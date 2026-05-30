@@ -12,9 +12,10 @@ Tier 1 marketing features:
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Literal
 from datetime import datetime, date, timedelta
+import re
 import uuid
 import time
 import logging
@@ -66,6 +67,34 @@ def _get_db():
 # ============================================================================
 
 
+# Valid channels and known template IDs — gate the API surface.
+# Callers must use one of these; free-form strings are rejected (validation
+# errors > silent mis-configuration or injection).
+VALID_CHANNELS = {"WHATSAPP", "SMS", "EMAIL"}
+# Templates that are purely transactional and therefore exempt from the
+# marketing_consent gate. TRAI/DLT allow transactional messages (order
+# confirmation, OTP, service reminders) regardless of marketing opt-out.
+_TRANSACTIONAL_TEMPLATES = {
+    "ORDER_DELIVERED",
+    "GOOGLE_REVIEW_REQUEST",
+    "NPS_SURVEY",
+}
+
+# Indian mobile: 10 digits starting with 6-9.
+_INDIA_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
+
+
+def _validate_phone(v: str) -> str:
+    """Validate an Indian mobile number (10 digits, leading 6-9). Strips
+    leading country code (+91 / 91) for robustness before validating."""
+    stripped = re.sub(r"^\+?91", "", v.strip())
+    if not _INDIA_MOBILE_RE.match(stripped):
+        raise ValueError(
+            "Phone must be a 10-digit Indian mobile number starting with 6-9"
+        )
+    return stripped
+
+
 class SendNotificationRequest(BaseModel):
     customer_id: str
     customer_phone: str
@@ -75,9 +104,26 @@ class SendNotificationRequest(BaseModel):
     variables: dict = {}
     category: str = "SERVICE"
 
+    @field_validator("channel")
+    @classmethod
+    def validate_channel(cls, v: str) -> str:
+        val = v.upper().strip()
+        if val not in VALID_CHANNELS:
+            raise ValueError(
+                f"channel must be one of {sorted(VALID_CHANNELS)}"
+            )
+        return val
+
+    @field_validator("customer_phone")
+    @classmethod
+    def validate_phone(cls, v: str) -> str:
+        return _validate_phone(v)
+
 
 class WalkinRequest(BaseModel):
-    phone: str = Field(..., pattern=r"^\d{10}$")
+    # Indian mobile: 10 digits, leading digit 6-9.  ^\d{10}$ (the old pattern)
+    # accepted 0-5 prefix numbers that cannot belong to Indian mobiles.
+    phone: str = Field(..., pattern=r"^[6-9]\d{9}$")
     name: Optional[str] = None
     interest: str = "frames"
     notes: Optional[str] = None
@@ -116,6 +162,24 @@ async def send_marketing_notification(
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
 
+    # Marketing-consent gate: non-transactional templates must not be sent to
+    # customers who have opted out.  Only an explicit False opts out; missing /
+    # None defaults to consented (matches the customer-create default).
+    if req.template_id not in _TRANSACTIONAL_TEMPLATES:
+        db = _get_db()
+        if db is not None:
+            cust = (
+                db.get_collection("customers").find_one(
+                    {"customer_id": req.customer_id}
+                )
+                or {}
+            )
+            if cust.get("marketing_consent") is False:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Customer has opted out of marketing messages",
+                )
+
     active_store = store_id or current_user.get("active_store_id", "")
     result = await send_notification(
         store_id=active_store,
@@ -142,6 +206,16 @@ class SendBulkRequest(BaseModel):
     template_id: str
     recipients: List[BulkRecipient]
     channel: str = "WHATSAPP"
+
+    @field_validator("channel")
+    @classmethod
+    def validate_channel(cls, v: str) -> str:
+        val = v.upper().strip()
+        if val not in VALID_CHANNELS:
+            raise ValueError(
+                f"channel must be one of {sorted(VALID_CHANNELS)}"
+            )
+        return val
 
 
 @router.post("/notifications/send-bulk")
@@ -355,20 +429,76 @@ async def send_rx_reminder(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
+    # Marketing-consent gate: PRESCRIPTION_EXPIRY is a reminder template and
+    # counts as marketing under TRAI/TCCCPR (it is not a transactional event
+    # like an OTP or order confirmation).  Never send to opted-out customers.
+    if customer.get("marketing_consent") is False:
+        raise HTTPException(
+            status_code=422,
+            detail="Customer has opted out of marketing messages",
+        )
+
+    # Phone validation: refuse to call the provider with an empty or clearly
+    # invalid number rather than silently logging a PENDING notification that
+    # will never be delivered.
+    phone = customer.get("mobile", "")
+    try:
+        phone = _validate_phone(phone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid customer phone: {exc}") from exc
+
     store_id = current_user.get("active_store_id", "")
     store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+
+    # Duplicate / spam guard: do not send the same Rx expiry reminder more than
+    # once in a 24-hour window.  Repeat clicks (or UI retries) must not spam
+    # the customer.  Only PENDING/SENT/SIMULATED logs count; FAILED entries
+    # do NOT block a retry (the previous attempt didn't reach the customer).
+    cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat()
+    recent = db.get_collection("notification_logs").find_one(
+        {
+            "customer_id": customer_id,
+            "template_id": "PRESCRIPTION_EXPIRY",
+            "status": {"$in": ["PENDING", "SENT", "SIMULATED"]},
+            "created_at": {"$gte": cutoff_24h},
+        }
+    )
+    if recent:
+        raise HTTPException(
+            status_code=429,
+            detail="Rx reminder already sent to this customer within the last 24 hours",
+        )
+
+    # Derive the actual expiry date from the most recent prescription so the
+    # customer sees "expires 12 Jun 2026" rather than the placeholder "soon".
+    rx_coll = db.get_collection("prescriptions")
+    latest_rx = rx_coll.find_one(
+        {"customer_id": customer_id},
+        sort=[("created_at", -1)],
+    )
+    expiry_date_str = "soon"
+    if latest_rx:
+        created = latest_rx.get("created_at") or latest_rx.get("test_date")
+        if created:
+            if isinstance(created, str):
+                try:
+                    created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                except Exception:
+                    created = None
+            if created:
+                expiry_date_str = (created + timedelta(days=730)).strftime("%d %b %Y")
 
     result = await send_notification(
         store_id=store_id,
         customer_id=customer_id,
-        customer_phone=customer.get("mobile", ""),
+        customer_phone=phone,
         customer_name=customer.get("name", "Customer"),
         template_id="PRESCRIPTION_EXPIRY",
         channel="WHATSAPP",
         variables={
             "store_name": store.get("name", "Better Vision"),
             "store_phone": store.get("phone", ""),
-            "expiry_date": "soon",
+            "expiry_date": expiry_date_str,
         },
         category="REMINDER",
         triggered_by=current_user.get("user_id", "unknown"),
@@ -420,6 +550,13 @@ async def send_referral_invite(
     )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
+
+    # Marketing-consent gate: REFERRAL_INVITE is a PROMOTIONAL message.
+    if customer.get("marketing_consent") is False:
+        raise HTTPException(
+            status_code=422,
+            detail="Customer has opted out of marketing messages",
+        )
 
     store_id = current_user.get("active_store_id", "")
 
@@ -822,6 +959,12 @@ async def record_walkout(
         db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
     )
 
+    # Walkout recording itself is always allowed, but the WALKOUT_RECOVERY
+    # WhatsApp message is a PROMOTIONAL message and must not be sent to
+    # customers who have opted out of marketing.  Record the walkout regardless;
+    # only skip the outbound notification.
+    send_recovery_msg = customer.get("marketing_consent") is not False
+
     walkout_id = (
         f"WKO-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
     )
@@ -844,33 +987,37 @@ async def record_walkout(
 
     db.get_collection("walkouts").insert_one(walkout)
 
-    # Schedule recovery message (log as SCHEDULED for now)
-    frame_names = ", ".join(req.frames_tried[:3]) if req.frames_tried else "some frames"
-    validity = (datetime.now() + timedelta(days=7)).strftime("%d %b %Y")
+    recovery_status = "skipped (opted out)"
+    if send_recovery_msg:
+        # Schedule recovery message (log as SCHEDULED for now)
+        frame_names = ", ".join(req.frames_tried[:3]) if req.frames_tried else "some frames"
+        validity = (datetime.now() + timedelta(days=7)).strftime("%d %b %Y")
 
-    await send_notification(
-        store_id=active_store,
-        customer_id=customer_id,
-        customer_phone=customer.get("mobile", ""),
-        customer_name=customer.get("name", "Customer"),
-        template_id="WALKOUT_RECOVERY",
-        channel="WHATSAPP",
-        variables={
-            "store_name": store.get("name", "Better Vision"),
-            "frame_names": frame_names,
-            "discount_percent": "10",
-            "validity_date": validity,
-        },
-        category="PROMOTIONAL",
-        triggered_by=current_user.get("user_id", "unknown"),
-        related_entity_type="walkout",
-        related_entity_id=walkout_id,
-    )
+        await send_notification(
+            store_id=active_store,
+            customer_id=customer_id,
+            customer_phone=customer.get("mobile", ""),
+            customer_name=customer.get("name", "Customer"),
+            template_id="WALKOUT_RECOVERY",
+            channel="WHATSAPP",
+            variables={
+                "store_name": store.get("name", "Better Vision"),
+                "frame_names": frame_names,
+                "discount_percent": "10",
+                "validity_date": validity,
+            },
+            category="PROMOTIONAL",
+            triggered_by=current_user.get("user_id", "unknown"),
+            related_entity_type="walkout",
+            related_entity_id=walkout_id,
+        )
+        recovery_status = "scheduled"
 
     walkout.pop("_id", None)
     return {
-        "message": "Walkout recorded, recovery message scheduled",
+        "message": f"Walkout recorded, recovery message {recovery_status}",
         "walkout": walkout,
+        "recovery_message": recovery_status,
     }
 
 
