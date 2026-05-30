@@ -122,10 +122,85 @@ class OracleAgent(JarvisAgent):
             await self._record_anomalies(anomalies, eod=is_eod)
             await self._emit_for_severe(anomalies)
 
+        # 4. Low-stock -> enqueue a reversible draft_po CHANGE PROPOSAL for
+        #    Superadmin review (SYSTEM_INTENT section 8). ORACLE no longer
+        #    relies solely on TASKMASTER silently drafting POs; it surfaces
+        #    the suggestion into the approval queue so a human approves before
+        #    the (reversible) DRAFT PO is created. Fail-soft.
+        proposals = await self._propose_reorders()
+
         self._anomalies_found += len(anomalies)
-        logger.info(f"[ORACLE] tick complete — {len(anomalies)} anomalies "
+        logger.info(f"[ORACLE] tick complete - {len(anomalies)} anomalies "
                     f"({'EOD' if is_eod else 'hourly'} scan); "
-                    f"{sum(1 for a in anomalies if a.get('ai_powered'))} ai-enriched")
+                    f"{sum(1 for a in anomalies if a.get('ai_powered'))} ai-enriched; "
+                    f"{proposals} reorder proposal(s) enqueued")
+
+    async def _propose_reorders(self) -> int:
+        """
+        For SKUs below their reorder point, enqueue a reversible ``draft_po``
+        change-proposal instead of acting. Approving it (Superadmin) creates
+        a DRAFT purchase order via the shared executor; sending the PO to the
+        vendor remains a separate, non-reversible, human step.
+
+        De-duped per SKU+day so the hourly tick doesn't stack identical
+        suggestions. Fully fail-soft — returns the count enqueued (0 on any
+        problem) and never raises.
+        """
+        stock_coll = self.get_collection("stock_units")
+        if stock_coll is None:
+            return 0
+        # Lazy import keeps ORACLE importable even if proposals module is absent
+        try:
+            from ..proposals import create_proposal
+        except Exception as e:  # pragma: no cover
+            logger.debug(f"[ORACLE] proposals module import failed: {e}")
+            return 0
+
+        enqueued = 0
+        try:
+            low_stock = list(stock_coll.find({
+                "$expr": {"$lt": ["$quantity", "$reorder_point"]},
+            }).limit(20))
+        except Exception as e:
+            logger.debug(f"[ORACLE] low-stock scan error: {e}")
+            return 0
+
+        today = datetime.now(timezone.utc).strftime("%y%m%d")
+        for item in low_stock:
+            sku = item.get("sku")
+            if not sku:
+                continue
+            on_hand = item.get("quantity", 0)
+            reorder_point = item.get("reorder_point", 0)
+            suggested_qty = max(reorder_point * 2 - on_hand, 1)
+            try:
+                result = create_proposal(
+                    self.db,
+                    created_by_agent=self.agent_id,
+                    proposal_type="draft_po",
+                    title=f"Reorder {sku} — stock {on_hand} < reorder point {reorder_point}",
+                    rationale=(
+                        f"On-hand quantity {on_hand} for SKU {sku} is below its "
+                        f"reorder point of {reorder_point}. Approving drafts a "
+                        f"purchase order for {suggested_qty} unit(s) (NOT sent to "
+                        f"the vendor — sending is a separate manual step)."
+                    ),
+                    payload={
+                        "sku": sku,
+                        "quantity": suggested_qty,
+                        "vendor_id": item.get("default_vendor_id"),
+                        "on_hand": on_hand,
+                        "reorder_point": reorder_point,
+                    },
+                    before_state={"sku": sku, "on_hand": on_hand,
+                                  "reorder_point": reorder_point},
+                    dedupe_key=f"draft_po:{sku}:{today}",
+                )
+                if result:
+                    enqueued += 1
+            except Exception as e:  # pragma: no cover — defensive
+                logger.debug(f"[ORACLE] failed to enqueue reorder proposal for {sku}: {e}")
+        return enqueued
 
     async def _detect_sales_anomalies(self) -> List[Dict[str, Any]]:
         """Compare today's revenue against trailing 4-week average."""

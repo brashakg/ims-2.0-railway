@@ -71,12 +71,14 @@ from .routers import (
     marketing_router,
     analytics_v2_router,
     agents_router,
+    proposals_router,
     walkouts_router,
     points_router,
     payout_router,
     webhooks_router,
     loyalty_router,
     vendor_portal_router,
+    portal_router,
     techcherry_import_router,
     vouchers_router,
     entities_router,
@@ -704,11 +706,20 @@ async def seed_database(secret: str = "", force: str = ""):
     Requires secret key. Only inserts into empty collections.
     Use force=users to drop and re-seed users (fixes password hashes).
     """
-    # Seed secret reads from env (rotatable on Railway) with a hardcoded
-    # fallback so existing scripts that pass `bv-seed-2026` keep working.
-    # Set SEED_SECRET on the backend service to override.
-    expected = os.getenv("SEED_SECRET", "bv-seed-2026")
-    if secret != expected:
+    # SECURITY: the seed secret MUST come from the environment. There is NO
+    # hardcoded fallback — this is a public repo, and a known secret on an
+    # endpoint that can `force`-drop the users collection (re-seeding accounts
+    # with known passwords) is a full unauthenticated account-takeover path.
+    # If SEED_SECRET is unset the endpoint is disabled. Constant-time compare.
+    import hmac as _hmac
+
+    expected = os.getenv("SEED_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail="DB seeding is disabled (SEED_SECRET not configured on the server).",
+        )
+    if not secret or not _hmac.compare_digest(secret, expected):
         raise HTTPException(status_code=403, detail="Invalid seed secret")
 
     if not DATABASE_AVAILABLE:
@@ -873,6 +884,10 @@ app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )
 app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
+# AI change-proposal workflow (SYSTEM_INTENT section 8) - SUPERADMIN-only.
+# Mounted at the same /api/v1/jarvis prefix; its paths (/proposals*) don't
+# collide with agents_router's (/agents*).
+app.include_router(proposals_router, prefix="/api/v1/jarvis", tags=["AI Proposals"])
 app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
 app.include_router(
     points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"]
@@ -887,6 +902,10 @@ app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"]
 app.include_router(
     vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
 )
+# Customer self-service portal — PUBLIC. Order tracking is a tokenized link
+# (no login); Rx viewing is OTP-gated (medical data). Mounted OUTSIDE the
+# JWT-protected family because real customers hit this without an IMS account.
+app.include_router(portal_router, prefix="/api/v1/portal", tags=["Customer Portal"])
 # TechCherry one-time migration — SUPERADMIN-only batch upsert endpoint.
 # Mounted under /admin/techcherry so it sits in the operator namespace
 # without inheriting the broader admin router (which is ADMIN+SUPERADMIN;

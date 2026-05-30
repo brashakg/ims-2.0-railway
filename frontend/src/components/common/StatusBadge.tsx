@@ -111,7 +111,7 @@ const getStatusColor = (
       case 'inactive':
         return 'bg-gray-600 text-white dark:bg-gray-100 dark:text-gray-900';
       case 'archived':
-        return 'bg-slate-600 text-gray-900 dark:bg-gray-100 dark:text-gray-900';
+        return 'bg-slate-600 text-white dark:bg-gray-100 dark:text-gray-900';
       default:
         return 'bg-gray-600 text-white dark:bg-gray-100 dark:text-gray-900';
     }

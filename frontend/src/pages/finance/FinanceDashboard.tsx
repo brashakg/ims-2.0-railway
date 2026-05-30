@@ -4,8 +4,9 @@
 // Comprehensive financial management for Indian optical retail accounting
 // Supports GST management, P&L reporting, cash flow, reconciliation, budgeting
 
-import { useState, useEffect } from 'react';
-import { Loader2 } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { Loader2, ArrowUpDown } from 'lucide-react';
+import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
@@ -178,7 +179,10 @@ export default function FinanceDashboard() {
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [reconciliation, setReconciliation] = useState<ReconciliationData[]>([]);
-  const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number }>>([]);
+  const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
+  // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
+  // own sort) but every column header is clickable to re-sort.
+  const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
   const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
   const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
 
@@ -248,6 +252,54 @@ export default function FinanceDashboard() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Per-store P&L rows enriched with gross profit (revenue - COGS) + margin %,
+  // then sorted by the active column. Gross profit / margin aren't returned by
+  // the endpoint so they're derived here.
+  const pnlStoreRows = useMemo(() => {
+    const enriched = pnlByStore.map((s) => {
+      const revenue = s.revenue || 0;
+      const cogs = s.cogs || 0;
+      const grossProfit = revenue - cogs;
+      return {
+        ...s,
+        revenue,
+        cogs,
+        gross_profit: grossProfit,
+        // Gross margin %. Backend ships net_margin (after expenses + payroll);
+        // this is the gross-level figure the column header asks for.
+        margin: revenue > 0 ? (grossProfit / revenue) * 100 : 0,
+      };
+    });
+    const { key, dir } = pnlStoreSort;
+    const factor = dir === 'asc' ? 1 : -1;
+    const numeric = (row: (typeof enriched)[number]): number => {
+      switch (key) {
+        case 'revenue': return row.revenue;
+        case 'cogs': return row.cogs;
+        case 'gross_profit': return row.gross_profit;
+        case 'margin': return row.margin;
+        case 'expenses': return row.expenses || 0;
+        case 'payroll': return row.payroll || 0;
+        case 'net_profit': return row.net_profit || 0;
+        default: return 0;
+      }
+    };
+    return enriched.sort((a, b) => {
+      if (key === 'store_id') {
+        return (a.store_id || '').localeCompare(b.store_id || '') * factor;
+      }
+      return (numeric(a) - numeric(b)) * factor;
+    });
+  }, [pnlByStore, pnlStoreSort]);
+
+  const togglePnlStoreSort = (key: typeof pnlStoreSort.key) => {
+    setPnlStoreSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'store_id' ? 'asc' : 'desc' },
+    );
   };
 
   const handleLockPeriod = async () => {
@@ -359,22 +411,48 @@ export default function FinanceDashboard() {
                   <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">P&amp;L by store</div>
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-50 text-gray-600"><tr>
-                      <th className="px-3 py-2 text-left">Store</th>
-                      <th className="px-3 py-2 text-right">Revenue</th>
-                      <th className="px-3 py-2 text-right">COGS</th>
-                      <th className="px-3 py-2 text-right">Expenses</th>
-                      <th className="px-3 py-2 text-right">Payroll</th>
-                      <th className="px-3 py-2 text-right">Net</th>
+                      {([
+                        { key: 'store_id', label: 'Store', align: 'left' },
+                        { key: 'revenue', label: 'Revenue', align: 'right' },
+                        { key: 'cogs', label: 'COGS', align: 'right' },
+                        { key: 'gross_profit', label: 'Gross profit', align: 'right' },
+                        { key: 'margin', label: 'Margin %', align: 'right' },
+                        { key: 'expenses', label: 'Expenses', align: 'right' },
+                        { key: 'payroll', label: 'Payroll', align: 'right' },
+                        { key: 'net_profit', label: 'Net', align: 'right' },
+                      ] as Array<{ key: typeof pnlStoreSort.key; label: string; align: 'left' | 'right' }>).map((col) => (
+                        <th
+                          key={col.key}
+                          onClick={() => togglePnlStoreSort(col.key)}
+                          className={clsx(
+                            'px-3 py-2 cursor-pointer select-none hover:text-gray-900',
+                            col.align === 'right' ? 'text-right' : 'text-left',
+                          )}
+                          title="Click to sort"
+                        >
+                          <span className={clsx('inline-flex items-center gap-1', col.align === 'right' && 'flex-row-reverse')}>
+                            {col.label}
+                            <ArrowUpDown
+                              className={clsx(
+                                'w-3 h-3',
+                                pnlStoreSort.key === col.key ? 'text-bv-red-600' : 'text-gray-300',
+                              )}
+                            />
+                          </span>
+                        </th>
+                      ))}
                     </tr></thead>
                     <tbody>
-                      {pnlByStore.map((s) => (
+                      {pnlStoreRows.map((s) => (
                         <tr key={s.store_id} className="border-t border-gray-100">
                           <td className="px-3 py-2">{s.store_id}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(s.revenue || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(s.cogs || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.revenue).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.cogs).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right font-medium', s.gross_profit < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.gross_profit).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right', s.margin < 0 ? 'text-red-600' : 'text-gray-600')}>{s.margin.toFixed(1)}%</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(s.expenses || 0).toLocaleString('en-IN')}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(s.payroll || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right font-semibold', (s.net_profit || 0) < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
                     </tbody>

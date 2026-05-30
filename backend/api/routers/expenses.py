@@ -662,7 +662,7 @@ async def create_expense(
 
     if expense_repo is not None:
         now = datetime.now().isoformat()
-        expense_repo.create(
+        created = expense_repo.create(
             {
                 "expense_id": expense_id,
                 "employee_id": current_user.get("user_id"),
@@ -681,6 +681,14 @@ async def create_expense(
                 "submitted_at": now,
             }
         )
+        # BaseRepository.create swallows write errors and returns None. A 201
+        # with a client-minted id on a failed write is silent data loss --
+        # surface it LOUDLY instead (SYSTEM_INTENT: Fail Loudly).
+        if not created:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not persist expense; please retry.",
+            )
 
     return {"expense_id": expense_id, "message": "Expense submitted for approval"}
 
@@ -862,6 +870,13 @@ async def approve_expense(
         if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
 
+        # Separation of duties (SYSTEM_INTENT s7): a requester cannot approve
+        # their own claim, even with an approver role.
+        if existing.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(
+                status_code=403, detail="You cannot approve your own expense."
+            )
+
         if existing.get("status") != "PENDING":
             raise HTTPException(
                 status_code=400, detail="Expense is not pending approval"
@@ -903,6 +918,12 @@ async def reject_expense(
         existing = expense_repo.find_by_id(expense_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
+
+        # Separation of duties (SYSTEM_INTENT s7): cannot act on your own claim.
+        if existing.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(
+                status_code=403, detail="You cannot reject your own expense."
+            )
 
         if existing.get("status") != "PENDING":
             raise HTTPException(
@@ -1154,15 +1175,35 @@ async def list_advances(
 async def request_advance(
     advance: AdvanceCreate, current_user: dict = Depends(get_current_user)
 ):
-    """Request a new advance"""
+    """Request a new advance.
+
+    Outstanding-advance block: an employee with an unsettled (DISBURSED /
+    PARTIALLY_SETTLED) advance must settle it before requesting another --
+    mirrors the same guard on expense creation so an employee can't stack
+    unsettled cash advances.
+    """
     advance_repo = get_advance_repository()
     advance_id = str(uuid.uuid4())
 
+    employee_id = current_user.get("user_id")
+
+    # Outstanding-advance block. A NEW advance request never settles an
+    # existing one, so any unsettled advance blocks it (linked_advance_id=None).
+    outstanding = _outstanding_advances(employee_id)
+    if has_blocking_advance(outstanding, None):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "You have an outstanding (unsettled) advance. Settle it first "
+                "before requesting a new advance."
+            ),
+        )
+
     if advance_repo is not None:
-        advance_repo.create(
+        created = advance_repo.create(
             {
                 "advance_id": advance_id,
-                "employee_id": current_user.get("user_id"),
+                "employee_id": employee_id,
                 "employee_name": current_user.get("full_name"),
                 "store_id": current_user.get("active_store_id"),
                 "advance_type": advance.advance_type,
@@ -1177,6 +1218,14 @@ async def request_advance(
                 "created_at": datetime.now().isoformat(),
             }
         )
+        # BaseRepository.create swallows write errors and returns None. Surface
+        # the failure LOUDLY rather than 201-ing on silent data loss
+        # (SYSTEM_INTENT: Fail Loudly).
+        if not created:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not persist advance request; please retry.",
+            )
 
     return {"advance_id": advance_id, "message": "Advance request submitted"}
 
@@ -1193,6 +1242,12 @@ async def approve_advance(
         existing = advance_repo.find_by_id(advance_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
+
+        # Separation of duties (SYSTEM_INTENT s7): cannot approve your own advance.
+        if existing.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(
+                status_code=403, detail="You cannot approve your own advance."
+            )
 
         if existing.get("status") != "PENDING":
             raise HTTPException(

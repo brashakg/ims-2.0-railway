@@ -2606,8 +2606,10 @@ jarvis_instance = Jarvis()
 
 @router.get("")
 @router.get("/")
-async def get_jarvis_root():
-    """Root endpoint for AI assistant status"""
+async def get_jarvis_root(current_user: dict = Depends(require_superadmin)):
+    """Root endpoint for AI assistant status. SUPERADMIN-only like the rest of
+    Jarvis -- even the bare root must not confirm the subsystem exists to an
+    anonymous / non-superadmin caller (SYSTEM_INTENT: AI is SUPERADMIN-only)."""
     return {
         "module": "jarvis",
         "status": "active",

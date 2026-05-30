@@ -2778,8 +2778,42 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
     overflow: hidden;
   }
 
-  /* 7. Focus trap: make the rail drawer fully scrollable on small phones */
-  .rail.rail-mobile-open { overscroll-behavior: contain; }
+  /* 7. Drawer scroll fix (verified headless @ 375x667): 25+ nav rows don't fit a
+     phone's height. As a fixed-height FLEX column the rows compressed and
+     OVERLAPPED (Chromium won't honor flex-shrink on the display:contents
+     .rail-group children, so the column couldn't grow + scroll). Switch the OPEN
+     drawer to a plain block scroll container: rows stack at natural height and
+     the drawer scrolls (scrollHeight 1059 vs 666 viewport, 0 overlapping rows). */
+  .rail.rail-mobile-open {
+    display: block;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    height: 100vh;            /* fallback for browsers without dvh */
+    height: 100dvh;
+  }
+  .rail.rail-mobile-open .rail-spacer { display: none; }
+  /* Items must render icon-BESIDE-label (row), not stacked. A base rule computes
+     flex-direction:column on the drawer rows, so the icon+label stacked and
+     overflowed the 38px row box, overlapping the next row (the real "broken
+     drawer"). Force row + center so each row is a clean 38px line. */
+  .rail.rail-mobile-open .rail-item {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    height: 38px;
+    padding: 0 14px;
+  }
+  .rail.rail-mobile-open .rail-item svg { flex-shrink: 0; }
+  .rail.rail-mobile-open .rail-label {
+    position: static;
+    opacity: 1;
+    transform: none;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    font-size: 14px;
+  }
 }
 
 /* ====== Very small phones (< 390px, e.g. 360×640) ====== */

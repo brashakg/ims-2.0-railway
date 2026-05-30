@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
 import uuid
+import secrets
 
 import logging
 
@@ -22,6 +23,7 @@ from ..dependencies import (
     get_stock_repository,
     get_product_repository,
     get_walkin_counter_repository,
+    validate_store_access,
 )
 
 # Discount cap by product discount_category (mirrors billing.py caps)
@@ -31,6 +33,19 @@ CATEGORY_DISCOUNT_CAPS = {
     "MASS": 10.0,
     "NON_DISCOUNTABLE": 0.0,
 }
+
+# Roles permitted to create / modify POS orders. Excludes ACCOUNTANT,
+# CATALOG_MANAGER, OPTOMETRIST, WORKSHOP_STAFF (out of POS scope) and INVESTOR
+# (read-only, also blocked by middleware). CASHIER is payment-only -> may record
+# payments but not create orders, so it is intentionally NOT in this set.
+POS_WRITE_ROLES = (
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "SALES_CASHIER",
+    "SALES_STAFF",
+)
 
 # Per-category GST is sourced from the canonical table in
 # api/services/gst_rates.py (single source of truth, shared with the product
@@ -420,7 +435,7 @@ async def list_orders(
 ):
     """List orders with filters"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         if customer_id:
@@ -463,7 +478,7 @@ async def get_pending_deliveries(
 ):
     """Get orders pending delivery"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_ready_for_delivery(active_store)
@@ -480,7 +495,7 @@ async def get_unpaid_orders(
 ):
     """Get unpaid/partially paid orders"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_unpaid(active_store)
@@ -497,7 +512,7 @@ async def get_overdue_orders(
 ):
     """Get overdue orders (past expected delivery)"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_overdue(active_store)
@@ -515,7 +530,7 @@ async def search_orders(
 ):
     """Search orders by number, customer name, or phone"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.search_orders(q, active_store)
@@ -534,7 +549,7 @@ async def get_sales_summary(
 ):
     """Get sales summary for a date range"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo and active_store:
         summary = repo.get_sales_summary(active_store, from_date, to_date)
@@ -556,7 +571,7 @@ async def get_status_counts(
 ):
     """Get order counts by status"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         counts = repo.get_status_counts(active_store)
@@ -748,6 +763,13 @@ async def create_order(
     order: OrderCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create new sales order"""
+    # RBAC: only POS-facing roles may create orders. This was relying on the
+    # frontend alone -> ACCOUNTANT / OPTOMETRIST / CATALOG_MANAGER / WORKSHOP_STAFF
+    # could all POST an order. Enforce server-side.
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to create orders."
+        )
     order_repo = get_order_repository()
     customer_repo = get_customer_repository()
     store_id = current_user.get("active_store_id")
@@ -860,9 +882,10 @@ async def create_order(
         user_discount_cap = effective_discount_cap(
             user_roles, current_user.get("discount_cap")
         )
-        is_admin = any(
-            r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
-        )
+        # Only HQ roles bypass discount caps. STORE_MANAGER has a real 20%
+        # cap (SYSTEM_INTENT discount matrix) and MUST flow through the
+        # effective_cap + category-cap path -- it was incorrectly bypassing.
+        is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
 
         for item in order.items:
             item_total = item.unit_price * item.quantity
@@ -1052,6 +1075,15 @@ async def create_order(
         # built with key "item_total". The per-category math is now in
         # `_compute_per_category_gst`, used by create + add + remove.
         cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
+        # Order-level cart discount must honour the SAME role cap as per-item
+        # discounts. It was only clamped to [0,100], so any role could apply up
+        # to 100% off via the cart discount, bypassing the per-item cap above.
+        if not is_admin and cart_discount_percent > user_discount_cap:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Cart discount {cart_discount_percent}% exceeds your limit of "
+                f"{user_discount_cap}%. Contact a manager for approval.",
+            )
         gst = _compute_per_category_gst(items_data, cart_discount_percent)
         taxable_after_cart_discount = gst["taxable"]
         tax_amount = gst["tax"]
@@ -1147,6 +1179,12 @@ async def create_order(
         order_data = {
             "order_id": precomputed_order_id,
             "order_number": generate_order_number(store_id),
+            # Public order-tracking token — long, unguessable, customer-facing.
+            # Powers the no-login /portal/track/{token} link + QR. Additive;
+            # does not touch any POS pricing/tax logic. Backfill-safe: orders
+            # created before this field get a token lazily minted on lookup
+            # (see portal.ensure_tracking_token).
+            "tracking_token": secrets.token_urlsafe(24),
             "store_id": store_id,
             "customer_id": order.customer_id,
             "customer_name": customer_name,
@@ -1287,6 +1325,19 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
     if repo is not None:
         order = repo.find_by_id(order_id)
         if order is not None:
+            # Store-scope: only view an order in a store the user can access
+            # (raises 403 otherwise; SUPERADMIN/ADMIN pass through).
+            validate_store_access(order.get("store_id"), current_user)
+            # Backfill-safe: ensure a public tracking token exists so the
+            # staff-facing order view can render the customer-tracking QR
+            # even for orders created before that field existed. Fail-soft.
+            if not order.get("tracking_token"):
+                try:
+                    from .portal import ensure_tracking_token
+
+                    order["tracking_token"] = ensure_tracking_token(repo, order)
+                except Exception:  # noqa: BLE001
+                    pass
             return order_to_frontend(order)
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -1367,6 +1418,23 @@ async def add_order_item(
         if order.get("status") != "DRAFT":
             raise HTTPException(
                 status_code=400, detail="Can only add items to DRAFT orders"
+            )
+
+        # Enforce the role discount cap on items added to a DRAFT order — this
+        # path was unchecked, a cap bypass parallel to create_order's per-item gate.
+        from api.services.role_caps import effective_discount_cap
+
+        _cap = effective_discount_cap(
+            current_user.get("roles", []), current_user.get("discount_cap")
+        )
+        _is_admin = any(
+            r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
+        )
+        if not _is_admin and item.discount_percent > _cap:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Discount {item.discount_percent}% exceeds your limit of "
+                f"{_cap}%. Contact a manager for approval.",
             )
 
         # Calculate item totals

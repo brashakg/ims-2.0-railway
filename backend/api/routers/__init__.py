@@ -38,12 +38,14 @@ from .payroll import router as payroll_router
 from .marketing import router as marketing_router
 from .analytics_v2 import router as analytics_v2_router
 from .agents import router as agents_router
+from .proposals import router as proposals_router
 from .walkouts import router as walkouts_router
 from .points import router as points_router
 from .payout import router as payout_router
 from .webhooks import router as webhooks_router
 from .loyalty import router as loyalty_router
 from .vendor_portal import router as vendor_portal_router
+from .portal import router as portal_router
 from .techcherry_import import router as techcherry_import_router
 from .vouchers import router as vouchers_router
 from .entities import router as entities_router
@@ -94,12 +96,14 @@ __all__ = [
     "marketing_router",
     "analytics_v2_router",
     "agents_router",
+    "proposals_router",
     "walkouts_router",
     "points_router",
     "payout_router",
     "webhooks_router",
     "loyalty_router",
     "vendor_portal_router",
+    "portal_router",
     "techcherry_import_router",
     "vouchers_router",
     "entities_router",

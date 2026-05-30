@@ -430,14 +430,17 @@ async def get_pnl(
     revenue = rev[0]["revenue"] if rev else 0
     tax = rev[0]["tax"] if rev else 0
 
-    # Expenses
+    # Expenses. Expense docs store the date on `expense_date` (a 'YYYY-MM-DD'
+    # ISO string), NOT `date` -- filtering on `date` dropped EVERY expense
+    # whenever a date range was supplied. from_date / to_date arrive as
+    # 'YYYY-MM-DD' query strings, so the string comparison is consistent.
     exp_match = {}
     if store_id:
         exp_match["store_id"] = store_id
     if from_date:
-        exp_match.setdefault("date", {})["$gte"] = from_date
+        exp_match.setdefault("expense_date", {})["$gte"] = from_date
     if to_date:
-        exp_match.setdefault("date", {})["$lte"] = to_date
+        exp_match.setdefault("expense_date", {})["$lte"] = to_date
     exp_match["status"] = {"$in": ["APPROVED", "PAID", "approved", "paid"]}
     exp_pipeline = [
         {"$match": exp_match},
@@ -500,8 +503,10 @@ async def get_gst_summary(
     else:
         end = datetime(y, m + 1, 1)
 
-    # GST collected (from sales)
-    sales_match = {"created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    # GST collected (from sales). Orders store `created_at` as a BSON
+    # datetime, so the match MUST use datetime objects -- an .isoformat()
+    # STRING comparison silently matched nothing and zeroed the GST summary.
+    sales_match = {"created_at": {"$gte": start, "$lt": end}}
     collected = list(
         db.get_collection("orders").aggregate(
             [
@@ -808,10 +813,12 @@ async def get_cash_flow(
 
     # Outflows (expenses + purchase orders) — scoped to the active store.
     # NOTE: POs store the store as `delivery_store_id`, expenses as `store_id`.
-    exp_match = {
-        "date": {"$gte": start.isoformat()},
-        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
-    }
+    # Expenses are dated on `expense_date` (date-only 'YYYY-MM-DD' string), NOT
+    # `date`; the old field name dropped every expense. The boundary uses
+    # start.date().isoformat() (date-only) so it compares cleanly with the
+    # stored date-only strings and INCLUDES 1st-of-month expenses (a datetime
+    # 'YYYY-MM-01T00:00:00' boundary would sort AFTER the bare 'YYYY-MM-01').
+    exp_match = {"expense_date": {"$gte": start.date().isoformat()}, "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
     if active_store:
         exp_match["store_id"] = active_store
     exp_out = list(
@@ -1470,7 +1477,10 @@ async def get_budget(
             },
         }
 
-    # Fill actuals from expenses
+    # Fill actuals from expenses. Expenses are dated on `expense_date`
+    # (date-only 'YYYY-MM-DD' string), NOT `date`; the old field name + datetime
+    # isoformat boundary matched nothing. Use date-only string bounds to match
+    # the stored values.
     start = datetime(y, m, 1)
     end = datetime(y, m + 1 if m < 12 else 1, 1) if m < 12 else datetime(y + 1, 1, 1)
     actuals = list(
@@ -1478,7 +1488,10 @@ async def get_budget(
             [
                 {
                     "$match": {
-                        "date": {"$gte": start.isoformat(), "$lt": end.isoformat()},
+                        "expense_date": {
+                            "$gte": start.date().isoformat(),
+                            "$lt": end.date().isoformat(),
+                        },
                         "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
                     }
                 },
@@ -1672,21 +1685,20 @@ async def get_pnl_by_store(
             [o], cost_map, fallback_rate=0.6
         )
 
+    # Expenses are dated on `expense_date` (ISO 'YYYY-MM-DD' string), not
+    # `date`; the old field name silently dropped every expense for any
+    # date-ranged P&L. from_date / to_date are 'YYYY-MM-DD' strings -> the
+    # string comparison is consistent.
     exp_match: dict = {"status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
     if store_ids is not None:
         exp_match["store_id"] = {"$in": store_ids}
     if from_date:
-        exp_match.setdefault("date", {})["$gte"] = from_date
+        exp_match.setdefault("expense_date", {})["$gte"] = from_date
     if to_date:
-        exp_match.setdefault("date", {})["$lte"] = to_date
-    exp = list(
-        db.get_collection("expenses").aggregate(
-            [
-                {"$match": exp_match},
-                {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}},
-            ]
-        )
-    )
+        exp_match.setdefault("expense_date", {})["$lte"] = to_date
+    exp = list(db.get_collection("expenses").aggregate(
+        [{"$match": exp_match}, {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}}]
+    ))
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
 
     pay_by_store = _payroll_by_store(db, from_date, to_date)

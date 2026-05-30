@@ -406,6 +406,35 @@ export const workshopApi = {
     return response.data;
   },
 
+  // QC a COMPLETED (or re-QC a QC_FAILED) job. passed=true -> READY,
+  // passed=false -> QC_FAILED. The notes carry the checklist outcome.
+  // Backend reads `passed` + `notes` as query params (POST, no body).
+  qcJob: async (jobId: string, passed: boolean, notes?: string) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/qc`, null, {
+      params: { passed, ...(notes ? { notes } : {}) },
+    });
+    return response.data as {
+      job_id: string;
+      status: 'READY' | 'QC_FAILED';
+      qc_passed: boolean;
+      message: string;
+    };
+  },
+
+  // Send a QC_FAILED job back to the bench (QC_FAILED -> IN_PROGRESS).
+  // Backend reads `notes` as a query param.
+  reworkJob: async (jobId: string, notes?: string) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/rework`, null, {
+      params: notes ? { notes } : {},
+    });
+    return response.data as {
+      job_id: string;
+      status: 'IN_PROGRESS';
+      rework_count: number;
+      message: string;
+    };
+  },
+
   // Phase 6.4 — pending jobs report with aging buckets + per-tech breakdown.
   getPendingJobsReport: async (storeId?: string) => {
     const response = await api.get('/reports/workshop/pending-jobs', {

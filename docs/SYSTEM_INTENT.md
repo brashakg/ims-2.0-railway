@@ -215,8 +215,8 @@ IF offer_price == mrp:
 ### AI Access
 - Superadmin ONLY
 - Read-only by default
-- Advisory only
-- NO auto-execution
+- Advisory by default
+- NO auto-execution EXCEPT under the narrow carve-out below
 
 ### AI Can Suggest
 - Inventory optimization
@@ -224,18 +224,55 @@ IF offer_price == mrp:
 - Sales trends
 - Staff performance insights
 
-### AI CANNOT
+### AI CANNOT (without an approved, reversible proposal)
 - Execute changes
 - Approve requests
 - Block operations
 - Override human decisions
 
-### AI Approval Flow (If suggestions implemented)
-1. AI generates suggestion
+### AI Approval Flow (the change-proposal loop)
+1. AI generates a suggestion as a PROPOSAL (status PENDING)
 2. Superadmin reviews
-3. Superadmin approves/rejects
-4. If approved, system executes
-5. Full audit trail maintained
+3. Superadmin approves or rejects
+4. If approved, the system AUTO-EXECUTES the change **only when the
+   carve-out below is satisfied**; otherwise the approval is recorded as
+   ADVISORY and a human performs the change
+5. Full immutable before/after audit trail maintained for every approval,
+   rejection, execution, and execution failure
+
+### Auto-Execution Carve-Out (REVERSIBLE TIER-1 ONLY)
+
+This is the SINGLE, deliberate exception to "NO auto-execution". It is the
+sanctioned resolution of the apparent conflict between this section and the
+TASKMASTER agent's three-tier safety model: the product owner chose
+"auto-execute reversible only".
+
+AI MAY auto-execute a change if and ONLY if BOTH gates are satisfied:
+
+  (a) a Superadmin has explicitly APPROVED the specific proposal, AND
+  (b) the proposal's type is in the **reversible Tier-1 whitelist**:
+        - `draft_po`                          (create a DRAFT purchase order — NOT sent to the vendor)
+        - `inter_store_transfer_suggestion`   (record a DRAFT transfer — NO stock moved)
+        - `rx_reminder`                        (QUEUE a reminder — NOT dispatched)
+        - `mark_task`                          (create/flag a follow-up task)
+
+When both gates hold, the system performs the change through the EXISTING
+domain services, captures `before_state` and `after_state`, and writes an
+IMMUTABLE `audit_logs` entry. On any execution error the proposal lands in
+status FAILED and the failure is audited — the system fails loudly, never
+silently.
+
+EVERYTHING ELSE remains strictly ADVISORY. Approving a non-whitelisted
+proposal (e.g. `price_ceiling_change`, `refund`, `writeoff`,
+`staff_transfer`, `po_send`) records and audits the approval but does NOT
+act — a human still performs the change by hand. There is no third option:
+a change is either an approved reversible Tier-1 act, or it is advisory.
+
+This carve-out legalizes TASKMASTER's reversible Tier-1 auto-acts. It does
+NOT relax Control over Convenience: a human (Superadmin) still authorizes
+every act, nothing happens silently, and every action is auditable and
+reversible. Tier-2 (ask-confirm) and Tier-3 (advisory) acts are NOT covered
+and never auto-execute.
 
 ---
 
@@ -267,7 +304,9 @@ IF offer_price == mrp:
 - Delete audit logs
 - Allow silent data modification
 - Bypass approval chains
-- Auto-execute AI suggestions
+- Auto-execute AI suggestions, EXCEPT a Superadmin-approved reversible
+  Tier-1 proposal under the section 8 carve-out (with full immutable
+  before/after audit). No AI act without explicit approval; nothing silent.
 
 ### System MUST
 - Log every change

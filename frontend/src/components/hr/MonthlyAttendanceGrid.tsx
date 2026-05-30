@@ -8,9 +8,9 @@
 // computed by GET /hr/attendance/grid. Read-only. Light theme only.
 
 import { useState, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, AlertTriangle } from 'lucide-react';
 import { hrApi } from '../../services/api';
-import type { AttendanceCode, AttendanceGrid } from '../../services/api/hr';
+import type { AttendanceCode, AttendanceGrid, LwpReport } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
 
@@ -56,6 +56,7 @@ export function MonthlyAttendanceGrid() {
   const { user } = useAuth();
   const [month, setMonth] = useState<string>(currentMonthValue());
   const [grid, setGrid] = useState<AttendanceGrid | null>(null);
+  const [lwp, setLwp] = useState<LwpReport | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -63,11 +64,18 @@ export function MonthlyAttendanceGrid() {
     const load = async () => {
       if (!user?.activeStoreId) return;
       setIsLoading(true);
+      const [y, m] = month.split('-').map(Number);
       try {
-        const data = await hrApi.getAttendanceGrid({ month, storeId: user.activeStoreId });
-        if (!cancelled) setGrid(data);
+        const [gridData, lwpData] = await Promise.all([
+          hrApi.getAttendanceGrid({ month, storeId: user.activeStoreId }),
+          hrApi.getLwpReport({ year: y, month: m, storeId: user.activeStoreId }).catch(() => null),
+        ]);
+        if (!cancelled) {
+          setGrid(gridData);
+          setLwp(lwpData);
+        }
       } catch {
-        if (!cancelled) setGrid(null);
+        if (!cancelled) { setGrid(null); setLwp(null); }
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -79,6 +87,7 @@ export function MonthlyAttendanceGrid() {
   const days = grid?.days ?? [];
   const employees = grid?.employees ?? [];
   const totals = grid?.totals;
+  const lwpRows = (lwp?.employees ?? []).filter((r) => r.lwp_days > 0);
 
   return (
     <div className="space-y-4">
@@ -155,6 +164,8 @@ export function MonthlyAttendanceGrid() {
                 <th className="px-2 py-2 text-center text-xs font-bold text-green-700 border-l border-gray-200">P</th>
                 <th className="px-2 py-2 text-center text-xs font-bold text-red-700">A</th>
                 <th className="px-2 py-2 text-center text-xs font-bold text-amber-700">L</th>
+                <th className="px-2 py-2 text-center text-xs font-bold text-orange-700" title="Late marks">Late</th>
+                <th className="px-2 py-2 text-center text-xs font-bold text-orange-700" title="Leave Without Pay (report only)">LWP</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
@@ -189,6 +200,8 @@ export function MonthlyAttendanceGrid() {
                   <td className="px-2 py-2 text-center font-semibold text-amber-700">
                     {emp.summary.leave + emp.summary.half_day + emp.summary.lwp}
                   </td>
+                  <td className="px-2 py-2 text-center font-semibold text-orange-700">{emp.summary.late}</td>
+                  <td className="px-2 py-2 text-center font-semibold text-orange-700">{emp.summary.lwp}</td>
                 </tr>
               ))}
             </tbody>
@@ -206,10 +219,58 @@ export function MonthlyAttendanceGrid() {
                   <td className="px-2 py-2 text-center text-amber-700">
                     {totals.leave + totals.half_day + totals.lwp}
                   </td>
+                  <td className="px-2 py-2 text-center text-orange-700">{totals.late}</td>
+                  <td className="px-2 py-2 text-center text-orange-700">{totals.lwp}</td>
                 </tr>
               </tfoot>
             )}
           </table>
+        </div>
+      )}
+
+      {/* LWP breakdown (report only — accountant enters these manually into payroll) */}
+      {!isLoading && lwp && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-base font-bold text-gray-900">Leave Without Pay (LWP)</h3>
+            <span className="text-sm font-semibold text-orange-700">
+              {lwp.total_lwp_days} day{lwp.total_lwp_days === 1 ? '' : 's'} total
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+            Report only — enter LWP days manually into the payroll run. Not auto-applied.
+          </p>
+          {lwpRows.length === 0 ? (
+            <p className="text-sm text-gray-500">No LWP days this month.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Employee</th>
+                    <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">LWP Days</th>
+                    <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Absent</th>
+                    <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Marked LWP</th>
+                    <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Half-days</th>
+                    <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Unpaid Leave</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {lwpRows.map((row) => (
+                    <tr key={row.employee_id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 font-medium text-gray-900">{row.name}</td>
+                      <td className="px-3 py-2 text-center font-bold text-orange-700">{row.lwp_days}</td>
+                      <td className="px-3 py-2 text-center text-gray-700">{row.absent_days}</td>
+                      <td className="px-3 py-2 text-center text-gray-700">{row.marked_lwp_days}</td>
+                      <td className="px-3 py-2 text-center text-gray-700">{row.half_days}</td>
+                      <td className="px-3 py-2 text-center text-gray-700">{row.unpaid_leave_days}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -26,6 +26,10 @@ export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sale
 // Customers
 export { customerApi } from './customers';
 
+// CRM analytics (RFM segments, churn-risk, lifecycle)
+export { crmApi } from './crm';
+export type { ChurnRiskCustomer, ChurnRiskLevel } from './crm';
+
 // Customer Returns / Exchanges / Credit Notes
 export { returnsApi } from './returns';
 export type {
@@ -114,3 +118,24 @@ export type { Entity, GstinEntry, PtRegistration } from './entities';
 // Payroll config (Structured-CTC salary master + Professional Tax slabs)
 export { payrollApi, grossOf } from './payroll';
 export type { SalaryConfig, PtSlab, OtherAllowance } from './payroll';
+
+// Jarvis AI change-proposals (SUPERADMIN only — SYSTEM_INTENT section 8)
+export { proposalsApi } from './proposals';
+export type {
+  ProposalStatus,
+  AIProposal,
+  ProposalListResponse,
+  ApproveResponse,
+  RejectResponse,
+} from './proposals';
+// Customer self-service portal (public: order tracking + OTP-gated Rx view)
+export { portalApi } from './portal';
+export type {
+  OrderTracking,
+  TrackingStatusEntry,
+  TrackingItem,
+  OtpRequestResponse,
+  OtpVerifyResponse,
+  PortalPrescription,
+  PortalRxResponse,
+} from './portal';

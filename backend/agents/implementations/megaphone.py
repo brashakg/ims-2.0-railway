@@ -24,7 +24,7 @@ Scope of MVP implementation:
   - Respects DND quiet hours
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 import logging
 
@@ -32,6 +32,48 @@ from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..providers import send_whatsapp, send_sms, dispatch_mode, provider_ready
 
 logger = logging.getLogger(__name__)
+
+# IST timezone for the DND quiet window. TRAI/DLT rules define the window in
+# India Standard Time, NOT UTC -- computing it in UTC shifts it by 5h30m and
+# lets promotional messages go out at ~1 AM IST (a compliance breach).
+# Wrapped defensively per the fail-soft contract: if zoneinfo / the tz database
+# is unavailable on the host, fall back to a fixed UTC+5:30 offset (India has no
+# DST, so the offset is exact). Only if BOTH fail do we degrade to UTC with a
+# warning.
+_IST: Optional[timezone] = None
+try:
+    from zoneinfo import ZoneInfo
+
+    _IST = ZoneInfo("Asia/Kolkata")  # type: ignore[assignment]
+except Exception as _e:  # pragma: no cover - only on hosts without tzdata
+    try:
+        _IST = timezone(timedelta(hours=5, minutes=30), name="IST")
+        logger.warning(
+            "[MEGAPHONE] zoneinfo Asia/Kolkata unavailable (%s) -- using fixed "
+            "UTC+5:30 offset for DND. India does not observe DST so this is exact.",
+            _e,
+        )
+    except Exception:  # pragma: no cover
+        _IST = None
+        logger.warning(
+            "[MEGAPHONE] Could not resolve IST timezone -- DND falls back to UTC. "
+            "Promotional sends may not respect the IST quiet window."
+        )
+
+
+def _now_ist(now: Optional[datetime] = None) -> datetime:
+    """Return `now` (or real current time) expressed in IST.
+
+    `now` may be naive or tz-aware; if naive it's assumed to already be IST.
+    Falls back to UTC only if IST could not be resolved at import time.
+    """
+    if now is None:
+        tz = _IST or timezone.utc
+        return datetime.now(tz)
+    if now.tzinfo is None:
+        # Naive datetimes from callers/tests are taken to mean IST wall-clock.
+        return now if _IST is None else now.replace(tzinfo=_IST)
+    return now.astimezone(_IST) if _IST is not None else now.astimezone(timezone.utc)
 
 # How many PENDING notifications to drain per tick. Keeps the 30-min loop
 # bounded and stops a backed-up queue from taking hours to clear (at 60/tick
@@ -66,10 +108,45 @@ class MegaphoneAgent(JarvisAgent):
         super().__init__(db=db)
         self._queued_count = 0
 
-    def _in_dnd_window(self) -> bool:
-        """True if current time is inside the DND quiet window."""
-        now_hour = datetime.now(timezone.utc).hour  # naive — real impl uses IST
-        return self.DND_START_HOUR <= now_hour or now_hour < self.DND_END_HOUR
+    def _in_dnd_window(self, now: Optional[datetime] = None) -> bool:
+        """True if `now` (default: real IST now) is inside the DND quiet window.
+
+        The window is 21:00-09:00 IST with an overnight wrap, so the test is
+        hour >= DND_START_HOUR (>=21) OR hour < DND_END_HOUR (<9). `now` is
+        injectable for testing; it is normalised to IST first.
+        """
+        now_hour = _now_ist(now).hour
+        return now_hour >= self.DND_START_HOUR or now_hour < self.DND_END_HOUR
+
+    def _next_dnd_end(self, now: Optional[datetime] = None) -> datetime:
+        """Return the next 09:00 IST instant at or after `now`, as a tz-aware
+        datetime carrying the IST offset (+05:30).
+
+        Used as `scheduled_for` so a message queued inside the DND window is
+        held until quiet hours end. If it's already past 09:00 today (i.e. we
+        are in the evening 21:00-24:00 leg of the window) the target rolls to
+        09:00 tomorrow.
+        """
+        ist_now = _now_ist(now)
+        target = ist_now.replace(
+            hour=self.DND_END_HOUR, minute=0, second=0, microsecond=0
+        )
+        if ist_now.hour >= self.DND_END_HOUR:
+            # Past 09:00 already -> the next quiet-hours end is tomorrow 09:00.
+            target = target + timedelta(days=1)
+        return target
+
+    def _next_dnd_end_utc_iso(self, now: Optional[datetime] = None) -> str:
+        """`_next_dnd_end` as a UTC ISO-8601 string for storage in
+        scheduled_for. We store UTC (same instant as the 09:00 IST target) so
+        the drain query's lexicographic `$lte` against a UTC `now_iso` stays
+        valid -- mixing +05:30 and +00:00 offset strings would compare wrong.
+        Falls back gracefully if the target is somehow naive.
+        """
+        target = self._next_dnd_end(now)
+        if target.tzinfo is None:  # pragma: no cover - _next_dnd_end is tz-aware
+            return target.isoformat()
+        return target.astimezone(timezone.utc).isoformat()
 
     async def _do_background_work(self):
         """
@@ -97,8 +174,10 @@ class MegaphoneAgent(JarvisAgent):
                     "status": "PENDING",
                     "queued_at": datetime.now(timezone.utc).isoformat(),
                     "dnd_window": self._in_dnd_window(),
+                    # If queued during DND, hold until the next 09:00 IST
+                    # (stored as UTC so the drain query compares correctly).
                     "scheduled_for": None if not self._in_dnd_window()
-                                     else datetime.now(timezone.utc).replace(hour=self.DND_END_HOUR, minute=0, second=0).isoformat(),
+                                     else self._next_dnd_end_utc_iso(),
                 })
                 queued_this_run += 1
             except Exception as e:
@@ -146,6 +225,20 @@ class MegaphoneAgent(JarvisAgent):
                 {"expiry_date": {"$lte": cutoff, "$gt": now.isoformat()}},
                 {"_id": 0, "customer_id": 1, "patient_name": 1, "expiry_date": 1},
             ).limit(50))
+            # Consent gate (TCCCPR): prescriptions carry no consent flag, so
+            # drop rows whose customer has opted out of marketing. A missing
+            # flag defaults to consented (matches the customer-create default).
+            cust_coll = self.get_collection("customers")
+            if cust_coll is not None and expiring:
+                ids = [e.get("customer_id") for e in expiring if e.get("customer_id")]
+                opted_out = {
+                    c.get("customer_id")
+                    for c in cust_coll.find(
+                        {"customer_id": {"$in": ids}, "marketing_consent": False},
+                        {"_id": 0, "customer_id": 1},
+                    )
+                }
+                expiring = [e for e in expiring if e.get("customer_id") not in opted_out]
             return expiring
         except Exception as e:
             logger.debug(f"[MEGAPHONE] Rx scan error (non-fatal): {e}")
@@ -161,7 +254,12 @@ class MegaphoneAgent(JarvisAgent):
             # Customers store birthday as "YYYY-MM-DD" or "DD-MM-YYYY"; we
             # match on the suffix that ends with -MM-DD.
             matches = list(coll.find(
-                {"date_of_birth": {"$regex": today + "$"}},
+                # Consent gate (TCCCPR): never queue a promotional birthday
+                # message to a customer who has opted out of marketing.
+                {
+                    "date_of_birth": {"$regex": today + "$"},
+                    "marketing_consent": {"$ne": False},
+                },
                 {"_id": 0, "customer_id": 1, "name": 1},
             ).limit(50))
             return matches

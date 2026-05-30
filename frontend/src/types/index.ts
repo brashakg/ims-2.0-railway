@@ -326,6 +326,11 @@ export interface Order {
   createdAt: string;
   deliveredAt?: string;
   statusHistory?: StatusHistory[];
+  /** Public order-tracking token — powers the no-login /track/{token} link
+   *  and the staff-facing tracking QR. Snake-case on the wire (tracking_token);
+   *  the axios camelCase aliaser also exposes it as trackingToken. */
+  trackingToken?: string;
+  tracking_token?: string;
 }
 
 // ============================================================================

@@ -1,282 +1,259 @@
-# IMS 2.0 — Updated Feature Status After Audit Session
+# IMS 2.0 — Feature Status (Ground-Truth Rebuild)
 
-**Before this session:** 117 built, 12 partial, 166 not built
-**After this session:** 130 built, 8 partial, 157 not built
-**After Phase 6.3 (2026-04-20):** 132 built, 8 partial, 155 not built
-  - ✅ Non-moving stock report (90+ days) — backend + frontend + 10 tests
-  - ✅ MoM / YoY sales growth — backend endpoint pre-existed, now surfaced on the Reports page Sales Comparison card
-**After Phase 6.4 (2026-04-20):** 134 built, 8 partial, 153 not built
-  - ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — `GET /api/v1/workshop/dashboard-kpis` + wired into WorkshopPage header
-  - ✅ Pending jobs report with aging buckets (0-3d / 3-7d / 7+d) + per-technician breakdown — rewrote `GET /api/v1/reports/workshop/pending-jobs` to use `workshop_jobs` collection (was incorrectly reading from `tasks` collection, never populated)
-**After Phase 6.7 (2026-04-21):** 137 built, 8 partial, 150 not built
-  - ✅ Simplified customer invoice — "Brand Category" (e.g. "Ray-Ban Sunglass") on thermal + A4 receipt + GST tax invoice. Helper in `frontend/src/utils/receiptFormat.ts`
-  - ✅ Delivery date + time slot + priority fields on POS orders (frontend posStore + POSLayout Review UI + backend OrderCreate schema + persistence)
-  - ✅ Overall cart discount (order-level, stacks on per-item discounts, capped at user's role discountCap) — frontend + backend, GST recomputed on post-discount taxable value
+**Rebuilt 2026-05-29** from a live audit of the actual codebase. This replaces the
+stale Phase-6.7 status (preserved at the bottom) whose counts were wrong by a wide
+margin.
 
 ---
 
-## What We ACTUALLY Built/Fixed This Session
+## ⚠️ Why this file was rebuilt
 
-### Bug Fixes & Infrastructure (not new features, but critical)
-- ✅ Fixed loading spinners on Clinical/Workshop/HR (were broken)
-- ✅ Fixed Settings profile/stores/users API paths (were calling wrong endpoints)
-- ✅ Fixed Reports API params (start_date→from_date mismatch)
-- ✅ Unified colour scheme to dark theme across 9 pages
-- ✅ Fixed PO "View Details" button (was non-functional)
-- ✅ Fixed INP performance (5-6s blocking → near-zero with startTransition)
-- ✅ Fixed Storefront routing (was showing Settings sidebar)
-- ✅ Cleaned up 7 stale git branches, merged all to main
-- ✅ Removed 8 unnecessary doc files from repo root
-- ✅ Enabled Vercel Speed Insights + Web Analytics
+The previous version claimed **130 built / 8 partial / 157 remaining**. That was
+substantially wrong: a large majority of the "❌ Not Built" items **already ship in
+code**. The history just landed faster than this file got updated (a long QA sweep
++ ~50 PRs landed after the doc was last meaningfully touched). Proven during the
+audit:
 
-### NEW Features Built (moved from ❌ to ✅)
-1. ✅ Mark Order as DELIVERED (Orders module)
-2. ✅ Order timeline/history tracking (status changes with timestamps)
-3. ✅ Target vs Achievement meter (Dashboard — daily + monthly)
-4. ✅ Vendor return workflow (create → approve → ship → credit/replace)
-5. ✅ Staff incentive tracking (3-tier slabs, kicker system, leaderboard)
-6. ✅ Expense tracker with approval workflow (submit → approve → reject)
-7. ✅ Customer follow-up automation (eye test reminders, frame replacement, etc.)
-8. ✅ PO Print template (A4 with letterhead)
-9. ✅ GRN Print template (A4 with variance tracking)
-10. ✅ Auto-populating search in customer creation modal
-11. ✅ Billing module rewritten to real MongoDB (was all mock)
-12. ✅ Purchase/HR modules wired to real API (were mock)
-13. ✅ Workshop status pipeline fix + dark theme
+| Doc said ❌ "Not Built" | Reality |
+|---|---|
+| Payroll — *"entire module, 1/10 built"* | Full router + `payroll_engine.py` + **4 test files** |
+| Outstanding receivables aging | `GET /finance/outstanding`, due-date buckets (`finance.py:633`) |
+| GST filing prep (GSTR-1/3B) | `gstn_export.py` + `/reports/gstr1`, `/reports/gstr3b`, `/reports/gstr*/gstn-json` |
+| Tally export | `payroll_exports.py` + finance/reports |
+| P&L by store / by category | `/finance/pnl/by-store`, `/finance/pnl/by-category`, `/reports/profit/by-*` |
+| Period locking | `/finance/period-lock` + `_period_locked` guards in expenses & finance |
+| Cash flow statement | `/finance/cash-flow` + `/finance/cash-flow-forecast` |
+| Tasks/SOPs — *"1/11 built"* | `auto-generate`, `sop-templates`, `integrity/fake-closures`, `integrity/silent`, SLA escalation, `{id}/reassign` — all exist |
+| Dashboard — *"12 missing"* | **All 12** widgets exist in `dashboard_widgets.py` |
+| EMI payment | `PaymentMethod.EMI` + `emi_months` + interest calc (`orders.py:316,1574`) |
 
-**Total new features: 13 moved from ❌→✅**
+**Building "from the top of the old list" would have meant rebuilding live features.**
 
 ---
 
-## What's STILL NOT BUILT (157 items)
+## How this was verified (so you can trust it)
 
-### HIGH PRIORITY — Core Business Operations
+- **Backend surface** — imported the live FastAPI app and enumerated routes:
+  **811 API routes across 50 domains** (the "387 endpoints" in CLAUDE.md and even
+  the README's "~677" are stale). Endpoint existence = **HIGH confidence**.
+- **Frontend wiring** — grepped `frontend/src` for each endpoint to tell "surfaced
+  in UI" from "backend-only". **MEDIUM confidence** (a ref ≠ a working screen).
+- **NOT verified here** — runtime correctness / end-to-end behaviour. ✅ means
+  "the code path exists", **not** "QA-passed in a browser". A live click-through of
+  the 9 module routes (the Phase-6 "End-to-end prod verification" item) is still the
+  only way to confirm behaviour, and is the single most valuable QA action left.
 
-**Payroll (entire module — 10 items)**
-- ❌ Monthly salary calculation (basic + HRA + allowances - deductions)
-- ❌ Advance salary tracking
-- ❌ Payslip generation
-- ❌ Salary sheet export
-- ❌ Kicker system fully connected to actual sales data
-- ❌ Google review incentive tracking
-- ❌ Real-time incentive dashboard per staff (backend exists, needs real sales data piping)
+### Legend
+- ✅ **Done** — backend + surfaced in UI
+- 🔌 **Backend-only** — endpoint exists, not (or barely) wired into the UI → *cheap win*
+- 🚪 **Gated** — built but disabled by env (needs API keys / `DISPATCH_MODE=live`)
+- ❌ **Genuinely missing** — no code found
+- 🐞 **Bug/risk** — verified defect (see [Bugs & Risks](#-bugs--risks-verified-in-code))
 
-**Finance & Accounting (12 items)**
-- ❌ Revenue tracking (daily/monthly/yearly with MoM/YoY)
-- ❌ Expense heads with actual vs survival budgets
-- ❌ GST filing preparation (GSTR-1, GSTR-3B)
-- ❌ GST portal API integration
-- ❌ Tally export integration
-- ❌ Outstanding receivables aging report
-- ❌ Vendor payment tracking
-- ❌ Profit & loss by store/category
-- ❌ Period locking
-- ❌ Cash flow statement
-- ❌ Inter-store reconciliation
-- ❌ Dual-mode budgeting (full ops vs survival)
+### Corrected counts (honest estimate)
 
-**Expenses (6 items still pending)**
-- ❌ Expense categories with daily/monthly caps per role
-- ❌ Bill upload (mandatory image/PDF with hash)
-- ❌ Duplicate bill detection
-- ❌ Approval hierarchy (staff → manager → finance → admin)
-- ❌ Outstanding advance blocks new advances
-- ❌ Reimbursement aging report
+The old "157 remaining" is mostly fiction. After reconciliation the picture is
+roughly:
 
-### MEDIUM PRIORITY — Feature Completions
+| | Estimate | Notes |
+|---|---|---|
+| ✅ Done (built + surfaced) | **~245–260** | the bulk of every operational module |
+| 🔌 Backend-only (UI wiring left) | **~10–15** | churn-risk list, profit/by-store, workshop QC UI, etc. |
+| 🚪 Gated (built, needs keys/flag) | **~10** | MSG91, Shopify, Razorpay, Shiprocket, Tally, PageSpeed |
+| ❌ Genuinely missing | **~25–30** | concentrated in 4 themes (below) + training content |
+| 🐞 Verified bugs/risks | **4** | DND tz, scheduler singleton, AI-constitution, doc-drift |
 
-**Dashboard additions (12 items)**
-- ❌ Pending deliveries for assigned customers
-- ❌ Reminders to call customers for order updates
-- ❌ Daily stock count status
-- ❌ Task checklist completion percentage
-- ❌ Eye test count today
-- ❌ Store vs target graphical representation
-- ❌ Escalations requiring attention
-- ❌ Staff attendance compliance across stores
-- ❌ Pending HQ escalations
-- ❌ HR summary (attendance compliance, pending leaves)
-- ❌ System health monitoring
-- ❌ AI insights summary
-
-**Orders (2 items)**
-- ❌ Customer notification on status change (WhatsApp/SMS)
-- ❌ Order tracking QR code for customer
-
-**Clinical (6 items)**
-- ❌ Prescription validity setting per optometrist
-- ❌ Prescription printout (A5 card format)
-- ❌ Eye test token/queue number system
-- ❌ Prescription redo tracking
-- ❌ Clinical abuse detection
-- ❌ Family-based prescription view
-
-**Workshop (5 items)**
-- ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — Phase 6.4, `GET /api/v1/workshop/dashboard-kpis`
-- ❌ Lens order tracking (ordered → received → mounted)
-- ❌ QC checklist (power verification, fitting, cosmetic check)
-- ❌ Customer notification when job is ready
-- ❌ Workshop job linked back to order + prescription
-
-**Inventory (11 items)**
-- ❌ Daily stock count per staff member
-- ❌ Stock count barcode scanning interface
-- ❌ Auto-variance detection (system vs physical count)
-- ✅ Non-moving stock identification (90+ days) — `GET /api/v1/reports/inventory/non-moving-stock?days=N` + Reports page table (Phase 6.3)
-- ❌ AI-recommended inter-store transfer
-- ❌ Stock photo gallery per product
-- ❌ Sell-through % per brand group
-- ❌ Contact lens batch/expiry tracking grid
-- ❌ Power-wise lens stock grid (SPH × CYL matrix)
-- ❌ Stock dump analysis
-- ❌ Staff-assigned stock accountability
-
-**Reports (12 items)**
-- ❌ Daily/Monthly/Yearly sales comparison
-- ✅ MoM and YoY growth reports — `GET /api/v1/reports/sales/growth?year=Y&month=M` + surfaced in Reports page Sales Comparison card (backend pre-existed; frontend wired Phase 6.3)
-- ❌ Profit by category and store
-- ❌ Discount average by category and store
-- ❌ Staff performance ranking
-- ❌ Daily stock count report
-- ❌ Eye test count report
-- ✅ Pending jobs report — Phase 6.4, `GET /api/v1/reports/workshop/pending-jobs` with aging buckets + per-tech breakdown
-- ❌ Expense vs revenue report
-- ❌ Customer acquisition/retention report
-- ❌ Brand-wise sell-through report
-- ❌ Stock movement report
-
-**POS additions (5 items)**
-- ❌ EMI payment option
-- ❌ Credit billing for known customers
-- ❌ Gift card / voucher redemption
-- ❌ Customer loyalty points display
-- ❌ Previous Rx summary on customer card
-
-**Returns (3 items)**
-- ❌ Credit note balance tracking per customer
-- ❌ Exchange flow → select replacement → adjust price
-- ❌ Return to vendor workflow (defective products)
-
-### LOWER PRIORITY — Nice-to-haves / Integrations
-
-**Tasks/SOPs/Escalation (10 items)**
-- ❌ System-generated tasks (auto on stock mismatch, payment variance)
-- ❌ SOP-bound tasks (daily opening/closing checklists)
-- ❌ Priority color coding (P0-P4)
-- ❌ Time-based escalation engine
-- ❌ Silence detection (task untouched → auto-escalate)
-- ❌ In-app task assignment (replace WhatsApp)
-- ❌ Task countdown timers
-- ❌ Fake closure detection
-- ❌ Clear checkboxes for daily activities
-- ❌ Task mutation audit trail
-
-**Catalog (6 items)**
-- ❌ Product photography workflow
-- ❌ Bulk product upload (CSV/Excel)
-- ❌ MRP + Offer Price setting with validation
-- ❌ Store-wise product activation
-- ❌ Barcode generation at store level
-- ❌ Shopify product sync
-
-**CRM & Marketing (6 items)**
-- ❌ WhatsApp Business integration
-- ❌ Marketing agency oversight dashboard
-- ❌ OTP-based customer verification
-- ❌ Prescription access portal for customers
-- ❌ Automated follow-up reminders (we built the tracking, but not the auto-send)
-- ❌ Customer purchase history summary for staff during sale
-
-**Print Templates (5 items still pending)**
-- ❌ Eye test token print
-- ❌ Workshop job card print
-- ❌ Delivery challan print
-- ❌ Credit note print
-- ❌ Estimate/Quotation print
-
-**Integrations (7 items)**
-- ❌ Tally accounting export
-- ❌ Shiprocket delivery tracking
-- ❌ WhatsApp Business API
-- ❌ Razorpay payment gateway
-- ❌ Google Ads API
-- ❌ Meta Ads API
-- ❌ GST Portal API
-
-**Marketplace (8 items)**
-- ❌ Marketplace control panel (Amazon/Flipkart/Shopify unified)
-- ❌ Auto-sync products to channels
-- ❌ Channel-wise sales tracking
-- ❌ Omnichannel stock sync
-- ❌ Shiprocket integration
-- ❌ Customer order tracking via WhatsApp
-- ❌ Multiple website management
-
-**AI Intelligence (10 items)**
-- ❌ AI Change Proposals
-- ❌ Marketing intelligence
-- ❌ Purchase advisor
-- ❌ Inventory optimization suggestions
-- ❌ Sales trend analysis with ML
-- ❌ Customer behavior pattern detection
-- ❌ Staff performance anomaly detection
-- ❌ Finance intelligence
-- ❌ Natural language query
-- ❌ AI image-based product search
-
-**Training & Rollout (5 items)**
-- ❌ 7-day role-wise training curriculum
-- ❌ HQ trainer scripts
-- ❌ Success metrics
-- ❌ Progressive rollout plan
-- ❌ In-app help text
-
-**Store Setup (7 items)**
-- ❌ Deep store setup (tea break times, prescription validity, display zones)
-- ❌ New store setup SOP
-- ❌ Superadmin feature toggles (3-8 layers deep)
-- ❌ Activity log per user
-- ❌ Approval workflow configuration
-- ❌ Audit log viewer
-- ❌ Integration settings UI
-
-**HR additions (7 items)**
-- ❌ Geo-fenced check-in enforcement
-- ❌ Shift configuration per employee
-- ❌ Week-off swap with manager approval
-- ❌ Late mark auto-calculation
-- ❌ LWP auto-deduction
-- ❌ Overtime tracking
-- ❌ Monthly attendance grid view
+> Precise per-item counts are deliberately avoided — false precision is what got
+> the old doc into trouble. The themes below are what matters.
 
 ---
 
-## Updated Summary Counts
+## Module reconciliation (old "missing" → reality)
 
-| Category | ✅ Built | 🔧 Partial | ❌ Not Built | Changed This Session |
-|----------|---------|-----------|-------------|---------------------|
-| Dashboard | 9 | 2 | 12 | +1 target meter |
-| POS | 32 | 0 | 5 | (no change) |
-| Orders | 8 | 0 | 2 | +2 (deliver, timeline) |
-| Returns | 6 | 0 | 3 | (no change) |
-| Clinical | 7 | 1 | 6 | (fixed loading) |
-| Workshop | 5 | 0 | 5 | (fixed loading + theme) |
-| Inventory | 11 | 0 | 11 | (no change) |
-| Catalog | 3 | 1 | 6 | (no change) |
-| HR | 4 | 0 | 7 | +1 incentive dashboard |
-| Payroll | 1 | 0 | 9 | +1 incentive system |
-| Finance | 1 | 0 | 11 | +1 expense tracker |
-| Expenses | 2 | 0 | 8 | +1 expense tracker |
-| Tasks/SOPs | 1 | 1 | 10 | (no change) |
-| Reports | 6 | 0 | 12 | (fixed API) |
-| Setup | 7 | 1 | 7 | (fixed stores/users) |
-| AI | 5 | 0 | 10 | (no change) |
-| Marketplace | 1 | 1 | 8 | (no change) |
-| CRM | 7 | 0 | 5 | +1 follow-ups |
-| Purchase | 6 | 0 | 4 | +2 (vendor returns, PO connected) |
-| Print | 7 | 0 | 5 | +2 (PO print, GRN print) |
-| Integrations | 0 | 1 | 7 | (no change) |
-| Training | 0 | 0 | 5 | (no change) |
-| **TOTALS** | **130** | **8** | **157** | **+13 features, -4 partial→done** |
+### Dashboard — old: 12 missing → reality: ✅ all 12 exist
+Every claimed-missing widget has an endpoint in `dashboard_widgets.py`:
+pending deliveries (`orders/pending/delivery`), call reminders (`follow-ups`),
+daily stock-count status, task completion %, eye-test count, store-vs-target
+(`analytics/store-target-today`), escalations (`tasks/escalations`,
+`admin/escalations`), attendance compliance (`hr/attendance-compliance`),
+HR summary (`hr/summary-today`), system health (`admin/system-health`), AI
+insights (`jarvis` activity). Whether each is *rendered* on the Hub is a UI-verify
+item, not a build item.
 
-**130 features built. 8 partially built. 157 remaining.**
+### Tasks / SOPs — old: 1 built / 10 missing → reality: ✅ essentially all built
+`auto-generate`, `scan/payment-variance`, `sop-templates` + `sop-checklist`,
+P0–P4 colour coding (frontend `TasksDashboard.PRIORITY_COLORS`), `auto-escalate-overdue`
++ `task_sla`, silence detection (`integrity/silent`), fake-closure detection
+(`integrity/fake-closures`), in-app assignment (`{id}/reassign`, `{id}/assign`),
+SLA countdown chip (frontend), daily checkboxes (`checklists/{type}/complete-item`).
+Audit trail via `audit_logs`.
+
+### Inventory — old: 11 missing → reality: ✅ ~10 of 11 built
+Stock count (`stock-count/start|items|complete`), barcode scanning
+(`stock-count-scan`), variance/shrinkage (`accountability/shrinkage`), non-moving
+(`non-moving`), AI transfer (`transfer-recommendations`), brand sell-through
+(`sell-through-analysis` + `reports/inventory/brand-sellthrough`), CL batch/expiry
+(`contact-lenses/expiry-status`), power grid SPH×CYL (`lenses/power-grid`),
+dump/overstock (`overstock-analysis`), staff accountability (`accountability`).
+**Possible gap:** product stock-photo gallery (see true backlog).
+
+### Reports — old: 12 missing → reality: ✅ all 12 exist
+`sales/comparison`, `sales/growth` (MoM/YoY), `profit/by-category`,
+`profit/by-store`, `discount/analysis`, `staff/ranking`, `stock/count`,
+`clinical/eye-tests`, `finance/expense-vs-revenue`, `customers/acquisition`,
+`inventory/brand-sellthrough`. Plus extras the old doc never listed:
+`sales/price-bands`, `sales/lens-deep-dive`, `sales/seasonality`,
+`purchase/recommendations`, `walkouts/footfall-audit`.
+🔌 `profit/by-store` has **0 frontend refs** — backend-only.
+
+### Clinical — old: 6 missing → reality: ✅ ~5 of 6 built
+Rx validity (`prescriptions/{id}/validate`, `patient/{id}/valid`), A5 print
+(`clinical/prescriptions/{id}/print`), token/queue (`clinical/queue` + `queue/stats`),
+redo tracking (`prescriptions/{id}/redo`, `/redos`), abuse detection
+(`clinical/abuse-detection`). ❌ **Family/household Rx view** — genuinely missing.
+
+### Workshop — old: 5 missing → reality: ✅ ~all built
+Lens order tracking (`jobs/{id}/lens-status`), QC checklist (`jobs/{id}/qc`,
+`/rework`), ready-notification (`jobs/{id}/notify-ready` — send 🚪 gated on
+dispatch), dashboard KPIs (`dashboard-kpis`). 🔌 QC checklist **UI** is thin
+(`/qc` has 0 direct frontend refs) — wiring/verify item.
+
+### Finance / Expenses — old: 11 + 8 missing → reality: ✅ almost entirely built
+Finance: AR aging, AP (`ap_engine`, `net_payable`), P&L, cash-flow + forecast,
+period lock, GSTR-1/3B, ITC reconcile (`itc_reconcile`), cash register.
+Expenses: per-(role,category) caps (`expense_category_caps`), bill hashing
+(`hashlib`), duplicate-bill watch-list, approval roles, advances + settlement,
+period-lock guard. ❌ **Dual-mode "full ops vs survival" budgeting** — not found;
+the only true finance gap.
+
+### Catalog / Purchase — old: 6 + 4 missing → reality: ✅ mostly built
+Bulk import (`catalog/products/import`), export, MRP/offer validation
+(`pricing_caps`), store activation (`online-status`), store barcodes
+(`labels.py`, `reconcile-store-barcodes`), Shopify sync (`sync-shopify`,
+`bulk-sync-shopify` — 🚪 needs keys). Purchase: PO→GRN→serialized stock, partial
+receipt, vendor returns. **Possible gap:** structured product-photography workflow.
+
+### CRM / Marketing — old: 5 + 6 missing → reality: ✅ mostly built
+Customer 360 (`crm/customers/360`), RFM segmentation (`segment/rfm`), churn risk
+(`churn-risk/list` — 🔌 0 frontend refs, backend-only), follow-ups (`auto-generate`,
+`due-today`), referrals, NPS (`nps-survey`, `nps-dashboard`), Rx-expiry alerts,
+walk-in/walkout recovery, WhatsApp via MSG91 (🚪 gated). ❌ **OTP customer
+verification**, ❌ **customer-facing Rx access portal**, ❌ **marketing-agency
+oversight dashboard** — genuinely missing.
+
+### HR / Payroll — old: 7 + 9 missing → reality: mixed
+Payroll: ✅ **complete** (engine + run flow + payslip/Tally JV/PF ECR exports +
+4 test files). HR: ✅ attendance (`check-in/out`, `grid`, compliance), leaves +
+balances. ✅ **Attendance engine** now shipped: **shift config per employee**,
+**late-mark auto-calc**, **week-off swap approval** (no self-approval),
+**geo-fenced enforcement on check-in** (roles 4-7), and a **monthly LWP report**
+(read-only — surfaced for the accountant, never auto-applied to payroll).
+**Overtime is intentionally NOT built** (product-owner decision: no overtime).
+
+### POS / Orders / Returns — old: 5 + 2 + 3 missing → reality: ✅ mostly built
+*(POS is revenue-critical — audit only, no changes without explicit go-ahead.)*
+EMI (`PaymentMethod.EMI` + interest), credit/known-customer (`store-credit/*`),
+voucher redemption (`vouchers/{code}/redeem`), loyalty (`loyalty/account`,
+`customers/{id}/loyalty/add`), previous Rx (`customers/{id}/prescriptions`),
+delivery date/slot/priority + cart discount (Phase 6.7). Returns: restock,
+credit-note balance = `store-credit/ledger`, vendor returns. ❌ **Order-tracking
+QR for customer**, ❌ **explicit exchange→replacement→price-adjust flow** (only
+partial `exchange` refs).
+
+### AI / Integrations / Marketplace / Training — the real frontier
+- AI: 8 agents live (JARVIS, CORTEX, SENTINEL, PIXEL, MEGAPHONE, ORACLE,
+  TASKMASTER, NEXUS) + cross-agent activity feed + diagnostic endpoint. ORACLE
+  already does Claude-powered anomaly narratives. ❌ Missing: **AI change-proposal
+  workflow** (SYSTEM_INTENT §8's "AI suggests → Superadmin approves → execute"),
+  natural-language query, image-based product search.
+- Integrations: code present for MSG91 / Shopify / Razorpay / Shiprocket / Tally /
+  PageSpeed — all 🚪 **gated** (`DISPATCH_MODE=off`, no keys). "Missing" here means
+  *activation*, not code.
+- Marketplace (Amazon/Flipkart unified, omnichannel stock sync): ❌ genuinely
+  missing.
+- Training & rollout (curriculum, scripts, in-app help): ❌ genuinely missing —
+  but this is **content/process**, not code.
+
+---
+
+## 🎯 The TRUE backlog (genuinely missing — prioritized)
+
+This is the real to-do list. Everything else above is "verify in browser", not "build".
+
+**Tier 1 — high business value, self-contained, no POS risk**
+1. **Customer self-service surfaces** — order-tracking QR + a read-only customer
+   Rx/prescription portal (+ OTP verify). High customer-facing value; net-new
+   surface, low blast radius on existing flows.
+2. ~~**HR attendance engine**~~ — ✅ DONE. Shift config per employee, late-mark
+   auto-calc, week-off swap approval (no self-approval), geo-fenced check-in
+   enforcement, and a monthly LWP report. The LWP number is surfaced for the
+   accountant (read-only); it is NOT auto-pushed into payroll — manual entry
+   stays the source of truth. Overtime intentionally excluded (product decision).
+3. **🔌 Cheap UI wins** — wire the already-built backend-only endpoints:
+   `finance/pnl/by-store`, `crm/customers/churn-risk/list`, workshop **QC checklist
+   UI**. Hours, not days.
+
+**Tier 2 — valuable, larger**
+4. **AI change-proposal workflow** — the SYSTEM_INTENT §8 loop (suggest → review →
+   approve → audited execute). This is the product's actual differentiator and the
+   natural home for ORACLE/TASKMASTER.
+5. **Dual-mode budgeting** (full-ops vs survival) — the one true Finance gap.
+6. **Explicit exchange flow** (return → pick replacement → adjust price) — *POS-adjacent,
+   confirm before touching.*
+
+**Tier 3 — big/strategic or non-code**
+7. **Marketplace/omnichannel** (Amazon/Flipkart unified, stock sync) — large.
+8. **Integration activation** — provision keys + flip `DISPATCH_MODE=live` **after**
+   fixing the DND bug below. Config/ops, not a build.
+9. **Training & rollout content** — curriculum, scripts, in-app help.
+10. **Family/household Rx view**, **product stock-photo gallery** — smaller features.
+
+---
+
+## 🐞 Bugs & Risks (verified in code)
+
+Found while auditing. These are real and worth fixing **before** the integration
+activation in Tier 3.
+
+1. **DND quiet-hours computed in UTC, not IST** — `agents/implementations/megaphone.py:71`
+   ```python
+   now_hour = datetime.now(timezone.utc).hour   # naive — real impl uses IST
+   ```
+   DND is *defined* 21:00–09:00 **IST** but *checked* against the **UTC** hour. Net
+   effect once `DISPATCH_MODE=live`: the system goes quiet 02:30–14:30 IST and
+   **sends 21:00 IST → 02:30 IST** — i.e. WhatsApp/SMS blasts at ~1 AM, the exact
+   opposite of intent and a **TRAI/DLT violation** that can blacklist the sender
+   header. Currently harmless only because dispatch defaults to `off`. **Fix:**
+   compute the hour in `Asia/Kolkata` before the activation work.
+
+2. **Agent scheduler has no singleton guard** — `api/main.py:231` starts an
+   `AsyncIOScheduler` in *every* process; `max_instances:1` only prevents overlap
+   *within one process*. No leader election, no `SCHEDULER_ENABLED` gate. Safe only
+   while Railway runs exactly one worker/replica. The day that changes, TASKMASTER
+   drafts **N** duplicate POs / 5 min and MEGAPHONE sends **N** duplicate messages.
+   Phase 6.2's Redis pub/sub fixed event *fan-out*, not scheduler singleton-ness.
+   **Fix:** a Redis `SETNX` leader lock or an env gate so only one process schedules.
+
+3. **TASKMASTER contradicts the constitution** — `SYSTEM_INTENT.md §8`: *"AI CANNOT
+   execute changes / No auto-execution."* `taskmaster.py`: *"the ONE agent that
+   actually changes state… Tier 1 (auto-act)"* — its SLA pass reassigns task
+   ownership and flips status to `ESCALATED` with no human in the loop. Either amend
+   SYSTEM_INTENT to bless reversible Tier-1 auto-acts, or gate TASKMASTER's writes
+   behind approval. **Decision needed, not just code.**
+
+4. **Documentation truth-decay** — counts drift across docs (CLAUDE.md "387
+   endpoints", README "~677", actual **811**; README "48 test files", actual
+   **130**). This file is the attempt to fix it; keep it honest by re-running the
+   811-route dump when counts are quoted.
+
+---
+
+<details>
+<summary>📜 Previous (stale) status — preserved for history</summary>
+
+The pre-2026-05-29 version claimed **130 built / 8 partial / 157 remaining** with a
+per-module table topping out at "POS 32 / Reports 6 / Payroll 1". Those numbers were
+disproven module-by-module above and should not be used for planning. See git
+history for the full prior text.
+
+</details>
