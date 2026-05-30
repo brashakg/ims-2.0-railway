@@ -73,15 +73,23 @@ class TransferItemInput(BaseModel):
     product_id: str
     sku: str
     product_name: str
-    quantity_requested: int
-    unit_cost: Optional[float] = None
+    # BUG FIX: quantity_requested must be >= 1 (0 or negative lines create phantom
+    # transfer entries that corrupt the ship/receive unit-move math).
+    quantity_requested: int = Field(..., ge=1)
+    # BUG FIX: unit_cost must be non-negative (negative cost inverts total_value sign).
+    unit_cost: Optional[float] = Field(default=None, ge=0)
     notes: Optional[str] = None
 
 
 class TransferItemReceive(BaseModel):
     transfer_item_id: str
-    quantity_received: int
-    quantity_damaged: int = 0
+    # BUG FIX: receive quantities must be non-negative; negative would
+    # attempt to un-receive units and flip committed counts backward.
+    quantity_received: int = Field(..., ge=0)
+    # BUG FIX: damaged count must be non-negative and cannot exceed received.
+    # The ge=0 floor is enforced here; the damaged<=received invariant is
+    # enforced in receive_transfer() at the endpoint level.
+    quantity_damaged: int = Field(default=0, ge=0)
     damage_notes: Optional[str] = None
 
 
@@ -96,7 +104,8 @@ class TransferInput(BaseModel):
     expected_date: Optional[str] = None
     notes: Optional[str] = None
     shipping_method: Optional[str] = None
-    shipping_cost: Optional[float] = None
+    # BUG FIX: shipping_cost must be non-negative.
+    shipping_cost: Optional[float] = Field(default=None, ge=0)
     # Shiprocket integration
     create_shiprocket_shipment: bool = False
     shiprocket_courier: Optional[str] = None
@@ -107,7 +116,8 @@ class TransferUpdate(BaseModel):
     expected_date: Optional[str] = None
     notes: Optional[str] = None
     shipping_method: Optional[str] = None
-    shipping_cost: Optional[float] = None
+    # BUG FIX: shipping_cost must be non-negative.
+    shipping_cost: Optional[float] = Field(default=None, ge=0)
     tracking_number: Optional[str] = None
     tracking_url: Optional[str] = None
 
@@ -158,6 +168,20 @@ def _coerce(value):
     if isinstance(value, list):
         return [_coerce(v) for v in value]
     return value
+
+
+def _append_status_history(transfer: Dict, entry: Dict) -> None:
+    """Append a status-history entry, tolerating a missing/null field.
+
+    BUG FIX: transfer docs loaded from Mongo (e.g. migrated from the old
+    in-memory dict or inserted via a back-fill script) may not carry the
+    `status_history` list. A bare list.append() on None raises AttributeError
+    which 500s the endpoint. Use setdefault so the list is always present.
+    """
+    history = transfer.setdefault("status_history", [])
+    if not isinstance(history, list):
+        transfer["status_history"] = []
+    transfer["status_history"].append(entry)
 
 
 def _save_transfer(transfer: Dict) -> None:
@@ -617,6 +641,24 @@ async def create_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+    # BUG FIX: a self-transfer (source == destination) would mark source units
+    # TRANSFERRED then re-home them back to the same store on receive — the
+    # on-hand count looks correct after completion but the TRANSFERRED phase
+    # temporarily drops the source on-hand to zero, confusing POS / alerts,
+    # and writes a spurious audit trail of units leaving/arriving a single store.
+    if transfer.from_location_id == transfer.to_location_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Source and destination store must be different",
+        )
+
+    # BUG FIX: at least one item must be in the transfer.
+    if not transfer.items:
+        raise HTTPException(
+            status_code=400,
+            detail="Transfer must contain at least one item",
+        )
+
     transfer_id = f"trf_{uuid.uuid4().hex[:12]}"
     transfer_number = generate_transfer_number()
 
@@ -777,7 +819,7 @@ async def approve_transfer(
     )
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": new_status,
             "timestamp": datetime.now().isoformat(),
@@ -816,7 +858,7 @@ async def start_picking(
     transfer["picking_by"] = current_user.get("user_id")
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": TransferStatus.PICKING,
             "timestamp": datetime.now().isoformat(),
@@ -865,7 +907,7 @@ async def complete_picking(
     transfer["picking_completed_at"] = datetime.now().isoformat()
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": TransferStatus.PACKED,
             "timestamp": datetime.now().isoformat(),
@@ -932,7 +974,7 @@ async def ship_transfer(
     # `stock_shipped` flag set inside the helper, so a re-POST won't double-move.
     transfer = _apply_ship_stock_move(transfer)
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": TransferStatus.IN_TRANSIT,
             "timestamp": datetime.now().isoformat(),
@@ -978,6 +1020,18 @@ async def receive_transfer(
             status_code=400, detail="Transfer must be in transit to receive"
         )
 
+    # BUG FIX: damaged qty cannot exceed received qty on any line.
+    for received in items_received:
+        if received.quantity_damaged > received.quantity_received:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"quantity_damaged ({received.quantity_damaged}) cannot exceed "
+                    f"quantity_received ({received.quantity_received}) for item "
+                    f"{received.transfer_item_id}"
+                ),
+            )
+
     # Update item quantities
     item_map = {item["id"]: item for item in transfer["items"]}
     total_expected = 0
@@ -1017,7 +1071,7 @@ async def receive_transfer(
     transfer["total_damaged"] = total_damaged
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": new_status,
             "timestamp": datetime.now().isoformat(),
@@ -1070,7 +1124,7 @@ async def complete_transfer(
     transfer["completion_notes"] = notes
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": TransferStatus.COMPLETED,
             "timestamp": datetime.now().isoformat(),
@@ -1116,7 +1170,7 @@ async def cancel_transfer(
     transfer["cancellation_reason"] = reason
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append(
+    _append_status_history(transfer,
         {
             "status": TransferStatus.CANCELLED,
             "timestamp": datetime.now().isoformat(),
@@ -1265,7 +1319,7 @@ async def bulk_approve_transfers(
         transfer["approved_at"] = datetime.now().isoformat()
         transfer["updated_at"] = datetime.now().isoformat()
 
-        transfer["status_history"].append(
+        _append_status_history(transfer,
             {
                 "status": TransferStatus.APPROVED,
                 "timestamp": datetime.now().isoformat(),

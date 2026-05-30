@@ -1373,6 +1373,26 @@ async def receive_transfer(
 # ADVANCED INVENTORY FEATURES (IMS 2.0)
 # ============================================================================
 
+# Broad "this order represents a real sale" status set (both cases seen in DB).
+# Defined here — before its first use in get_non_moving_stock — so it is
+# unambiguously initialised before ANY call-site (including the functions below
+# that also reference it: get_sell_through_analysis, get_overstock_analysis,
+# get_stock_alerts, _aggregate_sales_by_barcode).
+_SOLD_STATUSES = [
+    "DELIVERED",
+    "delivered",
+    "Delivered",
+    "COMPLETED",
+    "completed",
+    "Completed",
+    "PAID",
+    "paid",
+    "Paid",
+    "FULFILLED",
+    "fulfilled",
+    "Fulfilled",
+]
+
 # ============================================================================
 # 1. NON-MOVING STOCK IDENTIFICATION
 # ============================================================================
@@ -1426,8 +1446,14 @@ async def get_non_moving_stock(
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # Get current stock (at the active store)
-                stock_filter = {"product_id": product_id}
+                # BUG FIX: count ONLY on-hand (AVAILABLE/RESERVED) units.
+                # Previously, ALL stock_units rows were counted regardless of
+                # status, so SOLD units inflated current_stock and a product
+                # with 10 sold and 0 available showed current_stock=10.
+                stock_filter = {
+                    "product_id": product_id,
+                    "status": {"$in": ["AVAILABLE", "RESERVED", "available", "reserved"]},
+                }
                 if active_store:
                     stock_filter["store_id"] = active_store
                 stock = stock_coll.find(stock_filter)
@@ -1445,6 +1471,27 @@ async def get_non_moving_stock(
                     sort=[("created_at", -1)],
                 )
 
+                # BUG FIX: days_since_sale was always set to the query
+                # parameter `days` instead of the actual days elapsed since
+                # the last sale. Products with a last_sold_date showed the
+                # wrong staleness figure in the non-moving report.
+                last_sold_dt = None
+                if last_order:
+                    raw_date = last_order.get("created_at")
+                    if isinstance(raw_date, datetime):
+                        last_sold_dt = raw_date
+                    elif isinstance(raw_date, str):
+                        try:
+                            last_sold_dt = datetime.fromisoformat(
+                                raw_date.replace("Z", "+00:00").split("+")[0]
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                if last_sold_dt is not None:
+                    actual_days_since = (datetime.utcnow() - last_sold_dt).days
+                else:
+                    actual_days_since = None  # never sold
+
                 non_moving.append(
                     {
                         "product_id": product_id,
@@ -1452,9 +1499,9 @@ async def get_non_moving_stock(
                         "sku": product.get("sku", ""),
                         "current_stock": total_qty,
                         "last_sold_date": (
-                            last_order.get("created_at") if last_order else None
+                            last_sold_dt.isoformat() if last_sold_dt else None
                         ),
-                        "days_since_sale": days,
+                        "days_since_sale": actual_days_since,
                     }
                 )
 
@@ -2155,23 +2202,10 @@ async def get_overstock_analysis(
 # _SOLD_STATUSES set is now also used by /non-moving, /overstock-analysis
 # and /sell-through-analysis (previously lowercase-only, so they silently
 # missed every imported sale).
-
-
-# Broad "this order represents a real sale" status set (both cases seen in DB)
-_SOLD_STATUSES = [
-    "DELIVERED",
-    "delivered",
-    "Delivered",
-    "COMPLETED",
-    "completed",
-    "Completed",
-    "PAID",
-    "paid",
-    "Paid",
-    "FULFILLED",
-    "fulfilled",
-    "Fulfilled",
-]
+#
+# _SOLD_STATUSES is defined near the top of the ADVANCED INVENTORY FEATURES
+# section (before its first use in get_non_moving_stock) so it is always
+# initialised before any caller runs.
 
 
 def _empty_alert_stats() -> dict:
