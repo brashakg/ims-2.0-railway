@@ -7,7 +7,7 @@ Customer and patient management endpoints
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional
-from datetime import date
+from datetime import date, datetime
 import uuid
 import re
 from .auth import get_current_user, require_roles
@@ -26,6 +26,25 @@ def _sanitize_text(value: str) -> str:
     # Remove control characters except newline/tab
     clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", clean)
     return clean.strip()
+
+
+# 15-character Indian GSTIN format.
+# Pattern: 2-digit state code + 5-letter PAN prefix + 4-digit PAN year + 1 PAN check
+#          + 1 entity number + 'Z' + 1 check character.
+_GSTIN_RE = re.compile(
+    r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
+)
+
+# Basic e-mail sanity check (no external dependency).
+# Deliberately permissive -- just ensures there is an @, a dot-separated domain,
+# and no whitespace. Full RFC-5321 compliance is intentionally out of scope.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Allowed customer types.
+# NOTE: mobile leading-digit restriction (e.g. must start with 6-9 for Indian
+# numbers) is deferred -- policy call for the user.
+# NOTE: requiring GSTIN for B2B customers is deferred -- policy call for the user.
+_VALID_CUSTOMER_TYPES = {"B2C", "B2B"}
 
 
 from ..dependencies import get_customer_repository, validate_store_access
@@ -50,6 +69,14 @@ class PatientCreate(BaseModel):
     anniversary: Optional[date] = None
     relation: Optional[str] = None
 
+    @field_validator("dob", mode="after")
+    @classmethod
+    def dob_not_future(cls, v):
+        """Reject a DOB that is in the future -- a birthdate cannot be tomorrow."""
+        if v is not None and v > date.today():
+            raise ValueError("Date of birth cannot be in the future")
+        return v
+
 
 class CustomerCreate(BaseModel):
     customer_type: str = "B2C"  # B2C, B2B
@@ -70,6 +97,51 @@ class CustomerCreate(BaseModel):
     @classmethod
     def sanitize_name(cls, v):
         return _sanitize_text(v) if isinstance(v, str) else v
+
+    @field_validator("customer_type", mode="after")
+    @classmethod
+    def validate_customer_type(cls, v):
+        """Restrict to the known set {B2C, B2B}; reject unknown values early."""
+        if v not in _VALID_CUSTOMER_TYPES:
+            raise ValueError(
+                f"customer_type must be one of {sorted(_VALID_CUSTOMER_TYPES)}, got '{v}'"
+            )
+        return v
+
+    @field_validator("gstin", mode="after")
+    @classmethod
+    def validate_gstin(cls, v):
+        """Validate 15-char Indian GSTIN format when a non-empty value is supplied.
+
+        Absent (None) or blank GSTIN is accepted -- GSTIN is optional for all
+        customer types; requiring it for B2B is a policy call deferred to the user.
+        """
+        if v and not _GSTIN_RE.match(v):
+            raise ValueError(
+                "GSTIN must be a valid 15-character Indian GSTIN "
+                "(e.g. 27AAPFU0939F1ZV)"
+            )
+        return v
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def validate_email(cls, v):
+        """Basic email format check when a non-empty value is provided.
+
+        Uses a simple local regex -- the email-validator package is NOT a
+        dependency and must not be added here.
+        """
+        if v and not _EMAIL_RE.match(v):
+            raise ValueError("email must be a valid email address (e.g. a@b.com)")
+        return v
+
+    @field_validator("dob", mode="after")
+    @classmethod
+    def dob_not_future(cls, v):
+        """Reject a DOB that is in the future -- a birthdate cannot be tomorrow."""
+        if v is not None and v > date.today():
+            raise ValueError("Date of birth cannot be in the future")
+        return v
 
 
 class CustomerUpdate(BaseModel):
@@ -237,7 +309,11 @@ async def create_customer(
                         "anniversary": (
                             p.anniversary.isoformat() if p.anniversary else None
                         ),
-                        "relation": "Self" if p.name == customer.name else "Other",
+                        # Honor the caller-supplied relation; fall back to the
+                        # name-heuristic only when the field is absent/blank.
+                        "relation": p.relation or (
+                            "Self" if p.name == customer.name else "Other"
+                        ),
                     }
                 )
         else:

@@ -747,8 +747,11 @@ async def upload_bill(
 
     store = get_file_store()
     if store is None:
-        # Fail-soft: don't 500 — tell the caller storage is unavailable. Still
-        # persist the fingerprint so a later re-upload can be matched.
+        # Storage is unavailable: raise 503 so callers that check only the
+        # HTTP status code see a failure (consistent with the handoffs upload
+        # pattern and the download-bill path in this same file).
+        # Still persist the SHA-256 fingerprint so a later successful re-upload
+        # can be matched against it for the anti-fraud duplicate check.
         try:
             expense_repo.update(
                 expense_id,
@@ -760,14 +763,10 @@ async def upload_bill(
             )
         except Exception:
             pass
-        return {
-            "message": "File storage unavailable; bill not saved",
-            "filename": file.filename,
-            "persisted": False,
-            "bill_sha256": bill_sha256,
-            "duplicate_bill": bool(duplicate_of),
-            "duplicate_of": duplicate_of,
-        }
+        raise HTTPException(
+            status_code=503,
+            detail="File storage unavailable",
+        )
 
     file_id = store.put(
         content=content,
