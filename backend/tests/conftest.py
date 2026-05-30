@@ -25,66 +25,35 @@ from fastapi.testclient import TestClient
 # Stock Ledger bug stayed hidden behind that noise. (`mongo_db`-style tests are
 # already isolated -- they use their own throwaway `ims_test_*` databases.)
 #
-# Fix: before each `client` test, clear the TRANSACTIONAL collections from the
-# app DB so every test starts from a known-empty state. We deliberately do NOT
-# touch reference / config / startup-seeded collections (stores, users,
-# entities, hsn_gst_master, agent_config, ...) so store/user
-# validation and the idempotent startup seeds keep working. Fail-soft: with no
-# DB connected (local runs), this is a no-op and DB-needing tests still skip.
-_CHURN_COLLECTIONS = (
-    "products",
-    "orders",
-    "stock_units",
-    "stock",
-    "customers",
-    "prescriptions",
-    "returns",
-    "credit_note_ledger",
-    "vendor_bills",
-    "vendor_payments",
-    "vendor_debit_notes",
-    "purchase_orders",
-    "grns",
-    "tasks",
-    "notifications",
-    "notification_logs",
-    "notification_templates",
-    "expenses",
-    "advances",
-    "audit_logs",
-    "audit_log",
-    "agent_events",
-    "health_checks",
-    "alert_history",
-    "lens_catalog",
-    "lens_stock_lines",
-    "display_fixtures",
-    "fixture_placements",
-    "cash_register_sessions",
-    "gift_cards",
-    "walkouts",
-    "eye_test_queue",
-    "eye_tests",
-    "sop_completions",
-    "workshop_jobs",
-    # Settings singletons + HR transactional collections that tests write but
-    # that previously leaked across tests (not reset) -> intermittent CI flakes.
-    # `marketplace_channels` is the documented gstn_export TestMarketplaceChannels
-    # flake (an enable in one test bled into another's "default disabled" assert);
-    # `leaves`/`attendance` are now persisted by the hardened HR endpoints.
-    "marketplace_channels",
-    "leaves",
-    "attendance",
-    # `pt_slabs` is NOT actually startup-seeded into the DB: GET
-    # /payroll/pt-slabs serves DEFAULT_PT_SLABS (JH + MH) ONLY while the
-    # collection is EMPTY, and returns just the stored rows the moment any
-    # exist. Tests that upsert a slab (settings_validation PUT /pt-slabs/27,
-    # the RBAC matrix PUT /pt-slabs/JH, POST /pt-slabs/seed) leave the
-    # collection non-empty -> the virtual defaults are suppressed -> the later
-    # `test_pt_slabs_list_includes_jh_and_mh` victim sees only the leaked row
-    # (e.g. {'27'}) and fails, but only in test orders where a polluter runs
-    # first (the CI flake). Resetting to empty restores the defaults baseline.
-    "pt_slabs",
+# Fix: before each `client` test, clear EVERY collection in the app DB except a
+# small preserve-set of seeded/reference collections (a DENYLIST, not an
+# allowlist) so every test starts from a known-empty state AND a newly-added
+# transactional collection can never silently start leaking across the test
+# order. (The allowlist this replaced went stale four times -- marketplace_channels,
+# leaves, attendance, pt_slabs each leaked until someone remembered to list it,
+# each surfacing only as an order-dependent CI flake.) We deliberately do NOT
+# touch the startup-seeded / reference collections (see _PRESERVE_COLLECTIONS)
+# so store/user validation and the idempotent startup seeds keep working.
+# Fail-soft: with no DB connected (local runs), this is a no-op and DB-needing
+# tests still skip.
+# Collections SEEDED at startup / holding reference data the whole session
+# depends on -- these are NEVER wiped. migrations.py seeds the superadmin
+# `users` row, a `stores` doc and the `lens_enum_config` singleton; main.py's
+# lifespan seeds `hsn_gst_master` (services/gst_rates) and the 8 `agent_config`
+# rows; `sso_jti` is the JWT-revocation TTL collection. EVERYTHING ELSE in the
+# app DB is transactional and is cleared before each test (see
+# _reset_churn_collections). Add a collection here only if it is startup-seeded
+# or otherwise expected to persist across the whole session.
+_PRESERVE_COLLECTIONS = frozenset(
+    {
+        "stores",
+        "users",
+        "entities",
+        "hsn_gst_master",
+        "agent_config",
+        "lens_enum_config",
+        "sso_jti",
+    }
 )
 
 
@@ -100,7 +69,9 @@ def _reset_churn_collections():
         mongo = getattr(db, "db", None)
         if mongo is None:
             return
-        for name in _CHURN_COLLECTIONS:
+        for name in mongo.list_collection_names():
+            if name in _PRESERVE_COLLECTIONS or name.startswith("system."):
+                continue
             try:
                 mongo[name].delete_many({})
             except Exception:  # noqa: BLE001
