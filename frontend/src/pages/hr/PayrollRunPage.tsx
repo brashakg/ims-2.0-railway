@@ -208,6 +208,7 @@ export function PayrollRunPage() {
             No salary configs in scope. Add them under Salary Setup first.
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
@@ -241,6 +242,7 @@ export function PayrollRunPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
         {canRun && configs.length > 0 && (
           <div className="flex justify-end gap-2 p-3 border-t border-gray-100">
@@ -289,6 +291,7 @@ export function PayrollRunPage() {
         {rows.length === 0 ? (
           <div className="p-6 text-center text-gray-500 text-sm">No payroll rows yet. Run payroll above.</div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
@@ -328,6 +331,7 @@ export function PayrollRunPage() {
               </tr>
             </tfoot>
           </table>
+          </div>
         )}
       </div>
 

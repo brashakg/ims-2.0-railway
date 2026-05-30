@@ -173,6 +173,7 @@ export function EntitiesPage() {
         ) : entities.length === 0 ? (
           <div className="p-6 text-center text-gray-500">No entities yet. Add your first legal entity.</div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
@@ -205,6 +206,7 @@ export function EntitiesPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

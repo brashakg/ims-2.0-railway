@@ -337,6 +337,7 @@ export default function ActivityLogPage() {
             </p>
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-[10.5px] font-mono uppercase tracking-wider text-gray-400 bg-gray-50 border-b border-gray-200">
@@ -446,6 +447,7 @@ export default function ActivityLogPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

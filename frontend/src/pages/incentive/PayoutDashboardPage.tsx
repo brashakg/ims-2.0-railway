@@ -263,7 +263,7 @@ export function PayoutDashboardPage() {
       {view && (
         <section className="card p-4">
           <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Targets</h2>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
             {(['L1', 'L2', 'L3'] as const).map(lvl => {
               const t = view.targets[lvl];
               const achieved = t.achieved;

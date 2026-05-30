@@ -168,7 +168,7 @@ export function BarcodeManagementModal({
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Barcode Format
             </label>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
               {(['CODE128', 'EAN13', 'UPC', 'CODE39'] as BarcodeFormat[]).map((f) => (
                 <button
                   key={f}

@@ -225,6 +225,7 @@ export default function ItcReconcilePage() {
               Total booked ITC: <span className="font-medium text-gray-900">{inr(reg.total_itc)}</span>
             </div>
           </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-xs text-gray-500">
               <tr>
@@ -255,6 +256,7 @@ export default function ItcReconcilePage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -392,6 +394,7 @@ function Bucket({
         )}
       </div>
       <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+        <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead className="text-gray-400"><tr>{cols.map((c) => <th key={c} className={`px-3 py-1.5 ${isMoney(c) ? 'text-right' : 'text-left'}`}>{c.replace(/_/g, ' ')}</th>)}</tr></thead>
           <tbody className="divide-y divide-gray-100">
@@ -406,6 +409,7 @@ function Bucket({
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
