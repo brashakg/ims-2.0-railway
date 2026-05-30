@@ -92,6 +92,7 @@ from .routers import (
     lens_stock_router,
     lens_enums_router,
     product_templates_router,
+    audit_router,
 )
 from .routers.auth import require_roles
 
@@ -921,6 +922,14 @@ app.include_router(
     print_overrides_router,
     prefix="/api/v1/print-overrides",
     tags=["Print Overrides"],
+)
+# Audit trail integrity (SYSTEM_INTENT 10). READ-ONLY, SUPERADMIN-only:
+# GET /api/v1/audit/verify walks the tamper-evident hash-chain. The audit
+# collection is append-only -- this router exposes no mutation route.
+app.include_router(
+    audit_router,
+    prefix="/api/v1/audit",
+    tags=["Audit"],
 )
 
 
