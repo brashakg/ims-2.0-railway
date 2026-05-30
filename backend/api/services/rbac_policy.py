@@ -989,7 +989,11 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/workshop/jobs/{job_id}/label', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/lens-status', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
     {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/notify-ready', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
-    {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/qc', "allowed": 'AUTHENTICATED'},
+    # /qc gate tightened to WORKSHOP_ROLES (not AUTHENTICATED) — sales staff
+    # cannot run or override QC. Mirrors require_roles(*WORKSHOP_ROLES) on the handler.
+    {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/qc', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SUPERADMIN', 'WORKSHOP_STAFF']},
+    # New Phase 6.9 structured QC checklist endpoint.
+    {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/qc-checklist', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SUPERADMIN', 'WORKSHOP_STAFF']},
     {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/rework', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/scan-advance', "allowed": ['ADMIN', 'AREA_MANAGER', 'CASHIER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
     {"method": 'POST', "path": '/api/v1/workshop/jobs/{job_id}/start', "allowed": 'AUTHENTICATED'},

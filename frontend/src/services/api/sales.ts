@@ -493,6 +493,40 @@ export const workshopApi = {
     };
   },
 
+  // Phase 6.9 — structured per-item QC checklist. Sends each check item
+  // (key, label, passed, optional note) to the dedicated /qc-checklist
+  // endpoint which stores them with reviewer identity + timestamps.
+  qcChecklist: async (
+    jobId: string,
+    checklist: Array<{ key: string; label: string; passed: boolean; note?: string }>,
+    overallNotes?: string,
+    waived?: boolean,
+    waiveReason?: string,
+  ) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/qc-checklist`, {
+      checklist,
+      overall_notes: overallNotes,
+      waived: waived ?? false,
+      waive_reason: waiveReason,
+    });
+    return response.data as {
+      job_id: string;
+      status: 'READY' | 'QC_FAILED';
+      qc_passed: boolean;
+      all_items_passed: boolean;
+      waived: boolean;
+      checklist: Array<{
+        key: string;
+        label: string;
+        passed: boolean;
+        note: string;
+        checked_by: string;
+        checked_at: string;
+      }>;
+      message: string;
+    };
+  },
+
   // Send a QC_FAILED job back to the bench (QC_FAILED -> IN_PROGRESS).
   // Backend reads `notes` as a query param.
   reworkJob: async (jobId: string, notes?: string) => {
