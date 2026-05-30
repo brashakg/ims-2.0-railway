@@ -554,6 +554,12 @@ async def enable_category(
     store_id: str, category: str, current_user: dict = Depends(get_current_user)
 ):
     """Enable a category for the store"""
+    # SYSTEM_INTENT section 11: store configuration is HQ-only (Admin/Superadmin).
+    if not any(r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")):
+        raise HTTPException(
+            status_code=403,
+            detail="Store configuration is restricted to HQ (Admin/Superadmin)",
+        )
     repo = get_store_repository()
 
     if repo is not None:
@@ -574,6 +580,12 @@ async def disable_category(
     store_id: str, category: str, current_user: dict = Depends(get_current_user)
 ):
     """Disable a category for the store"""
+    # SYSTEM_INTENT section 11: store configuration is HQ-only (Admin/Superadmin).
+    if not any(r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")):
+        raise HTTPException(
+            status_code=403,
+            detail="Store configuration is restricted to HQ (Admin/Superadmin)",
+        )
     repo = get_store_repository()
 
     if repo is not None:

@@ -12,6 +12,10 @@ import uuid
 import re
 from .auth import get_current_user, require_roles
 
+# Roles allowed to mint customer monetary value (store credit, loyalty points).
+# Defined above the endpoints so it can gate the add/issue/redeem routes.
+_CREDIT_ROLES = ("ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN")
+
 
 def _sanitize_text(value: str) -> str:
     """Strip HTML tags and dangerous characters from user input."""
@@ -516,7 +520,7 @@ async def get_customer_prescriptions(
 async def add_loyalty_points(
     customer_id: str = Path(..., description="Customer ID"),
     points: int = Query(..., ge=1, description="Loyalty points to add"),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
 ):
     """Add loyalty points to customer"""
     repo = get_customer_repository()
@@ -541,7 +545,7 @@ async def add_loyalty_points(
 async def add_store_credit(
     customer_id: str,
     amount: float = Query(..., gt=0),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
 ):
     """Add store credit to customer"""
     repo = get_customer_repository()
@@ -563,8 +567,6 @@ async def add_store_credit(
 # ============================================================================
 # STORE-CREDIT / CREDIT-NOTE LEDGER (auditable history per customer)
 # ============================================================================
-
-_CREDIT_ROLES = ("ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN")
 
 
 class StoreCreditEntryRequest(BaseModel):
