@@ -166,7 +166,7 @@ export function BarcodeManagement({
       </div>
 
       {/* Barcodes List */}
-      <div className="divide-y divide-gray-200">
+      <div className="divide-y divide-gray-200 overflow-x-auto">
         {loading ? (
           <div className="p-8 text-center text-gray-500">
             <p>Loading barcodes...</p>
@@ -179,7 +179,7 @@ export function BarcodeManagement({
         ) : (
           <>
             {/* Header Row */}
-            <div className="p-4 bg-gray-50 text-sm font-medium text-gray-700 grid grid-cols-8 gap-2 items-center">
+            <div className="p-4 bg-gray-50 text-sm font-medium text-gray-700 grid grid-cols-8 gap-2 items-center min-w-[820px]">
               <input
                 type="checkbox"
                 checked={selectedBarcodes.size === filteredBarcodes.length && filteredBarcodes.length > 0}
@@ -197,7 +197,7 @@ export function BarcodeManagement({
 
             {/* Barcode Rows */}
             {filteredBarcodes.map(barcode => (
-              <div key={barcode.id} className="p-4 hover:bg-gray-50 transition-colors grid grid-cols-8 gap-2 items-center">
+              <div key={barcode.id} className="p-4 hover:bg-gray-50 transition-colors grid grid-cols-8 gap-2 items-center min-w-[820px]">
                 <input
                   type="checkbox"
                   checked={selectedBarcodes.has(barcode.id)}
