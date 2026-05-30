@@ -25,54 +25,57 @@ from fastapi.testclient import TestClient
 # Stock Ledger bug stayed hidden behind that noise. (`mongo_db`-style tests are
 # already isolated -- they use their own throwaway `ims_test_*` databases.)
 #
-# Fix: before each `client` test, clear the TRANSACTIONAL collections from the
-# app DB so every test starts from a known-empty state. We deliberately do NOT
-# touch reference / config / startup-seeded collections (stores, users,
-# entities, hsn_gst_master, agent_config, pt_slabs, ...) so store/user
-# validation and the idempotent startup seeds keep working. Fail-soft: with no
-# DB connected (local runs), this is a no-op and DB-needing tests still skip.
-_CHURN_COLLECTIONS = (
-    "products",
-    "orders",
-    "stock_units",
-    "stock",
-    "customers",
-    "prescriptions",
-    "returns",
-    "credit_note_ledger",
-    "vendor_bills",
-    "vendor_payments",
-    "vendor_debit_notes",
-    "purchase_orders",
-    "grns",
-    "tasks",
-    "notifications",
-    "notification_logs",
-    "notification_templates",
-    "expenses",
-    "advances",
-    "audit_logs",
-    "audit_log",
-    "agent_events",
-    "health_checks",
-    "alert_history",
-    "lens_catalog",
-    "lens_stock_lines",
-    "display_fixtures",
-    "fixture_placements",
-    "cash_register_sessions",
-    "gift_cards",
-    "walkouts",
-    "eye_test_queue",
-    "eye_tests",
-    "sop_completions",
-    "workshop_jobs",
+# Fix: before each `client` test, clear EVERY collection in the app DB except a
+# small preserve-set of seeded/reference collections (a DENYLIST, not an
+# allowlist) so every test starts from a known-empty state AND a newly-added
+# transactional collection can never silently start leaking across the test
+# order. (The allowlist this replaced went stale four times -- marketplace_channels,
+# leaves, attendance, pt_slabs each leaked until someone remembered to list it,
+# each surfacing only as an order-dependent CI flake.) We deliberately do NOT
+# touch the startup-seeded / reference collections (see _PRESERVE_COLLECTIONS)
+# so store/user validation and the idempotent startup seeds keep working.
+# Fail-soft: with no DB connected (local runs), this is a no-op and DB-needing
+# tests still skip.
+# Collections SEEDED at startup / holding reference data the whole session
+# depends on -- these are NEVER wiped. migrations.py seeds the superadmin
+# `users` row, a `stores` doc and the `lens_enum_config` singleton; main.py's
+# lifespan seeds `hsn_gst_master` (services/gst_rates) and the 8 `agent_config`
+# rows; `sso_jti` is the JWT-revocation TTL collection. EVERYTHING ELSE in the
+# app DB is transactional and is cleared before each test (see
+# _reset_churn_collections). Add a collection here only if it is startup-seeded
+# or otherwise expected to persist across the whole session.
+_PRESERVE_COLLECTIONS = frozenset(
+    {
+        "stores",
+        "users",
+        "entities",
+        "hsn_gst_master",
+        "agent_config",
+        "lens_enum_config",
+        "sso_jti",
+    }
 )
 
 
+# Post-startup snapshot of the preserve-set, captured once on the first reset
+# (after the app lifespan has seeded users/stores/hsn_gst_master/agent_config/...
+# but before any test has mutated them). It is RESTORED before every test so a
+# test that edits a seeded/reference collection -- test_tally_export inserts into
+# `stores`, test_admin_hsn/test_gst_master edit `hsn_gst_master` rates, the
+# lens-config tests upsert `lens_enum_config` -- cannot leak that mutation into a
+# later test that asserts the seeded baseline. That is the second, subtler half
+# of the order-flake; the denylist clear below handles the leak-into-empty half.
+# Together they make the whole app DB deterministic before every test.
+_PRESERVE_BASELINE = None
+
+
 def _reset_churn_collections():
-    """Empty the transactional collections in the app DB so each HTTP test is
-    isolated on CI's shared mongo. No-op (fail-soft) when no DB is connected."""
+    """Make the app DB deterministic before each HTTP test: (1) clear every
+    transactional collection (denylist -- everything except _PRESERVE_COLLECTIONS)
+    and (2) restore the preserve-set to its post-startup baseline, undoing any
+    in-test mutation of seeded/reference data. The baseline is captured lazily on
+    the first call. No-op (fail-soft) when no DB is connected."""
+    global _PRESERVE_BASELINE
     try:
         from database.connection import get_db
 
@@ -82,13 +85,46 @@ def _reset_churn_collections():
         mongo = getattr(db, "db", None)
         if mongo is None:
             return
-        for name in _CHURN_COLLECTIONS:
+        # Capture the seeded baseline once, before any test has mutated it.
+        if _PRESERVE_BASELINE is None:
+            snap = {}
+            for name in _PRESERVE_COLLECTIONS:
+                try:
+                    snap[name] = list(mongo[name].find({}))
+                except Exception:  # noqa: BLE001
+                    snap[name] = []
+            _PRESERVE_BASELINE = snap
+        # (1) Clear every transactional collection.
+        for name in mongo.list_collection_names():
+            if name in _PRESERVE_COLLECTIONS or name.startswith("system."):
+                continue
             try:
                 mongo[name].delete_many({})
             except Exception:  # noqa: BLE001
                 pass
+        # (2) Restore the preserve-set to its captured baseline.
+        for name, docs in _PRESERVE_BASELINE.items():
+            try:
+                mongo[name].delete_many({})
+                if docs:
+                    mongo[name].insert_many([dict(d) for d in docs])
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001
         pass
+
+
+def pytest_collection_modifyitems(items):
+    """Force a deterministic, machine-independent collection order. pytest's
+    default order follows the filesystem directory-scan order, which differs
+    between this container and the CI runner -- so an order-sensitive failure
+    can hit CI yet never reproduce locally (and vice versa). Sorting by file
+    path (Python's stable sort preserves each file's original in-file order)
+    makes the suite run in the SAME order everywhere: CI becomes reproducible
+    locally, and collection nondeterminism can no longer mask or unmask a
+    failure. Inert under pytest-randomly (only installed locally) when that
+    plugin is left active; pass -p no:randomly to honour this order."""
+    items.sort(key=lambda it: str(getattr(it, "fspath", "") or it.nodeid))
 
 
 def _noop_close(*_args, **_kwargs):
