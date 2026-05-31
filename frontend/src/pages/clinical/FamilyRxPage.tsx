@@ -29,6 +29,7 @@ import type {
 } from '../../services/api/sales';
 import { useToast } from '../../context/ToastContext';
 import { AutoSearch } from '../../components/common/AutoSearch';
+import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
 
 // --- Field readers -----------------------------------------------------------
 // Backend ships raw Mongo docs, so eye keys vary (sph/sphere, cyl/cylinder,
@@ -244,39 +245,47 @@ export function FamilyRxPage() {
           flow as POS StepCustomer, scoped to the active store. */}
       <div className="card">
         <label className="block text-sm font-medium text-gray-700 mb-2">Find a customer</label>
-        <AutoSearch<Record<string, any>>
+        <AutoSearch<CustomerSearchHit>
           fetchResults={async (q, sid) => {
             try {
               const res = await customerApi.getCustomers({ search: q, storeId: sid, limit: 8 });
-              return res?.customers || res || [];
+              const customers = (res as any)?.customers || (res as any) || [];
+              return buildCustomerSearchHits(customers, q);
             } catch {
               return [];
             }
           }}
-          renderItem={(cust) => {
-            const custName = cust.name || cust.customer_name || cust.full_name || 'Unknown';
-            const custPhone = cust.phone || cust.mobile || '';
+          maxResults={10}
+          renderItem={(hit) => {
+            const isPatient = hit.kind === 'patient';
+            const initial = (hit.displayName || '?').charAt(0).toUpperCase();
             return (
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-purple-600 flex items-center justify-center text-sm font-bold text-white">
-                  {custName.charAt(0).toUpperCase()}
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white ${isPatient ? 'bg-blue-600' : 'bg-purple-600'}`}>
+                  {initial}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{custName}</p>
-                  <p className="text-xs text-gray-500">
-                    {custPhone}
-                    {cust.city && ` · ${cust.city}`}
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {hit.displayName}
+                    <span className={`ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${isPatient ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{isPatient ? 'Patient' : 'Account'}</span>
+                  </p>
+                  <p className="text-xs text-gray-500 truncate">
+                    {hit.phone || 'No phone'}
+                    {isPatient ? ` · under ${hit.accountName}` : (hit.customer?.city ? ` · ${hit.customer.city}` : '')}
                   </p>
                 </div>
               </div>
             );
           }}
-          onSelect={(cust) => {
-            const id = cust.customer_id || cust._id || cust.id;
-            const name = cust.name || cust.customer_name || cust.full_name || 'Customer';
+          onSelect={(hit) => {
+            const c = hit.customer;
+            const id = c.customer_id || c._id || c.id;
+            const name = c.name || c.customer_name || c.full_name || 'Customer';
+            // Family Rx loads the whole account family (which includes the matched
+            // patient), so a patient hit resolves to its parent account.
             if (id) loadFamily(id, name);
           }}
-          getKey={(cust) => cust.customer_id || cust._id || cust.id || cust.phone || cust.name || 'unknown'}
+          getKey={(hit) => hit.key}
           placeholder="Search by phone number or name..."
           emptyMessage="No customers found"
           icon={<Search className="w-4 h-4" />}
