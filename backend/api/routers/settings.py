@@ -833,8 +833,63 @@ async def test_notification(
     test_email: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """Send test notification"""
-    return {"message": "Test notification sent", "template_id": template_id}
+    """Probe a notification template by attempting a real provider send.
+
+    Previously this ALWAYS returned "Test notification sent" without calling any
+    provider -- a silent lie: the operator believed a message went out when none
+    did. Now we run the message through the same DISPATCH_MODE-gated provider the
+    drain uses and report the HONEST result:
+
+      - DISPATCH_MODE=off (default): nothing is dispatched. status SIMULATED,
+        dispatched=False, message "not dispatched (DISPATCH_MODE=off)".
+      - DISPATCH_MODE=test: only the configured TEST_PHONE actually receives;
+        any other number is SIMULATED/suppressed.
+      - DISPATCH_MODE=live: a real WhatsApp/SMS is sent to test_phone.
+
+    Gated to SUPERADMIN/ADMIN because in live mode it can trigger a real send.
+    """
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    if not test_phone:
+        # Nothing to send to. Be explicit rather than claiming success.
+        return {
+            "message": "No test_phone provided -- nothing dispatched",
+            "template_id": template_id,
+            "dispatched": False,
+            "status": "SKIPPED",
+        }
+
+    try:
+        from agents.providers import send_whatsapp, dispatch_mode
+    except Exception as exc:  # pragma: no cover - provider import failure
+        raise HTTPException(
+            status_code=503, detail=f"Notification provider unavailable: {exc}"
+        ) from exc
+
+    mode = dispatch_mode()
+    body = f"[IMS test] template {template_id}"
+    result = await send_whatsapp(test_phone, body, template_id=template_id)
+    dispatched = result.status == "SENT"
+
+    if result.status == "SIMULATED":
+        human = f"Not dispatched (DISPATCH_MODE={mode}); message simulated only"
+    elif result.status == "SENT":
+        human = "Test notification dispatched to provider"
+    elif result.status == "FAILED":
+        human = f"Test notification FAILED: {result.error or 'unknown error'}"
+    else:
+        human = f"Test notification {result.status}"
+
+    return {
+        "message": human,
+        "template_id": template_id,
+        "dispatch_mode": mode,
+        "dispatched": dispatched,
+        "status": result.status,
+        "provider_id": result.provider_id,
+        "error": result.error,
+    }
 
 
 # ============================================================================

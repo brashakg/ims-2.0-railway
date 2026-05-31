@@ -274,6 +274,125 @@ async def _ingest(
 # ============================================================================
 
 
+# ============================================================================
+# MSG91 delivery-report (DLR) receiver -- advances delivery_status on the
+# matching notification_logs row past SENT. Authenticated by HMAC signature
+# (X-MSG91-Signature) against the `msg91` integration's webhook_secret, exactly
+# like the vendor receivers above (the signature IS the auth; MSG91 has no IMS
+# bearer token).
+# ============================================================================
+
+# MSG91 DLR status -> canonical delivery_status on notification_logs.
+# MSG91 reports both numeric codes and string statuses depending on channel;
+# we accept either. Anything unknown is recorded verbatim (upper-cased) so we
+# never silently swallow a status we don't yet model.
+_MSG91_STATUS_MAP = {
+    "1": "DELIVERED",
+    "delivered": "DELIVERED",
+    "read": "READ",
+    "2": "FAILED",
+    "failed": "FAILED",
+    "undelivered": "FAILED",
+    "rejected": "FAILED",
+    "blocked": "FAILED",
+    "sent": "SENT",
+    "submitted": "SENT",
+}
+
+
+def _canonical_dlr_status(raw: str) -> str:
+    return _MSG91_STATUS_MAP.get(str(raw or "").strip().lower(), str(raw or "").upper() or "UNKNOWN")
+
+
+@router.post("/msg91/delivery")
+async def receive_msg91_delivery(request: Request):
+    """MSG91 WhatsApp/SMS delivery-report webhook.
+
+    Verifies the HMAC signature, then advances `delivery_status` on the
+    notification_logs row whose `provider_msg_id` / `provider_id` matches the
+    DLR's request id. Stub-level handler: it does the lookup + status advance
+    and records the raw DLR; it does not (yet) fan out further events.
+
+    Fail-soft like the other receivers: missing secret -> 200 skipped (so MSG91
+    won't hammer its retry queue), bad signature -> 401, Mongo down -> 200.
+    """
+    raw_body = await request.body()
+    sig = request.headers.get("X-MSG91-Signature") or request.headers.get(
+        "x-msg91-signature"
+    )
+
+    secret = _load_secret("msg91")
+    if not secret:
+        logger.info("[WEBHOOKS] msg91: no webhook_secret configured -- skipping verification")
+        return {"status": "skipped", "reason": "secret_not_configured"}
+
+    if not sig or not webhook_verify.verify_msg91(raw_body, sig, secret):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (UnicodeDecodeError, ValueError):
+        payload = {}
+
+    # MSG91 nests DLR data differently per product; pull the common fields with
+    # several fallbacks rather than assuming one exact shape.
+    def _first(d: Dict[str, Any], *keys):
+        for k in keys:
+            v = d.get(k)
+            if v:
+                return v
+        return None
+
+    body_obj = payload if isinstance(payload, dict) else {}
+    data_obj = body_obj.get("data") if isinstance(body_obj.get("data"), dict) else {}
+    request_id = (
+        _first(body_obj, "request_id", "requestId", "messageId", "message_id")
+        or _first(data_obj, "request_id", "requestId", "messageId", "message_id")
+    )
+    raw_status = (
+        _first(body_obj, "status", "deliveryStatus", "delivery_status", "event")
+        or _first(data_obj, "status", "deliveryStatus", "delivery_status", "event")
+        or ""
+    )
+    canonical = _canonical_dlr_status(raw_status)
+
+    updated = 0
+    db = _get_db()
+    if db is not None and request_id:
+        try:
+            coll = db.get_collection("notification_logs")
+            update = {
+                "delivery_status": canonical,
+                "dlr_received_at": datetime.now(timezone.utc).isoformat(),
+                "dlr_raw_status": str(raw_status),
+            }
+            if canonical == "DELIVERED":
+                update["delivered_at"] = update["dlr_received_at"]
+            res = coll.update_many(
+                {"$or": [{"provider_msg_id": request_id}, {"provider_id": request_id}]},
+                {"$set": update},
+            )
+            updated = getattr(res, "modified_count", 0) or 0
+        except Exception as e:
+            # Stay green so MSG91 doesn't retry-storm; the miss is logged.
+            logger.error(f"[WEBHOOKS] msg91 DLR update failed: {e}")
+
+    if request_id and updated == 0:
+        logger.info(
+            "[WEBHOOKS] msg91 DLR for request_id=%s status=%s matched no rows",
+            request_id,
+            canonical,
+        )
+
+    return {
+        "status": "received",
+        "vendor": "msg91",
+        "request_id": request_id,
+        "delivery_status": canonical,
+        "updated": updated,
+    }
+
+
 @router.post("/razorpay")
 async def receive_razorpay(request: Request):
     """Razorpay webhook receiver. Signed via X-Razorpay-Signature."""

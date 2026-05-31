@@ -92,6 +92,13 @@ def test_bulk_send_skips_opted_out_customers(monkeypatch):
     monkeypatch.setattr(
         marketing_router, "_check_notification_rate", lambda *_a, **_k: None
     )
+    # This test asserts consent-skip behavior and must be time-independent. The
+    # promo quiet-hours window (council S18) is tested in
+    # test_marketing_quiet_hours.py; force it OPEN here so a CI run during
+    # 21:00-09:00 IST doesn't 409 this promotional fan-out.
+    from agents import quiet_hours as _qh
+
+    monkeypatch.setattr(_qh, "in_quiet_hours", lambda now=None: False)
 
     app = FastAPI()
     app.include_router(marketing_router.router, prefix="/api/v1/marketing")

@@ -31,49 +31,20 @@ import logging
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..providers import send_whatsapp, send_sms, dispatch_mode, provider_ready
 
+# Quiet-hours / IST clock is now shared so EVERY outbound path (MEGAPHONE,
+# task-escalation WhatsApp, and the manual marketing send API) agree on the
+# SAME 21:00-09:00 IST window computed in the SAME timezone. See
+# agents.quiet_hours. _IST / _now_ist are re-exported for back-compat (and for
+# the existing test_megaphone_dnd suite which imports them from here).
+from ..quiet_hours import (
+    _IST,
+    now_ist as _now_ist,
+    in_quiet_hours as _shared_in_quiet_hours,
+    next_quiet_end as _shared_next_quiet_end,
+    next_quiet_end_utc_iso as _shared_next_quiet_end_utc_iso,
+)
+
 logger = logging.getLogger(__name__)
-
-# IST timezone for the DND quiet window. TRAI/DLT rules define the window in
-# India Standard Time, NOT UTC -- computing it in UTC shifts it by 5h30m and
-# lets promotional messages go out at ~1 AM IST (a compliance breach).
-# Wrapped defensively per the fail-soft contract: if zoneinfo / the tz database
-# is unavailable on the host, fall back to a fixed UTC+5:30 offset (India has no
-# DST, so the offset is exact). Only if BOTH fail do we degrade to UTC with a
-# warning.
-_IST: Optional[timezone] = None
-try:
-    from zoneinfo import ZoneInfo
-
-    _IST = ZoneInfo("Asia/Kolkata")  # type: ignore[assignment]
-except Exception as _e:  # pragma: no cover - only on hosts without tzdata
-    try:
-        _IST = timezone(timedelta(hours=5, minutes=30), name="IST")
-        logger.warning(
-            "[MEGAPHONE] zoneinfo Asia/Kolkata unavailable (%s) -- using fixed "
-            "UTC+5:30 offset for DND. India does not observe DST so this is exact.",
-            _e,
-        )
-    except Exception:  # pragma: no cover
-        _IST = None
-        logger.warning(
-            "[MEGAPHONE] Could not resolve IST timezone -- DND falls back to UTC. "
-            "Promotional sends may not respect the IST quiet window."
-        )
-
-
-def _now_ist(now: Optional[datetime] = None) -> datetime:
-    """Return `now` (or real current time) expressed in IST.
-
-    `now` may be naive or tz-aware; if naive it's assumed to already be IST.
-    Falls back to UTC only if IST could not be resolved at import time.
-    """
-    if now is None:
-        tz = _IST or timezone.utc
-        return datetime.now(tz)
-    if now.tzinfo is None:
-        # Naive datetimes from callers/tests are taken to mean IST wall-clock.
-        return now if _IST is None else now.replace(tzinfo=_IST)
-    return now.astimezone(_IST) if _IST is not None else now.astimezone(timezone.utc)
 
 # How many PENDING notifications to drain per tick. Keeps the 30-min loop
 # bounded and stops a backed-up queue from taking hours to clear (at 60/tick
@@ -111,42 +82,29 @@ class MegaphoneAgent(JarvisAgent):
     def _in_dnd_window(self, now: Optional[datetime] = None) -> bool:
         """True if `now` (default: real IST now) is inside the DND quiet window.
 
-        The window is 21:00-09:00 IST with an overnight wrap, so the test is
-        hour >= DND_START_HOUR (>=21) OR hour < DND_END_HOUR (<9). `now` is
-        injectable for testing; it is normalised to IST first.
+        The window is 21:00-09:00 IST with an overnight wrap. Delegates to the
+        shared agents.quiet_hours guard so MEGAPHONE, task-escalation WhatsApp,
+        and the manual marketing send API all use the SAME window.
         """
-        now_hour = _now_ist(now).hour
-        return now_hour >= self.DND_START_HOUR or now_hour < self.DND_END_HOUR
+        return _shared_in_quiet_hours(now)
 
     def _next_dnd_end(self, now: Optional[datetime] = None) -> datetime:
         """Return the next 09:00 IST instant at or after `now`, as a tz-aware
-        datetime carrying the IST offset (+05:30).
+        datetime carrying the IST offset (+05:30). Delegates to the shared
+        agents.quiet_hours helper.
 
         Used as `scheduled_for` so a message queued inside the DND window is
-        held until quiet hours end. If it's already past 09:00 today (i.e. we
-        are in the evening 21:00-24:00 leg of the window) the target rolls to
-        09:00 tomorrow.
+        held until quiet hours end.
         """
-        ist_now = _now_ist(now)
-        target = ist_now.replace(
-            hour=self.DND_END_HOUR, minute=0, second=0, microsecond=0
-        )
-        if ist_now.hour >= self.DND_END_HOUR:
-            # Past 09:00 already -> the next quiet-hours end is tomorrow 09:00.
-            target = target + timedelta(days=1)
-        return target
+        return _shared_next_quiet_end(now)
 
     def _next_dnd_end_utc_iso(self, now: Optional[datetime] = None) -> str:
         """`_next_dnd_end` as a UTC ISO-8601 string for storage in
         scheduled_for. We store UTC (same instant as the 09:00 IST target) so
         the drain query's lexicographic `$lte` against a UTC `now_iso` stays
-        valid -- mixing +05:30 and +00:00 offset strings would compare wrong.
-        Falls back gracefully if the target is somehow naive.
+        valid. Delegates to the shared agents.quiet_hours helper.
         """
-        target = self._next_dnd_end(now)
-        if target.tzinfo is None:  # pragma: no cover - _next_dnd_end is tz-aware
-            return target.isoformat()
-        return target.astimezone(timezone.utc).isoformat()
+        return _shared_next_quiet_end_utc_iso(now)
 
     async def _do_background_work(self):
         """
@@ -363,10 +321,18 @@ class MegaphoneAgent(JarvisAgent):
         }
         if provider_id:
             updates["provider_id"] = provider_id
+            # Keep the DLT audit field in lock-step so the MSG91 delivery-report
+            # webhook can match this row by provider_msg_id and advance it.
+            updates["provider_msg_id"] = provider_id
         if error:
             updates["failure_reason"] = error
         if status == "SENT":
             updates["sent_at"] = updates["dispatched_at"]
+            # Advance the DLR ladder QUEUED -> SENT; the webhook moves it on to
+            # DELIVERED/READ/FAILED when MSG91 reports back.
+            updates["delivery_status"] = "SENT"
+        elif status == "FAILED":
+            updates["delivery_status"] = "FAILED"
         try:
             coll.update_one({"_id": row["_id"]}, {"$set": updates})
         except Exception as e:

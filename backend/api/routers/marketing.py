@@ -77,13 +77,47 @@ def _get_db():
 # errors > silent mis-configuration or injection).
 VALID_CHANNELS = {"WHATSAPP", "SMS", "EMAIL"}
 # Templates that are purely transactional and therefore exempt from the
-# marketing_consent gate. TRAI/DLT allow transactional messages (order
-# confirmation, OTP, service reminders) regardless of marketing opt-out.
+# marketing_consent gate AND the promotional quiet-hours window. TRAI/DLT allow
+# transactional messages (order confirmation, OTP, service reminders) regardless
+# of marketing opt-out or time of day.
 _TRANSACTIONAL_TEMPLATES = {
     "ORDER_DELIVERED",
     "GOOGLE_REVIEW_REQUEST",
     "NPS_SURVEY",
 }
+
+
+def _enforce_promo_window(template_id: str) -> None:
+    """Block PROMOTIONAL manual sends outside the 9 AM - 9 PM IST window.
+
+    TRAI/DLT forbids promotional messages during night quiet hours (21:00-09:00
+    IST). The MEGAPHONE agent already queues-and-defers automated promos; this
+    guards the MANUAL send API the same way, using the SAME shared IST guard
+    (agents.quiet_hours) so both agree on the window and timezone.
+
+    Transactional/service templates in _TRANSACTIONAL_TEMPLATES are exempt
+    (order confirmations, review/NPS, OTP-class). Everything else is treated as
+    promotional and is BLOCKED out-of-window -- we default to block rather than
+    silently auto-queueing, because turning a manual "send now" into a deferred
+    send is an owner policy decision, not a default the API should make.
+    Fail-soft: if the IST guard can't be imported we DO NOT block (availability
+    over a hard stop on an infra hiccup)."""
+    if template_id in _TRANSACTIONAL_TEMPLATES:
+        return
+    try:
+        from agents.quiet_hours import promo_send_allowed, now_ist
+    except Exception:  # pragma: no cover - guard import failure -> don't block
+        return
+    if not promo_send_allowed():
+        ist = now_ist().strftime("%H:%M IST")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Promotional messages are blocked during quiet hours "
+                f"(21:00-09:00 IST). Current time is {ist}. Send transactional "
+                f"templates only, or retry after 09:00 IST."
+            ),
+        )
 
 # Indian mobile: 10 digits starting with 6-9.
 _INDIA_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
@@ -179,6 +213,10 @@ async def send_marketing_notification(
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
 
+    # Promo quiet-hours window: block promotional templates outside 9AM-9PM IST
+    # (transactional templates are exempt). Same shared guard as MEGAPHONE.
+    _enforce_promo_window(req.template_id)
+
     # Marketing-consent gate: non-transactional templates must not be sent to
     # customers who have opted out.  Only an explicit False opts out; missing /
     # None defaults to consented (matches the customer-create default).
@@ -247,6 +285,9 @@ async def send_bulk_notifications(
     rate_err = _check_notification_rate(current_user.get("user_id", "unknown"))
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
+    # Promo quiet-hours window: a bulk fan-out is promotional unless it uses a
+    # transactional template. Block out-of-window (9AM-9PM IST) before any send.
+    _enforce_promo_window(req.template_id)
     active_store = store_id or current_user.get("active_store_id", "")
     # Respect marketing consent (consent / DLT compliance): a customer who has
     # turned OFF "Receive marketing messages" (marketing_consent == False) must

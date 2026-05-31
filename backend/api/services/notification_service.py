@@ -2,15 +2,45 @@
 IMS 2.0 - Notification Service
 ================================
 Shared notification sending and logging for all marketing features.
-MVP: Logs to notification_logs collection. Actual WhatsApp/SMS API integration
-is a future enhancement when API keys are configured.
+
+Honest-status contract (do NOT fake success):
+- This function QUEUES a customer message to the notification_logs collection.
+  It does NOT itself hit the provider -- MEGAPHONE's drain pass (or a future
+  worker) picks up PENDING rows and dispatches them via agents.providers, which
+  is gated by DISPATCH_MODE (off/test/live).
+- Therefore the truthful status at queue time is PENDING ("accepted, not yet
+  sent"), never a fabricated SENT. The returned dict carries `dispatched=False`
+  and the current `dispatch_mode` so callers/UI never imply a message left the
+  building. When DISPATCH_MODE is off (the default) nothing is ever dispatched
+  to a real customer -- no accidental spam from a fresh deploy.
+
+DLT audit fields (additive, per-message) are written so each notification_logs
+row is independently auditable for Indian telecom (TRAI/DLT) compliance:
+template_id, pe_id, category, consent_basis, provider_msg_id, delivery_status.
 """
 
 from datetime import datetime
+import os
 import uuid
 import logging
 
 logger = logging.getLogger(__name__)
+
+# DLT Principal Entity ID (registered on the telecom DLT platform). Stamped on
+# every outbound row for audit; read from env so it is environment-specific and
+# never hard-coded. Empty when not yet registered -- the field is still present.
+DLT_PE_ID = os.getenv("DLT_PE_ID", "") or os.getenv("MSG91_DLT_PE_ID", "")
+
+
+def _dispatch_mode() -> str:
+    """Current dispatch mode (off/test/live), read fresh so a runtime env change
+    is reflected. Falls back to the provider module's value, else the env."""
+    try:
+        from agents.providers import dispatch_mode as _dm
+
+        return _dm()
+    except Exception:
+        return os.getenv("DISPATCH_MODE", "off").lower()
 
 
 def _get_db():
@@ -47,6 +77,18 @@ def populate_template(template_id: str, variables: dict) -> str:
         return template
 
 
+def _default_consent_basis(category: str) -> str:
+    """Why this message is permitted under DLT/TRAI -- recorded for audit.
+
+    Transactional/service messages ride the 'transactional' basis (allowed even
+    to marketing-opt-outs); everything else is 'marketing_consent' (the caller
+    is responsible for having checked the opt-out before queueing)."""
+    cat = (category or "").upper()
+    if cat in ("SERVICE", "TRANSACTIONAL", "REMINDER", "OTP"):
+        return "transactional"
+    return "marketing_consent"
+
+
 async def send_notification(
     store_id: str,
     customer_id: str,
@@ -59,11 +101,16 @@ async def send_notification(
     triggered_by: str = "auto",
     related_entity_type: str = None,
     related_entity_id: str = None,
+    consent_basis: str = None,
 ) -> dict:
     """
-    Send a notification to a customer.
-    MVP: Logs to notification_logs collection with status PENDING.
-    Future: Integrate with WhatsApp Business API / MSG91 / Twilio.
+    Queue a customer notification (does NOT itself send -- see module docstring).
+
+    Writes a notification_logs row with the HONEST status PENDING and the
+    current dispatch_mode, plus per-message DLT audit fields. The returned dict
+    carries `dispatched=False`: nothing has gone to the customer yet, and with
+    DISPATCH_MODE=off (default) nothing ever will until the mode is changed.
+    MEGAPHONE's drain pass is what flips PENDING -> SENT/SIMULATED/FAILED.
     """
     if variables is None:
         variables = {}
@@ -74,7 +121,10 @@ async def send_notification(
     # Build message from template
     message = populate_template(template_id, variables)
 
-    # Create notification log entry
+    mode = _dispatch_mode()
+
+    # Create notification log entry. Status is PENDING (truthful: accepted +
+    # queued, not yet dispatched). The DLT audit block is additive.
     notification = {
         "notification_id": f"NTF-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
         "store_id": store_id,
@@ -93,6 +143,12 @@ async def send_notification(
         "sent_at": None,
         "delivered_at": None,
         "failure_reason": None,
+        # --- DLT / TRAI per-message audit fields (additive) ---
+        "pe_id": DLT_PE_ID,
+        "consent_basis": consent_basis or _default_consent_basis(category),
+        "provider_msg_id": None,  # set by the drain/provider once dispatched
+        "delivery_status": "QUEUED",  # advances QUEUED->SENT->DELIVERED via DLR webhook
+        "dispatch_mode": mode,  # the mode in effect when queued
     }
 
     # Persist to MongoDB
@@ -102,7 +158,8 @@ async def send_notification(
             coll = db.get_collection("notification_logs")
             coll.insert_one(notification)
             logger.info(
-                "Notification logged: %s -> %s (%s)",
+                "Notification queued (status=PENDING, mode=%s): %s -> %s (%s)",
+                mode,
                 template_id,
                 customer_phone,
                 channel,
@@ -110,4 +167,9 @@ async def send_notification(
         except Exception as e:
             logger.warning("Failed to log notification: %s", e)
 
-    return notification
+    # Honest, explicit signal to callers: this was queued, NOT sent. A copy with
+    # `dispatched=False` (no real customer contact has occurred yet).
+    result = dict(notification)
+    result.pop("_id", None)  # insert_one mutates the dict with an ObjectId
+    result["dispatched"] = False
+    return result
