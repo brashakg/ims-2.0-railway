@@ -29,6 +29,7 @@ import { AbuseDetection } from '../../components/clinical/AbuseDetection';
 import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
 import { ClinicPrescriptionHistory } from '../../components/clinical/ClinicPrescriptionHistory';
 import clsx from 'clsx';
+import { readEyePower } from '../../utils/rxEye';
 
 // Types
 interface QueueItem {
@@ -753,8 +754,8 @@ export function ClinicalPage() {
                     {/* Quick Rx Preview */}
                     <div className="flex items-center gap-6">
                       <div className="text-sm">
-                        <p className="text-gray-500">R: {formatPower(test.rightEye.sphere)} / {formatPower(test.rightEye.cylinder)}</p>
-                        <p className="text-gray-500">L: {formatPower(test.leftEye.sphere)} / {formatPower(test.leftEye.cylinder)}</p>
+                        <p className="text-gray-500">R: {formatPower(readEyePower(test, 'right', 'sphere'))} / {formatPower(readEyePower(test, 'right', 'cylinder'))}</p>
+                        <p className="text-gray-500">L: {formatPower(readEyePower(test, 'left', 'sphere'))} / {formatPower(readEyePower(test, 'left', 'cylinder'))}</p>
                       </div>
                       <button
                         onClick={() =>
@@ -775,8 +776,8 @@ export function ClinicalPage() {
                           patientName: test.patientName,
                           date: test.completedAt,
                           optometristName: user?.name || 'Optometrist',
-                          rightEye: { sphere: test.rightEye.sphere || 0, cylinder: test.rightEye.cylinder || 0, axis: test.rightEye.axis || 0, add: 0 },
-                          leftEye: { sphere: test.leftEye.sphere || 0, cylinder: test.leftEye.cylinder || 0, axis: test.leftEye.axis || 0, add: 0 },
+                          rightEye: { sphere: readEyePower(test, 'right', 'sphere') || 0, cylinder: readEyePower(test, 'right', 'cylinder') || 0, axis: readEyePower(test, 'right', 'axis') || 0, add: 0 },
+                          leftEye: { sphere: readEyePower(test, 'left', 'sphere') || 0, cylinder: readEyePower(test, 'left', 'cylinder') || 0, axis: readEyePower(test, 'left', 'axis') || 0, add: 0 },
                           pd: 0,
                           visualAcuity: '',
                           notes: '',
