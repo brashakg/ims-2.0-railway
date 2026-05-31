@@ -46,7 +46,7 @@ Order per owner's directive: **clinic → POS → finance → inventory → …*
 ### Modules
 | # | Module | Status | Branch | Notes |
 |---|--------|--------|--------|-------|
-| 1 | **Clinic / Optometry** | 🛠 Implementing — C1, C2 shipped | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
+| 1 | **Clinic / Optometry** | 🛠 Implementing — C1,C2,C3,C4 shipped | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
 | 2 | POS / Billing | ⏳ Queued | — | revenue-critical; extra care |
 | 3 | Finance / GST | ⏳ Queued | — | GST returns, P&L, AP/AR, Tally |
 | 4 | Inventory | ⏳ Queued | — | stock, transfers, counts, serials |
@@ -86,7 +86,7 @@ Legend: ⏳ Queued · 🔬 Research+Audit · 🏛 Council · 🛠 Implementing �
 |----|--------------|--------|--------|------|--------|
 | C1 | Validate Rx powers on the version-PATCH path (close bypass) | Audit P2 | High | Low | ✅ shipped |
 | C2 | Stop fabricating AXIS 180 / 0.00 powers + thread patient_id (Family Rx grouping) | Audit P1 | High | Low–Med | ✅ shipped (incl. C2-B) |
-| C3 | Canonical Rx field shape (sph/cyl/axis/add) — finalized Rx prints blank, progression null | Audit P1 (root cause) | Very High | Med | ⏳ next (needs migration care) |
+| C3 | Canonical Rx shape — finalized Rx printed blank + progression null | Audit P1 (root cause) | Very High | Med | ✅ shipped (core: mirror+progression+reader; full field migration deferred) |
 | C4 | Blank-powers display on Clinical/Prescriptions pages | Audit P1 | Med | Low (FE) | ✅ shipped |
 | C5 | Lane→POS Rx auto-flow (zero re-keying) + GST split (exempt service vs goods) | Both research #1 | Very High | Med | ⏳ |
 | C6 | CL-fitting wiring; persist full exam; DLT recall; FHIR/ABDM; DPDP consent | Research | High (strategic) | Varies | ⏳ |
@@ -96,8 +96,11 @@ versioned Rx (never overwrite); keyboard-first ±0.25 grid steppers; DLT-complia
 India edge: GST split (eye-test SAC 9993 exempt vs lenses 12% / frames 18%), FHIR R4
 `VisionPrescription` schema → cheap ABDM/ABHA later, DPDP 2023 consent/retention.
 
-**Shipped:** C1 (`patch_prescription_version` now range/0.25-grid validated; 9 tests) ·
-C2 (no fabricated AXIS 180 / 0.00 powers; forward-compatible patient_id).
-**Next:** C2-B (thread patient_id queue→test→Rx + fix blank-powers display), then C3.
+**Shipped this pass:** C1 (version-PATCH validation; 9 tests) · C2 (no fabricated
+AXIS 180 / 0.00 powers) · C2-B (patient_id threaded queue→test→Rx; Family-Rx grouping) ·
+C4 (blank-powers display + shared rxEye reader) · C3-core (finalized Rx prints +
+progression spans both shapes; 2 tests). All verified; existing clinic suites green.
+**Next:** C5 (lane→POS Rx auto-flow + GST service/goods split), then C6 (CL fitting,
+full-exam persistence, DLT recall, FHIR/ABDM, DPDP). Then module 2 = POS.
 
 _(Appended as each module/concern advances.)_
