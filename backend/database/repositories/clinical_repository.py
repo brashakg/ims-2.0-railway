@@ -28,7 +28,8 @@ class EyeTestQueueRepository(BaseRepository):
         customer_phone: str,
         age: Optional[int] = None,
         reason: Optional[str] = None,
-        customer_id: Optional[str] = None
+        customer_id: Optional[str] = None,
+        patient_id: Optional[str] = None,
     ) -> Optional[Dict]:
         """Add patient to eye test queue"""
         # Get today's token count for this store
@@ -46,6 +47,9 @@ class EyeTestQueueRepository(BaseRepository):
             "age": age,
             "reason": reason,
             "customer_id": customer_id,
+            # the specific family member (patient) under the account being tested;
+            # carried into the test + auto-Rx so Family Rx groups correctly.
+            "patient_id": patient_id,
             "status": "WAITING",
             "created_date": today,
             "wait_time": 0
@@ -125,7 +129,8 @@ class EyeTestRepository(BaseRepository):
         store_id: str,
         optometrist_id: str,
         optometrist_name: str,
-        customer_id: Optional[str] = None
+        customer_id: Optional[str] = None,
+        patient_id: Optional[str] = None,
     ) -> Optional[Dict]:
         """Create a new eye test record when test starts"""
         test_data = {
@@ -133,6 +138,7 @@ class EyeTestRepository(BaseRepository):
             "patient_name": patient_name,
             "customer_phone": customer_phone,
             "customer_id": customer_id,
+            "patient_id": patient_id,
             "store_id": store_id,
             "optometrist_id": optometrist_id,
             "optometrist_name": optometrist_name,

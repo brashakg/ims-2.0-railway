@@ -401,11 +401,18 @@ export function ClinicalPage() {
         ? calculateAge(modalPatient.dateOfBirth)
         : undefined;
 
+      const queuePatientId =
+        (modalPatient as any)?.id ||
+        (modalPatient as any)?.patient_id ||
+        (existingPatient as any)?.patient_id ||
+        (existingPatient as any)?.id ||
+        undefined;
       await clinicalApi.addToQueue({
         storeId: user?.activeStoreId || '',
         patientName: queuePatientName,
         customerPhone: sanitizedMobile,
         customerId,
+        patientId: queuePatientId,
         age: queueAge,
         reason: 'Eye examination',
       });
@@ -884,6 +891,7 @@ export function ClinicalPage() {
               age: patient?.dateOfBirth ? calculateAge(patient.dateOfBirth) : undefined,
               reason: 'Eye examination',
               customerId: (customer as any).customer_id || customer.id,
+              patientId: (patient as any)?.id || (patient as any)?.patient_id,
             });
             toast.success(`${patient?.name || customer.name} added to queue`);
             setShowQueueExistingModal(false);

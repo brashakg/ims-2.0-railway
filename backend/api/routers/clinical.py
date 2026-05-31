@@ -56,6 +56,7 @@ class QueueItemCreate(BaseModel):
     age: Optional[int] = None
     reason: Optional[str] = None
     customer_id: Optional[str] = Field(None, alias="customerId")
+    patient_id: Optional[str] = Field(None, alias="patientId")
 
     class Config:
         populate_by_name = True
@@ -289,6 +290,7 @@ async def add_to_queue(
             age=item.age,
             reason=item.reason,
             customer_id=item.customer_id,
+            patient_id=item.patient_id,
         )
         if created:
             result = _convert_to_camel(created)
@@ -306,6 +308,7 @@ async def add_to_queue(
         "age": item.age,
         "reason": item.reason,
         "customerId": item.customer_id,
+        "patientId": item.patient_id,
         "status": "WAITING",
         "createdAt": datetime.now().isoformat(),
         "waitTime": 0,
@@ -386,6 +389,7 @@ async def start_test(
                 optometrist_id=current_user.get("user_id", ""),
                 optometrist_name=current_user.get("full_name", "Unknown"),
                 customer_id=queue_item.get("customer_id"),
+                patient_id=queue_item.get("patient_id"),
             )
 
             if test:
