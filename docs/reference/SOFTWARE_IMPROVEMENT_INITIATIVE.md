@@ -85,7 +85,7 @@ Legend: ⏳ Queued · 🔬 Research+Audit · 🏛 Council · 🛠 Implementing �
 | ID | Modification | Source | Impact | Risk | Status |
 |----|--------------|--------|--------|------|--------|
 | C1 | Validate Rx powers on the version-PATCH path (close bypass) | Audit P2 | High | Low | ✅ shipped |
-| C2 | Stop auto-Rx fabricating AXIS 180 / 0.00 powers; patient_id fallback | Audit P1 | High | Low–Med | ✅ shipped (display + full patient_id threading = C2-B, next) |
+| C2 | Stop fabricating AXIS 180 / 0.00 powers + thread patient_id (Family Rx grouping) | Audit P1 | High | Low–Med | ✅ shipped (incl. C2-B) |
 | C3 | Canonical Rx field shape (sph/cyl/axis/add) — finalized Rx prints blank, progression null | Audit P1 (root cause) | Very High | Med | ⏳ next (needs migration care) |
 | C4 | Blank-powers display on Clinical/Prescriptions pages | Audit P1 | Med | Low (FE) | ✅ shipped |
 | C5 | Lane→POS Rx auto-flow (zero re-keying) + GST split (exempt service vs goods) | Both research #1 | Very High | Med | ⏳ |
