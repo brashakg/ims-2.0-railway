@@ -191,6 +191,15 @@ export function POSLayout() {
         cart_note: store.cart_note,
         payments: store.payments,
         is_advance_payment: store.is_advance_payment,
+        // Previously dropped on hold -> a cashier's cart-level discount and
+        // delivery schedule were silently lost on recall. Snapshot them too.
+        cart_discount_percent: store.cart_discount_percent,
+        cart_discount_amount: store.cart_discount_amount,
+        cart_discount_reason: store.cart_discount_reason,
+        cart_discount_approved_by: store.cart_discount_approved_by,
+        delivery_date: store.delivery_date,
+        delivery_time_slot: store.delivery_time_slot,
+        delivery_priority: store.delivery_priority,
       },
     });
     localStorage.setItem('ims-held-bills', JSON.stringify(bills));
@@ -203,23 +212,13 @@ export function POSLayout() {
     const bills = getHeldBills();
     const bill = bills.find(b => b.id === billId);
     if (!bill) return;
-    const s = bill.state;
-    if (s.customer) store.setCustomer(s.customer);
-    if (s.patient) store.setPatient(s.patient);
-    if (s.prescription) store.setPrescription(s.prescription);
-    if (s.sale_type) store.setSaleType(s.sale_type);
-    if (s.cart_note) store.setCartNote(s.cart_note);
-    if (s.is_advance_payment) store.setAdvancePayment(s.is_advance_payment);
-    for (const item of (s.cart || [])) {
-      store.addToCart(item);
-    }
-    for (const p of (s.payments || [])) {
-      store.addPayment(p);
-    }
+    // Atomic REPLACE (not a per-item merge into the current cart). Restores the
+    // cart verbatim plus the cart-level discount + delivery fields, and lands on
+    // the review step when there are items — all handled inside the store.
+    store.restoreHeldSale(bill.state);
     localStorage.setItem('ims-held-bills', JSON.stringify(bills.filter(b => b.id !== billId)));
     refreshHeldBills();
     setShowRecallPanel(false);
-    if ((s.cart || []).length > 0) store.setStep('review');
   };
 
   const deleteHeldBill = (billId: string) => {
