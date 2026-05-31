@@ -1,24 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import crypto from "crypto";
 import { logActivity } from "@/lib/activityLog";
 import { recomputeCustomerAggregates } from "@/lib/customerAggregates";
+import { verifyShopifyWebhookHmac } from "@/lib/shopifyWebhookVerify";
 
-// Shopify sends webhooks as POST requests with HMAC verification
-// The HMAC is in the X-Shopify-Hmac-Sha256 header
-
-function verifyWebhookHmac(body: string, hmacHeader: string): boolean {
-  const secret = process.env.SHOPIFY_CLIENT_SECRET || process.env.SHOPIFY_WEBHOOK_SECRET || "";
-  if (!secret) {
-    console.warn("No webhook secret configured — skipping HMAC verification");
-    return true; // Allow if no secret (for development)
-  }
-  const hash = crypto
-    .createHmac("sha256", secret)
-    .update(body, "utf8")
-    .digest("base64");
-  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hmacHeader));
-}
+// Shopify sends webhooks as POST requests with HMAC verification.
+// The HMAC is in the X-Shopify-Hmac-Sha256 header. The verification logic
+// lives in src/lib/shopifyWebhookVerify.ts so it can be unit-tested without
+// pulling in Prisma; SECURITY CONTRACT documented there.
+const verifyWebhookHmac = (body: string, hmacHeader: string): boolean =>
+  verifyShopifyWebhookHmac(body, hmacHeader);
 
 // Parse brand from tags (same logic as pull route)
 function extractBrandFromTags(tags: string, vendor: string): string {
@@ -828,12 +819,21 @@ export async function POST(request: NextRequest) {
     const hmacHeader = request.headers.get("x-shopify-hmac-sha256") || "";
     const topic = request.headers.get("x-shopify-topic") || "unknown";
     const shopifyDomain = request.headers.get("x-shopify-shop-domain") || "";
+    const webhookId = request.headers.get("x-shopify-webhook-id") || "";
 
-    // Verify HMAC (fast operation — do before returning 200)
-    if (hmacHeader && !verifyWebhookHmac(rawBody, hmacHeader)) {
-      console.error("Webhook HMAC verification failed");
+    // SECURITY: verify HMAC unconditionally. A missing signature header is now
+    // a rejection (not a bypass) — unsigned/forged webhooks are never
+    // processed. Done before any DB writes or the 200 fast-return.
+    if (!verifyWebhookHmac(rawBody, hmacHeader)) {
+      console.error("Webhook HMAC verification failed or signature missing");
       prisma.webhookEvent.create({
-        data: { topic, status: "FAILED", message: "HMAC verification failed" },
+        data: {
+          topic,
+          status: "FAILED",
+          message: hmacHeader
+            ? "HMAC verification failed"
+            : "Missing X-Shopify-Hmac-Sha256 signature",
+        },
       }).catch(() => {});
       return NextResponse.json(
         { success: false, error: "HMAC verification failed" },
@@ -841,15 +841,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // IDEMPOTENCY: Shopify retries deliver the same X-Shopify-Webhook-Id.
+    // Short-circuit if we've already recorded this id so retries don't
+    // re-run side effects (double inventory writes, duplicate orders, etc.).
+    if (webhookId) {
+      const seen = await prisma.webhookEvent
+        .findUnique({ where: { webhookId }, select: { id: true } })
+        .catch(() => null);
+      if (seen) {
+        return NextResponse.json({ success: true, duplicate: true });
+      }
+    }
+
     const payload = JSON.parse(rawBody);
     const shopifyId = payload.id ? String(payload.id) : null;
 
     // Quick-log the event and return 200 immediately
-    // Use a non-awaited create so we respond fast, but catch errors
+    // Use a non-awaited create so we respond fast, but catch errors.
+    // The unique constraint on webhookId also closes the race where two
+    // concurrent retries both pass the findUnique check above.
     const eventPromise = prisma.webhookEvent.create({
       data: {
         topic,
         shopifyId,
+        webhookId: webhookId || null,
         payload: rawBody.substring(0, 5000),
         status: "RECEIVED",
       },
@@ -863,8 +878,14 @@ export async function POST(request: NextRequest) {
         processWebhookInBackground(topic, payload, shopifyId, shopifyDomain, event.id);
       })
       .catch((err) => {
+        // A unique-constraint violation here means a concurrent delivery of
+        // the same webhookId already won the insert — that's a benign dedupe,
+        // not an error, so do NOT re-process.
+        if (err?.code === "P2002") {
+          return;
+        }
         console.error("Failed to log webhook event:", err);
-        // Still try to process even if logging failed
+        // Still try to process even if logging failed for another reason.
         processWebhookInBackground(topic, payload, shopifyId, shopifyDomain, "unknown");
       });
 

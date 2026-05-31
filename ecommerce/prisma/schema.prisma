@@ -450,6 +450,11 @@ model WebhookEvent {
   id        String   @id @default(cuid())
   topic     String   // e.g. "products/update", "orders/create", "inventory_levels/update"
   shopifyId String?  // Shopify resource ID from the event
+  // X-Shopify-Webhook-Id of the incoming delivery. UNIQUE so retries of the
+  // same delivery are deduped (idempotency). Nullable: rows logged before an
+  // id is known (HMAC-failure logs, logging-failure fallback) carry no id, and
+  // Postgres permits multiple NULLs under a UNIQUE constraint.
+  webhookId String?  @unique
   payload   String?  // JSON string of the webhook payload (truncated)
   status    String   @default("RECEIVED") // RECEIVED, PROCESSED, FAILED, IGNORED
   message   String?

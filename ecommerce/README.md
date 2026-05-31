@@ -124,11 +124,12 @@ EOF
 
 npx prisma generate
 npx prisma db push
-curl http://localhost:3000/api/seed   # creates admin user + attribute options + discount rules
+# Seeding is gated: set SEED_SECRET and SEED_ADMIN_PASSWORD first, then:
+curl -H "x-seed-secret: $SEED_SECRET" http://localhost:3000/api/seed   # creates the admin user
 
 npm run dev
 # Open http://localhost:3000
-# Login: admin@bettervision.in / admin123 (or set SEED_ADMIN_PASSWORD env var)
+# Login: admin@bettervision.in / <your SEED_ADMIN_PASSWORD>
 ```
 
 ### Common dev commands
@@ -1035,7 +1036,8 @@ Plus the storefront theme needs to register the new theme templates so admin can
 | `SHOPIFY_WEBHOOK_SECRET` | optional | Explicit webhook HMAC secret. Falls back to `CLIENT_SECRET` if not set. |
 | `ANTHROPIC_API_KEY` | optional | Required for AI SEO generation (Claude Haiku 4.5). |
 | `REMOVEBG_API_KEY` | optional | remove.bg API for background removal on uploaded product images. |
-| `SEED_ADMIN_PASSWORD` | optional | Custom password for the seeded admin user. Default `admin123`. |
+| `SEED_SECRET` | required to seed | Gate for `GET /api/seed`. The route 401s unless this is set on the server AND presented via the `x-seed-secret` header (or `?secret=`). No default — seeding is disabled until configured. |
+| `SEED_ADMIN_PASSWORD` | required to seed | Password for the seeded admin user. No default anymore — `GET /api/seed` 400s rather than minting a well-known `admin123` login. |
 
 ### Local dev (`.env`)
 

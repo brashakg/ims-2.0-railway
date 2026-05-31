@@ -34,7 +34,10 @@ yarn-error.log*
 # prisma
 prisma/dev.db
 prisma/dev.db-journal
-prisma/migrations/
+# NOTE: prisma/migrations/ is intentionally TRACKED now (it used to be ignored
+# when this app ran `prisma db push` with no migration history). Schema changes
+# that need an explicit migration — e.g. the WebhookEvent.webhookId UNIQUE
+# constraint — must be reviewable in git and applied via `prisma migrate deploy`.
 
 # uploads (user images stored locally)
 public/uploads/*

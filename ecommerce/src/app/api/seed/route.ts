@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hash } from "bcryptjs";
+import crypto from "crypto";
 
 // Only thing that gets seeded anymore is the initial admin user.
 // Everything else (attributes, locations, discount rules) is populated
@@ -16,14 +17,63 @@ import { hash } from "bcryptjs";
 //
 // If you need to repopulate AttributeType.options from the real data
 // already in the DB, call POST /api/admin/resync-attributes.
+// SECURITY: no hardcoded password default. The seed admin password MUST be
+// supplied via SEED_ADMIN_PASSWORD — if it is unset we refuse to create the
+// account rather than minting a well-known "admin123" login on a public route.
 const SEED_ADMIN = {
   email: "admin@bettervision.in",
-  password: process.env.SEED_ADMIN_PASSWORD || "admin123",
+  password: process.env.SEED_ADMIN_PASSWORD || "",
   name: "Admin User",
 };
 
-export async function GET(_request: NextRequest) {
+// Constant-time secret comparison so the gate can't be probed by timing.
+function secretMatches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+export async function GET(request: NextRequest) {
   try {
+    // SECURITY GATE: this route provisions the initial ADMIN account and is
+    // reachable unauthenticated, so it must be locked behind a deploy-only
+    // secret. Require SEED_SECRET to be configured AND presented (via the
+    // x-seed-secret header or ?secret= query param). No secret -> 401, never
+    // a silent open door.
+    const expectedSecret = process.env.SEED_SECRET || "";
+    if (!expectedSecret) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Seeding is disabled: SEED_SECRET is not configured on the server.",
+        },
+        { status: 401 }
+      );
+    }
+    const providedSecret =
+      request.headers.get("x-seed-secret") ||
+      request.nextUrl.searchParams.get("secret") ||
+      "";
+    if (!secretMatches(providedSecret, expectedSecret)) {
+      return NextResponse.json(
+        { success: false, message: "Invalid or missing seed secret." },
+        { status: 401 }
+      );
+    }
+
+    if (!SEED_ADMIN.password) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Cannot seed admin: SEED_ADMIN_PASSWORD is not set. Refusing to create a default-password account.",
+        },
+        { status: 400 }
+      );
+    }
+
     const existingAdmin = await prisma.user.findUnique({
       where: { email: SEED_ADMIN.email },
     });
