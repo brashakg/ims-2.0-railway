@@ -804,6 +804,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'PUT', "path": '/api/v1/settings/system', "allowed": ['SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/settings/tax', "allowed": 'AUTHENTICATED'},
     {"method": 'PUT', "path": '/api/v1/settings/tax', "allowed": ['ACCOUNTANT', 'ADMIN', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/settings/tds-rates', "allowed": 'AUTHENTICATED'},
+    {"method": 'PUT', "path": '/api/v1/settings/tds-rates', "allowed": ['SUPERADMIN']},
     # --- /api/v1/shipping ---
     {"method": 'GET', "path": '/api/v1/shipping/shipments', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/shipping/shipments', "allowed": ['ADMIN', 'AREA_MANAGER', 'CASHIER', 'SALES_CASHIER', 'STORE_MANAGER']},
