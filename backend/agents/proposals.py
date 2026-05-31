@@ -460,6 +460,37 @@ class ProposalStore:
         except Exception as e:
             logger.warning("[PROPOSALS] update failed for %s: %s", proposal_id, e)
 
+    def _audit_repo(self):
+        """Resolve the hash-chaining AuditRepository for ``audit_logs``.
+
+        Bind to THIS store's own db (the one handed to ProposalStore) so the
+        audit row lands in the same database as the proposal -- in production
+        that's the live/seeded DB (the router builds ProposalStore over
+        get_seeded_db()), and in unit tests it's the in-memory fake, keeping
+        writes isolated. Wrapping that collection in AuditRepository routes the
+        write through AuditRepository.create -> audit_chain.append_audit_entry,
+        the SAME chained path GET /api/v1/audit/verify walks.
+
+        Only when this store has no db at all do we fall back to the app-level
+        get_audit_repository() dependency. Returns None when there is genuinely
+        no audit collection to write to.
+        """
+        coll = self._audit_coll()
+        if coll is not None:
+            try:
+                from database.repositories.audit_repository import AuditRepository
+
+                return AuditRepository(coll)
+            except Exception as e:  # noqa: BLE001 - fall through to the dependency
+                logger.debug("[PROPOSALS] AuditRepository build failed: %s", e)
+        try:
+            from api.dependencies import get_audit_repository
+
+            return get_audit_repository()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[PROPOSALS] get_audit_repository unavailable: %s", e)
+            return None
+
     def _write_audit(
         self,
         *,
@@ -473,17 +504,23 @@ class ProposalStore:
         error: Optional[str] = None,
     ) -> Optional[str]:
         """
-        Write an IMMUTABLE row to the shared ``audit_logs`` collection. Per
-        SYSTEM_INTENT 'Audit Everything' + 'Delete audit logs = forbidden':
-        this is an append-only record of who approved/rejected what, when,
-        and the old vs new state.
+        Write an IMMUTABLE, HASH-CHAINED row to the shared ``audit_logs``
+        collection. Per SYSTEM_INTENT 'Audit Everything' + 'Delete audit logs =
+        forbidden': this is an append-only record of who approved/rejected what,
+        when, and the old vs new state.
+
+        Routed through AuditRepository.create() (NOT a raw insert_one) so the
+        row is stamped with seq / prev_hash / entry_hash by the tamper-evident
+        chain (database/repositories/audit_chain.py). before_state/after_state
+        are in HASHED_FIELDS, so the captured change is committed to the hash
+        and any post-hoc edit surfaces at GET /api/v1/audit/verify.
 
         Fail-soft: returns None on any error; the lifecycle transition still
         happens (we never block an approval because the audit write hiccuped,
         but we DO log loudly so the gap is visible).
         """
-        coll = self._audit_coll()
-        if coll is None:
+        repo = self._audit_repo()
+        if repo is None:
             return None
         log_id = f"AUD-{uuid.uuid4().hex[:12]}"
         doc = {
@@ -506,12 +543,19 @@ class ProposalStore:
             "timestamp": _now(),
         }
         try:
-            coll.insert_one(doc)
-        except Exception as e:
+            created = repo.create(doc)
+        except Exception as e:  # noqa: BLE001 - never block the lifecycle
             logger.warning("[PROPOSALS] audit write failed for %s: %s",
                            proposal.get("proposal_id"), e)
             return None
-        return log_id
+        if created is None:
+            logger.warning(
+                "[PROPOSALS] audit write returned no row for %s",
+                proposal.get("proposal_id"),
+            )
+            return None
+        # AuditRepository.create stamps/returns the row; trust its log_id.
+        return created.get("log_id", log_id)
 
 
 def _jsonable(proposal: Dict[str, Any]) -> Dict[str, Any]:

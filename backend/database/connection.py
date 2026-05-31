@@ -285,6 +285,32 @@ class DatabaseConnection:
                 background=True,
             )
 
+            # Audit logs (SYSTEM_INTENT 10 -- immutable, hash-chained trail).
+            # The UNIQUE index on `seq` is the DB-level guard against two writers
+            # ever committing the same sequence number (the chain head is atomic,
+            # but a unique index is the belt-and-braces: a duplicate seq would
+            # otherwise let the tamper-evident chain be forked). It is SPARSE on
+            # purpose: the chain is fail-soft and writes UNCHAINED rows (no `seq`)
+            # when the head can't be advanced -- sparse excludes those from the
+            # index so multiple seq-less rows coexist instead of colliding on a
+            # single null key. The rest mirror schemas.INDEXES['audit_logs'] for
+            # the common read paths (by time, by user, by entity, by severity).
+            audit = self._db["audit_logs"]
+            audit.create_index("seq", unique=True, sparse=True, background=True)
+            audit.create_index("log_id", unique=True, sparse=True, background=True)
+            audit.create_index([("timestamp", -1)], background=True)
+            audit.create_index([("user_id", 1), ("timestamp", -1)], background=True)
+            audit.create_index([("store_id", 1), ("timestamp", -1)], background=True)
+            audit.create_index([("action", 1), ("timestamp", -1)], background=True)
+            audit.create_index([("entity_type", 1), ("entity_id", 1)], background=True)
+            audit.create_index([("severity", 1), ("timestamp", -1)], background=True)
+
+            # Audit chain head -- single-document control row keyed by _id
+            # ("primary"). The unique index on `_id` exists implicitly; we index
+            # `seq` so the guarded head-advance / commit reads stay cheap.
+            audit_head = self._db["audit_chain_head"]
+            audit_head.create_index("seq", background=True)
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

@@ -716,6 +716,12 @@ INDEXES = {
         {"keys": [("status", 1)]}
     ],
     "audit_logs": [
+        # UNIQUE seq is the DB-level guard against a duplicate sequence number
+        # in the tamper-evident hash-chain (audit_chain.py). SPARSE so the
+        # fail-soft UNCHAINED rows (written without `seq` when the chain head
+        # can't be advanced) don't collide on a single null key.
+        {"keys": [("seq", 1)], "unique": True, "sparse": True},
+        {"keys": [("log_id", 1)], "unique": True, "sparse": True},
         {"keys": [("timestamp", -1)]},
         {"keys": [("user_id", 1), ("timestamp", -1)]},
         {"keys": [("store_id", 1), ("timestamp", -1)]},
