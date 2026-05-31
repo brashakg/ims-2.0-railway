@@ -226,7 +226,22 @@ class PayslipData(BaseModel):
 
 
 def _get_db():
-    """Get database connection"""
+    """Get database connection.
+
+    Prefer the shared ``dependencies.get_db`` (which falls back to the SEEDED
+    mock DB when no live Mongo is connected) so payroll config / PT-slab / salary
+    endpoints work in a mock / test / fresh environment like every other router.
+    The old code returned ``database.connection.get_db()`` directly, a
+    NOT-connected handle whose ``get_collection()`` is None -> 500 with
+    "'NoneType' object has no attribute 'find'" whenever Mongo was absent."""
+    try:
+        from ..dependencies import get_db as _dep_get_db
+
+        db = _dep_get_db()
+        if db is not None:
+            return db
+    except Exception:  # noqa: BLE001
+        pass
     if not DATABASE_AVAILABLE:
         return None
     return get_db()
