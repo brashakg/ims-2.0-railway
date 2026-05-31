@@ -660,6 +660,20 @@ async def create_job(
 
         created = repo.create(job_data)
         if created:
+            # Stamp the reverse pointer on the order so an order can find its
+            # workshop job directly (the link was previously one-way: job ->
+            # order only). Best-effort: a stamp failure never fails job create.
+            if order_repo is not None:
+                try:
+                    order_repo.update(
+                        job.order_id,
+                        {
+                            "workshop_job_id": created["job_id"],
+                            "workshop_job_number": created["job_number"],
+                        },
+                    )
+                except Exception:
+                    pass
             return {
                 "job_id": created["job_id"],
                 "job_number": created["job_number"],
