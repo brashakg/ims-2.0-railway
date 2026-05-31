@@ -35,7 +35,26 @@ class TestAuthAndEnvelope:
         resp = client.get("/api/v1/reports/inventory/non-moving-stock")
         assert resp.status_code == 401
 
-    def test_returns_empty_envelope_when_db_absent(self, client, auth_headers):
+    def test_returns_empty_envelope_when_db_absent(
+        self, client, auth_headers, monkeypatch
+    ):
+        # Force the db-absent branch deterministically. Previously this relied on
+        # the AMBIENT get_db() being not-connected, which only holds when no
+        # earlier test in the suite left a connected DB installed -- an
+        # order-dependent CI flake (a prior test's connected fake made the
+        # endpoint return real rows instead of the empty envelope). Patch the
+        # endpoint's get_db to an explicit not-connected stub so this test
+        # exercises the db-absent path regardless of suite order.
+        from api.routers import reports as reports_module
+
+        class _NoDB:
+            is_connected = False
+
+            def get_collection(self, _name):  # pragma: no cover - never reached
+                return None
+
+        monkeypatch.setattr(reports_module, "get_db", lambda: _NoDB())
+
         resp = client.get(
             "/api/v1/reports/inventory/non-moving-stock",
             headers=auth_headers,
