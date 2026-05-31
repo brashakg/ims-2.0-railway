@@ -191,4 +191,26 @@ got its own branch + a verified fix (or an honest "already hardened"), then PRs:
 **Compliance flags raised to owner/CA (not changed unilaterally):** finance ITC eligibility
 scope; the corrected TDS rates. **Next: Module 8 = Workshop** (audit-led, same pipeline).
 
+### 2026-05-31 (cont.) — missed-module sweep merged + loyalty P2-C
+After the owner asked to also cover the modules the first pass skipped (AI, Settings,
+Walkouts, etc.), shipped + merged: **Settings (#398)** printer-settings role gate;
+**Marketing (#399)** referral-redeem role gate + atomic idempotency; **HR (#401)** leave
+approve/reject manager gate; plus a **test-isolation fix (#400)** for a pre-existing
+order-dependent non-moving-stock flake on main, and an **asyncio.run** fix for two new
+async-endpoint unit tests (closed-loop-safe in the full suite). Audited & verified-secure
+(no change): Jarvis (all 18 endpoints SUPERADMIN), Portal + Vendor-portal (OTP lockout,
+token scoping, IDOR-safe), Walkouts, Workshop, Catalog caps, Vouchers (atomic).
+
+**Loyalty P2-C (#402)** — the documented over-expiry bug: the `/loyalty/expire` sweep
+expired `min(lot.points, account_balance)` per expired lot, destroying points from NEWER
+valid lots when an old spent lot expired. New pure FIFO helper
+`loyalty_engine.expirable_points_by_lot` walks the full ledger (redemptions consume oldest
+lots first) so each expired lot sheds only its unspent remainder. Customer-protective
+(only ever expires ≤ before); 6 tests.
+
+**CI-discipline note:** a repeat `test (3.10/3.11)` red on the new PRs was root-caused to
+(a) the pre-existing non-moving flake and (b) my own `get_event_loop().run_until_complete`
+tests breaking on a closed loop — both fixed, not masked; the payroll/period-lock "failures"
+seen locally were a no-Mongo artifact (green in CI).
+
 _(Appended as each module/concern advances.)_
