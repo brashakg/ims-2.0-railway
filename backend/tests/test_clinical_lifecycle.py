@@ -58,13 +58,17 @@ class _FakeTestRepo:
         return None
 
     def complete_test(self, test_id, right_eye, left_eye, pd=None, notes=None,
-                       lens_recommendation=None, coating_recommendation=None):
+                      lens_recommendation=None, coating_recommendation=None,
+                      clinical_findings=None):
         if not self._doc or self._doc.get("test_id") != test_id:
             return False
         self.complete_calls += 1
-        # Mirror the real repo: flips status to COMPLETED + stamps the Rx blob.
+        # Mirror the real repo: flips status to COMPLETED + stamps the Rx blob,
+        # and persists the optional C6-B full-exam findings when present.
         self._doc["status"] = "COMPLETED"
         self._doc["prescription"] = {"right_eye": right_eye, "left_eye": left_eye}
+        if clinical_findings:
+            self._doc["clinical_findings"] = clinical_findings
         return True
 
 

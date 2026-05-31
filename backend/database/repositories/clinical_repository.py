@@ -156,9 +156,16 @@ class EyeTestRepository(BaseRepository):
         pd: Optional[float] = None,
         notes: Optional[str] = None,
         lens_recommendation: Optional[str] = None,
-        coating_recommendation: Optional[str] = None
+        coating_recommendation: Optional[str] = None,
+        clinical_findings: Optional[Dict] = None,
     ) -> bool:
-        """Complete eye test with prescription data"""
+        """Complete eye test with prescription data.
+
+        `clinical_findings` (C6-B) is the optional full-exam block (VA / IOP /
+        history / diagnosis / ...). When absent the test stays a refraction-only
+        record exactly as before; when present it's persisted alongside the
+        prescription so the full optometric exam is recoverable, not dropped.
+        """
         update_data = {
             "status": "COMPLETED",
             "completed_at": datetime.now().isoformat(),
@@ -171,6 +178,8 @@ class EyeTestRepository(BaseRepository):
                 "coating_recommendation": coating_recommendation
             }
         }
+        if clinical_findings:
+            update_data["clinical_findings"] = clinical_findings
         return self.update(test_id, update_data)
 
     def get_store_tests(

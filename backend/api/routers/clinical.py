@@ -6,7 +6,7 @@ Eye test queue and clinical management endpoints with database persistence
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, date
 from html import escape as _html_escape
@@ -62,6 +62,50 @@ class QueueItemCreate(BaseModel):
         populate_by_name = True
 
 
+class ClinicalFindings(BaseModel):
+    """C6-B: the rest of an optometric exam record beyond refraction.
+
+    Every field is OPTIONAL -- a quick refraction-only test sends none of this
+    and behaves exactly as before; a full exam can now persist the clinical
+    context that was previously dropped (VA, IOP, history, diagnosis, extra
+    findings). Stored on the test record under `clinical_findings`; never blocks
+    a completion. Strings are kept free-text on purpose (no premature enum) so
+    the optometrist isn't fought by validation mid-exam.
+    """
+
+    # Visual acuity (e.g. "6/6", "6/9 N6"), unaided + aided, per eye + binocular.
+    va_right_unaided: Optional[str] = Field(None, alias="vaRightUnaided")
+    va_left_unaided: Optional[str] = Field(None, alias="vaLeftUnaided")
+    va_right_aided: Optional[str] = Field(None, alias="vaRightAided")
+    va_left_aided: Optional[str] = Field(None, alias="vaLeftAided")
+    va_binocular: Optional[str] = Field(None, alias="vaBinocular")
+    # Intra-ocular pressure (tonometry), mmHg, per eye. Bounded to a sane clinical
+    # window so a fat-finger ("220") is rejected but a real reading (10-30) passes.
+    iop_right: Optional[float] = Field(None, ge=0, le=80, alias="iopRight")
+    iop_left: Optional[float] = Field(None, ge=0, le=80, alias="iopLeft")
+    # History / presenting problem + structured-ish findings.
+    chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
+    history: Optional[str] = None
+    diagnosis: Optional[str] = None
+    colour_vision: Optional[str] = Field(None, alias="colourVision")  # e.g. "Normal", "Ishihara 14/14"
+    cover_test: Optional[str] = Field(None, alias="coverTest")
+    dominant_eye: Optional[str] = Field(None, alias="dominantEye")  # "RIGHT"/"LEFT"
+    additional_notes: Optional[str] = Field(None, alias="additionalNotes")
+
+    @field_validator("dominant_eye", mode="after")
+    @classmethod
+    def _v_dominant(cls, v):
+        if v is None or v == "":
+            return None
+        up = str(v).strip().upper()
+        if up not in ("RIGHT", "LEFT", "R", "L"):
+            raise ValueError("dominant_eye must be RIGHT or LEFT")
+        return "RIGHT" if up in ("RIGHT", "R") else "LEFT"
+
+    class Config:
+        populate_by_name = True
+
+
 class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
@@ -74,6 +118,11 @@ class EyeTestData(BaseModel):
     notes: Optional[str] = None
     lens_recommendation: Optional[str] = Field(None, alias="lensRecommendation")
     coating_recommendation: Optional[str] = Field(None, alias="coatingRecommendation")
+    # C6-B: optional full-exam findings (VA / IOP / history / diagnosis / ...).
+    # Absent -> the test stays a refraction-only record exactly as before.
+    clinical_findings: Optional[ClinicalFindings] = Field(
+        None, alias="clinicalFindings"
+    )
 
     class Config:
         populate_by_name = True
@@ -518,7 +567,10 @@ async def complete_test(
                 "alreadyCompleted": True,
             }
 
-        # Update test record
+        # Update test record. C6-B: persist the optional full-exam findings
+        # (VA / IOP / history / diagnosis / ...) so a complete optometric exam
+        # is recorded, not just the refraction. by_alias=False keeps the stored
+        # keys snake_case (consistent with the rest of the test doc).
         success = test_repo.complete_test(
             test_id=test_id,
             right_eye=data.right_eye,
@@ -527,6 +579,11 @@ async def complete_test(
             notes=data.notes,
             lens_recommendation=data.lens_recommendation,
             coating_recommendation=data.coating_recommendation,
+            clinical_findings=(
+                data.clinical_findings.model_dump(exclude_none=True)
+                if data.clinical_findings
+                else None
+            ),
         )
 
         if success:

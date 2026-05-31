@@ -4,6 +4,26 @@
 
 import api from './client';
 
+// C6-B: full optometric-exam findings beyond refraction. Mirrors the backend
+// ClinicalFindings model (camelCase aliases). All optional — a refraction-only
+// test omits the whole block.
+export interface ClinicalFindings {
+  vaRightUnaided?: string;
+  vaLeftUnaided?: string;
+  vaRightAided?: string;
+  vaLeftAided?: string;
+  vaBinocular?: string;
+  iopRight?: number;
+  iopLeft?: number;
+  chiefComplaint?: string;
+  history?: string;
+  diagnosis?: string;
+  colourVision?: string;
+  coverTest?: string;
+  dominantEye?: 'RIGHT' | 'LEFT';
+  additionalNotes?: string;
+}
+
 // Shape returned by GET /clinical/abuse-detection. Mirrors the backend
 // _build_abuse_alerts() output and the AbuseDetection component's renderer.
 export interface AbuseAlert {
@@ -84,6 +104,10 @@ export const clinicalApi = {
     lensRecommendation?: string;
     nextCheckup?: string;
     notes?: string;
+    // C6-B: optional full-exam findings (VA / IOP / history / diagnosis / ...).
+    // Omit entirely for a quick refraction-only test — the backend stores the
+    // test exactly as before when this is absent.
+    clinicalFindings?: ClinicalFindings;
   }) => {
     const response = await api.post(`/clinical/tests/${testId}/complete`, data);
     return response.data;
