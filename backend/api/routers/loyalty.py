@@ -40,6 +40,7 @@ from ..services.loyalty_engine import (
     calc_earn_points,
     calc_redeem,
     compute_tier,
+    expirable_points_by_lot,
     expiry_for_earn,
 )
 
@@ -618,14 +619,17 @@ async def write_settings(
 async def expire_sweep(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Cron-style sweep: read every EARN row whose expires_at <= now,
-    write a balancing EXPIRE row, mark the source EARN as expired, and
-    decrement balance_points by the unredeemed remainder.
+    """Cron-style sweep: for every EARN row whose expires_at <= now, write a
+    balancing EXPIRE row for the lot's UNSPENT remainder, mark the source EARN
+    as expired, and decrement balance_points.
 
-    Note: we do NOT track per-line balance, so the implementation expires
-    the FULL points of an EARN row even if some have been spent. To make
-    that fair, the engine processes oldest-EARN-first and only expires
-    points up to the customer's CURRENT balance.
+    P2-C fix: the old code expired ``min(lot.points, account_balance)`` per lot.
+    The account balance can belong to NEWER, non-expired lots, so a customer who
+    earned an old (now-expiring) lot, spent it, then earned a fresh lot would
+    have the FRESH lot's points destroyed when the old lot expired. We now use
+    per-lot FIFO (``expirable_points_by_lot``): redemptions consume the oldest
+    lots first, so an expired lot only sheds the points it still holds -- newer
+    lots are never touched.
     """
     if not _is_admin(current_user):
         raise HTTPException(status_code=403, detail="Admin role required")
@@ -636,8 +640,6 @@ async def expire_sweep(
 
     now = datetime.now()
     candidates = txns.find_expired_unprocessed(now)
-    # Oldest first
-    candidates.sort(key=lambda d: d.get("created_at") or now)
 
     by_customer: Dict[str, List[Dict[str, Any]]] = {}
     for c in candidates:
@@ -649,11 +651,18 @@ async def expire_sweep(
     total_points = 0
 
     for customer_id, rows in by_customer.items():
-        account = accounts.find_or_create(customer_id)
-        balance = int(account.get("balance_points", 0))
+        # Per-lot FIFO over the customer's FULL ledger decides how many points
+        # each expired lot may shed (its unspent remainder), so we never expire
+        # points that were already redeemed or belong to a newer, valid lot.
+        ledger = txns.find_for_customer(customer_id, limit=100000)
+        expirable_by_lot = expirable_points_by_lot(ledger, now)
+
         for row in rows:
-            txns.mark_expired(row.get("txn_id"))
-            expirable = min(int(row.get("points") or 0), balance)
+            lot_id = row.get("txn_id")
+            # Always mark the lot processed so a future sweep skips it (even when
+            # it has nothing left to shed -- it was fully spent).
+            txns.mark_expired(lot_id)
+            expirable = int(expirable_by_lot.get(lot_id, 0))
             if expirable <= 0:
                 continue
             txn_id = str(uuid.uuid4())
@@ -665,15 +674,14 @@ async def expire_sweep(
                     "points": expirable,
                     "rupee_value": 0.0,
                     "order_id": None,
-                    "reason": f"Auto-expire of {row.get('txn_id')}",
-                    "source_earn_txn_id": row.get("txn_id"),
+                    "reason": f"Auto-expire of {lot_id}",
+                    "source_earn_txn_id": lot_id,
                     "expires_at": None,
                     "created_by": current_user.get("user_id"),
                     "created_at": datetime.now(),
                 }
             )
             accounts.adjust_balance(customer_id, delta_points=-expirable)
-            balance -= expirable
             expired_txns += 1
             total_points += expirable
 

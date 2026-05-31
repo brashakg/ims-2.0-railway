@@ -214,4 +214,12 @@ scope; the corrected TDS rates. **Next: Module 8 = Workshop** (audit-led, same p
 **Method note:** sub-agent audits are a *lead source*, not ground truth — every finding was
 re-checked against the actual file before any edit; false positives were discarded, not shipped.
 
+**Loyalty P2-C (#402)** — the documented over-expiry bug: `/loyalty/expire` expired
+`min(lot.points, account_balance)` per lot, destroying points from NEWER valid lots when an old
+spent lot expired. New pure FIFO helper `loyalty_engine.expirable_points_by_lot` walks the full
+ledger (oldest-lot-first consumption) so each expired lot sheds only its unspent remainder.
+Customer-protective; 6 tests. (A repeat `test (3.10/3.11)` red on these PRs was root-caused to
+the pre-existing non-moving flake + two new `get_event_loop().run_until_complete` tests breaking
+on a closed loop — both fixed via the deterministic db-absent patch and `asyncio.run`.)
+
 _(Appended as each module/concern advances.)_

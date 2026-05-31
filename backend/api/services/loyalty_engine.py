@@ -235,3 +235,93 @@ def expiry_for_earn(
     days = int(settings.get("expiry_days", 365) or 365)
     base = now or datetime.now()
     return base + timedelta(days=max(0, days))
+
+
+# ============================================================================
+# FIFO expiry (initiative P2-C: don't over-expire already-spent lots)
+# ============================================================================
+
+
+def _txn_sort_key(t: Dict[str, Any]):
+    """Chronological key for a ledger row (oldest first). Falls back to a
+    far-past sentinel so a row with no timestamp sorts first deterministically."""
+    return (t.get("created_at") or datetime.min, str(t.get("txn_id") or ""))
+
+
+def expirable_points_by_lot(
+    ledger: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> Dict[str, int]:
+    """Given a customer's FULL loyalty ledger, return {earn_txn_id: points to
+    expire} using per-lot FIFO accounting.
+
+    The bug this fixes (P2-C): the old sweep expired ``min(lot.points, account
+    balance)`` for each expired EARN lot. The account balance can belong to
+    NEWER, non-expired lots, so a customer who earned an old (now-expiring) lot,
+    then spent it and earned a fresh lot, would have the FRESH lot's points
+    destroyed when the old lot expired.
+
+    Correct model: redemptions (and prior expirations) consume the OLDEST lots
+    first (FIFO). Walk the ledger oldest->newest, tracking each EARN lot's
+    remaining balance; apply every REDEEM / EXPIRE / negative ADJUST against the
+    oldest remaining lots. Then, for each EARN lot whose ``expires_at <= now``
+    and that is not already swept, the expirable amount is its REMAINING balance
+    after FIFO consumption -- never more, never touching newer lots.
+
+    Pure + deterministic; no I/O. Only EARN lots that still have unspent points
+    AND are past expiry appear in the result (always > 0).
+    """
+    now = now or datetime.now()
+    rows = sorted(ledger or [], key=_txn_sort_key)
+
+    # Each EARN lot: its remaining (unspent, unexpired) balance, in FIFO order.
+    lots: List[Dict[str, Any]] = []  # [{txn_id, remaining, expires_at, expired}]
+
+    def _consume(amount: int) -> None:
+        """Spend `amount` points off the oldest remaining lots (FIFO)."""
+        remaining = int(amount)
+        for lot in lots:
+            if remaining <= 0:
+                break
+            take = min(lot["remaining"], remaining)
+            lot["remaining"] -= take
+            remaining -= take
+
+    for t in rows:
+        ttype = str(t.get("type") or "").upper()
+        pts = int(t.get("points") or 0)
+        if ttype == "EARN":
+            lots.append(
+                {
+                    "txn_id": t.get("txn_id"),
+                    "remaining": pts,
+                    "expires_at": t.get("expires_at"),
+                    "already_swept": bool(t.get("expired")),
+                }
+            )
+        elif ttype in ("REDEEM", "EXPIRE"):
+            # Both reduce the live balance; points are stored positive on the row.
+            _consume(abs(pts))
+        elif ttype == "ADJUST":
+            # A signed adjustment: negative reduces (FIFO), positive is a manual
+            # grant that behaves like a tiny EARN lot with no expiry.
+            if pts < 0:
+                _consume(abs(pts))
+            elif pts > 0:
+                lots.append(
+                    {
+                        "txn_id": t.get("txn_id"),
+                        "remaining": pts,
+                        "expires_at": None,
+                        "already_swept": False,
+                    }
+                )
+
+    out: Dict[str, int] = {}
+    for lot in lots:
+        if lot["already_swept"] or lot["remaining"] <= 0:
+            continue
+        exp = lot["expires_at"]
+        if exp is not None and exp <= now and lot["txn_id"]:
+            out[lot["txn_id"]] = int(lot["remaining"])
+    return out
