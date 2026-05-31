@@ -54,8 +54,15 @@ function renderMarkdown(md: string): ReactElement {
   };
 
   const renderInline = (text: string): string => {
+    // Escape HTML before applying markdown transforms to prevent XSS
+    let s = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#x27;');
     // **bold**
-    let s = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     // `code`
     s = s.replace(/`([^`]+)`/g, '<code class="bg-gray-100 px-1 py-0.5 rounded text-sm font-mono">$1</code>');
     // *italic* (avoid double-stars edge)
