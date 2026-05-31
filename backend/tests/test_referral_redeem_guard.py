@@ -74,9 +74,10 @@ def _run(db, roles=("STORE_MANAGER",), referral_id="REF-1"):
     mk._get_db = lambda: mk_db
     try:
         user = {"user_id": "u1", "roles": list(roles)}
-        return asyncio.get_event_loop().run_until_complete(
-            mk.redeem_referral(referral_id, user)
-        )
+        # asyncio.run() uses a FRESH loop per call. get_event_loop() can reuse a
+        # loop an earlier async test left closed -> "RuntimeError: Event loop is
+        # closed" in the full suite (passes in isolation).
+        return asyncio.run(mk.redeem_referral(referral_id, user))
     finally:
         mk._get_db = orig
 
