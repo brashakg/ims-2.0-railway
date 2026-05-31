@@ -1773,6 +1773,17 @@ async def get_gst_reconciliation(
     return recon
 
 
+def _jv_cgst_sgst_split(tax: float) -> tuple:
+    """Split a line's total GST into intra-state CGST + SGST so they sum to the
+    tax EXACTLY (the rounding residual goes on SGST). A naive round(tax/2) on both
+    sides over-states by a paisa on odd-paise tax (100.01 -> 50.01 + 50.01 =
+    100.02), which IMBALANCES the Tally voucher and gets it rejected on import.
+    Mirrors orders._build_invoice_gst_split."""
+    cgst = round(tax / 2.0, 2)
+    sgst = round(tax - cgst, 2)
+    return cgst, sgst
+
+
 @router.get("/tally/sales-jv")
 async def get_tally_sales_jv(
     from_date: Optional[str] = None,
@@ -1808,8 +1819,9 @@ async def get_tally_sales_jv(
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
-        o["cgst_amount"] = round(tax / 2, 2)
-        o["sgst_amount"] = round(tax / 2, 2)
+        cgst, sgst = _jv_cgst_sgst_split(tax)
+        o["cgst_amount"] = cgst
+        o["sgst_amount"] = sgst
         o["subtotal"] = round(grand - tax, 2)
         o["grand_total"] = grand
 
