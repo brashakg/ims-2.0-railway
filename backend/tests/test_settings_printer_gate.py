@@ -26,9 +26,10 @@ def _call(user_roles):
     from api.routers.settings import PrinterSettings, update_printer_settings
 
     user = {"user_id": "u1", "roles": user_roles}
-    return asyncio.get_event_loop().run_until_complete(
-        update_printer_settings(PrinterSettings(), user)
-    ), HTTPException
+    # asyncio.run() spins up a FRESH event loop per call. get_event_loop() +
+    # run_until_complete reuses a process-wide loop that an earlier async test in
+    # the full suite can leave closed -> "RuntimeError: Event loop is closed".
+    return asyncio.run(update_printer_settings(PrinterSettings(), user)), HTTPException
 
 
 def test_workshop_staff_blocked():
