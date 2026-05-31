@@ -64,17 +64,34 @@ export function buildCustomerSearchHits(
     const patients: any[] = Array.isArray(c?.patients) ? c.patients : [];
     const cid = custId(c) || accountName; // never empty -> stable, collision-safe keys
 
-    const accountMatches = matchesAll(accountName, c?.phone, c?.mobile, c?.email);
-    let matchingPatients = patients.filter((p) =>
-      matchesAll(p?.name, p?.mobile, p?.phone),
-    );
-    // Fallback: the backend returned this customer but the tokens were split
-    // across holder + patient (no single entity carries them all). Surface
-    // any-token patient matches so a genuine backend hit never vanishes.
-    if (!accountMatches && matchingPatients.length === 0) {
-      matchingPatients = patients.filter((p) =>
-        matchesAny(p?.name, p?.mobile, p?.phone),
-      );
+    // Prefer the server-authoritative match metadata when present (backend
+    // customers.py::_annotate_customer_matches, computed with the same token
+    // semantics as the query). Fall back to the client heuristic for
+    // un-annotated / cached responses so nothing breaks.
+    const sm = c?.match;
+    let accountMatches: boolean;
+    let matchingPatients: any[];
+    if (sm && typeof sm === 'object' && Array.isArray(sm.matched_patient_ids)) {
+      accountMatches = tokens.length === 0 ? true : !!sm.account;
+      const ids = new Set(sm.matched_patient_ids.map((x: unknown) => String(x)));
+      matchingPatients =
+        tokens.length === 0
+          ? []
+          : patients.filter((p) => ids.has(String(patId(p))));
+    } else {
+      accountMatches = matchesAll(accountName, c?.phone, c?.mobile, c?.email);
+      // No query -> browse mode: account only, never spurious patient rows.
+      matchingPatients =
+        tokens.length === 0
+          ? []
+          : patients.filter((p) => matchesAll(p?.name, p?.mobile, p?.phone));
+      // Fallback: tokens split across holder + patient (no single entity carries
+      // them all). Surface any-token patient matches so a hit never vanishes.
+      if (!accountMatches && matchingPatients.length === 0) {
+        matchingPatients = patients.filter((p) =>
+          matchesAny(p?.name, p?.mobile, p?.phone),
+        );
+      }
     }
 
     const pushAccount = () =>

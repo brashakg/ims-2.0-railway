@@ -52,6 +52,46 @@ from ..dependencies import get_customer_repository, validate_store_access
 router = APIRouter()
 
 
+def _annotate_customer_matches(customers: List[Dict], query: str) -> List[Dict]:
+    """Attach a ``match`` field to each search result so the UI can label
+    account-holder vs family-member (patient) hits *authoritatively*, computed
+    with the SAME token/field semantics as the query (base_repository.search):
+    every whitespace token must appear somewhere across the entity's fields.
+
+    Shape (additive / non-breaking):
+        "match": {"account": bool, "matched_patient_ids": [str, ...]}
+
+    The frontend (utils/customerSearchHits) prefers this when present and falls
+    back to a client-side heuristic when absent (old/un-annotated responses)."""
+    tokens = [t.lower() for t in (query or "").split() if t]
+
+    def _all_in(*vals: Any) -> bool:
+        if not tokens:
+            return True
+        joined = " ".join(str(v).lower() for v in vals if v)
+        return all(t in joined for t in tokens)
+
+    for c in customers or []:
+        # No query -> browse mode: the account, never spurious patient rows.
+        if not tokens:
+            c["match"] = {"account": True, "matched_patient_ids": []}
+            continue
+        try:
+            acct = _all_in(c.get("name"), c.get("mobile"), c.get("phone"), c.get("email"))
+            matched_pids = [
+                p.get("patient_id") or p.get("id") or p.get("name")
+                for p in (c.get("patients") or [])
+                if _all_in(p.get("name"), p.get("mobile"))
+            ]
+            c["match"] = {
+                "account": bool(acct),
+                "matched_patient_ids": [pid for pid in matched_pids if pid],
+            }
+        except Exception:  # noqa: BLE001 - labeling must never break search
+            c["match"] = {"account": True, "matched_patient_ids": []}
+    return customers
+
+
 # ============================================================================
 # Note: All customer data comes from the database (or seeded mock database)
 # ============================================================================
@@ -247,7 +287,9 @@ async def list_customers(
 
         # If search provided, use search method (also respects store filter)
         if search:
-            customers = repo.search_customers(search, effective_store)
+            customers = _annotate_customer_matches(
+                repo.search_customers(search, effective_store), search
+            )
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 
@@ -359,7 +401,9 @@ async def search_customers(
     repo = get_customer_repository()
 
     if repo is not None:
-        customers = repo.search_customers(q, current_user.get("active_store_id"))
+        customers = _annotate_customer_matches(
+            repo.search_customers(q, current_user.get("active_store_id")), q
+        )
         return {"customers": customers}
 
     # No database available - return empty
@@ -391,6 +435,7 @@ async def search_customer_by_phone(
     # TechCherry-imported docs carry the number under `phone`.
     exact = repo.find_by_mobile(digits)
     if exact:
+        _annotate_customer_matches([exact], digits)
         return {"customers": [exact], "customer": exact}
 
     # Also search nested family members (patients[].mobile) so a patient's own
@@ -398,7 +443,9 @@ async def search_customer_by_phone(
     # silently misses anyone billed under a relative's account. (Patient
     # sub-docs only ever store `mobile`; top-level `phone` is the TechCherry
     # import field.)
-    matches = repo.search(digits, ["mobile", "phone", "patients.mobile"])
+    matches = _annotate_customer_matches(
+        repo.search(digits, ["mobile", "phone", "patients.mobile"]), digits
+    )
     return {
         "customers": matches,
         "customer": matches[0] if matches else None,
