@@ -974,6 +974,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/webhooks/razorpay', "allowed": 'PUBLIC'},
     {"method": 'POST', "path": '/api/v1/webhooks/shiprocket', "allowed": 'PUBLIC'},
     {"method": 'POST', "path": '/api/v1/webhooks/shopify', "allowed": 'PUBLIC'},
+    {"method": 'POST', "path": '/api/v1/webhooks/msg91/delivery', "allowed": 'PUBLIC'},
     # --- /api/v1/workshop ---
     {"method": 'GET', "path": '/api/v1/workshop', "allowed": 'PUBLIC'},
     {"method": 'GET', "path": '/api/v1/workshop/', "allowed": 'PUBLIC'},
