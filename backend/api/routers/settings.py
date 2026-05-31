@@ -1717,3 +1717,83 @@ async def get_audit_summary(current_user: dict = Depends(get_current_user)):
         },
         "this_week": {"total_actions": 0, "top_users": []},
     }
+
+
+# ============================================================================
+# TDS RATES (editable; SUPERADMIN). National set per the owner decision.
+# ============================================================================
+# The code defaults live in services/ap_engine.TDS_SECTIONS; this lets the owner
+# tweak a rate (Budget changes, CA guidance) without a redeploy. Stored as a
+# {section: rate%} map in `tds_rate_config`; ap_engine.compute_tds applies the
+# override when the AP/payment path passes it in.
+
+
+class TdsRatesUpdate(BaseModel):
+    """A {section: rate%} map. Only the canonical sections are accepted; rates
+    must be 0-30% (a sane TDS band -- 20% no-PAN is the realistic ceiling)."""
+
+    rates: Dict[str, float]
+
+    @field_validator("rates")
+    @classmethod
+    def _validate(cls, v):
+        from ..services.ap_engine import TDS_SECTIONS
+
+        clean = {}
+        for sec, rate in (v or {}).items():
+            key = str(sec).strip().upper()
+            if key not in TDS_SECTIONS:
+                raise ValueError(f"Unknown TDS section: {sec}")
+            try:
+                r = float(rate)
+            except (TypeError, ValueError):
+                raise ValueError(f"Rate for {sec} must be a number")
+            if not (0.0 <= r <= 30.0):
+                raise ValueError(f"Rate for {sec} must be between 0 and 30 percent")
+            clean[key] = r
+        return clean
+
+
+@router.get("/tds-rates")
+async def get_tds_rates(current_user: dict = Depends(get_current_user)):
+    """Effective TDS rates = code defaults overlaid with any admin overrides.
+    Readable by any authenticated user (the AP/payment screens show them);
+    editing is SUPERADMIN-only (see PUT)."""
+    from ..services.ap_engine import TDS_SECTIONS
+
+    effective = dict(TDS_SECTIONS)
+    overrides: Dict[str, float] = {}
+    coll = _get_settings_collection("tds_rate_config")
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": "default"})
+            if doc and isinstance(doc.get("rates"), dict):
+                overrides = doc["rates"]
+                effective.update(overrides)
+        except Exception:  # noqa: BLE001
+            pass
+    return {"rates": effective, "defaults": TDS_SECTIONS, "overrides": overrides}
+
+
+@router.put("/tds-rates")
+async def update_tds_rates(
+    body: TdsRatesUpdate,
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """Edit TDS rates (SUPERADMIN only). Persists the override map; ap_engine
+    reads it so deductions immediately use the new rate."""
+    coll = _get_settings_collection("tds_rate_config")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll.update_one(
+        {"_id": "default"},
+        {
+            "$set": {
+                "rates": body.rates,
+                "updated_at": datetime.now().isoformat(),
+                "updated_by": current_user.get("user_id"),
+            }
+        },
+        upsert=True,
+    )
+    return {"message": "TDS rates updated", "rates": body.rates}

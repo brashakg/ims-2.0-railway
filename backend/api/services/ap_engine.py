@@ -124,15 +124,33 @@ def aging_bucket(days_past_due: int) -> str:
 # --- TDS -------------------------------------------------------------------
 
 
-def compute_tds(base_amount, section: str) -> dict:
+def resolve_tds_rate(section: str, overrides: Optional[dict] = None) -> float:
+    """The effective TDS rate (%) for a section: an admin-edited DB override wins,
+    otherwise the code default in TDS_SECTIONS (0.0 for an unknown section).
+
+    `overrides` is the SUPERADMIN-editable {section: rate} map persisted in
+    settings (read by the router); passing it keeps this function pure + tested.
+    """
+    sec = (section or "NONE").strip().upper()
+    if overrides and sec in overrides:
+        try:
+            return float(overrides[sec])
+        except (TypeError, ValueError):
+            pass
+    return TDS_SECTIONS.get(sec, 0.0)
+
+
+def compute_tds(base_amount, section: str, overrides: Optional[dict] = None) -> dict:
     """TDS on a payment base for a given section.
 
     Returns {section, rate, tds_amount, net_payable}. net_payable = the cash
     that actually leaves the bank (base - tds). Unknown section -> 0% (NONE).
+    `overrides` (optional) is the admin-edited rate map; an override for the
+    section wins over the code default.
     """
     base = _f(base_amount)
     sec = (section or "NONE").strip().upper()
-    rate = TDS_SECTIONS.get(sec, 0.0)
+    rate = resolve_tds_rate(sec, overrides)
     tds = round(base * rate / 100.0, 2)
     return {
         "section": sec if sec in TDS_SECTIONS else "NONE",
