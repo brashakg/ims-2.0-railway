@@ -65,6 +65,15 @@ HASHED_FIELDS = (
     "description",
     "previous_value",
     "new_value",
+    # before_state / after_state are the canonical old->new snapshot the AI
+    # change-proposal trail (agents/proposals.py) and other state-diffing
+    # callers record. Committing them to the hash means a post-hoc edit of the
+    # captured change is detectable at GET /api/v1/audit/verify, not just an
+    # edit of the previous_value/new_value pair. Absent fields are skipped by
+    # _hashable_view (if k in doc), so rows that never set these stay byte-for-
+    # byte identical to before and the existing chain still verifies.
+    "before_state",
+    "after_state",
     "diff",
     "context",
     "metadata",

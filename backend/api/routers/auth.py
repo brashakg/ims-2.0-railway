@@ -319,6 +319,77 @@ def require_roles(*allowed_roles: str):
 
 
 # ============================================================================
+# AUDIT -- chained auth-event trail
+# ============================================================================
+# SYSTEM_INTENT 'Audit Everything': authentication is a security boundary, so
+# login success/failure, logout, and password changes are recorded in the
+# tamper-evident audit_logs chain (database/repositories/audit_chain.py) via
+# AuditRepository.create(). The client IP is threaded as the "where" dimension.
+# Every helper is FAIL-SOFT: a missing DB or any error never blocks the auth
+# action -- a login must not 500 because the audit write hiccuped.
+
+
+def _client_ip(req: "Request") -> str:
+    """Best-effort client IP for the audit "where" dimension.
+
+    Prefers the first hop of X-Forwarded-For (the real client behind Railway's
+    proxy), then the direct socket peer. Fail-soft -> 'unknown'.
+    """
+    if req is None:
+        return "unknown"
+    try:
+        xff = req.headers.get("x-forwarded-for", "") or ""
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+        if req.client and req.client.host:
+            return req.client.host
+    except Exception:  # noqa: BLE001
+        pass
+    return "unknown"
+
+
+def _audit_auth_event(
+    *,
+    action: str,
+    user_id: Optional[str],
+    username: Optional[str],
+    ip_address: str,
+    severity: str = "INFO",
+    detail: Optional[str] = None,
+) -> None:
+    """Append a hash-chained row to audit_logs for an auth event.
+
+    Routed through AuditRepository.create() (NOT a raw insert) so the row gets
+    seq / prev_hash / entry_hash and is verifiable at GET /api/v1/audit/verify.
+    Fail-soft: swallows every error so authentication never breaks on an audit
+    hiccup (the gap then shows honestly at verify time).
+    """
+    try:
+        from ..dependencies import get_audit_repository
+
+        repo = get_audit_repository()
+        if repo is None:
+            return
+        repo.create(
+            {
+                "action": action,
+                "entity_type": "auth",
+                "entity_id": user_id or username,
+                "user_id": user_id or username,
+                "username": username,
+                "source": "AUTH",
+                "ip_address": ip_address,
+                "severity": severity,
+                "detail": detail,
+                "timestamp": datetime.utcnow(),
+            }
+        )
+    except Exception as e:  # noqa: BLE001 - auth must never break on audit
+        logger.debug("[AUTH] audit write skipped (%s): %s", action, e)
+
+
+# ============================================================================
 # ENDPOINTS
 # ============================================================================
 
@@ -370,14 +441,7 @@ async def login(request: LoginRequest, req: Request = None):
     Rate-limited: 5 failed attempts per IP (15 min), 10 per username (30 min).
     """
     # Rate limiting check
-    client_ip = "unknown"
-    if req:
-        client_ip = (
-            req.headers.get("x-forwarded-for", "").split(",")[0].strip()
-            or req.client.host
-            if req.client
-            else "unknown"
-        )
+    client_ip = _client_ip(req)
     rate_err = _login_limiter.check(client_ip, request.username)
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
@@ -433,13 +497,37 @@ async def login(request: LoginRequest, req: Request = None):
 
     if user is None:
         _login_limiter.record(client_ip, request.username, success=False)
+        _audit_auth_event(
+            action="login_failure",
+            user_id=None,
+            username=request.username,
+            ip_address=client_ip,
+            severity="WARNING",
+            detail="unknown username",
+        )
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if not verify_password(request.password, user.get("password_hash", "")):
         _login_limiter.record(client_ip, request.username, success=False)
+        _audit_auth_event(
+            action="login_failure",
+            user_id=user.get("user_id"),
+            username=user.get("username", request.username),
+            ip_address=client_ip,
+            severity="WARNING",
+            detail="bad password",
+        )
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if not user.get("is_active", False):
+        _audit_auth_event(
+            action="login_failure",
+            user_id=user.get("user_id"),
+            username=user.get("username", request.username),
+            ip_address=client_ip,
+            severity="WARNING",
+            detail="account disabled",
+        )
         raise HTTPException(status_code=403, detail="User account is disabled")
 
     # Geo-fence validation: a geo_restricted user must log in within range of an
@@ -519,6 +607,13 @@ async def login(request: LoginRequest, req: Request = None):
 
     # Record successful login (clears lockouts)
     _login_limiter.record(client_ip, request.username, success=True)
+    _audit_auth_event(
+        action="login_success",
+        user_id=token_data["user_id"],
+        username=user.get("username", request.username),
+        ip_address=client_ip,
+        severity="INFO",
+    )
 
     # Compute role-aware effective discount cap so the frontend doesn't have to
     # know the role→cap matrix. SUPERADMIN/ADMIN → 100% (unlimited), managers
@@ -549,6 +644,7 @@ async def login(request: LoginRequest, req: Request = None):
 
 @router.post("/logout")
 async def logout(
+    req: Request = None,
     current_user: dict = Depends(get_current_user),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
@@ -563,6 +659,13 @@ async def logout(
         except (TypeError, ValueError):
             expires_at = None
         _token_blacklist.revoke(credentials.credentials, expires_at)
+    _audit_auth_event(
+        action="logout",
+        user_id=current_user.get("user_id"),
+        username=current_user.get("username"),
+        ip_address=_client_ip(req),
+        severity="INFO",
+    )
     return {"message": "Successfully logged out"}
 
 
@@ -709,7 +812,9 @@ async def refresh_token(request: RefreshTokenRequest):
 
 @router.post("/change-password")
 async def change_password(
-    request: ChangePasswordRequest, current_user: dict = Depends(get_current_user)
+    request: ChangePasswordRequest,
+    req: Request = None,
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Change user password
@@ -731,6 +836,14 @@ async def change_password(
 
     # Verify current password
     if not verify_password(request.current_password, user.get("password_hash", "")):
+        _audit_auth_event(
+            action="password_change_failed",
+            user_id=user.get("user_id"),
+            username=user.get("username"),
+            ip_address=_client_ip(req),
+            severity="WARNING",
+            detail="current password incorrect",
+        )
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     # Hash new password and update. Clear must_change_password so a forced
@@ -745,6 +858,14 @@ async def change_password(
                 "updated_at": datetime.utcnow().isoformat(),
             }
         },
+    )
+
+    _audit_auth_event(
+        action="password_changed",
+        user_id=user.get("user_id"),
+        username=user.get("username"),
+        ip_address=_client_ip(req),
+        severity="INFO",
     )
 
     return {"message": "Password changed successfully"}
