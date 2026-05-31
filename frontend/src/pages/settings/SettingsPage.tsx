@@ -204,8 +204,8 @@ export function SettingsPage() {
   const SETTINGS_GROUPS: Array<{ id: GroupId; label: string; members: SettingsTab[] }> = [
     { id: 'account', label: 'Account',      members: ['profile'] },
     { id: 'org',     label: 'Organisation', members: ['business', 'stores', 'users'] },
-    { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'lens-enums', 'discounts'] },
-    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'printers', 'notifications', 'integrations'] },
+    { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts'] },
+    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'printers', 'notifications', 'integrations', 'loyalty'] },
     { id: 'system',  label: 'System',       members: ['approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'] },
   ];
 
@@ -320,6 +320,35 @@ export function SettingsPage() {
             </div>
           );
         })}
+        {/* Orphan-catch: any visible section not assigned to a group above
+            still renders here, so a newly-added section can never be silently
+            unreachable from the nav (this is how Lens Pricing + Loyalty were
+            previously dropped). */}
+        {(() => {
+          const grouped = new Set<SettingsTab>(SETTINGS_GROUPS.flatMap((g) => g.members));
+          const orphans = visibleSections.filter((s) => !grouped.has(s.id));
+          if (orphans.length === 0) return null;
+          return (
+            <div key="more">
+              <span className="s-nav-group">More</span>
+              {orphans.map((section) => {
+                const IconCmp = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    type="button"
+                    onClick={() => setActiveTab(section.id)}
+                    className={'s-nav-item' + (activeTab === section.id ? ' on' : '')}
+                    title={section.description}
+                  >
+                    <IconCmp className="s-nav-icon" />
+                    <span className="s-nav-label">{section.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
         {user?.activeRole === 'SUPERADMIN' && (
           <>
             <div className="divider" />
