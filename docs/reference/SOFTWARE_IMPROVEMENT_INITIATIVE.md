@@ -46,7 +46,7 @@ Order per owner's directive: **clinic → POS → finance → inventory → …*
 ### Modules
 | # | Module | Status | Branch | Notes |
 |---|--------|--------|--------|-------|
-| 1 | **Clinic / Optometry** | 🛠 Implementing — C1,C2,C3,C4 shipped | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
+| 1 | **Clinic / Optometry** | 🛠 Implementing — C1–C5 shipped; C6 strategic remains | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
 | 2 | POS / Billing | ⏳ Queued | — | revenue-critical; extra care |
 | 3 | Finance / GST | ⏳ Queued | — | GST returns, P&L, AP/AR, Tally |
 | 4 | Inventory | ⏳ Queued | — | stock, transfers, counts, serials |
@@ -88,7 +88,7 @@ Legend: ⏳ Queued · 🔬 Research+Audit · 🏛 Council · 🛠 Implementing �
 | C2 | Stop fabricating AXIS 180 / 0.00 powers + thread patient_id (Family Rx grouping) | Audit P1 | High | Low–Med | ✅ shipped (incl. C2-B) |
 | C3 | Canonical Rx shape — finalized Rx printed blank + progression null | Audit P1 (root cause) | Very High | Med | ✅ shipped (core: mirror+progression+reader; full field migration deferred) |
 | C4 | Blank-powers display on Clinical/Prescriptions pages | Audit P1 | Med | Low (FE) | ✅ shipped |
-| C5 | Lane→POS Rx auto-flow (zero re-keying) + GST split (exempt service vs goods) | Both research #1 | Very High | Med | ⏳ |
+| C5 | Lane→POS Rx auto-flow (zero re-keying) + GST split (exempt service vs goods) | Both research #1 | Very High | Med | ✅ shipped (C5-A auto-attach behind default-OFF flag; C5-B GST-exempt SAC 9993) |
 | C6 | CL-fitting wiring; persist full exam; DLT recall; FHIR/ABDM; DPDP consent | Research | High (strategic) | Varies | ⏳ |
 
 **Research signal (both streams agreed):** #1 = lane→POS Rx continuity, zero re-keying;
@@ -100,7 +100,23 @@ India edge: GST split (eye-test SAC 9993 exempt vs lenses 12% / frames 18%), FHI
 AXIS 180 / 0.00 powers) · C2-B (patient_id threaded queue→test→Rx; Family-Rx grouping) ·
 C4 (blank-powers display + shared rxEye reader) · C3-core (finalized Rx prints +
 progression spans both shapes; 2 tests). All verified; existing clinic suites green.
-**Next:** C5 (lane→POS Rx auto-flow + GST service/goods split), then C6 (CL fitting,
-full-exam persistence, DLT recall, FHIR/ABDM, DPDP). Then module 2 = POS.
+
+### 2026-05-31 (cont.) — Clinic C5 shipped (owner-confirmed via AskUserQuestion)
+Two owner decisions gated C5; both confirmed, both shipped:
+- **C5-A — lane→POS Rx auto-attach** behind a **default-OFF** build flag
+  `VITE_POS_AUTO_ATTACH_SINGLE_RX`. Fires only when exactly one valid (non-expired)
+  Rx exists and none is attached; ambiguous multi-Rx still falls to manual choice.
+  Zero behaviour change unless the owner opts in (POS is revenue-critical). tsc 0 +
+  vite build green.
+- **C5-B — GST-exempt eye-test line (SAC 9993)**. EYE_TEST/EYE_EXAM/EYE_CHECKUP/
+  CONSULT/CONSULTATION/OPTOMETRY → `("9993", 0.0)` in the canonical GST table, so a
+  consult bills at 0% on the SAME invoice as taxable goods. Proven purely additive
+  (rate-bucketed split leaves 5%/18% rows byte-identical); 5 regression tests, existing
+  GST/orders suites (94) green. Eye-test item_types also added to
+  `_NON_SERIALIZED_ITEM_TYPES` (a consult never demands stock).
+
+**Clinic remaining:** only **C6** (strategic — CL-fitting wiring, full-exam persistence,
+DLT-compliant recall, FHIR R4 `VisionPrescription` / ABDM, DPDP 2023 consent). These are
+larger, partly compliance-gated builds; tackled next, then **module 2 = POS**.
 
 _(Appended as each module/concern advances.)_
