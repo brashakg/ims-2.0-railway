@@ -652,16 +652,35 @@ async def get_gst_summary(
     )
     gst_collected = collected[0]["total_tax"] if collected else 0
 
-    # GST paid (input credit from purchases)
-    purchase_match = {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    # GST paid (Input Tax Credit). ITC is claimable on PURCHASES recorded as
+    # vendor BILLS (GRN-backed), NOT purchase_orders -- POs are intent only and
+    # carry no `date` field, so the old match on purchase_orders.date summed
+    # NOTHING: ITC always showed 0 and net GST payable was overstated. Read the
+    # SAME source + date field as /itc-register (vendor_bills.bill_date) so the
+    # summary reconciles with the authoritative ITC register. CA to confirm the
+    # eligibility scope (this counts all booked vendor-bill GST in the period).
+    purchase_match: dict = {}
+    _apply_created_at_range(
+        purchase_match,
+        start.strftime("%Y-%m-%d"),
+        (end - timedelta(days=1)).strftime("%Y-%m-%d"),
+        field="bill_date",
+    )
     paid = list(
-        db.get_collection("purchase_orders").aggregate(
+        db.get_collection("vendor_bills").aggregate(
             [
                 {"$match": purchase_match},
                 {
                     "$group": {
                         "_id": None,
-                        "total_tax": {"$sum": {"$ifNull": ["$tax_amount", 0]}},
+                        "total_tax": {
+                            "$sum": {
+                                "$ifNull": [
+                                    "$tax_amount",
+                                    {"$ifNull": ["$gst_amount", 0]},
+                                ]
+                            }
+                        },
                     }
                 },
             ]
