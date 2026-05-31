@@ -51,6 +51,40 @@ def _safe_div(a, b, ndigits=2):
     return round(a / b, ndigits) if b else 0
 
 
+# ----------------------------------------------------------------------------
+# created_at filter / day-key helpers
+# ----------------------------------------------------------------------------
+# BaseRepository writes `created_at` as a real BSON **datetime**. The original
+# code filtered with `{"$gte": dt.isoformat()}` -- a STRING compared against a
+# Date field never matches in Mongo, so every windowed analytic silently
+# returned 0 rows (zero / under-report). And `str_value[:10]` on a datetime
+# raises TypeError ('datetime' is not subscriptable), 500'ing the endpoint.
+# These two helpers centralise the correct datetime filter + a safe day-key.
+
+
+def _created_range(gte: Optional[datetime] = None, lte: Optional[datetime] = None) -> dict:
+    """Build a `created_at` Mongo range using real datetime objects (BSON
+    Date), so the comparison actually matches stored orders. Pass naive
+    datetimes; tz is stripped to match how the orders are written."""
+    rng: dict = {}
+    if gte is not None:
+        rng["$gte"] = gte.replace(tzinfo=None) if gte.tzinfo else gte
+    if lte is not None:
+        rng["$lte"] = lte.replace(tzinfo=None) if lte.tzinfo else lte
+    return rng
+
+
+def _day_key(value) -> str:
+    """Coerce a `created_at` value (BSON datetime OR legacy ISO string OR
+    None) to 'YYYY-MM-DD'. Never raises -- replaces the unsafe `[:10]` slice
+    that TypeError'd on datetime objects."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, str):
+        return value[:10]
+    return ""
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -114,12 +148,9 @@ async def discount_analysis(
     dt_to = _parse_date(date_to)
 
     if dt_from or dt_to:
-        date_filter: dict = {}
-        if dt_from:
-            date_filter["$gte"] = dt_from.isoformat()
-        if dt_to:
-            date_filter["$lte"] = dt_to.isoformat()
-        query["created_at"] = date_filter
+        # Datetime objects, NOT .isoformat() strings -- created_at is a BSON
+        # Date and a string comparison never matches.
+        query["created_at"] = _created_range(dt_from, dt_to)
 
     orders = list(db.get_collection("orders").find(query).limit(5000))
 
@@ -183,7 +214,7 @@ async def discount_analysis(
     prev_to = dt_from or (now - timedelta(days=period_days))
     prev_query: dict = {
         "store_id": active_store,
-        "created_at": {"$gte": prev_from.isoformat(), "$lte": prev_to.isoformat()},
+        "created_at": _created_range(prev_from, prev_to),
     }
     prev_orders = list(db.get_collection("orders").find(prev_query).limit(5000))
     previous_total = sum(float(o.get("discount_amount", 0) or 0) for o in prev_orders)
@@ -229,11 +260,12 @@ async def demand_forecast(
         return {"forecasts": []}
 
     now = datetime.now()
-    ninety_days_ago = (now - timedelta(days=90)).isoformat()
+    ninety_days_ago = now - timedelta(days=90)
 
     order_query: dict = {
         "store_id": active_store,
-        "created_at": {"$gte": ninety_days_ago},
+        # Datetime, NOT .isoformat() string -- created_at is a BSON Date.
+        "created_at": _created_range(gte=ninety_days_ago),
     }
     orders = list(db.get_collection("orders").find(order_query).limit(10000))
 
@@ -258,7 +290,7 @@ async def demand_forecast(
                 }
             qty = int(item.get("quantity", 1) or 1)
             product_sales[pid]["qty"] += qty
-            day_key = (o.get("created_at") or "")[:10]
+            day_key = _day_key(o.get("created_at"))
             product_sales[pid]["daily_counts"][day_key] = (
                 product_sales[pid]["daily_counts"].get(day_key, 0) + qty
             )
@@ -329,20 +361,22 @@ async def dead_stock(
         return {"dead_stock": [], "total_value": 0, "total_skus": 0}
 
     now = datetime.now()
-    threshold_date = (now - timedelta(days=days_threshold)).isoformat()
+    threshold_date = now - timedelta(days=days_threshold)
 
     # Get all products for this store
     products = list(
         db.get_collection("products").find({"store_id": active_store}).limit(5000)
     )
 
-    # Get orders in the threshold period to find which products sold
+    # Get orders in the threshold period to find which products sold.
+    # Datetime, NOT .isoformat() string -- created_at is a BSON Date so a
+    # string filter matched nothing and EVERY product looked dead.
     orders = list(
         db.get_collection("orders")
         .find(
             {
                 "store_id": active_store,
-                "created_at": {"$gte": threshold_date},
+                "created_at": _created_range(gte=threshold_date),
             }
         )
         .limit(10000)
@@ -356,8 +390,13 @@ async def dead_stock(
             pid = item.get("product_id", "")
             if pid:
                 sold_product_ids.add(pid)
-                order_date = o.get("created_at", "")
-                if pid not in last_sold_map or order_date > last_sold_map[pid]:
+                # Normalize to a 'YYYY-MM-DD' day-key so the > comparison and
+                # the later parse both work whether created_at is a BSON
+                # datetime or a legacy ISO string.
+                order_date = _day_key(o.get("created_at"))
+                if order_date and (
+                    pid not in last_sold_map or order_date > last_sold_map[pid]
+                ):
                     last_sold_map[pid] = order_date
 
     # Also check older orders for last_sold_date of dead stock
@@ -384,7 +423,7 @@ async def dead_stock(
                 for item in items:
                     pid = item.get("product_id", "")
                     if pid and pid not in last_sold_map:
-                        last_sold_map[pid] = o.get("created_at", "")
+                        last_sold_map[pid] = _day_key(o.get("created_at"))
 
     dead_items = []
     total_value = 0.0
@@ -401,10 +440,11 @@ async def dead_stock(
         value = qty * cost
         total_value += value
 
+        # last_sold is a normalized 'YYYY-MM-DD' day-key (see _day_key above).
         last_sold = last_sold_map.get(pid)
         if last_sold:
             try:
-                last_dt = datetime.fromisoformat(last_sold.replace("Z", "+00:00"))
+                last_dt = datetime.fromisoformat(last_sold)
                 days_since = (now - last_dt).days
             except Exception:
                 days_since = days_threshold + 1
@@ -909,24 +949,21 @@ async def staff_leaderboard(
 
     now = datetime.now()
     if period == "today":
-        from_date = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        from_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "week":
-        from_date = (
-            (now - timedelta(days=now.weekday()))
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .isoformat()
+        from_date = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
         )
     else:
-        from_date = now.replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        from_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     orders = list(
         db.get_collection("orders")
         .find(
             {
                 "store_id": active_store,
-                "created_at": {"$gte": from_date},
+                # Datetime, NOT .isoformat() string -- created_at is a BSON Date.
+                "created_at": _created_range(gte=from_date),
             }
         )
         .limit(10000)
@@ -1122,7 +1159,8 @@ async def anomaly_detection(
         .find(
             {
                 "store_id": active_store,
-                "created_at": {"$gte": dt_from.isoformat(), "$lte": dt_to.isoformat()},
+                # Datetime, NOT .isoformat() string -- created_at is a BSON Date.
+                "created_at": _created_range(dt_from, dt_to),
             }
         )
         .limit(10000)
@@ -1141,7 +1179,7 @@ async def anomaly_detection(
         sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
         status = (o.get("status", "") or "").lower()
         oid = o.get("order_id", str(o.get("_id", "")))
-        order_date = (o.get("created_at", "") or "")[:10]
+        order_date = _day_key(o.get("created_at"))
 
         # 1. Excessive voids / cancellations
         if status in ("void", "voided", "cancelled", "canceled"):

@@ -10,7 +10,7 @@ import traceback
 import logging
 
 logger = logging.getLogger(__name__)
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
 from ..dependencies import (
     get_order_repository,
@@ -20,6 +20,14 @@ from ..dependencies import (
 )
 
 router = APIRouter(prefix="", tags=["Analytics"])
+
+# Roles allowed to read enterprise analytics / KPI dashboards. These surface
+# cross-store revenue, margins, cash-register and customer intelligence -- the
+# same management tier that reports.py gates its financial reports behind
+# (_REPORT_FINANCE_ROLES). Previously EVERY authenticated user (down to
+# workshop staff) could read enterprise KPIs. SUPERADMIN auto-passes inside
+# require_roles. Additive gate only; per-store_id scoping is a separate item.
+_ANALYTICS_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 
 # ============================================================================
@@ -37,8 +45,17 @@ def _norm_order(o: dict) -> dict:
         "store_id": o.get("store_id") or o.get("storeId", ""),
         "customer_id": o.get("customer_id") or o.get("customerId", ""),
         "created_at": raw_date,
+        # Prefer the post-discount billable total. orders.py stamps
+        # `grand_total` (snake); fall through camelCase + legacy total_amount.
+        # `subtotal` is the PRE-discount gross (over-counts revenue) so it is
+        # the LAST resort only -- the previous order put it ahead of the real
+        # grand_total and silently inflated revenue for discounted orders.
         "total_amount": _safe_float(
-            o.get("total_amount") or o.get("grandTotal") or o.get("subtotal")
+            o.get("grand_total")
+            or o.get("grandTotal")
+            or o.get("total_amount")
+            or o.get("totalAmount")
+            or o.get("subtotal")
         ),
         "status": o.get("status") or o.get("orderStatus", ""),
         "items": [
@@ -74,6 +91,46 @@ def _filter_orders_by_date(orders: list, start: datetime, end: datetime) -> list
         if dt and start <= dt <= end:
             result.append(o)
     return result
+
+
+def _fetch_orders_in_window(
+    order_repo,
+    *,
+    store_id: Optional[str],
+    start: datetime,
+    end: datetime,
+) -> list:
+    """Date-bounded order fetch that pushes the window into Mongo and is NOT
+    capped at 500 (find_by_store) / 100 (find_many default).
+
+    `order_repo.find_by_store` filters with an `.isoformat()` STRING against a
+    BSON Date (never matches) AND hard-caps at 500 rows -- so store totals
+    silently dropped every order past the 500th and, for any non-string
+    created_at, returned 0. This queries with real datetime objects and
+    `limit=0` (no cap), then normalizes. `store_id=None` => all stores.
+
+    Falls back to the repo's find_many(filter) when the underlying collection
+    isn't reachable (mock/stub mode) so it degrades the same as before.
+    """
+    if order_repo is None:
+        return []
+
+    flt: dict = {
+        # Real datetime objects -- a BSON Date range that actually matches.
+        "created_at": {"$gte": start, "$lte": end},
+    }
+    if store_id:
+        flt["store_id"] = store_id
+    try:
+        # limit=0 -> no cap (see BaseRepository.find_many: falsy limit skips
+        # the .limit() call). A store/period total must not be truncated.
+        return _norm_orders(order_repo.find_many(flt, limit=0))
+    except Exception:
+        # Defensive: never 500 a dashboard on a query hiccup.
+        try:
+            return _norm_orders(order_repo.find_many(flt))
+        except Exception:
+            return []
 
 
 # ============================================================================
@@ -221,7 +278,7 @@ async def get_analytics_root():
 
 @router.get("/dashboard-summary")
 async def get_dashboard_summary(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_ANALYTICS_ROLES)),
     period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
     store_id: Optional[str] = Query(None),
 ):
@@ -321,7 +378,7 @@ async def get_dashboard_summary(
 
 @router.get("/revenue-trends")
 async def get_revenue_trends(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_ANALYTICS_ROLES)),
     period: str = Query("daily", pattern="^(daily|weekly|monthly)$"),
     days: int = Query(30, ge=7, le=365),
     store_id: Optional[str] = Query(None),
@@ -433,7 +490,7 @@ async def get_revenue_trends(
 
 @router.get("/store-performance")
 async def get_store_performance(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_ANALYTICS_ROLES)),
     period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
 ):
     """
@@ -446,15 +503,22 @@ async def get_store_performance(
         order_repo = get_order_repository()
         stock_repo = get_stock_repository()
 
-        # Get all orders
-        all_orders = (
-            _norm_orders(order_repo.find_many({})) if order_repo is not None else []
+        # Date-bounded, all-store fetch pushed into Mongo (no 100/500 cap).
+        # The previous find_many({}) capped at 100 arbitrary recent rows AND
+        # carried no date filter, so store totals dropped most orders.
+        prev_start = start_date - (end_date - start_date)
+        window_orders = _fetch_orders_in_window(
+            order_repo, store_id=None, start=start_date, end=end_date
+        )
+        prev_window_orders = _fetch_orders_in_window(
+            order_repo, store_id=None, start=prev_start, end=start_date
         )
 
-        # Group by store
+        # Group by store (union of both windows so a store with only prior
+        # sales still appears).
         stores = {}
-        for order in all_orders:
-            store_id = order.get("store_id", "store-001")
+        for order in list(window_orders) + list(prev_window_orders):
+            store_id = order.get("store_id") or "store-001"
             if store_id not in stores:
                 stores[store_id] = {
                     "store_id": store_id,
@@ -464,27 +528,16 @@ async def get_store_performance(
         store_metrics = []
 
         for store_id, store_info in stores.items():
-            # Orders for this store
-            orders = [
-                o
-                for o in all_orders
-                if o.get("store_id") == store_id
-                and _safe_parse_date(o.get("created_at")) is not None
-                and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
-            ]
+            # Orders for this store in the current window.
+            orders = [o for o in window_orders if o.get("store_id") == store_id]
 
             revenue = sum(_safe_float(o.get("total_amount")) for o in orders)
             order_count = len(orders)
             avg_order_value = revenue / order_count if order_count > 0 else 0
 
-            # Previous period comparison
-            prev_start = start_date - (end_date - start_date)
+            # Previous period comparison (same-length window before start).
             prev_orders = [
-                o
-                for o in all_orders
-                if o.get("store_id") == store_id
-                and _safe_parse_date(o.get("created_at")) is not None
-                and prev_start <= _safe_parse_date(o.get("created_at")) <= start_date
+                o for o in prev_window_orders if o.get("store_id") == store_id
             ]
 
             prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
@@ -549,7 +602,7 @@ async def get_store_performance(
 
 @router.get("/inventory-intelligence")
 async def get_inventory_intelligence(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_ANALYTICS_ROLES)),
     store_id: Optional[str] = Query(None),
 ):
     """
@@ -674,7 +727,7 @@ async def get_inventory_intelligence(
 
 @router.get("/customer-insights")
 async def get_customer_insights(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_ANALYTICS_ROLES)),
     period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
     store_id: Optional[str] = Query(None),
 ):
@@ -772,7 +825,7 @@ async def get_customer_insights(
 
 @router.get("/enterprise-kpis")
 async def get_enterprise_kpis(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_ANALYTICS_ROLES)),
     period: str = Query("today", pattern="^(today|week|month|year)$"),
     store_id: Optional[str] = Query(None),
 ):
@@ -793,26 +846,21 @@ async def get_enterprise_kpis(
             raise HTTPException(status_code=500, detail="Database connection failed")
 
         # ===== REVENUE METRICS =====
-        all_orders = _norm_orders(order_repo.find_by_store(store_id))
-        current_orders = [
-            o
-            for o in all_orders
-            if _safe_parse_date(o.get("created_at")) is not None
-            and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
-        ]
+        # Date-bounded fetch pushed into Mongo (no 500 cap, real datetime
+        # filter). The previous find_by_store() string-filtered a BSON Date
+        # (never matched) and truncated at 500 orders.
+        prev_start = start_date - (end_date - start_date)
+        prev_end = start_date
+        current_orders = _fetch_orders_in_window(
+            order_repo, store_id=store_id, start=start_date, end=end_date
+        )
+        prev_orders = _fetch_orders_in_window(
+            order_repo, store_id=store_id, start=prev_start, end=prev_end
+        )
 
         total_revenue = sum(_safe_float(o.get("total_amount")) for o in current_orders)
         total_orders_count = len(current_orders)
 
-        # Previous period for comparison
-        prev_start = start_date - (end_date - start_date)
-        prev_end = start_date
-        prev_orders = [
-            o
-            for o in all_orders
-            if _safe_parse_date(o.get("created_at")) is not None
-            and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
-        ]
         prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
         revenue_change = (
             ((total_revenue - prev_revenue) / prev_revenue * 100)
@@ -909,25 +957,27 @@ async def get_enterprise_kpis(
         closing_balance = opening_balance + sales_amount - expenses_amount
 
         # ===== STORE COMPARISON (if applicable) =====
-        all_store_orders = _norm_orders(order_repo.find_many({}))
+        # Date-bounded to the SELECTED period window (all stores, no cap).
+        # Previously this pulled find_many({}) capped at 100 rows and only
+        # tallied same-day orders regardless of the chosen period.
+        all_store_orders = _fetch_orders_in_window(
+            order_repo, store_id=None, start=start_date, end=end_date
+        )
         store_comparison = []
         stores_by_id = {}
 
         for order in all_store_orders:
-            order_store_id = order.get("store_id", "store-001")
+            order_store_id = order.get("store_id") or "store-001"
             if order_store_id not in stores_by_id:
                 stores_by_id[order_store_id] = {
                     "store_id": order_store_id,
                     "revenue": 0.0,
                     "orders": 0,
                 }
-            order_date_str = to_date_str(order.get("created_at"))
-            current_date_str = end_date.date().isoformat()
-            if order_date_str == current_date_str:  # Same day for today
-                stores_by_id[order_store_id]["revenue"] += _safe_float(
-                    order.get("total_amount")
-                )
-                stores_by_id[order_store_id]["orders"] += 1
+            stores_by_id[order_store_id]["revenue"] += _safe_float(
+                order.get("total_amount")
+            )
+            stores_by_id[order_store_id]["orders"] += 1
 
         store_comparison = sorted(
             list(stores_by_id.values()), key=lambda x: x["revenue"], reverse=True
