@@ -43,9 +43,10 @@ TDS_SECTIONS = {
     "NONE": 0.0,
     "194C_IND": 1.0,  # payment to contractor - individual / HUF
     "194C_OTHER": 2.0,  # payment to contractor - company / firm / others
-    "194J": 10.0,  # professional / technical services
+    "194J": 10.0,  # professional services (default 194J rate)
+    "194J_TECH": 2.0,  # 194J technical services / call-centre (2% since FY2020-21)
     "194Q": 0.1,  # purchase of goods (aggregate > Rs 50 lakh / payee)
-    "194H": 5.0,  # commission / brokerage
+    "194H": 2.0,  # commission / brokerage (cut 5% -> 2% by Budget 2024, eff. 1 Oct 2024)
     "194I_PLANT": 2.0,  # rent - plant & machinery
     "194I_LAND": 10.0,  # rent - land / building / furniture
 }
