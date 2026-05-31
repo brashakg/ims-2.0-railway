@@ -48,6 +48,7 @@ _VALID_CUSTOMER_TYPES = {"B2C", "B2B"}
 
 
 from ..dependencies import get_customer_repository, validate_store_access
+from ..services.phone import normalize_indian_mobile
 
 router = APIRouter()
 
@@ -69,6 +70,13 @@ class PatientCreate(BaseModel):
     anniversary: Optional[date] = None
     relation: Optional[str] = None
 
+    @field_validator("mobile", mode="before")
+    @classmethod
+    def normalize_patient_mobile(cls, v):
+        """A family member's phone is OPTIONAL; when given, store the canonical
+        bare 10-digit form (so it matches the account holder's + search/dedup)."""
+        return normalize_indian_mobile(v)
+
     @field_validator("dob", mode="after")
     @classmethod
     def dob_not_future(cls, v):
@@ -81,7 +89,12 @@ class PatientCreate(BaseModel):
 class CustomerCreate(BaseModel):
     customer_type: str = "B2C"  # B2C, B2B
     name: str = Field(..., min_length=2)
-    mobile: str = Field(..., pattern=r"^[6-9]\d{9}$")
+    # Normalized to the canonical bare 10-digit form via the shared phone util,
+    # so +91 / 0 / spaces / dashes that staff actually type are accepted and
+    # stored identically to a bare number (was a raw pattern that 422'd them and
+    # could split the same customer across collections). Still required + still
+    # ultimately ^[6-9]\d{9}$.
+    mobile: str
     email: Optional[str] = None
     dob: Optional[date] = None
     anniversary: Optional[date] = None
@@ -97,6 +110,16 @@ class CustomerCreate(BaseModel):
     @classmethod
     def sanitize_name(cls, v):
         return _sanitize_text(v) if isinstance(v, str) else v
+
+    @field_validator("mobile", mode="before")
+    @classmethod
+    def normalize_mobile(cls, v):
+        """Accept +91 / 0 / spaced input; store the canonical bare 10-digit form.
+        Required field -> a blank/None value raises (mobile is mandatory here)."""
+        norm = normalize_indian_mobile(v)
+        if not norm:
+            raise ValueError("mobile is required (10-digit Indian mobile, 6-9)")
+        return norm
 
     @field_validator("customer_type", mode="after")
     @classmethod
