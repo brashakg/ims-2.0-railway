@@ -212,6 +212,7 @@ async def dashboard_stats(
     # Get today's date range
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_str = today.strftime("%Y-%m-%d")
+    yesterday_str = (today - timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Initialize stats
     total_sales = 0
@@ -222,6 +223,9 @@ async def dashboard_stats(
     today_deliveries = 0
     today_new_customers = 0
     payments_received = 0
+    # Today-vs-yesterday sales for the real `change` delta (see below).
+    today_sales = 0.0
+    yesterday_sales = 0.0
 
     # Fetch orders data
     if order_repo is not None:
@@ -248,11 +252,12 @@ async def dashboard_stats(
 
             # Total sales (completed orders)
             if status not in ["CANCELLED", "DRAFT"]:
-                total_sales += (
-                    order.get("final_amount", 0)
-                    or order.get("grand_total", 0)
-                    or order.get("total_amount", 0)
-                )
+                rev = _order_revenue(order)
+                total_sales += rev
+                if order_date == today_str:
+                    today_sales += rev
+                elif order_date == yesterday_str:
+                    yesterday_sales += rev
 
     # Fetch inventory data
     if stock_repo is not None:
@@ -277,9 +282,18 @@ async def dashboard_stats(
                 "IN_PROGRESS", 0
             )
 
+    # Real today-vs-yesterday sales change (same delta math as
+    # /sales/comparison + /sales/growth). null when yesterday had no sales
+    # to compare against -- the frontend renders "-" for null rather than a
+    # fabricated 12.5%.
+    if yesterday_sales > 0:
+        change = round((today_sales - yesterday_sales) / yesterday_sales * 100, 2)
+    else:
+        change = None
+
     return {
         "totalSales": total_sales,
-        "change": 12.5,  # Would need historical data for comparison
+        "change": change,
         "pendingOrders": pending_orders,
         "urgentOrders": ready_orders,
         "appointmentsToday": open_tasks,
@@ -423,10 +437,12 @@ async def sales_by_salesperson(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
+    # Datetime objects, NOT .isoformat() strings -- created_at is a BSON Date
+    # so a string filter never matched and this report came back empty.
     orders = order_repo.find_many(
         {
             "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
         }
     )
@@ -443,9 +459,9 @@ async def sales_by_salesperson(
                 "sales": 0,
                 "orders": 0,
             }
-        by_person[person]["sales"] += order.get("final_amount", 0) or order.get(
-            "total_amount", 0
-        )
+        # Use the canonical revenue reader (grand_total first) so the legacy
+        # final_amount/total_amount-only sum doesn't zero out modern orders.
+        by_person[person]["sales"] += _order_revenue(order)
         by_person[person]["orders"] += 1
 
     return {"data": list(by_person.values())}
@@ -1058,10 +1074,12 @@ async def profit_by_category(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
+    # Datetime objects, NOT .isoformat() strings -- created_at is a BSON Date
+    # so a string filter never matched and this report came back empty.
     orders = order_repo.find_many(
         {
             "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
         }
     )
@@ -1078,9 +1096,9 @@ async def profit_by_category(
                     "profit": 0,
                     "margin_percent": 0,
                 }
-            selling_price = item.get("total", 0) or (
-                item.get("price", 0) * item.get("quantity", 1)
-            )
+            # _item_revenue reads item_total first (the field orders.py
+            # actually stamps), falling back to legacy total / price*qty.
+            selling_price = _item_revenue(item)
             cost_price = item.get("cost_price", 0) * item.get("quantity", 1)
             profit = selling_price - cost_price
 
@@ -1116,9 +1134,11 @@ async def profit_by_store(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
+    # Datetime objects, NOT .isoformat() strings -- created_at is a BSON Date
+    # so a string filter never matched and this report came back empty.
     orders = order_repo.find_many(
         {
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
         }
     )
@@ -1135,7 +1155,8 @@ async def profit_by_store(
                 "orders": 0,
             }
         profit_by_st[store]["orders"] += 1
-        order_amount = order.get("final_amount", 0) or order.get("total_amount", 0)
+        # Canonical revenue reader (grand_total first).
+        order_amount = _order_revenue(order)
         profit_by_st[store]["revenue"] += order_amount
 
         # Calculate cost from items
@@ -1302,11 +1323,13 @@ async def eye_tests_report(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
-    # Get all tasks/appointments (eye tests)
+    # Get all tasks/appointments (eye tests). Datetime objects, NOT
+    # .isoformat() strings -- created_at is a BSON Date so a string filter
+    # never matched and this report came back empty.
     tasks = task_repo.find_many(
         {
             "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "created_at": {"$gte": from_dt, "$lte": to_dt},
             "task_type": "eye_test",
         }
     )

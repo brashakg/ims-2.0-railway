@@ -4,6 +4,23 @@
 // CSV/Excel export and print helpers for reports and data tables
 
 /**
+ * Neutralize CSV / spreadsheet formula injection.
+ *
+ * Excel / Google Sheets treat a cell whose first character is `=`, `+`, `-`,
+ * `@` (or a leading TAB / CR) as a formula. A malicious value such as
+ * `=HYPERLINK(...)` or `=cmd|...` exported from user-entered fields (customer
+ * name, notes, product name) then executes when the file is opened. Prefixing
+ * the value with a single quote forces the spreadsheet to treat it as text.
+ * Reference: OWASP "CSV Injection".
+ */
+function neutralizeFormula(str: string): string {
+  if (str.length > 0 && /^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
+
+/**
  * Convert array of objects to CSV string
  */
 export function toCSV(data: Record<string, any>[], columns?: { key: string; label: string }[]): string {
@@ -15,7 +32,9 @@ export function toCSV(data: Record<string, any>[], columns?: { key: string; labe
     cols.map(c => {
       const val = row[c.key];
       if (val === null || val === undefined) return '""';
-      const str = String(val).replace(/"/g, '""');
+      // Neutralize formula injection BEFORE quote-escaping so the leading
+      // single quote is preserved inside the quoted field.
+      const str = neutralizeFormula(String(val)).replace(/"/g, '""');
       return `"${str}"`;
     }).join(',')
   );
