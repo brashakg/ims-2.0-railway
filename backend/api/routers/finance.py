@@ -652,22 +652,28 @@ async def get_gst_summary(
     )
     gst_collected = collected[0]["total_tax"] if collected else 0
 
-    # GST paid (input credit from purchases)
-    purchase_match = {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
-    paid = list(
-        db.get_collection("purchase_orders").aggregate(
-            [
-                {"$match": purchase_match},
-                {
-                    "$group": {
-                        "_id": None,
-                        "total_tax": {"$sum": {"$ifNull": ["$tax_amount", 0]}},
-                    }
-                },
-            ]
-        )
-    )
-    gst_paid = paid[0]["total_tax"] if paid else 0
+    # GST paid (Input Tax Credit). ITC is claimable on PURCHASES recorded as
+    # vendor BILLS (GRN-backed), NOT purchase_orders -- POs are intent only and
+    # carry no `date` field, so the old match on purchase_orders.date summed
+    # NOTHING: ITC always showed 0 and net GST payable was overstated. Read the
+    # SAME source + date field as /itc-register (vendor_bills.bill_date) so the
+    # summary reconciles with the authoritative ITC register. CA to confirm the
+    # eligibility scope (this counts all booked vendor-bill GST in the period).
+    # Filter in Python via the tolerant date parser so this is robust whether
+    # vendor_bills.bill_date is stored as an ISO string or a BSON datetime (the
+    # shared _apply_created_at_range helper is created_at-specific and can't take
+    # a field). gst_amount is the legacy alias for tax_amount.
+    gst_paid = 0.0
+    try:
+        for _b in db.get_collection("vendor_bills").find(
+            {}, {"_id": 0, "bill_date": 1, "tax_amount": 1, "gst_amount": 1}
+        ):
+            _bd = ap_engine.parse_date(_b.get("bill_date"))
+            if _bd is not None and start <= _bd < end:
+                gst_paid += float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
+    except Exception:
+        gst_paid = 0.0
+    gst_paid = round(gst_paid, 2)
 
     cgst = gst_collected / 2
     sgst = gst_collected / 2
@@ -1773,6 +1779,17 @@ async def get_gst_reconciliation(
     return recon
 
 
+def _jv_cgst_sgst_split(tax: float) -> tuple:
+    """Split a line's total GST into intra-state CGST + SGST so they sum to the
+    tax EXACTLY (the rounding residual goes on SGST). A naive round(tax/2) on both
+    sides over-states by a paisa on odd-paise tax (100.01 -> 50.01 + 50.01 =
+    100.02), which IMBALANCES the Tally voucher and gets it rejected on import.
+    Mirrors orders._build_invoice_gst_split."""
+    cgst = round(tax / 2.0, 2)
+    sgst = round(tax - cgst, 2)
+    return cgst, sgst
+
+
 @router.get("/tally/sales-jv")
 async def get_tally_sales_jv(
     from_date: Optional[str] = None,
@@ -1808,8 +1825,9 @@ async def get_tally_sales_jv(
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
-        o["cgst_amount"] = round(tax / 2, 2)
-        o["sgst_amount"] = round(tax / 2, 2)
+        cgst, sgst = _jv_cgst_sgst_split(tax)
+        o["cgst_amount"] = cgst
+        o["sgst_amount"] = sgst
         o["subtotal"] = round(grand - tax, 2)
         o["grand_total"] = grand
 
