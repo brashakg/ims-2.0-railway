@@ -5,12 +5,18 @@ Vendor returns, debit notes, and credit note management
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime
 import uuid
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import get_db
+
+# A vendor return mints a debit/credit note -- a financial instrument against a
+# vendor. Restrict create + status changes to the same roles that manage vendors
+# / AP (mirrors vendors.py _VENDOR_ROLES); it was previously open to ANY
+# authenticated user (down to a cashier).
+_VENDOR_RETURN_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 router = APIRouter()
 
@@ -23,9 +29,11 @@ router = APIRouter()
 class ReturnItemCreate(BaseModel):
     product_id: str
     product_name: str
-    quantity: int
+    # Bounded so a zero/negative/garbage qty can't produce a bogus (or negative)
+    # debit-note amount. Upper bound mirrors the orders.py line guard.
+    quantity: int = Field(..., gt=0, le=100000)
     reason: str  # defective, wrong_item, expired, damaged_in_transit, quality_issue, not_as_ordered, other
-    unit_price: float
+    unit_price: float = Field(..., ge=0, le=10_000_000)
 
 
 class VendorReturnCreate(BaseModel):
@@ -130,9 +138,9 @@ async def list_vendor_returns(
 @router.post("/", status_code=201)
 async def create_vendor_return(
     return_data: VendorReturnCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_ROLES)),
 ):
-    """Create a new vendor return"""
+    """Create a new vendor return (debit note). Vendor/AP roles only."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -226,9 +234,9 @@ async def get_vendor_return(
 async def update_return_status(
     return_id: str,
     status_update: VendorReturnStatusUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_ROLES)),
 ):
-    """Update vendor return status"""
+    """Update vendor return status (incl. issuing a credit note). Vendor/AP roles only."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
