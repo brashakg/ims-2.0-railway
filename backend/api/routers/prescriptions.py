@@ -94,6 +94,35 @@ def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
     return value
 
 
+def _validate_rx_number(value, field_name: str):
+    """Numeric (float) variant of _validate_rx_value for the 4-version Rx model,
+    which stores sphere/cylinder/addition as floats. Applies the SAME ranges +
+    0.25-diopter grid, so the version-PATCH path can no longer be used to slip an
+    out-of-range power past the validation the POST/PUT paths enforce -- an
+    unvalidated version mirrors straight to top-level right_eye on finalize."""
+    if value is None:
+        return value
+    try:
+        num = float(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
+    if num == 0:  # plano / no-add -- mirror the string validator's "0" pass-through
+        return value
+    lo, hi = _RX_LIMITS.get(field_name, (-999, 999))
+    if num < lo or num > hi:
+        raise ValueError(
+            f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
+            f"Please double-check the prescription."
+        )
+    if field_name in ("sph", "cyl", "add", "cl_power", "cl_cyl", "cl_add"):
+        if round(num * 100) % 25 != 0:
+            raise ValueError(
+                f"{field_name} value {num} must be in 0.25-diopter steps "
+                f"(e.g. -1.25, 0.00, +2.50)."
+            )
+    return value
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -1069,9 +1098,28 @@ async def print_prescription(
 class VersionEyeData(BaseModel):
     sphere: Optional[float] = None
     cylinder: Optional[float] = None
-    axis: Optional[int] = None
+    axis: Optional[int] = Field(None, ge=1, le=180)
     addition: Optional[float] = None
     va: Optional[str] = None
+
+    # Close the version-PATCH validation bypass (audit P2): range + 0.25-grid
+    # check sphere/cylinder/addition exactly like the POST/PUT paths, so a value
+    # like SPH +99 can't be saved into a version and mirrored to top-level on
+    # finalize. axis is bounded structurally above (ge=1, le=180).
+    @field_validator("sphere")
+    @classmethod
+    def _v_sphere(cls, v):
+        return _validate_rx_number(v, "sph")
+
+    @field_validator("cylinder")
+    @classmethod
+    def _v_cylinder(cls, v):
+        return _validate_rx_number(v, "cyl")
+
+    @field_validator("addition")
+    @classmethod
+    def _v_addition(cls, v):
+        return _validate_rx_number(v, "add")
 
 
 class PrescriptionVersionPayload(BaseModel):
