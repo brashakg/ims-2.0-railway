@@ -66,6 +66,21 @@ GST_CATEGORY_TABLE: dict = {
     "LENS": ("900150", 5.0),  # order item_type for a spectacle lens -> 5%
     "ACCESSORY": ("392690", 18.0),  # order item_type (singular) -> 18%
     "SERVICE": ("998599", 18.0),  # order item_type (singular) -> 18%
+    # Eye-test / optometry consultation -> GST-EXEMPT health service (SAC 9993).
+    # Diagnosis/treatment by a registered medical/clinical professional is exempt
+    # under Notification 12/2017-CT(R) (Sr. 74, "health care services"). Billed at
+    # 0%, so it sits on the same invoice as taxable goods without perturbing any
+    # other rate row -- the invoice tax split is rate-bucketed (orders.py
+    # _invoice_tax_summary), so a 0% line contributes taxable>0, tax=0 and leaves
+    # the 5%/18% buckets untouched. CONFIRM the exact SAC sub-code with the
+    # accountant before go-live; eye-test item_types are also non-serialized
+    # (orders.py _NON_SERIALIZED_ITEM_TYPES) so they never demand stock.
+    "EYE_TEST": ("9993", 0.0),
+    "EYE_EXAM": ("9993", 0.0),
+    "EYE_CHECKUP": ("9993", 0.0),
+    "CONSULT": ("9993", 0.0),
+    "CONSULTATION": ("9993", 0.0),
+    "OPTOMETRY": ("9993", 0.0),
     # --- legacy / alternate aliases kept for back-compat (no regression) ---
     "FRAMES": ("900311", 5.0),
     "EYEGLASS_FRAME": ("900311", 5.0),
