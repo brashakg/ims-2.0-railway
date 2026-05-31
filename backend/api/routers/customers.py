@@ -393,7 +393,12 @@ async def search_customer_by_phone(
     if exact:
         return {"customers": [exact], "customer": exact}
 
-    matches = repo.search(digits, ["mobile", "phone"])
+    # Also search nested family members (patients[].mobile) so a patient's own
+    # number surfaces their parent account -- otherwise clinic/POS phone lookup
+    # silently misses anyone billed under a relative's account. (Patient
+    # sub-docs only ever store `mobile`; top-level `phone` is the TechCherry
+    # import field.)
+    matches = repo.search(digits, ["mobile", "phone", "patients.mobile"])
     return {
         "customers": matches,
         "customer": matches[0] if matches else None,

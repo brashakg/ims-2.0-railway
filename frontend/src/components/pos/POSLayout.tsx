@@ -56,6 +56,7 @@ import { DiscountModal } from './DiscountModal';
 import { DayEndReport } from './DayEndReport';
 import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
+import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
@@ -1298,7 +1299,7 @@ function StepCustomer() {
                     that pink bg and still fine on the white walk-in card. */}
                 <p className="text-sm text-gray-600">{store.customer.phone || 'No phone'}</p>
                 {isWalkin && <p className="text-xs text-amber-600 mt-0.5">Walk-in -- Quick Sale only</p>}
-                {store.patient && <p className="text-xs text-bv-red-600 mt-0.5">Patient: {store.patient.name}</p>}
+                {store.patient && <p className="text-xs text-bv-red-700 mt-0.5 font-medium">Patient: {store.patient.name}<span className="text-gray-500 font-normal"> · billed to {store.customer.name}</span></p>}
               </div>
             </div>
             <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-600 hover:text-gray-800 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
@@ -1309,37 +1310,58 @@ function StepCustomer() {
           </>
         ) : (
           <>
-            <AutoSearch<any>
+            <AutoSearch<CustomerSearchHit>
               fetchResults={async (q, sid) => {
                 try {
                   const res = await customerApi.getCustomers({ search: q, storeId: sid, limit: 8 });
-                  return res?.customers || res || [];
+                  const customers = (res as any)?.customers || (res as any) || [];
+                  return buildCustomerSearchHits(customers, q);
                 } catch { return []; }
               }}
-              renderItem={(cust) => {
-                const custName = cust.name || cust.customer_name || cust.full_name || 'Unknown';
-                const custPhone = cust.phone || cust.mobile || '';
+              maxResults={10}
+              renderItem={(hit) => {
+                const isPatient = hit.kind === 'patient';
+                const initial = (hit.displayName || '?').charAt(0).toUpperCase();
                 return (
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-bv-red-700 flex items-center justify-center text-sm font-bold text-white">{custName.charAt(0).toUpperCase()}</div>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white ${isPatient ? 'bg-blue-600' : 'bg-bv-red-700'}`}>{initial}</div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{custName}</p>
-                      <p className="text-xs text-gray-500">{custPhone} {cust.city && `\u00B7 ${cust.city}`}</p>
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {hit.displayName}
+                        <span className={`ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${isPatient ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{isPatient ? 'Patient' : 'Account'}</span>
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">
+                        {hit.phone || 'No phone'}
+                        {isPatient ? ` \u00B7 under ${hit.accountName}` : (hit.customer?.city ? ` \u00B7 ${hit.customer.city}` : '')}
+                      </p>
                     </div>
                   </div>
                 );
               }}
-              onSelect={(cust) => {
+              onSelect={(hit) => {
+                const c = hit.customer;
                 startTransition(() => {
                   store.setCustomer({
-                    ...cust,
-                    id: cust.customer_id || cust._id || cust.id,
-                    name: cust.name || cust.customer_name || cust.full_name || 'Customer',
-                    phone: cust.phone || cust.mobile || '',
+                    ...c,
+                    id: c.customer_id || c._id || c.id,
+                    name: c.name || c.customer_name || c.full_name || 'Customer',
+                    phone: c.phone || c.mobile || '',
                   } as any);
+                  // setCustomer resets patient to null; set the chosen family member AFTER.
+                  if (hit.kind === 'patient' && hit.patient) {
+                    const p = hit.patient;
+                    store.setPatient({
+                      id: p.patient_id || p.id || p.name,
+                      customerId: c.customer_id || c._id || c.id || '',
+                      name: p.name,
+                      relation: p.relation,
+                      dateOfBirth: p.dob || p.dateOfBirth,
+                      phone: p.mobile || p.phone,
+                    } as any);
+                  }
                 });
               }}
-              getKey={(cust) => cust.customer_id || cust._id || cust.id || cust.phone || cust.name || 'unknown'}
+              getKey={(hit) => hit.key}
               placeholder="Search by phone number or name..."
               autoFocus
               clearOnSelect
