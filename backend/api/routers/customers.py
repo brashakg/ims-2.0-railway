@@ -674,10 +674,22 @@ def _ledger_coll():
 
 
 def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
-    """Ledger is authoritative once it has entries; before that, bridge from the
-    legacy customer.store_credit number so existing balances aren't lost."""
+    """Authoritative running balance = `customer.store_credit`.
+
+    BOTH mutation paths keep that field current: an ISSUE/ADJUST syncs it to the
+    entry's balance_after, and a REDEEM decrements it atomically
+    (try_debit_store_credit). The ledger is the AUDIT TRAIL, not the source of
+    truth -- `compute_balance` sums only the ledger DELTAS, which silently drops
+    any pre-ledger legacy balance: a customer who had store_credit set before
+    their first ledger entry would see it vanish from the displayed/issuable
+    balance, while redeem still enforced against the full `store_credit` (a
+    display-vs-redeem divergence on real customer money). So trust the synced
+    field; fall back to the ledger delta-sum only when the customer doc isn't
+    available (e.g. a minimal/mock collection in tests)."""
     from ..services import store_credit_ledger as scl
 
+    if customer_doc is not None and customer_doc.get("store_credit") is not None:
+        return float(customer_doc.get("store_credit") or 0)
     coll = _ledger_coll()
     if coll is not None:
         entries = list(coll.find({"customer_id": customer_id}, {"_id": 0}))
