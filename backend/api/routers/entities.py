@@ -177,6 +177,24 @@ class EntityUpdate(BaseModel):
 
 
 def _get_db():
+    """Resolve a usable DB handle.
+
+    Prefer the shared ``dependencies.get_db`` (which falls back to the SEEDED
+    mock DB when no live Mongo is connected) so entity create/read works in a
+    mock / test / fresh environment exactly like every other router. The old
+    code returned ``database.connection.get_db()`` directly, which yields a
+    NOT-connected handle whose ``get_collection()`` returns None -> entity
+    create 500'd with "'NoneType' object has no attribute 'insert_one'" whenever
+    Mongo was absent. Falls back to the raw connection if the dependency import
+    fails for any reason."""
+    try:
+        from ..dependencies import get_db as _dep_get_db
+
+        db = _dep_get_db()
+        if db is not None:
+            return db
+    except Exception:  # noqa: BLE001
+        pass
     if not DATABASE_AVAILABLE:
         return None
     return get_db()
@@ -476,11 +494,15 @@ async def assign_store_to_entity(
         entity = db.get_collection("entities").find_one({"entity_id": entity_id})
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
-        result = db.get_collection("stores").update_one(
+        stores = db.get_collection("stores")
+        # Verify the store exists FIRST (a 404 for a missing store), rather than
+        # relying on update_one().matched_count -- the seeded mock collection's
+        # update_one returns a stub without that attribute, which 500'd here.
+        if stores.find_one({"store_id": store_id}) is None:
+            raise HTTPException(status_code=404, detail="Store not found")
+        stores.update_one(
             {"store_id": store_id}, {"$set": {"entity_id": entity_id}}
         )
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Store not found")
         return {"status": "success", "entity_id": entity_id, "store_id": store_id}
     except HTTPException:
         raise
@@ -500,14 +522,17 @@ async def unassign_store_from_entity(
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
-        result = db.get_collection("stores").update_one(
-            {"store_id": store_id, "entity_id": entity_id},
-            {"$set": {"entity_id": None}},
-        )
-        if result.matched_count == 0:
+        stores = db.get_collection("stores")
+        # Verify the (store, entity) link exists first -> clean 404; avoids the
+        # update_one().matched_count attribute the seeded mock lacks (500-safe).
+        if stores.find_one({"store_id": store_id, "entity_id": entity_id}) is None:
             raise HTTPException(
                 status_code=404, detail="Store not found or not assigned to this entity"
             )
+        stores.update_one(
+            {"store_id": store_id, "entity_id": entity_id},
+            {"$set": {"entity_id": None}},
+        )
         return {"status": "success", "store_id": store_id}
     except HTTPException:
         raise
