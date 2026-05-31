@@ -528,18 +528,54 @@ async def get_low_stock_alerts(
 
 @router.get("/barcode/{barcode}")
 async def get_stock_by_barcode_short(
-    barcode: str, current_user: dict = Depends(get_current_user)
+    barcode: str,
+    store_id: Optional[str] = Query(
+        None,
+        description="Scope the lookup to this store; defaults to the caller's active store.",
+    ),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get stock item by barcode"""
+    """Resolve a SINGLE physical unit by its unique intake barcode.
+
+    This backs the POS scan path. Behaviour:
+      - Scope to a store: the `store_id` query param wins, else the caller's
+        active store. A hit in a DIFFERENT store is NOT silently returned --
+        it comes back flagged `cross_store: true` so the POS can warn the
+        cashier (selling another store's stock at this terminal is wrong) and
+        loud-fail rather than quietly adding a foreign unit to the cart.
+      - Enrich with the product master (name / category / mrp / offer_price /
+        gst_rate / brand): a `stock_units` row only carries product_id, so the
+        scan response now joins the product so the cart has everything it needs
+        without a second round-trip.
+      - A barcode that matches NOTHING is a hard 404 (fail loudly), never a
+        soft empty body that the caller might mistake for a hit.
+    """
     repo = get_stock_repository()
 
-    if repo is not None:
-        stock = repo.find_by_barcode(barcode)
-        if stock:
-            return stock
+    if repo is None:
+        # No DB (stub mode) -- do not fabricate a hit; echo the barcode so the
+        # caller can fall through without treating it as a real unit.
+        return {"barcode": barcode}
+
+    stock = repo.find_by_barcode(barcode)
+    if not stock:
         raise HTTPException(status_code=404, detail="Stock item not found")
 
-    return {"barcode": barcode}
+    # Determine the scope store (explicit param > active store).
+    scope_store = store_id or current_user.get("active_store_id")
+    unit_store = stock.get("store_id")
+    cross_store = bool(scope_store and unit_store and unit_store != scope_store)
+    stock["cross_store"] = cross_store
+
+    # Join the product master so the POS scan has product fields in one hop.
+    product_repo = get_product_repository()
+    if product_repo is not None and stock.get("product_id"):
+        product = product_repo.find_by_id(stock["product_id"])
+        if product:
+            product.pop("_id", None)
+            stock["product"] = product
+
+    return stock
 
 
 @router.get("/expiring")

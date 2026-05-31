@@ -17,7 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi, productApi, workshopApi, adminStoreApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // POS Rx auto-attach (clinic initiative C5-A): owner-gated convenience. When the
@@ -1578,15 +1578,50 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
 
   const handleBarcodeScan = async (barcode: string) => {
+    const code = (barcode || '').trim();
+    if (!code) return;
+    // Resolve the EXACT physical unit by its intake barcode (GET
+    // /inventory/barcode/{code}), scoped to the active store. This is the real
+    // scan path -- the old code searched the product TEXT index (which never
+    // indexed the barcode field), so a genuine intake barcode matched nothing
+    // and was silently dumped into the search box (a Fail-Loudly violation).
     try {
-      const result = await productApi.getProducts({ search: barcode });
-      const products = result?.products || result || [];
-      if (Array.isArray(products) && products.length === 1) {
-        handleAddProduct(products[0]);
+      const hit = await inventoryApi.searchByBarcode(code, store.store_id || '');
+      // A foreign-store unit must NOT be quietly sold at this terminal.
+      if (hit?.cross_store) {
+        setBlockMsg(`Barcode ${code} belongs to another store's stock -- it cannot be sold here.`);
+        setTimeout(() => setBlockMsg(null), 6000);
         return;
       }
-    } catch { /* fall back to search */ }
-    startTransition(() => setDebouncedSearch(barcode));
+      // Build a cart-ready product from the joined product master (the scan
+      // endpoint joins `products` onto the `stock_units` row); fall back to the
+      // unit's own fields if the join is absent.
+      const p = hit?.product || {};
+      const product = {
+        product_id: p.product_id || hit?.product_id,
+        name: p.name || p.model || hit?.product_name,
+        sku: p.sku || hit?.sku,
+        barcode: hit?.barcode || code,
+        brand: p.brand,
+        subbrand: p.subbrand || p.sub_brand,
+        category: p.category || hit?.category,
+        mrp: p.mrp,
+        offer_price: p.offer_price ?? p.offerPrice,
+        image_url: p.image_url,
+      };
+      if (product.product_id) {
+        handleAddProduct(product);
+        return;
+      }
+      // Hit with no resolvable product -- loud-fail rather than swallow it.
+      setBlockMsg(`Barcode ${code} found but its product record is missing. Tell the manager.`);
+      setTimeout(() => setBlockMsg(null), 6000);
+    } catch {
+      // 404 (or any error) = this barcode is not in stock. Fail loudly; add
+      // NOTHING (do not dump the scanned value into the search box).
+      setBlockMsg(`Barcode ${code} not found in stock. Check the item or search by name.`);
+      setTimeout(() => setBlockMsg(null), 6000);
+    }
   };
 
   const handleManualSearch = (q: string) => {
