@@ -161,6 +161,55 @@ def _assert_mrp_ge_offer(mrp, offer_price) -> None:
         raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
 
 
+def _validate_product_barcode_or_400(barcode, repo, this_product_id: str) -> None:
+    """Validate a scan-to-sell product barcode, failing LOUDLY on a bad value.
+
+    A product master barcode must be a real, scannable code that resolves to
+    exactly one product, so:
+      - Format + check digit: it must be a valid 13-digit EAN-13 (the symbology
+        every other unit barcode in the system uses -- see services/barcode.py).
+        A malformed / wrong-check-digit value is rejected with HTTP 400 instead
+        of being silently persisted (a scanner would never decode it -> the
+        product becomes un-scannable, the exact Fail-Loudly violation this
+        guards against).
+      - Uniqueness: a barcode already on a DIFFERENT product is rejected with
+        HTTP 409 (the DB also enforces this via the unique sparse index; this
+        check gives a clear message before the write).
+
+    A blank / null barcode means "no change / clear it" and is intentionally
+    allowed (skipped) -- only a non-empty value is validated.
+    """
+    if barcode is None:
+        return
+    code = str(barcode).strip()
+    if not code:
+        # Explicit clear -- nothing to validate.
+        return
+
+    from ..services import barcode as barcode_svc
+
+    if not barcode_svc.validate_ean13(code):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid barcode '{code}'. A product barcode must be a valid "
+                "13-digit EAN-13 (numeric, with a correct check digit)."
+            ),
+        )
+
+    if repo is not None:
+        clash = repo.find_one({"barcode": code})
+        if clash is not None and clash.get("product_id") != this_product_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Barcode '{code}' is already assigned to another product "
+                    f"({clash.get('sku') or clash.get('product_id')}). "
+                    "Barcodes must be unique."
+                ),
+            )
+
+
 # Fields persisted top-level on the product doc only when provided (additive).
 # Shared by the single + bulk create paths so neither drifts.
 _OPTIONAL_PRODUCT_FIELDS = (
@@ -1140,6 +1189,16 @@ async def update_product(
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+            )
+
+        # Validate a scan-to-sell product barcode (EAN-13 format + check digit +
+        # uniqueness) the moment one is set, so a malformed/duplicate barcode is
+        # rejected loudly instead of silently saved (which would make the
+        # product un-scannable at POS). Only runs when `barcode` is in the
+        # payload; a blank value (clear) is allowed.
+        if "barcode" in update_data:
+            _validate_product_barcode_or_400(
+                update_data["barcode"], repo, product_id
             )
 
         # Validate MRP >= Offer Price using the EFFECTIVE post-update values.

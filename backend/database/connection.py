@@ -192,7 +192,15 @@ class DatabaseConnection:
             products = self._db["products"]
             products.create_index("product_id", unique=True, background=True)
             products.create_index("sku", unique=True, sparse=True, background=True)
-            products.create_index("barcode", sparse=True, background=True)
+            # UNIQUE + sparse: a scan-to-sell product barcode must resolve to
+            # exactly one product (two products sharing a barcode would make a
+            # POS scan ambiguous). Sparse so the many products WITHOUT a master
+            # barcode are exempt (only docs that have the field are indexed /
+            # constrained). The PUT /products validation rejects dupes before
+            # the write; this index is the DB-level backstop.
+            products.create_index(
+                "barcode", unique=True, sparse=True, background=True
+            )
             products.create_index([("store_id", 1), ("category", 1)], background=True)
 
             # Users
