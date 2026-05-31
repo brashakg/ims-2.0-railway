@@ -46,14 +46,14 @@ Order per owner's directive: **clinic → POS → finance → inventory → …*
 ### Modules
 | # | Module | Status | Branch | Notes |
 |---|--------|--------|--------|-------|
-| 1 | **Clinic / Optometry** | ✅ Tractable scope shipped — C1–C5 + C6-A (CL page); C6 B–E strategic/gated | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
-| 2 | **POS / Billing** | ✅ Operational-wins shipped (owner-chosen); larger bets deferred | `claude/improve-pos` | revenue-critical; turned out already mature |
-| 3 | **Finance / GST** | 🔬 Research + Audit next | `claude/improve-finance` (off main) | GST returns, P&L, AP/AR, Tally |
-| 4 | Inventory | ⏳ Queued | — | stock, transfers, counts, serials |
-| 5 | CRM / Customers | ⏳ Queued | — | (search distinction already shipped) |
-| 6 | Orders / Returns | ⏳ Queued | — | |
-| 7 | Purchase / Vendor | ⏳ Queued | — | |
-| 8 | Workshop | ⏳ Queued | — | job tracking, QC |
+| 1 | **Clinic / Optometry** | ✅ Shipped (PR #392, CI green) — C1–C5 + C6-A | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
+| 2 | **POS / Billing** | ✅ Shipped (PR #393, CI green) — operational wins | `claude/improve-pos` | revenue-critical; turned out already mature |
+| 3 | **Finance / GST** | ✅ Shipped (PR #394, CI green) — JV paisa-balance + ITC source | `claude/improve-finance` | GST returns, P&L, AP/AR, Tally |
+| 4 | **Inventory** | ✅ Shipped (PR #395, CI green) — /stock/add DoS bound | `claude/improve-inventory` | transfers idempotent; stock-count by design |
+| 5 | **CRM / Customers** | ✅ Shipped (PR #396, CI green) — store-credit authoritative balance | `claude/improve-crm` | loyalty/credit `$inc` atomic; validation in #367 |
+| 6 | **Orders / Returns** | ✅ Audited — already hardened (atomic restock + over-refund integrity) | — | no forced change; #373 covers the money holes |
+| 7 | **Purchase / Vendor** | ✅ Shipped (PR #397, CI green) — TDS 194H/194J corrections | `claude/improve-purchase` | AP aging/outstanding mature |
+| 8 | Workshop | 🔬 Audit next | — | job tracking, QC |
 | 9 | HR / Payroll | ⏳ Queued | — | |
 | 10 | Catalog / Pricing | ⏳ Queued | — | |
 | 11 | Marketing / Storefront | ⏳ Queued | — | |
@@ -167,5 +167,28 @@ exception controls / move-on). Shipped:
 per-cashier report, integrated payments (UPI QR / terminal / EMI reconciliation), offline-first.
 
 **Next: Module 3 = Finance / GST** (research → audit → council → owner sign-off → ship).
+
+### 2026-05-31 (cont.) — Modules 3–7 shipped; 6 PRs opened + green
+A grounded **bug-hunting** sweep (the app proved very mature — most best-practice
+features already exist, so the value is real defects, not greenfield). Each module
+got its own branch + a verified fix (or an honest "already hardened"), then PRs:
+- **Finance (#394)** — (a) **Tally sales-JV CGST/SGST paisa-imbalance**: `cgst=sgst=round(tax/2)`
+  over-states by a paisa on odd-paise tax → voucher rejected by Tally; residual now on SGST.
+  (b) **GST-summary ITC** was summed over `purchase_orders.date` (a field POs lack) → ITC always
+  0, net payable overstated; now reads `vendor_bills` (GRN-backed), tolerant date-parse. _CI:
+  the first ITC commit misused a helper kwarg (Pylint E1123) and went red; re-fixed + green._
+- **Inventory (#395)** — `/stock/add` minted one serialized row per unit with **no qty cap**
+  (DoS via `quantity=1e9`); added `le=10000`. Transfers verified idempotent (`received_qty_committed`).
+- **CRM (#396)** — **store-credit balance** read the ledger delta-sum, dropping any legacy opening
+  balance (display < redeemable). Now reads the authoritative `customer.store_credit` (kept in sync
+  by issue + atomic redeem); ledger stays the audit trail. Owner-approved safe read fix.
+- **Returns (audited, no change)** — `/restock` is atomic-claim guarded; create-return has
+  over-refund quantity integrity (#373). Mature.
+- **Purchase (#397)** — **TDS** table: 194H 5%→2% (Budget 2024), added 194J_TECH 2% (non-breaking).
+  CA to verify.
+- **Clinic (#392) + POS (#393)** PRs opened from the earlier branches; all 6 PRs (#392–#397) CI green.
+
+**Compliance flags raised to owner/CA (not changed unilaterally):** finance ITC eligibility
+scope; the corrected TDS rates. **Next: Module 8 = Workshop** (audit-led, same pipeline).
 
 _(Appended as each module/concern advances.)_
