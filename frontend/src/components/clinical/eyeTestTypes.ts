@@ -90,6 +90,19 @@ export interface FinalRxData {
   remarks: string;
 }
 
+// C6-B: full optometric-exam findings beyond refraction. INTERNAL ONLY — these
+// are stored on the test record (clinical_findings) but deliberately NOT printed
+// on the customer's Rx card. All optional; a refraction-only test leaves them
+// blank. Field names match the backend ClinicalFindings camelCase aliases.
+export interface ClinicalFindingsData {
+  iopRight: string;        // intra-ocular pressure (eye pressure), mmHg
+  iopLeft: string;
+  diagnosis: string;
+  colourVision: string;    // e.g. "Normal", "Ishihara 14/14"
+  coverTest: string;       // squint / phoria check
+  dominantEye: '' | 'RIGHT' | 'LEFT';
+}
+
 export interface UploadedFile {
   id: string;
   name: string;
@@ -109,6 +122,9 @@ export interface EyeTestData {
   autoRef: AutoRefData;
   subjectiveRx: SubjectiveRxData;
   finalRx: FinalRxData;
+  // C6-B internal-only exam findings (IOP / diagnosis / colour vision / cover
+  // test / dominant eye). Optional — blank for a refraction-only test.
+  clinicalFindings: ClinicalFindingsData;
   uploads: UploadedFile[];
 }
 
@@ -153,3 +169,15 @@ export const createEmptySlitLampEye = (): SlitLampEye => ({
   fundus: 'Normal',
   iop: '',
 });
+
+export const createEmptyClinicalFindings = (): ClinicalFindingsData => ({
+  iopRight: '',
+  iopLeft: '',
+  diagnosis: '',
+  colourVision: '',
+  coverTest: '',
+  dominantEye: '',
+});
+
+// Common colour-vision results for the pick-list (free-text still allowed via "Other").
+export const COLOUR_VISION_OPTIONS = ['Normal', 'Deficient', 'Ishihara 14/14', 'Not tested'];

@@ -247,10 +247,22 @@ export function ClinicalPage() {
         // is unchanged. Net-new inputs (IOP/diagnosis/...) land here once the
         // EyeTestForm grows those fields (follow-up).
         clinicalFindings: (() => {
-          const cf: Record<string, string> = {};
+          const cf: Record<string, string | number> = {};
           if (data.chiefComplaint) cf.chiefComplaint = data.chiefComplaint;
           if (re?.va) cf.vaRightAided = re.va;
           if (le?.va) cf.vaLeftAided = le.va;
+          // The new internal Clinical Findings card (IOP / diagnosis / colour
+          // vision / cover test / dominant eye). Only forward filled fields;
+          // IOP -> number so the backend's 0-80 mmHg bound applies.
+          const f = data.clinicalFindings;
+          if (f) {
+            if (f.iopRight) cf.iopRight = parseFloat(f.iopRight);
+            if (f.iopLeft) cf.iopLeft = parseFloat(f.iopLeft);
+            if (f.diagnosis) cf.diagnosis = f.diagnosis;
+            if (f.colourVision) cf.colourVision = f.colourVision;
+            if (f.coverTest) cf.coverTest = f.coverTest;
+            if (f.dominantEye) cf.dominantEye = f.dominantEye;
+          }
           return Object.keys(cf).length > 0 ? cf : undefined;
         })(),
       });
