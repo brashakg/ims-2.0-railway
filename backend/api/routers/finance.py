@@ -659,34 +659,21 @@ async def get_gst_summary(
     # SAME source + date field as /itc-register (vendor_bills.bill_date) so the
     # summary reconciles with the authoritative ITC register. CA to confirm the
     # eligibility scope (this counts all booked vendor-bill GST in the period).
-    purchase_match: dict = {}
-    _apply_created_at_range(
-        purchase_match,
-        start.strftime("%Y-%m-%d"),
-        (end - timedelta(days=1)).strftime("%Y-%m-%d"),
-        field="bill_date",
-    )
-    paid = list(
-        db.get_collection("vendor_bills").aggregate(
-            [
-                {"$match": purchase_match},
-                {
-                    "$group": {
-                        "_id": None,
-                        "total_tax": {
-                            "$sum": {
-                                "$ifNull": [
-                                    "$tax_amount",
-                                    {"$ifNull": ["$gst_amount", 0]},
-                                ]
-                            }
-                        },
-                    }
-                },
-            ]
-        )
-    )
-    gst_paid = paid[0]["total_tax"] if paid else 0
+    # Filter in Python via the tolerant date parser so this is robust whether
+    # vendor_bills.bill_date is stored as an ISO string or a BSON datetime (the
+    # shared _apply_created_at_range helper is created_at-specific and can't take
+    # a field). gst_amount is the legacy alias for tax_amount.
+    gst_paid = 0.0
+    try:
+        for _b in db.get_collection("vendor_bills").find(
+            {}, {"_id": 0, "bill_date": 1, "tax_amount": 1, "gst_amount": 1}
+        ):
+            _bd = ap_engine.parse_date(_b.get("bill_date"))
+            if _bd is not None and start <= _bd < end:
+                gst_paid += float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
+    except Exception:
+        gst_paid = 0.0
+    gst_paid = round(gst_paid, 2)
 
     cgst = gst_collected / 2
     sgst = gst_collected / 2

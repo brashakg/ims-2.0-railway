@@ -24,18 +24,28 @@ def test_gst_summary_reads_vendor_bills_for_itc():
     import api.routers.finance as finance
 
     src = inspect.getsource(finance.get_gst_summary)
-    # ITC must come from vendor_bills...
+    # ITC must come from vendor_bills, keyed on the bill date...
     assert "vendor_bills" in src, "ITC must be sourced from vendor_bills"
-    # ...keyed on the bill date...
-    assert 'field="bill_date"' in src
+    assert "bill_date" in src
     # ...and must NOT re-introduce the purchase_orders.date aggregation bug.
     assert 'purchase_orders").aggregate' not in src
 
 
-def test_gst_summary_uses_shared_date_range_helper():
-    """Reusing _apply_created_at_range guarantees the same (BSON-datetime) date
-    semantics as /itc-register, so the two reconcile."""
+def test_gst_summary_uses_tolerant_date_parse():
+    """bill_date may be an ISO string or a datetime; parse it tolerantly rather
+    than relying on a Mongo bound that only matches one storage type."""
     import api.routers.finance as finance
 
     src = inspect.getsource(finance.get_gst_summary)
-    assert "_apply_created_at_range" in src
+    assert "parse_date" in src
+
+
+def test_gst_summary_has_no_bad_kwarg_call():
+    """Regression: the earlier _apply_created_at_range(field="bill_date") call
+    used a kwarg the helper doesn't accept (Pylint E1123 / runtime TypeError) and
+    broke CI. The reader now filters in Python, so that call must be gone."""
+    import api.routers.finance as finance
+
+    src = inspect.getsource(finance.get_gst_summary)
+    assert "field=" not in src
+    assert callable(finance.get_gst_summary)
