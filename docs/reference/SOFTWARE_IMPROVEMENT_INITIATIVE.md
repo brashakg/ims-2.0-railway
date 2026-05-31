@@ -47,8 +47,8 @@ Order per owner's directive: **clinic → POS → finance → inventory → …*
 | # | Module | Status | Branch | Notes |
 |---|--------|--------|--------|-------|
 | 1 | **Clinic / Optometry** | ✅ Tractable scope shipped — C1–C5 + C6-A (CL page); C6 B–E strategic/gated | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
-| 2 | **POS / Billing** | 🔬 Research + Audit done → 🏛 Council → owner sign-off | `claude/improve-pos` (next, off latest main) | revenue-critical; extra care; rebase first |
-| 3 | Finance / GST | ⏳ Queued | — | GST returns, P&L, AP/AR, Tally |
+| 2 | **POS / Billing** | ✅ Operational-wins shipped (owner-chosen); larger bets deferred | `claude/improve-pos` | revenue-critical; turned out already mature |
+| 3 | **Finance / GST** | 🔬 Research + Audit next | `claude/improve-finance` (off main) | GST returns, P&L, AP/AR, Tally |
 | 4 | Inventory | ⏳ Queued | — | stock, transfers, counts, serials |
 | 5 | CRM / Customers | ⏳ Queued | — | (search distinction already shipped) |
 | 6 | Orders / Returns | ⏳ Queued | — | |
@@ -140,5 +140,32 @@ Two owner decisions gated C5; both confirmed, both shipped:
   the POS council focuses on the feature-level gaps + residual edge-hardening, NOT re-doing done
   work. **Next:** POS council (parallel review) → owner sign-off (POS is revenue-critical) →
   implement on `claude/improve-pos` off latest main.
+
+### 2026-05-31 (cont.) — Module 2 (POS) operational-wins shipped (`claude/improve-pos`)
+**Council (synthesized — the two parallel review agents degraded mid-run, so the chair
+synthesized from research + audit + grounded code reads).** Key finding: **POS is already
+mature.** Beyond the merged #373/#376/#368/#370, grounding revealed that Park/Hold, the
+workshop-job create, EMI 0%-rate guard, advance/balance (via partial payments), and
+Power-Grid lens config (`lens_line_id` + sph/cyl/add) **already exist** — and the audit's
+"EMI Infinity" P2 was a false positive (the guard is right there). So the genuine gaps were
+smaller than research implied. **Owner chose "Operational wins"** (vs lens-pricing UX /
+exception controls / move-on). Shipped:
+- **Workshop auto-link safety net** — confirming a fitting order (a lens to grind, or a
+  frame + Rx) now GUARANTEES a workshop/lab job. The POS client already creates one (Phase
+  6.8); `_ensure_workshop_job_for_order` is the idempotent, fail-soft backend net for the
+  client call failing or a non-POS confirm path. Never duplicates; never blocks a paid
+  confirm. **Reverse linkage** added: both the workshop create endpoint and the net stamp
+  `workshop_job_id`/`workshop_job_number` onto the order (link was one-way before).
+- **Delivery-date upper bound** — reject > 365 days out (fat-finger guard); past guard kept.
+- **Park/Hold hardening** — fixed two real bugs: the held snapshot dropped `cart_discount_*`
+  + `delivery_*` (silently lost on recall), and recall re-added items via `addToCart` (which
+  MERGES → two customers' sales could fuse). New `posStore.restoreHeldSale` does one atomic
+  REPLACE (cart verbatim, per-item discounts intact, cart-discount recomputed, delivery +
+  advance restored, lands on review).
+- 10 new backend tests; existing orders/workshop suites (113) green; tsc 0 + vite build.
+**Deferred POS bets (owner can pick later):** lens-config pricing UX, exception controls +
+per-cashier report, integrated payments (UPI QR / terminal / EMI reconciliation), offline-first.
+
+**Next: Module 3 = Finance / GST** (research → audit → council → owner sign-off → ship).
 
 _(Appended as each module/concern advances.)_
