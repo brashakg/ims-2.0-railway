@@ -1096,11 +1096,52 @@ def _all_catalog_products() -> List[Dict]:
     return list(CATALOG_PRODUCTS.values())
 
 
-def generate_sku(category: ProductCategory, attributes: Dict[str, Any]) -> str:
-    """Generate unique SKU based on category and attributes"""
-    prefix = category.value
+def _next_sku_counter(prefix: str, db=None) -> int:
+    """Next monotonic SKU counter for a category prefix.
+
+    PERSISTENT + multi-worker safe when a DB is available: a single atomic
+    find_one_and_update($inc) on the shared `counters` collection (same proven
+    pattern as barcode.allocate_sequence / order_repository invoice serials),
+    seeded at 1000 so the first issued value is 1001.
+
+    The previous implementation used a MODULE-GLOBAL in-memory dict
+    (SKU_COUNTERS), which (a) reset to 1000 on every server restart -> reissued
+    already-used SKUs, and (b) was per-worker -> two Railway workers minted the
+    SAME counter -> duplicate SKUs. Fail-soft: no DB / any error -> fall back to
+    the in-memory dict (keeps local/test + offline create working).
+    """
+    if db is not None:
+        try:
+            from pymongo import ReturnDocument
+
+            doc = db.get_collection("counters").find_one_and_update(
+                {"_id": f"sku:{prefix}"},
+                {"$inc": {"seq": 1}},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            if doc and isinstance(doc.get("seq"), int):
+                # Seed so the series starts at 1001 (matches the legacy 1000 base).
+                return 1000 + doc["seq"]
+        except Exception:  # noqa: BLE001 - fail-soft, never block a create
+            pass
     counter = SKU_COUNTERS.get(prefix, 1000)
     SKU_COUNTERS[prefix] = counter + 1
+    return counter
+
+
+def generate_sku(
+    category: ProductCategory, attributes: Dict[str, Any], db=None
+) -> str:
+    """Generate a unique SKU from category + attributes.
+
+    Pass `db` so the numeric counter is allocated ATOMICALLY + PERSISTENTLY
+    (see _next_sku_counter). The SKU still ends in a `find_by_sku` dedupe check
+    at the call site, so even if two products share brand/model/colour the
+    counter keeps them distinct.
+    """
+    prefix = category.value
+    counter = _next_sku_counter(prefix, db=db)
 
     # Add brand code
     brand = attributes.get("brand_name", "XX")[:2].upper()
@@ -1344,9 +1385,10 @@ async def create_catalog_product(
     # HSN/category) -- same rules the canonical /products path enforces.
     gst_rate, hsn_code = _guard_catalog_pricing(product)
 
-    # Generate SKU and title
+    # Generate SKU and title. Pass the DB so the SKU counter is allocated
+    # atomically + persistently (not the per-worker in-memory dict).
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
-    sku = generate_sku(product.category, product.attributes)
+    sku = generate_sku(product.category, product.attributes, db=_get_db())
     title = generate_product_title(product.category, product.attributes)
 
     # Build product data
@@ -1686,6 +1728,9 @@ async def import_products(
 
     created = 0
     errors = []
+    # Resolve the DB once so each row's SKU counter is allocated atomically +
+    # persistently (the per-worker in-memory dict would collide under concurrency).
+    _bulk_db = _get_db()
 
     for i, product in enumerate(products):
         try:
@@ -1706,7 +1751,7 @@ async def import_products(
                 continue
 
             product_id = f"prod_{uuid.uuid4().hex[:12]}"
-            sku = generate_sku(product.category, product.attributes)
+            sku = generate_sku(product.category, product.attributes, db=_bulk_db)
             title = generate_product_title(product.category, product.attributes)
 
             product_data = {
