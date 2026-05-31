@@ -856,7 +856,18 @@ async def get_printer_settings(current_user: dict = Depends(get_current_user)):
 async def update_printer_settings(
     settings: PrinterSettings, current_user: dict = Depends(get_current_user)
 ):
-    """Update printer settings"""
+    """Update printer settings (SUPERADMIN/ADMIN/STORE_MANAGER).
+
+    Printer config is store-management territory: every other settings write is
+    role-gated, but this one only required a valid login -- so any authenticated
+    user (e.g. workshop staff or a cashier) could overwrite the store's printer
+    configuration. Gate it consistently with the rest of the settings router.
+    """
+    if not any(
+        role in current_user["roles"]
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
+    ):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     payload = settings.model_dump()
     collection = _get_settings_collection("printer_settings")
     if collection is not None:

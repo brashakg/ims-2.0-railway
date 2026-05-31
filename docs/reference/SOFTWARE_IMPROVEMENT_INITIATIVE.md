@@ -53,13 +53,14 @@ Order per owner's directive: **clinic → POS → finance → inventory → …*
 | 5 | **CRM / Customers** | ✅ Shipped (PR #396, CI green) — store-credit authoritative balance | `claude/improve-crm` | loyalty/credit `$inc` atomic; validation in #367 |
 | 6 | **Orders / Returns** | ✅ Audited — already hardened (atomic restock + over-refund integrity) | — | no forced change; #373 covers the money holes |
 | 7 | **Purchase / Vendor** | ✅ Shipped (PR #397, CI green) — TDS 194H/194J corrections | `claude/improve-purchase` | AP aging/outstanding mature |
-| 8 | Workshop | 🔬 Audit next | — | job tracking, QC |
-| 9 | HR / Payroll | ⏳ Queued | — | |
-| 10 | Catalog / Pricing | ⏳ Queued | — | |
-| 11 | Marketing / Storefront | ⏳ Queued | — | |
+| 8 | **Workshop** | ✅ Audited — mature (validated status + lens state machines, careful KPIs) | — | no forced change |
+| 9 | HR / Payroll | 🔬 Audit next | — | statutory EPF/ESI/PT/TDS — payroll engine already careful |
+| 10 | Catalog / Pricing | ✅ Audited — pricing-cap resolver canonical/correct | — | min(category, luxury-brand), float-tolerant |
+| 11 | **Marketing** | ✅ Shipped (PR #399) — referral redeem role-gate + idempotency | `claude/improve-marketing` | consent gate + DISPATCH_MODE already correct |
 | 12 | Reports / Dashboards | ⏳ Queued | — | |
-| 13 | Settings / RBAC | ⏳ Queued | — | |
-| 14 | Jarvis / AI agents | ⏳ Queued | — | |
+| 13 | **Settings / RBAC** | ✅ Shipped (PR #398) — printer-settings role gate | `claude/improve-settings` | other writes already gated |
+| 14 | **Jarvis / AI agents** | ✅ Audited — all 18 /jarvis/* endpoints enforce require_superadmin | — | SUPERADMIN-only AI holds |
+| + | **Walkouts / Portal / Follow-ups / Handoffs** | ✅ Audited — portal OTP hardened, walkouts round-validated | — | audit-agent flags were false positives |
 
 ### Cross-cutting concerns (after modules)
 | Concern | Status | Notes |
@@ -191,26 +192,34 @@ got its own branch + a verified fix (or an honest "already hardened"), then PRs:
 **Compliance flags raised to owner/CA (not changed unilaterally):** finance ITC eligibility
 scope; the corrected TDS rates. **Next: Module 8 = Workshop** (audit-led, same pipeline).
 
-### 2026-05-31 (cont.) — missed-module sweep merged + loyalty P2-C
-After the owner asked to also cover the modules the first pass skipped (AI, Settings,
-Walkouts, etc.), shipped + merged: **Settings (#398)** printer-settings role gate;
-**Marketing (#399)** referral-redeem role gate + atomic idempotency; **HR (#401)** leave
-approve/reject manager gate; plus a **test-isolation fix (#400)** for a pre-existing
-order-dependent non-moving-stock flake on main, and an **asyncio.run** fix for two new
-async-endpoint unit tests (closed-loop-safe in the full suite). Audited & verified-secure
-(no change): Jarvis (all 18 endpoints SUPERADMIN), Portal + Vendor-portal (OTP lockout,
-token scoping, IDOR-safe), Walkouts, Workshop, Catalog caps, Vouchers (atomic).
+### 2026-05-31 (cont.) — 6 PRs merged; missed modules swept (Settings, Marketing, Jarvis, Walkouts…)
+- **Merged #392–#397** to main (clinic, POS, finance, inventory, CRM, purchase) — all CI green.
+- Swept the previously-missed modules the owner named (AI/Jarvis, Settings, Walkouts) + others
+  (Portal, Marketing, Tasks, Notifications, Follow-ups, Handoffs, Catalog, Workshop). Ran two
+  parallel audit agents, then **verified every claim against the real code** — most agent "P1"
+  findings were **false positives** (the agents read only fragments). Verified-real fixes shipped:
+  - **Settings (PR #398)** — `PUT /settings/printers` was authenticated but **not role-gated**
+    (any logged-in user could overwrite store printer config); now SUPERADMIN/ADMIN/STORE_MANAGER.
+  - **Marketing (PR #399)** — `POST /referrals/{id}/redeem` credited real store credit with **no
+    role gate and no idempotency** (any user could repeat-redeem → unlimited ₹500 credits). Now
+    role-gated (_REWARD_ROLES) + **atomic claim** (find_one_and_update on status≠REWARD_CREDITED);
+    wallet credited once.
+  - **Audited & confirmed already-correct (no change):** Jarvis — **all 18 `/jarvis/*` endpoints
+    enforce `require_superadmin`** (SUPERADMIN-only AI access holds). Portal — OTP is attempt-locked
+    (5) + per-phone/per-IP rate-limited + 5-min TTL + field-whitelist projection. Walkouts —
+    `round` is `Literal[1,2,3]`; POS walk-in increment delegates to the counter repo. Marketing
+    consent gate enforced on every promotional send; real dispatch path defaults `DISPATCH_MODE=off`.
+    Catalog pricing-caps resolver canonical. Workshop status/lens state machines validated.
 
-**Loyalty P2-C (#402)** — the documented over-expiry bug: the `/loyalty/expire` sweep
-expired `min(lot.points, account_balance)` per expired lot, destroying points from NEWER
-valid lots when an old spent lot expired. New pure FIFO helper
-`loyalty_engine.expirable_points_by_lot` walks the full ledger (redemptions consume oldest
-lots first) so each expired lot sheds only its unspent remainder. Customer-protective
-(only ever expires ≤ before); 6 tests.
+**Method note:** sub-agent audits are a *lead source*, not ground truth — every finding was
+re-checked against the actual file before any edit; false positives were discarded, not shipped.
 
-**CI-discipline note:** a repeat `test (3.10/3.11)` red on the new PRs was root-caused to
-(a) the pre-existing non-moving flake and (b) my own `get_event_loop().run_until_complete`
-tests breaking on a closed loop — both fixed, not masked; the payroll/period-lock "failures"
-seen locally were a no-Mongo artifact (green in CI).
+**Loyalty P2-C (#402)** — the documented over-expiry bug: `/loyalty/expire` expired
+`min(lot.points, account_balance)` per lot, destroying points from NEWER valid lots when an old
+spent lot expired. New pure FIFO helper `loyalty_engine.expirable_points_by_lot` walks the full
+ledger (oldest-lot-first consumption) so each expired lot sheds only its unspent remainder.
+Customer-protective; 6 tests. (A repeat `test (3.10/3.11)` red on these PRs was root-caused to
+the pre-existing non-moving flake + two new `get_event_loop().run_until_complete` tests breaking
+on a closed loop — both fixed via the deterministic db-absent patch and `asyncio.run`.)
 
 _(Appended as each module/concern advances.)_

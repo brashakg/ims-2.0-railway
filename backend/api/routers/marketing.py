@@ -52,6 +52,11 @@ router = APIRouter()
 # auto-passes via require_roles.
 _BULK_SEND_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 
+# Roles permitted to MINT customer monetary value (referral store-credit reward).
+# Mirrors customers.py _CREDIT_ROLES — crediting money is a controlled action,
+# not something any logged-in cashier/sales-staff may do.
+_REWARD_ROLES = ("ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN")
+
 
 def _get_db():
     try:
@@ -642,9 +647,21 @@ async def get_referrals(
 @router.post("/referrals/{referral_id}/redeem")
 async def redeem_referral(
     referral_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REWARD_ROLES)),
 ):
-    """Credit rewards for a completed referral"""
+    """Credit the referrer's reward for a completed referral.
+
+    Two holes closed here:
+      1. ROLE GATE — crediting real store credit is now restricted to the same
+         money-minting roles as customers.py store-credit (was any logged-in
+         user, down to a cashier).
+      2. IDEMPOTENCY — the credit is claimed ATOMICALLY: a single
+         find_one_and_update flips status INVITED/REDEEMED -> REWARD_CREDITED
+         only if it is NOT already credited. Previously the handler $inc'd the
+         reward and THEN set the status without ever checking it, so calling the
+         endpoint twice (double-click / retry / abuse) minted the reward again
+         and again. The customer wallet is only credited once the claim wins.
+    """
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -654,21 +671,52 @@ async def redeem_referral(
     if not referral:
         raise HTTPException(status_code=404, detail="Referral not found")
 
-    # Credit store credit to referrer
     reward = referral.get("reward_amount", 500)
+
+    # Atomic claim: only the caller that flips it to REWARD_CREDITED proceeds to
+    # credit the wallet. A concurrent / repeat call matches nothing and is a
+    # no-op "already credited" — never a second credit.
+    try:
+        from pymongo import ReturnDocument
+
+        claimed = coll.find_one_and_update(
+            {"referral_id": referral_id, "status": {"$ne": "REWARD_CREDITED"}},
+            {
+                "$set": {
+                    "status": "REWARD_CREDITED",
+                    "reward_credited_at": datetime.now().isoformat(),
+                    "reward_credited_by": current_user.get("user_id"),
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception:
+        # Minimal/mock collection without find_one_and_update: fall back to a
+        # guarded update_one (still single-credit under the status filter).
+        res = coll.update_one(
+            {"referral_id": referral_id, "status": {"$ne": "REWARD_CREDITED"}},
+            {
+                "$set": {
+                    "status": "REWARD_CREDITED",
+                    "reward_credited_at": datetime.now().isoformat(),
+                    "reward_credited_by": current_user.get("user_id"),
+                }
+            },
+        )
+        claimed = referral if getattr(res, "modified_count", 0) else None
+
+    if not claimed:
+        # Someone (or an earlier call) already credited this referral.
+        return {
+            "message": "Referral already credited",
+            "referral_id": referral_id,
+            "already_credited": True,
+        }
+
+    # We hold the claim — credit the referrer exactly once.
     db.get_collection("customers").update_one(
         {"customer_id": referral["referrer_customer_id"]},
         {"$inc": {"store_credit": reward, "loyalty_points": int(reward / 10)}},
-    )
-
-    coll.update_one(
-        {"referral_id": referral_id},
-        {
-            "$set": {
-                "status": "REWARD_CREDITED",
-                "reward_credited_at": datetime.now().isoformat(),
-            }
-        },
     )
 
     return {"message": f"Reward of Rs.{reward} credited", "referral_id": referral_id}
