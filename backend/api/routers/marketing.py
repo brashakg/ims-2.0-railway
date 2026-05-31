@@ -90,14 +90,19 @@ _INDIA_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
 
 
 def _validate_phone(v: str) -> str:
-    """Validate an Indian mobile number (10 digits, leading 6-9). Strips
-    leading country code (+91 / 91) for robustness before validating."""
-    stripped = re.sub(r"^\+?91", "", v.strip())
-    if not _INDIA_MOBILE_RE.match(stripped):
+    """Validate + normalize an Indian mobile to the canonical bare 10-digit form.
+    Delegates to the shared services.phone util (single source of truth) -- the
+    old local `re.sub(r"^\\+?91", ...)` also stripped a leading "91" from a valid
+    mobile like 9123456789, corrupting it; the shared helper only strips 91 when
+    it leaves exactly 10 digits."""
+    from ..services.phone import normalize_indian_mobile
+
+    norm = normalize_indian_mobile(v)
+    if not norm:
         raise ValueError(
             "Phone must be a 10-digit Indian mobile number starting with 6-9"
         )
-    return stripped
+    return norm
 
 
 class SendNotificationRequest(BaseModel):
@@ -126,12 +131,19 @@ class SendNotificationRequest(BaseModel):
 
 
 class WalkinRequest(BaseModel):
-    # Indian mobile: 10 digits, leading digit 6-9.  ^\d{10}$ (the old pattern)
-    # accepted 0-5 prefix numbers that cannot belong to Indian mobiles.
-    phone: str = Field(..., pattern=r"^[6-9]\d{9}$")
+    # Normalized via the shared phone util: accepts +91 / 0 / spaced input that
+    # staff type at the counter and stores the canonical bare 10-digit form
+    # (the old raw ^[6-9]\d{9}$ pattern 422'd those, so the same walk-in could be
+    # logged under two surface forms). Still required + still ^[6-9]\d{9}$ stored.
+    phone: str
     name: Optional[str] = None
     interest: str = "frames"
     notes: Optional[str] = None
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def normalize_walkin_phone(cls, v):
+        return _validate_phone(v)
 
 
 class WalkoutRequest(BaseModel):

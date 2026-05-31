@@ -33,25 +33,12 @@ _PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     """Validate + normalize a phone number to the canonical bare 10-digit form.
-    None/empty -> None (phone is optional). Strips all non-digits, then a
-    leading 91 country code or 0 trunk prefix, then enforces ^[6-9]\\d{9}$.
-    Raises ValueError on a malformed value so Pydantic surfaces a 422."""
-    if phone is None:
-        return None
-    digits = re.sub(r"\D", "", str(phone))
-    if digits == "":
-        return None
-    # Strip a leading 91 country code (only when it leaves exactly 10 digits) or
-    # a single leading 0 trunk prefix.
-    if len(digits) == 12 and digits.startswith("91"):
-        digits = digits[2:]
-    elif len(digits) == 11 and digits.startswith("0"):
-        digits = digits[1:]
-    if not _PHONE_RE.match(digits):
-        raise ValueError(
-            "Invalid phone number (expected a 10-digit Indian mobile)"
-        )
-    return digits
+    None/empty -> None (phone is optional). Delegates to the shared
+    services.phone util so every router normalizes identically (single source of
+    truth). Raises ValueError on a malformed value so Pydantic surfaces a 422."""
+    from ..services.phone import normalize_indian_mobile
+
+    return normalize_indian_mobile(phone)
 
 
 # ============================================================================
