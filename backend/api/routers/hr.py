@@ -785,8 +785,17 @@ async def apply_leave(
 
 
 @router.post("/leaves/{leave_id}/approve")
-async def approve_leave(leave_id: str, current_user: dict = Depends(get_current_user)):
-    """Approve a leave request"""
+async def approve_leave(
+    leave_id: str,
+    current_user: dict = Depends(require_roles(*_SWAP_APPROVER_ROLES)),
+):
+    """Approve a leave request (ADMIN/AREA_MANAGER/STORE_MANAGER; SUPERADMIN auto).
+
+    Was gated only by get_current_user -- so ANY authenticated user, including
+    the applicant themselves, could approve their own leave. Leave approval is a
+    manager action; gate it with the same approver roles the shift-swap approval
+    flow uses (_SWAP_APPROVER_ROLES) for a consistent workforce-control policy.
+    """
     leave_repo = get_leave_repository()
 
     if leave_repo is not None:
@@ -813,9 +822,13 @@ async def approve_leave(leave_id: str, current_user: dict = Depends(get_current_
 async def reject_leave(
     leave_id: str,
     reason: str = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_SWAP_APPROVER_ROLES)),
 ):
-    """Reject a leave request"""
+    """Reject a leave request (ADMIN/AREA_MANAGER/STORE_MANAGER; SUPERADMIN auto).
+
+    Same manager gate as approve_leave -- rejecting a colleague's (or one's own)
+    leave was previously open to any authenticated user.
+    """
     leave_repo = get_leave_repository()
 
     if leave_repo is not None:
