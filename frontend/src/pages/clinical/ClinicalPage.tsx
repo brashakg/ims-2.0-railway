@@ -29,6 +29,7 @@ import { AbuseDetection } from '../../components/clinical/AbuseDetection';
 import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
 import { ClinicPrescriptionHistory } from '../../components/clinical/ClinicPrescriptionHistory';
 import clsx from 'clsx';
+import { readEyePower } from '../../utils/rxEye';
 
 // Types
 interface QueueItem {
@@ -245,8 +246,20 @@ export function ClinicalPage() {
       setSelectedPatient(null);
       setCurrentTestId(null);
       await loadData();
-    } catch {
-      toast.error('Failed to save eye test');
+    } catch (err: any) {
+      // Surface the backend's specific validation message (e.g. "Right eye CYL
+      // value -50 is outside the valid range (-6 to 6)") instead of a generic
+      // failure, so the optometrist knows which field to fix.
+      const detail = err?.response?.data?.detail;
+      let msg = 'Failed to save eye test';
+      if (typeof detail === 'string') {
+        msg = detail;
+      } else if (Array.isArray(detail) && detail.length > 0) {
+        const first = detail[0];
+        const field = Array.isArray(first?.loc) ? first.loc[first.loc.length - 1] : '';
+        msg = field ? `${field}: ${first?.msg || 'invalid value'}` : first?.msg || msg;
+      }
+      toast.error(msg);
     }
   };
 
@@ -400,11 +413,18 @@ export function ClinicalPage() {
         ? calculateAge(modalPatient.dateOfBirth)
         : undefined;
 
+      const queuePatientId =
+        (modalPatient as any)?.id ||
+        (modalPatient as any)?.patient_id ||
+        (existingPatient as any)?.patient_id ||
+        (existingPatient as any)?.id ||
+        undefined;
       await clinicalApi.addToQueue({
         storeId: user?.activeStoreId || '',
         patientName: queuePatientName,
         customerPhone: sanitizedMobile,
         customerId,
+        patientId: queuePatientId,
         age: queueAge,
         reason: 'Eye examination',
       });
@@ -753,8 +773,8 @@ export function ClinicalPage() {
                     {/* Quick Rx Preview */}
                     <div className="flex items-center gap-6">
                       <div className="text-sm">
-                        <p className="text-gray-500">R: {formatPower(test.rightEye.sphere)} / {formatPower(test.rightEye.cylinder)}</p>
-                        <p className="text-gray-500">L: {formatPower(test.leftEye.sphere)} / {formatPower(test.leftEye.cylinder)}</p>
+                        <p className="text-gray-500">R: {formatPower(readEyePower(test, 'right', 'sphere'))} / {formatPower(readEyePower(test, 'right', 'cylinder'))}</p>
+                        <p className="text-gray-500">L: {formatPower(readEyePower(test, 'left', 'sphere'))} / {formatPower(readEyePower(test, 'left', 'cylinder'))}</p>
                       </div>
                       <button
                         onClick={() =>
@@ -775,8 +795,8 @@ export function ClinicalPage() {
                           patientName: test.patientName,
                           date: test.completedAt,
                           optometristName: user?.name || 'Optometrist',
-                          rightEye: { sphere: test.rightEye.sphere || 0, cylinder: test.rightEye.cylinder || 0, axis: test.rightEye.axis || 0, add: 0 },
-                          leftEye: { sphere: test.leftEye.sphere || 0, cylinder: test.leftEye.cylinder || 0, axis: test.leftEye.axis || 0, add: 0 },
+                          rightEye: { sphere: readEyePower(test, 'right', 'sphere') || 0, cylinder: readEyePower(test, 'right', 'cylinder') || 0, axis: readEyePower(test, 'right', 'axis') || 0, add: 0 },
+                          leftEye: { sphere: readEyePower(test, 'left', 'sphere') || 0, cylinder: readEyePower(test, 'left', 'cylinder') || 0, axis: readEyePower(test, 'left', 'axis') || 0, add: 0 },
                           pd: 0,
                           visualAcuity: '',
                           notes: '',
@@ -883,6 +903,7 @@ export function ClinicalPage() {
               age: patient?.dateOfBirth ? calculateAge(patient.dateOfBirth) : undefined,
               reason: 'Eye examination',
               customerId: (customer as any).customer_id || customer.id,
+              patientId: (patient as any)?.id || (patient as any)?.patient_id,
             });
             toast.success(`${patient?.name || customer.name} added to queue`);
             setShowQueueExistingModal(false);

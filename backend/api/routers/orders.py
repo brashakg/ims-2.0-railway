@@ -861,11 +861,21 @@ def _resolve_catalog_product_doc(pid: str):
 
 
 # Item types / product_id prefixes that have NO serialized stock to mark sold.
-# SERVICE = labour line (eg fitting); custom-/lens-/lens-sug- = virtual POS
-# items the configurator/suggestion helper generates on the fly. These never
-# carry a stock_unit row, so trying to mark_sold them is a no-op (not an error).
+# SERVICE = labour line (eg fitting); EYE_TEST/etc = a clinical consultation line
+# (GST-exempt SAC 9993, see gst_rates.py) -- a service, not a stocked good;
+# custom-/lens-/lens-sug- = virtual POS items the configurator/suggestion helper
+# generates on the fly. These never carry a stock_unit row, so trying to
+# mark_sold them is a no-op (not an error).
 _VIRTUAL_PID_PREFIXES = ("custom-", "lens-", "lens-sug-")
-_NON_SERIALIZED_ITEM_TYPES = {"SERVICE"}
+_NON_SERIALIZED_ITEM_TYPES = {
+    "SERVICE",
+    "EYE_TEST",
+    "EYE_EXAM",
+    "EYE_CHECKUP",
+    "CONSULT",
+    "CONSULTATION",
+    "OPTOMETRY",
+}
 
 
 def _mark_units_sold(

@@ -56,6 +56,7 @@ class QueueItemCreate(BaseModel):
     age: Optional[int] = None
     reason: Optional[str] = None
     customer_id: Optional[str] = Field(None, alias="customerId")
+    patient_id: Optional[str] = Field(None, alias="patientId")
 
     class Config:
         populate_by_name = True
@@ -289,6 +290,7 @@ async def add_to_queue(
             age=item.age,
             reason=item.reason,
             customer_id=item.customer_id,
+            patient_id=item.patient_id,
         )
         if created:
             result = _convert_to_camel(created)
@@ -306,6 +308,7 @@ async def add_to_queue(
         "age": item.age,
         "reason": item.reason,
         "customerId": item.customer_id,
+        "patientId": item.patient_id,
         "status": "WAITING",
         "createdAt": datetime.now().isoformat(),
         "waitTime": 0,
@@ -386,6 +389,7 @@ async def start_test(
                 optometrist_id=current_user.get("user_id", ""),
                 optometrist_name=current_user.get("full_name", "Unknown"),
                 customer_id=queue_item.get("customer_id"),
+                patient_id=queue_item.get("patient_id"),
             )
 
             if test:
@@ -562,7 +566,11 @@ async def complete_test(
                 rx_data = {
                     "prescription_id": str(uuid.uuid4()),
                     "prescription_number": rx_number,
-                    "patient_id": customer_id,  # In BV, patient_id maps to customer
+                    # Attribute to the specific family member when the queue/test
+                    # carried one; fall back to the account holder for legacy
+                    # tests. Threading patient_id through queue->test is the
+                    # remaining half of the Family-Rx grouping fix.
+                    "patient_id": test.get("patient_id") or customer_id,
                     "customer_id": customer_id,
                     "store_id": store_id,
                     "source": "TESTED_AT_STORE",
@@ -571,17 +579,18 @@ async def complete_test(
                         "full_name", current_user.get("username", "")
                     ),
                     "eye_test_id": test_id,
+                    # An ABSENT power/axis means "not tested for this eye" -> leave
+                    # it blank, never fabricate a 0.00 power or a 180 axis into a
+                    # billable Rx (audit P1). A genuine plano "0" is preserved.
                     "right_eye": {
                         "sph": str(
-                            data.right_eye.get("sphere", data.right_eye.get("sph", "0"))
+                            data.right_eye.get("sphere") or data.right_eye.get("sph") or ""
                         ),
                         "cyl": str(
-                            data.right_eye.get(
-                                "cylinder", data.right_eye.get("cyl", "0")
-                            )
+                            data.right_eye.get("cylinder") or data.right_eye.get("cyl") or ""
                         ),
-                        "axis": data.right_eye.get("axis", 180),
-                        "add": str(data.right_eye.get("add", "0")),
+                        "axis": data.right_eye.get("axis"),
+                        "add": str(data.right_eye.get("add") or ""),
                         "pd": str(data.right_eye.get("pd", "")),
                         "prism": (data.right_eye.get("prism") or None),
                         "base": (data.right_eye.get("base") or None),
@@ -593,13 +602,13 @@ async def complete_test(
                     },
                     "left_eye": {
                         "sph": str(
-                            data.left_eye.get("sphere", data.left_eye.get("sph", "0"))
+                            data.left_eye.get("sphere") or data.left_eye.get("sph") or ""
                         ),
                         "cyl": str(
-                            data.left_eye.get("cylinder", data.left_eye.get("cyl", "0"))
+                            data.left_eye.get("cylinder") or data.left_eye.get("cyl") or ""
                         ),
-                        "axis": data.left_eye.get("axis", 180),
-                        "add": str(data.left_eye.get("add", "0")),
+                        "axis": data.left_eye.get("axis"),
+                        "add": str(data.left_eye.get("add") or ""),
                         "pd": str(data.left_eye.get("pd", "")),
                         "prism": (data.left_eye.get("prism") or None),
                         "base": (data.left_eye.get("base") or None),

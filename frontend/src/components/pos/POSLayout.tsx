@@ -20,6 +20,14 @@ import { useProducts } from '../../hooks/usePOSQueries';
 import { customerApi, orderApi, prescriptionApi, productApi, workshopApi, adminStoreApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
+// POS Rx auto-attach (clinic initiative C5-A): owner-gated convenience. When the
+// flag is "true", the Prescription step auto-selects the customer's Rx IFF there
+// is exactly one valid (non-expired) one and none is attached yet. Default OFF so
+// staff keep choosing explicitly until the owner opts in — zero behaviour change
+// unless VITE_POS_AUTO_ATTACH_SINGLE_RX=true is set at build time.
+const POS_AUTO_ATTACH_SINGLE_RX =
+  import.meta.env.VITE_POS_AUTO_ATTACH_SINGLE_RX === 'true';
+
 // Backwards-compatible type exports (used by BillingEngine, CartPanel)
 export interface CartItem {
   product_id: string;
@@ -1438,6 +1446,20 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
     } as any;
     store.setPrescription(mapped);
   };
+
+  // C5-A: owner-gated auto-attach. Fires only when the flag is on, nothing is
+  // attached yet, the fetch has settled, and EXACTLY ONE valid Rx exists (so an
+  // ambiguous multi-Rx customer still falls to manual choice). Separate effect —
+  // declared after attachRx so there is no forward reference; re-runs once
+  // recentRx settles, then the store.prescription guard makes it idempotent.
+  useEffect(() => {
+    if (!POS_AUTO_ATTACH_SINGLE_RX) return;
+    if (rxLoading || store.prescription) return;
+    if (recentRx.length === 1) attachRx(recentRx[0]);
+    // attachRx is a stable closure over lookupId/store; deps below cover the
+    // trigger inputs without re-binding it each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recentRx, rxLoading, store.prescription]);
 
   const fmtPower = (v: any) => {
     const n = parseFloat(v);

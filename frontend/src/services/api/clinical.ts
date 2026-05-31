@@ -32,6 +32,9 @@ export const clinicalApi = {
     age?: number;
     reason?: string;
     customerId?: string;
+    /** The specific family member (patient) under the account being tested, so
+     *  the resulting Rx groups under them in Family Rx rather than the holder. */
+    patientId?: string;
   }) => {
     const response = await api.post('/clinical/queue', data);
     return response.data;

@@ -20,6 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionPrint } from '../../components/clinical/PrescriptionPrint';
 import type { PrescriptionPrintData, StoreInfo } from '../../components/clinical/PrescriptionPrint';
+import { readEyePower } from '../../utils/rxEye';
 
 interface Prescription {
   id: string;
@@ -98,16 +99,16 @@ export function PrescriptionsPage() {
       customerPhone: rx.customerPhone,
       prescribedAt: rx.prescribedAt,
       rightEye: {
-        sphere: rx.rightEye.sphere,
-        cylinder: rx.rightEye.cylinder,
-        axis: rx.rightEye.axis,
-        add: rx.rightEye.add,
+        sphere: readEyePower(rx, 'right', 'sphere'),
+        cylinder: readEyePower(rx, 'right', 'cylinder'),
+        axis: readEyePower(rx, 'right', 'axis'),
+        add: readEyePower(rx, 'right', 'add'),
       },
       leftEye: {
-        sphere: rx.leftEye.sphere,
-        cylinder: rx.leftEye.cylinder,
-        axis: rx.leftEye.axis,
-        add: rx.leftEye.add,
+        sphere: readEyePower(rx, 'left', 'sphere'),
+        cylinder: readEyePower(rx, 'left', 'cylinder'),
+        axis: readEyePower(rx, 'left', 'axis'),
+        add: readEyePower(rx, 'left', 'add'),
       },
       pd: rx.pd,
       notes: rx.notes,
@@ -306,13 +307,13 @@ export function PrescriptionsPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-500">Right (OD):</span>
                     <span className="font-medium">
-                      {formatPower(rx.rightEye.sphere)} / {formatPower(rx.rightEye.cylinder)}
+                      {formatPower(readEyePower(rx, 'right', 'sphere'))} / {formatPower(readEyePower(rx, 'right', 'cylinder'))}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-500">Left (OS):</span>
                     <span className="font-medium">
-                      {formatPower(rx.leftEye.sphere)} / {formatPower(rx.leftEye.cylinder)}
+                      {formatPower(readEyePower(rx, 'left', 'sphere'))} / {formatPower(readEyePower(rx, 'left', 'cylinder'))}
                     </span>
                   </div>
                   {rx.pd && (
@@ -439,31 +440,31 @@ export function PrescriptionsPage() {
                         <tr>
                           <td className="border border-gray-200 px-4 py-2 font-medium">Right (OD)</td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedPrescription.rightEye.sphere)}
+                            {formatPower(readEyePower(selectedPrescription, 'right', 'sphere'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedPrescription.rightEye.cylinder)}
+                            {formatPower(readEyePower(selectedPrescription, 'right', 'cylinder'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedPrescription.rightEye.axis ?? '-'}
+                            {readEyePower(selectedPrescription, 'right', 'axis') ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedPrescription.rightEye.add)}
+                            {formatPower(readEyePower(selectedPrescription, 'right', 'add'))}
                           </td>
                         </tr>
                         <tr>
                           <td className="border border-gray-200 px-4 py-2 font-medium">Left (OS)</td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedPrescription.leftEye.sphere)}
+                            {formatPower(readEyePower(selectedPrescription, 'left', 'sphere'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedPrescription.leftEye.cylinder)}
+                            {formatPower(readEyePower(selectedPrescription, 'left', 'cylinder'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedPrescription.leftEye.axis ?? '-'}
+                            {readEyePower(selectedPrescription, 'left', 'axis') ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedPrescription.leftEye.add)}
+                            {formatPower(readEyePower(selectedPrescription, 'left', 'add'))}
                           </td>
                         </tr>
                       </tbody>

@@ -285,6 +285,16 @@ export const prescriptionApi = {
     const response = await api.get(`/prescriptions/family/${customerId}`);
     return response.data as FamilyRxResponse;
   },
+
+  // Printable Rx card (CL-aware): the backend renders a contact-lens card when
+  // the Rx is rx_kind=CONTACT_LENS, else the spectacle card. Returns the HTML
+  // string; the caller writes it into a new window (auth token already attached
+  // by the api client, unlike a raw window.open of the URL).
+  getPrintHtml: async (prescriptionId: string): Promise<string> => {
+    const response = await api.get(`/prescriptions/${prescriptionId}/print`);
+    const data = response.data;
+    return (data?.html as string) ?? '';
+  },
 };
 
 // ---- Family Rx response shape (GET /prescriptions/family/{customer_id}) ------

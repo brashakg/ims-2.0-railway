@@ -126,6 +126,39 @@ def can_finalize(doc: Dict[str, Any]) -> bool:
     return bool(final and final.get("right_eye") and final.get("left_eye"))
 
 
+def _canonical_eye(eye: Dict[str, Any]) -> Dict[str, Any]:
+    """Bridge the transitional Rx field-name split: a version eye block stores
+    sphere/cylinder/addition, but print + POS read sph/cyl/add. Normalize to the
+    canonical sph/cyl/axis/add (so a FINALIZED Rx no longer prints blank) while
+    KEEPING the sphere/cylinder/addition aliases (so progression, which reads
+    those, still resolves). Additive -- no value is dropped. Collapses to a
+    single shape once the full canonical-shape migration (initiative C3) lands."""
+    if not isinstance(eye, dict):
+        return eye
+    out = dict(eye)
+
+    def pick(*keys):
+        for k in keys:
+            v = eye.get(k)
+            if v is not None and v != "":
+                return v
+        return None
+
+    sph = pick("sph", "sphere")
+    cyl = pick("cyl", "cylinder")
+    add = pick("add", "addition", "add_power")
+    axis = pick("axis")
+    if sph is not None:
+        out["sph"], out["sphere"] = str(sph), sph
+    if cyl is not None:
+        out["cyl"], out["cylinder"] = str(cyl), cyl
+    if add is not None:
+        out["add"], out["addition"] = str(add), add
+    if axis is not None:
+        out["axis"] = axis
+    return out
+
+
 def mirror_final_to_top_level(doc: Dict[str, Any]) -> Dict[str, Any]:
     """When finalizing, copy `versions.final.{right_eye,left_eye,pd}`
     into the top-level fields the legacy POS code reads. Idempotent.
@@ -134,9 +167,9 @@ def mirror_final_to_top_level(doc: Dict[str, Any]) -> Dict[str, Any]:
     final = versions.get("final") or {}
     out = dict(doc)
     if final.get("right_eye"):
-        out["right_eye"] = final["right_eye"]
+        out["right_eye"] = _canonical_eye(final["right_eye"])
     if final.get("left_eye"):
-        out["left_eye"] = final["left_eye"]
+        out["left_eye"] = _canonical_eye(final["left_eye"])
     if final.get("pd") is not None:
         out["pd"] = final["pd"]
     out["status"] = "finalized"
@@ -193,12 +226,28 @@ def progression_diffs(rx_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _eye_delta(a: Dict, b: Dict) -> Dict[str, Optional[float]]:
-    """Per-field signed delta. None when either side is missing the
-    field — different from a 0 delta (which means "value the same")."""
+    """Per-field signed delta. None when either side is missing the field —
+    different from a 0 delta. Reads both field-name shapes (sphere|sph,
+    cylinder|cyl, addition|add) so a progression series spanning create-path
+    (sph/cyl) and version-path (sphere/cylinder) docs still computes."""
     out: Dict[str, Optional[float]] = {}
-    for key in ("sphere", "cylinder", "axis", "addition"):
-        av = a.get(key)
-        bv = b.get(key)
+    aliases = {
+        "sphere": ("sphere", "sph"),
+        "cylinder": ("cylinder", "cyl"),
+        "axis": ("axis",),
+        "addition": ("addition", "add", "add_power"),
+    }
+
+    def _get(d: Dict, keys):
+        for k in keys:
+            v = d.get(k)
+            if v is not None and v != "":
+                return v
+        return None
+
+    for key, keys in aliases.items():
+        av = _get(a, keys)
+        bv = _get(b, keys)
         try:
             if av is None or bv is None:
                 out[f"{key}_delta"] = None
