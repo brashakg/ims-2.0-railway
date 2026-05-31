@@ -144,6 +144,14 @@ class CustomerCreate(BaseModel):
     # birthday / Rx-expiry / WhatsApp campaigns. Operators flip this off
     # only when the customer explicitly declines on the spot.
     marketing_consent: bool = True
+    # DPDP Act 2023: record that the customer agreed to us storing + using their
+    # personal data. Distinct from marketing_consent (which only governs
+    # promotional messages). Defaults True (the operator ticks it at the counter
+    # after telling the customer); the SERVER stamps the timestamp + the policy
+    # version actually shown, so consent is provable. `data_consent_text_version`
+    # ties the agreement to whatever wording was live (editable under Marketing).
+    data_consent: bool = True
+    data_consent_text_version: Optional[str] = None
     patients: List[PatientCreate] = []
 
     @field_validator("name", mode="before")
@@ -361,6 +369,12 @@ async def create_customer(
             "gstin": customer.gstin,
             "billing_address": customer.billing_address,
             "marketing_consent": customer.marketing_consent,
+            # DPDP consent — server-stamped so it's provable (who/when/what text).
+            "data_consent": customer.data_consent,
+            "data_consent_at": (
+                datetime.utcnow().isoformat() if customer.data_consent else None
+            ),
+            "data_consent_text_version": customer.data_consent_text_version,
             "home_store_id": current_user.get("active_store_id"),
             # Canonical alias for the store reference (imported customers store
             # it under `preferred_store_id`); mirrors `home_store_id`.

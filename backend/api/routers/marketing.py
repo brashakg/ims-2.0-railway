@@ -1109,3 +1109,88 @@ async def get_walkout_recoveries(
         "recovered": recovered,
         "recovery_rate": rate,
     }
+
+
+# ============================================================================
+# FEATURE 8: DPDP DATA-CONSENT TEXT (editable; shown at customer creation)
+# ============================================================================
+# The wording a customer agrees to when we store their personal data (DPDP Act
+# 2023). Editable by ADMIN under Marketing so legal/owner can tune it without a
+# deploy; the `version` is stamped onto each customer's consent record so an
+# agreement is always traceable to the exact text shown.
+
+_DEFAULT_CONSENT_TEXT = (
+    "I agree that Better Vision may store and use my personal details (name, "
+    "contact number, prescription and purchase history) to provide optical "
+    "services, process my orders, and send me service reminders and offers. I "
+    "can withdraw this consent at any time by contacting the store."
+)
+_CONSENT_DOC_ID = "dpdp_data_consent"
+
+
+class ConsentTextUpdate(BaseModel):
+    text: str = Field(..., min_length=10, max_length=4000)
+
+
+def _consent_collection():
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        return db.get_collection("marketing_config")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@router.get("/consent-text")
+async def get_consent_text(current_user: dict = Depends(get_current_user)):
+    """Current DPDP data-consent wording + its version. Any authenticated user
+    can READ it (the customer-create form needs it); editing is ADMIN-only."""
+    coll = _consent_collection()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": _CONSENT_DOC_ID})
+            if doc and doc.get("text"):
+                return {
+                    "text": doc["text"],
+                    "version": doc.get("version", "1"),
+                    "updated_at": doc.get("updated_at"),
+                }
+        except Exception:  # noqa: BLE001
+            pass
+    return {"text": _DEFAULT_CONSENT_TEXT, "version": "default", "updated_at": None}
+
+
+@router.put("/consent-text")
+async def update_consent_text(
+    body: ConsentTextUpdate,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Edit the DPDP consent wording (ADMIN/SUPERADMIN). Bumps the version so a
+    customer's stored consent always points at the exact text they saw."""
+    coll = _consent_collection()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    existing = None
+    try:
+        existing = coll.find_one({"_id": _CONSENT_DOC_ID})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        prev_version = int((existing or {}).get("version", "0") or 0)
+    except (TypeError, ValueError):
+        prev_version = 0
+    new_version = str(prev_version + 1)
+    coll.update_one(
+        {"_id": _CONSENT_DOC_ID},
+        {
+            "$set": {
+                "text": body.text.strip(),
+                "version": new_version,
+                "updated_at": datetime.now().isoformat(),
+                "updated_by": current_user.get("user_id"),
+            }
+        },
+        upsert=True,
+    )
+    return {"message": "Consent text updated", "version": new_version}

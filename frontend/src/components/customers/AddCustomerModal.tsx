@@ -54,6 +54,11 @@ export interface CustomerFormData {
   // Marketing consent — opt-in default, operator flips off only on
   // explicit decline. Drives birthday / Rx-expiry / WhatsApp campaigns.
   marketingConsent: boolean;
+  // DPDP Act 2023 data-storage consent — separate from marketing. Default on;
+  // the operator ticks it after telling the customer. Carries the version of
+  // the wording shown so the agreement is provable.
+  dataConsent: boolean;
+  dataConsentTextVersion?: string;
 }
 
 interface AddCustomerModalProps {
@@ -105,12 +110,17 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     panNumber: '',
     patients: [],
     marketingConsent: true,
+    dataConsent: true,
   });
 
   const [gstVerified, setGstVerified] = useState<boolean | null>(null);
   const [gstError, setGstError] = useState<string | null>(null);
   const [mobileError, setMobileError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  // DPDP consent wording (editable under Marketing). Fetched on open so the
+  // customer's stored consent records the exact text+version they were shown.
+  const [consentText, setConsentText] = useState('');
+  const [consentVersion, setConsentVersion] = useState<string | undefined>();
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearchQuery = useDebounce(searchQuery, 400);
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -164,6 +174,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
         panNumber: '',
         patients: [],
         marketingConsent: true,
+        dataConsent: true,
       });
       setGstVerified(null);
       setGstError(null);
@@ -178,6 +189,14 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
         dateOfBirth: '',
         relation: 'Self',
       });
+      // Pull the current consent wording (fail-soft: a fetch error just leaves
+      // the inline default text; the checkbox still works).
+      customerApi.getConsentText?.()
+        .then((r) => {
+          if (r?.text) setConsentText(r.text);
+          if (r?.version) setConsentVersion(r.version);
+        })
+        .catch(() => { /* keep default */ });
     }
   }, [isOpen]);
 
@@ -334,6 +353,9 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     const sanitizedFormData: CustomerFormData = {
       ...formData,
       mobileNumber: tenDigit,
+      // Stamp the consent wording version the operator actually saw, so the
+      // stored agreement is traceable to that exact text.
+      dataConsentTextVersion: consentVersion,
       patients: formData.patients.map(p => ({
         ...p,
         mobile: p.mobile ? (p.mobile.replace(/\D/g, '').slice(-10) || p.mobile) : p.mobile,
@@ -632,6 +654,25 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                     <span className="font-medium text-gray-900">Receive marketing messages</span>
                     <span className="block text-xs text-gray-500 mt-0.5">
                       Birthday wishes, Rx renewal reminders, and offers via SMS / WhatsApp. Customer can opt out anytime.
+                    </span>
+                  </span>
+                </label>
+              </div>
+              {/* DPDP Act 2023 data-storage consent. Separate from marketing —
+                  records that the customer agreed to us holding their data.
+                  Default on; the shown wording is editable under Marketing. */}
+              <div className="col-span-2">
+                <label className="flex items-start gap-2 cursor-pointer p-2 rounded-lg hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    checked={formData.dataConsent}
+                    onChange={e => setFormData(prev => ({ ...prev, dataConsent: e.target.checked }))}
+                    className="mt-0.5 w-4 h-4 text-bv-red-600 rounded border-gray-300 focus:ring-bv-red-500"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">Customer consents to data storage</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      {consentText || 'Customer agrees we may store and use their details to provide optical services and reminders. Editable under Marketing.'}
                     </span>
                   </span>
                 </label>
