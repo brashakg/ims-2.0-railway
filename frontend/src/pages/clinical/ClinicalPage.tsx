@@ -239,6 +239,20 @@ export function ClinicalPage() {
         lensRecommendation: fr?.lensType || undefined,
         nextCheckup: fr?.nextCheckup || undefined,
         notes: data.chiefComplaint || '',
+        // C6-B: also persist the structured exam findings the form already
+        // collects (chief complaint + per-eye aided VA from the Final Rx) into
+        // the test record's `clinical_findings` block, so they're queryable
+        // (VA trend across visits, search by complaint) rather than only buried
+        // in `notes`/per-eye. Only sent when non-empty -> a refraction-only test
+        // is unchanged. Net-new inputs (IOP/diagnosis/...) land here once the
+        // EyeTestForm grows those fields (follow-up).
+        clinicalFindings: (() => {
+          const cf: Record<string, string> = {};
+          if (data.chiefComplaint) cf.chiefComplaint = data.chiefComplaint;
+          if (re?.va) cf.vaRightAided = re.va;
+          if (le?.va) cf.vaLeftAided = le.va;
+          return Object.keys(cf).length > 0 ? cf : undefined;
+        })(),
       });
 
       toast.success('Eye test saved successfully');
