@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Search, User, UserPlus, Loader2, Phone } from 'lucide-react';
 import { customerApi } from '../../services/api';
+import { buildCustomerSearchHits } from '../../utils/customerSearchHits';
 import type { Customer, Patient } from '../../types';
 
 interface QueueExistingCustomerModalProps {
@@ -114,16 +115,27 @@ export function QueueExistingCustomerModal({
 
   if (!isOpen) return null;
 
-  const handleQueuePatient = async (patient: Patient | null) => {
-    if (!selectedCustomer || isQueuing) return;
+  // Queue any (customer, patient) pair — shared by the direct patient-hit rows
+  // and the expand-an-account flow.
+  const queue = async (customer: Customer, patient: Patient | null) => {
+    if (isQueuing) return;
     setIsQueuing(true);
     try {
-      await onQueue(selectedCustomer, patient);
+      await onQueue(customer, patient);
       // Parent closes us on success
     } finally {
       setIsQueuing(false);
     }
   };
+  const handleQueuePatient = (patient: Patient | null) => {
+    if (!selectedCustomer) return;
+    return queue(selectedCustomer, patient);
+  };
+
+  // Flatten results into labeled account/patient hits so a patient matched by
+  // name/phone is a directly-pickable row (not hidden inside a collapsed
+  // account). Account hits keep the expand-to-browse-all-patients affordance.
+  const hits = buildCustomerSearchHits(results, query);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -176,7 +188,7 @@ export function QueueExistingCustomerModal({
             <div className="text-center py-12 text-sm text-gray-500">
               Start typing to search customers.
             </div>
-          ) : results.length === 0 ? (
+          ) : hits.length === 0 ? (
             <div className="text-center py-10 px-5">
               <p className="text-sm text-gray-700 font-medium">No matching customers found</p>
               <p className="text-xs text-gray-500 mt-1 mb-4">
@@ -192,10 +204,44 @@ export function QueueExistingCustomerModal({
             </div>
           ) : (
             <div className="divide-y divide-gray-200">
-              {results.map((c) => {
+              {hits.map((hit) => {
+                // A patient matched directly by name/phone — pick them in one click,
+                // instead of hiding them inside a collapsed account row.
+                if (hit.kind === 'patient') {
+                  const p = hit.patient as Patient;
+                  return (
+                    <button
+                      key={hit.key}
+                      onClick={() => queue(hit.customer as Customer, p)}
+                      disabled={isQueuing}
+                      className="w-full px-5 py-3 text-left hover:bg-gray-50 flex items-center justify-between gap-3 disabled:opacity-60"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
+                          <User className="w-4 h-4 text-blue-700" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {hit.displayName}
+                            <span className="ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">Patient</span>
+                          </p>
+                          <p className="text-xs text-gray-500 flex items-center gap-1 truncate">
+                            <Phone className="w-3 h-3" />
+                            {hit.phone || '—'} · under {hit.accountName}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-xs text-bv-red-600 font-semibold flex-shrink-0">
+                        {isQueuing ? 'Adding…' : 'Add to queue →'}
+                      </span>
+                    </button>
+                  );
+                }
+                // Account holder — expand to browse / queue the account or any dependent.
+                const c = hit.customer as Customer;
                 const isSelected = selectedCustomer?.id === c.id;
                 return (
-                  <div key={c.id} className={isSelected ? 'bg-bv-red-50' : ''}>
+                  <div key={hit.key} className={isSelected ? 'bg-bv-red-50' : ''}>
                     <button
                       onClick={() => setSelectedCustomer(isSelected ? null : c)}
                       className="w-full px-5 py-3 text-left hover:bg-gray-50 flex items-center justify-between gap-3"
@@ -207,6 +253,7 @@ export function QueueExistingCustomerModal({
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-gray-900 truncate">
                             {c.name || '—'}
+                            <span className="ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">Account</span>
                           </p>
                           <p className="text-xs text-gray-500 flex items-center gap-1">
                             <Phone className="w-3 h-3" />
