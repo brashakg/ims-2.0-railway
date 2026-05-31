@@ -46,8 +46,8 @@ Order per owner's directive: **clinic → POS → finance → inventory → …*
 ### Modules
 | # | Module | Status | Branch | Notes |
 |---|--------|--------|--------|-------|
-| 1 | **Clinic / Optometry** | 🛠 Implementing — C1–C5 shipped; C6 strategic remains | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
-| 2 | POS / Billing | ⏳ Queued | — | revenue-critical; extra care |
+| 1 | **Clinic / Optometry** | ✅ Tractable scope shipped — C1–C5 + C6-A (CL page); C6 B–E strategic/gated | `claude/improve-clinic` | eye-test, Rx, contact-lens, dispensing, recall, lens catalog/stock |
+| 2 | **POS / Billing** | 🔬 Research + Audit done → 🏛 Council → owner sign-off | `claude/improve-pos` (next, off latest main) | revenue-critical; extra care; rebase first |
 | 3 | Finance / GST | ⏳ Queued | — | GST returns, P&L, AP/AR, Tally |
 | 4 | Inventory | ⏳ Queued | — | stock, transfers, counts, serials |
 | 5 | CRM / Customers | ⏳ Queued | — | (search distinction already shipped) |
@@ -89,7 +89,11 @@ Legend: ⏳ Queued · 🔬 Research+Audit · 🏛 Council · 🛠 Implementing �
 | C3 | Canonical Rx shape — finalized Rx printed blank + progression null | Audit P1 (root cause) | Very High | Med | ✅ shipped (core: mirror+progression+reader; full field migration deferred) |
 | C4 | Blank-powers display on Clinical/Prescriptions pages | Audit P1 | Med | Low (FE) | ✅ shipped |
 | C5 | Lane→POS Rx auto-flow (zero re-keying) + GST split (exempt service vs goods) | Both research #1 | Very High | Med | ✅ shipped (C5-A auto-attach behind default-OFF flag; C5-B GST-exempt SAC 9993) |
-| C6 | CL-fitting wiring; persist full exam; DLT recall; FHIR/ABDM; DPDP consent | Research | High (strategic) | Varies | ⏳ |
+| C6-A | **Working Contact Lens Fitting page** (dead stub → real workflow over the already-built CL backend) | Research + C6 audit | High | Low (additive, non-POS) | ✅ shipped |
+| C6-B | Full eye-exam persistence (VA/IOP/segment/diagnosis/colour-vision/cover-test/dominant-eye) | C6 audit | Med–High | Med | ⏳ needs UI + clinical sign-off on field set |
+| C6-C | DLT-compliant Rx-expiry recall (MEGAPHONE + MSG91) | Research | High | Med | ⏳ needs DLT template IDs (credentials) |
+| C6-D | FHIR R4 VisionPrescription export / ABDM-ABHA | Research | Strategic | Med | ⏳ needs ABDM sandbox credentials |
+| C6-E | DPDP 2023 consent capture + retention | Research | Compliance | Med | ⏳ needs schema migration + policy sign-off |
 
 **Research signal (both streams agreed):** #1 = lane→POS Rx continuity, zero re-keying;
 versioned Rx (never overwrite); keyboard-first ±0.25 grid steppers; DLT-compliant recall.
@@ -115,8 +119,26 @@ Two owner decisions gated C5; both confirmed, both shipped:
   GST/orders suites (94) green. Eye-test item_types also added to
   `_NON_SERIALIZED_ITEM_TYPES` (a consult never demands stock).
 
-**Clinic remaining:** only **C6** (strategic — CL-fitting wiring, full-exam persistence,
-DLT-compliant recall, FHIR R4 `VisionPrescription` / ABDM, DPDP 2023 consent). These are
-larger, partly compliance-gated builds; tackled next, then **module 2 = POS**.
+### 2026-05-31 (cont.) — Clinic C6-A shipped; Module 2 (POS) research+audit done
+- **C6-A — Contact Lens Fitting page** turned from a dead "under development" stub into a
+  real workflow over the **already-built, already-validated** CL backend (`POST /prescriptions`
+  `rx_kind=CONTACT_LENS`, per-eye `CLEyeData` BC/DIA/power/toric, modality/brand, CL print
+  card). Search customer → optional family-member → capture per-eye CL params → save; lists
+  existing CL fittings + prints the CL card. Additive, non-POS; tsc 0, vite build green,
+  backend model round-trips the page payload. The remaining C6 items are genuinely gated:
+  **C6-B** full-exam persistence (needs UI + clinical field-set sign-off), **C6-C** DLT recall
+  (needs DLT template IDs), **C6-D** FHIR/ABDM (needs ABDM sandbox creds), **C6-E** DPDP consent
+  (needs schema migration + policy sign-off). Clinic's **tractable** scope is now complete.
+
+- **Module 2 = POS** kicked off: ran the parallel **research** + **code-audit** workflows.
+  Research top-10 (job-order checkout, advance/balance, **lens-config price matrix**, GST-
+  compliant numbering, per-line HSN, atomic returns/redeem, workshop auto-link, offline-first,
+  integrated UPI/EMI, exception controls). Audit returned a P1/P2/P3 defect list (self-rated
+  ~50–60% coverage). **Cross-checked against current main:** research items #4 (FY-sequential
+  invoice numbering, **#376**) and #6 (atomic returns + loyalty/store-credit redeem, **#373**)
+  and per-line CGST/SGST/IGST split + ITC residual (**#368/#370**) are **ALREADY SHIPPED** — so
+  the POS council focuses on the feature-level gaps + residual edge-hardening, NOT re-doing done
+  work. **Next:** POS council (parallel review) → owner sign-off (POS is revenue-critical) →
+  implement on `claude/improve-pos` off latest main.
 
 _(Appended as each module/concern advances.)_
