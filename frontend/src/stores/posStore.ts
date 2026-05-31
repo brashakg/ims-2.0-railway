@@ -218,6 +218,10 @@ export interface POSState {
   // Reset
   resetTransaction: () => void;
   clearAllOnLogout: () => void;
+  // Park/Hold: atomically REPLACE the current transaction with a previously
+  // held one (no merge into the existing cart, per-item discounts preserved,
+  // cart-level discount + delivery fields restored).
+  restoreHeldSale: (snapshot: any) => void;
 
   // Computed getters
   getSubtotal: () => number;
@@ -505,6 +509,42 @@ export const usePOSStore = create<POSState>()(
       resetTransaction: () => {
         const { store_id, salesperson_id, salesperson_name } = get();
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
+      },
+
+      // --- Park/Hold: recall a held sale, REPLACING the current one ---
+      // The previous recall path re-added each line via addToCart (which merges
+      // into whatever was already in the cart -> two customers' sales could
+      // fuse) and dropped the cart-level discount + delivery fields entirely.
+      // This sets everything in ONE atomic write: cart verbatim (per-item
+      // discount_amount/approved_by/reason intact), cart-discount recomputed
+      // from the restored cart, delivery + advance flags restored.
+      restoreHeldSale: (snapshot: any) => {
+        const { store_id, salesperson_id, salesperson_name } = get();
+        const snap = snapshot || {};
+        const cart: CartLineItem[] = Array.isArray(snap.cart) ? snap.cart : [];
+        const percent = snap.cart_discount_percent || 0;
+        set({
+          ...initialState,
+          store_id,
+          salesperson_id,
+          salesperson_name,
+          sale_type: snap.sale_type || initialState.sale_type,
+          customer: snap.customer ?? null,
+          patient: snap.patient ?? null,
+          prescription: snap.prescription ?? null,
+          cart,
+          cart_note: snap.cart_note || '',
+          payments: Array.isArray(snap.payments) ? snap.payments : [],
+          is_advance_payment: !!snap.is_advance_payment,
+          delivery_date: snap.delivery_date ?? null,
+          delivery_time_slot: snap.delivery_time_slot ?? null,
+          delivery_priority: snap.delivery_priority || 'NORMAL',
+          cart_discount_percent: percent,
+          cart_discount_amount: recalcCartDiscountAmount(cart, percent),
+          cart_discount_reason: snap.cart_discount_reason ?? null,
+          cart_discount_approved_by: snap.cart_discount_approved_by ?? null,
+          current_step: cart.length > 0 ? 'review' : 'customer',
+        });
       },
 
       // --- Full clear (for logout) ---
