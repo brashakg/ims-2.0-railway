@@ -1004,6 +1004,13 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/vendors/purchase-invoices/', "allowed": ['ACCOUNTANT', 'ADMIN']},
     {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/from-grn/{grn_id}', "allowed": ['ACCOUNTANT', 'ADMIN']},
+    # Phase 2: 3-way-match config + per-invoice match detail + exception override.
+    # Config read is AUTHENTICATED; config write + exception override are
+    # accounting actions -> ACCOUNTANT/ADMIN. Match detail read is AUTHENTICATED.
+    {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/config', "allowed": 'AUTHENTICATED'},
+    {"method": 'PUT', "path": '/api/v1/vendors/purchase-invoices/config', "allowed": ['ACCOUNTANT', 'ADMIN']},
+    {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/{invoice_id}/match', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/vendors/purchase-invoices/{invoice_id}/approve-exception', "allowed": ['ACCOUNTANT', 'ADMIN']},
     {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/{invoice_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/vendors/purchase-orders', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/vendors/purchase-orders', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
