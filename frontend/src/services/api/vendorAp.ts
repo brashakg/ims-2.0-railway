@@ -47,6 +47,82 @@ export interface DebitNote {
   reason: string;
 }
 
+// ---- Purchase Invoice (first-class AP + ITC document) -------------------
+// A purchase invoice is the supplier's tax invoice booked into AP. Unlike the
+// header-only VendorBill, it carries line items (with HSN + per-rate GST) and
+// an explicit place_of_supply so the tax is split correctly:
+//   intra-state  -> CGST + SGST
+//   inter-state  -> IGST    (place_of_supply state != recipient/entity state)
+// place_of_supply being WRITTEN here is the fix for the long-standing bug
+// where every inter-state purchase was mis-booked as CGST+SGST.
+export interface PurchaseInvoiceLine {
+  product_id?: string;
+  product_name: string;
+  sku?: string;
+  hsn_code?: string;
+  quantity: number;
+  unit_price: number;
+  gst_rate: number;       // percent, e.g. 5 / 12 / 18
+  taxable_amount?: number; // qty * unit_price (server recomputes; sent for convenience)
+  cgst?: number;
+  sgst?: number;
+  igst?: number;
+  line_total?: number;
+}
+
+export interface PurchaseInvoice {
+  purchase_invoice_id: string;
+  invoice_number?: string;        // our internal doc number (server-assigned)
+  vendor_id: string;
+  vendor_name?: string;
+  vendor_invoice_no: string;      // supplier's invoice number (statutory)
+  vendor_invoice_date: string;
+  po_id?: string;
+  po_number?: string;
+  grn_id?: string;
+  grn_number?: string;
+  store_id?: string;
+  place_of_supply?: string;       // 2-digit state code or "NN-StateName"
+  recipient_gstin?: string;       // our GSTIN receiving the supply
+  vendor_gstin?: string;
+  is_interstate?: boolean;
+  lines: PurchaseInvoiceLine[];
+  taxable_amount: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  tax_amount: number;
+  total_amount: number;
+  status?: string;                // DRAFT | BOOKED | ...
+  bill_id?: string;               // AP bill this invoice posted into
+  notes?: string;
+  created_at?: string;
+}
+
+// Payload to create/book an invoice (manual or from a prepared GRN draft).
+export interface PurchaseInvoiceCreate {
+  vendor_id: string;
+  vendor_invoice_no: string;
+  vendor_invoice_date: string;
+  place_of_supply?: string;
+  recipient_gstin?: string;
+  po_id?: string;
+  grn_id?: string;
+  store_id?: string;
+  lines: PurchaseInvoiceLine[];
+  notes?: string;
+}
+
+// Server-prepared draft returned by create-from-GRN: a NOT-yet-booked invoice
+// prefilled from the GRN's accepted lines + the PO's unit prices. The user
+// reviews / edits it, then books it via create().
+export interface PurchaseInvoiceDraft extends Partial<PurchaseInvoice> {
+  vendor_id: string;
+  vendor_invoice_no: string;
+  vendor_invoice_date: string;
+  lines: PurchaseInvoiceLine[];
+}
+
 export interface LedgerEntry {
   date?: string;
   type: string;
@@ -137,6 +213,36 @@ export const vendorApApi = {
   createDebitNote: async (vendorId: string, payload: Partial<DebitNote> & { amount: number; date: string; reason: string }) => {
     const res = await api.post(`/vendors/${vendorId}/debit-notes`, payload);
     return res.data as DebitNote;
+  },
+};
+
+export const purchaseInvoicesApi = {
+  // Reads are fail-soft: a backend that hasn't shipped the route yet (404/500)
+  // returns an empty list so the Purchase page renders instead of erroring.
+  list: async (params?: { vendor_id?: string; store_id?: string; status?: string }) => {
+    try {
+      const res = await api.get('/vendors/purchase-invoices', { params });
+      const d = res.data as { purchase_invoices?: PurchaseInvoice[]; total?: number };
+      return { purchase_invoices: d.purchase_invoices ?? [], total: d.total ?? (d.purchase_invoices?.length ?? 0) };
+    } catch {
+      return { purchase_invoices: [] as PurchaseInvoice[], total: 0 };
+    }
+  },
+  get: async (id: string) => {
+    const res = await api.get(`/vendors/purchase-invoices/${id}`);
+    return res.data as PurchaseInvoice;
+  },
+  // Writes THROW so booking failures (validation, missing GRN, period lock) are
+  // surfaced loudly to the user rather than silently swallowed.
+  create: async (payload: PurchaseInvoiceCreate) => {
+    const res = await api.post('/vendors/purchase-invoices', payload);
+    return res.data as PurchaseInvoice;
+  },
+  // Returns a server-prepared DRAFT prefilled from the ACCEPTED GRN (+ its PO).
+  // Nothing is booked until create() is called with the reviewed draft.
+  createFromGrn: async (grnId: string) => {
+    const res = await api.post('/vendors/purchase-invoices/from-grn', { grn_id: grnId });
+    return res.data as PurchaseInvoiceDraft;
   },
 };
 
