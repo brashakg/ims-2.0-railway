@@ -13,6 +13,9 @@ export type UserRole =
   | 'STORE_MANAGER'
   | 'ACCOUNTANT'
   | 'CATALOG_MANAGER'
+  | 'DESIGN_MANAGER'  // 13th role (BVI merge): e-commerce image/design queue
+                      // owner. Forward-declared here for the Online Store
+                      // module; backend RBAC matrix gains it in a later phase.
   | 'OPTOMETRIST'
   | 'CASHIER'
   | 'SALES_CASHIER'
