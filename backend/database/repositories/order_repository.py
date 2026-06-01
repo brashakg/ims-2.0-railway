@@ -20,6 +20,31 @@ logger = logging.getLogger(__name__)
 # 1 Apr -> 31 Mar, so an invoice dated 2026-03-31 belongs to FY 2025-26 while
 # one dated 2026-04-01 starts the fresh FY 2026-27 series.
 
+# Default invoice prefix when neither the store nor the global invoice settings
+# configure one. Matches settings.InvoiceSettings.invoice_prefix default so a
+# fresh deployment is internally consistent.
+DEFAULT_INVOICE_PREFIX = "INV"
+
+
+def sanitize_invoice_prefix(value: object) -> Optional[str]:
+    """Normalise a human-entered invoice prefix into a safe serial segment.
+
+    Uppercases, strips surrounding whitespace, and keeps only characters that
+    are legal in a printed/scanned invoice number: alphanumerics plus a small
+    set of separators (``- _ /``). Caps the length at 10 (mirrors the
+    settings.InvoiceSettings validator). Returns None for an empty / unusable
+    input so callers can fall through to the next source rather than emit a
+    blank prefix that would collapse every store's series together.
+    """
+    if value is None:
+        return None
+    raw = str(value).strip().upper()
+    cleaned = "".join(c for c in raw if c.isalnum() or c in ("-", "_", "/"))
+    cleaned = cleaned.strip("/-_ ")
+    if not cleaned:
+        return None
+    return cleaned[:10]
+
 
 def fy_start_year(dt: datetime) -> int:
     """Return the calendar year the financial year STARTS in for ``dt``.
@@ -287,13 +312,19 @@ class OrderRepository(BaseRepository):
 
     @staticmethod
     def _store_invoice_prefix(store_id: Optional[str]) -> str:
-        """Stable alnum key fragment for a store's invoice counter.
+        """Stable alnum key fragment derived from the store_id string.
+
+        LAST-RESORT fallback only -- the configured ``invoice_prefix`` (per the
+        store doc, then global invoice settings) is the source of truth and is
+        resolved by ``_resolve_invoice_prefix``. This derivation is used only
+        when nothing is configured AND no store doc is available, so a missing
+        config still yields a stable, store-distinct key rather than collapsing
+        every store onto one series.
 
         Mirrors the order-number convention: drop the chain prefix (BV/WO/BVO),
         keep the store part, alnum-only, uppercase. "BV-BOK-01" -> "BOK01".
         Falls back to "IMS" so a missing/garbage store_id can't collapse the
-        counter key to an empty string (which would silently merge every
-        store's series).
+        counter key to an empty string.
         """
         raw = (store_id or "").strip().upper()
         parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
@@ -305,6 +336,73 @@ class OrderRepository(BaseRepository):
             frag = "IMS"
         frag = "".join(c for c in frag if c.isalnum()) or "IMS"
         return frag
+
+    def _lookup_configured_prefix(self, store_id: Optional[str]) -> Optional[str]:
+        """Read the configured invoice prefix from the DB, fail-soft.
+
+        Order of precedence:
+          1. ``stores.invoice_prefix`` for this ``store_id`` (per-store identity).
+          2. ``invoice_settings`` global doc (``_id == "default"``).
+        Returns a sanitized prefix or None if neither is configured / the DB is
+        unavailable. Never raises -- invoicing must not 500 on a config read.
+        """
+        db = None
+        try:
+            db = getattr(self.collection, "database", None)
+        except Exception:  # noqa: BLE001
+            db = None
+        if db is None:
+            return None
+        # 1) Per-store configured prefix.
+        if store_id:
+            try:
+                store_doc = db["stores"].find_one(
+                    {"store_id": store_id}, {"invoice_prefix": 1}
+                )
+                prefix = sanitize_invoice_prefix(
+                    (store_doc or {}).get("invoice_prefix")
+                )
+                if prefix:
+                    return prefix
+            except Exception:  # noqa: BLE001
+                logger.debug("store invoice_prefix lookup failed", exc_info=True)
+        # 2) Global invoice settings.
+        try:
+            settings_doc = db["invoice_settings"].find_one(
+                {"_id": "default"}, {"invoice_prefix": 1}
+            )
+            prefix = sanitize_invoice_prefix(
+                (settings_doc or {}).get("invoice_prefix")
+            )
+            if prefix:
+                return prefix
+        except Exception:  # noqa: BLE001
+            logger.debug("invoice_settings prefix lookup failed", exc_info=True)
+        return None
+
+    def _resolve_invoice_prefix(
+        self, store_id: Optional[str], store_doc: Optional[Dict] = None
+    ) -> str:
+        """Resolve the invoice prefix to use for ``store_id``.
+
+        Honors the CONFIGURED prefix rather than deriving it from the store_id
+        string. Precedence:
+          1. ``store_doc.invoice_prefix`` (when the caller already has the doc).
+          2. ``stores.invoice_prefix`` / global ``invoice_settings`` from the DB.
+          3. ``DEFAULT_INVOICE_PREFIX`` ("INV") -- a sane, non-empty default.
+
+        The result is sanitized (uppercased, serial-safe characters, <=10 chars)
+        and is GUARANTEED non-empty: an empty prefix would merge every store's
+        series and break Rule 46(b) uniqueness, so we never return one.
+        """
+        if store_doc is not None:
+            prefix = sanitize_invoice_prefix(store_doc.get("invoice_prefix"))
+            if prefix:
+                return prefix
+        prefix = self._lookup_configured_prefix(store_id)
+        if prefix:
+            return prefix
+        return DEFAULT_INVOICE_PREFIX
 
     def _counters_collection(self):
         """Best-effort handle on the shared ``counters`` collection.
@@ -345,30 +443,43 @@ class OrderRepository(BaseRepository):
             logger.debug("invoice_number index create skipped", exc_info=True)
 
     def next_invoice_number(
-        self, store_id: Optional[str], when: Optional[datetime] = None
+        self,
+        store_id: Optional[str],
+        when: Optional[datetime] = None,
+        store_doc: Optional[Dict] = None,
     ) -> str:
         """Allocate the next GST invoice number for ``store_id`` in its FY.
 
-        Atomic per (store, financial-year): a single ``find_one_and_update``
+        The prefix is the CONFIGURED ``invoice_prefix`` -- per the store doc,
+        then global invoice settings, then the "INV" default -- NOT a fragment
+        derived from the store_id string (see ``_resolve_invoice_prefix``). So a
+        store configured with prefix "BV" bills ``BV/2026-27/000123`` and one
+        configured "WO" bills ``WO/2026-27/000123``; the operator's configured
+        identity is honored.
+
+        Atomic per (prefix, financial-year): a single ``find_one_and_update``
         with ``$inc`` claims the next serial from a ``counters`` doc keyed
-        ``invoice:{store_prefix}:{fy_start_year}``. Mongo serialises the
-        increment, so two cashiers raising invoices at the same instant get
-        distinct serials -- no read-modify-write window, no duplicates.
+        ``invoice:{prefix}:{fy_start_year}``. Mongo serialises the increment, so
+        two cashiers raising invoices at the same instant get distinct serials
+        -- no read-modify-write window, no duplicates (Rule 46(b)).
 
-        Format: ``BV/INV/2026-27/000123`` -- FY-scoped, zero-padded to 6.
+        Format: ``{PREFIX}/{FY}/{serial}`` e.g. ``BV/2026-27/000123`` --
+        FY-scoped, zero-padded to 6. The serial RESETS for each new financial
+        year (a fresh counter doc) and is consecutive within the FY.
 
-        The serial RESETS for each new financial year (a fresh counter doc),
-        which is exactly what GST Rule 46(b) wants: a consecutive series
-        unique within the FY.
+        We do NOT renumber existing invoices: callers only invoke this for an
+        order with no stored invoice_number, and the stored value is never
+        overwritten -- historical invoices keep their original number.
 
         Fail-soft: with no counters collection (DB-less / mock), falls back to
         a timestamp-derived suffix so the caller still gets a usable, unique
-        string rather than a 500. That fallback path is only hit when the DB
-        is unavailable, in which case nothing is persisted anyway.
+        string (with the same configured prefix + FY) rather than a 500. That
+        fallback path is only hit when the DB is unavailable, in which case
+        nothing is persisted anyway.
         """
         now = when or datetime.now()
         label = fy_label(now)
-        prefix = self._store_invoice_prefix(store_id)
+        prefix = self._resolve_invoice_prefix(store_id, store_doc)
         counters = self._counters_collection()
         if counters is not None:
             try:
@@ -383,7 +494,7 @@ class OrderRepository(BaseRepository):
                 )
                 seq = (doc or {}).get("seq")
                 if isinstance(seq, int) and seq > 0:
-                    return f"BV/INV/{label}/{seq:06d}"
+                    return f"{prefix}/{label}/{seq:06d}"
             except Exception:  # noqa: BLE001 - fall through to safe fallback
                 logger.warning(
                     "invoice counter $inc failed; using fallback serial",
@@ -392,7 +503,7 @@ class OrderRepository(BaseRepository):
         # Fail-soft fallback (DB-less / counter error): time-derived, still
         # unique and still FY-labelled so the format stays consistent.
         suffix = now.strftime("%m%d%H%M%S")
-        return f"BV/INV/{label}/{suffix}"
+        return f"{prefix}/{label}/{suffix}"
 
     def create_unique(
         self, data: Dict, number_field: str, regenerate, max_retries: int = 6

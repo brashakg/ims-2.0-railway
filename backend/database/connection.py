@@ -179,6 +179,19 @@ class DatabaseConnection:
                 "order_number", unique=True, sparse=True, background=True
             )
             orders.create_index([("store_id", 1), ("balance_due", 1)], background=True)
+            # GST invoice serial (Rule 46(b)): UNIQUE so a duplicate invoice
+            # number can never be written -- the per-(prefix, FY) atomic counter
+            # already hands out unique serials; this is the DB-level backstop
+            # that makes a duplicate physically impossible. PARTIAL so the many
+            # legacy / DRAFT orders with NO invoice_number (field absent) aren't
+            # indexed and can't collide on a missing value.
+            orders.create_index(
+                "invoice_number",
+                unique=True,
+                partialFilterExpression={"invoice_number": {"$type": "string"}},
+                name="uniq_invoice_number",
+                background=True,
+            )
 
             # Customers
             customers = self._db["customers"]

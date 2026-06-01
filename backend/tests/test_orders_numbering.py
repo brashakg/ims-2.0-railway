@@ -6,10 +6,14 @@ Three audit findings on the revenue-critical order path:
   P3-A  GST invoice numbering. Indian GST Rule 46(b) wants a CONSECUTIVE
         serial unique per FINANCIAL year (Apr-Mar). The old format
         `BV/INV/{calendar_year}/{order_id[:8]}` was neither consecutive nor
-        FY-scoped. New invoices use an atomic per-(store, FY) counter
-        (`find_one_and_update($inc)`) -> `BV/INV/2026-27/000123`. OLD orders
-        keep their stored number (never rewritten) so historical invoices
-        still resolve.
+        FY-scoped, and it IGNORED the operator's configured invoice prefix.
+        New invoices honor the CONFIGURED `invoice_prefix` (store doc ->
+        global invoice_settings -> "INV" default) and use an atomic
+        per-(prefix, FY) counter (`find_one_and_update($inc)`) ->
+        `{PREFIX}/{FY}/{serial}` e.g. `BV/2026-27/000123`. A UNIQUE partial
+        index on `invoice_number` makes a duplicate physically impossible.
+        OLD orders keep their stored number (never rewritten) so historical
+        invoices still resolve.
 
   P3-B  order_number retry. order_number has a UNIQUE sparse index; a
         concurrent collision used to 500. `create_unique` regenerates just
@@ -46,6 +50,7 @@ from database.repositories.order_repository import (
     OrderRepository,
     fy_label,
     fy_start_year,
+    sanitize_invoice_prefix,
 )
 
 
@@ -87,28 +92,63 @@ class FakeCounters:
         return copy.deepcopy(doc)
 
 
+class FakeDocCollection:
+    """Tiny in-memory collection supporting the find_one shape the prefix
+    resolver uses (filter + projection). Backs the fake ``stores`` and
+    ``invoice_settings`` collections so configured-prefix resolution is
+    exercised exactly as it is in production."""
+
+    def __init__(self, docs: Optional[List[Dict[str, Any]]] = None) -> None:
+        self.docs: List[Dict[str, Any]] = list(docs or [])
+
+    def find_one(self, flt: Dict[str, Any], projection: Any = None):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in flt.items()):
+                return copy.deepcopy(d)
+        return None
+
+
 class FakeOrdersCollection:
     """Minimal orders collection: insert_one enforces a unique order_number
-    (raises E11000 on a repeat), and supports find_one + create_index."""
+    (raises E11000 on a repeat), and supports find_one + create_index.
 
-    def __init__(self, counters: Optional[FakeCounters] = None) -> None:
+    Its ``.database`` exposes ``counters`` (atomic $inc), ``stores`` and
+    ``invoice_settings`` so the configured-prefix resolver can be tested."""
+
+    def __init__(
+        self,
+        counters: Optional[FakeCounters] = None,
+        stores: Optional[FakeDocCollection] = None,
+        invoice_settings: Optional[FakeDocCollection] = None,
+    ) -> None:
         self.docs: List[Dict[str, Any]] = []
         self._counters = counters
+        self._stores = stores if stores is not None else FakeDocCollection()
+        self._invoice_settings = (
+            invoice_settings
+            if invoice_settings is not None
+            else FakeDocCollection()
+        )
         self.indexes: List[Dict[str, Any]] = []
         # Optional forced-collision queue: order_numbers the NEXT insert(s)
         # should reject as duplicates regardless of what's stored, to simulate
         # a racing worker that already took the value.
         self.force_dup_numbers: List[str] = []
 
-    # Lets the repo reach `counters` via self.collection.database["counters"].
+    # Lets the repo reach sibling collections via self.collection.database[...].
     @property
     def database(self):
         store = self
 
         class _DB:
             def __getitem__(self, name):
-                assert name == "counters"
-                return store._counters
+                if name == "counters":
+                    return store._counters
+                if name == "stores":
+                    return store._stores
+                if name == "invoice_settings":
+                    return store._invoice_settings
+                raise KeyError(name)
 
         return _DB()
 
@@ -144,10 +184,31 @@ class FakeOrdersCollection:
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
 
-def _repo_with_counter():
+def _repo_with_counter(stores=None, invoice_settings=None):
+    """Build a repo over fake collections.
+
+    With no ``stores`` / ``invoice_settings`` configured, the prefix resolver
+    falls through to the "INV" default -- so a bare ``_repo_with_counter()``
+    mints ``INV/...`` numbers. Pass a FakeDocCollection to exercise a store's
+    configured ``invoice_prefix`` or the global invoice settings."""
     counters = FakeCounters()
-    coll = FakeOrdersCollection(counters)
+    coll = FakeOrdersCollection(
+        counters, stores=stores, invoice_settings=invoice_settings
+    )
     return OrderRepository(coll), coll, counters
+
+
+def _stores(*store_docs):
+    """Fake ``stores`` collection seeded with the given docs."""
+    return FakeDocCollection(list(store_docs))
+
+
+def _invoice_settings(prefix: Optional[str]):
+    """Fake ``invoice_settings`` global doc (``_id == 'default'``)."""
+    doc = {"_id": "default"}
+    if prefix is not None:
+        doc["invoice_prefix"] = prefix
+    return FakeDocCollection([doc])
 
 
 # ============================================================================
@@ -175,72 +236,153 @@ class TestFinancialYearHelpers:
 
 
 # ============================================================================
-# P3-A: atomic consecutive invoice serial per store + FY
+# P3-A: atomic consecutive invoice serial per configured-prefix + FY
 # ============================================================================
 
 
+# A store whose operator configured the invoice prefix "BV" (Better Vision).
+_BV_STORE = {"store_id": "BV-BOK-01", "invoice_prefix": "BV"}
+_BV2_STORE = {"store_id": "BV-RNC-02", "invoice_prefix": "BV"}
+_WO_STORE = {"store_id": "WO-PUN-01", "invoice_prefix": "WO"}
+
+
 class TestInvoiceNumbering:
-    def test_sequential_within_store_and_fy(self):
+    def test_sequential_within_prefix_and_fy(self):
+        # Configured prefix is honored: store_doc.invoice_prefix == "BV" ->
+        # numbers read BV/2026-27/000001, NOT a store_id-derived fragment.
         repo, _coll, _counters = _repo_with_counter()
         when = datetime(2026, 5, 1)
-        n1 = repo.next_invoice_number("BV-BOK-01", when)
-        n2 = repo.next_invoice_number("BV-BOK-01", when)
-        n3 = repo.next_invoice_number("BV-BOK-01", when)
-        assert n1 == "BV/INV/2026-27/000001"
-        assert n2 == "BV/INV/2026-27/000002"
-        assert n3 == "BV/INV/2026-27/000003"
+        n1 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        n2 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        n3 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        assert n1 == "BV/2026-27/000001"
+        assert n2 == "BV/2026-27/000002"
+        assert n3 == "BV/2026-27/000003"
+
+    def test_configured_prefix_read_from_stores_collection(self):
+        # No store_doc passed -> the resolver reads stores.invoice_prefix.
+        repo, _coll, _counters = _repo_with_counter(stores=_stores(_BV_STORE))
+        n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
+        assert n == "BV/2026-27/000001"
+
+    def test_store_prefix_beats_global_invoice_settings(self):
+        # Per-store prefix wins over the global invoice_settings default.
+        repo, _coll, _counters = _repo_with_counter(
+            stores=_stores(_WO_STORE),
+            invoice_settings=_invoice_settings("BV"),
+        )
+        n = repo.next_invoice_number("WO-PUN-01", datetime(2026, 5, 1))
+        assert n == "WO/2026-27/000001"
+
+    def test_global_invoice_settings_prefix_used_when_store_has_none(self):
+        # Store has no invoice_prefix -> fall back to global invoice settings.
+        repo, _coll, _counters = _repo_with_counter(
+            stores=_stores({"store_id": "BV-BOK-01"}),
+            invoice_settings=_invoice_settings("ACME"),
+        )
+        n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
+        assert n == "ACME/2026-27/000001"
+
+    def test_default_prefix_when_nothing_configured(self):
+        # Neither store nor global settings configure a prefix -> "INV" default.
+        repo, _coll, _counters = _repo_with_counter()
+        n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
+        assert n == "INV/2026-27/000001"
 
     def test_serial_is_six_digit_zero_padded(self):
         repo, _coll, _counters = _repo_with_counter()
-        n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
+        n = repo.next_invoice_number(
+            "BV-BOK-01", datetime(2026, 5, 1), store_doc=_BV_STORE
+        )
         serial = n.rsplit("/", 1)[1]
         assert len(serial) == 6
         assert serial == "000001"
 
-    def test_distinct_stores_have_independent_series(self):
+    def test_distinct_prefixes_have_independent_series(self):
+        # Two stores on DIFFERENT configured prefixes keep independent series.
         repo, _coll, _counters = _repo_with_counter()
         when = datetime(2026, 5, 1)
-        a1 = repo.next_invoice_number("BV-BOK-01", when)
-        b1 = repo.next_invoice_number("BV-RNC-02", when)
-        a2 = repo.next_invoice_number("BV-BOK-01", when)
-        # Each store starts at 1 -- one store's bills don't advance another's.
-        assert a1 == "BV/INV/2026-27/000001"
-        assert b1 == "BV/INV/2026-27/000001"
-        assert a2 == "BV/INV/2026-27/000002"
+        a1 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        w1 = repo.next_invoice_number("WO-PUN-01", when, store_doc=_WO_STORE)
+        a2 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        assert a1 == "BV/2026-27/000001"
+        assert w1 == "WO/2026-27/000001"
+        assert a2 == "BV/2026-27/000002"
+
+    def test_same_prefix_shares_one_consecutive_series(self):
+        # Two stores that SHARE a configured prefix (same legal billing
+        # identity) draw from ONE consecutive series -- GST Rule 46(b) scopes
+        # the serial to the invoice prefix, not the physical store.
+        repo, _coll, _counters = _repo_with_counter()
+        when = datetime(2026, 5, 1)
+        a1 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        b1 = repo.next_invoice_number("BV-RNC-02", when, store_doc=_BV2_STORE)
+        a2 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+        assert a1 == "BV/2026-27/000001"
+        assert b1 == "BV/2026-27/000002"  # continues the SAME BV series
+        assert a2 == "BV/2026-27/000003"
 
     def test_fy_boundary_resets_serial(self):
         repo, _coll, _counters = _repo_with_counter()
         # End of FY 2025-26.
-        last_old = repo.next_invoice_number("BV-BOK-01", datetime(2026, 3, 31))
-        repo.next_invoice_number("BV-BOK-01", datetime(2026, 3, 31))
+        last_old = repo.next_invoice_number(
+            "BV-BOK-01", datetime(2026, 3, 31), store_doc=_BV_STORE
+        )
+        repo.next_invoice_number(
+            "BV-BOK-01", datetime(2026, 3, 31), store_doc=_BV_STORE
+        )
         # First of FY 2026-27 -> serial resets to 1, label flips.
-        first_new = repo.next_invoice_number("BV-BOK-01", datetime(2026, 4, 1))
-        assert last_old == "BV/INV/2025-26/000001"
-        assert first_new == "BV/INV/2026-27/000001"
+        first_new = repo.next_invoice_number(
+            "BV-BOK-01", datetime(2026, 4, 1), store_doc=_BV_STORE
+        )
+        assert last_old == "BV/2025-26/000001"
+        assert first_new == "BV/2026-27/000001"
 
     def test_parallel_inc_never_duplicates(self):
-        """Many allocations against the same (store, FY) counter must all be
-        distinct -- the $inc is the single point of serialization."""
+        """Many allocations against the same (prefix, FY) counter must all be
+        distinct AND consecutive -- the $inc is the single point of
+        serialization, so a burst of concurrent invoices is monotone 1..N with
+        no gaps or repeats."""
         repo, _coll, _counters = _repo_with_counter()
         when = datetime(2026, 6, 15)
-        numbers = [repo.next_invoice_number("BV-BOK-01", when) for _ in range(200)]
+        numbers = [
+            repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
+            for _ in range(200)
+        ]
         assert len(set(numbers)) == 200  # no collisions
         serials = sorted(int(n.rsplit("/", 1)[1]) for n in numbers)
-        assert serials == list(range(1, 201))  # consecutive 1..200
+        assert serials == list(range(1, 201))  # consecutive 1..200, no gaps
+        assert all(n.startswith("BV/2026-27/") for n in numbers)
 
     def test_no_counter_collection_falls_back_safely(self):
-        """DB-less / no counters collection -> a usable FY-labelled string,
-        not a 500."""
+        """DB-less / no counters collection -> a usable, prefix + FY-labelled
+        string, not a 500. The configured prefix is still honored when the
+        caller hands over the store_doc."""
         coll = FakeOrdersCollection(counters=None)
         repo = OrderRepository(coll)
-        n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
-        assert n.startswith("BV/INV/2026-27/")
+        n = repo.next_invoice_number(
+            "BV-BOK-01", datetime(2026, 5, 1), store_doc=_BV_STORE
+        )
+        assert n.startswith("BV/2026-27/")
         # Fallback suffix is not the 6-digit serial; just confirm it's present.
         assert len(n.rsplit("/", 1)[1]) > 0
 
+    def test_messy_configured_prefix_is_sanitized(self):
+        # Operators may type a prefix with stray spaces/casing; it is uppercased
+        # and trimmed to a serial-safe segment before use.
+        repo, _coll, _counters = _repo_with_counter()
+        n = repo.next_invoice_number(
+            "BV-BOK-01",
+            datetime(2026, 5, 1),
+            store_doc={"store_id": "BV-BOK-01", "invoice_prefix": "  bv-opt "},
+        )
+        assert n == "BV-OPT/2026-27/000001"
+
     def test_garbage_store_id_uses_ims_prefix_not_blank(self):
-        # The prefix is only a counter-key fragment, but a blank one would
-        # silently merge every store's series, so it must fall back to IMS.
+        # _store_invoice_prefix is now the LAST-RESORT derivation (used only
+        # when nothing is configured and no store doc is available). A blank
+        # would silently merge every store's series, so it still falls back to
+        # IMS -- behavior preserved.
         assert OrderRepository._store_invoice_prefix("") == "IMS"
         assert OrderRepository._store_invoice_prefix(None) == "IMS"
         assert OrderRepository._store_invoice_prefix("BV") == "IMS"
@@ -251,9 +393,12 @@ class TestInvoiceNumbering:
         assert len(coll.indexes) == 1
         idx = coll.indexes[0]
         assert idx.get("unique") is True
+        assert idx.get("name") == "uniq_invoice_number"
         # Partial so legacy/DRAFT orders with NO invoice_number aren't indexed
-        # and can't collide on a missing value.
-        assert "partialFilterExpression" in idx
+        # and can't collide on a missing value -- only docs whose
+        # invoice_number is a string are constrained.
+        pfe = idx.get("partialFilterExpression")
+        assert pfe == {"invoice_number": {"$type": "string"}}
 
     def test_ensure_invoice_index_never_raises(self):
         class _Boom(FakeOrdersCollection):
@@ -262,6 +407,98 @@ class TestInvoiceNumbering:
 
         repo = OrderRepository(_Boom(FakeCounters()))
         repo.ensure_invoice_index()  # must not raise
+
+
+# ============================================================================
+# P3-A: configured-prefix resolution + sanitization
+# ============================================================================
+
+
+class TestSanitizeInvoicePrefix:
+    def test_uppercases_and_trims(self):
+        assert sanitize_invoice_prefix("  bv ") == "BV"
+
+    def test_keeps_serial_safe_separators(self):
+        assert sanitize_invoice_prefix("BV-OPT") == "BV-OPT"
+        assert sanitize_invoice_prefix("BV/OPT") == "BV/OPT"
+        assert sanitize_invoice_prefix("BV_OPT") == "BV_OPT"
+
+    def test_strips_leading_trailing_separators(self):
+        assert sanitize_invoice_prefix("/BV/") == "BV"
+
+    def test_drops_unsafe_chars(self):
+        # Spaces and punctuation that don't belong in a serial are removed.
+        assert sanitize_invoice_prefix("B V!@#") == "BV"
+
+    def test_caps_length_at_10(self):
+        assert sanitize_invoice_prefix("ABCDEFGHIJKLMNOP") == "ABCDEFGHIJ"
+
+    def test_empty_and_none_return_none(self):
+        assert sanitize_invoice_prefix("") is None
+        assert sanitize_invoice_prefix(None) is None
+        assert sanitize_invoice_prefix("   ") is None
+        assert sanitize_invoice_prefix("///") is None
+
+
+class TestResolveInvoicePrefix:
+    def test_store_doc_wins(self):
+        repo, _coll, _counters = _repo_with_counter(
+            stores=_stores({"store_id": "BV-BOK-01", "invoice_prefix": "ZZ"}),
+            invoice_settings=_invoice_settings("GG"),
+        )
+        # An explicit store_doc takes precedence over both DB lookups.
+        assert (
+            repo._resolve_invoice_prefix(
+                "BV-BOK-01", store_doc={"invoice_prefix": "BV"}
+            )
+            == "BV"
+        )
+
+    def test_falls_back_to_store_collection(self):
+        repo, _coll, _counters = _repo_with_counter(
+            stores=_stores({"store_id": "BV-BOK-01", "invoice_prefix": "BV"})
+        )
+        assert repo._resolve_invoice_prefix("BV-BOK-01") == "BV"
+
+    def test_falls_back_to_global_settings(self):
+        repo, _coll, _counters = _repo_with_counter(
+            stores=_stores({"store_id": "BV-BOK-01"}),
+            invoice_settings=_invoice_settings("ACME"),
+        )
+        assert repo._resolve_invoice_prefix("BV-BOK-01") == "ACME"
+
+    def test_default_when_nothing_configured(self):
+        repo, _coll, _counters = _repo_with_counter()
+        assert repo._resolve_invoice_prefix("BV-BOK-01") == "INV"
+        # And resolves a non-empty default even with a blank store_id.
+        assert repo._resolve_invoice_prefix("") == "INV"
+        assert repo._resolve_invoice_prefix(None) == "INV"
+
+    def test_blank_configured_prefix_is_ignored(self):
+        # A store doc with an empty/garbage prefix must NOT yield a blank prefix
+        # (that would merge every store's series); fall through to the default.
+        repo, _coll, _counters = _repo_with_counter()
+        assert (
+            repo._resolve_invoice_prefix(
+                "BV-BOK-01", store_doc={"invoice_prefix": "   "}
+            )
+            == "INV"
+        )
+
+    def test_db_read_failure_is_fail_soft(self):
+        # A stores/invoice_settings read that raises must degrade to the default,
+        # never crash a sale.
+        class _BoomDB(FakeOrdersCollection):
+            @property
+            def database(self):
+                class _DB:
+                    def __getitem__(self, name):
+                        raise RuntimeError("db down")
+
+                return _DB()
+
+        repo = OrderRepository(_BoomDB(FakeCounters()))
+        assert repo._resolve_invoice_prefix("BV-BOK-01") == "INV"
 
 
 # ============================================================================
@@ -293,7 +530,8 @@ class TestOldInvoiceLookupStillWorks:
         assert found["order_id"] == "O-legacy"
 
     def test_order_without_invoice_gets_new_format_and_persists(self):
-        repo, coll, _counters = _repo_with_counter()
+        # The store carries the configured prefix "BV"; a new invoice uses it.
+        repo, coll, _counters = _repo_with_counter(stores=_stores(_BV_STORE))
         coll.docs.append(
             {
                 "_id": "O-new",
@@ -306,7 +544,7 @@ class TestOldInvoiceLookupStillWorks:
         assert not order.get("invoice_number")
         new_num = repo.next_invoice_number(order["store_id"], datetime(2026, 5, 1))
         repo.set_invoice("O-new", new_num)
-        assert new_num == "BV/INV/2026-27/000001"
+        assert new_num == "BV/2026-27/000001"
         # Persisted and now resolvable by the new number.
         assert coll.find_one({"invoice_number": new_num})["order_id"] == "O-new"
 

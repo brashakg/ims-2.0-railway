@@ -2678,10 +2678,13 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
         # Return existing invoice or generate a new one.
         #
         # GST compliance (P3-A): a NEW invoice gets a consecutive serial that
-        # is unique per (store, financial year) -- BV/INV/2026-27/000123 --
-        # allocated atomically via a counters doc so two simultaneous bills
-        # can't share a serial (Rule 46(b)). OLD orders keep whatever
-        # invoice_number they already carry (including the legacy
+        # is unique per (configured-prefix, financial year) -- e.g.
+        # BV/2026-27/000123 -- allocated atomically via a counters doc so two
+        # simultaneous bills can't share a serial (Rule 46(b)). The prefix is
+        # the store's CONFIGURED invoice_prefix (falling back to global invoice
+        # settings, then "INV"); store_doc was already loaded above for the
+        # GSTIN check, so we hand it straight to the allocator. OLD orders keep
+        # whatever invoice_number they already carry (including the legacy
         # BV/INV/{year}/{order_id[:8]} format); we never rewrite a stored
         # number, so historical invoices stay resolvable exactly as before.
         invoice_number = order.get("invoice_number")
@@ -2691,7 +2694,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
                 repo.ensure_invoice_index()
             except Exception:  # noqa: BLE001 - index is defense-in-depth only
                 pass
-            invoice_number = repo.next_invoice_number(store_id)
+            invoice_number = repo.next_invoice_number(store_id, store_doc=store_doc)
             repo.set_invoice(order_id, invoice_number)
 
         # Convert items to camelCase
