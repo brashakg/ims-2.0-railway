@@ -9,6 +9,7 @@ import {
   Plus,
   Search,
   FileText,
+  Receipt,
   Truck,
   TrendingUp,
   Loader2,
@@ -19,6 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import { vendorsApi } from '../../services/api';
 import { VendorReturns } from './VendorReturns';
 import { PurchaseTable } from './PurchaseTable';
+import { PurchaseInvoicesTab } from './PurchaseInvoicesTab';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
 import { PurchaseOrderDetail } from './PurchaseOrderDetail';
 import { SupplierPanel } from './SupplierPanel';
@@ -111,7 +113,7 @@ export function PurchaseManagementPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: TabType[] = ['purchase-orders', 'suppliers', 'vendor-returns', 'analytics'];
+      const validTabs: TabType[] = ['purchase-orders', 'purchase-invoices', 'suppliers', 'vendor-returns', 'analytics'];
       if (validTabs.includes(tabParam as TabType)) {
         setActiveTab(tabParam as TabType);
       }
@@ -219,13 +221,16 @@ export function PurchaseManagementPage() {
           <h1>Stock, from upstream.</h1>
           <div className="hint">Vendor ledger, purchase orders, GRN verification with quantity + price variance, payment aging, credit notes.</div>
         </div>
-        <button
-          onClick={() => activeTab === 'purchase-orders' ? setShowCreatePO(true) : setShowSupplierModal(true)}
-          className="btn sm primary"
-        >
-          <Plus className="w-4 h-4" />
-          {activeTab === 'purchase-orders' ? 'New PO' : 'New supplier'}
-        </button>
+        {/* Invoices tab carries its own Create-from-GRN / Manual buttons. */}
+        {activeTab !== 'purchase-invoices' && (
+          <button
+            onClick={() => activeTab === 'purchase-orders' ? setShowCreatePO(true) : setShowSupplierModal(true)}
+            className="btn sm primary"
+          >
+            <Plus className="w-4 h-4" />
+            {activeTab === 'purchase-orders' ? 'New PO' : 'New supplier'}
+          </button>
+        )}
       </div>
 
       {/* Load Error Banner */}
@@ -259,6 +264,19 @@ export function PurchaseManagementPage() {
             <div className="flex items-center gap-2">
               <FileText className="w-4 h-4" />
               Purchase Orders
+            </div>
+          </button>
+          <button
+            onClick={() => setActiveTab('purchase-invoices')}
+            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
+              activeTab === 'purchase-invoices'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Receipt className="w-4 h-4" />
+              Purchase Invoices
             </div>
           </button>
           <button
@@ -303,7 +321,8 @@ export function PurchaseManagementPage() {
         </nav>
       </div>
 
-      {/* Search & Filters */}
+      {/* Search & Filters (invoices tab has its own controls) */}
+      {activeTab !== 'purchase-invoices' && (
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
@@ -331,6 +350,7 @@ export function PurchaseManagementPage() {
           </select>
         )}
       </div>
+      )}
 
       {/* Content */}
       {isLoading ? (
@@ -339,6 +359,8 @@ export function PurchaseManagementPage() {
         </div>
       ) : activeTab === 'purchase-orders' ? (
         <PurchaseTable purchaseOrders={filteredPOs} onViewPO={setSelectedPO} />
+      ) : activeTab === 'purchase-invoices' ? (
+        <PurchaseInvoicesTab suppliers={suppliers} />
       ) : activeTab === 'suppliers' ? (
         <SupplierPanel suppliers={filteredSuppliers} />
       ) : activeTab === 'vendor-returns' ? (
