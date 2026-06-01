@@ -445,6 +445,11 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/hr/attendance/grid', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
     {"method": 'GET', "path": '/api/v1/hr/attendance/late-marks', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/hr/attendance/mark', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'GET', "path": '/api/v1/hr/attendance/summary', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    # Manager attendance CORRECTION is a stronger action than read/mark: gated to
+    # SUPERADMIN/ADMIN/STORE_MANAGER (require_roles('ADMIN','STORE_MANAGER') +
+    # SUPERADMIN auto) on top of the router-level finance gate, and audit-logged.
+    {"method": 'PUT', "path": '/api/v1/hr/attendance/{attendance_id}', "allowed": ['ADMIN', 'STORE_MANAGER', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/hr/attendance/{attendance_id}/check-out', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/hr/employee/{employee_id}/salary-slip', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/hr/leaves', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},

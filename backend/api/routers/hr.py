@@ -13,6 +13,7 @@ import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_attendance_repository,
+    get_audit_repository,
     get_leave_repository,
     get_payroll_repository,
     get_user_repository,
@@ -130,6 +131,70 @@ class AttendanceMarkRequest(BaseModel):
             ci_ts = ci.replace(tzinfo=None)
             co_ts = co.replace(tzinfo=None)
             if co_ts <= ci_ts:
+                raise ValueError("check_out must be after check_in")
+        return self
+
+
+class AttendanceEditRequest(BaseModel):
+    """Partial correction of an existing attendance row (admin function).
+
+    Every field is optional -- only the keys provided are changed. Used by the
+    PUT /attendance/{attendance_id} manager-edit endpoint so SUPERADMIN / ADMIN /
+    STORE_MANAGER can fix a wrong status, missing/wrong stamp, or a row recorded
+    on the wrong day. Mutating an immutable-by-staff record, so it is audit-logged.
+
+    NOTE: the date field is named ``record_date`` internally (alias ``date`` on
+    the wire) to avoid shadowing the imported ``date`` type -- a Python-level
+    annotation collision (hr.py has no ``from __future__ import annotations``, so
+    a field literally named ``date`` would make ``Optional[date]`` resolve to the
+    field, not the type, and reject every value).
+    """
+
+    model_config = {"populate_by_name": True}
+
+    status: Optional[str] = None
+    record_date: Optional[date] = Field(default=None, alias="date")
+    check_in: Optional[datetime] = None
+    check_out: Optional[datetime] = None
+    is_late: Optional[bool] = None
+    late_minutes: Optional[int] = None
+    notes: Optional[str] = None
+    # Sentinels so a caller can explicitly CLEAR a stamp (send null) vs. leave it
+    # untouched (omit the key). Pydantic can't distinguish those for Optional
+    # fields alone, so the endpoint uses model_fields_set.
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        normalised = v.strip().upper()
+        if normalised not in _VALID_STATUSES:
+            raise ValueError(
+                f"status must be one of: {', '.join(sorted(_VALID_STATUSES))}"
+            )
+        return normalised
+
+    @field_validator("record_date")
+    @classmethod
+    def date_not_future(cls, v):
+        if v is not None and v > date.today():
+            raise ValueError("Attendance date cannot be in the future")
+        return v
+
+    @field_validator("late_minutes")
+    @classmethod
+    def late_minutes_non_negative(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("late_minutes cannot be negative")
+        return v
+
+    @model_validator(mode="after")
+    def checkout_after_checkin(self) -> "AttendanceEditRequest":
+        ci = self.check_in
+        co = self.check_out
+        if ci is not None and co is not None:
+            if co.replace(tzinfo=None) <= ci.replace(tzinfo=None):
                 raise ValueError("check_out must be after check_in")
         return self
 
@@ -316,6 +381,92 @@ def _roster_from_users(users: list, store_id: Optional[str]) -> list:
     return roster
 
 
+def _pct_present(present: float, total_marked: float) -> float:
+    """Percent of marked working-days the employee was present (present +
+    half-day*0.5). 0.0 when no day was marked. Rounded to 1 dp."""
+    if total_marked <= 0:
+        return 0.0
+    return round(100.0 * present / total_marked, 1)
+
+
+def _summarise_grid(grid: dict) -> dict:
+    """Roll a built grid into per-employee + per-store summary rollups.
+
+    Pure (no DB): consumes the output of _build_grid so the counting logic stays
+    in ONE place. Per employee: counts present/absent/half_day/leave/lwp/
+    week_off/late, days_present (present + 0.5*half_day), days_marked, and
+    pct_present. Per store: the same counts summed across that store's roster +
+    an employee headcount. Also returns flat company-wide totals.
+    """
+    per_employee = []
+    per_store: dict = {}
+
+    for emp in grid.get("employees", []) or []:
+        s = emp.get("summary", {}) or {}
+        present = float(s.get("present", 0))
+        half = float(s.get("half_day", 0))
+        days_present = present + 0.5 * half
+        days_marked = (
+            present
+            + half
+            + float(s.get("absent", 0))
+            + float(s.get("leave", 0))
+            + float(s.get("lwp", 0))
+            + float(s.get("week_off", 0))
+        )
+        emp_row = {
+            "employee_id": emp.get("employee_id"),
+            "name": emp.get("name", ""),
+            "store_id": emp.get("store_id", ""),
+            "present": int(s.get("present", 0)),
+            "absent": int(s.get("absent", 0)),
+            "half_day": int(s.get("half_day", 0)),
+            "leave": int(s.get("leave", 0)),
+            "lwp": int(s.get("lwp", 0)),
+            "holiday": int(s.get("week_off", 0)),
+            "late": int(s.get("late", 0)),
+            "days_present": round(days_present, 1),
+            "days_marked": round(days_marked, 1),
+            "pct_present": _pct_present(days_present, days_marked),
+        }
+        per_employee.append(emp_row)
+
+        sid = emp.get("store_id") or ""
+        bucket = per_store.setdefault(
+            sid,
+            {
+                "store_id": sid,
+                "employees": 0,
+                "present": 0,
+                "absent": 0,
+                "half_day": 0,
+                "leave": 0,
+                "lwp": 0,
+                "holiday": 0,
+                "late": 0,
+                "days_present": 0.0,
+            },
+        )
+        bucket["employees"] += 1
+        for k in ("present", "absent", "half_day", "leave", "lwp", "holiday", "late"):
+            bucket[k] += emp_row[k]
+        bucket["days_present"] += days_present
+
+    stores = []
+    for bucket in per_store.values():
+        bucket["days_present"] = round(bucket["days_present"], 1)
+        stores.append(bucket)
+    stores.sort(key=lambda b: b["store_id"])
+    per_employee.sort(key=lambda e: (e.get("name") or "").lower())
+
+    return {
+        "month": grid.get("month"),
+        "totals": grid.get("totals", {}),
+        "stores": stores,
+        "employees": per_employee,
+    }
+
+
 # ============================================================================
 # ATTENDANCE ENDPOINTS
 # ============================================================================
@@ -433,6 +584,54 @@ async def get_attendance_grid(
     return _build_grid(year, mon, employees, records)
 
 
+@router.get("/attendance/summary")
+async def get_attendance_summary(
+    month: Optional[str] = Query(None, description="Target month as YYYY-MM"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
+):
+    """Monthly attendance SUMMARY rollups for the HR menu summary card.
+
+    Returns per-store and per-employee counts (present / absent / half_day /
+    leave / holiday / late), days_present, and % present, plus company-wide
+    totals. Built from the SAME roster + records as /attendance/grid (so the two
+    can never disagree), then aggregated. Store-scoped + fail-soft: no DB / no
+    records => a valid empty summary, never a 500.
+    """
+    year, mon = _parse_month(month)
+    active_store = validate_store_access(store_id, current_user)
+
+    user_repo = get_user_repository()
+    attendance_repo = get_attendance_repository()
+
+    employees = []
+    if user_repo is not None:
+        roster_filter = {"is_active": True}
+        if active_store:
+            roster_filter["store_ids"] = active_store
+        try:
+            users = user_repo.find_many(roster_filter, limit=1000)
+        except Exception:
+            users = []
+        employees = _roster_from_users(users, active_store)
+
+    records = []
+    if attendance_repo is not None:
+        n_days = _days_in_month(year, mon)
+        start = f"{year:04d}-{mon:02d}-01"
+        end = f"{year:04d}-{mon:02d}-{n_days:02d}"
+        rec_filter = {"date": {"$gte": start, "$lte": end}}
+        if active_store:
+            rec_filter["store_id"] = active_store
+        try:
+            records = attendance_repo.find_many(rec_filter, limit=5000)
+        except Exception:
+            records = []
+
+    grid = _build_grid(year, mon, employees, records)
+    return _summarise_grid(grid)
+
+
 def _store_coords(store_id: Optional[str]) -> dict:
     """Load a store's geo-fence coordinates + radius. Fail-soft: returns
     {lat: None, lng: None, radius_m: None} when the DB or store is absent."""
@@ -497,6 +696,60 @@ def _resolve_employee_shift(employee_id: str, store_id: Optional[str]) -> Option
     return None
 
 
+def _find_day_row(attendance_repo, employee_id: str, store_id: Optional[str], date_iso: str):
+    """Find an employee's single attendance row for a given day.
+
+    The canonical key is (employee_id, date) where `date` is the date-only ISO
+    STRING -- the exact shape the unique index, mark_attendance, and the grid all
+    use. We deliberately key on (employee_id, date) and NOT on store_id so a row
+    written with a missing/old store_id (legacy `mark` rows persisted
+    active_store_id, which can be None) is still matched -- otherwise a second
+    check-in would fail to see it and mint a duplicate, which is the exact bug
+    being fixed. Fail-soft: any repo error -> None (treated as 'no row')."""
+    try:
+        row = attendance_repo.find_one(
+            {"employee_id": employee_id, "date": date_iso}
+        )
+        if row is not None:
+            return row
+    except Exception:
+        return None
+    # Defensive fallback: a legacy row may have stored `date` as a datetime
+    # (the repo's mark_check_in helper did). Match on the date prefix so we still
+    # attach to it instead of duplicating. Only attempted when the string lookup
+    # missed, so it never adds cost on the normal path.
+    try:
+        from datetime import datetime as _dt
+
+        start = _dt.fromisoformat(f"{date_iso}T00:00:00")
+        end = _dt.fromisoformat(f"{date_iso}T23:59:59")
+        return attendance_repo.find_one(
+            {"employee_id": employee_id, "date": {"$gte": start, "$lte": end}}
+        )
+    except Exception:
+        return None
+
+
+def _create_day_row_safe(attendance_repo, data: dict):
+    """Insert a fresh attendance day-row, race-safe against the unique index.
+
+    If two check-ins for the same (employee_id, date) race, the unique index
+    makes the second insert raise DuplicateKeyError; we catch it and UPDATE the
+    row the winner just created instead of surfacing a 500 or leaving a dup.
+    Fail-soft otherwise (the BaseRepository.create already swallows errors)."""
+    try:
+        attendance_repo.create(data)
+    except Exception:  # noqa: BLE001 - includes pymongo DuplicateKeyError
+        existing = _find_day_row(
+            attendance_repo, data.get("employee_id"), data.get("store_id"), data.get("date")
+        )
+        if existing is not None:
+            patch = {k: v for k, v in data.items() if k not in ("attendance_id", "date", "employee_id")}
+            attendance_repo.update(
+                existing.get("attendance_id") or existing.get("_id"), patch
+            )
+
+
 @router.post("/attendance/check-in")
 async def check_in(
     latitude: Optional[float] = None,
@@ -557,44 +810,65 @@ async def check_in(
         (shift or {}).get("grace_minutes", 0),
     )
 
-    # --- Record (fail-soft) ---
+    # --- Record (fail-soft, IDEMPOTENT) ---
+    # Key the day-row on (employee_id, date) -- the SAME shape mark_attendance
+    # and the grid use (date = a date-only ISO STRING), which is exactly the
+    # collection's unique index. A second check-in the same day UPDATES the one
+    # existing row (refreshes the stamp / late-mark) instead of inserting a
+    # duplicate. Previously this raised 409 on re-check-in and, when no unique
+    # index existed in prod (see connection.ensure_indexes), a datetime-vs-string
+    # `date` mismatch or a race could slip a second row past the constraint --
+    # the "same user recorded twice" bug. find-then-update closes that here; the
+    # DB unique index is the backstop.
     employee_id = current_user.get("user_id")
     attendance_repo = get_attendance_repository()
+    already_checked_in = False
     if attendance_repo is not None and employee_id:
         today_iso = now.date().isoformat()
-        existing = attendance_repo.find_one(
-            {"employee_id": employee_id, "date": today_iso}
-        )
-        # Block double check-in: if a record already has a check_in timestamp,
-        # the employee must check out first before checking in again.
-        if existing is not None and existing.get("check_in"):
-            raise HTTPException(
-                status_code=409,
-                detail="Already checked in today. Please check out before checking in again.",
-            )
-        data = {
-            "employee_id": employee_id,
-            "employee_name": current_user.get("full_name") or current_user.get("username"),
-            "store_id": active_store,
-            "date": today_iso,
-            "status": "PRESENT",
-            "check_in": now.isoformat(),
-            "is_late": late["is_late"],
-            "late_minutes": late["late_minutes"],
-            "shift_id": (shift or {}).get("shift_id"),
-            "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
-            "marked_by": employee_id,
-            "marked_at": now.isoformat(),
-        }
+        existing = _find_day_row(attendance_repo, employee_id, active_store, today_iso)
+        already_checked_in = bool(existing and existing.get("check_in"))
         if existing is not None:
-            attendance_repo.update(existing.get("attendance_id"), data)
+            # Preserve an EARLIER check-in time + its late-mark: the first stamp
+            # of the day is the system of record. A repeat tap just keeps the row
+            # PRESENT and never duplicates.
+            update_data = {
+                "employee_name": current_user.get("full_name") or current_user.get("username"),
+                "store_id": existing.get("store_id") or active_store,
+                "status": existing.get("status") if existing.get("status") in ("PRESENT", "HALF_DAY") else "PRESENT",
+                "shift_id": (shift or {}).get("shift_id") or existing.get("shift_id"),
+                "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
+            }
+            if not already_checked_in:
+                update_data["check_in"] = now.isoformat()
+                update_data["is_late"] = late["is_late"]
+                update_data["late_minutes"] = late["late_minutes"]
+                update_data["marked_by"] = employee_id
+                update_data["marked_at"] = now.isoformat()
+            attendance_repo.update(
+                existing.get("attendance_id") or existing.get("_id"), update_data
+            )
         else:
-            data["attendance_id"] = str(uuid.uuid4())
-            attendance_repo.create(data)
+            data = {
+                "attendance_id": str(uuid.uuid4()),
+                "employee_id": employee_id,
+                "employee_name": current_user.get("full_name") or current_user.get("username"),
+                "store_id": active_store,
+                "date": today_iso,
+                "status": "PRESENT",
+                "check_in": now.isoformat(),
+                "is_late": late["is_late"],
+                "late_minutes": late["late_minutes"],
+                "shift_id": (shift or {}).get("shift_id"),
+                "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
+                "marked_by": employee_id,
+                "marked_at": now.isoformat(),
+            }
+            _create_day_row_safe(attendance_repo, data)
 
     return {
-        "message": "Check-in recorded",
+        "message": "Already checked in today" if already_checked_in else "Check-in recorded",
         "checkInTime": now.isoformat(),
+        "already_checked_in": already_checked_in,
         "is_late": late["is_late"],
         "late_minutes": late["late_minutes"],
         "geo": {"verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"), "reason": geo["reason"]},
@@ -602,8 +876,52 @@ async def check_in(
 
 
 @router.post("/attendance/check-out")
-async def check_out(current_user: dict = Depends(get_current_user)):
-    return {"message": "Check-out recorded", "checkOutTime": datetime.now().isoformat()}
+async def check_out(
+    store_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Check the current user OUT of TODAY's attendance row.
+
+    Attaches the check-out stamp to the same (employee_id, store_id, date) day
+    row that check-in created -- no second row, no orphan stamp. Previously this
+    was a no-op stub that returned a timestamp but persisted nothing, so a
+    staff-side "check out" never actually recorded. Fail-soft: with no DB / no
+    row yet, returns a stub timestamp so the operator UI still works.
+    """
+    now = datetime.now()
+    now_iso = now.isoformat()
+    employee_id = current_user.get("user_id")
+    active_store = store_id or current_user.get("active_store_id")
+    attendance_repo = get_attendance_repository()
+    if attendance_repo is None or not employee_id:
+        return {"message": "Check-out recorded", "checkOutTime": now_iso}
+
+    today_iso = now.date().isoformat()
+    existing = _find_day_row(attendance_repo, employee_id, active_store, today_iso)
+    if existing is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No check-in recorded today. Please check in before checking out.",
+        )
+    if not existing.get("check_in"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot check out: no check-in recorded for today.",
+        )
+    if existing.get("check_out"):
+        raise HTTPException(
+            status_code=409,
+            detail="Already checked out today.",
+        )
+    attendance_repo.update(
+        existing.get("attendance_id") or existing.get("_id"),
+        {"check_out": now_iso, "checked_out_by": employee_id},
+    )
+    return {
+        "attendance_id": existing.get("attendance_id") or existing.get("_id"),
+        "message": "Check-out recorded",
+        "checkOutTime": now_iso,
+    }
 
 
 @router.post("/attendance/{attendance_id}/check-out")
@@ -659,19 +977,25 @@ async def check_out_by_id(
 async def mark_attendance(
     request: AttendanceMarkRequest, current_user: dict = Depends(get_current_user)
 ):
-    """Mark attendance for an employee (admin function)"""
+    """Mark attendance for an employee (admin function).
+
+    De-dupes on (employee_id, date) via the shared day-row helpers so a re-mark
+    UPDATES the one row (also catching a legacy datetime-stored date) and a race
+    can't slip a duplicate past the unique index.
+    """
     attendance_repo = get_attendance_repository()
+    active_store = current_user.get("active_store_id")
 
     if attendance_repo is not None:
-        # Check if record exists
-        existing = attendance_repo.find_one(
-            {"employee_id": request.employee_id, "date": request.date.isoformat()}
+        date_iso = request.date.isoformat()
+        existing = _find_day_row(
+            attendance_repo, request.employee_id, active_store, date_iso
         )
 
         data = {
             "employee_id": request.employee_id,
-            "store_id": current_user.get("active_store_id"),
-            "date": request.date.isoformat(),
+            "store_id": active_store,
+            "date": date_iso,
             "status": request.status,
             "check_in": request.check_in.isoformat() if request.check_in else None,
             "check_out": request.check_out.isoformat() if request.check_out else None,
@@ -680,12 +1004,163 @@ async def mark_attendance(
         }
 
         if existing is not None:
-            attendance_repo.update(existing.get("attendance_id"), data)
+            attendance_repo.update(
+                existing.get("attendance_id") or existing.get("_id"), data
+            )
         else:
             data["attendance_id"] = str(uuid.uuid4())
-            attendance_repo.create(data)
+            _create_day_row_safe(attendance_repo, data)
 
     return {"message": "Attendance marked", "date": request.date.isoformat()}
+
+
+# Roles allowed to EDIT/correct an existing attendance row. Stricter than the
+# read tier: a correction overrides what staff recorded, so it is limited to
+# SUPERADMIN (auto via require_roles) + ADMIN + STORE_MANAGER and audit-logged.
+_ATTENDANCE_EDIT_ROLES = ("ADMIN", "STORE_MANAGER")
+
+
+def _audit_attendance_edit(current_user, attendance_id, before, after, changed):
+    """Write an immutable audit row for a manager attendance correction.
+
+    Fail-soft (SYSTEM_INTENT 'Audit Everything', but the correction must not 500
+    because the audit write hiccuped). Records before/after states + the set of
+    changed fields, keyed entity ATTENDANCE."""
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is None:
+            return
+        audit_repo.create(
+            {
+                "action": "ATTENDANCE_EDIT",
+                "entity_type": "ATTENDANCE",
+                "entity_id": attendance_id,
+                "store_id": (after or {}).get("store_id") or (before or {}).get("store_id"),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("full_name") or current_user.get("username"),
+                "timestamp": datetime.utcnow(),
+                "severity": "INFO",
+                "source": "domain",
+                "detail": {"changed_fields": changed},
+                "before_state": before,
+                "after_state": after,
+            }
+        )
+    except Exception:  # noqa: BLE001 - audit must never break the correction
+        pass
+
+
+@router.put("/attendance/{attendance_id}")
+async def edit_attendance(
+    attendance_id: str,
+    request: AttendanceEditRequest,
+    current_user: dict = Depends(require_roles(*_ATTENDANCE_EDIT_ROLES)),
+):
+    """Correct an existing attendance row (SUPERADMIN / ADMIN / STORE_MANAGER).
+
+    Owner-reported gap: managers had no way to fix a wrong attendance entry. This
+    edits status / check_in / check_out / date / is_late / late_minutes / notes
+    on one row (partial -- only the provided fields change; send a field as null
+    to CLEAR it). Re-dating is guarded so it cannot collide with the employee's
+    existing row on the target day (which the unique index would reject anyway).
+    Every edit writes an immutable audit_logs entry with before/after state.
+    """
+    attendance_repo = get_attendance_repository()
+    if attendance_repo is None:
+        raise HTTPException(status_code=503, detail="Attendance store unavailable")
+
+    existing = attendance_repo.find_one(
+        {"$or": [{"attendance_id": attendance_id}, {"_id": attendance_id}]}
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+
+    # Only the fields the caller actually sent (so null != absent).
+    sent = request.model_fields_set
+    if not sent:
+        raise HTTPException(status_code=422, detail="No fields provided to update")
+
+    before = {k: v for k, v in existing.items() if k != "_id"}
+    updates: dict = {}
+
+    if "status" in sent:
+        updates["status"] = request.status
+    if "is_late" in sent:
+        updates["is_late"] = request.is_late
+    if "late_minutes" in sent:
+        updates["late_minutes"] = request.late_minutes
+    if "notes" in sent:
+        updates["notes"] = (request.notes or "").strip() or None
+    if "check_in" in sent:
+        updates["check_in"] = request.check_in.isoformat() if request.check_in else None
+    if "check_out" in sent:
+        updates["check_out"] = request.check_out.isoformat() if request.check_out else None
+
+    # Cross-field guard: the resulting check_out must still be after check_in,
+    # accounting for the side NOT being edited (the model only validated the two
+    # when both were sent in the same request).
+    eff_ci = updates.get("check_in", existing.get("check_in")) if (
+        "check_in" in sent or existing.get("check_in")
+    ) else None
+    eff_co = updates.get("check_out", existing.get("check_out")) if (
+        "check_out" in sent or existing.get("check_out")
+    ) else None
+    if eff_ci and eff_co:
+        ci_dt = attendance_engine._coerce_check_in(eff_ci)
+        co_dt = attendance_engine._coerce_check_in(eff_co)
+        if ci_dt and co_dt and co_dt <= ci_dt:
+            raise HTTPException(
+                status_code=422, detail="check_out must be after check_in"
+            )
+
+    if "record_date" in sent and request.record_date is not None:
+        new_date_iso = request.record_date.isoformat()
+        if new_date_iso != existing.get("date"):
+            # Don't let a re-date duplicate the employee's day-row.
+            clash = _find_day_row(
+                attendance_repo,
+                existing.get("employee_id"),
+                existing.get("store_id"),
+                new_date_iso,
+            )
+            if clash is not None and (
+                clash.get("attendance_id") or clash.get("_id")
+            ) != (existing.get("attendance_id") or existing.get("_id")):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Employee already has an attendance row on that date.",
+                )
+            updates["date"] = new_date_iso
+
+    if not updates:
+        raise HTTPException(status_code=422, detail="No effective changes to apply")
+
+    updates["edited_by"] = current_user.get("user_id")
+    updates["edited_at"] = datetime.now().isoformat()
+
+    row_id = existing.get("attendance_id") or existing.get("_id")
+    attendance_repo.update(row_id, updates)
+
+    after = {**before, **updates}
+    changed = [k for k in updates if k not in ("edited_by", "edited_at")]
+    _audit_attendance_edit(current_user, row_id, before, after, changed)
+
+    return {
+        "message": "Attendance updated",
+        "attendance_id": row_id,
+        "changed_fields": changed,
+        "record": {
+            "attendanceId": row_id,
+            "employeeId": after.get("employee_id", ""),
+            "date": after.get("date", ""),
+            "status": after.get("status", ""),
+            "checkIn": after.get("check_in"),
+            "checkOut": after.get("check_out"),
+            "isLate": after.get("is_late"),
+            "lateMinutes": after.get("late_minutes"),
+            "storeId": after.get("store_id", ""),
+        },
+    }
 
 
 # ============================================================================

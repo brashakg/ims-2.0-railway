@@ -228,6 +228,28 @@ class DatabaseConnection:
             jobs.create_index("job_number", unique=True, background=True)
             jobs.create_index([("store_id", 1), ("status", 1)], background=True)
 
+            # Attendance -- one row PER (employee, day). The UNIQUE index on
+            # (employee_id, date) is the DB-level backstop against the "same
+            # user recorded twice" bug: check-in / mark de-dupe via find-then-
+            # update keyed on (employee_id, date) where `date` is the date-only
+            # ISO STRING, and this index makes a duplicate physically impossible
+            # even under a race or a stray datetime-vs-string `date` write. This
+            # collection was previously NOT indexed here at all (it is declared
+            # in database/schemas.py COLLECTIONS but ensure_indexes -- the live
+            # startup path -- never created it), so duplicates were unconstrained
+            # in production. Mirrors schemas.ATTENDANCE indexes. (Pre-existing
+            # duplicate rows, if any, must be de-duped before this index can
+            # build; create_index is fail-soft inside the outer try.)
+            attendance = self._db["attendance"]
+            attendance.create_index(
+                [("employee_id", 1), ("date", 1)],
+                unique=True,
+                name="uniq_employee_date",
+                background=True,
+            )
+            attendance.create_index([("store_id", 1), ("date", 1)], background=True)
+            attendance.create_index([("date", -1)], background=True)
+
             # Prescriptions
             rx = self._db["prescriptions"]
             rx.create_index("prescription_id", unique=True, background=True)

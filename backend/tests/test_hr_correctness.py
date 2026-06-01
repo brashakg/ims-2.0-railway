@@ -327,23 +327,36 @@ class TestLeaveCreateSchema:
 
 
 class TestCheckInBlocking:
-    def test_double_checkin_blocked_409(self, monkeypatch):
-        """Second check-in for the same employee today must return 409."""
+    def test_double_checkin_is_idempotent_no_duplicate(self, monkeypatch):
+        """A second check-in the same day must NOT create a 2nd row.
+
+        This is the owner-reported "same user recorded twice" bug. The endpoint
+        now returns 200 (idempotent), flags already_checked_in, PRESERVES the
+        original (earlier) check-in stamp, and the repo still holds exactly ONE
+        row for the employee+day."""
+        original_ci = "2026-01-01T09:00:00"
         existing = {
             "attendance_id": "att-1",
             "employee_id": "u-test",
+            "store_id": "S1",
             "date": date.today().isoformat(),
-            "check_in": "2026-01-01T09:00:00",  # already checked in
+            "check_in": original_ci,  # already checked in
+            "status": "PRESENT",
         }
         repo = _FakeAttendanceRepo([existing])
-        # Patch geo + shift so they don't fail.
         monkeypatch.setattr(hr, "_store_coords", lambda sid: {"lat": None, "lng": None, "radius_m": None})
         monkeypatch.setattr(hr, "_resolve_employee_shift", lambda eid, sid: None)
 
         c = _make_app(monkeypatch, attendance_repo=repo)
         resp = c.post("/hr/attendance/check-in", headers=_auth_headers())
-        assert resp.status_code == 409, resp.text
-        assert "Already checked in" in resp.json()["detail"]
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["already_checked_in"] is True
+        # Exactly one row -- no duplicate.
+        assert len(repo._store) == 1
+        # The first stamp of the day is the system of record (not overwritten).
+        only = next(iter(repo._store.values()))
+        assert only["check_in"] == original_ci
+        assert only["status"] == "PRESENT"
 
     def test_first_checkin_succeeds_201(self, monkeypatch):
         """First check-in of the day should return 200 with checkInTime."""
