@@ -37,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,22 @@ def _json_default(value: Any) -> str:
     STABLE: the same logical value must serialise identically at write time
     and at verify time, otherwise the recomputed hash would never match."""
     if isinstance(value, datetime):
-        # Mongo stores datetimes at MILLISECOND precision. A value hashed at write
-        # time (with microseconds) would NOT match the same value read back from
-        # Mongo (truncated to ms) -> the recomputed chain hash drifts intermittently
-        # (the test_proposal_audit_chain flake). Truncate microseconds to ms so the
-        # write-time and verify-time byte strings are identical.
+        # Two normalisations are BOTH required for the write-time and verify-time
+        # byte strings to be identical (any drift -> the chain hash never matches
+        # and GET /api/v1/audit/verify raises a FALSE "tamper detected").
+        #
+        # 1. TIMEZONE. Mongo stores datetimes as UTC and, with the default
+        #    tz_aware=False client, returns them NAIVE. A tz-AWARE value hashed at
+        #    write time isoformats WITH a "+00:00" offset that the naive read-back
+        #    lacks -> the bytes differ. (This is the residual test_proposal_audit_
+        #    chain failure the earlier ms-only fix missed: agents/proposals._now()
+        #    is datetime.now(timezone.utc) -- tz-aware.) Convert any aware value to
+        #    UTC and DROP tzinfo so both sides render the same naive-UTC string,
+        #    regardless of the client's tz_aware setting or the source tz.
+        # 2. PRECISION. Mongo stores at MILLISECOND precision; a microsecond value
+        #    would not match the ms-truncated read-back. Truncate us -> ms.
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
         if value.microsecond:
             value = value.replace(microsecond=(value.microsecond // 1000) * 1000)
         return value.isoformat()
