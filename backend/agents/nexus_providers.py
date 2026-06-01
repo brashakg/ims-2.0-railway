@@ -169,6 +169,146 @@ async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
         return SyncResult(ok=False, provider="shopify", kind="push", error=str(e))
 
 
+# Shopify GraphQL Admin API version. inventorySetQuantities (absolute set) has
+# been GA since 2023-10; pin a known-good version so a Shopify default bump
+# can't silently change the contract. Override via SHOPIFY_API_VERSION if needed.
+SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
+
+# Shopify caps a single inventorySetQuantities call at 250 quantity entries.
+_SHOPIFY_SET_MAX = 250
+
+
+async def shopify_set_inventory_available(
+    db,
+    inventory_item_id: str,
+    location_id: str,
+    available: int,
+) -> SyncResult:
+    """Set the ABSOLUTE available quantity for ONE Shopify variant at ONE
+    location via the GraphQL Admin API `inventorySetQuantities` mutation.
+
+    IMS is the inventory MASTER: on an in-store sale we push the reduced
+    available count so the website cannot oversell. We push the ABSOLUTE value
+    (not a delta) so a retry is idempotent -- replaying the same push lands the
+    same number.
+
+    Gating (identical convention to shopify_push_product):
+      1. IMS_SHOPIFY_WRITES must be enabled (BVI owns the catalog by default).
+      2. DISPATCH_MODE must be `live` for a real write; otherwise SIMULATED.
+      3. Missing shop creds / ids -> structured no-op (never raises).
+
+    `inventory_item_id` and `location_id` are Shopify GIDs
+    (e.g. "gid://shopify/InventoryItem/123"). A bare numeric id is accepted and
+    promoted to a GID. Returns a SyncResult; NEVER raises -- a Shopify failure
+    must not propagate into the sale path.
+    """
+    if not ims_shopify_writes_enabled():
+        return SyncResult(
+            ok=True, provider="shopify", kind="push",
+            notes="RETIRED -- Shopify catalog is owned by the e-commerce app (BVI); "
+                  "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
+        )
+
+    inv_gid = _as_shopify_gid(inventory_item_id, "InventoryItem")
+    loc_gid = _as_shopify_gid(location_id, "Location")
+    if not inv_gid or not loc_gid:
+        return SyncResult(ok=False, provider="shopify", kind="push",
+                          error="inventory_item_id or location_id missing")
+
+    try:
+        qty = max(0, int(available))
+    except (TypeError, ValueError):
+        return SyncResult(ok=False, provider="shopify", kind="push",
+                          error=f"non-integer available={available!r}")
+
+    if not _is_destructive_allowed():
+        # off/test/unknown -> log only, no live write. Identical to today's
+        # default behaviour (no outbound Shopify call).
+        return SyncResult(
+            ok=True, provider="shopify", kind="push", items_synced=0,
+            notes=f"SIMULATED -- dispatch_mode={dispatch_mode()}; would set "
+                  f"{inv_gid} @ {loc_gid} -> available={qty}",
+            payload={"inventory_item_id": inv_gid, "location_id": loc_gid, "available": qty},
+        )
+
+    cfg = _load_integration_config(db, "shopify")
+    shop_url = cfg.get("shop_url")
+    access_token = cfg.get("access_token")
+    if not shop_url or not access_token:
+        return SyncResult(ok=False, provider="shopify", kind="push",
+                          error="shop_url or access_token not configured")
+
+    # inventorySetQuantities atomically sets the on-hand/available count to an
+    # absolute value. `ignoreCompareQuantity` lets us set without supplying the
+    # current value (we are the source of truth and just overwrite).
+    mutation = """
+    mutation imsSetInventory($input: InventorySetQuantitiesInput!) {
+      inventorySetQuantities(input: $input) {
+        inventoryAdjustmentGroup { createdAt reason }
+        userErrors { field message }
+      }
+    }
+    """
+    variables = {
+        "input": {
+            "name": "available",
+            "reason": "correction",
+            "ignoreCompareQuantity": True,
+            "quantities": [
+                {
+                    "inventoryItemId": inv_gid,
+                    "locationId": loc_gid,
+                    "quantity": qty,
+                }
+            ],
+        }
+    }
+    url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": access_token, "content-type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
+            resp = await client.post(
+                url, headers=headers, json={"query": mutation, "variables": variables}
+            )
+        if resp.status_code not in (200, 201):
+            return SyncResult(ok=False, provider="shopify", kind="push",
+                              error=f"status {resp.status_code}: {resp.text[:200]}")
+        body = resp.json() or {}
+        # GraphQL transport-200 can still carry top-level `errors` or per-field
+        # userErrors -- treat both as failures so the caller can record them.
+        if body.get("errors"):
+            return SyncResult(ok=False, provider="shopify", kind="push",
+                              error=f"graphql errors: {str(body['errors'])[:200]}")
+        result = ((body.get("data") or {}).get("inventorySetQuantities") or {})
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            return SyncResult(ok=False, provider="shopify", kind="push",
+                              error=f"userErrors: {str(user_errors)[:200]}")
+        return SyncResult(
+            ok=True, provider="shopify", kind="push", items_synced=1,
+            payload={"inventory_item_id": inv_gid, "location_id": loc_gid, "available": qty},
+        )
+    except httpx.TimeoutException:
+        return SyncResult(ok=False, provider="shopify", kind="push", error="timeout")
+    except (httpx.HTTPError, ValueError) as e:
+        return SyncResult(ok=False, provider="shopify", kind="push", error=str(e))
+
+
+def _as_shopify_gid(value: Any, kind: str) -> str:
+    """Normalize a Shopify id to a GID. Accepts an existing GID
+    ("gid://shopify/InventoryItem/123") or a bare numeric id ("123") and
+    promotes the latter. Returns "" for empty/None."""
+    s = str(value).strip() if value not in (None, "") else ""
+    if not s:
+        return ""
+    if s.startswith("gid://"):
+        return s
+    if s.isdigit():
+        return f"gid://shopify/{kind}/{s}"
+    return s
+
+
 # ============================================================================
 # RAZORPAY — payment reconciliation (read-only)
 # ============================================================================
