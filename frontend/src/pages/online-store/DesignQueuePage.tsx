@@ -23,7 +23,7 @@
 // available" note); writes toast the backend error. Gated SUPERADMIN / ADMIN /
 // CATALOG_MANAGER / DESIGN_MANAGER at the route (App.tsx). Light theme only.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Image as ImageIcon,
@@ -41,15 +41,22 @@ import {
   Download,
   ImageOff,
   Info,
+  UploadCloud,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import {
   imagesApi,
+  pushApi,
   IMAGE_DESIGN_STATUSES,
   type EcomProductImage,
   type ImageDesignStatus,
 } from '../../services/api/onlineStore';
+import OnlineStoreSyncBanner, {
+  SyncChip,
+  formatPushResult,
+  type OnlineStoreSyncBannerHandle,
+} from '../../components/online-store/OnlineStoreSyncBanner';
 
 // ---------------------------------------------------------------------------
 // Status presentation (label + on-brand light-theme colours + the legal next
@@ -123,6 +130,10 @@ export default function DesignQueuePage() {
 
   // Only ADMIN / DESIGN_MANAGER (+ SUPERADMIN) may sign off (Approve/Reject).
   const canApprove = hasRole(['SUPERADMIN', 'ADMIN', 'DESIGN_MANAGER']);
+  // Publishing an approved image to the storefront is integration-critical ->
+  // SUPERADMIN / ADMIN only (matches the backend push router gate).
+  const canPublish = hasRole(['SUPERADMIN', 'ADMIN']);
+  const bannerRef = useRef<OnlineStoreSyncBannerHandle>(null);
 
   const [images, setImages] = useState<EcomProductImage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -130,6 +141,9 @@ export default function DesignQueuePage() {
   const [search, setSearch] = useState('');
   // id currently being mutated (disables that card's buttons + shows a spinner)
   const [busyId, setBusyId] = useState<string | null>(null);
+  // id currently being published (separate from busyId so a publish doesn't lock
+  // the lifecycle buttons and vice-versa).
+  const [publishingId, setPublishingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -257,6 +271,32 @@ export default function DesignQueuePage() {
     }
   };
 
+  // Publish (push) ONE approved image to Shopify. DARK by default -> a SIMULATED
+  // dry-run; the returned mode (SIMULATED vs LIVE) is surfaced in the toast so a
+  // dry-run is never mistaken for a live write. A non-APPROVED image returns
+  // ok=false action=skip (not an HTTP error) which we surface honestly. On a LIVE
+  // push refresh the board + banner so the Synced chip + counts update.
+  const publishImage = async (img: EcomProductImage) => {
+    setPublishingId(img.id);
+    try {
+      const label = `Image "${img.product_title || img.model_no || img.product_id}"`;
+      const result = await pushApi.pushImage(img.id);
+      if (result.ok) {
+        toast.success(formatPushResult(label, result));
+      } else {
+        toast.warning(formatPushResult(label, result));
+      }
+      if (result.ok && result.mode === 'LIVE') {
+        await load();
+        bannerRef.current?.refresh();
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || e?.message || 'Could not publish image');
+    } finally {
+      setPublishingId(null);
+    }
+  };
+
   return (
     <div className="p-6 max-w-6xl mx-auto">
       {/* Header */}
@@ -287,6 +327,9 @@ export default function DesignQueuePage() {
         Approving an image marks it ready; pushing it live to the storefront is a later, owner-approved
         step, so nothing here changes the live site yet.
       </p>
+
+      {/* Shopify publish (DARK / LIVE) banner */}
+      <OnlineStoreSyncBanner ref={bannerRef} className="mb-4" />
 
       {/* Status filter chip row */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -363,6 +406,8 @@ export default function DesignQueuePage() {
               img={img}
               busy={busyId === img.id}
               canApprove={canApprove}
+              canPublish={canPublish}
+              publishing={publishingId === img.id}
               currentUserId={user?.id}
               onAssignToMe={() => assignToMe(img)}
               onStart={() => start(img)}
@@ -370,6 +415,7 @@ export default function DesignQueuePage() {
               onApprove={() => approve(img)}
               onReject={() => reject(img)}
               onRemove={() => remove(img)}
+              onPublish={() => publishImage(img)}
             />
           ))}
         </div>
@@ -428,6 +474,8 @@ function ImageCard({
   img,
   busy,
   canApprove,
+  canPublish,
+  publishing,
   currentUserId,
   onAssignToMe,
   onStart,
@@ -435,10 +483,13 @@ function ImageCard({
   onApprove,
   onReject,
   onRemove,
+  onPublish,
 }: {
   img: EcomProductImage;
   busy: boolean;
   canApprove: boolean;
+  canPublish: boolean;
+  publishing: boolean;
   currentUserId?: string;
   onAssignToMe: () => void;
   onStart: () => void;
@@ -446,6 +497,7 @@ function ImageCard({
   onApprove: () => void;
   onReject: () => void;
   onRemove: () => void;
+  onPublish: () => void;
 }) {
   const meta = STATUS_META[img.design_status] ?? STATUS_META.QUEUED;
   const rawUrl = img.raw_url || (img.role === 'RAW' ? img.url : null) || img.original_url || null;
@@ -464,14 +516,20 @@ function ImageCard({
           </h2>
           {subtitle && <p className="text-xs text-gray-400 truncate">{subtitle}</p>}
         </div>
-        <span
-          className={
-            'inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ' +
-            meta.badge
-          }
-        >
-          {meta.label}
-        </span>
+        <div className="flex flex-col items-end gap-1">
+          <span
+            className={
+              'inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ' +
+              meta.badge
+            }
+          >
+            {meta.label}
+          </span>
+          {/* Show the Shopify sync state once an image is approved (push-eligible). */}
+          {img.design_status === 'APPROVED' && (
+            <SyncChip synced={!!img.shopify_media_id} pending={!!img.locally_modified} />
+          )}
+        </div>
       </div>
 
       {/* Raw + edited thumbnails side-by-side */}
@@ -539,6 +597,21 @@ function ImageCard({
               tone="approve"
             />
             <ActionButton onClick={onReject} disabled={busy} icon={XCircle} label="Reject" tone="reject" />
+          </>
+        )}
+
+        {/* Publish — only an APPROVED image is push-eligible; SUPERADMIN/ADMIN only.
+            DARK by default -> a dry-run; the toast states SIMULATED vs LIVE. The
+            shared busy spinner at the row start covers the in-flight feedback. */}
+        {img.design_status === 'APPROVED' && canPublish && (
+          <>
+            {publishing && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
+            <ActionButton
+              onClick={onPublish}
+              disabled={publishing}
+              icon={UploadCloud}
+              label="Publish"
+            />
           </>
         )}
 

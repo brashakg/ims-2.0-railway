@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
+import OnlineStoreSyncBanner from '../../components/online-store/OnlineStoreSyncBanner';
 
 type CountKey =
   | 'products'
@@ -221,6 +222,9 @@ export default function OnlineStorePage() {
         design workflow all live in one place. Sections below light up as each phase ships. The storefront
         (bettervision.in) keeps running on Shopify throughout — nothing changes for shoppers.
       </p>
+
+      {/* Shopify publish (DARK / LIVE) banner — states the push posture up front. */}
+      <OnlineStoreSyncBanner className="mb-4" />
 
       {/* Module status banner */}
       <div className="mb-6 rounded-xl border border-gray-200 bg-white p-4">

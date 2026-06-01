@@ -804,3 +804,156 @@ export const imagesApi = {
     await api.delete(`${IMAGES_BASE}/${encodeURIComponent(id)}`);
   },
 };
+
+// ============================================================================
+// PUSH sub-api  (BVI Phase 5 — IMS -> Shopify push control surface)
+// ----------------------------------------------------------------------------
+// The frontend half of the single-writer Shopify PUSH (backend router
+// api/routers/online_store_push.py -> api/services/shopify_push.py). It drives
+// the four per-entity push endpoints and reads the current push posture.
+//
+// ***** BUILT DARK (the non-negotiable safety contract) *****
+// Every push is SIMULATED (a dry-run PLAN, NO Shopify network call) UNLESS ALL of
+// IMS_SHOPIFY_WRITES on AND DISPATCH_MODE=live AND Shopify creds present. Default
+// / missing-creds / gate-off => SIMULATED. Per #262 BVI is the single Shopify
+// writer; the IMS push stays retired until the owner flips the gates in the
+// Phase-6 cutover. So the UI must make the mode unmistakable — nobody should
+// think a dry-run went live. The shared sync banner + the returned `mode` on
+// every publish do exactly that.
+//
+// ROLE GATE: the push routes are SUPERADMIN / ADMIN only (narrower than the rest
+// of the module). The UI also gates the Publish controls to those roles; the
+// backend is the real enforcement (a non-admin call 403s).
+//
+// GRACEFUL DEGRADATION: getStatus never throws — any error (incl. a 404 on a
+// stale deploy, or a 403 for a non-admin viewer) resolves to a safe DARK
+// placeholder so the banner always renders as "writes OFF". The publish calls
+// DO throw on failure so the screen can toast the error. Import this service
+// DIRECTLY from this module (NOT the api barrel — the barrel re-export fails to
+// resolve, TS2614, per past sessions).
+// ============================================================================
+
+/** Effective push posture + the three gate components (mirrors
+ *  shopify_push.push_mode_status). `is_live` is the single source of truth the
+ *  UI keys off; the components explain WHY when DARK. */
+export interface PushMode {
+  /** 'LIVE' only when all three gates align, else 'SIMULATED'. */
+  mode: 'SIMULATED' | 'LIVE';
+  /** IMS_SHOPIFY_WRITES env flag. */
+  writes_enabled?: boolean | null;
+  /** off | test | live (the destructive-write dispatch gate). */
+  dispatch_mode?: string | null;
+  /** shop_url + access_token present in the `integrations` config? */
+  creds_present?: boolean | null;
+  /** Convenience: writes_enabled && dispatch_mode==='live' && creds_present. */
+  is_live?: boolean | null;
+  api_version?: string | null;
+  /** Advisory note (the single-writer / cutover explanation). */
+  single_writer_note?: string | null;
+}
+
+/** Structured result of one push attempt (mirrors shopify_push.PushResult).
+ *  `mode` tells the user whether this was a dry-run (SIMULATED) or a real write
+ *  (LIVE); `shopify_id` is the gid (echoed if already mapped, set on a LIVE
+ *  create); `ok=false` carries a human `error`; `reason` explains a SIMULATED. */
+export interface PushResult {
+  mode: 'SIMULATED' | 'LIVE';
+  entity: 'product' | 'variant' | 'collection' | 'menu' | 'image' | string;
+  action: 'create' | 'update' | 'skip' | 'noop' | string;
+  target_id?: string | null;
+  ok: boolean;
+  shopify_id?: string | null;
+  payload?: Record<string, any> | null;
+  error?: string | null;
+  reason?: string | null;
+}
+
+/** Per-entity pushed-vs-pending counts (shapes differ per entity, mirroring the
+ *  backend GET /push/status counts block). All fields optional + nullable. */
+export interface PushCounts {
+  products?: { staged?: number; pushed?: number; pending?: number } | null;
+  collections?: { total?: number; pushed?: number; pending?: number } | null;
+  menus?: { total?: number; pushed?: number; pending?: number } | null;
+  images?: { approved?: number; pushed?: number; pending?: number } | null;
+}
+
+/** The GET /push/status payload. `db_connected=false` => the push store is
+ *  unavailable (counts are zeros). */
+export interface PushStatus {
+  mode: PushMode;
+  db_connected: boolean;
+  counts: PushCounts;
+}
+
+const PUSH_BASE = '/online-store/push';
+
+/** A safe DARK placeholder for getStatus — used when the backend is absent, the
+ *  viewer isn't an admin (403), or any error occurs. Always reads as "writes
+ *  OFF" so the banner can never mislead. */
+const PUSH_STATUS_PLACEHOLDER: PushStatus = {
+  mode: { mode: 'SIMULATED', is_live: false },
+  db_connected: false,
+  counts: {},
+};
+
+/** Unwrap the {result: PushResult} envelope the push routes return. Tolerates a
+ *  bare PushResult too. */
+function _pushResultFrom(data: any): PushResult {
+  const r = (data && typeof data === 'object' && data.result) ? data.result : data;
+  return (r ?? {}) as PushResult;
+}
+
+export const pushApi = {
+  /** Read the CURRENT push posture + per-entity counts. NEVER throws: any error
+   *  (404 stale deploy / 403 non-admin / network) -> the DARK placeholder so the
+   *  banner always renders as "writes OFF". */
+  getStatus: async (): Promise<PushStatus> => {
+    try {
+      const res = await api.get(`${PUSH_BASE}/status`);
+      const data = (res?.data ?? {}) as Partial<PushStatus>;
+      const mode = (data.mode ?? {}) as PushMode;
+      return {
+        mode: {
+          mode: mode.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
+          writes_enabled: mode.writes_enabled ?? null,
+          dispatch_mode: mode.dispatch_mode ?? null,
+          creds_present: mode.creds_present ?? null,
+          is_live: mode.is_live ?? (mode.mode === 'LIVE'),
+          api_version: mode.api_version ?? null,
+          single_writer_note: mode.single_writer_note ?? null,
+        },
+        db_connected: !!data.db_connected,
+        counts: (data.counts ?? {}) as PushCounts,
+      };
+    } catch {
+      return PUSH_STATUS_PLACEHOLDER;
+    }
+  },
+
+  /** Push a catalog product (+ ecom sub-doc + variants). Throws on HTTP failure
+   *  (the caller toasts); a SIMULATED dry-run is a normal ok=true result. */
+  pushProduct: async (productId: string): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/product/${encodeURIComponent(productId)}`);
+    return _pushResultFrom(res?.data);
+  },
+
+  /** Push an ecom_collections doc (collectionCreate/Update + smart ruleSet). */
+  pushCollection: async (collectionId: string): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/collection/${encodeURIComponent(collectionId)}`);
+    return _pushResultFrom(res?.data);
+  },
+
+  /** Push an ecom_menus doc (the nav / mega-menu tree). */
+  pushMenu: async (menuId: string): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`);
+    return _pushResultFrom(res?.data);
+  },
+
+  /** Push ONE APPROVED product image (productCreateMedia onto its parent). A
+   *  non-APPROVED image is NOT an HTTP error — the engine returns ok=false
+   *  action=skip, which the caller surfaces honestly. */
+  pushImage: async (imageId: string): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/image/${encodeURIComponent(imageId)}`);
+    return _pushResultFrom(res?.data);
+  },
+};

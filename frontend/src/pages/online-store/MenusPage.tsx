@@ -27,7 +27,7 @@
 // backend error. Gated SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER at
 // the route (App.tsx). Light theme only — no non-ASCII.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Menu as MenuIcon,
@@ -49,14 +49,22 @@ import {
   Image as ImageIcon,
   Tag,
   Link2,
+  UploadCloud,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import {
   menusApi,
+  pushApi,
   type EcomMenu,
   type MenuItem,
   type MenuItemType,
 } from '../../services/api/onlineStore';
+import OnlineStoreSyncBanner, {
+  SyncChip,
+  formatPushResult,
+  type OnlineStoreSyncBannerHandle,
+} from '../../components/online-store/OnlineStoreSyncBanner';
 
 // ---------------------------------------------------------------------------
 // Item-type vocabulary (mirrors the Shopify MenuItemType enum / BVI MenuItem).
@@ -245,6 +253,12 @@ function countNodes(items: MenuItem[] | null | undefined): number {
 // ===========================================================================
 export default function MenusPage() {
   const toast = useToast();
+  const { hasRole } = useAuth();
+  // Publishing the live nav is integration-critical -> SUPERADMIN / ADMIN only
+  // (matches the backend push router gate; backend is the real enforcement).
+  const canPublish = hasRole(['SUPERADMIN', 'ADMIN']);
+  const bannerRef = useRef<OnlineStoreSyncBannerHandle>(null);
+  const [publishing, setPublishing] = useState(false);
 
   const [menus, setMenus] = useState<EcomMenu[]>([]);
   const [loadingMenus, setLoadingMenus] = useState(true);
@@ -352,6 +366,36 @@ export default function MenusPage() {
     } catch (e: any) {
       setMenus((prev) => prev.map((x) => (x.id === m.id ? { ...x, active: !next } : x)));
       toast.error(e?.message || 'Could not update menu');
+    }
+  };
+
+  // Publish (push) a menu to Shopify. DARK by default -> a SIMULATED dry-run; the
+  // returned mode (SIMULATED vs LIVE) is surfaced in the toast so a dry-run is
+  // never mistaken for a live write. We block a publish while the tree has
+  // unsaved edits (you'd push the last-saved tree, not what's on screen). On a
+  // LIVE push refresh the menu + banner so the Synced chip + counts update.
+  const publishMenu = async (m: EcomMenu) => {
+    if (m.id === selectedId && dirty) {
+      toast.warning('Save your menu changes before publishing.');
+      return;
+    }
+    setPublishing(true);
+    try {
+      const result = await pushApi.pushMenu(m.id);
+      if (result.ok) {
+        toast.success(formatPushResult(`Menu "${m.title || m.handle}"`, result));
+      } else {
+        toast.warning(formatPushResult(`Menu "${m.title || m.handle}"`, result));
+      }
+      if (result.ok && result.mode === 'LIVE') {
+        await loadMenus();
+        if (m.id === selectedId) await loadTree(m.id);
+        bannerRef.current?.refresh();
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || e?.message || 'Could not publish menu');
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -518,6 +562,9 @@ export default function MenusPage() {
         Edits are saved inside IMS. Pushing the menu live to the storefront is a later, owner-approved
         step, so nothing here changes the live site yet.
       </p>
+
+      {/* Shopify publish (DARK / LIVE) banner */}
+      <OnlineStoreSyncBanner ref={bannerRef} className="mb-4" />
 
       <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
         {/* ---- Menus list (left) ---- */}
@@ -688,15 +735,41 @@ export default function MenusPage() {
                       Unsaved
                     </span>
                   )}
+                  <SyncChip
+                    synced={!!menuMeta?.shopify_menu_id}
+                    pending={!!menuMeta?.locally_modified}
+                  />
                 </div>
-                <button
-                  type="button"
-                  onClick={addTopLevel}
-                  className="btn-outline inline-flex items-center gap-1.5 text-xs"
-                  title="Add a top-level menu item"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Add item
-                </button>
+                <div className="flex items-center gap-2">
+                  {canPublish && menuMeta && (
+                    <button
+                      type="button"
+                      onClick={() => publishMenu(menuMeta)}
+                      disabled={publishing || dirty}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      title={
+                        dirty
+                          ? 'Save changes before publishing'
+                          : 'Push this menu to Shopify (dry-run unless live writes are armed)'
+                      }
+                    >
+                      {publishing ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <UploadCloud className="w-3.5 h-3.5" />
+                      )}
+                      Publish
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={addTopLevel}
+                    className="btn-outline inline-flex items-center gap-1.5 text-xs"
+                    title="Add a top-level menu item"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add item
+                  </button>
+                </div>
               </div>
 
               {/* tree body */}
