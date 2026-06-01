@@ -38,7 +38,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.routers import customers, prescriptions, clinical, settings as settings_router  # noqa: E402
+from api.routers import (
+    customers,
+    prescriptions,
+    clinical,
+    settings as settings_router,
+)  # noqa: E402
 from api.routers.auth import get_current_user, create_access_token  # noqa: E402
 
 
@@ -241,7 +246,9 @@ class TestCustomerCreateAudited:
         monkeypatch.setattr(settings_router, "get_audit_repository", lambda: audit)
         s_client = TestClient(app)
 
-        resp = s_client.get("/settings/audit-logs", params={"action": "CUSTOMER_CREATED"})
+        resp = s_client.get(
+            "/settings/audit-logs", params={"action": "CUSTOMER_CREATED"}
+        )
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["total"] >= 1
@@ -300,7 +307,9 @@ class TestPrescriptionAudited:
         audit = FakeAuditRepo()
         rx_repo = FakeRxRepo()
         cust_repo = FakeCustomerRepo()
-        cust_repo.create({"customer_id": "cust-1", "name": "Pat", "mobile": "9011100001"})
+        cust_repo.create(
+            {"customer_id": "cust-1", "name": "Pat", "mobile": "9011100001"}
+        )
         client = _rx_client(audit, rx_repo, cust_repo, monkeypatch)
 
         resp = client.post(
@@ -358,7 +367,9 @@ class TestAuditFailSoft:
     def test_customer_create_succeeds_when_audit_explodes(self, monkeypatch):
         repo = FakeCustomerRepo()
         client = _customer_client(ExplodingAuditRepo(), repo, monkeypatch)
-        resp = client.post("/customers", json={"name": "Resilient", "mobile": "9022200001"})
+        resp = client.post(
+            "/customers", json={"name": "Resilient", "mobile": "9022200001"}
+        )
         # The customer is still created (201) even though every audit write raised.
         assert resp.status_code == 201, resp.text
         assert resp.json()["customer_id"]

@@ -136,7 +136,7 @@ def _entity_and_id(path: str):
     raising.
     """
     try:
-        rest = path[len("/api/v1/"):]
+        rest = path[len("/api/v1/") :]
         segments = [s for s in rest.split("/") if s]
         if not segments:
             return "UNKNOWN", None
@@ -155,9 +155,7 @@ def _entity_and_id(path: str):
             # ORD-... / RX-...), or is long-ish. A short all-alpha tail like
             # "patients" / "redo" / "complete" is a sub-action, not an id.
             looks_like_id = (
-                any(ch.isdigit() for ch in last)
-                or "-" in last
-                or len(last) >= 16
+                any(ch.isdigit() for ch in last) or "-" in last or len(last) >= 16
             )
             if looks_like_id:
                 entity_id = last

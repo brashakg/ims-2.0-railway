@@ -51,8 +51,7 @@ def _audit_rx(
             "entity_id": prescription_id,
             "store_id": current_user.get("active_store_id"),
             "user_id": current_user.get("user_id"),
-            "user_name": current_user.get("full_name")
-            or current_user.get("username"),
+            "user_name": current_user.get("full_name") or current_user.get("username"),
             "timestamp": datetime.utcnow(),
             "severity": "INFO",
             "source": "domain",
