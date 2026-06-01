@@ -21,6 +21,14 @@ export interface AutopilotCandidate {
   specs?: Record<string, unknown>;
   description?: string | null;
   usp?: string | null;
+  // Enrichment hints the backend may attach (e.g. the AI-enrichment source).
+  // All optional + additive: the card renders them only when present, so the
+  // page works identically whether or not the enriching source is configured.
+  category?: string | null;
+  suggested_hsn?: string | null;
+  suggested_gst_rate?: number | null;
+  confidence?: number | null;
+  needs_review?: boolean | null;
   existing_status?: string | null;
   existing_shopify_product_id?: string | null;
   score: number;
@@ -28,6 +36,10 @@ export interface AutopilotCandidate {
   decision?: string | null;
   rights_confirmed?: boolean;
 }
+
+// Source id the backend uses for the AI-enrichment adapter. Cards badge this
+// distinctly ("AI-suggested") from scraped/catalog rows.
+export const AI_ENRICH_SOURCE = 'ai_enrich';
 
 export interface AutopilotSource {
   name: string;
