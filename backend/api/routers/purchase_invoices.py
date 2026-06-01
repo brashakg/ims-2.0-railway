@@ -1,11 +1,27 @@
 """
-IMS 2.0 - Purchase Invoices Router  (Phase 1)
-=============================================
+IMS 2.0 - Purchase Invoices Router  (Phase 1 + Phase 2)
+=======================================================
 A FIRST-CLASS purchase invoice: the vendor's tax invoice recorded with LINE
 ITEMS (HSN + per-rate GST split) that books BOTH the accounts-payable (AP)
 liability AND the input-tax-credit (ITC) ledger from a PO + GRN -- and FIXES the
 inter-state classification bug (place_of_supply was read by the ITC code but
 written nowhere, so inter-state purchases were mis-booked CGST+SGST not IGST).
+
+PHASE 2 adds the procure-to-pay CONTROL on top of Phase 1:
+  * 3-WAY MATCH -- when an invoice carries po_id + grn_id, compare PO (ordered
+    qty/price) vs GRN (accepted qty) vs invoice (billed qty/price) per product
+    via services/purchase_match.three_way_match. The verdict (MATCHED /
+    ON_HOLD_EXCEPTION + per-line reasons) is stored on the invoice doc.
+    GET /{id}/match returns the detail; POST /{id}/approve-exception lets an
+    ADMIN/ACCOUNTANT override a hold to MATCHED_OVERRIDE (audited).
+  * INVENTORY VALUATION TRUE-UP -- on booking, the invoice's per-unit landed
+    price trues up the product's moving-average cost (services/purchase_match.
+    valuation_trueup_for_invoice). Fail-soft: a valuation write NEVER blocks the
+    booking. (GRN acceptance in vendors.py provisionally stamps the PO price as
+    unit_cost on each minted stock_unit; the invoice is the authoritative cost.)
+  * CONFIG -- GET/PUT /config exposes valuation_method (MOVING_AVERAGE default,
+    alt FIFO) + match_tolerance_pct (default 5), stored in a single
+    ``purchase_settings`` doc with safe defaults when unset.
 
 Mounted at ``/api/v1/vendors/purchase-invoices`` and registered BEFORE the
 vendors router in main.py so its concrete paths win over the vendors
@@ -43,6 +59,7 @@ from ..dependencies import (
 )
 from ..services import ap_engine
 from ..services import purchase_invoice_engine as pinv
+from ..services import purchase_match as pmatch
 
 router = APIRouter()
 
@@ -101,6 +118,171 @@ class PurchaseInvoiceCreate(BaseModel):
 
 def _clean(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "_id"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 config (valuation_method + match_tolerance_pct) -- single settings doc
+# ---------------------------------------------------------------------------
+
+# All Phase-2 purchase config lives in ONE doc so the resolver is a single read.
+_PURCHASE_SETTINGS_COLL = "purchase_settings"
+_PURCHASE_SETTINGS_ID = "default"
+
+
+def _read_purchase_settings(db) -> Optional[dict]:
+    """Fetch the raw purchase_settings doc (or None). Fail-soft -- any DB error
+    returns None so resolve_config falls back to the static defaults."""
+    if db is None:
+        return None
+    try:
+        doc = db.get_collection(_PURCHASE_SETTINGS_COLL).find_one(
+            {"_id": _PURCHASE_SETTINGS_ID}, {"_id": 0}
+        )
+        return doc
+    except Exception:
+        return None
+
+
+def _resolved_purchase_config(db) -> dict:
+    """Effective {valuation_method, match_tolerance_pct} with safe defaults."""
+    return pmatch.resolve_config(_read_purchase_settings(db))
+
+
+class PurchaseConfigUpdate(BaseModel):
+    valuation_method: Optional[str] = None  # MOVING_AVERAGE | FIFO
+    match_tolerance_pct: Optional[float] = Field(default=None, ge=0, le=100)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 match-on-book + valuation true-up (fail-soft; never block the booking)
+# ---------------------------------------------------------------------------
+
+
+def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
+    """Fetch the PO + GRN and run the 3-way match against the computed invoice
+    lines. Returns the match dict, or None when there is no PO/GRN to match
+    against (a manual invoice with no link). Fail-soft -- a fetch/compute error
+    returns None so booking proceeds (the invoice is simply unmatched)."""
+    if not (po_id or grn_id):
+        return None
+    try:
+        po = None
+        grn = None
+        po_repo = get_purchase_order_repository()
+        grn_repo = get_grn_repository()
+        if po_id and po_repo is not None:
+            po = po_repo.find_by_id(po_id)
+        if grn_id and grn_repo is not None:
+            grn = grn_repo.find_by_id(grn_id)
+        # Need at least one comparison doc to make a meaningful verdict.
+        if po is None and grn is None:
+            return None
+        return pmatch.three_way_match(po, grn, computed_lines, tolerance_pct)
+    except Exception:
+        return None
+
+
+def _product_state_for_valuation(db, product_ids, store_id=None) -> dict:
+    """Build {product_id: {on_hand_qty, cost_price}} for the moving-average
+    true-up: the CURRENT on-hand quantity (count of AVAILABLE serialized
+    stock_units) and current cost (product cost_price / landed_cost) per
+    product. Fail-soft: any error yields an empty/partial map (the true-up then
+    treats missing products as zero on-hand at zero cost -> takes the invoice
+    cost, which is the correct first-receipt behaviour)."""
+    state: dict = {}
+    if db is None or not product_ids:
+        return state
+    pids = [p for p in product_ids if p]
+    # Current cost per product from the product master.
+    try:
+        for p in db.get_collection("products").find(
+            {"product_id": {"$in": pids}},
+            {"_id": 0, "product_id": 1, "cost_price": 1, "landed_cost": 1},
+        ):
+            pid = p.get("product_id")
+            if pid is None:
+                continue
+            state[pid] = {
+                "cost_price": p.get("cost_price")
+                if p.get("cost_price") is not None
+                else p.get("landed_cost"),
+                "on_hand_qty": 0,
+            }
+    except Exception:
+        pass
+    # Current on-hand qty from the canonical serialized stock_units collection.
+    try:
+        coll = db.get_collection("stock_units")
+        for pid in pids:
+            flt = {"product_id": pid, "status": "AVAILABLE"}
+            if store_id:
+                flt["store_id"] = store_id
+            try:
+                cnt = coll.count_documents(flt)
+            except Exception:
+                # very old pymongo / fake: fall back to count()
+                cnt = coll.count(flt) if hasattr(coll, "count") else 0
+            state.setdefault(pid, {"cost_price": None, "on_hand_qty": 0})
+            state[pid]["on_hand_qty"] = int(cnt or 0)
+    except Exception:
+        pass
+    return state
+
+
+def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]:
+    """Update each invoiced product's moving-average cost from the invoice's
+    per-unit landed price. Returns the list of applied updates (for the audit
+    detail), or None when nothing was done. STRICTLY fail-soft -- any error is
+    swallowed; a valuation update must NEVER roll back or block the booking."""
+    try:
+        lines = computed.get("lines") or []
+        pids = [ln.get("product_id") for ln in lines if ln.get("product_id")]
+        if db is None or not pids:
+            return None
+        store_id = None
+        # Prefer the receiving store from the linked GRN for the on-hand scope.
+        grn_id = invoice_doc.get("grn_id")
+        if grn_id:
+            try:
+                grn = db.get_collection("grns").find_one(
+                    {"grn_id": grn_id}, {"_id": 0, "store_id": 1}
+                )
+                store_id = (grn or {}).get("store_id")
+            except Exception:
+                store_id = None
+        product_state = _product_state_for_valuation(db, pids, store_id)
+        updates = pmatch.valuation_trueup_for_invoice(
+            lines, product_state, config.get("valuation_method")
+        )
+        if not updates:
+            return None
+        products = db.get_collection("products")
+        applied = []
+        for u in updates:
+            pid = u.get("product_id")
+            new_cost = u.get("new_cost")
+            if pid is None or new_cost is None:
+                continue
+            try:
+                products.update_one(
+                    {"product_id": pid},
+                    {
+                        "$set": {
+                            "cost_price": new_cost,
+                            "moving_avg_cost": new_cost,
+                            "valuation_method": u.get("method"),
+                            "cost_updated_at": datetime.now().isoformat(),
+                            "cost_source": "PURCHASE_INVOICE",
+                            "cost_source_id": invoice_doc.get("invoice_id"),
+                        }
+                    },
+                )
+                applied.append(u)
+            except Exception:
+                continue
+        return applied or None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +430,18 @@ async def create_purchase_invoice(
     credit_days = int((vendor or {}).get("credit_days", 30) or 30)
     due_date = ap_engine.compute_due_date(body.invoice_date, credit_days)
 
+    # Phase 2 -- 3-WAY MATCH: when the invoice links a PO + GRN, compare ordered
+    # vs received vs invoiced (qty + price) and stamp the verdict. An out-of-
+    # tolerance line puts the invoice ON_HOLD_EXCEPTION (it still books as a
+    # payable -- the hold is a review flag, not a hard block, so the liability is
+    # recorded; an ADMIN/ACCOUNTANT clears it via /approve-exception). No PO/GRN
+    # link -> no match (match_status None = a manual/unmatched invoice).
+    config = _resolved_purchase_config(db)
+    match = _run_match_for_invoice(
+        db, body.po_id, body.grn_id, computed["lines"], config["match_tolerance_pct"]
+    )
+    match_status = match.get("match_status") if match else None
+
     invoice_id = str(uuid.uuid4())
     taxable_total = computed["taxable_total"]
     tax_total = computed["tax_total"]
@@ -282,6 +476,10 @@ async def create_purchase_invoice(
         "credit_days": credit_days,
         "po_id": body.po_id,
         "grn_id": body.grn_id,
+        # Phase 2 -- 3-way match verdict + full per-line detail (None when the
+        # invoice has no PO/GRN to match against).
+        "match_status": match_status,
+        "match_detail": match,
         "lines": computed["lines"],
         # Header money mirrors the split so the ITC register (taxable_amount /
         # tax_amount) AND the new GST report (cgst/sgst/igst_total) both read it.
@@ -310,6 +508,13 @@ async def create_purchase_invoice(
                 status_code=500, detail="Failed to save purchase invoice"
             ) from exc
 
+    # Phase 2 -- INVENTORY VALUATION TRUE-UP. The invoice's per-unit landed price
+    # is the authoritative cost; blend it into each product's moving-average cost
+    # (or record the latest layer under FIFO). STRICTLY fail-soft: the helper
+    # swallows all errors and is called AFTER the booking insert so a valuation
+    # write can never roll back or block the recorded payable.
+    valuation_updates = _apply_valuation_trueup(db, doc, computed, config)
+
     # Audit the booking (fail-soft -- never blocks the save).
     try:
         audit = get_audit_repository()
@@ -332,6 +537,10 @@ async def create_purchase_invoice(
                         "sgst_total": computed["sgst_total"],
                         "igst_total": computed["igst_total"],
                         "total": total,
+                        "match_status": match_status,
+                        "match_exceptions": (match or {}).get("exceptions"),
+                        "valuation_method": config.get("valuation_method"),
+                        "valuation_updates": valuation_updates,
                     },
                 }
             )
@@ -457,6 +666,223 @@ async def draft_invoice_from_grn(
         "igst_total": computed["igst_total"],
         "tax_total": computed["tax_total"],
         "total": computed["total"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 -- config (valuation method + match tolerance)
+# ---------------------------------------------------------------------------
+# Registered BEFORE the GET /{invoice_id} catch-all so the literal /config path
+# wins over the {invoice_id} param (same route-order discipline as from-grn).
+
+
+@router.get("/config")
+async def get_purchase_config(current_user: dict = Depends(get_current_user)):
+    """Effective purchase config: valuation_method (MOVING_AVERAGE | FIFO) +
+    match_tolerance_pct. Returns the stored override merged over safe defaults
+    (so the response is always complete + valid even with no settings doc)."""
+    cfg = _resolved_purchase_config(_get_db())
+    return {
+        "config": cfg,
+        "defaults": {
+            "valuation_method": pmatch.DEFAULT_VALUATION_METHOD,
+            "match_tolerance_pct": pmatch.DEFAULT_MATCH_TOLERANCE_PCT,
+        },
+        "valuation_methods": list(pmatch.VALID_VALUATION_METHODS),
+    }
+
+
+@router.put("/config")
+async def update_purchase_config(
+    body: PurchaseConfigUpdate,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Update the purchase config (ADMIN / ACCOUNTANT). Only provided fields are
+    changed; values are normalised to a valid method / clamped tolerance before
+    persisting. Audited."""
+    db = _get_db()
+    current = _resolved_purchase_config(db)
+    payload = dict(current)
+    if body.valuation_method is not None:
+        payload["valuation_method"] = pmatch.normalize_valuation_method(
+            body.valuation_method
+        )
+    if body.match_tolerance_pct is not None:
+        payload["match_tolerance_pct"] = pmatch.normalize_tolerance_pct(
+            body.match_tolerance_pct
+        )
+
+    if db is not None:
+        try:
+            db.get_collection(_PURCHASE_SETTINGS_COLL).update_one(
+                {"_id": _PURCHASE_SETTINGS_ID},
+                {
+                    "$set": {
+                        **payload,
+                        "updated_by": current_user.get("user_id"),
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail="Failed to save purchase config"
+            ) from exc
+
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase_config.update",
+                    "entity_type": "purchase_settings",
+                    "entity_id": _PURCHASE_SETTINGS_ID,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {"from": current, "to": payload},
+                }
+            )
+    except Exception:
+        pass
+
+    return {"message": "Purchase config updated", "config": payload}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 -- 3-way match detail + exception override
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{invoice_id}/match")
+async def get_invoice_match(
+    invoice_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Return the stored 3-way match detail for an invoice.
+
+    If the invoice was booked before a match was run, or had no PO/GRN link,
+    match_detail is None and match_status reflects that (None / the stored
+    verdict). Re-computes on the fly from the linked PO/GRN when the stored
+    detail is absent but a link exists (so an older invoice still answers)."""
+    db = _get_db()
+    if db is None:
+        return {"invoice_id": invoice_id, "match_status": None, "match_detail": None}
+    try:
+        doc = db.get_collection("vendor_bills").find_one(
+            {"bill_id": invoice_id}, {"_id": 0}
+        )
+    except Exception:
+        doc = None
+    if not doc:
+        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+
+    detail = doc.get("match_detail")
+    status = doc.get("match_status")
+    if detail is None and (doc.get("po_id") or doc.get("grn_id")):
+        # Lazily recompute for invoices booked before Phase 2 (or where the
+        # stored detail was dropped). Read-only -- does not persist.
+        cfg = _resolved_purchase_config(db)
+        detail = _run_match_for_invoice(
+            db,
+            doc.get("po_id"),
+            doc.get("grn_id"),
+            doc.get("lines") or [],
+            cfg["match_tolerance_pct"],
+        )
+        if detail and status is None:
+            status = detail.get("match_status")
+
+    return {
+        "invoice_id": invoice_id,
+        "match_status": status,
+        "match_detail": detail,
+        "po_id": doc.get("po_id"),
+        "grn_id": doc.get("grn_id"),
+    }
+
+
+class ExceptionOverride(BaseModel):
+    reason: str = Field(..., min_length=1)
+
+
+@router.post("/{invoice_id}/approve-exception")
+async def approve_invoice_exception(
+    invoice_id: str,
+    body: ExceptionOverride,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """ADMIN / ACCOUNTANT override of an ON_HOLD_EXCEPTION 3-way match.
+
+    Flips match_status to MATCHED_OVERRIDE with the approver + reason recorded on
+    the invoice (the original match_detail is preserved for the audit trail).
+    Idempotent-ish: only an ON_HOLD_EXCEPTION can be approved -- a clean MATCHED
+    invoice has nothing to override (400), and a missing invoice 404s."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        doc = db.get_collection("vendor_bills").find_one(
+            {"bill_id": invoice_id}, {"_id": 0}
+        )
+    except Exception:
+        doc = None
+    if not doc:
+        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+
+    if doc.get("match_status") != pmatch.MATCH_ON_HOLD:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only an invoice on ON_HOLD_EXCEPTION can be exception-approved "
+                f"(current match_status: {doc.get('match_status')})."
+            ),
+        )
+
+    override = {
+        "match_status": pmatch.MATCH_OVERRIDE,
+        "exception_override": {
+            "approved_by": current_user.get("user_id"),
+            "reason": body.reason,
+            "approved_at": datetime.now().isoformat(),
+            "prior_status": pmatch.MATCH_ON_HOLD,
+        },
+    }
+    try:
+        db.get_collection("vendor_bills").update_one(
+            {"bill_id": invoice_id}, {"$set": override}
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Failed to record exception override"
+        ) from exc
+
+    # Audit the override (this is a control bypass -- it MUST be recorded; the
+    # write above is the source of truth, the audit is best-effort on top).
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase_invoice.approve_exception",
+                    "entity_type": "vendor_bill",
+                    "entity_id": invoice_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "reason": body.reason,
+                        "prior_status": pmatch.MATCH_ON_HOLD,
+                        "new_status": pmatch.MATCH_OVERRIDE,
+                        "match_exceptions": (doc.get("match_detail") or {}).get(
+                            "exceptions"
+                        ),
+                    },
+                }
+            )
+    except Exception:
+        pass
+
+    return {
+        "invoice_id": invoice_id,
+        "match_status": pmatch.MATCH_OVERRIDE,
+        "exception_override": override["exception_override"],
     }
 
 

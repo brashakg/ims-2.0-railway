@@ -942,6 +942,30 @@ async def accept_grn(
     grn_number = grn.get("grn_number")
     user_id = current_user.get("user_id")
 
+    # Phase 2 (inventory valuation): build a per-product unit_price map from the
+    # PO so each minted serialized unit is stamped with its PROVISIONAL cost
+    # (the agreed PO price). This is the receipt-time cost; the purchase invoice
+    # later trues it up to the actually-billed price. ADDITIVE + fail-soft: any
+    # problem here leaves po_unit_price empty and the units mint exactly as
+    # before (no unit_cost), never blocking receiving.
+    po_unit_price: dict = {}
+    po_for_cost = None
+    if po_repo is not None and po_id:
+        try:
+            po_for_cost = po_repo.find_by_id(po_id)
+            for it in (po_for_cost or {}).get("items", []) or []:
+                if not isinstance(it, dict):
+                    continue
+                pid = it.get("product_id")
+                if pid is None or pid in po_unit_price:
+                    continue
+                try:
+                    po_unit_price[pid] = round(float(it.get("unit_price") or 0), 2)
+                except (TypeError, ValueError):
+                    continue
+        except Exception:  # noqa: BLE001
+            po_unit_price = {}
+
     minted_stock_ids: List[str] = []
     units_added = 0
 
@@ -972,6 +996,23 @@ async def accept_grn(
             to_mint = accepted_qty - already
 
             location_code = item.get("location_code") or "DEFAULT"
+            # Provisional receipt cost from the PO line (Phase 2 valuation).
+            # Prefer the GRN line's own unit_price if it carries one, else the PO
+            # price. ADDITIVE: only stamped when we have a positive cost, so a
+            # priceless receipt mints exactly as before.
+            try:
+                line_cost = float(item.get("unit_price") or 0) or po_unit_price.get(
+                    product_id, 0.0
+                )
+            except (TypeError, ValueError):
+                line_cost = po_unit_price.get(product_id, 0.0)
+            cost_fields = {}
+            if line_cost and line_cost > 0:
+                cost_fields = {
+                    "unit_cost": round(line_cost, 2),
+                    "cost_price": round(line_cost, 2),
+                    "cost_source": "GRN_PO",
+                }
             for _ in range(to_mint):
                 created = stock_repo.create(
                     {
@@ -988,6 +1029,7 @@ async def accept_grn(
                         "grn_number": grn_number,
                         "po_id": po_id,
                         "created_by": user_id,
+                        **cost_fields,
                     }
                 )
                 if created:
