@@ -58,7 +58,7 @@ class UserCreate(BaseModel):
     full_name: str = Field(..., min_length=2)
     phone: Optional[str] = None
     roles: List[str] = Field(default=["SALES_STAFF"])
-    store_ids: List[str] = Field(default=[])
+    store_ids: List[str] = Field(default_factory=list)
     primary_store_id: Optional[str] = None
     # Per-user discount OVERRIDE. None = use the role baseline (services/
     # role_caps.py). A hardcoded default of 10 used to ELEVATE zero-privilege
