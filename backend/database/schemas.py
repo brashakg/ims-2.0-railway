@@ -1776,3 +1776,102 @@ COLLECTIONS.update({
         ],
     },
 })
+
+
+# ============================================================================
+# PRODUCT IMAGES / IMAGE DESIGN QUEUE  (BVI -> IMS)  Phase 4 -- FLAGSHIP #3
+# ============================================================================
+# `product_images` is the IMS home for BVI's ProductImage + VariantImage tables
+# AND the design-team work queue that wraps them (BVI_MERGE_PLAN.md section A.1
+# "ProductImage" / "VariantImage" -> NEW product_images, and section B Phase 4).
+# It is PUSH-DARK: image records + their RAW->EDITED->APPROVED design lifecycle
+# are tracked inside IMS Mongo only; nothing is written to Shopify in Phase 4
+# (the GraphQL image push that fills `shopify_image_id` is Phase 5).
+#
+# One doc = one image of a product (or a specific variant). BVI's two tables
+# (ProductImage on the parent, VariantImage on the variant) are merged into this
+# single collection, discriminated by an optional `variant_id`: a row with
+# variant_id=null is a parent/product-level image (BVI ProductImage); a row with
+# a variant_id is a variant-level image (BVI VariantImage).
+#
+# THE DESIGN LIFECYCLE (the daily-ops value):
+#   kind    = RAW (uploaded by a cataloger, the un-edited source) | EDITED (the
+#             designer's retouched output) | FINAL (the approved, push-ready asset).
+#   status  = QUEUED -> IN_PROGRESS -> REVIEW -> APPROVED | REJECTED, with
+#             REJECTED -> IN_PROGRESS to re-work. The valid-transition graph is
+#             enforced in the repository (set_status) + router (409 on illegal).
+#   assigned_to  = the DESIGN_MANAGER who owns the edit.
+#   edited_url   = where the designer's EDITED asset lives (set by attach_edited,
+#                  which also flips status to REVIEW).
+#   approved_at + reviewed_by  = stamped when a reviewer APPROVES (which also
+#                  writes a chained audit_logs row, since approval gates go-live).
+#
+# Idempotent join keys (never key on Mongo `_id`):
+#   image_id (internal uuid, primary) | product_id (-> catalog_products) |
+#   variant_id (-> catalog_variants, optional). `shopify_image_id` stays null in
+#   Phase 4; it is the Phase-5 push reverse-lookup. `url`/`edited_url` are the
+#   asset locations (the P4 re-host audit rewrites BVI /uploads/ paths into these).
+#
+# Every field beyond image_id/product_id/url is optional/additive so a partial
+# import (e.g. a Shopify-pulled image with no design state) never fails
+# validation. Fail-soft throughout (mirrors the other ecom collections).
+
+PRODUCT_IMAGE_SCHEMA = {
+    "bsonType": "object",
+    # image_id (internal id) + product_id (the parent it belongs to) + url (the
+    # asset location) are the minimum for a meaningful image record.
+    "required": ["image_id", "product_id", "url"],
+    "properties": {
+        "image_id": {"bsonType": "string"},          # internal uuid (repo _id)
+        # Lineage. product_id -> catalog_products; variant_id -> catalog_variants
+        # (null/absent = a parent/product-level image, BVI ProductImage; present =
+        # a variant-level image, BVI VariantImage).
+        "product_id": {"bsonType": "string"},
+        "variant_id": {"bsonType": ["string", "null"]},
+        # The (raw / source) asset URL. originalUrl in BVI; here `url` is the
+        # canonical location and `edited_url` (below) is the designer's output.
+        "url": {"bsonType": "string"},
+        "edited_url": {"bsonType": ["string", "null"]},
+        # Lifecycle discriminators.
+        "kind": {"enum": ["RAW", "EDITED", "FINAL"]},
+        "status": {
+            "enum": [
+                "QUEUED", "IN_PROGRESS", "REVIEW", "APPROVED", "REJECTED",
+            ]
+        },
+        # Where the image came from. Drives whether it enters the design queue
+        # (UPLOAD/SCRAPE/AI typically QUEUED) vs is a passive Shopify pull.
+        "source": {"enum": ["UPLOAD", "SHOPIFY", "SCRAPE", "AI"]},
+        # Display order among a product's images (0-based; BVI position).
+        "position": {"bsonType": "int"},
+        "alt_text": {"bsonType": ["string", "null"]},
+        # Free-form designer brief / reviewer feedback.
+        "design_notes": {"bsonType": ["string", "null"]},
+        # Workflow actors (user ids).
+        "assigned_to": {"bsonType": ["string", "null"]},   # a DESIGN_MANAGER
+        "submitted_by": {"bsonType": ["string", "null"]},  # who queued it
+        "reviewed_by": {"bsonType": ["string", "null"]},   # who approved/rejected
+        "approved_at": {"bsonType": ["date", "null"]},
+        # Shopify-side identity (set on the Phase-5 push; null while PUSH-DARK).
+        "shopify_image_id": {"bsonType": ["string", "null"]},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+    },
+}
+
+COLLECTIONS.update({
+    "product_images": {
+        "schema": PRODUCT_IMAGE_SCHEMA,
+        "indexes": [
+            # All images of a product (the PDP gallery + the per-product queue
+            # view). The hot read path.
+            {"keys": [("product_id", 1)]},
+            # The design QUEUE filter -- "show me everything QUEUED / IN_PROGRESS
+            # / awaiting REVIEW".
+            {"keys": [("status", 1)]},
+            # "My queue" -- everything assigned to a given DESIGN_MANAGER. Sparse
+            # so unassigned rows (assigned_to absent) aren't indexed on null.
+            {"keys": [("assigned_to", 1)], "sparse": True},
+        ],
+    },
+})

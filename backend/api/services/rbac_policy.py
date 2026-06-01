@@ -650,6 +650,22 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'PUT', "path": '/api/v1/online-store/menus/{menu_id}/items/{item_id}/move', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/online-store/menus/{menu_id}/items/{item_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'DELETE', "path": '/api/v1/online-store/menus/{menu_id}/items/{item_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    # --- /api/v1/online-store/images ---  (BVI Phase 4: Image Design Queue, FLAGSHIP #3)
+    # PUSH-DARK product_images CRUD + the RAW->EDITED->APPROVED design lifecycle
+    # (assign / status / attach-edited). All gated to the ecom role set
+    # (router-level require_roles); see routers/online_store_images.py +
+    # BVI_MERGE_PLAN.md Phase 4. The literal action sub-paths .../{image_id}/assign,
+    # .../{image_id}/status, .../{image_id}/edited are more specific than the bare
+    # .../{image_id} route (policy_for ranks fewest-params then longest first), so
+    # they resolve to their own entries. APPROVE writes a chained audit_logs row.
+    {"method": 'GET', "path": '/api/v1/online-store/images', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/images', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/online-store/images/{image_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/images/{image_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'DELETE', "path": '/api/v1/online-store/images/{image_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/assign', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/status', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/edited', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     # --- /api/v1/orders ---
     {"method": 'GET', "path": '/api/v1/orders', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders', "allowed": ['ADMIN', 'AREA_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},
