@@ -599,6 +599,20 @@ export const adminDiscountApi = {
     return response.data;
   },
 
+  // The caps the POS ACTUALLY enforces, sourced from code constants
+  // (role_caps.py + pricing_caps.py). Read-only -- there is no setter, because
+  // changing a cap is a code change + deploy, not a DB write.
+  getEnforcedDiscountCaps: async () => {
+    const response = await api.get('/admin/discounts/enforced-caps');
+    return response.data as {
+      source: string;
+      note: string;
+      role_caps: Record<string, number>;
+      category_caps: Record<string, number>;
+      luxury_brand_caps: Record<string, number>;
+    };
+  },
+
   getTierDiscounts: async () => {
     const response = await api.get('/admin/discounts/tier-discounts');
     return response.data;

@@ -551,27 +551,74 @@ async def change_password(
     return {"message": "Password changed successfully"}
 
 
+# Default display/notification preferences. Returned verbatim when the user has
+# no saved row yet; a saved row is overlaid on top of these so a partial save
+# never drops a key. email/sms default to True (opt-in by default).
+_DEFAULT_PREFERENCES = {
+    "theme": "light",
+    "language": "en",
+    "currency": "INR",
+    "date_format": "DD/MM/YYYY",
+    "notifications_enabled": True,
+    "email_notifications": True,
+    "sms_notifications": True,
+    "dashboard_widgets": ["sales", "orders", "tasks", "inventory"],
+}
+
+
+def _get_user_preferences_from_db(user_id: str) -> Optional[dict]:
+    """Fetch a user's saved preferences row (user_preferences collection, keyed
+    by user_id). Returns None when no DB / no saved row."""
+    if not user_id:
+        return None
+    collection = _get_settings_collection("user_preferences")
+    if collection is not None:
+        doc = collection.find_one({"_id": user_id})
+        if doc:
+            doc.pop("_id", None)
+            return doc
+    return None
+
+
 @router.get("/profile/preferences")
 async def get_preferences(current_user: dict = Depends(get_current_user)):
-    """Get user's display preferences"""
-    return {
-        "theme": "light",
-        "language": "en",
-        "currency": "INR",
-        "date_format": "DD/MM/YYYY",
-        "notifications_enabled": True,
-        "email_notifications": True,
-        "sms_notifications": True,
-        "dashboard_widgets": ["sales", "orders", "tasks", "inventory"],
-    }
+    """Get the current user's display/notification preferences.
+
+    Reads the per-user `user_preferences` row and overlays it on the defaults
+    (so email_notifications / sms_notifications reflect what the user actually
+    saved). Previously this returned hardcoded True/True regardless of any save
+    -- the Profile email/SMS toggles were a silent no-op."""
+    prefs = dict(_DEFAULT_PREFERENCES)
+    saved = _get_user_preferences_from_db(current_user.get("user_id"))
+    if saved:
+        # Drop bookkeeping fields that aren't user-facing preference values.
+        saved.pop("user_id", None)
+        saved.pop("updated_at", None)
+        prefs.update(saved)
+    return prefs
 
 
 @router.put("/profile/preferences")
 async def update_preferences(
     preferences: Dict, current_user: dict = Depends(get_current_user)
 ):
-    """Update user's display preferences"""
-    return {"message": "Preferences updated", "preferences": preferences}
+    """Persist the current user's display/notification preferences.
+
+    Writes the posted preferences to the `user_preferences` singleton keyed by
+    user_id so GET reads them back (and they survive a reload). Previously this
+    echoed the input WITHOUT writing -- toggling email/SMS notifications never
+    actually changed anything. Fail-soft: with no DB the call still 200s with a
+    '(no DB)' marker."""
+    user_id = current_user.get("user_id")
+    payload = {k: v for k, v in (preferences or {}).items() if k not in ("_id", "user_id")}
+    collection = _get_settings_collection("user_preferences")
+    if collection is not None and user_id:
+        to_write = dict(payload)
+        to_write["user_id"] = user_id
+        to_write["updated_at"] = datetime.utcnow().isoformat()
+        collection.update_one({"_id": user_id}, {"$set": to_write}, upsert=True)
+        return {"message": "Preferences updated", "preferences": payload}
+    return {"message": "Preferences updated (no DB)", "preferences": payload}
 
 
 # ============================================================================
@@ -940,13 +987,24 @@ async def list_available_printers(current_user: dict = Depends(get_current_user)
 
 
 # ============================================================================
-# DISCOUNT RULES ENDPOINTS
+# DISCOUNT RULES ENDPOINTS  (DEPRECATED -- see note below)
 # ============================================================================
+# These write to the `discount_rules` singleton in a {rules: {ROLE: {CAT: pct}}}
+# shape that NOTHING reads for enforcement: the POS sources role caps from
+# services/role_caps.py and category/luxury caps from services/pricing_caps.py
+# (code constants), and the only reader of the `discount_rules` collection
+# (admin_extras.get_discount_rules) expects a DIFFERENT category_caps shape. So
+# the writes here were effectively dead. They have ZERO frontend consumers (the
+# Settings Discount screen uses adminDiscountApi -> /admin/discounts/*, and is
+# now read-only). Kept as deprecated no-harm shims for backward compatibility;
+# the real, enforced caps are exposed read-only at
+# GET /api/v1/admin/discounts/enforced-caps.
 
 
-@router.get("/discount-rules")
+@router.get("/discount-rules", deprecated=True)
 async def get_discount_rules(current_user: dict = Depends(get_current_user)):
-    """Get all discount rules by role and tier"""
+    """DEPRECATED. Returns any legacy `discount_rules` doc; not used for
+    enforcement. The enforced caps live at /admin/discounts/enforced-caps."""
     db_rules = _get_discount_rules_from_db()
     if db_rules and "rules" in db_rules:
         return db_rules
@@ -954,15 +1012,15 @@ async def get_discount_rules(current_user: dict = Depends(get_current_user)):
     return {"rules": {}}
 
 
-@router.put("/discount-rules")
+@router.put("/discount-rules", deprecated=True)
 async def update_discount_rules(
     rules: Dict[str, Dict[str, int]], current_user: dict = Depends(get_current_user)
 ):
-    """Update discount rules (SUPERADMIN/ADMIN/AREA_MANAGER).
-
-    Persists the full rules dict under the 'discount_rules' singleton.
-    Previously returned success without writing (silent data loss on reload).
-    """
+    """DEPRECATED -- the discount caps the POS enforces come from code constants
+    (services/role_caps.py + services/pricing_caps.py), NOT this collection. This
+    write is not consumed by enforcement and has no UI; retained only as a
+    backward-compatible no-harm shim. To change a cap, edit the code constants.
+    (SUPERADMIN/ADMIN/AREA_MANAGER.)"""
     if not any(
         role in current_user["roles"]
         for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
@@ -979,15 +1037,13 @@ async def update_discount_rules(
     return {"message": "Discount rules updated (no DB)", "rules": rules}
 
 
-@router.post("/discount-rules")
+@router.post("/discount-rules", deprecated=True)
 async def set_discount_rule(
     rule: DiscountSettings, current_user: dict = Depends(get_current_user)
 ):
-    """Set individual discount rule (SUPERADMIN/ADMIN/AREA_MANAGER).
-
-    Merges one role+category entry into the 'discount_rules' singleton.
-    Previously returned success without writing (silent data loss on reload).
-    """
+    """DEPRECATED -- not consumed by enforcement (the POS uses code-constant
+    caps, see update_discount_rules). No-harm shim only; no UI consumer.
+    (SUPERADMIN/ADMIN/AREA_MANAGER.)"""
     if not any(
         role in current_user["roles"]
         for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]

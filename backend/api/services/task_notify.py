@@ -48,18 +48,54 @@ def notification_priority(task_priority: Any) -> str:
     return _PRIORITY_MAP.get(str(task_priority or "").upper(), "NORMAL")
 
 
+# Trigger keys the Settings -> Notification Templates editor can override. The
+# inline strings below remain the hard-coded defaults (and the fallback when no
+# saved template is enabled). Owner-edited bodies may use these placeholders:
+#   {title} {priority} {reason} {store}
+_INAPP_TRIGGER = "TASK_ESCALATION_INAPP"
+_WHATSAPP_TRIGGER = "TASK_ESCALATION_WHATSAPP"
+
+
+def _resolve_escalation_body(trigger: str, default: str, variables: Dict[str, Any]) -> str:
+    """Resolve an escalation body through the saved-template resolver, falling
+    back to the hard-coded default. Fail-soft: any error -> the default text
+    (an escalation is never suppressed by a template problem)."""
+    try:
+        from api.services.notification_templates import resolve_and_render
+
+        return resolve_and_render(
+            template_id=trigger,
+            trigger_event=trigger,
+            default_content=default,
+            variables=variables,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TASK_NOTIFY] template resolve failed, using default: %s", exc)
+        try:
+            return default.format(**variables)
+        except Exception:  # noqa: BLE001
+            return default
+
+
 def build_escalation_notification(
     task: Dict[str, Any], target_user_id: str, reason: str
 ) -> Dict[str, Any]:
-    """Build a NOTIFICATION_SCHEMA in-app notification doc. Pure."""
+    """Build a NOTIFICATION_SCHEMA in-app notification doc. Pure (the optional
+    saved-template lookup is fail-soft and falls back to the inline default)."""
     title = task.get("title") or "Task"
     priority = str(task.get("priority") or "P3").upper()
+    variables = {"title": title, "priority": priority, "reason": reason}
+    message = _resolve_escalation_body(
+        _INAPP_TRIGGER,
+        "[{priority}] '{title}' was escalated to you. Reason: {reason}.",
+        variables,
+    )
     return {
         "notification_id": f"NTF-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
         "notification_type": "task_escalation",
         "user_id": target_user_id,
         "title": f"Escalated to you: {title}",
-        "message": (f"[{priority}] '{title}' was escalated to you. Reason: {reason}."),
+        "message": message,
         "entity_type": "task",
         "entity_id": task.get("task_id"),
         "action_url": "/tasks",
@@ -71,16 +107,22 @@ def build_escalation_notification(
 
 
 def escalation_whatsapp_text(task: Dict[str, Any], reason: str) -> str:
-    """Plain-text WhatsApp body for an escalation. Pure."""
+    """Plain-text WhatsApp body for an escalation. An owner-edited template
+    overrides the default when enabled; otherwise the inline default is used."""
     title = task.get("title") or "Task"
     priority = str(task.get("priority") or "P3").upper()
     store = task.get("store_id") or "-"
-    return (
-        f"IMS escalation [{priority}]\n"
-        f"Task: {title}\n"
-        f"Store: {store}\n"
-        f"Reason: {reason}\n"
-        f"Open IMS > Tasks to action it."
+    variables = {"title": title, "priority": priority, "reason": reason, "store": store}
+    return _resolve_escalation_body(
+        _WHATSAPP_TRIGGER,
+        (
+            "IMS escalation [{priority}]\n"
+            "Task: {title}\n"
+            "Store: {store}\n"
+            "Reason: {reason}\n"
+            "Open IMS > Tasks to action it."
+        ),
+        variables,
     )
 
 

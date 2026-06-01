@@ -5,7 +5,7 @@
 import { useState, useEffect } from 'react';
 import {
   Store, Tag, Plus, Edit2, Trash2, X, Check,
-  Boxes,
+  Boxes, Lock, Info,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
@@ -519,79 +519,88 @@ export function BrandSection() {
 // Discount Section
 // ============================================================================
 
+// Friendly labels for role keys (display only). Any key not listed falls back
+// to a title-cased version of the key.
+const ROLE_LABELS: Record<string, string> = {
+  SUPERADMIN: 'Superadmin',
+  ADMIN: 'Admin',
+  AREA_MANAGER: 'Area Manager',
+  STORE_MANAGER: 'Store Manager',
+  INVENTORY_MANAGER: 'Inventory Manager',
+  ACCOUNTANT: 'Accountant',
+  CATALOG_MANAGER: 'Catalog Manager',
+  OPTOMETRIST: 'Optometrist',
+  SALES_CASHIER: 'Sales Cashier',
+  SALES_STAFF: 'Sales Staff',
+  CASHIER: 'Cashier',
+  WORKSHOP_STAFF: 'Workshop Staff',
+};
+
+const titleizeKey = (k: string) =>
+  ROLE_LABELS[k] ??
+  k.split('_').map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ');
+
+// Code-constant fallbacks (services/role_caps.py + services/pricing_caps.py),
+// shown if the read-only endpoint is unreachable so the panel never renders
+// blank. These mirror the enforced constants.
+const FALLBACK_ROLE_CAPS: Record<string, number> = {
+  SUPERADMIN: 100, ADMIN: 100, AREA_MANAGER: 25, STORE_MANAGER: 20,
+  INVENTORY_MANAGER: 20, ACCOUNTANT: 0, CATALOG_MANAGER: 0, OPTOMETRIST: 0,
+  SALES_CASHIER: 10, SALES_STAFF: 10, CASHIER: 0, WORKSHOP_STAFF: 0,
+};
+const FALLBACK_CATEGORY_CAPS: Record<string, number> = {
+  MASS: 15, PREMIUM: 20, LUXURY: 5, SERVICE: 10, NON_DISCOUNTABLE: 0,
+};
+const FALLBACK_LUXURY_BRAND_CAPS: Record<string, number> = {
+  CARTIER: 2, CHOPARD: 2, BVLGARI: 2, GUCCI: 5, PRADA: 5, VERSACE: 5, BURBERRY: 5,
+};
+
+// READ-ONLY. This panel DISPLAYS the discount caps the POS actually enforces.
+// Those caps are set in code (services/role_caps.py + services/pricing_caps.py)
+// and exposed read-only via GET /admin/discounts/enforced-caps. The old
+// editable table wrote to the `role_discount_caps` collection which the POS
+// never reads, so edits here had no effect -- a misleading screen. It is now
+// informational only; changing a cap is a code change (contact an admin).
 export function DiscountSection() {
-  const toast = useToast();
-  const [discounts, setDiscounts] = useState([
-    { role: 'Sales Staff', roleKey: 'SALES_STAFF', mass: 5, premium: 3, luxury: 0 },
-    { role: 'Sales Cashier', roleKey: 'SALES_CASHIER', mass: 10, premium: 5, luxury: 3 },
-    { role: 'Optometrist', roleKey: 'OPTOMETRIST', mass: 5, premium: 3, luxury: 0 },
-    { role: 'Workshop Staff', roleKey: 'WORKSHOP_STAFF', mass: 0, premium: 0, luxury: 0 },
-    { role: 'Store Manager', roleKey: 'STORE_MANAGER', mass: 15, premium: 10, luxury: 5 },
-    { role: 'Accountant', roleKey: 'ACCOUNTANT', mass: 10, premium: 5, luxury: 3 },
-    { role: 'Area Manager', roleKey: 'AREA_MANAGER', mass: 20, premium: 15, luxury: 10 },
-    { role: 'Admin', roleKey: 'ADMIN', mass: 100, premium: 100, luxury: 100 },
-    { role: 'Superadmin', roleKey: 'SUPERADMIN', mass: 100, premium: 100, luxury: 100 },
-  ]);
-  const [isSaving, setIsSaving] = useState(false);
+  const [roleCaps, setRoleCaps] = useState<Record<string, number>>(FALLBACK_ROLE_CAPS);
+  const [categoryCaps, setCategoryCaps] = useState<Record<string, number>>(FALLBACK_CATEGORY_CAPS);
+  const [luxuryBrandCaps, setLuxuryBrandCaps] = useState<Record<string, number>>(FALLBACK_LUXURY_BRAND_CAPS);
 
   useEffect(() => {
-    loadDiscounts();
+    loadEnforcedCaps();
   }, []);
 
-  const loadDiscounts = async () => {
+  const loadEnforcedCaps = async () => {
     try {
-      const [caps] = await Promise.all([
-        adminDiscountApi.getRoleDiscountCaps().catch(() => null),
-        adminDiscountApi.getTierDiscounts().catch(() => null),
-      ]);
-      // Backend returns { role_caps: { ROLE: max_discount_number } } — a single
-      // enforced cap per role (shown as the "Mass" column). The old code read
-      // caps.rules.{mass,premium,luxury}, which the endpoint never returns, so
-      // saved caps never reloaded. premium/luxury are not yet persisted/enforced
-      // server-side, so they keep their defaults until that's wired.
-      const capsMap = caps?.role_caps;
-      if (capsMap) {
-        setDiscounts(prev => prev.map(d => {
-          const m = capsMap[d.roleKey];
-          return typeof m === 'number' ? { ...d, mass: m } : d;
-        }));
-      }
+      const data = await adminDiscountApi.getEnforcedDiscountCaps();
+      if (data?.role_caps) setRoleCaps(data.role_caps);
+      if (data?.category_caps) setCategoryCaps(data.category_caps);
+      if (data?.luxury_brand_caps) setLuxuryBrandCaps(data.luxury_brand_caps);
     } catch {
-      // Discount API not available
+      // Endpoint unavailable -- keep the code-constant fallbacks already in state.
     }
   };
 
-  const handleSaveRules = async () => {
-    setIsSaving(true);
-    try {
-      // Save each role's discount cap
-      await Promise.all(
-        discounts.map(d =>
-          adminDiscountApi.setRoleDiscountCap(d.roleKey, d.mass).catch(() => null)
-        )
-      );
-      toast.success('Discount rules saved');
-    } catch {
-      toast.error('Failed to save');
-    }
-    setIsSaving(false);
-  };
+  const roleRows = Object.entries(roleCaps).sort((a, b) => b[1] - a[1]);
 
   return (
     <div className="card">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-2">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Discount Rules</h2>
-          <p className="text-sm text-gray-500">Maximum discount percentage by role</p>
+          <p className="text-sm text-gray-500">Maximum discount percentage by role (enforced)</p>
         </div>
-        <button
-          onClick={handleSaveRules}
-          disabled={isSaving}
-          className="btn-outline flex items-center gap-2"
-        >
-          <Edit2 className="w-4 h-4" />
-          {isSaving ? 'Saving...' : 'Save Rules'}
-        </button>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500 bg-gray-100 px-2.5 py-1 rounded-full">
+          <Lock className="w-3.5 h-3.5" />
+          Read-only
+        </span>
+      </div>
+      <div className="mb-5 flex items-start gap-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg p-3">
+        <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+        <span>
+          These are the caps the POS actually enforces. They are set in code
+          (single source of truth) -- contact an administrator to change them.
+        </span>
       </div>
 
       <div className="overflow-x-auto">
@@ -603,33 +612,52 @@ export function DiscountSection() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
-            {discounts.map((row, idx) => (
-              <tr key={row.roleKey}>
-                <td className="px-4 py-3 font-medium">{row.role}</td>
-                <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={row.mass}
-                    onChange={(e) => {
-                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
-                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, mass: val } : d));
-                    }}
-                    min="0"
-                    max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
-                  />
-                  %
+            {roleRows.map(([key, cap]) => (
+              <tr key={key}>
+                <td className="px-4 py-3 font-medium">{titleizeKey(key)}</td>
+                <td className="px-4 py-3 text-center tabular-nums">
+                  {cap >= 100 ? 'Unlimited' : `${cap}%`}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <p className="mt-3 text-xs text-gray-500">
-        The maximum discount per role. Category caps (Mass 15%, Premium 20%, Luxury 5%,
-        Service 10%, Non-discountable 0%) and luxury brand caps apply on top and always
-        win when lower.
-      </p>
+
+      <div className="mt-6 grid grid-cols-1 tablet:grid-cols-2 gap-6">
+        <div>
+          <h3 className="text-sm font-medium text-gray-700 mb-3">Category Caps</h3>
+          <div className="space-y-1.5 text-sm">
+            {Object.entries(categoryCaps).map(([cat, cap]) => (
+              <div key={cat} className="flex items-center justify-between">
+                <span className="text-gray-600">
+                  {cat.split('_').map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ')}
+                </span>
+                <span className="font-medium tabular-nums">{cap}%</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-gray-400">
+            Category caps apply on top of the role cap and always win when lower.
+          </p>
+        </div>
+        <div>
+          <h3 className="text-sm font-medium text-gray-700 mb-3">Luxury Brand Caps</h3>
+          <div className="space-y-1.5 text-sm">
+            {Object.entries(luxuryBrandCaps).map(([brand, cap]) => (
+              <div key={brand} className="flex items-center justify-between">
+                <span className="text-gray-600">
+                  {brand.charAt(0) + brand.slice(1).toLowerCase()}
+                </span>
+                <span className="font-medium tabular-nums">{cap}%</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-gray-400">
+            Named luxury brands further constrain the category cap when lower.
+          </p>
+        </div>
+      </div>
 
       <div className="mt-6 pt-6 border-t border-gray-200">
         <h3 className="text-sm font-medium text-gray-700 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>

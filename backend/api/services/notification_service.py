@@ -66,15 +66,30 @@ TEMPLATES = {
 
 
 def populate_template(template_id: str, variables: dict) -> str:
-    """Fill template variables. Returns the formatted message."""
-    template = TEMPLATES.get(template_id, "")
-    if not template:
+    """Fill template variables. Returns the formatted message.
+
+    An owner-edited template (Settings -> Notification Templates) overrides the
+    hard-coded default when an ENABLED, non-empty saved doc matches this
+    template_id; otherwise the hard-coded TEMPLATES default is used (fail-soft,
+    so a missing/disabled/empty override never blanks a message)."""
+    default = TEMPLATES.get(template_id, "")
+    try:
+        from api.services.notification_templates import resolve_template
+
+        content, _ = resolve_template(
+            template_id=template_id,
+            trigger_event=template_id,
+            default_content=default,
+        )
+    except Exception:  # noqa: BLE001 - resolver is fail-soft; keep the default
+        content = default
+    if not content:
         return f"[Template {template_id} not found]"
     try:
-        return template.format(**variables)
+        return content.format(**variables)
     except KeyError as e:
         logger.warning("Missing template variable %s for %s", e, template_id)
-        return template
+        return content
 
 
 def _default_consent_basis(category: str) -> str:

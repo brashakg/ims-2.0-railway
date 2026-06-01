@@ -135,6 +135,38 @@ async def set_role_discount_cap(body: RoleCapBody):
     return {"role": body.role, "max_discount": body.max_discount}
 
 
+@router.get("/discounts/enforced-caps")
+async def get_enforced_discount_caps():
+    """The discount caps the POS ACTUALLY enforces, sourced from the live code
+    constants -- NOT from any editable Settings collection.
+
+    POS enforcement (orders.py) reads role caps from services.role_caps and
+    category/luxury-brand caps from services.pricing_caps; those are set in code
+    and are the single source of truth. This read-only endpoint exposes exactly
+    those constants so the Settings screen can DISPLAY the real, enforced caps
+    instead of an editable table that wrote to a collection the POS never reads.
+    Changing a cap means changing the code constants (and a deploy), not a DB
+    write -- hence there is no companion setter here.
+    """
+    from api.services.role_caps import ROLE_DISCOUNT_CAPS
+    from api.services.pricing_caps import (
+        CATEGORY_DISCOUNT_CAPS,
+        LUXURY_BRAND_CAPS,
+    )
+
+    return {
+        "source": "code_constants",
+        "note": (
+            "These caps are enforced from code (services/role_caps.py + "
+            "services/pricing_caps.py). They are not editable here -- contact an "
+            "administrator to change them in code."
+        ),
+        "role_caps": dict(ROLE_DISCOUNT_CAPS),
+        "category_caps": dict(CATEGORY_DISCOUNT_CAPS),
+        "luxury_brand_caps": dict(LUXURY_BRAND_CAPS),
+    }
+
+
 @router.get("/discounts/tier-discounts")
 async def get_tier_discounts():
     """Loyalty-tier auto-discount %."""
