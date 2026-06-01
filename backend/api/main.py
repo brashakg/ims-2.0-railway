@@ -94,6 +94,7 @@ from .routers import (
     product_templates_router,
     audit_router,
     budgets_router,
+    online_store_router,
 )
 from .routers.auth import require_roles
 
@@ -965,6 +966,16 @@ app.include_router(
     audit_router,
     prefix="/api/v1/audit",
     tags=["Audit"],
+)
+# Online Store module (BVI Phase 1 foundation). The Shopify PIM folded into IMS
+# as ONE app -- see docs/reference/BVI_MERGE_PLAN.md. Phase 1 mounts the module
+# skeleton + a stub GET /online-store/summary. Each route is role-gated INSIDE
+# the router (require_roles -> SUPERADMIN/ADMIN/CATALOG_MANAGER/DESIGN_MANAGER),
+# so a plain mount here; no router-level dependency needed.
+app.include_router(
+    online_store_router,
+    prefix="/api/v1/online-store",
+    tags=["Online Store"],
 )
 
 

@@ -22,9 +22,13 @@ USER_SCHEMA = {
         "roles": {
             "bsonType": "array",
             "items": {
+                # DESIGN_MANAGER (lowest-privilege ecom design-queue role, BVI
+                # Phase 1) is additive: a new member of the role matrix, no
+                # existing gate changed. See api/services/rbac_policy.ALL_ROLES.
                 "enum": ["SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF",
                         "STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER",
-                        "ACCOUNTANT", "ADMIN", "SUPERADMIN", "INVESTOR"]
+                        "DESIGN_MANAGER", "ACCOUNTANT", "ADMIN", "SUPERADMIN",
+                        "INVESTOR"]
             }
         },
         "store_ids": {"bsonType": "array", "items": {"bsonType": "string"}},
@@ -1407,6 +1411,120 @@ COLLECTIONS.update({
         "schema": LENS_ENUM_CONFIG_SCHEMA,
         "indexes": [
             {"keys": [("enum_id", 1)], "unique": True},
+        ],
+    },
+})
+
+
+# ============================================================================
+# E-COMMERCE (BVI -> IMS) FOUNDATION SCHEMAS  (Phase 1)
+# ============================================================================
+# The "Online Store" module brings BVI's Shopify PIM into IMS as ONE app.
+# Full target architecture: docs/reference/BVI_MERGE_PLAN.md section A.
+#
+# THE BRIDGE INVARIANT (locked by the council, section A.2):
+#   - `stock_units` remains the master physical on-hand (serialized, one row per
+#     physical unit). There is NO stored quantity mirror in `catalog_variants`.
+#   - on_hand        = COUNT(stock_units WHERE sku, store, status=AVAILABLE)
+#   - online_qty     = stock_allocation.recommend_allocation(on_hand - buffer)
+#   - online listed-qty must NEVER exceed real on-hand, not even momentarily.
+#
+# `catalog_variants` is the variant IDENTITY + Shopify-mapping tier ONLY. It
+# resolves the qty-model crux: BVI `VariantLocation.quantity` (an aggregate
+# count) is NOT ported; IMS keeps serialized `stock_units` as on-hand truth.
+#
+# Idempotent join keys (never key on Mongo `_id`):
+#   sku (primary) | store_barcode -> stock_units.barcode (the immutable physical
+#   join key) | shopify_variant_id / shopify_inventory_item_id (Shopify side).
+# Two-barcode model (BVI): `gtin`/`barcode` (the GTIN pushed to Shopify
+# inventoryItem.barcode) vs `store_barcode` (NEVER pushed; joins to the physical
+# serialized unit via stock_units.barcode).
+
+CATALOG_VARIANT_SCHEMA = {
+    "bsonType": "object",
+    # `sku` is the primary identity + the physical-stock join handle. A variant
+    # row must always carry it. Everything else is optional/additive so a partial
+    # import (e.g. a variant not yet mapped to Shopify) never fails validation.
+    "required": ["sku"],
+    "properties": {
+        "variant_id": {"bsonType": "string"},  # internal uuid (repo _id)
+        "sku": {"bsonType": "string"},          # UNIQUE -- primary identity
+        # Lineage to the parent PIM product (catalog_products). parent_sku is the
+        # human handle; parent_product_id is the catalog_products id.
+        "parent_product_id": {"bsonType": "string"},
+        "parent_sku": {"bsonType": "string"},
+        # Storefront PDP grouping (BVI ProductVariant option axes).
+        "option_color": {"bsonType": "string"},
+        "option_size": {"bsonType": "string"},
+        # Shopify-side identity (set on first push; isolated here so the rest of
+        # the catalog never carries Shopify GIDs). All optional until mapped.
+        "shopify_variant_id": {"bsonType": "string"},
+        "shopify_inventory_item_id": {"bsonType": "string"},
+        "shopify_location_id": {"bsonType": "string"},
+        # Two-barcode model: gtin/barcode = GTIN pushed to Shopify
+        # inventoryItem.barcode; store_barcode = physical join key to
+        # stock_units.barcode (NEVER pushed to Shopify).
+        "gtin": {"bsonType": "string"},
+        "barcode": {"bsonType": "string"},
+        "store_barcode": {"bsonType": "string"},
+        # NOTE: deliberately NO `quantity` field. On-hand is DERIVED from
+        # stock_units; storing a count here would re-introduce the BVI split.
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+        "created_by": {"bsonType": "string"},
+    },
+}
+
+# OPTIONAL embedded `ecom` sub-document on `catalog_products`. This is a
+# DOCUMENTATION/contract schema only -- it is NOT registered as its own
+# collection and NOT added to the catalog_products validator (catalog_products
+# is currently schemaless via the catalog router). Every field is optional and
+# additive: a product with no `ecom` key behaves exactly as before (fail-soft).
+# Mirrors BVI Product's Shopify/SEO/theme/rxable/design-status fields.
+# See BVI_MERGE_PLAN.md A.2.
+ECOM_SUBDOC_SCHEMA = {
+    "bsonType": "object",
+    "properties": {
+        "shopify_product_id": {"bsonType": "string"},
+        "status": {"enum": ["DRAFT", "PUBLISHED", "ARCHIVED"]},
+        "handle": {"bsonType": "string"},          # storefront URL slug
+        "theme_suffix": {"bsonType": "string"},    # Shopify template suffix
+        "rxable": {"bsonType": "bool"},            # prescription-configurable PDP
+        "seo": {
+            "bsonType": "object",
+            "properties": {
+                "title": {"bsonType": "string"},
+                "description": {"bsonType": "string"},
+                "page_url": {"bsonType": "string"},
+                "tags": {"bsonType": "array", "items": {"bsonType": "string"}},
+                "html": {"bsonType": "string"},
+            },
+        },
+        # BVI Product.categorySpecific JSON (free-form per-category attributes).
+        "category_specific": {"bsonType": "object"},
+        "image_design_status": {"enum": ["PENDING_DESIGN", "READY"]},
+        "last_pushed_at": {"bsonType": "date"},
+        # Dirty flag -> push queue. True = changed locally since last Shopify push.
+        "locally_modified": {"bsonType": "bool"},
+    },
+}
+
+COLLECTIONS.update({
+    "catalog_variants": {
+        "schema": CATALOG_VARIANT_SCHEMA,
+        "indexes": [
+            # UNIQUE sparse on sku -- the primary identity + stock join handle.
+            # Sparse so a (malformed) row missing sku can't collide on null.
+            {"keys": [("sku", 1)], "unique": True, "sparse": True},
+            # Lineage roll-up: list all variants of a parent product.
+            {"keys": [("parent_product_id", 1)], "sparse": True},
+            # Shopify-side reverse lookup (webhook -> IMS variant). UNIQUE sparse:
+            # one Shopify variant maps to exactly one IMS variant; unmapped rows
+            # (field absent) are exempt.
+            {"keys": [("shopify_variant_id", 1)], "unique": True, "sparse": True},
+            # Physical join key. UNIQUE sparse so a store_barcode resolves to one
+            # variant (mirrors stock_units.barcode being the immutable join key).
+            {"keys": [("store_barcode", 1)], "unique": True, "sparse": True},
         ],
     },
 })

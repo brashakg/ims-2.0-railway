@@ -45,6 +45,9 @@ VALID_ROLES = frozenset(
         "SALES_STAFF",
         "CASHIER",
         "WORKSHOP_STAFF",
+        # DESIGN_MANAGER: lowest-privilege ecom design-queue role (BVI Phase 1).
+        # Mirrors rbac_policy.ALL_ROLES (asserted in sync by test_user_role_guards).
+        "DESIGN_MANAGER",
         "INVESTOR",
     }
 )
@@ -63,6 +66,9 @@ ROLE_LEVEL: Dict[str, int] = {
     "CASHIER": 25,
     "SALES_STAFF": 20,
     "WORKSHOP_STAFF": 20,
+    # DESIGN_MANAGER sits at the staff tier (ecom design-queue only); ADMIN+ can
+    # assign it. Additive -- does not change any existing role's level.
+    "DESIGN_MANAGER": 20,
     "INVESTOR": 10,
 }
 

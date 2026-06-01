@@ -324,6 +324,27 @@ class DatabaseConnection:
             audit_head = self._db["audit_chain_head"]
             audit_head.create_index("seq", background=True)
 
+            # Catalog variants (BVI Phase 1 -- Online Store module). The variant
+            # identity + Shopify-mapping tier. `sku` is the primary identity +
+            # the physical-stock join handle; the Shopify GID + store_barcode
+            # reverse-lookups are UNIQUE so a Shopify variant / physical unit
+            # resolves to exactly one IMS variant. All SPARSE so partial imports
+            # (rows not yet mapped to Shopify) aren't constrained on absent keys.
+            # See database/schemas.py CATALOG_VARIANT_SCHEMA + BVI_MERGE_PLAN A.2.
+            catalog_variants = self._db["catalog_variants"]
+            catalog_variants.create_index(
+                "sku", unique=True, sparse=True, background=True
+            )
+            catalog_variants.create_index(
+                "parent_product_id", sparse=True, background=True
+            )
+            catalog_variants.create_index(
+                "shopify_variant_id", unique=True, sparse=True, background=True
+            )
+            catalog_variants.create_index(
+                "store_barcode", unique=True, sparse=True, background=True
+            )
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")
