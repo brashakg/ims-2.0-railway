@@ -47,6 +47,7 @@ from .routers import (
     orders_router,
     prescriptions_router,
     vendors_router,
+    purchase_invoices_router,
     vendor_returns_router,
     returns_router,
     tasks_router,
@@ -826,6 +827,15 @@ app.include_router(crm_router, prefix="/api/v1/crm", tags=["CRM"])
 app.include_router(orders_router, prefix="/api/v1/orders", tags=["Orders"])
 app.include_router(
     prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"]
+)
+# Purchase Invoices share the /vendors prefix but MUST be mounted BEFORE the
+# vendors router so their concrete /purchase-invoices/* paths win over the
+# vendors `GET /{vendor_id}` catch-all (which would otherwise resolve
+# /vendors/purchase-invoices to get_vendor with vendor_id="purchase-invoices").
+app.include_router(
+    purchase_invoices_router,
+    prefix="/api/v1/vendors/purchase-invoices",
+    tags=["Purchase Invoices"],
 )
 app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
 app.include_router(

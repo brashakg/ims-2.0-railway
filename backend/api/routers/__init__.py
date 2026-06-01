@@ -13,6 +13,7 @@ from .customers import router as customers_router
 from .orders import router as orders_router
 from .prescriptions import router as prescriptions_router
 from .vendors import router as vendors_router
+from .purchase_invoices import router as purchase_invoices_router
 from .vendor_returns import router as vendor_returns_router
 from .returns import router as returns_router
 from .tasks import router as tasks_router
@@ -79,6 +80,7 @@ __all__ = [
     "orders_router",
     "prescriptions_router",
     "vendors_router",
+    "purchase_invoices_router",
     "vendor_returns_router",
     "returns_router",
     "tasks_router",
