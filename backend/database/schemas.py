@@ -1654,3 +1654,125 @@ COLLECTIONS.update({
         ],
     },
 })
+
+
+# ============================================================================
+# E-COMMERCE MENUS / MEGA-MENU  (BVI -> IMS)  Phase 3 -- FLAGSHIP #2
+# ============================================================================
+# `ecom_menus` is the IMS home for BVI's Shopify navigation Menus + the mega-menu
+# (BVI_MERGE_PLAN.md section A.1 "Menu / MenuItem" -> NEW ecom_menus, and section
+# B Phase 3). It is PUSH-DARK: menus are stored + edited inside IMS Mongo; nothing
+# is written to Shopify in Phase 3 (the GraphQL `menuUpdate` push is Phase 5).
+#
+# Mongo's nested-document model fits Shopify's recursive MenuItem tree natively,
+# so the whole item hierarchy is stored as an EMBEDDED `items` tree on the menu
+# doc (no separate join collection, unlike BVI's relational MenuItem table with
+# its parentId self-relation). Each node carries its own `children` array of the
+# same node shape, so an N-level mega-menu is one document.
+#
+# A MenuItem node (the shape of every element of `items` and of any node's
+# `children`):
+#   id           internal uuid for the node (stable across reorders; the handle
+#                used by the add/move/remove item helpers -- never Mongo `_id`).
+#   parent_id    id of the parent node, or null for a top-level node. Redundant
+#                with tree position but kept so a flat view / move op is cheap.
+#   position     0-based order among its siblings (renumbered on every mutation).
+#   title        display label.
+#   item_type    Shopify MenuItemType: COLLECTION | COLLECTIONS | PRODUCT | PAGE |
+#                BLOG | ARTICLE | FRONTPAGE | CATALOG | SEARCH | HTTP |
+#                SHOP_POLICY | METAOBJECT.
+#   url          for HTTP / external links; otherwise derived from resource_id.
+#   resource_id  Shopify GID of the linked resource (Collection/Product/Page...).
+#   tags_filter  CSV -- "filter this collection by these tags".
+#   shopify_item_id  Shopify MenuItem GID (set on first push; PUSH-DARK -> absent).
+#   -- mega-menu presentation (BVI round-2 M6/M11) --
+#   icon_url     small thumbnail shown next to the item.
+#   banner_url   wider banner for top-level mega-menu cards.
+#   badge_text   NEW / SALE / META / EXCLUSIVE.
+#   badge_color  hex; null = theme default.
+#   pinned_to_top  bool -- top categories pinned above niche ones.
+#   children     recursive array of MenuItem nodes (sub-menu).
+#
+# `handle` is the unique menu slug (main-menu, footer, ...) + the idempotent
+# join key alongside `shopify_menu_id`; never key on Mongo `_id`. `is_default`
+# marks the storefront's primary menu; `active=false` hides a menu from the
+# editor + skips its (future) Shopify push without deleting it. `locally_modified`
+# is the dirty flag -> Phase-5 push queue.
+
+# A single MenuItem node. NOTE: `children` is typed as a generic array-of-object
+# rather than a self-$ref because MongoDB's $jsonSchema validator cannot express
+# unbounded recursion; the node CONTRACT (every child is this same shape) is
+# enforced in the repository's _renumber/_normalize_node walk, not the validator.
+ECOM_MENU_ITEM_SCHEMA = {
+    "bsonType": "object",
+    "required": ["id", "title"],
+    "properties": {
+        "id": {"bsonType": "string"},          # internal node uuid
+        "parent_id": {"bsonType": ["string", "null"]},
+        "position": {"bsonType": "int"},
+        "title": {"bsonType": "string"},
+        "item_type": {
+            "enum": [
+                "COLLECTION", "COLLECTIONS", "PRODUCT", "PAGE", "BLOG",
+                "ARTICLE", "FRONTPAGE", "CATALOG", "SEARCH", "HTTP",
+                "SHOP_POLICY", "METAOBJECT",
+            ]
+        },
+        "url": {"bsonType": ["string", "null"]},
+        "resource_id": {"bsonType": ["string", "null"]},
+        "tags_filter": {"bsonType": ["string", "null"]},
+        "shopify_item_id": {"bsonType": ["string", "null"]},
+        # Mega-menu presentation.
+        "icon_url": {"bsonType": ["string", "null"]},
+        "banner_url": {"bsonType": ["string", "null"]},
+        "badge_text": {"bsonType": ["string", "null"]},
+        "badge_color": {"bsonType": ["string", "null"]},
+        "pinned_to_top": {"bsonType": "bool"},
+        # Recursive sub-tree (validator can't self-ref -- see note above).
+        "children": {"bsonType": "array"},
+    },
+}
+
+ECOM_MENU_SCHEMA = {
+    "bsonType": "object",
+    # `handle` is the unique menu slug + idempotent re-import key; `title` is
+    # required for the editor list. Everything else is optional/additive so a
+    # partial import (a menu not yet mapped to Shopify) never fails validation.
+    "required": ["handle", "title"],
+    "properties": {
+        "menu_id": {"bsonType": "string"},      # internal uuid (repo _id)
+        # Shopify-side identity (set on first push / seed-import). Optional until
+        # mapped; isolated here so the rest of the catalog never carries GIDs.
+        "shopify_menu_id": {"bsonType": "string"},
+        "handle": {"bsonType": "string"},        # UNIQUE slug: main-menu, footer...
+        "title": {"bsonType": "string"},
+        # The storefront's primary menu (BVI Menu.isDefault).
+        "is_default": {"bsonType": "bool"},
+        # active=false hides the menu from the editor + skips Shopify push without
+        # deleting it (so it can be re-enabled later). BVI Menu.active.
+        "active": {"bsonType": "bool"},
+        # Dirty flag -> Phase-5 push queue. True = edited in IMS since last sync.
+        "locally_modified": {"bsonType": "bool"},
+        "last_synced_at": {"bsonType": "date"},
+        # EMBEDDED recursive item tree (top-level nodes; each has `children`).
+        "items": {"bsonType": "array", "items": ECOM_MENU_ITEM_SCHEMA},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+        "created_by": {"bsonType": "string"},
+    },
+}
+
+COLLECTIONS.update({
+    "ecom_menus": {
+        "schema": ECOM_MENU_SCHEMA,
+        "indexes": [
+            # UNIQUE sparse on handle -- the menu slug + idempotent re-import key.
+            # Sparse so a (malformed) row missing handle can't collide on null.
+            {"keys": [("handle", 1)], "unique": True, "sparse": True},
+            # Shopify-side reverse lookup (seed-import / future webhook). UNIQUE
+            # sparse: one Shopify menu maps to exactly one IMS menu; unmapped
+            # (PUSH-DARK) rows are exempt.
+            {"keys": [("shopify_menu_id", 1)], "unique": True, "sparse": True},
+        ],
+    },
+})

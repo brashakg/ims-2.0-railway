@@ -18,6 +18,7 @@ from .hr_repository import AttendanceRepository, LeaveRepository, PayrollReposit
 from .workshop_repository import WorkshopJobRepository
 from .catalog_variant_repository import CatalogVariantRepository
 from .ecom_collection_repository import EcomCollectionRepository
+from .ecom_menu_repository import EcomMenuRepository
 
 __all__ = [
     # Base

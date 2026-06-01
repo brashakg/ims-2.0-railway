@@ -96,6 +96,7 @@ from .routers import (
     budgets_router,
     online_store_router,
     online_store_collections_router,
+    online_store_menus_router,
 )
 from .routers.auth import require_roles
 
@@ -987,6 +988,17 @@ app.include_router(
     online_store_collections_router,
     prefix="/api/v1/online-store/collections",
     tags=["Online Store - Collections"],
+)
+# Menus / Mega-menu sub-module (BVI Phase 3, FLAGSHIP #2). ecom_menus CRUD + an
+# embedded recursive item-tree editor (add/move/remove/reorder nodes) -- PUSH-DARK
+# (Mongo only, no Shopify writes; the menuUpdate push is Phase 5). Mounted at
+# /api/v1/online-store/menus. Each route is role-gated INSIDE the router
+# (require_roles -> SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER) +
+# catalogued in rbac_policy.POLICY.
+app.include_router(
+    online_store_menus_router,
+    prefix="/api/v1/online-store/menus",
+    tags=["Online Store - Menus"],
 )
 
 

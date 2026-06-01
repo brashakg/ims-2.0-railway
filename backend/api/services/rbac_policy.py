@@ -633,6 +633,23 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'DELETE', "path": '/api/v1/online-store/collections/{collection_id}/products/{sku}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/online-store/collections/{collection_id}/products/reorder', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/online-store/collections/{collection_id}/resolved-products', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    # --- /api/v1/online-store/menus ---  (BVI Phase 3: Menus / Mega-menu, FLAGSHIP #2)
+    # PUSH-DARK ecom_menus CRUD + an embedded recursive item-tree editor
+    # (add/move/remove/reorder/patch nodes). All gated to the ecom role set
+    # (router-level require_roles); see routers/online_store_menus.py +
+    # BVI_MERGE_PLAN.md Phase 3. The literal .../items/reorder + .../items/{item_id}/move
+    # routes are more specific than .../items/{item_id} (policy_for ranks fewest-params
+    # first), so they resolve correctly.
+    {"method": 'GET', "path": '/api/v1/online-store/menus', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/menus', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/online-store/menus/{menu_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/menus/{menu_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'DELETE', "path": '/api/v1/online-store/menus/{menu_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/menus/{menu_id}/items', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/menus/{menu_id}/items/reorder', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/menus/{menu_id}/items/{item_id}/move', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/menus/{menu_id}/items/{item_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'DELETE', "path": '/api/v1/online-store/menus/{menu_id}/items/{item_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     # --- /api/v1/orders ---
     {"method": 'GET', "path": '/api/v1/orders', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders', "allowed": ['ADMIN', 'AREA_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},
