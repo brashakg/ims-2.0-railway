@@ -484,6 +484,11 @@ class NexusAgent(JarvisAgent):
             if vendor == "razorpay":
                 await self._handle_razorpay_webhook(webhook_payload)
             elif vendor == "shopify":
+                # Stash the inbox headers so the handler can read the Shopify
+                # topic (orders/create) + the X-Shopify-Webhook-Id for the
+                # idempotent ingestion, WITHOUT changing the handler's 1-arg
+                # call signature (the handler still takes just `payload`).
+                self._current_webhook_headers = doc.get("headers") or {}
                 await self._handle_shopify_webhook(webhook_payload)
             elif vendor == "shiprocket":
                 await self._handle_shiprocket_webhook(webhook_payload)
@@ -523,8 +528,55 @@ class NexusAgent(JarvisAgent):
         logger.info(f"[NEXUS] razorpay webhook event={evt}")
 
     async def _handle_shopify_webhook(self, payload: Dict[str, Any]):
-        evt = payload.get("topic") or payload.get("event") or "unknown"
-        logger.info(f"[NEXUS] shopify webhook topic={evt}")
+        """Translate a verified Shopify webhook into an IMS-side mutation.
+
+        For `orders/create` (the seller's own bettervision.in storefront), IMS
+        becomes the GST invoice system-of-record: we idempotently create an IMS
+        order tagged channel='ONLINE' and mint a consecutive GST tax invoice
+        (per-line HSN + taxable + tax, IGST vs CGST+SGST by place of supply) via
+        api.services.shopify_ingest. A replayed delivery (same Shopify order id
+        or same X-Shopify-Webhook-Id) creates NOTHING further -- so revenue is
+        never double-counted. Other topics just log (catalog is owned by BVI).
+
+        The Shopify topic + X-Shopify-Webhook-Id are read from the inbox headers
+        stashed on `self._current_webhook_headers` by `_handle_inbox_webhook`
+        (kept off the call signature so the existing 1-arg handler contract is
+        preserved). They also fall back to fields on the payload body.
+
+        Fail-soft: any error here is swallowed by the caller's try/except; the
+        ingestion service itself never raises on its normal paths and SIMULATES
+        when the DB is unavailable.
+        """
+        headers = getattr(self, "_current_webhook_headers", None)
+        headers = headers if isinstance(headers, dict) else {}
+        topic = (
+            payload.get("topic")
+            or payload.get("event")
+            or headers.get("x-shopify-topic")
+            or "unknown"
+        )
+        logger.info(f"[NEXUS] shopify webhook topic={topic}")
+
+        if str(topic).strip().lower() not in ("orders/create", "orders/paid"):
+            return
+
+        try:
+            from api.services.shopify_ingest import ingest_shopify_order
+
+            result = ingest_shopify_order(
+                self.db,
+                payload,
+                webhook_id=headers.get("x-shopify-webhook-id"),
+                topic=str(topic),
+            )
+            logger.info(
+                "[NEXUS] shopify order ingest -> status=%s ims_order=%s invoice=%s",
+                result.get("status"),
+                result.get("order_id"),
+                result.get("invoice_number"),
+            )
+        except Exception as e:  # noqa: BLE001 - never let ingestion crash the loop
+            logger.warning(f"[NEXUS] shopify order ingestion failed: {e}")
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
         evt = payload.get("current_status") or payload.get("event") or "unknown"
