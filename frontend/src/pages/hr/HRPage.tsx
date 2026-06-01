@@ -23,7 +23,7 @@ import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
-import { MonthlyAttendanceGrid } from '../../components/hr/MonthlyAttendanceGrid';
+import { AttendanceSummaryCard } from '../../components/hr/AttendanceSummaryCard';
 import { EmployeeSelfService } from '../../components/hr/EmployeeSelfService';
 import { ShiftSetup } from '../../components/hr/ShiftSetup';
 import { WeekOffSwap } from '../../components/hr/WeekOffSwap';
@@ -361,7 +361,7 @@ export function HRPage() {
           )}
         >
           <Calendar className="w-4 h-4" />
-          Monthly View
+          Monthly Summary
         </button>
         <button
           onClick={() => setActiveTab('weekoff_swaps')}
@@ -558,10 +558,12 @@ export function HRPage() {
         </div>
       )}
 
-      {/* Monthly Attendance Grid Tab (late marks + LWP) */}
+      {/* Monthly attendance SUMMARY — the full grid (with admin edit) now
+          lives on the dedicated /attendance page; this is a compact rollup
+          with a "View attendance" link. */}
       {activeTab === 'monthly_grid' && (
         <div>
-          <MonthlyAttendanceGrid />
+          <AttendanceSummaryCard />
         </div>
       )}
 

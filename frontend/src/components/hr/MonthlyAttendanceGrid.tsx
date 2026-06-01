@@ -1,18 +1,47 @@
 // ============================================================================
-// Monthly Attendance Grid View (HR Page - "Monthly View" tab)
+// Monthly Attendance Grid View (Attendance page + HR summary source)
 // ============================================================================
 // Rows = Employees, Columns = days 1..N of the selected month.
 // Cell values: P / A / L / HD / LWP / WO color-coded status codes, plus a
 // right-hand summary column (P/A/L counts) and a totals row.
 // Server-authoritative: the grid (day math + roster join + per-day codes) is
-// computed by GET /hr/attendance/grid. Read-only. Light theme only.
+// computed by GET /hr/attendance/grid. Light theme only.
+//
+// Admin edit: SUPERADMIN/ADMIN/STORE_MANAGER can click a cell (or the row
+// pencil) to open a small modal and set a day's status + check-in/out. The
+// save upserts via POST /hr/attendance/mark (keyed on employee_id + date),
+// then refetches the grid. Lower roles see the grid read-only.
 
-import { useState, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Loader2, AlertTriangle } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { ChevronLeft, ChevronRight, Loader2, AlertTriangle, Pencil, X } from 'lucide-react';
 import { hrApi } from '../../services/api';
 import type { AttendanceCode, AttendanceGrid, LwpReport } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
+
+// Statuses an admin can set from the edit modal. Maps 1:1 to the codes the
+// grid renders (server normalises any of these on POST /attendance/mark).
+const EDITABLE_STATUSES: { value: string; label: string; code: AttendanceCode }[] = [
+  { value: 'PRESENT', label: 'Present', code: 'P' },
+  { value: 'ABSENT', label: 'Absent', code: 'A' },
+  { value: 'HALF_DAY', label: 'Half Day', code: 'HD' },
+  { value: 'LEAVE', label: 'Leave', code: 'L' },
+  { value: 'HOLIDAY', label: 'Holiday / Week-off', code: 'WO' },
+];
+
+// 'YYYY-MM' + day number -> 'YYYY-MM-DD' for the mark payload.
+function dateForDay(month: string, day: number): string {
+  return `${month}-${String(day).padStart(2, '0')}`;
+}
+
+interface EditTarget {
+  employeeId: string;
+  employeeName: string;
+  day: number;
+  date: string;       // YYYY-MM-DD
+  currentCode: AttendanceCode;
+}
 
 const ATTENDANCE_COLORS: Record<AttendanceCode, { bg: string; text: string; label: string }> = {
   P: { bg: 'bg-green-100', text: 'text-green-700', label: 'Present' },
@@ -52,37 +81,101 @@ function weekdayInitial(month: string, day: number): { initial: string; isWeeken
   return { initial: ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'][dow], isWeekend: dow === 0 || dow === 6 };
 }
 
-export function MonthlyAttendanceGrid() {
-  const { user } = useAuth();
-  const [month, setMonth] = useState<string>(currentMonthValue());
+// `storeId` (when provided) overrides the user's active store so the parent
+// Attendance page can host a store selector. `initialMonth` seeds the picker.
+export function MonthlyAttendanceGrid({
+  storeId,
+  initialMonth,
+}: {
+  storeId?: string;
+  initialMonth?: string;
+} = {}) {
+  const { user, hasRole } = useAuth();
+  const toast = useToast();
+  const [month, setMonth] = useState<string>(initialMonth || currentMonthValue());
   const [grid, setGrid] = useState<AttendanceGrid | null>(null);
   const [lwp, setLwp] = useState<LwpReport | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
+  // Admin edit modal state.
+  const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
+  const [edit, setEdit] = useState<EditTarget | null>(null);
+  const [editStatus, setEditStatus] = useState<string>('PRESENT');
+  const [editCheckIn, setEditCheckIn] = useState<string>('');
+  const [editCheckOut, setEditCheckOut] = useState<string>('');
+  const [saving, setSaving] = useState(false);
+
+  // The store this grid reads. Explicit prop wins so the page can drive it.
+  const effectiveStore = storeId !== undefined ? storeId : user?.activeStoreId;
+
+  const load = useCallback(async () => {
+    if (!effectiveStore) {
+      setGrid(null);
+      setLwp(null);
+      return;
+    }
+    setIsLoading(true);
+    const [y, m] = month.split('-').map(Number);
+    try {
+      const [gridData, lwpData] = await Promise.all([
+        hrApi.getAttendanceGrid({ month, storeId: effectiveStore }),
+        hrApi.getLwpReport({ year: y, month: m, storeId: effectiveStore }).catch(() => null),
+      ]);
+      setGrid(gridData);
+      setLwp(lwpData);
+    } catch {
+      setGrid(null);
+      setLwp(null);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [month, effectiveStore]);
+
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      if (!user?.activeStoreId) return;
-      setIsLoading(true);
-      const [y, m] = month.split('-').map(Number);
-      try {
-        const [gridData, lwpData] = await Promise.all([
-          hrApi.getAttendanceGrid({ month, storeId: user.activeStoreId }),
-          hrApi.getLwpReport({ year: y, month: m, storeId: user.activeStoreId }).catch(() => null),
-        ]);
-        if (!cancelled) {
-          setGrid(gridData);
-          setLwp(lwpData);
-        }
-      } catch {
-        if (!cancelled) { setGrid(null); setLwp(null); }
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    };
-    load();
-    return () => { cancelled = true; };
-  }, [month, user?.activeStoreId]);
+    void load();
+  }, [load]);
+
+  // Open the edit modal for a given employee + day, prefilling the dropdown
+  // from the current cell code.
+  const openEdit = useCallback((emp: { employee_id: string; name: string }, day: number) => {
+    if (!canEdit) return;
+    const code = (grid?.employees.find((e) => e.employee_id === emp.employee_id)?.days[String(day)] || '-') as AttendanceCode;
+    const match = EDITABLE_STATUSES.find((s) => s.code === code);
+    setEditStatus(match?.value || 'PRESENT');
+    setEditCheckIn('');
+    setEditCheckOut('');
+    setEdit({
+      employeeId: emp.employee_id,
+      employeeName: emp.name,
+      day,
+      date: dateForDay(month, day),
+      currentCode: code,
+    });
+  }, [canEdit, grid, month]);
+
+  const saveEdit = useCallback(async () => {
+    if (!edit) return;
+    setSaving(true);
+    try {
+      // check_in / check_out are optional times (HH:MM); send full ISO so the
+      // backend's datetime parser accepts them. Omitted when blank.
+      const toIso = (t: string) => (t ? `${edit.date}T${t}:00` : null);
+      await hrApi.markAttendance({
+        employee_id: edit.employeeId,
+        date: edit.date,
+        status: editStatus,
+        check_in: toIso(editCheckIn),
+        check_out: toIso(editCheckOut),
+      });
+      toast.success(`Attendance updated for ${edit.employeeName}`);
+      setEdit(null);
+      await load();
+    } catch {
+      toast.error('Could not update attendance. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  }, [edit, editStatus, editCheckIn, editCheckOut, load, toast]);
 
   const days = grid?.days ?? [];
   const employees = grid?.employees ?? [];
@@ -95,7 +188,14 @@ export function MonthlyAttendanceGrid() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-bold text-gray-900">{monthLabel(month)}</h2>
-          <p className="text-sm text-gray-500">Monthly attendance — per-employee, per-day</p>
+          <p className="text-sm text-gray-500 flex items-center gap-1">
+            Monthly attendance — per-employee, per-day
+            {canEdit && (
+              <span className="inline-flex items-center gap-1 text-bv-red-600">
+                <Pencil className="w-3.5 h-3.5" /> click a day to edit
+              </span>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setMonth(shiftMonth(month, -1))} className="btn-outline p-2" title="Previous month">
@@ -172,23 +272,51 @@ export function MonthlyAttendanceGrid() {
               {employees.map(emp => (
                 <tr key={emp.employee_id} className="hover:bg-gray-50">
                   <td className="px-3 py-2 font-medium text-gray-900 sticky left-0 bg-white z-10 whitespace-nowrap">
-                    {emp.name}
+                    <span className="inline-flex items-center gap-1.5">
+                      {emp.name}
+                      {canEdit && days.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => openEdit(emp, Math.min(new Date().getDate(), days[days.length - 1]))}
+                          className="text-gray-400 hover:text-bv-red-600"
+                          title={`Edit attendance for ${emp.name}`}
+                          aria-label={`Edit attendance for ${emp.name}`}
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </span>
                   </td>
                   {days.map(day => {
                     const code = (emp.days[String(day)] || '-') as AttendanceCode;
                     const color = ATTENDANCE_COLORS[code] || ATTENDANCE_COLORS['-'];
                     const { isWeekend } = weekdayInitial(month, day);
+                    const cellInner = (
+                      <span
+                        title={canEdit ? `${color.label} — click to edit` : color.label}
+                        className={clsx(
+                          'inline-flex w-7 h-7 items-center justify-center rounded font-bold text-xs',
+                          color.bg, color.text,
+                          canEdit && 'cursor-pointer hover:ring-2 hover:ring-bv-red-300',
+                        )}
+                      >
+                        {code === '-' ? '' : code}
+                      </span>
+                    );
                     return (
                       <td key={day} className={clsx('px-1 py-1.5 text-center', isWeekend ? 'bg-gray-50' : '')}>
-                        <span
-                          title={color.label}
-                          className={clsx(
-                            'inline-flex w-7 h-7 items-center justify-center rounded font-bold text-xs',
-                            color.bg, color.text,
-                          )}
-                        >
-                          {code === '-' ? '' : code}
-                        </span>
+                        {canEdit ? (
+                          <button
+                            type="button"
+                            onClick={() => openEdit(emp, day)}
+                            className="appearance-none bg-transparent border-0 p-0"
+                            aria-label={`Edit ${emp.name} day ${day} (${color.label})`}
+                          >
+                            {cellInner}
+                          </button>
+                        ) : (
+                          cellInner
+                        )}
                       </td>
                     );
                   })}
@@ -271,6 +399,104 @@ export function MonthlyAttendanceGrid() {
               </table>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Admin edit modal — set a single day's status + optional check-in/out.
+          Upserts via POST /hr/attendance/mark (employee_id + date keyed). */}
+      {edit && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Edit attendance"
+          onClick={() => !saving && setEdit(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
+              <h3 className="text-base font-bold text-gray-900">Edit attendance</h3>
+              <button
+                type="button"
+                onClick={() => !saving && setEdit(null)}
+                className="text-gray-400 hover:text-gray-700"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="space-y-4 px-5 py-4">
+              <div className="text-sm text-gray-600">
+                <span className="font-semibold text-gray-900">{edit.employeeName}</span>
+                <span className="mx-1">·</span>
+                {new Date(edit.date + 'T00:00:00').toLocaleDateString('en-IN', {
+                  weekday: 'short', day: '2-digit', month: 'short', year: 'numeric',
+                })}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1" htmlFor="att-status">
+                  Status
+                </label>
+                <select
+                  id="att-status"
+                  value={editStatus}
+                  onChange={(e) => setEditStatus(e.target.value)}
+                  className="input-field w-full"
+                >
+                  {EDITABLE_STATUSES.map((s) => (
+                    <option key={s.value} value={s.value}>{s.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1" htmlFor="att-in">
+                    Check-in (optional)
+                  </label>
+                  <input
+                    id="att-in"
+                    type="time"
+                    value={editCheckIn}
+                    onChange={(e) => setEditCheckIn(e.target.value)}
+                    className="input-field w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1" htmlFor="att-out">
+                    Check-out (optional)
+                  </label>
+                  <input
+                    id="att-out"
+                    type="time"
+                    value={editCheckOut}
+                    onChange={(e) => setEditCheckOut(e.target.value)}
+                    className="input-field w-full"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setEdit(null)}
+                disabled={saving}
+                className="btn-outline text-sm disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveEdit}
+                disabled={saving}
+                className="btn-primary text-sm disabled:opacity-50 flex items-center gap-2"
+              >
+                {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                Save
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

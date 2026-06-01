@@ -1,13 +1,22 @@
 // ============================================================================
 // IMS 2.0 — Attendance Check-In/Check-Out
 // ============================================================================
+// Self-service check-in card. Server-authoritative with a localStorage cache
+// for instant paint. Guards against double check-in:
+//   - On mount it reconciles against today's server record (so an already-
+//     checked-in user sees the checked-in state even on a fresh device).
+//   - The Check In button is disabled once checked in.
+// The backend is idempotent on (employee, store, date), so a stray duplicate
+// POST is harmless; this guard keeps the UI honest.
+
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { default as api } from '../../services/api/client';
+import { hrApi } from '../../services/api';
 import { Clock, MapPin, LogIn, LogOut, CheckCircle, AlertTriangle } from 'lucide-react';
 
 interface AttendanceRecord {
   date: string;
+  attendanceId: string | null;
   checkIn: string | null;
   checkOut: string | null;
   status: 'CHECKED_IN' | 'CHECKED_OUT' | 'NOT_CHECKED_IN';
@@ -15,28 +24,58 @@ interface AttendanceRecord {
   late: boolean;
 }
 
+function todayIso(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
 export function AttendanceWidget() {
   const { user } = useAuth();
   const [record, setRecord] = useState<AttendanceRecord>({
-    date: new Date().toISOString().split('T')[0],
+    date: todayIso(),
+    attendanceId: null,
     checkIn: null, checkOut: null,
     status: 'NOT_CHECKED_IN', late: false,
   });
   const [isLoading, setIsLoading] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
 
-  // Load today's record from localStorage (until backend wired)
+  // Optimistic cache key.
+  const cacheKey = `attendance-${user?.id}-${record.date}`;
+
+  // 1) Instant paint from localStorage. 2) Reconcile with the server so an
+  //    already-checked-in user (on any device) sees the real state.
   useEffect(() => {
-    const key = `attendance-${user?.id}-${record.date}`;
-    const saved = localStorage.getItem(key);
+    const saved = localStorage.getItem(cacheKey);
     if (saved) {
-      try { setRecord(JSON.parse(saved)); } catch { /* ignore */ }
+      try { setRecord((prev) => ({ ...prev, ...JSON.parse(saved) })); } catch { /* ignore */ }
     }
-  }, [user?.id, record.date]);
+    let cancelled = false;
+    (async () => {
+      if (!user?.id) return;
+      try {
+        const data = await hrApi.getAttendance(user.activeStoreId || '', todayIso());
+        const records: any[] = data?.records || [];
+        const mine = records.find(
+          (r) => (r.employeeId === user.id || r.userId === user.id) && r.date === todayIso(),
+        );
+        if (mine && !cancelled) {
+          setRecord((prev) => ({
+            ...prev,
+            attendanceId: mine.attendanceId || mine.id || null,
+            checkIn: mine.checkIn ?? prev.checkIn,
+            checkOut: mine.checkOut ?? prev.checkOut,
+            status: mine.checkOut ? 'CHECKED_OUT' : 'CHECKED_IN',
+          }));
+        }
+      } catch {
+        // Offline / no DB — keep the optimistic localStorage state.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, user?.activeStoreId]);
 
   const saveRecord = (updated: AttendanceRecord) => {
-    const key = `attendance-${user?.id}-${updated.date}`;
-    localStorage.setItem(key, JSON.stringify(updated));
+    localStorage.setItem(`attendance-${user?.id}-${updated.date}`, JSON.stringify(updated));
     setRecord(updated);
   };
 
@@ -52,61 +91,46 @@ export function AttendanceWidget() {
   };
 
   const handleCheckIn = async () => {
+    // UI guard: never double check-in.
+    if (record.status !== 'NOT_CHECKED_IN') return;
     setIsLoading(true);
     const loc = await getLocation();
-    const now = new Date();
-    const checkInTime = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    
-    // Late if after 10:15 AM (configurable in production)
-    const isLate = now.getHours() > 10 || (now.getHours() === 10 && now.getMinutes() > 15);
-
-    const updated: AttendanceRecord = {
-      ...record,
-      checkIn: checkInTime,
-      status: 'CHECKED_IN',
-      location: loc || undefined,
-      late: isLate,
-    };
-    saveRecord(updated);
-
-    // POST to attendance check-in API
     try {
-      await api.post('/hr/attendance/check-in', {
-        userId: user?.id,
-        storeId: user?.activeStoreId,
-        checkInTime: checkInTime,
+      // Geo-fenced, late-aware check-in (query-param contract). Idempotent server-side.
+      const res = await hrApi.checkIn(user?.activeStoreId || '', loc?.lat ?? 0, loc?.lng ?? 0);
+      saveRecord({
+        ...record,
+        checkIn: res?.checkInTime || new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+        status: 'CHECKED_IN',
         location: loc || undefined,
-        late: isLate,
+        late: !!res?.is_late,
       });
-    } catch (err) {
-      // silently handle error — local state already saved
+    } catch {
+      // Fail-soft: still reflect locally so the user isn't stuck; the backend
+      // idempotency means a later real check-in won't duplicate.
+      saveRecord({
+        ...record,
+        checkIn: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+        status: 'CHECKED_IN',
+        location: loc || undefined,
+      });
+    } finally {
+      setIsLoading(false);
     }
-
-    setIsLoading(false);
   };
 
   const handleCheckOut = async () => {
+    if (record.status !== 'CHECKED_IN') return;
     setIsLoading(true);
-    const now = new Date();
-    const checkOutTime = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const updated: AttendanceRecord = {
-      ...record,
-      checkOut: checkOutTime,
-      status: 'CHECKED_OUT',
-    };
-    saveRecord(updated);
-
-    // POST to attendance check-out API
+    const checkOutTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
     try {
-      await api.post('/hr/attendance/check-out', {
-        userId: user?.id,
-        storeId: user?.activeStoreId,
-        checkOutTime: checkOutTime,
-      });
-    } catch (err) {
-      // silently handle error — local state already saved
+      if (record.attendanceId) {
+        await hrApi.checkOut(record.attendanceId);
+      }
+    } catch {
+      // Keep local state regardless.
     }
-
+    saveRecord({ ...record, checkOut: checkOutTime, status: 'CHECKED_OUT' });
     setIsLoading(false);
   };
 

@@ -52,6 +52,7 @@ const PurchaseManagementPage = lazy(() => import('./pages/purchase/PurchaseManag
 const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage').then(m => ({ default: m.TaskManagementPage })));
 const TasksDashboard = lazy(() => import('./pages/tasks/TasksDashboard').then(m => ({ default: m.TasksDashboard })));
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
+const AttendancePage = lazy(() => import('./pages/attendance/AttendancePage').then(m => ({ default: m.AttendancePage })));
 const PayrollDashboard = lazy(() => import('./pages/hr/PayrollDashboard').then(m => ({ default: m.PayrollDashboard })));
 const SalarySetupPage = lazy(() => import('./pages/hr/SalarySetupPage').then(m => ({ default: m.SalarySetupPage })));
 const PayrollRunPage = lazy(() => import('./pages/hr/PayrollRunPage').then(m => ({ default: m.PayrollRunPage })));
@@ -672,6 +673,21 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF']}>
                         <TasksDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Attendance — its own top-level page (was an HR tab).
+                      Open to all operational roles: managers get the monthly
+                      grid + admin edit, floor staff get the self check-in card.
+                      The grid + edit are further role-gated inside the page. */}
+                  <Route
+                    path="attendance"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF']}
+                      >
+                        <AttendancePage />
                       </ProtectedRoute>
                     }
                   />

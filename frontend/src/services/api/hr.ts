@@ -69,6 +69,50 @@ export const hrApi = {
     return response.data as AttendanceGrid;
   },
 
+  // Compact monthly attendance summary (present/absent/late counts) for the
+  // HR page summary card. month: 'YYYY-MM'. Fail-soft on the caller side —
+  // the HR card derives counts from the grid if this endpoint is unavailable.
+  getAttendanceSummary: async (opts: { month: string; storeId?: string }) => {
+    const params: Record<string, string> = { month: opts.month };
+    if (opts.storeId) params.store_id = opts.storeId;
+    const response = await api.get('/hr/attendance/summary', { params });
+    return response.data as AttendanceMonthSummary;
+  },
+
+  // Admin upsert of one employee's attendance for a single day. Used by the
+  // grid Edit modal. Maps to the existing POST /hr/attendance/mark which
+  // upserts by (employee_id, date) — no per-cell id needed. status is one of
+  // PRESENT/ABSENT/HALF_DAY/LEAVE/HOLIDAY (also accepts LWP/WEEK_OFF server-side).
+  markAttendance: async (payload: {
+    employee_id: string;
+    date: string; // 'YYYY-MM-DD'
+    status: string;
+    check_in?: string | null;  // ISO datetime
+    check_out?: string | null; // ISO datetime
+  }) => {
+    const body: Record<string, unknown> = {
+      employee_id: payload.employee_id,
+      date: payload.date,
+      status: payload.status,
+    };
+    if (payload.check_in) body.check_in = payload.check_in;
+    if (payload.check_out) body.check_out = payload.check_out;
+    const response = await api.post('/hr/attendance/mark', body);
+    return response.data as { message: string; date: string };
+  },
+
+  // Edit an existing attendance record by its id (forward-compatible with a
+  // PUT /hr/attendance/{id} backend route). The grid does not surface per-cell
+  // ids today, so the Edit modal uses markAttendance above; this is provided
+  // for callers that already hold an attendance id.
+  updateAttendance: async (
+    attendanceId: string,
+    updates: { status?: string; check_in?: string | null; check_out?: string | null },
+  ) => {
+    const response = await api.put(`/hr/attendance/${attendanceId}`, updates);
+    return response.data;
+  },
+
   // --- Shift config (attendance engine) ----------------------------
   getShifts: async (opts?: { storeId?: string; activeOnly?: boolean }) => {
     const params: Record<string, string | boolean> = {};
@@ -169,6 +213,20 @@ export interface AttendanceGrid {
   days: number[];
   employees: AttendanceGridEmployee[];
   totals: AttendanceGridSummary;
+}
+
+// Compact month-level totals for the HR summary card. Mirrors the grid totals
+// shape so the HR card can fall back to the grid if /summary is unavailable.
+export interface AttendanceMonthSummary {
+  month: string;
+  present: number;
+  absent: number;
+  leave: number;
+  half_day: number;
+  lwp: number;
+  week_off: number;
+  late: number;
+  employee_count?: number;
 }
 
 // weekly_off uses Python weekday() convention: Mon=0 .. Sun=6.
