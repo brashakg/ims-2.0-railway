@@ -83,3 +83,157 @@ export const marketingApi = {
     return response.data;
   },
 };
+
+// ============================================================================
+// Campaign layer (real backend: routers/campaigns.py under /api/v1/marketing)
+// ============================================================================
+
+export type CampaignType = 'rx_renewal' | 'birthday' | 'winback' | 'custom';
+export type CampaignStatus = 'DRAFT' | 'SCHEDULED' | 'ACTIVE' | 'COMPLETED' | 'PAUSED';
+export type ScheduleKind = 'ONE_TIME' | 'RECURRING' | 'TRIGGERED';
+
+export interface CampaignSchedule {
+  kind: ScheduleKind;
+  send_at?: string | null;
+  frequency?: string | null;
+  time_of_day?: string | null;
+  trigger_event?: string | null;
+}
+
+export interface Campaign {
+  campaign_id: string;
+  name: string;
+  type: CampaignType;
+  segment_key: string;
+  segment_params?: Record<string, unknown>;
+  channels: string[];
+  template_id: string;
+  store_id?: string | null;
+  schedule?: CampaignSchedule | null;
+  description?: string | null;
+  status: CampaignStatus;
+  audience_count: number;
+  sent_count: number;
+  failed_count: number;
+  skipped_count: number;
+  opened_count: number;
+  converted_count: number;
+  last_sent_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  audience_estimate?: number;
+}
+
+export interface CampaignSummary {
+  active: number;
+  total_campaigns: number;
+  total_sent: number;
+  open_rate: number;
+  conversion: number;
+}
+
+export interface Segment {
+  key: string;
+  label: string;
+  description: string;
+  default_channel: string;
+  default_template_id: string;
+  campaign_type: CampaignType;
+  store_scoped: boolean;
+  count: number;
+}
+
+export interface SegmentPreview {
+  key: string;
+  label: string;
+  count: number;
+  sample: { customer_id: string; name: string; phone_masked: string }[];
+}
+
+export interface CampaignAnalytics {
+  campaign_id: string;
+  name?: string;
+  status?: string;
+  total: number;
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  opened: number;
+  converted: number;
+  open_rate: number;
+  conversion_rate: number;
+  delivery_rate: number;
+  by_channel: Record<string, { total: number; sent: number; delivered: number; failed: number }>;
+}
+
+export interface CampaignCreatePayload {
+  name: string;
+  type: CampaignType;
+  segment_key: string;
+  channels: string[];
+  template_id: string;
+  store_id?: string;
+  segment_params?: Record<string, unknown>;
+  schedule?: CampaignSchedule;
+  description?: string;
+}
+
+export const campaignsApi = {
+  listSegments: async (storeId?: string): Promise<{ segments: Segment[]; total: number }> => {
+    const response = await api.get('/marketing/segments', { params: { store_id: storeId } });
+    return response.data;
+  },
+  previewSegment: async (
+    key: string,
+    params?: { store_id?: string; customer_type?: string; window_days?: number },
+  ): Promise<SegmentPreview> => {
+    const response = await api.get(`/marketing/segments/${key}/preview`, { params });
+    return response.data;
+  },
+
+  list: async (params?: { store_id?: string; status?: string; limit?: number }): Promise<{ campaigns: Campaign[]; total: number; summary: CampaignSummary }> => {
+    const response = await api.get('/marketing/campaigns', { params });
+    return response.data;
+  },
+  get: async (id: string): Promise<Campaign> => {
+    const response = await api.get(`/marketing/campaigns/${id}`);
+    return response.data;
+  },
+  create: async (data: CampaignCreatePayload): Promise<{ message: string; campaign: Campaign }> => {
+    const response = await api.post('/marketing/campaigns', data);
+    return response.data;
+  },
+  update: async (id: string, data: Partial<CampaignCreatePayload>): Promise<{ message: string; campaign: Campaign }> => {
+    const response = await api.put(`/marketing/campaigns/${id}`, data);
+    return response.data;
+  },
+  remove: async (id: string): Promise<{ message: string; campaign_id: string }> => {
+    const response = await api.delete(`/marketing/campaigns/${id}`);
+    return response.data;
+  },
+  duplicate: async (id: string): Promise<{ message: string; campaign: Campaign }> => {
+    const response = await api.post(`/marketing/campaigns/${id}/duplicate`);
+    return response.data;
+  },
+  schedule: async (id: string, schedule: CampaignSchedule): Promise<{ message: string; campaign: Campaign }> => {
+    const response = await api.post(`/marketing/campaigns/${id}/schedule`, schedule);
+    return response.data;
+  },
+  pause: async (id: string): Promise<{ message: string; campaign: Campaign }> => {
+    const response = await api.post(`/marketing/campaigns/${id}/pause`);
+    return response.data;
+  },
+  resume: async (id: string): Promise<{ message: string; campaign: Campaign }> => {
+    const response = await api.post(`/marketing/campaigns/${id}/resume`);
+    return response.data;
+  },
+  send: async (id: string): Promise<{ message: string; campaign_id: string; status: CampaignStatus; audience_count: number; queued: number; skipped: number; failed: number }> => {
+    const response = await api.post(`/marketing/campaigns/${id}/send`);
+    return response.data;
+  },
+  analytics: async (id: string): Promise<CampaignAnalytics> => {
+    const response = await api.get(`/marketing/campaigns/${id}/analytics`);
+    return response.data;
+  },
+};

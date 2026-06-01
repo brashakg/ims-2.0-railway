@@ -70,6 +70,7 @@ from .routers import (
     follow_ups_router,
     payroll_router,
     marketing_router,
+    campaigns_router,
     analytics_v2_router,
     agents_router,
     proposals_router,
@@ -931,6 +932,10 @@ app.include_router(
     dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
 )
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
+# Campaign layer (campaigns CRUD + segments + schedule + send + analytics) shares
+# the /api/v1/marketing prefix. Reuses marketing.py's send/consent/quiet-hours
+# infra; does NOT re-implement the sender. See routers/campaigns.py.
+app.include_router(campaigns_router, prefix="/api/v1/marketing", tags=["Marketing"])
 app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )
