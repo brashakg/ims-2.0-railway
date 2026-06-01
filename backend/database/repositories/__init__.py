@@ -19,6 +19,7 @@ from .workshop_repository import WorkshopJobRepository
 from .catalog_variant_repository import CatalogVariantRepository
 from .ecom_collection_repository import EcomCollectionRepository
 from .ecom_menu_repository import EcomMenuRepository
+from .product_image_repository import ProductImageRepository
 
 __all__ = [
     # Base
@@ -59,7 +60,9 @@ __all__ = [
     # Workshop
     'WorkshopJobRepository',
 
-    # E-commerce (Online Store / BVI Phase 1-2)
+    # E-commerce (Online Store / BVI Phase 1-4)
     'CatalogVariantRepository',
     'EcomCollectionRepository',
+    'EcomMenuRepository',
+    'ProductImageRepository',
 ]

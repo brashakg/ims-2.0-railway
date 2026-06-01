@@ -97,6 +97,7 @@ from .routers import (
     online_store_router,
     online_store_collections_router,
     online_store_menus_router,
+    online_store_images_router,
 )
 from .routers.auth import require_roles
 
@@ -999,6 +1000,17 @@ app.include_router(
     online_store_menus_router,
     prefix="/api/v1/online-store/menus",
     tags=["Online Store - Menus"],
+)
+# Image Design Queue sub-module (BVI Phase 4, FLAGSHIP #3). product_images CRUD +
+# the RAW->EDITED->APPROVED design lifecycle (assign / status / attach-edited) --
+# PUSH-DARK (Mongo only, no Shopify image push; that is Phase 5). Mounted at
+# /api/v1/online-store/images. Each route is role-gated INSIDE the router
+# (require_roles -> SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER) +
+# catalogued in rbac_policy.POLICY. APPROVE writes a chained audit_logs row.
+app.include_router(
+    online_store_images_router,
+    prefix="/api/v1/online-store/images",
+    tags=["Online Store - Images"],
 )
 
 

@@ -402,6 +402,22 @@ class DatabaseConnection:
                 "shopify_menu_id", unique=True, sparse=True, background=True
             )
 
+            # Product images / image design queue (BVI Phase 4 -- Online Store
+            # FLAGSHIP #3). `product_id` backs a product's gallery + per-product
+            # queue view (the hot read); `status` backs the design-queue filter
+            # (QUEUED / IN_PROGRESS / REVIEW); `assigned_to` backs a designer's
+            # "my queue" (SPARSE so unassigned rows aren't indexed on null). No
+            # unique constraint: a product legitimately has many images, and the
+            # same source asset can appear as RAW + EDITED rows. The PUSH-DARK
+            # `shopify_image_id` is null in Phase 4 (Phase-5 push reverse-lookup).
+            # See database/schemas.py PRODUCT_IMAGE_SCHEMA + BVI_MERGE_PLAN A.1.
+            product_images = self._db["product_images"]
+            product_images.create_index("product_id", background=True)
+            product_images.create_index("status", background=True)
+            product_images.create_index(
+                "assigned_to", sparse=True, background=True
+            )
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")
