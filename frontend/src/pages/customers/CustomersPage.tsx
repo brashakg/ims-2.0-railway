@@ -26,11 +26,17 @@ import {
   Award,
   MessageCircle,
   PhoneCall,
+  Copy,
 } from 'lucide-react';
 import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import {
+  applyCustomerToPatient,
+  hasCopyableCustomerFields,
+  copyWouldOverwrite,
+} from '../../utils/patientFromCustomer';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { PromotionEngine } from '../../components/crm/PromotionEngine';
@@ -283,6 +289,34 @@ export function CustomersPage() {
       const detail = e?.response?.data?.detail || e?.message || 'Failed to create customer';
       toast.error(typeof detail === 'string' ? detail : 'Failed to create customer');
     }
+  };
+
+  // "Copy from customer details" for the Add-Patient modal. The parent
+  // customer is `selectedCustomer` (name / phone / email; DOB lives per-patient
+  // in this app, so it's copied only if the customer record happens to carry
+  // one). Non-destructive by default — confirm before overwriting typed fields.
+  const canCopyPatientFromCustomer = hasCopyableCustomerFields(selectedCustomer as any);
+
+  const handleCopyPatientFromCustomer = () => {
+    if (!selectedCustomer) return;
+    const wouldOverwrite = copyWouldOverwrite(patientForm, selectedCustomer as any);
+    const overwrite =
+      wouldOverwrite &&
+      window.confirm(
+        'Some patient fields are already filled. Overwrite them with the customer’s details?'
+      );
+    setPatientForm(prev => applyCustomerToPatient(prev, selectedCustomer as any, !overwrite));
+  };
+
+  // Selecting "Self" prefills from the customer (blanks only — safe, no prompt).
+  const handlePatientRelationChange = (relation: string) => {
+    setPatientForm(prev => {
+      const base = { ...prev, relation };
+      if (relation === 'Self' && selectedCustomer) {
+        return applyCustomerToPatient(base, selectedCustomer as any, true);
+      }
+      return base;
+    });
   };
 
   // Handle adding a patient to the selected customer
@@ -727,7 +761,15 @@ export function CustomersPage() {
             <h2 className="font-semibold text-gray-900">Patients</h2>
             {canAddCustomer && (
               <button
-                onClick={() => setShowAddPatientModal(true)}
+                onClick={() => {
+                  // Pristine form defaults to relation "Self" (the account
+                  // holder) — prefill from the customer on open. Blanks only,
+                  // so a half-typed form (if reopened) is never clobbered.
+                  if (!patientForm.name.trim() && patientForm.relation === 'Self' && selectedCustomer) {
+                    setPatientForm(prev => applyCustomerToPatient(prev, selectedCustomer as any, true));
+                  }
+                  setShowAddPatientModal(true);
+                }}
                 className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
               >
                 <Plus className="w-4 h-4" />
@@ -925,16 +967,34 @@ export function CustomersPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Relation</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-gray-700">Relation</label>
+                    {canCopyPatientFromCustomer && (
+                      <button
+                        type="button"
+                        onClick={handleCopyPatientFromCustomer}
+                        className="text-xs text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                        title="Fill this patient from the customer's details"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Copy from customer details
+                      </button>
+                    )}
+                  </div>
                   <select
                     value={patientForm.relation}
-                    onChange={e => setPatientForm(f => ({ ...f, relation: e.target.value }))}
+                    onChange={e => handlePatientRelationChange(e.target.value)}
                     className="input-field"
                   >
                     {['Self', 'Spouse', 'Child', 'Parent', 'Sibling', 'Other'].map(r => (
                       <option key={r} value={r}>{r}</option>
                     ))}
                   </select>
+                  {patientForm.relation === 'Self' && canCopyPatientFromCustomer && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      This patient is the account holder — details copied from the customer.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Mobile</label>
