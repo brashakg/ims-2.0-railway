@@ -556,3 +556,251 @@ export const menusApi = {
     return m;
   },
 };
+
+// ============================================================================
+// IMAGES sub-api  (BVI Phase 4 — Image Design Workflow, "push-dark")
+// ----------------------------------------------------------------------------
+// FLAGSHIP #3 of the BVI merge: the product-image DESIGN QUEUE — the design
+// team's daily workflow, run entirely inside IMS. See
+// docs/reference/BVI_MERGE_PLAN.md section A.1 (ProductImage -> product_images)
+// and section B Phase 4.
+//
+// Each image record tracks one product/variant photo through its design
+// lifecycle:  QUEUED -> IN_PROGRESS -> REVIEW -> APPROVED | REJECTED. A raw
+// (cataloger) photo becomes an edited (designer) hero image; an editor/approver
+// signs it off. role distinguishes the RAW source from the EDITED output (BVI
+// ProductImage.role). NOTHING is pushed to Shopify here — images are stored +
+// progressed inside IMS Mongo `product_images`; the single-writer Shopify image
+// push (shopifyMediaId) is Phase 5/6.
+//
+// Field set mirrors the BVI Prisma `ProductImage` / `VariantImage` models
+// (ecommerce/prisma/schema.prisma:254-292) mapped to snake_case, PLUS the
+// per-image design-status lifecycle + assignee that IMS adds on top of BVI's
+// product-level imageDesignStatus.
+//
+// GRACEFUL DEGRADATION: the Phase-4 backend images router (online_store_images)
+// may not be deployed yet (it ships separately). Every read resolves to a safe
+// empty value rather than throwing, so the Design Queue screen always renders
+// ("backend not yet available" rather than a crash). Writes surface a thrown
+// error so the screen can toast it. Import this service DIRECTLY from this
+// module (NOT the api barrel — the barrel re-export fails to resolve, TS2614,
+// per past sessions).
+// ============================================================================
+
+/** Where an image sits in the design lifecycle.
+ *  - QUEUED      = raw image submitted by a cataloger, awaiting a designer
+ *  - IN_PROGRESS = a designer has started editing it
+ *  - REVIEW      = an edited image is attached, awaiting approver sign-off
+ *  - APPROVED    = signed off; eligible for the (later) Shopify push
+ *  - REJECTED    = sent back; needs a redo (mirrors a designer/approver bounce) */
+export type ImageDesignStatus =
+  | 'QUEUED'
+  | 'IN_PROGRESS'
+  | 'REVIEW'
+  | 'APPROVED'
+  | 'REJECTED';
+
+/** The five lifecycle states, in pipeline order — drives the filter chip row
+ *  + status columns on the Design Queue screen. */
+export const IMAGE_DESIGN_STATUSES: ImageDesignStatus[] = [
+  'QUEUED',
+  'IN_PROGRESS',
+  'REVIEW',
+  'APPROVED',
+  'REJECTED',
+];
+
+/** Image source role (BVI ProductImage.role).
+ *  - RAW    = uploaded by the cataloger (not pushed to Shopify)
+ *  - EDITED = the designer's finished hero image (the push candidate) */
+export type ImageRole = 'RAW' | 'EDITED';
+
+/** One product/variant image record progressing through the design queue.
+ *  All presentation fields are optional + nullable so a partial backend payload
+ *  never breaks rendering. */
+export interface EcomProductImage {
+  id: string;
+  // The IMS product this image belongs to (catalog_products / products _id or
+  // the bridged sku — the backend resolves it). Variant images carry variant_sku
+  // (BVI VariantImage merged into product_images via a variant discriminator).
+  product_id: string;
+  variant_sku?: string | null;
+  // Human-friendly product reference for the card (backend joins these in).
+  product_title?: string | null;
+  brand?: string | null;
+  model_no?: string | null;
+  category?: string | null;
+  // The image itself. `url` = current best (edited if present, else raw);
+  // `raw_url`/`edited_url` are the explicit RAW source + EDITED output so the
+  // card can show them side-by-side. `original_url` mirrors BVI originalUrl
+  // (the un-rehosted source) for download.
+  url?: string | null;
+  raw_url?: string | null;
+  edited_url?: string | null;
+  original_url?: string | null;
+  position?: number | null;
+  role?: ImageRole | null;
+  // The design lifecycle.
+  design_status: ImageDesignStatus;
+  // The designer/owner currently working it (user id) + a display name the
+  // backend resolves for the card. null = unassigned.
+  assignee_id?: string | null;
+  assignee_name?: string | null;
+  // Last reject reason / review note (shown on a REJECTED card).
+  note?: string | null;
+  // Shopify-side mapping (informational in Phase 4 — push is Phase 5/6).
+  shopify_media_id?: string | null;
+  // dirty flag -> Phase-5 push queue. Informational in Phase 4.
+  locally_modified?: boolean | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Create payload for a new image record (a cataloger submitting a raw photo).
+ *  product_id + a raw url are the minimum; everything else is optional. */
+export interface ImageCreate {
+  product_id: string;
+  variant_sku?: string | null;
+  raw_url?: string;
+  url?: string;
+  original_url?: string;
+  position?: number;
+  role?: ImageRole;
+}
+
+/** Partial update payload (the backend merges). Used by the edit affordances
+ *  + as the low-level primitive the higher-level helpers build on. */
+export interface ImageUpdate {
+  variant_sku?: string | null;
+  raw_url?: string | null;
+  edited_url?: string | null;
+  original_url?: string | null;
+  url?: string | null;
+  position?: number;
+  role?: ImageRole;
+  design_status?: ImageDesignStatus;
+  assignee_id?: string | null;
+  note?: string | null;
+}
+
+/** Filters for the queue list. All optional — omit for "everything". */
+export interface ImageListFilters {
+  status?: ImageDesignStatus;
+  product_id?: string;
+  assignee_id?: string;
+  /** free-text over product title / brand / model (backend-side). */
+  search?: string;
+  limit?: number;
+}
+
+const IMAGES_BASE = '/online-store/images';
+
+/** Normalise an images list payload into EcomProductImage[] (accepts a bare
+ *  array or an envelope {images:[...]} / {items:[...]}). */
+function _imagesFrom(data: any): EcomProductImage[] {
+  const arr = Array.isArray(data) ? data : (data?.images ?? data?.items ?? []);
+  return (Array.isArray(arr) ? arr : []) as EcomProductImage[];
+}
+
+/** Unwrap a single-image payload (accepts {image:{...}} or a bare object). */
+function _imageFrom(data: any): EcomProductImage | null {
+  if (!data) return null;
+  const m = data.image ?? data;
+  return (m && typeof m === 'object' ? m : null) as EcomProductImage | null;
+}
+
+export const imagesApi = {
+  /** List queue images, optionally filtered by status / product / assignee /
+   *  search. Fail-soft: any error (incl. a 404 on a stale deploy) -> [] so the
+   *  Design Queue renders even before the Phase-4 backend is deployed. */
+  list: async (filters: ImageListFilters = {}): Promise<EcomProductImage[]> => {
+    try {
+      const params: Record<string, string | number> = {};
+      if (filters.status) params.status = filters.status;
+      if (filters.product_id) params.product_id = filters.product_id;
+      if (filters.assignee_id) params.assignee_id = filters.assignee_id;
+      if (filters.search) params.search = filters.search;
+      if (typeof filters.limit === 'number') params.limit = filters.limit;
+      const res = await api.get(IMAGES_BASE, { params });
+      return _imagesFrom(res?.data);
+    } catch {
+      return [];
+    }
+  },
+
+  /** Fetch one image record. Fail-soft -> null. */
+  get: async (id: string): Promise<EcomProductImage | null> => {
+    try {
+      const res = await api.get(`${IMAGES_BASE}/${encodeURIComponent(id)}`);
+      return _imageFrom(res?.data);
+    } catch {
+      return null;
+    }
+  },
+
+  /** Create a new image record (cataloger submits a raw photo). Throws on
+   *  failure (caller toasts the message). */
+  create: async (payload: ImageCreate): Promise<EcomProductImage> => {
+    const res = await api.post(IMAGES_BASE, payload);
+    const m = _imageFrom(res?.data);
+    if (!m) throw new Error('Create image returned no record');
+    return m;
+  },
+
+  /** Patch an image record (partial merge). Throws on failure. Returns the
+   *  updated record so the screen can re-render from a single source of truth. */
+  update: async (id: string, payload: ImageUpdate): Promise<EcomProductImage> => {
+    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, payload);
+    const m = _imageFrom(res?.data);
+    if (!m) throw new Error('Update image returned no record');
+    return m;
+  },
+
+  /** Assign the image to a user (the designer who will work it). Pass null to
+   *  unassign. Convenience wrapper over `update`. Throws on failure. */
+  assign: async (id: string, assigneeId: string | null): Promise<EcomProductImage> => {
+    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, {
+      assignee_id: assigneeId,
+    });
+    const m = _imageFrom(res?.data);
+    if (!m) throw new Error('Assign image returned no record');
+    return m;
+  },
+
+  /** Move the image to a new lifecycle status (Start -> IN_PROGRESS, Approve ->
+   *  APPROVED, Reject -> REJECTED, ...). `note` carries a reject/review reason.
+   *  Throws on failure. Returns the updated record. */
+  setStatus: async (
+    id: string,
+    status: ImageDesignStatus,
+    note?: string,
+  ): Promise<EcomProductImage> => {
+    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, {
+      design_status: status,
+      ...(note !== undefined ? { note } : {}),
+    });
+    const m = _imageFrom(res?.data);
+    if (!m) throw new Error('Set image status returned no record');
+    return m;
+  },
+
+  /** Attach the designer's edited image URL and advance the record to REVIEW
+   *  (awaiting approver sign-off), mirroring BVI's "upload edited -> publish"
+   *  step but stopping at REVIEW (the approve gate is a separate action).
+   *  Throws on failure. Returns the updated record. */
+  attachEdited: async (id: string, editedUrl: string): Promise<EcomProductImage> => {
+    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, {
+      edited_url: editedUrl,
+      role: 'EDITED' as ImageRole,
+      design_status: 'REVIEW' as ImageDesignStatus,
+    });
+    const m = _imageFrom(res?.data);
+    if (!m) throw new Error('Attach edited image returned no record');
+    return m;
+  },
+
+  /** Delete an image record. Throws on failure. */
+  remove: async (id: string): Promise<void> => {
+    await api.delete(`${IMAGES_BASE}/${encodeURIComponent(id)}`);
+  },
+};

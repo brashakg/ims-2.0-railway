@@ -94,11 +94,13 @@ const SECTIONS: Section[] = [
     key: 'images',
     title: 'Image design queue',
     blurb:
-      'The design team workflow: raw photo to edited hero image, role-gated, with per-product design status — entirely inside IMS.',
+      'The design team workflow: raw photo to edited hero image, role-gated, with per-image design status — entirely inside IMS.',
     icon: ImageIcon,
     phase: 'Phase 4',
     countKey: 'images_pending_design',
     countLabel: 'awaiting design',
+    // Phase 4 shipped: the image design queue is live in-app.
+    href: '/online-store/images',
   },
   {
     key: 'customers',

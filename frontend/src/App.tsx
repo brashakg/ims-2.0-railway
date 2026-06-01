@@ -42,6 +42,7 @@ const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
 const OnlineStorePage = lazy(() => import('./pages/online-store/OnlineStorePage'));
 const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
+const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -344,6 +345,20 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <MenusPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Image design queue (BVI Phase 4). Same
+                      catalog/design role gate as the module shell; in-page
+                      Approve/Reject is further gated to ADMIN/DESIGN_MANAGER. */}
+                  <Route
+                    path="online-store/images"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <DesignQueuePage />
                       </ProtectedRoute>
                     }
                   />
