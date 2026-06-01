@@ -69,6 +69,7 @@ from .routers import (
     follow_ups_router,
     payroll_router,
     marketing_router,
+    campaigns_router,
     analytics_v2_router,
     agents_router,
     proposals_router,
@@ -921,6 +922,13 @@ app.include_router(
     dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
 )
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
+# Campaign Manager - the campaign layer (CRUD + segments + send + analytics) on
+# top of the marketing send infra. Mounted UNDER /marketing so its paths are
+# /api/v1/marketing/campaigns/*. Separate router file from marketing.py so the
+# campaign surface evolves independently of the transactional send endpoints.
+app.include_router(
+    campaigns_router, prefix="/api/v1/marketing/campaigns", tags=["Marketing Campaigns"]
+)
 app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )

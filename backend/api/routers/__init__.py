@@ -36,6 +36,7 @@ from .crm import router as crm_router
 from .follow_ups import router as follow_ups_router
 from .payroll import router as payroll_router
 from .marketing import router as marketing_router
+from .campaigns import router as campaigns_router
 from .analytics_v2 import router as analytics_v2_router
 from .agents import router as agents_router
 from .proposals import router as proposals_router
@@ -101,6 +102,7 @@ __all__ = [
     "follow_ups_router",
     "payroll_router",
     "marketing_router",
+    "campaigns_router",
     "analytics_v2_router",
     "agents_router",
     "proposals_router",

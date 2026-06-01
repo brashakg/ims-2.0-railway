@@ -611,6 +611,24 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/marketing/walkins', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/marketing/walkout-recoveries', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/marketing/walkout/{customer_id}', "allowed": 'AUTHENTICATED'},
+    # --- /api/v1/marketing/campaigns (Campaign Manager) ---
+    # Reads (list / view / segment audience estimates / analytics) are open to
+    # any logged-in staff. Writes + SEND are gated to the bulk-send management
+    # roles (same set as marketing notifications/send-bulk) since a campaign is
+    # a mass, metered customer fan-out. SUPERADMIN passes implicitly.
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns/segments', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/segments/preview', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns/{campaign_id}', "allowed": 'AUTHENTICATED'},
+    {"method": 'PUT', "path": '/api/v1/marketing/campaigns/{campaign_id}', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'DELETE', "path": '/api/v1/marketing/campaigns/{campaign_id}', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns/{campaign_id}/analytics', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/duplicate', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/pause', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/resume', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/schedule', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/send', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     # --- /api/v1/notifications ---
     {"method": 'GET', "path": '/api/v1/notifications', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/notifications/', "allowed": 'AUTHENTICATED'},
