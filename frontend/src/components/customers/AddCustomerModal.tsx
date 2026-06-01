@@ -16,8 +16,14 @@ import {
   AlertCircle,
   Building2,
   User,
+  Copy,
 } from 'lucide-react';
 import clsx from 'clsx';
+import {
+  applyCustomerToPatient,
+  hasCopyableCustomerFields,
+  copyWouldOverwrite,
+} from '../../utils/patientFromCustomer';
 
 // ============================================================================
 // Types
@@ -246,6 +252,44 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
       ...prev,
       patients: prev.patients.filter(p => p.id !== patientId),
     }));
+  };
+
+  // The parent customer's details, as the patient-copy helper expects them.
+  // `formData` is the customer being created/edited in this very modal.
+  const customerForCopy = {
+    name: formData.fullName,
+    mobile: formData.mobileNumber,
+    email: formData.email,
+    dateOfBirth: formData.dateOfBirth,
+  };
+  const canCopyFromCustomer = hasCopyableCustomerFields(customerForCopy);
+
+  // One-tap "Copy from customer details" into the in-progress patient. Fills
+  // only blank patient fields by default; if the operator already typed
+  // something that differs, confirm before overwriting so nothing is lost.
+  const handleCopyFromCustomer = () => {
+    if (!canCopyFromCustomer) return;
+    const wouldOverwrite = copyWouldOverwrite(newPatient, customerForCopy);
+    const overwrite =
+      wouldOverwrite &&
+      window.confirm(
+        'Some patient fields are already filled. Overwrite them with the customer’s details?'
+      );
+    setNewPatient(prev => applyCustomerToPatient(prev, customerForCopy, !overwrite));
+  };
+
+  // When relation becomes "Self", the patient IS the account holder, so offer
+  // to prefill from the customer. Non-destructive: only fills blanks (never
+  // clobbers something the operator already typed) so it's safe to fire on
+  // selection without a prompt.
+  const handleRelationChange = (relation: string) => {
+    setNewPatient(prev => {
+      const base = { ...prev, relation };
+      if (relation === 'Self' && canCopyFromCustomer) {
+        return applyCustomerToPatient(base, customerForCopy, true);
+      }
+      return base;
+    });
   };
 
   // Search API call
@@ -709,7 +753,14 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
               <button
                 type="button"
                 onClick={() => {
-                  setNewPatient(prev => ({ ...prev, mobile: formData.mobileNumber }));
+                  // The blank patient defaults to relation "Self" (the account
+                  // holder), so prefill from the customer on open — blanks only,
+                  // never clobbering anything already typed.
+                  setNewPatient(prev =>
+                    prev.relation === 'Self' && canCopyFromCustomer
+                      ? applyCustomerToPatient(prev, customerForCopy, true)
+                      : { ...prev, mobile: prev.mobile || formData.mobileNumber }
+                  );
                   setShowAddPatient(true);
                 }}
                 className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
@@ -797,18 +848,37 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                     />
                   </div>
                   <div className="col-span-2">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Relation
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-sm font-medium text-gray-700">
+                        Relation
+                      </label>
+                      {canCopyFromCustomer && (
+                        <button
+                          type="button"
+                          onClick={handleCopyFromCustomer}
+                          className="text-xs text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                          title="Fill this patient from the customer's details above"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                          Copy from customer details
+                        </button>
+                      )}
+                    </div>
                     <select
                       value={newPatient.relation}
-                      onChange={e => setNewPatient(prev => ({ ...prev, relation: e.target.value }))}
+                      onChange={e => handleRelationChange(e.target.value)}
                       className="input-field"
                     >
                       {RELATIONS.map(rel => (
                         <option key={rel} value={rel}>{rel}</option>
                       ))}
                     </select>
+                    {newPatient.relation === 'Self' && canCopyFromCustomer && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        This patient is the account holder — their details were filled
+                        from the customer above.
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="flex gap-2">
