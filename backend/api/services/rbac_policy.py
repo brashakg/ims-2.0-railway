@@ -992,6 +992,15 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/vendors/grn/{grn_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/vendors/grn/{grn_id}/accept', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'POST', "path": '/api/v1/vendors/grn/{grn_id}/escalate', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
+    # Create/from-grn/book is an accounting action -> ACCOUNTANT/ADMIN; reads
+    # are AUTHENTICATED. (SUPERADMIN auto-passes via require_roles.)
+    {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/vendors/purchase-invoices', "allowed": ['ACCOUNTANT', 'ADMIN']},
+    {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/vendors/purchase-invoices/', "allowed": ['ACCOUNTANT', 'ADMIN']},
+    {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/from-grn/{grn_id}', "allowed": ['ACCOUNTANT', 'ADMIN']},
+    {"method": 'GET', "path": '/api/v1/vendors/purchase-invoices/{invoice_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/vendors/purchase-orders', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/vendors/purchase-orders', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/vendors/purchase-orders/{po_id}', "allowed": 'AUTHENTICATED'},

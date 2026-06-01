@@ -418,6 +418,31 @@ class DatabaseConnection:
                 "assigned_to", sparse=True, background=True
             )
 
+            # Vendor bills / purchase invoices (AP + ITC source of truth). The
+            # SAME collection now stores both legacy header-only AP bills and the
+            # Phase-1 first-class Purchase Invoice (lines + per-rate GST split +
+            # written place_of_supply). `bill_id` is the canonical id (unique,
+            # sparse so any legacy rows lacking it don't collide on null);
+            # (vendor_id, bill_number) backs the per-vendor duplicate-invoice
+            # lookup; `po_id` / `grn_id` back the create-from-GRN + PO/GRN
+            # back-links (sparse -- on-account/header-only bills have neither).
+            # NON-unique on (vendor_id, bill_number): the duplicate-invoice guard
+            # lives in application code (vendors.create_vendor_bill +
+            # purchase_invoices) because legacy prod data may already hold a
+            # duplicate a unique index would reject at build time.
+            # See database/schemas.py PURCHASE_INVOICE_SCHEMA.
+            vendor_bills = self._db["vendor_bills"]
+            vendor_bills.create_index(
+                "bill_id", unique=True, sparse=True, background=True
+            )
+            vendor_bills.create_index(
+                [("vendor_id", 1), ("bill_number", 1)], background=True
+            )
+            vendor_bills.create_index("po_id", sparse=True, background=True)
+            vendor_bills.create_index("grn_id", sparse=True, background=True)
+            vendor_bills.create_index("status", background=True)
+            vendor_bills.create_index([("bill_date", -1)], background=True)
+
             # health_checks (SENTINEL telemetry) -- a row every ~60s tick, so it
             # grows UNBOUNDED. A TTL index auto-expires rows >14 days old server-
             # side. Wrapped in its OWN try: building a TTL index needs >=500MB

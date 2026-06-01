@@ -1885,3 +1885,120 @@ COLLECTIONS.update({
         ],
     },
 })
+
+
+# ============================================================================
+# PURCHASE INVOICE (AP + ITC source of truth)  --  Phase 1
+# ============================================================================
+# A first-class purchase invoice: the vendor's tax invoice recorded with LINE
+# ITEMS (HSN + per-rate GST split) on top of the header-only AP record that the
+# Cash-Flow screen used to create. It is stored in the SAME `vendor_bills`
+# collection that AP aging + the ITC register / GSTR-2B reconcile already read,
+# so the enrichment is purely additive:
+#
+#   * legacy header-only bills (no `lines`, no `doc_type`) stay valid and keep
+#     aging / reconciling exactly as before;
+#   * a line-item invoice carries `doc_type:"PURCHASE_INVOICE"`, the per-rate
+#     CGST/SGST/IGST split, and -- crucially -- a WRITTEN `place_of_supply` so
+#     the ITC code classifies inter-state purchases as IGST (the bug it fixes:
+#     place_of_supply was READ by itc_reconcile but written nowhere, so every
+#     inter-state purchase was mis-booked CGST+SGST).
+#
+# The fields the AP engine + ITC register consume are kept identical to a
+# header-only bill (bill_id / vendor_id / bill_number / bill_date / due_date /
+# taxable_amount / tax_amount / total_amount / outstanding / status /
+# place_of_supply) so NO read path needs to change. `lines` + the split totals
+# are a strict superset for the new Purchase Invoice screen + GST reports.
+#
+# This schema is registered in COLLECTIONS for documentation + tooling parity.
+# It is intentionally NOT applied as a strict Mongo $jsonSchema validator at
+# runtime (connection.ensure_indexes hand-builds indexes and applies no
+# validators), so pre-existing header-only bills in production are never
+# rejected. `required` is therefore the minimal header every bill already has.
+PURCHASE_INVOICE_LINE_SCHEMA = {
+    "bsonType": "object",
+    "properties": {
+        "product_id": {"bsonType": ["string", "null"]},
+        "description": {"bsonType": ["string", "null"]},
+        "hsn": {"bsonType": ["string", "null"]},
+        "qty": {"bsonType": ["double", "int"]},
+        "unit_price": {"bsonType": ["double", "int"]},
+        "taxable": {"bsonType": ["double", "int"]},
+        "gst_rate": {"bsonType": ["double", "int"]},
+        "cgst": {"bsonType": ["double", "int"]},
+        "sgst": {"bsonType": ["double", "int"]},
+        "igst": {"bsonType": ["double", "int"]},
+        "line_total": {"bsonType": ["double", "int"]},
+    },
+}
+
+PURCHASE_INVOICE_SCHEMA = {
+    "bsonType": "object",
+    # Minimal header -- exactly what a legacy header-only vendor bill already
+    # carries, so registering this schema cannot invalidate existing rows.
+    "required": ["bill_id", "vendor_id", "bill_number", "bill_date", "total_amount"],
+    "properties": {
+        # Canonical AP identity (shared with header-only bills).
+        "bill_id": {"bsonType": "string"},
+        # Alias of bill_id for the Purchase Invoice surface (same value).
+        "invoice_id": {"bsonType": "string"},
+        # Discriminator: present + "PURCHASE_INVOICE" => has lines + GST split.
+        "doc_type": {"bsonType": "string"},
+        "vendor_id": {"bsonType": "string"},
+        "vendor_name": {"bsonType": "string"},
+        "vendor_gstin": {"bsonType": ["string", "null"]},
+        # Recipient (buyer) -- which of our legal entities / GSTINs is claiming
+        # the ITC. Drives the inter-state (IGST) vs intra-state decision.
+        "recipient_entity_id": {"bsonType": ["string", "null"]},
+        "recipient_gstin": {"bsonType": ["string", "null"]},
+        # 2-digit GST state code of the place of supply (the buyer's state for
+        # a goods purchase). WRITTEN here so itc_reconcile classifies correctly.
+        "place_of_supply": {"bsonType": ["string", "null"]},
+        # The vendor's own invoice number (== bill_number, the AP dup key).
+        "bill_number": {"bsonType": "string"},
+        "invoice_number": {"bsonType": ["string", "null"]},
+        "bill_date": {"bsonType": "string"},
+        "invoice_date": {"bsonType": ["string", "null"]},
+        "due_date": {"bsonType": ["string", "null"]},
+        "credit_days": {"bsonType": ["int", "double"]},
+        "po_id": {"bsonType": ["string", "null"]},
+        "grn_id": {"bsonType": ["string", "null"]},
+        "lines": {"bsonType": "array", "items": PURCHASE_INVOICE_LINE_SCHEMA},
+        # Header money (shared with AP + ITC reads). taxable_amount/tax_amount
+        # mirror taxable_total / (cgst+sgst+igst) so the existing register works.
+        "taxable_amount": {"bsonType": ["double", "int"]},
+        "tax_amount": {"bsonType": ["double", "int"]},
+        "taxable_total": {"bsonType": ["double", "int"]},
+        "cgst_total": {"bsonType": ["double", "int"]},
+        "sgst_total": {"bsonType": ["double", "int"]},
+        "igst_total": {"bsonType": ["double", "int"]},
+        "total_amount": {"bsonType": ["double", "int"]},
+        "total": {"bsonType": ["double", "int"]},
+        "tds": {"bsonType": ["double", "int"]},
+        "itc_eligible": {"bsonType": "bool"},
+        "outstanding": {"bsonType": ["double", "int"]},
+        "status": {"enum": ["DRAFT", "OUTSTANDING", "PARTIAL", "PAID"]},
+        "notes": {"bsonType": ["string", "null"]},
+        "created_by": {"bsonType": ["string", "null"]},
+        "created_at": {"bsonType": "string"},
+    },
+}
+
+COLLECTIONS.update({
+    # Same physical collection as the header-only AP bills (see the long note
+    # above). Indexes mirror the per-vendor duplicate guard + the new PO/GRN
+    # back-links. Non-unique on (vendor_id, bill_number): the duplicate-invoice
+    # block stays in application code (create paths) because legacy prod data
+    # may already contain duplicates a unique index would reject at build time.
+    "vendor_bills": {
+        "schema": PURCHASE_INVOICE_SCHEMA,
+        "indexes": [
+            {"keys": [("bill_id", 1)], "unique": True, "sparse": True},
+            {"keys": [("vendor_id", 1), ("bill_number", 1)]},
+            {"keys": [("po_id", 1)], "sparse": True},
+            {"keys": [("grn_id", 1)], "sparse": True},
+            {"keys": [("status", 1)]},
+            {"keys": [("bill_date", -1)]},
+        ],
+    },
+})
