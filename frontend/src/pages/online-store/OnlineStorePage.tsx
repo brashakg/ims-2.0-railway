@@ -10,6 +10,7 @@
 // image design queue, Shopify push, …) land in later phases — NOT here.
 
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Store,
   Package,
@@ -24,6 +25,7 @@ import {
   ExternalLink,
   Loader2,
   CheckCircle2,
+  ArrowRight,
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
@@ -46,6 +48,9 @@ interface Section {
   /** Which summary count (if any) to surface as a live stat on this card. */
   countKey?: CountKey;
   countLabel?: string;
+  /** When set, the section is LIVE: the card becomes a link to this in-app
+   *  route and shows an "Open" CTA instead of the "Coming soon" pill. */
+  href?: string;
 }
 
 // The planned Online Store sections, ordered by the blueprint's phase roadmap.
@@ -70,6 +75,8 @@ const SECTIONS: Section[] = [
     phase: 'Phase 2',
     countKey: 'collections',
     countLabel: 'collections',
+    // Phase 2 shipped: the Collections editor is live in-app.
+    href: '/online-store/collections',
   },
   {
     key: 'menus',
@@ -268,21 +275,34 @@ export default function OnlineStorePage() {
             ? (counts as Record<string, number | null | undefined>)[section.countKey]
             : undefined;
           const showCount = available && section.countKey;
-          return (
-            <div
-              key={section.key}
-              className="rounded-xl border border-gray-200 bg-white p-4 flex flex-col"
-            >
+          const isLive = !!section.href;
+
+          // Shared inner content (icon, title, blurb, footer). For LIVE
+          // sections the footer shows an "Open" CTA; otherwise the count or a
+          // "Coming soon" pill.
+          const inner = (
+            <>
               <div className="flex items-start justify-between gap-2 mb-2">
                 <div className="flex items-center gap-2">
-                  <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-gray-100 text-gray-700">
+                  <span
+                    className={
+                      'inline-flex items-center justify-center w-8 h-8 rounded-lg ' +
+                      (isLive ? 'bg-bv-red-50 text-bv-red-600' : 'bg-gray-100 text-gray-700')
+                    }
+                  >
                     <SectionIcon className="w-4 h-4" />
                   </span>
                   <h2 className="text-sm font-semibold text-gray-900">{section.title}</h2>
                 </div>
-                <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-500 border border-gray-200 px-2 py-0.5 text-[11px] font-medium whitespace-nowrap">
-                  {section.phase}
-                </span>
+                {isLive ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-green-100 text-green-800 border border-green-200 px-2 py-0.5 text-[11px] font-medium whitespace-nowrap">
+                    <CheckCircle2 className="w-3 h-3" /> Live
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-500 border border-gray-200 px-2 py-0.5 text-[11px] font-medium whitespace-nowrap">
+                    {section.phase}
+                  </span>
+                )}
               </div>
               <p className="text-xs leading-relaxed text-gray-500 flex-1">{section.blurb}</p>
               <div className="mt-3 flex items-center justify-between">
@@ -292,11 +312,39 @@ export default function OnlineStorePage() {
                     {section.countLabel}
                   </span>
                 ) : (
+                  <span />
+                )}
+                {isLive ? (
+                  <span className="inline-flex items-center gap-1 text-xs font-medium text-bv-red-600">
+                    Open <ArrowRight className="w-3.5 h-3.5" />
+                  </span>
+                ) : !showCount ? (
                   <span className="inline-flex items-center rounded-full bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 text-[11px] font-medium">
                     Coming soon
                   </span>
-                )}
+                ) : null}
               </div>
+            </>
+          );
+
+          if (isLive && section.href) {
+            return (
+              <Link
+                key={section.key}
+                to={section.href}
+                className="rounded-xl border border-gray-200 bg-white p-4 flex flex-col hover:border-bv-red-300 hover:shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-bv-red-200"
+              >
+                {inner}
+              </Link>
+            );
+          }
+
+          return (
+            <div
+              key={section.key}
+              className="rounded-xl border border-gray-200 bg-white p-4 flex flex-col"
+            >
+              {inner}
             </div>
           );
         })}
