@@ -135,6 +135,73 @@ def online_status_for_skus(skus: List[str]) -> Dict[str, Dict[str, Any]]:
             pass
 
 
+# ---------------------------------------------------------------------------
+# Reverse direction: resolve Shopify inventory-set TARGETS for a list of SKUs.
+# IMS = inventory master; on a sale we push the reduced available qty to
+# Shopify so the site can't oversell. To call Shopify's inventorySetQuantities
+# we need, per product, the Shopify InventoryItem GID + a location GID.
+#
+# Match key is the same bridge as online_status_for_skus: sku OR storeBarcode
+# OR barcode. The location GID resolves to (in priority order):
+#   1. SHOPIFY_ONLINE_LOCATION_ID env (authoritative single online location), else
+#   2. the shopifyLocationId of a Location that this variant is stocked at.
+# A variant with no shopifyInventoryItemId is NOT online-syncable -> skipped.
+# ---------------------------------------------------------------------------
+_TARGETS_QUERY = """
+    WITH req(key) AS (SELECT DISTINCT unnest(%s::text[]))
+    SELECT req.key,
+           v."shopifyInventoryItemId" AS inventory_item_id,
+           MAX(l."shopifyLocationId") AS location_id
+    FROM req
+    JOIN "ProductVariant" v
+      ON v.sku = req.key OR v."storeBarcode" = req.key OR v.barcode = req.key
+    LEFT JOIN "VariantLocation" vl ON vl."variantId" = v.id
+    LEFT JOIN "Location" l ON l.id = vl."locationId"
+    WHERE v."shopifyInventoryItemId" IS NOT NULL AND v."shopifyInventoryItemId" <> ''
+    GROUP BY req.key, v."shopifyInventoryItemId"
+"""
+
+
+def online_variant_targets_for_skus(skus: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return {key: {inventory_item_id, location_id}} for SKUs/barcodes that map
+    to an online variant carrying a Shopify InventoryItem GID. `key` is the
+    REQUESTED identifier so the caller can map straight back. location_id falls
+    back to SHOPIFY_ONLINE_LOCATION_ID when the variant's location has no
+    shopifyLocationId. Empty dict on any failure (fail-soft)."""
+    clean = sorted({normalize_sku(s) for s in (skus or []) if normalize_sku(s)})
+    if not clean:
+        return {}
+    env_location = (os.getenv("SHOPIFY_ONLINE_LOCATION_ID") or "").strip()
+    conn = _connect()
+    if conn is None:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(_TARGETS_QUERY, (clean,))
+            for row in cur.fetchall():
+                key, inv_item, location_id = row
+                key = normalize_sku(key)
+                inv_item = normalize_sku(inv_item)
+                if not key or not inv_item:
+                    continue
+                loc = normalize_sku(location_id) or env_location
+                if not loc:
+                    # No usable location -> can't target a set; skip (caller
+                    # treats a missing target as "not online", a safe no-op).
+                    continue
+                out[key] = {"inventory_item_id": inv_item, "location_id": loc}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ONLINE_CATALOG] targets query failed: %s", e)
+        return {}
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def online_summary() -> Dict[str, Any]:
     """Small health/summary for diagnostics: configured + reachable + counts."""
     if not ecommerce_db_configured():

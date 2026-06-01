@@ -1655,6 +1655,18 @@ async def create_order(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[STOCK] mark_units_sold failed: %s", exc)
 
+            # IMS = inventory MASTER (council B11): after the in-store sale
+            # reduces on-hand, push the reduced AVAILABLE qty to Shopify so the
+            # website can't oversell. Gated (IMS_SHOPIFY_WRITES + DISPATCH_MODE)
+            # + fire-and-forget + fully fail-soft: a Shopify error can NEVER
+            # block or slow the sale. No online mapping for a SKU -> no-op.
+            try:
+                from ..services.online_stock_writeback import writeback_after_sale
+
+                writeback_after_sale(None, items_data, store_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[STOCK] online write-back skipped: %s", exc)
+
             # Pune-incentive walk-in counter (Module i, Phase 4): bump
             # the per-store-per-day counter, dedup'd by mobile.
             try:

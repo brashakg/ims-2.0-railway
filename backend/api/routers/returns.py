@@ -1091,6 +1091,21 @@ async def create_return(
     restock_applied = bool(restock_result.get("applied"))
     restock_stock_ids = restock_result.get("restock_stock_ids", [])
 
+    # Online oversell guard (council B11): a GOOD-condition return puts stock
+    # back on the shelf, so the online AVAILABLE count goes UP -- re-push it to
+    # Shopify. Gated (IMS_SHOPIFY_WRITES + DISPATCH_MODE) + fail-soft: never
+    # blocks the return. No online mapping for a SKU -> no-op.
+    if restock_applied and restocked:
+        try:
+            from ..services.online_stock_writeback import writeback_after_restock
+
+            restocked_skus = [
+                r.get("sku") for r in restocked if isinstance(r, dict) and r.get("sku")
+            ]
+            writeback_after_restock(None, restocked_skus, store_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[RETURNS] online write-back skipped: %s", exc)
+
     # 4. Persist the return doc.
     now = datetime.now().isoformat()
     doc: Dict[str, Any] = {
