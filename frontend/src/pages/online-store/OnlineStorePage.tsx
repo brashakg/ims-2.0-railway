@@ -87,6 +87,8 @@ const SECTIONS: Section[] = [
     phase: 'Phase 3',
     countKey: 'menus',
     countLabel: 'menus',
+    // Phase 3 shipped: the Mega-menu editor is live in-app.
+    href: '/online-store/menus',
   },
   {
     key: 'images',

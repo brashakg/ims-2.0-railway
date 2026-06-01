@@ -41,6 +41,7 @@ const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
 const OnlineStorePage = lazy(() => import('./pages/online-store/OnlineStorePage'));
 const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'));
+const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -330,6 +331,19 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <CollectionsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Menus / Mega-menu editor (BVI Phase 3). Same
+                      catalog/design role gate as the module shell. */}
+                  <Route
+                    path="online-store/menus"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <MenusPage />
                       </ProtectedRoute>
                     }
                   />
