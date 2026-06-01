@@ -30,7 +30,9 @@ Editing/cropping does NOT clear copyright, so we never auto-use unverified art.
 
 from __future__ import annotations
 
+import asyncio
 import html
+import json
 import logging
 import os
 import re
@@ -829,6 +831,246 @@ class MarketplaceAdapter(SourceAdapter):
         return out
 
 
+# --- Priority 2: Claude AI product enrichment (AUTHORIZED, generated TEXT) ---
+
+# The IMS GST categories the AI is allowed to choose from. Sourced from the
+# canonical gst_rates table (single source of truth) so the AI's category always
+# maps to a real IMS product category that POS can bill. Fail-soft to a curated
+# optical-retail subset if the table can't be imported for any reason.
+_AI_CATEGORY_FALLBACK = (
+    "FRAME",
+    "OPTICAL_LENS",
+    "CONTACT_LENS",
+    "COLORED_CONTACT_LENS",
+    "READING_GLASSES",
+    "SUNGLASS",
+    "WATCH",
+    "SMARTWATCH",
+    "SMARTGLASSES",
+    "WALL_CLOCK",
+    "ACCESSORIES",
+    "HEARING_AID",
+)
+
+
+def _ai_allowed_categories() -> List[str]:
+    """Canonical IMS product categories for the AI to pick from. Reads the
+    gst_rates master so the AI category is always one POS can price; fail-soft
+    to a curated optical subset. Never raises."""
+    try:
+        from .gst_rates import GST_CATEGORY_TABLE
+
+        # The canonical product categories (not the legacy aliases / short UI
+        # codes / order-only item_types). Keep it to recognisable optical-retail
+        # product types so the model isn't shown 60 near-duplicate keys.
+        wanted = list(_AI_CATEGORY_FALLBACK)
+        present = [c for c in wanted if c in GST_CATEGORY_TABLE]
+        return present or list(_AI_CATEGORY_FALLBACK)
+    except Exception:  # noqa: BLE001
+        return list(_AI_CATEGORY_FALLBACK)
+
+
+def _ai_client_importable() -> bool:
+    """True if the shared agents Claude helper can be imported. Pure import
+    probe (no network, no key check); is_enabled() ANDs this with the key."""
+    try:
+        from agents import claude_client  # noqa: F401
+
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _run_coro_sync(coro) -> Any:
+    """Run an async coroutine to completion from this SYNC code path and return
+    its result. run_search (and thus every adapter._search) is synchronous,
+    while the Claude helper is async. Bridge fail-soft:
+
+    - No running loop (the normal FastAPI threadpool / pytest case): drive the
+      coroutine to completion on a throwaway loop via asyncio.run-style.
+    - A loop already running in THIS thread (rare for our sync call sites):
+      run the coroutine on a dedicated loop in a worker thread so we never call
+      asyncio.run() re-entrantly (which would raise).
+    Any failure -> the coroutine is closed and None is returned (never raises).
+    """
+    try:
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is None:
+            return asyncio.run(coro)
+
+        # A loop is already running in this thread; execute the coroutine on a
+        # separate thread with its own event loop to avoid re-entrancy.
+        import concurrent.futures
+
+        def _runner():
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_runner).result()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[AUTOPILOT] ai_enrich async bridge failed: %s", e)
+        try:
+            coro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
+def _coerce_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _coerce_specs(value: Any) -> Dict[str, str]:
+    """Flatten the AI's specs object to a {str: str} map, fail-soft."""
+    out: Dict[str, str] = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if v is None:
+                continue
+            try:
+                out[str(k)[:60]] = str(v)[:200]
+            except Exception:  # noqa: BLE001
+                continue
+            if len(out) >= 40:
+                break
+    return out
+
+
+class AIEnrichAdapter(SourceAdapter):
+    """Generate catalog enrichment TEXT for a brand+model via one Claude call
+    (reusing the shared agents Claude client - no new SDK dependency). This is
+    the RELIABLE contributor: it needs no scraping and no dealer-portal creds,
+    only ANTHROPIC_API_KEY. The generated copy is original TEXT, so it is
+    AUTHORIZED to use; it never fabricates product image URLs (image_urls stays
+    [] - images remain a scraping / authorized-source concern). Fully fail-soft:
+    missing key / import error / API error / bad JSON -> [] (never raises)."""
+
+    name = "ai_enrich"
+    label = "AI product enrichment (Claude)"
+    source_class = AUTHORIZED
+    priority = 2
+
+    def is_enabled(self) -> bool:
+        return bool(os.getenv("ANTHROPIC_API_KEY")) and _ai_client_importable()
+
+    def reason(self) -> str:
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return "Set ANTHROPIC_API_KEY to enable Claude product enrichment."
+        if not _ai_client_importable():
+            return "agents Claude client unavailable; AI enrichment disabled."
+        return "Claude generates catalog copy/specs from brand + model (no images)."
+
+    def _build_prompt(self, brand, model, color, size) -> tuple:
+        cats = ", ".join(_ai_allowed_categories())
+        descriptor = " ".join(
+            p for p in [brand, model, color, size] if (p and str(p).strip())
+        ).strip()
+        system = (
+            "You are an optical-retail catalog assistant. Given an eyewear "
+            "product, return concise, factual catalog enrichment as STRICT JSON. "
+            "Do NOT invent a product image URL. If you are not confident the "
+            "exact product exists, set needs_review to true and confidence low."
+        )
+        user = (
+            "For the eyewear product "
+            + (descriptor or f"{brand} {model}".strip())
+            + ", return STRICT JSON with these keys:\n"
+            '  "title": string,\n'
+            '  "category": one of [' + cats + "],\n"
+            '  "frame_shape": string,\n'
+            '  "frame_material": string,\n'
+            '  "lens_material": string,\n'
+            '  "gender": string,\n'
+            '  "description": string (2-3 sentences),\n'
+            '  "usp": string (one line),\n'
+            '  "specs": object of concise key facts,\n'
+            '  "suggested_hsn": string,\n'
+            '  "suggested_gst_rate": number,\n'
+            '  "confidence": number between 0 and 1,\n'
+            '  "needs_review": boolean (true if unsure of the exact product).'
+        )
+        return system, user
+
+    def _to_candidate(self, data, brand, model, color, size) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+        cand = _candidate_skeleton(self.name, self.source_class)
+        cand.update(
+            {
+                "title": _coerce_str(data.get("title")) or f"{brand} {model}".strip(),
+                "brand": brand,
+                "model": model,
+                "color": (_coerce_str(color) or _coerce_str(data.get("color"))),
+                "size": (_coerce_str(size) or _coerce_str(data.get("size"))),
+                # AI MUST NOT fabricate image URLs - images stay an authorized-
+                # source / scraping concern. Surfaced honestly as empty.
+                "image_urls": [],
+                "specs": _coerce_specs(data.get("specs")),
+                "description": _coerce_str(data.get("description")),
+                "usp": _coerce_str(data.get("usp")),
+            }
+        )
+        # Carry the AI's enrichment fields on the candidate dict so the reviewer
+        # UI / downstream can map category -> IMS GST and surface confidence.
+        category = _coerce_str(data.get("category"))
+        if category:
+            cand["category"] = category.upper()
+        # Pull a few common spec fields up to top-level when the model returned
+        # them as discrete keys (harmless if absent).
+        for key in ("frame_shape", "frame_material", "lens_material", "gender"):
+            val = _coerce_str(data.get(key))
+            if val:
+                cand[key] = val
+        hsn = _coerce_str(data.get("suggested_hsn"))
+        if hsn:
+            cand["suggested_hsn"] = hsn
+        rate = data.get("suggested_gst_rate")
+        if rate is not None:
+            try:
+                cand["suggested_gst_rate"] = float(rate)
+            except (TypeError, ValueError):
+                pass
+        conf = data.get("confidence")
+        if conf is not None:
+            try:
+                cand["confidence"] = float(conf)
+            except (TypeError, ValueError):
+                pass
+        cand["needs_review"] = bool(data.get("needs_review", True))
+        return cand
+
+    def _search(self, brand, model, color, size, limit):
+        if not self.is_enabled():
+            return []
+        try:
+            from agents.claude_client import call_claude_json
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[AUTOPILOT] ai_enrich import failed: %s", e)
+            return []
+        system, user = self._build_prompt(brand, model, color, size)
+        max_tokens = int(os.getenv("AUTOPILOT_AI_MAX_TOKENS", "700"))
+        # ONE Claude call. The helper already strips code fences + parses JSON
+        # fail-soft (returns None on any failure), so we never see raw text.
+        data = _run_coro_sync(
+            call_claude_json(system, user, max_tokens=max_tokens)
+        )
+        if data is None:
+            return []
+        cand = self._to_candidate(data, brand, model, color, size)
+        return [cand] if cand else []
+
+
 # ---------------------------------------------------------------------------
 # Registry + orchestration
 # ---------------------------------------------------------------------------
@@ -839,6 +1081,7 @@ def build_registry() -> List[SourceAdapter]:
     source of truth for both run_search and GET /sources."""
     adapters = [
         BrandSiteAdapter(),
+        AIEnrichAdapter(),
         MyLuxotticaAdapter(),
         InternalCatalogAdapter(),
         MarketplaceAdapter(),
