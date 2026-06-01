@@ -615,6 +615,19 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/notifications/{notification_id}/snooze', "allowed": 'AUTHENTICATED'},
     # --- /api/v1/online-store ---  (BVI Phase 1: Online Store module skeleton)
     {"method": 'GET', "path": '/api/v1/online-store/summary', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    # --- /api/v1/online-store/collections ---  (BVI Phase 2: Collections, FLAGSHIP #1)
+    # PUSH-DARK ecom_collections CRUD + manual/smart membership + smart-rule
+    # resolver. All gated to the ecom role set (router-level require_roles); see
+    # routers/online_store_collections.py + BVI_MERGE_PLAN.md Phase 2.
+    {"method": 'GET', "path": '/api/v1/online-store/collections', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/collections', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/online-store/collections/{collection_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/collections/{collection_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'DELETE', "path": '/api/v1/online-store/collections/{collection_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/collections/{collection_id}/products', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'DELETE', "path": '/api/v1/online-store/collections/{collection_id}/products/{sku}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/online-store/collections/{collection_id}/products/reorder', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/online-store/collections/{collection_id}/resolved-products', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     # --- /api/v1/orders ---
     {"method": 'GET', "path": '/api/v1/orders', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders', "allowed": ['ADMIN', 'AREA_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},

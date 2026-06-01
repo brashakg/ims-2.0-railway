@@ -345,6 +345,26 @@ class DatabaseConnection:
                 "store_barcode", unique=True, sparse=True, background=True
             )
 
+            # E-commerce collections (BVI Phase 2 -- Online Store FLAGSHIP #1).
+            # `handle` is the unique storefront slug + idempotent re-import key;
+            # `shopify_collection_id` is the Shopify-side reverse-lookup. Both
+            # UNIQUE SPARSE so a PUSH-DARK row not yet mapped to Shopify (handle
+            # present, GID absent) isn't constrained on the missing key. The
+            # auto-lineage filters (auto_source / category_anchor) back the menu
+            # placement + idempotent auto-collection re-run lookups. See
+            # database/schemas.py ECOM_COLLECTION_SCHEMA + BVI_MERGE_PLAN A.1.
+            ecom_collections = self._db["ecom_collections"]
+            ecom_collections.create_index(
+                "handle", unique=True, sparse=True, background=True
+            )
+            ecom_collections.create_index(
+                "shopify_collection_id", unique=True, sparse=True, background=True
+            )
+            ecom_collections.create_index("auto_source", sparse=True, background=True)
+            ecom_collections.create_index(
+                "category_anchor", sparse=True, background=True
+            )
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

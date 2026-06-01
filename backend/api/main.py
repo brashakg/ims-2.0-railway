@@ -95,6 +95,7 @@ from .routers import (
     audit_router,
     budgets_router,
     online_store_router,
+    online_store_collections_router,
 )
 from .routers.auth import require_roles
 
@@ -976,6 +977,16 @@ app.include_router(
     online_store_router,
     prefix="/api/v1/online-store",
     tags=["Online Store"],
+)
+# Collections sub-module (BVI Phase 2, FLAGSHIP #1). ecom_collections CRUD +
+# manual/smart membership + smart-rule resolver -- PUSH-DARK (Mongo only, no
+# Shopify writes; that is Phase 5). Mounted at /api/v1/online-store/collections.
+# Each route is role-gated INSIDE the router (require_roles -> SUPERADMIN /
+# ADMIN / CATALOG_MANAGER / DESIGN_MANAGER) + catalogued in rbac_policy.POLICY.
+app.include_router(
+    online_store_collections_router,
+    prefix="/api/v1/online-store/collections",
+    tags=["Online Store - Collections"],
 )
 
 
