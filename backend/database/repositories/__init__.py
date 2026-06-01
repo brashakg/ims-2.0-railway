@@ -16,6 +16,7 @@ from .expense_repository import ExpenseRepository, AdvanceRepository
 from .audit_repository import AuditRepository, NotificationRepository
 from .hr_repository import AttendanceRepository, LeaveRepository, PayrollRepository
 from .workshop_repository import WorkshopJobRepository
+from .catalog_variant_repository import CatalogVariantRepository
 
 __all__ = [
     # Base
@@ -54,5 +55,8 @@ __all__ = [
     'PayrollRepository',
     
     # Workshop
-    'WorkshopJobRepository'
+    'WorkshopJobRepository',
+
+    # E-commerce (Online Store / BVI Phase 1)
+    'CatalogVariantRepository',
 ]

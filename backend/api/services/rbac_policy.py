@@ -99,6 +99,10 @@ ALL_ROLES: List[str] = [
     "SALES_STAFF",
     "CASHIER",
     "WORKSHOP_STAFF",
+    # DESIGN_MANAGER (lowest-privilege ecom design-queue role, BVI Phase 1).
+    # Added to the matrix for the "Online Store" module; does not change any
+    # existing route gate. See routers/online_store.py + BVI_MERGE_PLAN.md.
+    "DESIGN_MANAGER",
 ]
 
 # Sentinel allow-values.
@@ -128,6 +132,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'DELETE', "path": '/api/v1/admin/categories/{category_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/categories/{category_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/admin/categories/{category_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/admin/discounts/enforced-caps', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/discounts/promo-codes', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/discounts/promo-codes', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'DELETE', "path": '/api/v1/admin/discounts/promo-codes/{code_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
@@ -191,6 +196,10 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/admin/lens/pricing-ranges/quote', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'DELETE', "path": '/api/v1/admin/lens/pricing-ranges/{range_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/admin/lens/pricing-ranges/{range_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
+    # Online-store bridge health tile. Lives under the ADMIN-gated admin router
+    # but the handler narrows to SUPERADMIN inline (online-store admin is a
+    # SUPERADMIN concern, matching the Jarvis / ecommerce-SSO posture).
+    {"method": 'GET', "path": '/api/v1/admin/online-store/sync-health', "allowed": ['SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/products', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/products/bulk-import', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/products/bulk-import/{job_id}/file', "allowed": ['ADMIN', 'SUPERADMIN']},
@@ -604,6 +613,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/notifications/unread-count', "allowed": 'AUTHENTICATED'},
     {"method": 'PATCH', "path": '/api/v1/notifications/{notification_id}/read', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/notifications/{notification_id}/snooze', "allowed": 'AUTHENTICATED'},
+    # --- /api/v1/online-store ---  (BVI Phase 1: Online Store module skeleton)
+    {"method": 'GET', "path": '/api/v1/online-store/summary', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     # --- /api/v1/orders ---
     {"method": 'GET', "path": '/api/v1/orders', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders', "allowed": ['ADMIN', 'AREA_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},
