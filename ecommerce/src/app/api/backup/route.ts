@@ -8,7 +8,8 @@ import { requireAuth } from "@/lib/apiAuth";
  */
 export async function GET() {
   try {
-    const auth = await requireAuth();
+    // SECURITY: a full product/inventory export is admin-only.
+    const auth = await requireAuth("ADMIN");
     if (!auth.authorized) return auth.response!;
 
     const products = await prisma.product.findMany({
@@ -121,7 +122,8 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
-    const auth = await requireAuth();
+    // SECURITY: restoring inventory quantities mutates stock data — admin-only.
+    const auth = await requireAuth("ADMIN");
     if (!auth.authorized) return auth.response!;
 
     const body = await request.json();
