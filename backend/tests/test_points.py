@@ -176,6 +176,28 @@ def patched_points(monkeypatch):
     }
 
 
+@pytest.fixture
+def frozen_points_now(monkeypatch):
+    """Freeze the points router clock to a fixed MID-MONTH date so the MTD /
+    staff-history window tests are deterministic. Those tests seed rows at
+    `today - N days`; on the 1st/2nd of a month the earlier days fall in the
+    PREVIOUS month, so the window endpoints (which key off datetime.now().month)
+    see fewer rows -> a real calendar-boundary flake (e.g. days_logged 1 != 3 on
+    the 1st). Returns the frozen `date`."""
+    from datetime import datetime as _dt
+    from api.routers import points as points_module
+
+    frozen = _dt(2026, 6, 15, 12, 0, 0)
+
+    class _FrozenDateTime(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(points_module, "datetime", _FrozenDateTime)
+    return frozen.date()
+
+
 # ============================================================================
 # Auth helpers (mirror conftest.auth_headers but with extra roles)
 # ============================================================================
@@ -539,10 +561,10 @@ def test_visufit_gate_no_data_does_not_apply(
     assert body["visufit_gate_applied"] is False
 
 
-def test_mtd_aggregation_per_staff(client, auth_headers, patched_points):
+def test_mtd_aggregation_per_staff(client, auth_headers, patched_points, frozen_points_now):
     """MTD endpoint: per-staff days_logged + per-category averages."""
     from datetime import date as _d, timedelta
-    today = _d.today()
+    today = frozen_points_now
     for offset in range(3):
         d = (today - timedelta(days=offset)).isoformat()
         client.post(
@@ -577,11 +599,11 @@ def test_mtd_aggregation_per_staff(client, auth_headers, patched_points):
 
 
 def test_leaderboard_sorted_desc_with_tiebreak(
-    client, auth_headers, patched_points
+    client, auth_headers, patched_points, frozen_points_now
 ):
     """Leaderboard sorted by avg.total DESC; tie-broken by days_logged."""
     from datetime import date as _d, timedelta
-    today = _d.today()
+    today = frozen_points_now
     # Akshay: 1 day, total = 80 (high avg, low days)
     client.post(
         "/api/v1/incentive/points/daily",
@@ -614,11 +636,11 @@ def test_leaderboard_sorted_desc_with_tiebreak(
 
 
 def test_staff_history_returns_ordered_rows(
-    client, auth_headers, patched_points
+    client, auth_headers, patched_points, frozen_points_now
 ):
     """staff/{id}/history returns rows for the date range, newest-first."""
     from datetime import date as _d, timedelta
-    today = _d.today()
+    today = frozen_points_now
     for offset in range(4):
         d = (today - timedelta(days=offset)).isoformat()
         client.post(
