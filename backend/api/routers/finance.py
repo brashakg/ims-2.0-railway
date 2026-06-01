@@ -602,6 +602,33 @@ async def get_pnl(
 # === GST Management ===
 
 
+# Bill statuses that mean "not yet received / not bookable for ITC". A bill in
+# one of these is excluded from the ITC total; any other status (or none) counts.
+_ITC_PENDING_STATUSES = {"DRAFT", "PENDING", "CANCELLED", "REJECTED", "VOID"}
+
+
+def _itc_eligible_bill(bill: dict) -> bool:
+    """Whether a vendor bill's GST counts toward input credit (owner decision:
+    received AND not 17(5)-blocked). DEFAULT-INCLUDE: a bill with no eligibility
+    flags is counted, so historical data never silently drops. Excluded only
+    when EXPLICITLY blocked or not-yet-received."""
+    if not isinstance(bill, dict):
+        return False
+    # 17(5) disallowed (food / motor vehicle / personal use ...) -> never ITC.
+    if bool(bill.get("itc_blocked")):
+        return False
+    # An explicit itc_eligible=False also blocks (operator marked it).
+    if bill.get("itc_eligible") is False:
+        return False
+    # Not-yet-received: explicit received=False, or a pending-ish status.
+    if bill.get("received") is False:
+        return False
+    status = str(bill.get("status") or "").strip().upper()
+    if status in _ITC_PENDING_STATUSES:
+        return False
+    return True
+
+
 @router.get("/gst/summary")
 async def get_gst_summary(
     month: Optional[int] = None,
@@ -653,27 +680,39 @@ async def get_gst_summary(
     gst_collected = collected[0]["total_tax"] if collected else 0
 
     # GST paid (Input Tax Credit). ITC is claimable on PURCHASES recorded as
-    # vendor BILLS (GRN-backed), NOT purchase_orders -- POs are intent only and
-    # carry no `date` field, so the old match on purchase_orders.date summed
-    # NOTHING: ITC always showed 0 and net GST payable was overstated. Read the
-    # SAME source + date field as /itc-register (vendor_bills.bill_date) so the
-    # summary reconciles with the authoritative ITC register. CA to confirm the
-    # eligibility scope (this counts all booked vendor-bill GST in the period).
-    # Filter in Python via the tolerant date parser so this is robust whether
-    # vendor_bills.bill_date is stored as an ISO string or a BSON datetime (the
-    # shared _apply_created_at_range helper is created_at-specific and can't take
-    # a field). gst_amount is the legacy alias for tax_amount.
+    # vendor BILLS (GRN-backed), NOT purchase_orders. Read vendor_bills.bill_date
+    # (same source as /itc-register) so the summary reconciles. Date filtered in
+    # Python via the tolerant parser (handles ISO string OR BSON datetime).
+    #
+    # ELIGIBILITY (owner decision, mix of 'received' + 'not blocked'): a bill's
+    # tax counts toward ITC only when it is ELIGIBLE -- _itc_eligible_bill()
+    # excludes a bill explicitly flagged itc_blocked (17(5) disallowed: food /
+    # motor vehicle / etc.) OR whose status says it is not yet received
+    # (DRAFT/PENDING/CANCELLED). A bill with NO such flags DEFAULTS to included
+    # so historical data never silently drops. gst_amount is the legacy alias.
     gst_paid = 0.0
+    gst_paid_excluded = 0.0  # surfaced so the report can show what was held back
     try:
         for _b in db.get_collection("vendor_bills").find(
-            {}, {"_id": 0, "bill_date": 1, "tax_amount": 1, "gst_amount": 1}
+            {},
+            {
+                "_id": 0, "bill_date": 1, "tax_amount": 1, "gst_amount": 1,
+                "status": 1, "itc_blocked": 1, "received": 1, "itc_eligible": 1,
+            },
         ):
             _bd = ap_engine.parse_date(_b.get("bill_date"))
-            if _bd is not None and start <= _bd < end:
-                gst_paid += float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
+            if _bd is None or not (start <= _bd < end):
+                continue
+            _tax = float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
+            if _itc_eligible_bill(_b):
+                gst_paid += _tax
+            else:
+                gst_paid_excluded += _tax
     except Exception:
         gst_paid = 0.0
+        gst_paid_excluded = 0.0
     gst_paid = round(gst_paid, 2)
+    gst_paid_excluded = round(gst_paid_excluded, 2)
 
     cgst = gst_collected / 2
     sgst = gst_collected / 2
@@ -695,6 +734,9 @@ async def get_gst_summary(
         "cgst": cgst,
         "sgst": sgst,
         "gst_input_credit": gst_paid,
+        # ITC held back this period (not-yet-received or 17(5)-blocked bills) so
+        # the CA can see what was excluded rather than wonder why ITC dropped.
+        "gst_input_credit_excluded": gst_paid_excluded,
         "net_gst_payable": net_payable,
         "gstr1_due_date": gstr1_due.isoformat(),
         "gstr3b_due_date": gstr3b_due.isoformat(),

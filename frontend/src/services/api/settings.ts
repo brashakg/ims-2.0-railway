@@ -326,6 +326,17 @@ export const settingsApi = {
     const response = await api.put('/settings/approval-workflows', { workflows });
     return response.data;
   },
+
+  // TDS rates (national set; editable by SUPERADMIN). Effective = code defaults
+  // overlaid with any saved overrides; the AP/payment path applies them.
+  getTdsRates: async (): Promise<{ rates: Record<string, number>; defaults: Record<string, number>; overrides: Record<string, number> }> => {
+    const response = await api.get('/settings/tds-rates');
+    return response.data;
+  },
+  updateTdsRates: async (rates: Record<string, number>) => {
+    const response = await api.put('/settings/tds-rates', { rates });
+    return response.data;
+  },
 };
 
 export interface ApprovalWorkflow {

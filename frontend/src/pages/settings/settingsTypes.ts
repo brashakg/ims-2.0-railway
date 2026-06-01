@@ -14,6 +14,7 @@ export type SettingsTab =
   | 'discounts'
   | 'tax-invoice'
   | 'hsn-rates'
+  | 'tds-rates'
   | 'notifications'
   | 'integrations'
   | 'printers'
