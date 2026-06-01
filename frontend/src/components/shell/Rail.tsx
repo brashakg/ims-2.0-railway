@@ -100,6 +100,10 @@ const RAIL_GROUPS: NavGroup[] = [
     items: [
       { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'expenses', label: 'Expenses', to: '/finance/expenses', icon: 'banknote' },
+      // Attendance is its OWN top-level item (was buried in HR tabs). Managers
+      // see the full monthly grid + admin edit; staff (roles 5-7) get their
+      // self check-in card. requireRoles mirrors the /attendance route gate.
+      { id: 'attendance', label: 'Attendance', to: '/attendance', icon: 'calendarCheck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'] },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
