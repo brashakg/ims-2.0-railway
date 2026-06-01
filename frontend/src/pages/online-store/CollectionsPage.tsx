@@ -22,7 +22,7 @@
 // note); writes toast the backend error. Gated SUPERADMIN / ADMIN /
 // CATALOG_MANAGER / DESIGN_MANAGER at the route (App.tsx). Light theme only.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Layers,
@@ -42,10 +42,13 @@ import {
   PackagePlus,
   Info,
   RefreshCw,
+  UploadCloud,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import {
   collectionsApi,
+  pushApi,
   type EcomCollection,
   type CollectionType,
   type CollectionProduct,
@@ -53,6 +56,11 @@ import {
   type SmartRule,
   type SmartRules,
 } from '../../services/api/onlineStore';
+import OnlineStoreSyncBanner, {
+  SyncChip,
+  formatPushResult,
+  type OnlineStoreSyncBannerHandle,
+} from '../../components/online-store/OnlineStoreSyncBanner';
 
 // ---------------------------------------------------------------------------
 // Smart-rule vocabulary (kept small + storefront-meaningful — Shopify-like).
@@ -141,10 +149,18 @@ interface EditorDraft {
 // ===========================================================================
 export default function CollectionsPage() {
   const toast = useToast();
+  const { hasRole } = useAuth();
+  // Publishing to the live storefront is integration-critical -> SUPERADMIN /
+  // ADMIN only (matches the backend push router gate). The backend is the real
+  // enforcement; this just hides the control from everyone else.
+  const canPublish = hasRole(['SUPERADMIN', 'ADMIN']);
 
   const [collections, setCollections] = useState<EcomCollection[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  // Which collection id is mid-publish (disables its button + spins).
+  const [publishingId, setPublishingId] = useState<string | null>(null);
+  const bannerRef = useRef<OnlineStoreSyncBannerHandle>(null);
 
   // Drawer state
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -232,6 +248,34 @@ export default function CollectionsPage() {
         prev.map((x) => (x.id === c.id ? { ...x, published: !next } : x)),
       );
       toast.error(e?.message || 'Could not update published status');
+    }
+  };
+
+  // Publish (push) one collection to Shopify. DARK by default -> a SIMULATED
+  // dry-run; the returned mode (SIMULATED vs LIVE) is surfaced in the toast so a
+  // dry-run is never mistaken for a live write. On a successful LIVE create the
+  // collection gains a shopify_collection_id; refresh the list + banner so the
+  // Synced chip + counts update.
+  const publishCollection = async (c: EcomCollection) => {
+    setPublishingId(c.id);
+    try {
+      const result = await pushApi.pushCollection(c.id);
+      if (result.ok) {
+        toast.success(formatPushResult(`Collection "${c.title || c.handle}"`, result));
+      } else {
+        toast.warning(formatPushResult(`Collection "${c.title || c.handle}"`, result));
+      }
+      if (result.ok && result.mode === 'LIVE') {
+        // Live write may have minted/updated the Shopify id -> reflect it.
+        await load();
+        bannerRef.current?.refresh();
+      }
+    } catch (e: any) {
+      toast.error(
+        e?.response?.data?.detail || e?.message || 'Could not publish collection',
+      );
+    } finally {
+      setPublishingId(null);
     }
   };
 
@@ -336,6 +380,9 @@ export default function CollectionsPage() {
         so nothing here changes the live site yet.
       </p>
 
+      {/* Shopify publish (DARK / LIVE) banner */}
+      <OnlineStoreSyncBanner ref={bannerRef} className="mb-4" />
+
       {/* Toolbar */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[220px] max-w-md">
@@ -401,7 +448,7 @@ export default function CollectionsPage() {
                     >
                       {c.title || '(untitled)'}
                     </button>
-                    <div className="text-xs text-gray-400 flex items-center gap-2">
+                    <div className="text-xs text-gray-400 flex items-center gap-2 flex-wrap">
                       {c.handle ? <span>/{c.handle}</span> : null}
                       {c.auto_source ? (
                         <span
@@ -411,6 +458,10 @@ export default function CollectionsPage() {
                           auto: {c.auto_source}
                         </span>
                       ) : null}
+                      <SyncChip
+                        synced={!!c.shopify_collection_id}
+                        pending={!!c.locally_modified}
+                      />
                     </div>
                   </td>
                   <td className="px-4 py-2.5">
@@ -450,6 +501,22 @@ export default function CollectionsPage() {
                   </td>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center justify-end gap-1">
+                      {canPublish && (
+                        <button
+                          type="button"
+                          onClick={() => publishCollection(c)}
+                          disabled={publishingId === c.id}
+                          className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                          title="Push this collection to Shopify (dry-run unless live writes are armed)"
+                        >
+                          {publishingId === c.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <UploadCloud className="w-3.5 h-3.5" />
+                          )}
+                          Publish
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => openEdit(c)}
