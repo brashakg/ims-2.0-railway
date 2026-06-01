@@ -596,6 +596,23 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/marketing ---
     {"method": 'GET', "path": '/api/v1/marketing/consent-text', "allowed": 'AUTHENTICATED'},
     {"method": 'PUT', "path": '/api/v1/marketing/consent-text', "allowed": ['ADMIN']},
+    # Campaign layer (routers/campaigns.py): ADMIN/AREA_MANAGER/STORE_MANAGER
+    # (SUPERADMIN implicit). Campaign-specific routes additionally restrict a
+    # store-scoped campaign (one carrying a store_id) to that store via
+    # _enforce_store_scope -> validate_store_access; hence store_scoped=True.
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns/{campaign_id}', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'PUT', "path": '/api/v1/marketing/campaigns/{campaign_id}', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'DELETE', "path": '/api/v1/marketing/campaigns/{campaign_id}', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/duplicate', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/schedule', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/pause', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/resume', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/marketing/campaigns/{campaign_id}/send', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/marketing/campaigns/{campaign_id}/analytics', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/marketing/segments', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/marketing/segments/{key}/preview', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
     {"method": 'GET', "path": '/api/v1/marketing/notifications/logs', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/marketing/notifications/send', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'POST', "path": '/api/v1/marketing/notifications/send-bulk', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
