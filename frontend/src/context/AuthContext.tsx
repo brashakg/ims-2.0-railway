@@ -409,6 +409,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
       STORE_MANAGER: ['pos.*', 'inventory.accept', 'inventory.count', 'till.*', 'hr.view'],
       ACCOUNTANT: ['reports.*', 'expenses.approve', 'finance.*'],
       CATALOG_MANAGER: ['inventory.*', 'products.*'],
+      // DESIGN_MANAGER (BVI merge): owns the Online Store image/design queue.
+      // Read-mostly on the catalog plus a design-scoped grant for later phases.
+      DESIGN_MANAGER: ['products.view', 'online_store.view', 'design.*'],
       OPTOMETRIST: ['clinical.*', 'pos.create'],
       CASHIER: ['pos.*', 'till.*'],
       SALES_CASHIER: ['pos.*', 'till.*'],

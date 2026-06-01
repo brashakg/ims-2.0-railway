@@ -47,11 +47,6 @@ interface NavItem {
   sso?: boolean; // external app reached via an SSO handoff (mint token, then open)
 }
 
-// The consolidated e-commerce (BVI) admin. Configurable per-env so the URL can
-// change with the uniparallel.com cutover without a code change.
-const ECOMMERCE_URL =
-  (import.meta.env.VITE_ECOMMERCE_URL as string | undefined) || 'https://uniparallel.com';
-
 interface NavGroup {
   /** Section title rendered only in expanded mode. Omit for the first
    *  group so the menu starts flush with the brand wordmark. */
@@ -125,7 +120,10 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Growth',
     items: [
       { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'online-store', label: 'Online Store', to: ECOMMERCE_URL, icon: 'tag', external: true, sso: true, requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      // In-app Online Store module (BVI merge). Replaces the old external SSO
+      // link to uniparallel.com; the storefront admin remains reachable from a
+      // button inside the module page during the strangler-fig transition.
+      { id: 'online-store', label: 'Online Store', to: '/online-store', icon: 'store', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'] },
     ],
   },
   {

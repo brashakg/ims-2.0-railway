@@ -39,6 +39,7 @@ const FollowUpDashboard = lazy(() => import('./pages/customers/FollowUpDashboard
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
+const OnlineStorePage = lazy(() => import('./pages/online-store/OnlineStorePage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -301,6 +302,19 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <CampaignManager />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — consolidated e-commerce (BVI merge) module shell.
+                      Phase 1 foundation; gated to the catalog/design roles. */}
+                  <Route
+                    path="online-store"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <OnlineStorePage />
                       </ProtectedRoute>
                     }
                   />
