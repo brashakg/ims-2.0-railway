@@ -2,14 +2,17 @@
 // IMS 2.0 - Final Rx (Prescription) Tab Component
 // ============================================================================
 
-import { FileText } from 'lucide-react';
-import type { FinalRxData, SubjectiveRxData } from './eyeTestTypes';
-import { LENS_TYPES } from './eyeTestTypes';
+import { FileText, Stethoscope } from 'lucide-react';
+import type { FinalRxData, SubjectiveRxData, ClinicalFindingsData } from './eyeTestTypes';
+import { LENS_TYPES, COLOUR_VISION_OPTIONS } from './eyeTestTypes';
 
 interface FinalRxTabProps {
   data: FinalRxData;
   onChange: (data: FinalRxData) => void;
   subjectiveRxData: SubjectiveRxData;
+  // C6-B internal-only findings — rendered here but never printed on the Rx card.
+  findings: ClinicalFindingsData;
+  onFindingsChange: (data: ClinicalFindingsData) => void;
 }
 
 const VA_OPTIONS = ['6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'];
@@ -66,7 +69,13 @@ function DistanceVisionRow({
   );
 }
 
-export function FinalRxTab({ data, onChange, subjectiveRxData }: FinalRxTabProps) {
+export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindingsChange }: FinalRxTabProps) {
+  const setFinding = (field: keyof ClinicalFindingsData, value: string) =>
+    onFindingsChange({ ...findings, [field]: value });
+  const iopHigh = (v: string) => {
+    const n = parseFloat(v);
+    return !isNaN(n) && n > 21; // >21 mmHg is the common 'refer' threshold
+  };
   const handleFieldChange = (eye: 'rightEye' | 'leftEye', field: string, value: string) => {
     onChange({
       ...data,
@@ -213,6 +222,85 @@ export function FinalRxTab({ data, onChange, subjectiveRxData }: FinalRxTabProps
               value={data.nextCheckup}
               min={new Date().toISOString().slice(0, 10)}
               onChange={(e) => onChange({ ...data, nextCheckup: e.target.value })}
+              className="input-field"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Clinical Findings (INTERNAL — not printed on the Rx card) */}
+      <div className="card border-teal-200">
+        <div className="flex items-center gap-2 mb-1">
+          <Stethoscope className="w-4 h-4 text-teal-600" />
+          <h4 className="font-medium text-gray-800">Clinical Findings</h4>
+          <span className="text-xs text-gray-400">(internal — not printed for the customer)</span>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">All optional. Leave blank for a quick refraction-only test.</p>
+        <div className="grid grid-cols-2 tablet:grid-cols-3 gap-4">
+          <div>
+            <label className="text-sm text-gray-600 mb-1 block">Eye Pressure — Right (mmHg)</label>
+            <input
+              type="number" step="0.5" min="0" max="80"
+              value={findings.iopRight}
+              onChange={(e) => setFinding('iopRight', e.target.value)}
+              placeholder="e.g., 14"
+              className={`input-field ${iopHigh(findings.iopRight) ? 'border-red-400 text-red-700' : ''}`}
+            />
+            {iopHigh(findings.iopRight) && <p className="text-xs text-red-600 mt-0.5">High (&gt;21) — consider referral</p>}
+          </div>
+          <div>
+            <label className="text-sm text-gray-600 mb-1 block">Eye Pressure — Left (mmHg)</label>
+            <input
+              type="number" step="0.5" min="0" max="80"
+              value={findings.iopLeft}
+              onChange={(e) => setFinding('iopLeft', e.target.value)}
+              placeholder="e.g., 15"
+              className={`input-field ${iopHigh(findings.iopLeft) ? 'border-red-400 text-red-700' : ''}`}
+            />
+            {iopHigh(findings.iopLeft) && <p className="text-xs text-red-600 mt-0.5">High (&gt;21) — consider referral</p>}
+          </div>
+          <div>
+            <label className="text-sm text-gray-600 mb-1 block">Dominant Eye</label>
+            <select
+              value={findings.dominantEye}
+              onChange={(e) => setFinding('dominantEye', e.target.value)}
+              className="input-field"
+            >
+              <option value="">—</option>
+              <option value="RIGHT">Right</option>
+              <option value="LEFT">Left</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-sm text-gray-600 mb-1 block">Colour Vision</label>
+            <input
+              type="text" list="colour-vision-options"
+              value={findings.colourVision}
+              onChange={(e) => setFinding('colourVision', e.target.value)}
+              placeholder="Normal"
+              className="input-field"
+            />
+            <datalist id="colour-vision-options">
+              {COLOUR_VISION_OPTIONS.map(o => <option key={o} value={o} />)}
+            </datalist>
+          </div>
+          <div>
+            <label className="text-sm text-gray-600 mb-1 block">Cover Test</label>
+            <input
+              type="text"
+              value={findings.coverTest}
+              onChange={(e) => setFinding('coverTest', e.target.value)}
+              placeholder="e.g., Orthophoria"
+              className="input-field"
+            />
+          </div>
+          <div className="col-span-2 tablet:col-span-3">
+            <label className="text-sm text-gray-600 mb-1 block">Diagnosis</label>
+            <input
+              type="text"
+              value={findings.diagnosis}
+              onChange={(e) => setFinding('diagnosis', e.target.value)}
+              placeholder="e.g., Myopia, Astigmatism"
               className="input-field"
             />
           </div>

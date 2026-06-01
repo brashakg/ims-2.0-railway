@@ -29,6 +29,7 @@ import type {
   AutoRefData,
   SubjectiveRxData,
   FinalRxData,
+  ClinicalFindingsData,
   UploadedFile,
   TabId,
 } from './eyeTestTypes';
@@ -37,6 +38,7 @@ import {
   VDU_OPTIONS,
   createEmptyPowerReading,
   createEmptySlitLampEye,
+  createEmptyClinicalFindings,
 } from './eyeTestTypes';
 
 import { LensometerTab } from './LensometerTab';
@@ -97,6 +99,9 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     remarks: '',
   });
 
+  const [clinicalFindings, setClinicalFindings] =
+    useState<ClinicalFindingsData>(createEmptyClinicalFindings());
+
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
 
   if (!isOpen || !patient) return null;
@@ -144,6 +149,7 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
         autoRef: autoRefData,
         subjectiveRx: subjectiveRxData,
         finalRx: finalRxData,
+        clinicalFindings,
         uploads,
       };
       await onSave(data);
@@ -316,7 +322,13 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
             <SubjectiveRxTab data={subjectiveRxData} onChange={setSubjectiveRxData} />
           )}
           {activeTab === 'final' && (
-            <FinalRxTab data={finalRxData} onChange={setFinalRxData} subjectiveRxData={subjectiveRxData} />
+            <FinalRxTab
+              data={finalRxData}
+              onChange={setFinalRxData}
+              subjectiveRxData={subjectiveRxData}
+              findings={clinicalFindings}
+              onFindingsChange={setClinicalFindings}
+            />
           )}
           {activeTab === 'uploads' && (
             <UploadsTab uploads={uploads} onUpload={handleFileUpload} onRemove={removeUpload} />

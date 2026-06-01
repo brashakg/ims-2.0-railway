@@ -280,6 +280,10 @@ export function CustomersPage() {
           dob: p.dateOfBirth || undefined,
           relation: p.relation || 'Self',
         })),
+        marketing_consent: formData.marketingConsent,
+        // DPDP data-storage consent + the version of the wording shown.
+        data_consent: formData.dataConsent,
+        data_consent_text_version: formData.dataConsentTextVersion,
       };
       await customerApi.createCustomer(customerData as any);
       toast.success('Customer created successfully');

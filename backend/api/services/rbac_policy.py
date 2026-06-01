@@ -594,6 +594,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/loyalty/settings', "allowed": 'AUTHENTICATED'},
     {"method": 'PUT', "path": '/api/v1/loyalty/settings', "allowed": ['SUPERADMIN']},
     # --- /api/v1/marketing ---
+    {"method": 'GET', "path": '/api/v1/marketing/consent-text', "allowed": 'AUTHENTICATED'},
+    {"method": 'PUT', "path": '/api/v1/marketing/consent-text', "allowed": ['ADMIN']},
     {"method": 'GET', "path": '/api/v1/marketing/notifications/logs', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/marketing/notifications/send', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'POST', "path": '/api/v1/marketing/notifications/send-bulk', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},

@@ -3,9 +3,12 @@
 // ============================================================================
 // Marketing campaigns: Rx Renewal, Birthday, Winback with builder & analytics
 
-import { useState } from 'react';
-import { Plus, Edit, BarChart3 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Plus, Edit, BarChart3, ShieldCheck, Save, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
+import { customerApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 type CampaignType = 'rx_renewal' | 'birthday' | 'winback';
 
@@ -29,7 +32,7 @@ interface Campaign {
 }
 
 export function CampaignManager() {
-  const [activeTab, setActiveTab] = useState<'campaigns' | 'builder'>('campaigns');
+  const [activeTab, setActiveTab] = useState<'campaigns' | 'builder' | 'consent'>('campaigns');
   const [selectedCampaign, setSelectedCampaign] = useState<string | null>(null);
   const [campaigns] = useState<Campaign[]>([]);
 
@@ -53,7 +56,7 @@ export function CampaignManager() {
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-gray-200">
-        {(['campaigns', 'builder'] as const).map((tab) => (
+        {(['campaigns', 'builder', 'consent'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -64,10 +67,12 @@ export function CampaignManager() {
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
-            {tab === 'campaigns' ? 'Active Campaigns' : 'Campaign Builder'}
+            {tab === 'campaigns' ? 'Active Campaigns' : tab === 'builder' ? 'Campaign Builder' : 'Consent Text'}
           </button>
         ))}
       </div>
+
+      {activeTab === 'consent' && <ConsentTextEditor />}
 
       {activeTab === 'campaigns' && (
         <div className="space-y-4">
@@ -255,6 +260,85 @@ export function CampaignManager() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DPDP data-consent wording editor (ADMIN/SUPERADMIN). The text shown to a
+// customer at creation time; editing bumps the version so each stored consent
+// traces to the exact wording the customer agreed to.
+// ---------------------------------------------------------------------------
+function ConsentTextEditor() {
+  const { hasRole } = useAuth();
+  const toast = useToast();
+  const canEdit = hasRole?.('ADMIN') || hasRole?.('SUPERADMIN');
+  const [text, setText] = useState('');
+  const [version, setVersion] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    customerApi.getConsentText()
+      .then((r) => { setText(r.text || ''); setVersion(r.version || ''); })
+      .catch(() => { /* keep blank */ })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const save = async () => {
+    if (text.trim().length < 10) { toast.error('Consent text is too short'); return; }
+    setSaving(true);
+    try {
+      const r = await customerApi.updateConsentText(text.trim());
+      setVersion(r?.version || version);
+      toast.success('Consent text updated');
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Could not save consent text');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 max-w-3xl">
+      <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <ShieldCheck className="w-4 h-4 text-teal-600" />
+          <h3 className="font-semibold text-gray-900">Data-Storage Consent (DPDP)</h3>
+          {version && <span className="text-xs text-gray-400">v{version}</span>}
+        </div>
+        <p className="text-sm text-gray-500 mb-3">
+          The wording a customer agrees to when you store their personal data. Shown on the
+          Add-Customer form; the version is recorded on each customer's consent.
+        </p>
+        {loading ? (
+          <div className="py-8 text-center text-gray-400"><Loader2 className="w-5 h-5 animate-spin inline" /> Loading…</div>
+        ) : (
+          <>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              disabled={!canEdit}
+              rows={5}
+              maxLength={4000}
+              className="input-field w-full resize-none"
+              placeholder="Enter the consent wording shown to customers…"
+            />
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-xs text-gray-400">{text.length}/4000</span>
+              {canEdit ? (
+                <button onClick={save} disabled={saving} className="btn-primary flex items-center gap-2">
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  Save
+                </button>
+              ) : (
+                <span className="text-xs text-gray-400">Read-only — ADMIN can edit</span>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

@@ -62,4 +62,17 @@ export const customerApi = {
     const response = await api.post(`/customers/${customerId}/patients`, patient);
     return response.data;
   },
+
+  // DPDP data-consent wording (editable under Marketing). The add-customer form
+  // fetches this to show the customer the exact text they're agreeing to, and
+  // stamps the returned `version` onto their stored consent.
+  getConsentText: async (): Promise<{ text: string; version: string; updated_at: string | null }> => {
+    const response = await api.get('/marketing/consent-text');
+    return response.data;
+  },
+  // ADMIN-only: edit the consent wording (bumps the version).
+  updateConsentText: async (text: string) => {
+    const response = await api.put('/marketing/consent-text', { text });
+    return response.data;
+  },
 };
