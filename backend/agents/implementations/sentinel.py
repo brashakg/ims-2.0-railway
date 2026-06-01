@@ -22,6 +22,31 @@ from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext, HealthSt
 
 logger = logging.getLogger(__name__)
 
+# health_checks is high-churn telemetry (a row per ~60s SENTINEL tick) and would
+# grow UNBOUNDED. It is capped two ways: a TTL index (database/connection.py
+# ensure_indexes) AND this defensive in-tick prune, which bounds the collection
+# even before/without the TTL index. (A TTL index build needs >=500MB free disk;
+# on a small Mongo volume the index can be deferred while this prune caps growth.)
+HEALTH_CHECK_RETENTION_DAYS = 14
+
+
+def prune_health_checks(col, retention_days: int = HEALTH_CHECK_RETENTION_DAYS, now=None) -> int:
+    """Delete health_checks rows older than `retention_days`. Fail-soft: returns
+    the number deleted, or 0 on any error / missing collection. Kept pure so it
+    is unit-testable with a fake collection (no Mongo required)."""
+    if col is None:
+        return 0
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=retention_days)
+    try:
+        res = col.delete_many({"timestamp": {"$lt": cutoff}})
+        return int(getattr(res, "deleted_count", 0) or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[SENTINEL] health_checks prune skipped: %s", exc)
+        return 0
+
+
 # API base URL for health checks
 API_BASE_URL = os.getenv(
     "API_BASE_URL",
@@ -468,6 +493,9 @@ class SentinelAgent(JarvisAgent):
                     "results": results,
                     "agent_id": self.agent_id,
                 })
+                # Defensive retention: cap this high-churn collection on each
+                # tick so it self-bounds even before the TTL index can build.
+                prune_health_checks(col)
         except Exception as e:
             logger.warning(f"[SENTINEL] Failed to store health check: {e}")
 
