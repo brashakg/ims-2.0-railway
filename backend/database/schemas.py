@@ -758,6 +758,16 @@ INDEXES = {
         # not by inserting a duplicate row. Stops accidental double-writes
         # from the GRN modal and the move endpoint.
         {"keys": [("store_id", 1), ("sku", 1), ("fixture_id", 1)], "unique": True}
+    ],
+    # SENTINEL system-health telemetry -- a row every ~60s tick, so it grows
+    # UNBOUNDED. The TTL index auto-expires rows older than 14 days server-side.
+    # It is CREATED by database/connection.py ensure_indexes (the live startup
+    # path); health_checks has no JSON-schema validator so it is intentionally
+    # NOT in COLLECTIONS. The TTL build needs >=500MB free disk; until it can
+    # build, the SENTINEL in-tick prune (agents/implementations/sentinel.
+    # prune_health_checks) bounds the collection.
+    "health_checks": [
+        {"keys": [("timestamp", 1)], "expireAfterSeconds": 1209600, "name": "ttl_timestamp"},
     ]
 }
 

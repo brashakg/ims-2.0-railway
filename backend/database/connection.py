@@ -418,6 +418,24 @@ class DatabaseConnection:
                 "assigned_to", sparse=True, background=True
             )
 
+            # health_checks (SENTINEL telemetry) -- a row every ~60s tick, so it
+            # grows UNBOUNDED. A TTL index auto-expires rows >14 days old server-
+            # side. Wrapped in its OWN try: building a TTL index needs >=500MB
+            # free disk (indexBuildMinAvailableDiskSpaceMB); on a small/full
+            # volume the build raises OutOfDiskSpace, and that must NOT abort the
+            # other indexes above. Until it can build, the SENTINEL in-tick prune
+            # (agents/implementations/sentinel.prune_health_checks) bounds the
+            # collection. Mirrors the sso_jti / handoff TTL pattern.
+            try:
+                self._db["health_checks"].create_index(
+                    "timestamp",
+                    expireAfterSeconds=14 * 24 * 60 * 60,
+                    name="ttl_timestamp",
+                    background=True,
+                )
+            except Exception as ttl_exc:  # noqa: BLE001
+                print(f"[WARN] health_checks TTL index deferred (non-fatal): {ttl_exc}")
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")
