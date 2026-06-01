@@ -810,3 +810,47 @@ async def list_all_integrations(current_user: dict = Depends(get_current_user)):
         )
 
     return {"integrations": integrations}
+
+
+# ============================================================================
+# ONLINE-STORE SYNC HEALTH (SUPERADMIN tile -- council D10)
+# ============================================================================
+# Read-only diagnostic for the IMS <-> online-store (BVI/Shopify) bridge:
+# last successful Shopify sync, count of pending online-stock reconcile diffs
+# (reuses the /catalog/online-stock-reconcile logic), and failed/skipped
+# inbound webhook counts. Fully fail-soft -> zeros when data is absent.
+
+
+def _sync_health_db():
+    """Underlying Database for the read-only sync-health queries, or None."""
+    try:
+        from database.connection import get_db
+
+        conn = get_db()
+        if conn is not None and conn.is_connected:
+            return conn.db
+    except Exception:
+        pass
+    return None
+
+
+@router.get("/online-store/sync-health")
+async def online_store_sync_health(
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only health tile for the online-store bridge.
+
+    The admin router already gates SUPERADMIN/ADMIN; we narrow this online-store
+    diagnostic to SUPERADMIN (AI / online-store admin is a SUPERADMIN concern,
+    matching the Jarvis + e-commerce-SSO posture). Read-only + fail-soft: every
+    section degrades to zeros/flags independently, never 500s, and needs no live
+    Shopify call (the Shopify signal comes from locally-recorded NEXUS sync_runs
+    and the already-fail-soft Postgres read)."""
+    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Online-store sync health is restricted to SUPERADMIN",
+        )
+    from ..services.online_sync_health import sync_health
+
+    return sync_health(_sync_health_db())
