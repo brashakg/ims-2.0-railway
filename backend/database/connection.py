@@ -387,6 +387,21 @@ class DatabaseConnection:
                 "category_anchor", sparse=True, background=True
             )
 
+            # E-commerce menus / mega-menu (BVI Phase 3 -- Online Store FLAGSHIP #2).
+            # `handle` is the unique menu slug (main-menu / footer / ...) + the
+            # idempotent re-import key; `shopify_menu_id` is the Shopify-side
+            # reverse-lookup. Both UNIQUE SPARSE so a PUSH-DARK row not yet mapped
+            # to Shopify (handle present, GID absent) isn't constrained on the
+            # missing key. The recursive item tree is embedded (no per-item index).
+            # See database/schemas.py ECOM_MENU_SCHEMA + BVI_MERGE_PLAN A.1.
+            ecom_menus = self._db["ecom_menus"]
+            ecom_menus.create_index(
+                "handle", unique=True, sparse=True, background=True
+            )
+            ecom_menus.create_index(
+                "shopify_menu_id", unique=True, sparse=True, background=True
+            )
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

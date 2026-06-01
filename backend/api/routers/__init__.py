@@ -63,6 +63,7 @@ from .audit import router as audit_router
 from .budgets import router as budgets_router
 from .online_store import router as online_store_router
 from .online_store_collections import router as online_store_collections_router
+from .online_store_menus import router as online_store_menus_router
 
 __all__ = [
     "auth_router",
@@ -124,4 +125,6 @@ __all__ = [
     "audit_router",
     "budgets_router",
     "online_store_router",
+    "online_store_collections_router",
+    "online_store_menus_router",
 ]
