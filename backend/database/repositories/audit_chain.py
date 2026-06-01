@@ -84,7 +84,16 @@ def _json_default(value: Any) -> str:
     """Make datetimes / dates / ObjectIds JSON-serialisable and, crucially,
     STABLE: the same logical value must serialise identically at write time
     and at verify time, otherwise the recomputed hash would never match."""
-    if isinstance(value, (datetime, date)):
+    if isinstance(value, datetime):
+        # Mongo stores datetimes at MILLISECOND precision. A value hashed at write
+        # time (with microseconds) would NOT match the same value read back from
+        # Mongo (truncated to ms) -> the recomputed chain hash drifts intermittently
+        # (the test_proposal_audit_chain flake). Truncate microseconds to ms so the
+        # write-time and verify-time byte strings are identical.
+        if value.microsecond:
+            value = value.replace(microsecond=(value.microsecond // 1000) * 1000)
+        return value.isoformat()
+    if isinstance(value, date):
         return value.isoformat()
     return str(value)
 
