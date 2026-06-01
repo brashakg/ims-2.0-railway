@@ -138,7 +138,11 @@ class TestAdapterInterface:
     def test_registry_is_priority_ordered(self):
         names = [a.name for a in ap.build_registry()]
         prios = [a.priority for a in ap.build_registry()]
-        assert names == ["brand_site", "myluxottica", "internal_bvi", "marketplace"]
+        # ai_enrich (Claude, priority 2) is the reliable contributor; it shares
+        # priority 2 with myluxottica and is inserted ahead of it.
+        assert names == [
+            "brand_site", "ai_enrich", "myluxottica", "internal_bvi", "marketplace"
+        ]
         assert prios == sorted(prios)
 
     def test_search_wrapper_stamps_source_and_class(self, monkeypatch):
@@ -232,9 +236,13 @@ class TestProviderStatus:
     def test_provider_status_reflects_real_enabled_flags(self, monkeypatch):
         _clear_source_env(monkeypatch)
         monkeypatch.setenv("AUTOPILOT_DISABLE_NETWORK", "1")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         status = {s["name"]: s for s in ap._provider_status()}
-        assert set(status) == {"brand_site", "myluxottica", "internal_bvi", "marketplace"}
+        assert set(status) == {
+            "brand_site", "ai_enrich", "myluxottica", "internal_bvi", "marketplace"
+        }
         assert status["brand_site"]["enabled"] is False  # killswitch on
+        assert status["ai_enrich"]["enabled"] is False  # no ANTHROPIC_API_KEY
         assert status["myluxottica"]["enabled"] is False
         assert status["internal_bvi"]["enabled"] is False
         assert status["marketplace"]["enabled"] is False
@@ -608,6 +616,7 @@ class TestMarketplaceAdapterMocked:
 class TestRunSearchEndToEndMocked:
     def test_brand_site_candidate_flows_through_run_search(self, monkeypatch):
         _clear_source_env(monkeypatch)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # keep ai_enrich off
         monkeypatch.setenv("AUTOPILOT_DISABLE_NETWORK", "0")
 
         def handler(request):
@@ -615,7 +624,7 @@ class TestRunSearchEndToEndMocked:
 
         _install_mock_httpx(monkeypatch, handler)
         out = ap.run_search("Ray-Ban", "RB4105")
-        # Only brand_site is enabled (no creds/URLs for the others).
+        # Only brand_site is enabled (no creds/URLs/key for the others).
         assert out["candidate_count"] == 1
         cand = out["candidates"][0]
         assert cand["source"] == "brand_site"
@@ -623,5 +632,5 @@ class TestRunSearchEndToEndMocked:
         assert cand["source_priority"] == 1
         # sources array still derived from the registry.
         assert {s["name"] for s in out["sources"]} == {
-            "brand_site", "myluxottica", "internal_bvi", "marketplace"
+            "brand_site", "ai_enrich", "myluxottica", "internal_bvi", "marketplace"
         }
