@@ -118,6 +118,37 @@ def verify_shiprocket(body: bytes, signature_header: str, secret: str) -> bool:
 
 
 # ============================================================================
+# MSG91 - hex HMAC-SHA256 (delivery-report / DLR webhook)
+# ============================================================================
+
+
+def verify_msg91(body: bytes, signature_header: str, secret: str) -> bool:
+    """
+    MSG91 posts delivery reports (DLRs) to a configured webhook URL. MSG91's
+    own scheme is a shared-secret HMAC; the industry-standard shape (and what we
+    require here) is hex HMAC-SHA256 over the raw body -- identical to Razorpay
+    / Shiprocket. The shared secret lives in the `integrations` doc
+    (type "msg91", key `webhook_secret`). If MSG91 publishes a more specific
+    header scheme we swap the implementation here without touching the receiver.
+
+    Header: `X-MSG91-Signature`.
+    """
+    if not body or not signature_header or not secret:
+        return False
+    if not isinstance(body, (bytes, bytearray)):
+        return False
+    try:
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            bytes(body),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature_header.strip())
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+# ============================================================================
 # Replay protection
 # ============================================================================
 
@@ -181,5 +212,6 @@ __all__ = [
     "verify_razorpay",
     "verify_shopify",
     "verify_shiprocket",
+    "verify_msg91",
     "is_replay",
 ]

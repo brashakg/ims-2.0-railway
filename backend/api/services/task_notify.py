@@ -32,9 +32,13 @@ _PRIORITY_MAP = {
     "P4": "LOW",
 }
 
-# Quiet hours (server local clock): no WhatsApp between these hours.
-QUIET_START_HOUR = 21  # 9 PM
-QUIET_END_HOUR = 9  # 9 AM
+# Quiet hours are now evaluated in IST via the shared agents.quiet_hours guard
+# (NOT the server-local clock -- a UTC-hosted box read its quiet window 5h30m
+# off, so a low-priority escalation could ping a manager at ~02:30 IST). These
+# constants are kept for reference/back-compat; the live check delegates to the
+# shared helper so MEGAPHONE + task escalation + the manual send API agree.
+QUIET_START_HOUR = 21  # 9 PM IST
+QUIET_END_HOUR = 9  # 9 AM IST
 # Priorities that bypass quiet hours (true emergencies).
 _ALWAYS_WHATSAPP = {"P0", "P1"}
 
@@ -83,15 +87,15 @@ def escalation_whatsapp_text(task: Dict[str, Any], reason: str) -> str:
 def whatsapp_allowed(task_priority: Any, *, now: Optional[datetime] = None) -> bool:
     """Quiet-hours gate for WhatsApp. Pure.
 
-    Returns False during 21:00-09:00 (server local clock) UNLESS the task is
-    P0/P1 (emergencies always notify). In-app notifications ignore this gate."""
+    Returns False during 21:00-09:00 IST UNLESS the task is P0/P1 (emergencies
+    always notify). In-app notifications ignore this gate. The window is
+    evaluated in IST via the shared agents.quiet_hours guard so it matches
+    MEGAPHONE's DND exactly; a naive `now` is treated as IST wall-clock."""
     if str(task_priority or "P3").upper() in _ALWAYS_WHATSAPP:
         return True
-    now = now or datetime.now()
-    hour = now.hour
-    # Quiet window wraps midnight: [21:00, 24:00) U [00:00, 09:00).
-    in_quiet = hour >= QUIET_START_HOUR or hour < QUIET_END_HOUR
-    return not in_quiet
+    from agents.quiet_hours import in_quiet_hours  # lazy import (shared guard)
+
+    return not in_quiet_hours(now)
 
 
 async def notify_escalation(

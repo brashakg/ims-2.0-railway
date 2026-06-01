@@ -175,6 +175,14 @@ def _mk_marketing_client(db, *, monkeypatch) -> TestClient:
     monkeypatch.setattr(marketing_mod, "_get_db", lambda: db)
     monkeypatch.setattr(marketing_mod, "send_notification", _noop_send)
     monkeypatch.setattr(marketing_mod, "_check_notification_rate", _noop_rate)
+    # These tests assert consent / phone-validation behavior and must be
+    # time-independent. The promo quiet-hours window (added for council S18) is
+    # exercised separately in test_marketing_quiet_hours.py; force it OPEN here
+    # so a CI run during 21:00-09:00 IST doesn't turn an expected 200/422 into a
+    # 409. Pin the shared predicate both modules call.
+    from agents import quiet_hours as _qh
+
+    monkeypatch.setattr(_qh, "in_quiet_hours", lambda now=None: False)
     app = FastAPI()
     app.include_router(marketing_mod.router, prefix="/api/v1/marketing")
     return TestClient(app)

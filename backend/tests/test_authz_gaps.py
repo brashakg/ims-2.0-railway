@@ -78,6 +78,12 @@ def test_marketing_send_allowed_for_manager(monkeypatch):
 
     monkeypatch.setattr(marketing, "send_notification", _fake_send)
     monkeypatch.setattr(marketing, "_check_notification_rate", lambda *_a, **_k: None)
+    # This asserts the ROLE gate allows a manager; keep it time-independent by
+    # forcing the promo quiet-hours window (council S18) open. The window itself
+    # is tested in test_marketing_quiet_hours.py.
+    from agents import quiet_hours as _qh
+
+    monkeypatch.setattr(_qh, "in_quiet_hours", lambda now=None: False)
     r = _client(marketing.router, "/api/v1/marketing", ["STORE_MANAGER"]).post(
         "/api/v1/marketing/notifications/send", json=_NOTIF)
     assert r.status_code == 200
