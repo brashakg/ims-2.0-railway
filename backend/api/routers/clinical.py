@@ -19,10 +19,47 @@ from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
     get_store_repository,
+    get_audit_repository,
 )
 from ..services import clinical_abuse as _abuse
 
 router = APIRouter()
+
+
+def _audit_clinical(
+    action: str,
+    entity_id: Optional[str],
+    current_user: dict,
+    *,
+    store_id: Optional[str] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    """Best-effort domain audit for a clinical/eye-test action -> append-only
+    audit_logs (source="domain"). Eye-test completions (which auto-mint a
+    prescription) were invisible in the Activity Log; this records who recorded
+    which exam. FAIL-SOFT: any audit failure is swallowed so it can never undo
+    or 500 the clinical write. ``timestamp`` is stamped explicitly (the Activity
+    Log sorts + range-filters on it)."""
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is None:
+            return
+        audit_repo.create(
+            {
+                "action": action,
+                "entity_type": "CLINICAL",
+                "entity_id": entity_id,
+                "store_id": store_id or current_user.get("active_store_id"),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("full_name") or current_user.get("username"),
+                "timestamp": datetime.utcnow(),
+                "severity": "INFO",
+                "source": "domain",
+                "detail": detail or {},
+            }
+        )
+    except Exception:  # noqa: BLE001 - audit must never break the clinical write
+        pass
 
 # Roles permitted to mutate the optometry queue + eye-test records. Mirrors the
 # frontend Clinical route guard. SUPERADMIN auto-passes via require_roles.
@@ -698,6 +735,18 @@ async def complete_test(
                     logging.getLogger(__name__).warning(
                         f"Auto-prescription creation failed: {e}"
                     )
+
+            _audit_clinical(
+                "EYE_TEST_RECORDED",
+                test_id,
+                current_user,
+                store_id=(test or {}).get("store_id"),
+                detail={
+                    "customer_id": (test or {}).get("customer_id"),
+                    "patient_id": (test or {}).get("patient_id"),
+                    "prescription_id": prescription_id,
+                },
+            )
 
             return {
                 "message": "Test completed",

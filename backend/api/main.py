@@ -629,6 +629,21 @@ from .middleware.rbac_enforcement import rbac_enforcement_middleware
 app.middleware("http")(rbac_enforcement_middleware)
 
 
+# ── Activity-audit ("Audit Everything") ───────────────────────────────────
+# A request-time middleware that writes ONE append-only, hash-chained
+# audit_logs row after every SUCCESSFUL authenticated MUTATING request under
+# /api/v1/* (POST/PUT/PATCH/DELETE), so EVERY mutation -- now and future,
+# whether or not its handler also emits a rich domain audit row -- reaches the
+# SUPERADMIN Activity Log (GET /settings/audit-logs, the same trail JARVIS
+# reads). The owner reported clinic/Rx, customer-create and mobile-edit actions
+# were missing; this guarantees baseline coverage structurally. FAIL-SOFT: a
+# logging failure never blocks, errors, or alters the real request. See
+# api/middleware/audit_activity.py for the full contract.
+from .middleware.audit_activity import audit_activity_middleware
+
+app.middleware("http")(audit_activity_middleware)
+
+
 # HTTPException handler - handles authentication and validation errors
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):

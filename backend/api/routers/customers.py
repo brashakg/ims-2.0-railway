@@ -47,10 +47,59 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _VALID_CUSTOMER_TYPES = {"B2C", "B2B"}
 
 
-from ..dependencies import get_customer_repository, validate_store_access
+from ..dependencies import (
+    get_customer_repository,
+    get_audit_repository,
+    validate_store_access,
+)
 from ..services.phone import normalize_indian_mobile
 
 router = APIRouter()
+
+
+def _audit_customer(
+    action: str,
+    entity_id: Optional[str],
+    current_user: dict,
+    *,
+    before_state: Optional[dict] = None,
+    after_state: Optional[dict] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    """Best-effort domain audit for a customer action -> append-only audit_logs.
+
+    "Audit Everything" (SYSTEM_INTENT): customer create / update / mobile-edit /
+    patient-add were previously invisible in the Activity Log. This records a
+    rich row (source="domain") with optional before/after state so a reviewer
+    sees exactly what changed. FAIL-SOFT: any audit failure is swallowed -- it
+    must never undo or 500 the customer write that triggered it. ``timestamp``
+    is stamped explicitly because the Activity Log sorts + range-filters on it
+    (BaseRepository only sets created_at/updated_at).
+    """
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is None:
+            return
+        row = {
+            "action": action,
+            "entity_type": "CUSTOMER",
+            "entity_id": entity_id,
+            "store_id": current_user.get("active_store_id"),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("full_name") or current_user.get("username"),
+            "timestamp": datetime.utcnow(),
+            "severity": "INFO",
+            "source": "domain",
+        }
+        if before_state is not None:
+            row["before_state"] = before_state
+        if after_state is not None:
+            row["after_state"] = after_state
+        if detail is not None:
+            row["detail"] = detail
+        audit_repo.create(row)
+    except Exception:  # noqa: BLE001 - audit must never break the business write
+        pass
 
 
 def _annotate_customer_matches(customers: List[Dict], query: str) -> List[Dict]:
@@ -404,6 +453,17 @@ async def create_customer(
 
         created = repo.create(customer_data)
         if created:
+            _audit_customer(
+                "CUSTOMER_CREATED",
+                created.get("customer_id"),
+                current_user,
+                after_state={
+                    "name": created.get("name"),
+                    "mobile": created.get("mobile"),
+                    "customer_type": created.get("customer_type"),
+                    "email": created.get("email"),
+                },
+            )
             return {
                 "customer_id": created["customer_id"],
                 "name": created["name"],
@@ -588,7 +648,28 @@ async def update_customer(
         if not update_data:
             return {"message": "No changes", "customer_id": customer_id}
 
+        # Detect a mobile-number change for a dedicated audit action. The owner
+        # specifically wanted mobile-number edits visible in the Activity Log.
+        old_mobile = existing.get("mobile") or existing.get("phone")
+        new_mobile = update_data.get("mobile") or update_data.get("phone")
+        mobile_changed = bool(new_mobile) and str(new_mobile) != str(old_mobile or "")
+
         if repo.update(customer_id, update_data):
+            if mobile_changed:
+                _audit_customer(
+                    "MOBILE_NUMBER_CHANGED",
+                    customer_id,
+                    current_user,
+                    before_state={"mobile": old_mobile},
+                    after_state={"mobile": new_mobile},
+                )
+            else:
+                _audit_customer(
+                    "CUSTOMER_UPDATED",
+                    customer_id,
+                    current_user,
+                    detail={"fields": sorted(update_data.keys())},
+                )
             return {"message": "Customer updated", "customer_id": customer_id}
 
         raise HTTPException(status_code=500, detail="Failed to update customer")
@@ -622,6 +703,16 @@ async def add_patient(
         }
 
         if repo.add_patient(customer_id, patient_data):
+            _audit_customer(
+                "CUSTOMER_PATIENT_ADDED",
+                customer_id,
+                current_user,
+                after_state={
+                    "patient_id": patient_data["patient_id"],
+                    "name": patient_data.get("name"),
+                    "relation": patient_data.get("relation"),
+                },
+            )
             return {"patient_id": patient_data["patient_id"], "name": patient.name}
 
         raise HTTPException(status_code=500, detail="Failed to add patient")

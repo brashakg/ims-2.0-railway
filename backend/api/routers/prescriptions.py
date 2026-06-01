@@ -12,9 +12,58 @@ from datetime import date, datetime, timedelta
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_prescription_repository, get_customer_repository
+from ..dependencies import (
+    get_prescription_repository,
+    get_customer_repository,
+    get_audit_repository,
+)
 
 router = APIRouter()
+
+
+def _audit_rx(
+    action: str,
+    prescription_id: Optional[str],
+    current_user: dict,
+    *,
+    customer_id: Optional[str] = None,
+    rx_kind: Optional[str] = None,
+    before_state: Optional[dict] = None,
+    after_state: Optional[dict] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    """Best-effort domain audit for a prescription action -> append-only
+    audit_logs (source="domain"). Clinical / Rx saves were invisible in the
+    Activity Log; this records who saved which Rx for which customer. FAIL-SOFT:
+    any audit failure is swallowed so it can never undo or 500 the Rx write.
+    ``timestamp`` is stamped explicitly (the Activity Log sorts + range-filters
+    on it; BaseRepository only sets created_at/updated_at)."""
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is None:
+            return
+        merged_detail = {"customer_id": customer_id, "rx_kind": rx_kind}
+        if detail:
+            merged_detail.update(detail)
+        row = {
+            "action": action,
+            "entity_type": "PRESCRIPTION",
+            "entity_id": prescription_id,
+            "store_id": current_user.get("active_store_id"),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("full_name") or current_user.get("username"),
+            "timestamp": datetime.utcnow(),
+            "severity": "INFO",
+            "source": "domain",
+            "detail": merged_detail,
+        }
+        if before_state is not None:
+            row["before_state"] = before_state
+        if after_state is not None:
+            row["after_state"] = after_state
+        audit_repo.create(row)
+    except Exception:  # noqa: BLE001 - audit must never break the Rx write
+        pass
 
 
 # ============================================================================
@@ -724,6 +773,19 @@ async def create_prescription(
 
         created = repo.create(rx_data)
         if created:
+            _audit_rx(
+                "PRESCRIPTION_CREATED",
+                created.get("prescription_id"),
+                current_user,
+                customer_id=rx.customer_id,
+                rx_kind=rx.rx_kind,
+                after_state={
+                    "prescription_number": created.get("prescription_number"),
+                    "patient_id": rx.patient_id,
+                    "source": rx.source,
+                    "optometrist_id": rx.optometrist_id,
+                },
+            )
             return {
                 "prescription_id": created["prescription_id"],
                 "prescription_number": created["prescription_number"],
@@ -829,6 +891,14 @@ async def update_prescription(
 
     repo.update(prescription_id, update_doc)
     refreshed = repo.find_by_id(prescription_id) or {**existing, **update_doc}
+    _audit_rx(
+        "PRESCRIPTION_UPDATED",
+        prescription_id,
+        current_user,
+        customer_id=existing.get("customer_id"),
+        rx_kind=existing.get("rx_kind"),
+        detail={"fields": sorted(body.keys())},
+    )
     return {
         "prescription_id": prescription_id,
         "message": "Prescription updated",
