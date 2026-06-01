@@ -66,7 +66,9 @@ jobs:
         continue-on-error: true  # gradual adoption
 
       - name: Run unit tests
-        run: pytest tests/ --cov=api --cov-report=xml --cov-report=term -x
+        # No -x: run the WHOLE suite so one failure can't abort + mask the rest
+        # (a single flake used to red the job and hide every test after it).
+        run: pytest tests/ --cov=api --cov-report=xml --cov-report=term
         env:
           MONGODB_URL: mongodb://localhost:27017/ims_test
           JWT_SECRET_KEY: ci-test-secret-key
