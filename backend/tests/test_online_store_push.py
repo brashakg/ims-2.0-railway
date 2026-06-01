@@ -1,0 +1,611 @@
+"""
+Tests for the BVI Phase 5 Shopify PUSH module (IMS -> Shopify).
+
+***** SAFETY-CRITICAL: every Shopify call is MOCKED. *****
+The real network boundary `shopify_push._graphql` is monkeypatched to a fake in
+every test that exercises the LIVE branch, so NO real Shopify request is ever
+made. The DARK-by-default tests assert the engine returns a SIMULATED dry-run
+WITHOUT even reaching that boundary (a spy proves _graphql was never called).
+
+Four layers:
+  1. Gating / mode -- push_mode_status + the three gate components; the default
+     posture is DARK (SIMULATED) with no creds / gate off.
+  2. Engine SIMULATED-by-default -- push_product/collection/menu/image each return
+     mode=SIMULATED with the dry-run payload and DO NOT touch the network, for
+     every reason a gate can be closed.
+  3. Engine LIVE (gates+creds mocked on, _graphql mocked) -- the LIVE path calls
+     the mock, returns mode=LIVE, and WRITES BACK the Shopify gid (idempotent
+     re-push UPDATES instead of duplicating). Payload builders are checked too.
+  4. Router wiring over a TestClient + monkeypatched DB + audit repo: every push
+     route is catalogued in rbac_policy.POLICY with EXACTLY {ADMIN, SUPERADMIN}
+     (narrower than the rest of the module -- CATALOG_MANAGER/DESIGN_MANAGER are
+     denied), check_access allow/deny, a 403 for CATALOG_MANAGER, the live
+     SIMULATED push flow over HTTP, an audit_logs row PER push, and GET /status.
+
+Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_online_store_push.py -q
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("JWT_SECRET_KEY", "test")
+os.environ.setdefault("ENVIRONMENT", "test")
+
+import asyncio  # noqa: E402
+
+import pytest  # noqa: E402
+
+from database.connection import MockCollection  # noqa: E402
+from api.services import shopify_push  # noqa: E402
+from api.services import rbac_policy as rbac  # noqa: E402
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+def _run(coro):
+    """Run one coroutine to completion (the engine functions are async).
+
+    Uses asyncio.run() (a fresh loop each call) -- get_event_loop() raises
+    'no current event loop' on Python 3.12+ outside a running loop."""
+    return asyncio.run(coro)
+
+
+class _SpyGraphQL:
+    """A fake shopify_push._graphql: records every call and returns a canned
+    GraphQL response. Used to prove (a) the LIVE branch calls it and (b) the DARK
+    branch never does."""
+
+    def __init__(self, response):
+        self.calls = []
+        self._response = response
+
+    async def __call__(self, db, query, variables):
+        self.calls.append({"query": query, "variables": variables})
+        return self._response
+
+
+def _force_live(monkeypatch, graphql_response):
+    """Open all three gates ON shopify_push's OWN namespace (it imported the
+    symbols by value) and replace the network boundary with a spy. Returns the
+    spy so a test can assert calls + inspect variables."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+    monkeypatch.setattr(
+        shopify_push, "_load_integration_config",
+        lambda db, t: {"shop_url": "test.myshopify.com", "access_token": "shpat_test"},
+    )
+    spy = _SpyGraphQL(graphql_response)
+    monkeypatch.setattr(shopify_push, "_graphql", spy)
+    return spy
+
+
+def _force_dark(monkeypatch, reason="writes_off"):
+    """Close a gate so the engine is SIMULATED, and install a spy that EXPLODES if
+    called (the dark branch must never reach the network)."""
+    if reason == "writes_off":
+        monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+        monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+        monkeypatch.setattr(shopify_push, "_load_integration_config",
+                            lambda db, t: {"shop_url": "x", "access_token": "y"})
+    elif reason == "dispatch_off":
+        monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+        monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "off")
+        monkeypatch.setattr(shopify_push, "_load_integration_config",
+                            lambda db, t: {"shop_url": "x", "access_token": "y"})
+    elif reason == "no_creds":
+        monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+        monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+        monkeypatch.setattr(shopify_push, "_load_integration_config", lambda db, t: {})
+
+    async def _boom(db, query, variables):  # pragma: no cover - must never run
+        raise AssertionError("DARK push must not hit the Shopify network")
+
+    monkeypatch.setattr(shopify_push, "_graphql", _boom)
+
+
+class _FakeConn:
+    """Stand-in for the DatabaseConnection the push router's _get_db() expects:
+    `.is_connected` True + `.db[name]` returns a shared MockCollection so the
+    router + engine hit the same in-memory store."""
+
+    def __init__(self):
+        self._colls = {}
+        self.is_connected = True
+
+    class _DB:
+        def __init__(self, outer):
+            self._outer = outer
+
+        def __getitem__(self, name):
+            return self._outer._colls.setdefault(name, MockCollection(name))
+
+        # The engine's write-backs use db["name"].update_one(...); MockCollection
+        # provides that. find_one likewise. Subscript is the only access used.
+
+    @property
+    def db(self):
+        return _FakeConn._DB(self)
+
+
+# A minimal in-memory db that the ENGINE can use directly (db["x"] subscript).
+class _EngineDB:
+    def __init__(self):
+        self._colls = {}
+
+    def __getitem__(self, name):
+        return self._colls.setdefault(name, MockCollection(name))
+
+
+# ===========================================================================
+# Layer 1 -- gating / mode posture
+# ===========================================================================
+
+def test_mode_is_dark_by_default(monkeypatch):
+    """With writes off (the default per #262), the posture is SIMULATED and the
+    three gate components are reported."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "off")
+    status = shopify_push.push_mode_status(None)
+    assert status["mode"] == "SIMULATED"
+    assert status["is_live"] is False
+    assert status["writes_enabled"] is False
+    assert status["creds_present"] is False
+    assert "single_writer_note" in status
+
+
+def test_mode_is_live_only_when_all_three_align(monkeypatch):
+    _force_live(monkeypatch, {})
+    status = shopify_push.push_mode_status(object())
+    assert status["mode"] == "LIVE"
+    assert status["is_live"] is True
+    assert status["writes_enabled"] and status["creds_present"]
+    assert status["dispatch_mode"] == "live"
+
+
+def test_mode_dark_when_creds_missing_even_if_gates_on(monkeypatch):
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+    monkeypatch.setattr(shopify_push, "_load_integration_config", lambda db, t: {})
+    status = shopify_push.push_mode_status(object())
+    assert status["mode"] == "SIMULATED" and status["creds_present"] is False
+
+
+# ===========================================================================
+# Layer 2 -- engine is SIMULATED by default + NEVER touches the network
+# ===========================================================================
+
+@pytest.mark.parametrize("reason", ["writes_off", "dispatch_off", "no_creds"])
+def test_push_product_simulated_no_network(monkeypatch, reason):
+    _force_dark(monkeypatch, reason)
+    product = {"id": "P1", "title": "Ray-Ban Aviator", "brand": "Ray-Ban",
+               "ecom": {"status": "PUBLISHED", "handle": "rayban-aviator"}}
+    res = _run(shopify_push.push_product(_EngineDB(), product, []))
+    assert res.mode == "SIMULATED"
+    assert res.ok is True            # a dry-run is a success
+    assert res.action == "create"    # no stored gid yet
+    assert res.entity == "product"
+    assert res.target_id == "P1"
+    # The dry-run carries the would-be Shopify ProductInput.
+    assert res.payload["title"] == "Ray-Ban Aviator"
+    assert res.payload["status"] == "ACTIVE"   # PUBLISHED -> ACTIVE
+    assert res.payload["handle"] == "rayban-aviator"
+    assert res.reason  # explains WHY we are dark
+
+
+def test_push_collection_menu_image_simulated_no_network(monkeypatch):
+    _force_dark(monkeypatch, "writes_off")
+    db = _EngineDB()
+    coll = {"collection_id": "C1", "title": "Sunglasses", "handle": "sunglasses",
+            "collection_type": "SMART", "disjunctive": False,
+            "rules": [{"field": "category", "relation": "EQUALS", "value": "SUNGLASSES"}]}
+    menu = {"menu_id": "M1", "title": "Main", "handle": "main-menu",
+            "items": [{"id": "n1", "title": "Shop", "item_type": "COLLECTION",
+                       "resource_id": "gid://shopify/Collection/9", "children": []}]}
+    img = {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
+           "status": "APPROVED"}
+
+    rc = _run(shopify_push.push_collection(db, coll))
+    rm = _run(shopify_push.push_menu(db, menu))
+    ri = _run(shopify_push.push_image(db, img))
+    for r in (rc, rm, ri):
+        assert r.mode == "SIMULATED" and r.ok is True
+    # Collection dry-run carries the smart ruleSet.
+    assert rc.payload["ruleSet"]["rules"][0]["column"] == "TYPE"
+    # Menu dry-run carries the mapped item tree.
+    assert rm.payload["items"][0]["type"] == "COLLECTION"
+    # Image dry-run carries the media input.
+    assert ri.payload["media"][0]["originalSource"] == "http://x/raw.jpg"
+
+
+def test_push_image_non_approved_is_skipped_even_dark(monkeypatch):
+    """A non-APPROVED image is push-INELIGIBLE: ok=False action=skip, regardless of
+    the gate (the design-queue go-live gate). No network either."""
+    _force_dark(monkeypatch, "writes_off")
+    img = {"image_id": "I2", "product_id": "P1", "url": "u", "status": "REVIEW"}
+    res = _run(shopify_push.push_image(_EngineDB(), img))
+    assert res.action == "skip" and res.ok is False
+    assert "APPROVED" in (res.error or "")
+
+
+# ===========================================================================
+# Layer 3 -- engine LIVE (mocked client) + idempotent gid write-back
+# ===========================================================================
+
+def test_push_product_live_creates_and_writes_back_gid(monkeypatch):
+    """LIVE create: calls the mocked _graphql, returns the new gid, and persists
+    ecom.shopify_product_id back onto the catalog_products doc + clears dirty."""
+    spy = _force_live(monkeypatch, {
+        "data": {"productCreate": {
+            "product": {"id": "gid://shopify/Product/111", "handle": "rb"},
+            "userErrors": [],
+        }}
+    })
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        {"id": "P1", "title": "RB", "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.mode == "LIVE" and res.ok is True
+    assert res.action == "create"
+    assert res.shopify_id == "gid://shopify/Product/111"
+    assert len(spy.calls) == 1  # the network boundary WAS hit (once)
+
+    # Idempotency write-back: the gid is now on the doc + dirty cleared.
+    saved = db["catalog_products"].find_one({"id": "P1"})
+    assert saved["ecom"]["shopify_product_id"] == "gid://shopify/Product/111"
+    assert saved["ecom"]["locally_modified"] is False
+    assert "last_pushed_at" in saved["ecom"]
+
+
+def test_push_product_live_repush_updates_not_duplicates(monkeypatch):
+    """A second push of a product that ALREADY has a gid uses productUpdate (not
+    create) and includes the gid in the input -> Shopify updates the same object."""
+    spy = _force_live(monkeypatch, {
+        "data": {"productUpdate": {
+            "product": {"id": "gid://shopify/Product/111", "handle": "rb"},
+            "userErrors": [],
+        }}
+    })
+    db = _EngineDB()
+    product = {"id": "P1", "title": "RB",
+               "ecom": {"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/111"}}
+
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.action == "update"
+    assert res.shopify_id == "gid://shopify/Product/111"
+    # The mutation was the UPDATE one and carried the existing id in the input.
+    assert "productUpdate" in spy.calls[0]["query"]
+    assert spy.calls[0]["variables"]["input"]["id"] == "gid://shopify/Product/111"
+
+
+def test_push_collection_live_writes_back_and_handles_user_errors(monkeypatch):
+    # First: a clean create writes back the collection gid.
+    spy = _force_live(monkeypatch, {
+        "data": {"collectionCreate": {
+            "collection": {"id": "gid://shopify/Collection/55", "handle": "sg"},
+            "userErrors": [],
+        }}
+    })
+    db = _EngineDB()
+    db["ecom_collections"].insert_one(
+        {"collection_id": "C1", "title": "SG", "handle": "sg", "collection_type": "CUSTOM",
+         "locally_modified": True}
+    )
+    coll = db["ecom_collections"].find_one({"collection_id": "C1"})
+    res = _run(shopify_push.push_collection(db, coll))
+    assert res.ok is True and res.shopify_id == "gid://shopify/Collection/55"
+    saved = db["ecom_collections"].find_one({"collection_id": "C1"})
+    assert saved["shopify_collection_id"] == "gid://shopify/Collection/55"
+    assert saved["locally_modified"] is False
+
+    # Now: a userErrors response -> ok=False, NO write-back of a bad gid.
+    monkeypatch.setattr(shopify_push, "_graphql", _SpyGraphQL({
+        "data": {"collectionCreate": {
+            "collection": None,
+            "userErrors": [{"field": "handle", "message": "is invalid"}],
+        }}
+    }))
+    db2 = _EngineDB()
+    db2["ecom_collections"].insert_one(
+        {"collection_id": "C2", "title": "Bad", "handle": "bad", "collection_type": "CUSTOM"}
+    )
+    bad = db2["ecom_collections"].find_one({"collection_id": "C2"})
+    res2 = _run(shopify_push.push_collection(db2, bad))
+    assert res2.ok is False and "userErrors" in (res2.error or "")
+    assert db2["ecom_collections"].find_one({"collection_id": "C2"}).get("shopify_collection_id") is None
+
+
+def test_push_menu_live_writes_back_gid(monkeypatch):
+    spy = _force_live(monkeypatch, {
+        "data": {"menuCreate": {
+            "menu": {"id": "gid://shopify/Menu/7", "handle": "main-menu"},
+            "userErrors": [],
+        }}
+    })
+    db = _EngineDB()
+    db["ecom_menus"].insert_one(
+        {"menu_id": "M1", "title": "Main", "handle": "main-menu",
+         "items": [{"id": "n1", "title": "Shop", "item_type": "HTTP", "url": "/shop", "children": []}],
+         "locally_modified": True}
+    )
+    menu = db["ecom_menus"].find_one({"menu_id": "M1"})
+    res = _run(shopify_push.push_menu(db, menu))
+    assert res.ok is True and res.shopify_id == "gid://shopify/Menu/7"
+    assert db["ecom_menus"].find_one({"menu_id": "M1"})["shopify_menu_id"] == "gid://shopify/Menu/7"
+    # menuCreate carried the title/handle/items variables.
+    assert spy.calls[0]["variables"]["handle"] == "main-menu"
+
+
+def test_push_image_live_attaches_media_and_writes_back(monkeypatch):
+    """An APPROVED image whose parent product is already on Shopify pushes via
+    productCreateMedia and writes back the MediaImage gid."""
+    spy = _force_live(monkeypatch, {
+        "data": {"productCreateMedia": {
+            "media": [{"id": "gid://shopify/MediaImage/900"}],
+            "mediaUserErrors": [],
+        }}
+    })
+    db = _EngineDB()
+    # Parent product must already carry a Shopify gid (media attaches to a product).
+    db["catalog_products"].insert_one(
+        {"id": "P1", "ecom": {"shopify_product_id": "gid://shopify/Product/111"}}
+    )
+    db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": "http://x/raw.jpg",
+         "edited_url": "http://x/edited.jpg", "status": "APPROVED", "shopify_image_id": None}
+    )
+    img = db["product_images"].find_one({"image_id": "I1"})
+    res = _run(shopify_push.push_image(db, img))
+    assert res.ok is True and res.shopify_id == "gid://shopify/MediaImage/900"
+    assert db["product_images"].find_one({"image_id": "I1"})["shopify_image_id"] == "gid://shopify/MediaImage/900"
+    # Prefer the EDITED asset as the source.
+    assert spy.calls[0]["variables"]["media"][0]["originalSource"] == "http://x/edited.jpg"
+
+
+def test_push_image_live_skips_when_parent_not_on_shopify(monkeypatch):
+    """LIVE but the parent product has no Shopify gid yet -> skip (ok=False), no
+    media call (you must push the product first)."""
+    spy = _force_live(monkeypatch, {"data": {"productCreateMedia": {"media": [], "mediaUserErrors": []}}})
+    db = _EngineDB()
+    db["catalog_products"].insert_one({"id": "P1", "ecom": {}})  # no shopify_product_id
+    db["product_images"].insert_one(
+        {"image_id": "I1", "product_id": "P1", "url": "u", "status": "APPROVED"}
+    )
+    img = db["product_images"].find_one({"image_id": "I1"})
+    res = _run(shopify_push.push_image(db, img))
+    assert res.action == "skip" and res.ok is False
+    assert spy.calls == []  # never reached the network
+
+
+def test_push_product_live_failsoft_on_transport_error(monkeypatch):
+    """A transport exception from _graphql becomes a fail-soft ok=False result,
+    never a raise."""
+    _force_live(monkeypatch, {})
+
+    async def _raise(db, query, variables):
+        raise ValueError("status 500: boom")
+
+    monkeypatch.setattr(shopify_push, "_graphql", _raise)
+    res = _run(shopify_push.push_product(_EngineDB(),
+                                         {"id": "P1", "title": "X", "ecom": {"status": "DRAFT"}}, []))
+    assert res.mode == "LIVE" and res.ok is False
+    assert "boom" in (res.error or "")
+
+
+# ===========================================================================
+# Layer 3b -- payload builders (pure)
+# ===========================================================================
+
+def test_build_product_input_maps_status_and_options():
+    product = {"id": "P1", "title": "RB", "brand": "Ray-Ban", "category": "SUNGLASS",
+               "ecom": {"status": "DRAFT", "handle": "rb",
+                        "seo": {"title": "RB SEO", "tags": ["new", "summer"]}}}
+    variants = [{"sku": "S-1", "option_color": "Black", "option_size": "M"},
+                {"sku": "S-2", "option_color": "Gold", "option_size": "M"}]
+    inp = shopify_push.build_product_input(product, variants)
+    assert inp["status"] == "DRAFT"
+    assert inp["vendor"] == "Ray-Ban"
+    assert inp["productType"] == "SUNGLASS"
+    assert inp["seo"]["title"] == "RB SEO"
+    assert inp["tags"] == ["new", "summer"]
+    # Options derived + de-duped (Color: Black, Gold ; Size: M).
+    opts = {o["name"]: [v["name"] for v in o["values"]] for o in inp["productOptions"]}
+    assert opts["Color"] == ["Black", "Gold"]
+    assert opts["Size"] == ["M"]
+
+
+def test_build_rule_set_skips_unknown_columns():
+    rules = [
+        {"field": "brand", "relation": "EQUALS", "value": "Ray-Ban"},
+        {"field": "nonsense", "relation": "EQUALS", "value": "x"},  # dropped
+        {"field": "tag", "relation": "CONTAINS", "value": "sale"},
+    ]
+    out = shopify_push._build_rule_set(rules)
+    cols = [r["column"] for r in out]
+    assert cols == ["VENDOR", "TAG"]  # nonsense skipped, never pushed
+
+
+# ===========================================================================
+# Layer 4 -- router RBAC catalogue + role gate + live flow + audit + status
+# ===========================================================================
+
+_PUSH_ROUTES = [
+    ("GET", "/api/v1/online-store/push/status"),
+    ("POST", "/api/v1/online-store/push/product/{product_id}"),
+    ("POST", "/api/v1/online-store/push/collection/{collection_id}"),
+    ("POST", "/api/v1/online-store/push/menu/{menu_id}"),
+    ("POST", "/api/v1/online-store/push/image/{image_id}"),
+]
+
+_PUSH_SET = {"ADMIN", "SUPERADMIN"}
+
+
+def test_every_push_route_catalogued_admin_superadmin_only():
+    """Push is integration-critical -> EXACTLY {ADMIN, SUPERADMIN}; the broader
+    ecom roles (CATALOG_MANAGER/DESIGN_MANAGER) are NOT admitted here."""
+    for method, path in _PUSH_ROUTES:
+        entry = rbac.policy_for(method, path)
+        assert entry is not None, f"{method} {path} not catalogued in rbac_policy"
+        assert set(entry["allowed"]) == _PUSH_SET, f"{method} {path} -> {entry['allowed']}"
+
+
+def test_status_route_beats_entity_param_routes():
+    """The literal /push/status resolves to its own row, not an entity push."""
+    hit = rbac.policy_for("GET", "/api/v1/online-store/push/status")
+    assert hit is not None and hit["path"].endswith("/push/status")
+    # And an entity push resolves to its own templated row.
+    hit2 = rbac.policy_for("POST", "/api/v1/online-store/push/product/P1")
+    assert hit2 is not None and hit2["path"].endswith("/push/product/{product_id}")
+
+
+def test_check_access_admin_superadmin_only():
+    path = "/api/v1/online-store/push/product/{product_id}"
+    for role in ("SUPERADMIN", "ADMIN"):
+        assert rbac.check_access("POST", path, [role]) is True, role
+    # Crucially: the OTHER ecom roles are denied on the push surface.
+    for role in ("CATALOG_MANAGER", "DESIGN_MANAGER", "SALES_STAFF", "ACCOUNTANT"):
+        assert rbac.check_access("POST", path, [role]) is False, role
+
+
+# --- live HTTP flow over a monkeypatched DB + audit repo (no live Mongo) -----
+
+@pytest.fixture
+def patched_db(monkeypatch):
+    """Point dependencies.get_db at a fresh _FakeConn + get_audit_repository at a
+    real AuditRepository bound to that conn's audit_logs MockCollection, so the
+    push router's _get_db() + _write_audit() resolve without live Mongo. Returns
+    (conn, audit_repo)."""
+    from api import dependencies as deps
+    from database.repositories.audit_repository import AuditRepository
+
+    conn = _FakeConn()
+    audit_repo = AuditRepository(conn.db["audit_logs"])
+    monkeypatch.setattr(deps, "get_db", lambda: conn)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: audit_repo)
+    return conn, audit_repo
+
+
+@pytest.fixture
+def catalog_headers(client):
+    """A CATALOG_MANAGER JWT -- allowed elsewhere in the module, but MUST be 403
+    on the push surface."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token({
+        "user_id": "test-catalog-001", "username": "catmgr",
+        "roles": ["CATALOG_MANAGER"], "store_ids": ["BV-TEST-01"],
+        "active_store_id": "BV-TEST-01",
+    })
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_live_role_gate_forbids_catalog_manager(client, catalog_headers, patched_db):
+    """CATALOG_MANAGER is inside the ecom set but OUTSIDE the push set -> 403."""
+    r = client.get("/api/v1/online-store/push/status", headers=catalog_headers)
+    assert r.status_code == 403, r.text
+
+
+def test_live_role_gate_forbids_sales_staff(client, staff_headers, patched_db):
+    r = client.post("/api/v1/online-store/push/product/P1", headers=staff_headers)
+    assert r.status_code == 403, r.text
+
+
+def test_status_endpoint_reports_dark_and_counts(client, auth_headers, patched_db, monkeypatch):
+    """GET /status: DARK by default + per-entity counts from the seeded docs."""
+    conn, _ = patched_db
+    # Force DARK explicitly (default), regardless of process env.
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "off")
+    # Seed a staged + pushed product and a pending collection.
+    conn.db["catalog_products"].insert_one({"id": "P1", "ecom": {"locally_modified": True}})
+    conn.db["catalog_products"].insert_one(
+        {"id": "P2", "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C1", "handle": "sg", "title": "SG", "locally_modified": True})
+
+    r = client.get("/api/v1/online-store/push/status", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"]["mode"] == "SIMULATED"
+    assert body["mode"]["is_live"] is False
+    assert body["db_connected"] is True
+    counts = body["counts"]
+    assert counts["products"]["staged"] == 2
+    assert counts["products"]["pushed"] == 1
+    assert counts["products"]["pending"] == 1
+    assert counts["collections"]["pending"] == 1
+
+
+def test_live_push_product_simulated_over_http_writes_audit(client, auth_headers, patched_db, monkeypatch):
+    """End-to-end over HTTP: a DARK product push returns mode=SIMULATED with the
+    dry-run payload AND writes a chained ONLINE_STORE_PUSH audit row."""
+    conn, audit_repo = patched_db
+    # DARK posture; install a boom-spy so a network call would fail the test.
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "title": "Ray-Ban", "brand": "Ray-Ban",
+         "ecom": {"status": "PUBLISHED", "handle": "rb"}}
+    )
+
+    r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    result = r.json()["result"]
+    assert result["mode"] == "SIMULATED"
+    assert result["ok"] is True
+    assert result["entity"] == "product"
+    assert result["payload"]["title"] == "Ray-Ban"
+
+    rows = audit_repo.find_many({"action": "ONLINE_STORE_PUSH"})
+    assert len(rows) == 1, "every push must write exactly one audit row"
+    row = rows[0]
+    assert row["entity_type"] == "product"
+    assert row["entity_id"] == "P1"
+    assert row["details"]["mode"] == "SIMULATED"
+    assert row["user_id"] == "test-admin-001"
+
+
+def test_live_push_product_404_when_missing(client, auth_headers, patched_db):
+    r = client.post("/api/v1/online-store/push/product/NOPE", headers=auth_headers)
+    assert r.status_code == 404, r.text
+
+
+def test_push_product_400_without_ecom_subdoc(client, auth_headers, patched_db):
+    """A product never staged for the online store (no ecom sub-doc) is a 400."""
+    conn, _ = patched_db
+    conn.db["catalog_products"].insert_one({"id": "P9", "title": "Offline only"})
+    r = client.post("/api/v1/online-store/push/product/P9", headers=auth_headers)
+    assert r.status_code == 400, r.text
+
+
+def test_live_push_collection_and_menu_simulated_over_http(client, auth_headers, patched_db, monkeypatch):
+    conn, audit_repo = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C1", "title": "SG", "handle": "sg", "collection_type": "CUSTOM"})
+    conn.db["ecom_menus"].insert_one(
+        {"menu_id": "M1", "title": "Main", "handle": "main-menu", "items": []})
+
+    rc = client.post("/api/v1/online-store/push/collection/C1", headers=auth_headers)
+    rm = client.post("/api/v1/online-store/push/menu/M1", headers=auth_headers)
+    assert rc.status_code == 200 and rc.json()["result"]["mode"] == "SIMULATED"
+    assert rm.status_code == 200 and rm.json()["result"]["mode"] == "SIMULATED"
+    # Two pushes -> two audit rows.
+    assert len(audit_repo.find_many({"action": "ONLINE_STORE_PUSH"})) == 2
+
+
+def test_push_unknown_collection_and_menu_are_404(client, auth_headers, patched_db):
+    assert client.post("/api/v1/online-store/push/collection/NOPE", headers=auth_headers).status_code == 404
+    assert client.post("/api/v1/online-store/push/menu/NOPE", headers=auth_headers).status_code == 404
+
+
+def test_db_down_push_is_503_not_false_200(client, auth_headers, monkeypatch):
+    """No DB -> the push surface 503s (Fail Loudly, not a false 200)."""
+    from api import dependencies as deps
+    monkeypatch.setattr(deps, "get_db", lambda: None)
+    r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
+    assert r.status_code == 503, r.text

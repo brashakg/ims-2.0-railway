@@ -666,6 +666,21 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/assign', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/status', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/edited', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    # --- /api/v1/online-store/push ---  (BVI Phase 5: IMS -> Shopify GraphQL PUSH)
+    # The IMS->Shopify push for product/collection/menu/image + a status surface.
+    # BUILT DARK: every push is SIMULATED (dry-run, no network) unless
+    # IMS_SHOPIFY_WRITES on AND DISPATCH_MODE=live AND creds present (per #262 BVI
+    # is the single Shopify writer until the Phase-6 cutover). UNLIKE the rest of
+    # the Online Store module this surface is NARROWED to SUPERADMIN/ADMIN ONLY
+    # (integration-critical -- pushing to the live storefront). Each push writes a
+    # chained audit_logs row. See routers/online_store_push.py + BVI_MERGE_PLAN.md
+    # Phase 5. The literal /status route is more specific than the /{entity}/{id}
+    # POST routes and resolves on its own; the four POST routes carry one param each.
+    {"method": 'GET', "path": '/api/v1/online-store/push/status', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/push/product/{product_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/push/collection/{collection_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/push/menu/{menu_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/push/image/{image_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     # --- /api/v1/orders ---
     {"method": 'GET', "path": '/api/v1/orders', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders', "allowed": ['ADMIN', 'AREA_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},

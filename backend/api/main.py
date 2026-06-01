@@ -98,6 +98,7 @@ from .routers import (
     online_store_collections_router,
     online_store_menus_router,
     online_store_images_router,
+    online_store_push_router,
 )
 from .routers.auth import require_roles
 
@@ -1011,6 +1012,19 @@ app.include_router(
     online_store_images_router,
     prefix="/api/v1/online-store/images",
     tags=["Online Store - Images"],
+)
+# Shopify PUSH sub-module (BVI Phase 5). The IMS -> Shopify GraphQL push for
+# product / collection / menu / image + a status surface -- BUILT DARK: every
+# push is SIMULATED (dry-run, no network) unless IMS_SHOPIFY_WRITES on AND
+# DISPATCH_MODE=live AND creds present (per #262 BVI is the single writer until
+# the Phase-6 cutover). Mounted at /api/v1/online-store/push. Role-gated INSIDE
+# the router to SUPERADMIN/ADMIN ONLY (integration-critical, narrower than the
+# rest of the module) + catalogued in rbac_policy.POLICY. Every push writes a
+# chained audit_logs row. See docs/reference/BVI_MERGE_PLAN.md Phase 5.
+app.include_router(
+    online_store_push_router,
+    prefix="/api/v1/online-store/push",
+    tags=["Online Store - Push"],
 )
 
 
