@@ -9,6 +9,7 @@
 // fields elsewhere — extend them here.
 
 import type { CreateProductPayload } from '../../services/api/products';
+import type { AutopilotCandidate } from '../../services/api/catalogAutopilot';
 import { getHSNByCategory, getGSTRateByCategory } from '../../constants/gst';
 
 // Product categories with display names + emoji (used in the category picker).
@@ -435,4 +436,160 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     shopifyTags: [],
     publishPOS: true,
   };
+}
+
+// ============================================================================
+// Catalog Autopilot -> Add Product prefill (the "payoff").
+// ----------------------------------------------------------------------------
+// Turn an approved/scraped/AI-enriched Autopilot candidate into ProductFormValues
+// so the operator can hit "Create product from this" on a candidate and land on
+// the Quick Add screen with brand/model/category/description/HSN/GST already
+// filled. Pure + side-effect-free (the sessionStorage handoff is separate, below)
+// so it is unit-testable.
+
+// Free-text/category-ish label -> the Quick Add CATEGORIES code (SG/FR/CL/...).
+// The candidate's `category` (and, as a fallback, its specs.category) can be a
+// human label ("Sunglasses"), an enum ("SUNGLASS"), or absent. We normalise to
+// alphanumerics and match against a small synonym table; an unknown value
+// returns '' so the user simply picks the category (nothing is mis-filed).
+const CATEGORY_CODE_SYNONYMS: Record<string, string> = {
+  // Sunglasses
+  SUNGLASS: 'SG', SUNGLASSES: 'SG', SG: 'SG', SHADES: 'SG',
+  // Frames
+  FRAME: 'FR', FRAMES: 'FR', FR: 'FR', EYEGLASSFRAME: 'FR', SPECTACLEFRAME: 'FR',
+  OPTICALFRAME: 'FR', EYEGLASSES: 'FR', SPECTACLES: 'FR',
+  // Contact lenses
+  CONTACTLENS: 'CL', CONTACTLENSES: 'CL', CL: 'CL', CONTACTS: 'CL',
+  COLOREDCONTACTLENS: 'CL', COLOURCONTACTS: 'CL',
+  // Optical (spectacle) lenses
+  OPTICALLENS: 'LS', LENS: 'LS', LENSES: 'LS', LS: 'LS', RXLENS: 'LS',
+  RXLENSES: 'LS', EYEGLASSLENS: 'LS', SPECTACLELENS: 'LS',
+  // Reading glasses
+  READINGGLASSES: 'RG', RG: 'RG', READERS: 'RG', READER: 'RG',
+  // Watches / clocks
+  WATCH: 'WT', WATCHES: 'WT', WRISTWATCH: 'WT', WRISTWATCHES: 'WT', WT: 'WT',
+  CLOCK: 'CK', CLOCKS: 'CK', WALLCLOCK: 'CK', CK: 'CK',
+  // Hearing aids
+  HEARINGAID: 'HA', HEARINGAIDS: 'HA', HA: 'HA',
+  // Accessories
+  ACCESSORY: 'ACC', ACCESSORIES: 'ACC', ACC: 'ACC',
+  // Smart eyewear / watches
+  SMARTSUNGLASS: 'SMTSG', SMARTSUNGLASSES: 'SMTSG', SMTSG: 'SMTSG',
+  SMARTGLASSES: 'SMTFR', SMARTGLASS: 'SMTFR', SMTFR: 'SMTFR',
+  SMARTWATCH: 'SMTWT', SMARTWATCHES: 'SMTWT', SMTWT: 'SMTWT',
+};
+
+export function inferCategoryCode(raw: unknown): string {
+  const key = String(raw ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (!key) return '';
+  if (CATEGORY_CODE_SYNONYMS[key]) return CATEGORY_CODE_SYNONYMS[key];
+  // Direct match against a real CATEGORIES code (e.g. already 'SG').
+  if (CATEGORIES.some((c) => c.code === key)) return key;
+  return '';
+}
+
+// Coerce the candidate's specs (Record<string, unknown>) into the string->string
+// shape the form's review/extra display expects, dropping empty values.
+function specsToStrings(specs: Record<string, unknown> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!specs) return out;
+  Object.entries(specs).forEach(([k, v]) => {
+    if (v === null || v === undefined) return;
+    const s = String(v).trim();
+    if (s) out[k] = s;
+  });
+  return out;
+}
+
+// Map an Autopilot candidate -> ProductFormValues for prefill. Brand + model land
+// in the attribute keys the form reads (brand_name; both model_no AND model_name
+// so whichever the chosen category renders is populated). Category is inferred;
+// HSN/GST prefer the candidate's suggestions, else resolve from the category.
+// Pricing is intentionally left blank -- the operator sets MRP/cost (Autopilot
+// is a catalog/spec source, not a price source).
+export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFormValues {
+  const category = inferCategoryCode(c.category ?? (c.specs ? (c.specs as Record<string, unknown>).category : undefined));
+
+  const brand = str(c.brand);
+  const model = str(c.model);
+
+  // Seed attributes from the candidate's specs (so spec key/values aren't lost),
+  // then layer identity on top. Spec keys are free-form scraped labels; the form
+  // only renders the category's declared fields, so extra keys are harmless
+  // passthrough that buildProductPayload forwards under `attributes`.
+  const attributes: Record<string, string> = specsToStrings(c.specs as Record<string, unknown> | undefined);
+  // Drop a spec-level "category" label so it doesn't masquerade as a form field.
+  delete attributes.category;
+  if (brand) attributes.brand_name = brand;
+  if (model) {
+    attributes.model_no = model;
+    attributes.model_name = model;
+  }
+
+  // Description: prefer the full description, fall back to the USP one-liner.
+  const description = str(c.description) || str(c.usp);
+
+  // HSN/GST: prefer the candidate's explicit suggestions; else, if we resolved a
+  // category, fall back to that category's canonical 4-digit HSN + rate; else
+  // leave blank so the Quick Add category-change autofill fills them in.
+  let hsnCode = str(c.suggested_hsn);
+  let gstRate =
+    c.suggested_gst_rate !== null && c.suggested_gst_rate !== undefined && Number.isFinite(Number(c.suggested_gst_rate))
+      ? String(c.suggested_gst_rate)
+      : '';
+  if ((!hsnCode || !gstRate) && category) {
+    const resolved = resolveHsnGst(category, false);
+    if (!hsnCode) hsnCode = resolved.hsnCode;
+    if (!gstRate) gstRate = resolved.gstRate;
+  }
+
+  return {
+    category,
+    attributes,
+    description,
+    hsnCode,
+    gstRate: gstRate || '18',
+    weight: '',
+    // No price signal from Autopilot -- operator fills these in.
+    mrp: '',
+    offerPrice: '',
+    costPrice: '',
+    discountCategory: 'MASS',
+    // A new SKU shouldn't auto-sync online.
+    syncToShopify: false,
+    shopifyTags: [],
+    publishPOS: true,
+  };
+}
+
+// ----------------------------------------------------------------------------
+// sessionStorage handoff for the Autopilot -> Quick Add prefill. We pass the
+// candidate via sessionStorage (not router state, which is lost when the lazily
+// loaded /catalog/add shell mounts, and not the URL, which can't carry specs/
+// image arrays). CatalogAutopilotPage stashes the candidate then navigates to
+// /catalog/add?prefill=autopilot; QuickAddPage reads + clears it on mount.
+export const AUTOPILOT_PREFILL_KEY = 'ims.autopilot.prefill';
+export const AUTOPILOT_PREFILL_PARAM = 'prefill';
+export const AUTOPILOT_PREFILL_VALUE = 'autopilot';
+
+export function stashAutopilotPrefill(c: AutopilotCandidate): boolean {
+  try {
+    window.sessionStorage.setItem(AUTOPILOT_PREFILL_KEY, JSON.stringify(c));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Read + remove the stashed candidate (one-shot). Returns null if absent/invalid.
+export function takeAutopilotPrefill(): AutopilotCandidate | null {
+  try {
+    const raw = window.sessionStorage.getItem(AUTOPILOT_PREFILL_KEY);
+    if (!raw) return null;
+    window.sessionStorage.removeItem(AUTOPILOT_PREFILL_KEY);
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as AutopilotCandidate) : null;
+  } catch {
+    return null;
+  }
 }

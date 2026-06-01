@@ -44,6 +44,10 @@ import {
   buildProductPayload,
   resolveHsnGst,
   productToFormValues,
+  autopilotCandidateToFormValues,
+  takeAutopilotPrefill,
+  AUTOPILOT_PREFILL_PARAM,
+  AUTOPILOT_PREFILL_VALUE,
   type CategoryField,
   type ProductFormValues,
   type ProductDoc,
@@ -394,6 +398,27 @@ export function QuickAddPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloneId]);
+
+  // Catalog Autopilot payoff: /catalog/add?prefill=autopilot reads the candidate
+  // stashed in sessionStorage (set by "Create product from this" on the Autopilot
+  // page) and prefills the form. One-shot: the candidate is consumed and the
+  // param cleared so a manual edit/reset isn't re-clobbered on re-render.
+  const prefillKind = searchParams.get(AUTOPILOT_PREFILL_PARAM);
+  useEffect(() => {
+    if (prefillKind !== AUTOPILOT_PREFILL_VALUE) return;
+    const candidate = takeAutopilotPrefill();
+    if (candidate) {
+      applyFormValues(autopilotCandidateToFormValues(candidate));
+      toast.success('Prefilled from Catalog Autopilot. Add price + any missing fields, then save.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      toast.info('Nothing to prefill — open a candidate from Catalog Autopilot first.');
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete(AUTOPILOT_PREFILL_PARAM);
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillKind]);
 
   if (!canAddProduct) {
     return (
