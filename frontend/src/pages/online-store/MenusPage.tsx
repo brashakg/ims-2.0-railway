@@ -895,7 +895,6 @@ function TreeRow({
 
         {/* icon thumbnail (mega-menu) */}
         {node.icon_url ? (
-          // eslint-disable-next-line jsx-a11y/img-redundant-alt
           <img
             src={node.icon_url}
             alt=""
@@ -1146,7 +1145,6 @@ function ItemEditorDrawer({
                 />
                 {item.icon_url ? (
                   <div className="mt-2">
-                    {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
                     <img
                       src={item.icon_url}
                       alt="Thumbnail preview"
@@ -1170,7 +1168,6 @@ function ItemEditorDrawer({
                 />
                 {item.banner_url ? (
                   <div className="mt-2">
-                    {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
                     <img
                       src={item.banner_url}
                       alt="Banner preview"

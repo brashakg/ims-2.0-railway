@@ -160,3 +160,15 @@ class CustomerRepository(BaseRepository):
             return True
         except:
             return False
+
+    def increment_loyalty_points(self, customer_id: str, delta: int) -> dict | None:
+        """Atomically add (or subtract) loyalty points. Returns updated doc or None."""
+        from bson import ObjectId
+        try:
+            return self.collection.find_one_and_update(
+                {"_id": ObjectId(customer_id)},
+                {"$inc": {"loyalty_points": delta}},
+                return_document=True,
+            )
+        except Exception:
+            return None
