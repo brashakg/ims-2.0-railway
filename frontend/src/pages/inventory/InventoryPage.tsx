@@ -435,7 +435,7 @@ export function InventoryPage() {
     // ignored (stock is created via GRN, not at product-create time).
     const num = (v: string | undefined): number | undefined => {
       if (v === undefined || String(v).trim() === '') return undefined;
-      const n = Number(String(v).replace(/[^0-9.\-]/g, ''));
+      const n = Number(String(v).replace(/[^0-9.-]/g, ''));
       return Number.isFinite(n) ? n : undefined;
     };
     const products: CreateProductPayload[] = csvRows.map((row) => {

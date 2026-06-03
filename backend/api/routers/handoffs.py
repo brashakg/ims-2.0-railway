@@ -104,7 +104,7 @@ class HandoffResponseInput(BaseModel):
 
 
 class HandoffReshareInput(BaseModel):
-    recipient_user_ids: List[str] = Field(..., min_items=1)
+    recipient_user_ids: List[str] = Field(..., min_length=1)
     comment: Optional[str] = Field(None, max_length=200)
 
 

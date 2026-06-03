@@ -694,7 +694,6 @@ function CollectionDrawer({
               />
               {draft.banner_image ? (
                 <div className="mt-2">
-                  {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
                   <img
                     src={draft.banner_image}
                     alt="Banner preview"
