@@ -195,7 +195,73 @@ export const inventoryApi = {
     });
     return response.data as CLExpiryStatusResponse;
   },
+
+  // Opening-stock importer (go-live). Dry-run preview, then commit. The active
+  // store is taken from the caller's token server-side.
+  previewOpeningStock: async (
+    rows: OpeningStockInputRow[],
+    skipIfExisting = true,
+  ): Promise<OpeningStockResponse> => {
+    const response = await api.post('/inventory/opening-stock/preview', {
+      rows,
+      skip_if_existing: skipIfExisting,
+    });
+    return response.data as OpeningStockResponse;
+  },
+
+  commitOpeningStock: async (
+    rows: OpeningStockInputRow[],
+    skipIfExisting = true,
+  ): Promise<OpeningStockResponse> => {
+    const response = await api.post('/inventory/opening-stock/commit', {
+      rows,
+      skip_if_existing: skipIfExisting,
+    });
+    return response.data as OpeningStockResponse;
+  },
 };
+
+// One opening-stock import row (product identified by product_id OR sku).
+export interface OpeningStockInputRow {
+  product_id?: string;
+  sku?: string;
+  quantity: number;
+  location_code?: string;
+  batch_code?: string;
+  expiry_date?: string;
+}
+
+export interface OpeningStockResultRow {
+  index: number;
+  status:
+    | 'WILL_ADD'
+    | 'WILL_ADD_ON_TOP'
+    | 'SKIP_EXISTING'
+    | 'ADDED'
+    | 'SKIPPED'
+    | 'ERROR';
+  product_id?: string;
+  sku?: string;
+  name?: string;
+  identifier?: string;
+  quantity?: number;
+  existing?: number;
+  added?: number;
+  message: string;
+}
+
+export interface OpeningStockResponse {
+  rows: OpeningStockResultRow[];
+  summary: {
+    total_rows: number;
+    units_to_add?: number;
+    rows_to_skip?: number;
+    units_added?: number;
+    rows_skipped?: number;
+    rows_with_errors: number;
+    skip_if_existing?: boolean;
+  };
+}
 
 // Contact-lens inventory line (one SKU x batch group).
 export interface CLInventoryLine {
