@@ -69,6 +69,7 @@ const OutstandingPaymentsReport = lazy(() => import('./pages/reports/Outstanding
 const PrintPage = lazy(() => import('./pages/print/PrintPage'));
 const ReturnsPage = lazy(() => import('./pages/orders/ReturnsPage'));
 const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
+const GoLiveChecklistPage = lazy(() => import('./pages/settings/GoLiveChecklistPage').then(m => ({ default: m.GoLiveChecklistPage })));
 
 // Phase 4: Supply Chain & Procurement
 const PurchaseOrderDashboard = lazy(() => import('./pages/purchase/PurchaseOrderDashboard').then(m => ({ default: m.PurchaseOrderDashboard })));
@@ -872,6 +873,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <SetupPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Go-Live Readiness Checklist */}
+                  <Route
+                    path="go-live"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <GoLiveChecklistPage />
                       </ProtectedRoute>
                     }
                   />

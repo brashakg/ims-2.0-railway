@@ -912,6 +912,7 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/stores ---
     {"method": 'GET', "path": '/api/v1/stores', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/stores', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/stores/go-live-checklist', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/stores/summary', "allowed": 'AUTHENTICATED'},
     {"method": 'DELETE', "path": '/api/v1/stores/{store_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/stores/{store_id}', "allowed": 'AUTHENTICATED', "store_scoped": True},

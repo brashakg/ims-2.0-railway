@@ -19,7 +19,29 @@ export const storeApi = {
     const response = await api.get(`/stores/${storeId}/stats`);
     return response.data;
   },
+
+  // Go-live readiness checklist (ADMIN/SUPERADMIN). Aggregates the real
+  // prerequisites for the first live sale into one payload.
+  getGoLiveChecklist: async (): Promise<GoLiveChecklist> => {
+    const response = await api.get('/stores/go-live-checklist');
+    return response.data as GoLiveChecklist;
+  },
 };
+
+export interface GoLiveCheck {
+  key: string;
+  label: string;
+  status: 'PASS' | 'WARN' | 'FAIL';
+  count: number;
+  hint: string;
+  route: string | null;
+}
+
+export interface GoLiveChecklist {
+  ready: boolean;
+  checks: GoLiveCheck[];
+  summary: { pass: number; warn: number; fail: number; total: number };
+}
 
 // ============================================================================
 // Org setup - store CRUD with the real backend StoreCreate/StoreUpdate shape
