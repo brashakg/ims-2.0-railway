@@ -230,7 +230,23 @@ export function QuickAddPage() {
 
       setIsSubmitting(true);
       try {
-        await productApi.createProduct(buildProductPayload(values));
+        const created = await productApi.createProduct(buildProductPayload(values));
+        // ProductCreate does NOT model barcode/reorder_point (only ProductUpdate
+        // does), so persist the Inventory-section fields via a follow-up update
+        // on the new product_id. Fail-soft: a bad/duplicate barcode (PUT runs the
+        // EAN-13 + uniqueness guard) must not fail the create the user just did.
+        const newId = created?.product_id || created?.id;
+        const reorderNum = Number(reorderLevel);
+        const inventoryPatch: { barcode?: string; reorder_point?: number } = {};
+        if (barcode.trim()) inventoryPatch.barcode = barcode.trim();
+        if (Number.isFinite(reorderNum) && reorderNum >= 0) inventoryPatch.reorder_point = reorderNum;
+        if (newId && Object.keys(inventoryPatch).length > 0) {
+          try {
+            await productApi.updateProduct(newId, inventoryPatch);
+          } catch {
+            toast.warning('Product created, but the barcode / reorder level could not be saved.');
+          }
+        }
         toast.success('Product created successfully!');
         if (saveAndNew) {
           resetForm(true);

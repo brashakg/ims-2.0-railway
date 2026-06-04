@@ -610,7 +610,7 @@ export function InventoryPage() {
   }> = [
     { id: 'catalog',  label: 'Catalog',     icon: Package,         members: ['catalog', 'display-layout'] },
     { id: 'health',   label: 'Stock health',icon: AlertTriangle,   members: ['low-stock', 'non-moving', 'aging', 'alerts'] },
-    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'movements', 'stock-count'] },
+    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'stock-count'] },
     { id: 'optical',  label: 'Optical',     icon: Eye,             members: ['serial-numbers', 'contact-lens', 'power-grid'] },
     { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock'] },
   ];

@@ -53,11 +53,13 @@ export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) 
                   {formatCurrency(v.amount_due)}
                 </td>
                 <td className="px-4 py-3 text-slate-700">
-                  {new Date(v.due_date).toLocaleDateString('en-IN', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric',
-                  })}
+                  {v.due_date
+                    ? new Date(v.due_date).toLocaleDateString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric',
+                      })
+                    : '--'}
                 </td>
                 <td className="px-4 py-3">
                   <span

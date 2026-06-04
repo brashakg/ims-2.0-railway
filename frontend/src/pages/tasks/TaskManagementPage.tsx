@@ -1030,6 +1030,23 @@ function isSaneDue(min: number): boolean {
 }
 
 function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
+  const toast = useToast();
+  // Interim reassign: prompt for the new owner's user id + an optional reason,
+  // then POST through the existing tasksApi.reassignTask seam. A full owner-
+  // picker modal is a follow-up; this unblocks the previously-dead button.
+  const handleReassign = async () => {
+    const newAssignee = window.prompt('Reassign to (user id):', task.assignedTo || '');
+    if (!newAssignee || !newAssignee.trim()) return;
+    const reason = window.prompt('Reason (optional):', '') || undefined;
+    try {
+      await tasksApi.reassignTask(task.id, newAssignee.trim(), reason);
+      toast.success('Task reassigned');
+      onClose();
+    } catch (e) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === 'string' ? msg : 'Failed to reassign task');
+    }
+  };
   const dueSane = isSaneDue(task.dueInMin);
   const minLeft = dueSane ? Math.max(0, task.dueInMin) : 0;
   const minLeftLabel = dueSane ? humanizeMinutes(minLeft) : '—';
@@ -1058,7 +1075,7 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
           >
             <ArrowLeft className="w-3 h-3" /> Back
           </button>
-          <button type="button" className="btn sm">
+          <button type="button" className="btn sm" onClick={handleReassign}>
             <User className="w-3 h-3" /> Reassign
           </button>
         </div>

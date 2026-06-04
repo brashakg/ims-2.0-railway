@@ -153,7 +153,7 @@ export function OrdersPage() {
     setIsLoading(true);
     setError(null);
     try {
-      const params: { storeId?: string; status?: string; date?: string; skip?: number; limit?: number } = {};
+      const params: { storeId?: string; status?: string; from_date?: string; skip?: number; limit?: number } = {};
       // Always scope to the topbar-selected store. The selection lives in
       // user.activeStoreId for every role (HQ admins included) — previously
       // this was gated to non-HQ roles, so an admin switching the topbar to
@@ -166,7 +166,21 @@ export function OrdersPage() {
         params.status = statusFilter;
       }
       if (dateFilter !== 'all') {
-        params.date = dateFilter;
+        // Backend orders-list takes from_date/to_date (YYYY-MM-DD), not ?date=.
+        // Map the chosen window to a start date; the repo filters created_at >=
+        // from_date (today / start-of-week / start-of-month), which covers all
+        // three options without needing to_date.
+        const now = new Date();
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        if (dateFilter === 'week') {
+          start.setDate(start.getDate() - 6);
+        } else if (dateFilter === 'month') {
+          start.setMonth(start.getMonth() - 1);
+        }
+        const y = start.getFullYear();
+        const m = String(start.getMonth() + 1).padStart(2, '0');
+        const d = String(start.getDate()).padStart(2, '0');
+        params.from_date = `${y}-${m}-${d}`;
       }
       params.skip = (currentPage - 1) * pageSize;
       params.limit = pageSize;

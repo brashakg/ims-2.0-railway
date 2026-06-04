@@ -200,10 +200,9 @@ export function PayrollDashboard() {
 
   const exportSalarySheet = () => {
     let csv = 'Name,Basic,HRA,Allowances,Gross,PF,ESI,PT,TDS,LWP,Advance,Net Pay\n';
-    salarySheet.forEach((salary) => {
-      const b = salary.breakdown;
-      const allowances = b.conveyance + b.medical;
-      csv += `${salary.employee_name},${b.basic},${b.hra},${allowances},${b.gross_salary},${b.pf_employee},${b.esi},${b.professional_tax},${b.tds},${b.lwp_deduction},${b.advance_deduction},${b.net_pay}\n`;
+    salarySheet.forEach((salary: any) => {
+      // Flat rows from GET /payroll/salary-sheet (no nested breakdown).
+      csv += `${salary.employee_name},${salary.basic ?? 0},${salary.hra ?? 0},${salary.allowances ?? 0},${salary.gross_salary ?? 0},${salary.pf_employee ?? 0},${salary.esi ?? 0},${salary.professional_tax ?? 0},${salary.tds ?? 0},${salary.lwp_deduction ?? 0},${salary.advance_deduction ?? 0},${salary.net_pay ?? 0}\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -342,9 +341,12 @@ export function PayrollDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {salarySheet.map((salary) => {
-                    const b = salary.breakdown;
-                    const allowances = b.conveyance + b.medical;
+                  {salarySheet.map((salary: any) => {
+                    // GET /payroll/salary-sheet returns FLAT rows (no nested
+                    // `breakdown`): basic / hra / allowances / gross_salary /
+                    // pf_employee / esi / professional_tax / tds / lwp_deduction
+                    // / advance_deduction / net_pay. Read them directly with
+                    // ?? 0 guards (the old salary.breakdown.* threw at runtime).
                     return (
                       <tr
                         key={salary.salary_record_id}
@@ -353,20 +355,20 @@ export function PayrollDashboard() {
                         <td className="px-4 py-2 text-gray-900 font-medium">
                           {salary.employee_name}
                         </td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.basic.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.hra.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{allowances.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.basic ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.hra ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.allowances ?? 0).toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-green-600 font-medium">
-                          ₹{b.gross_salary.toLocaleString()}
+                          ₹{(salary.gross_salary ?? 0).toLocaleString()}
                         </td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.pf_employee.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.esi.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.professional_tax.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.tds.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.lwp_deduction.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-600">₹{b.advance_deduction.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.pf_employee ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.esi ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.professional_tax ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.tds ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.lwp_deduction ?? 0).toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{(salary.advance_deduction ?? 0).toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-yellow-600 font-bold">
-                          ₹{b.net_pay.toLocaleString()}
+                          ₹{(salary.net_pay ?? 0).toLocaleString()}
                         </td>
                       </tr>
                     );

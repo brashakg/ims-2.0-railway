@@ -82,7 +82,7 @@ function mapOutstanding(d: any): OutstandingReceivable[] {
     customer_name: o.customer_name || 'Unknown',
     amount: Number(o.amount || 0),
     gst_amount: 0,
-    due_date: '',
+    due_date: o.due_date || '',
     days_overdue: Number(o.days_overdue || 0),
     status: (Number(o.days_overdue || 0) > 30 ? 'overdue' : 'active') as OutstandingReceivable['status'],
   }));
