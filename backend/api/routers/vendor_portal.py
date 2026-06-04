@@ -29,7 +29,7 @@ import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Path
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from ..dependencies import (
     get_vendor_portal_token_repository,
@@ -177,7 +177,14 @@ PORTAL_STATUSES = {
 class VendorPortalStatusUpdate(BaseModel):
     status: str = Field(..., description="One of " + ", ".join(sorted(PORTAL_STATUSES)))
     note: Optional[str] = Field(None, max_length=500)
-    tracking_url: Optional[str] = Field(None, max_length=500)
+    # Accept BOTH the canonical key and the key the public lab-portal FE actually
+    # submits ("vendor_tracking_url"). Without this the unknown key was dropped by
+    # pydantic, so the lab's tracking URL never reached the job card.
+    tracking_url: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("tracking_url", "vendor_tracking_url"),
+        max_length=500,
+    )
     vendor_order_id: Optional[str] = Field(None, max_length=100)
 
 

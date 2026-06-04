@@ -3,7 +3,17 @@
 // ============================================================================
 
 export type TabType = 'purchase-orders' | 'purchase-invoices' | 'suppliers' | 'vendor-returns' | 'analytics';
-export type POStatus = 'DRAFT' | 'PENDING' | 'APPROVED' | 'ORDERED' | 'RECEIVED' | 'CANCELLED';
+export type POStatus =
+  | 'DRAFT'
+  | 'PENDING'
+  | 'APPROVED'
+  | 'SENT'
+  | 'ACKNOWLEDGED'
+  | 'ORDERED'
+  | 'PARTIAL'
+  | 'PARTIALLY_RECEIVED'
+  | 'RECEIVED'
+  | 'CANCELLED';
 
 export interface Supplier {
   id: string;

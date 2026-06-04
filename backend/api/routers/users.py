@@ -320,6 +320,7 @@ async def get_user_summary(
     return {"summary": {}}
 
 
+@router.get("", response_model=List[dict])
 @router.get("/", response_model=List[dict])
 async def list_users(
     store_id: Optional[str] = Query(None),
