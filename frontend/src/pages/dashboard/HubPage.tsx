@@ -13,6 +13,7 @@ import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
+import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
 import './HubPage.css';
 
 interface HeroMeta {
@@ -354,6 +355,13 @@ export default function HubPage() {
           </div>
         </div>
       </section>
+
+      {/* Owner digest — day-close snapshot, SUPERADMIN / ADMIN only. */}
+      {hasRole(['SUPERADMIN', 'ADMIN']) && (
+        <section style={{ marginBottom: 18 }}>
+          <OwnerDigestCard storeId={user?.activeStoreId} />
+        </section>
+      )}
 
       {/* Priority work: tasks + SOP checklists */}
       <section className="hub-work-row">

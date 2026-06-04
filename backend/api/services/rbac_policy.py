@@ -207,6 +207,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/admin/products/{product_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/seed-database', "allowed": 'PUBLIC'},
     {"method": 'GET', "path": '/api/v1/admin/system-health', "allowed": ['ADMIN']},
+    {"method": 'GET', "path": '/api/v1/admin/owner-digest', "allowed": ['ADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/system/audit-logs', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/system/backups', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/system/backups', "allowed": ['ADMIN', 'SUPERADMIN']},
