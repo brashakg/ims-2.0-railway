@@ -878,6 +878,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/settings/business', "allowed": 'AUTHENTICATED'},
     {"method": 'PUT', "path": '/api/v1/settings/business', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/settings/business/logo', "allowed": ['ADMIN', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/settings/business/logo/{file_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/settings/discount-rules', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/settings/discount-rules', "allowed": ['ADMIN', 'AREA_MANAGER', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/settings/discount-rules', "allowed": ['ADMIN', 'AREA_MANAGER', 'SUPERADMIN']},

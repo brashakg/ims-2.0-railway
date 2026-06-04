@@ -10,7 +10,8 @@ Comprehensive settings management for all user roles.
 - Audit logs
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -651,12 +652,130 @@ async def update_business_settings(
     return {"message": "Business settings updated (no DB)", "settings": payload}
 
 
+# Company logo upload constraints. Images only (no PDF) and a modest cap --
+# a brand logo is small; 5 MB is generous and keeps GridFS blobs lean.
+_LOGO_ALLOWED_MIME_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+        "image/svg+xml",
+        "image/gif",
+    }
+)
+_LOGO_MAX_BYTES = 5 * 1024 * 1024
+
+
 @router.post("/business/logo")
-async def upload_logo(current_user: dict = Depends(get_current_user)):
-    """Upload company logo (placeholder for file upload)"""
+async def upload_logo(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload a company/brand logo image and persist it.
+
+    Stores the image bytes in the GridFS-backed file store (the same
+    durable store the handoffs feature uses) and returns a stable URL
+    pointing at the serve endpoint below. The caller (Settings -> Company
+    Profile) then saves that URL onto the business_settings doc via
+    PUT /settings/business, so the logo survives reloads.
+
+    Role-gated to SUPERADMIN / ADMIN. Fail-soft: if no durable file store
+    is available (DB down), returns 503 rather than a fake success URL.
+    """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Logo uploaded", "url": "/images/logo.png"}
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    mime = (file.content_type or "").lower()
+    if mime not in _LOGO_ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"File type '{mime}' not allowed. "
+                f"Accepted image types: {sorted(_LOGO_ALLOWED_MIME_TYPES)}"
+            ),
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > _LOGO_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Logo exceeds {_LOGO_MAX_BYTES // (1024 * 1024)} MB cap",
+        )
+
+    from ..services.file_store import get_file_store
+
+    fs = get_file_store()
+    if fs is None:
+        # Honest failure -- no durable store, so we don't pretend to save.
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    file_id = fs.put(
+        content=content,
+        filename=file.filename,
+        mime_type=mime,
+        metadata={
+            "kind": "business_logo",
+            "uploaded_by": current_user.get("user_id"),
+        },
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    logo_url = f"/api/v1/settings/business/logo/{file_id}"
+
+    # Best-effort: persist the new logo_url straight onto the business
+    # settings doc so it's live even before the client's follow-up save.
+    collection = _get_settings_collection("business_settings")
+    if collection is not None:
+        try:
+            collection.update_one(
+                {"_id": "default"}, {"$set": {"logo_url": logo_url}}, upsert=True
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "message": "Logo uploaded",
+        "logo_url": logo_url,
+        "url": logo_url,  # back-compat alias
+        "file_id": file_id,
+        "filename": file.filename,
+        "mime_type": mime,
+        "size_bytes": len(content),
+    }
+
+
+@router.get("/business/logo/{file_id}")
+async def get_logo(
+    file_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream a previously-uploaded company logo by its file id.
+
+    Any authenticated user may fetch the logo (it renders in the app
+    shell / Settings / invoices). Returns 404 when the blob is gone.
+    """
+    from ..services.file_store import get_file_store
+
+    fs = get_file_store()
+    if fs is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    blob = fs.get(file_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="Logo not found")
+    content, filename, mime_type = blob
+    return Response(
+        content=content,
+        media_type=mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename or "logo"}"',
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 # ============================================================================
