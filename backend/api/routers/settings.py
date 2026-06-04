@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 import hashlib
 import os
 import base64
@@ -1549,6 +1549,63 @@ def _audit_time_filter(start_date: Optional[str], end_date: Optional[str]) -> di
     return {"timestamp": clause} if clause else {}
 
 
+def _resolve_user_names(user_ids: set) -> dict:
+    """Batch-resolve user_id -> human display name for the activity log.
+
+    The audit trail stores only `user_id` (a slug); the SUPERADMIN "who did
+    what" screen wants to read activity BY NAME, not by a cryptic id. One
+    indexed {user_id: {$in: [...]}} lookup resolves a whole page of logs.
+    Fail-soft: a missing user / no DB just leaves that id unresolved (the FE
+    falls back to showing the raw user_id).
+    """
+    ids = [u for u in user_ids if u]
+    if not ids:
+        return {}
+    try:
+        from ..dependencies import get_user_repository
+
+        user_repo = get_user_repository()
+        if user_repo is None:
+            return {}
+        users = user_repo.find_many({"user_id": {"$in": ids}}, limit=len(ids))
+        names: dict = {}
+        for u in users:
+            uid = u.get("user_id")
+            if not uid:
+                continue
+            names[uid] = u.get("full_name") or u.get("username") or uid
+        return names
+    except Exception:  # noqa: BLE001 - name resolution is best-effort cosmetics
+        return {}
+
+
+def _audit_changes(log: dict):
+    """Derive a field-level old->new change list for the activity-log detail
+    panel from whatever the row recorded.
+
+    Prefers a before_state/after_state dict diff (only the keys that actually
+    changed); falls back to a single previous_value -> new_value pair when both
+    are scalars. Returns None when nothing structured is available, so the FE
+    just shows the free-text description instead. Reads only fields the row
+    already exposes -- no new data is surfaced.
+    """
+    before = log.get("before_state")
+    after = log.get("after_state")
+    if isinstance(before, dict) and isinstance(after, dict):
+        changes = []
+        for key in sorted(set(before) | set(after)):
+            ov, nv = before.get(key), after.get(key)
+            if ov != nv:
+                changes.append({"field": key, "old_value": ov, "new_value": nv})
+        if changes:
+            return changes
+    pv, nv = log.get("previous_value"), log.get("new_value")
+    scalar = (str, int, float, bool, type(None))
+    if isinstance(pv, scalar) and isinstance(nv, scalar) and not (pv is None and nv is None):
+        return [{"field": log.get("entity_type") or "value", "old_value": pv, "new_value": nv}]
+    return None
+
+
 @router.get("/audit-logs")
 async def get_audit_logs(
     entity_type: Optional[str] = None,
@@ -1595,14 +1652,76 @@ async def get_audit_logs(
         )
         total = audit_repo.count(filter_dict)
 
-        # Clean up MongoDB _id fields
+        # Enrich the page: resolve actor user_id -> readable name (one batched
+        # lookup) so the screen reads "who did what" by NAME, and derive a
+        # field-level old->new change list for the expandable detail. Both are
+        # additive + fail-soft -- a missing user or unstructured row degrades to
+        # the raw user_id / the free-text description.
+        name_map = _resolve_user_names({log.get("user_id") for log in logs})
         for log in logs:
             log.pop("_id", None)
+            uid = log.get("user_id")
+            if uid and name_map.get(uid):
+                log["user_name"] = name_map[uid]
+                log.setdefault("username", name_map[uid])
+            changes = _audit_changes(log)
+            if changes is not None:
+                log["changes"] = changes
 
         return {"logs": logs, "total": total, "limit": limit, "offset": offset}
 
     # Return empty when no database
     return {"logs": [], "total": 0, "limit": limit, "offset": offset}
+
+
+@router.get("/audit-logs/summary")
+async def get_audit_logs_summary(current_user: dict = Depends(get_current_user)):
+    """Today-at-a-glance activity counters for the SUPERADMIN audit screen.
+
+    Returns {"today": {total_actions, logins, orders_created}} so the operator
+    can see, in one line, how busy the system is and how many people signed in /
+    sold today. total_actions + logins come from the audit trail (same
+    `timestamp` day window the Activity Log screen filters on, so the numbers
+    reconcile); orders_created counts the orders collection directly because a
+    routine order create does NOT write a generic audit row (only exceptions
+    like a zero-total approval do), so the audit count would under-report sales.
+
+    Fail-soft: a missing DB / repo just yields zeros, never a 500.
+    """
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    today = date.today()
+    total_actions = 0
+    logins = 0
+    orders_created = 0
+
+    audit_repo = get_audit_repository()
+    if audit_repo is not None:
+        day_clause = _audit_time_filter(today.isoformat(), today.isoformat())
+        total_actions = audit_repo.count(day_clause)
+        # auth.py stamps a successful sign-in as action="login_success".
+        logins = audit_repo.count({**day_clause, "action": "login_success"})
+
+    try:
+        from ..dependencies import get_order_repository
+
+        order_repo = get_order_repository()
+        if order_repo is not None:
+            start = datetime.combine(today, datetime.min.time())
+            end = datetime.combine(today, datetime.max.time())
+            orders_created = order_repo.count({"created_at": {"$gte": start, "$lte": end}})
+    except Exception:  # noqa: BLE001 - a summary stat must never 500 the screen
+        orders_created = 0
+
+    return {
+        "date": today.isoformat(),
+        "today": {
+            "total_actions": total_actions,
+            "logins": logins,
+            "orders_created": orders_created,
+        },
+    }
 
 
 # ============================================================================

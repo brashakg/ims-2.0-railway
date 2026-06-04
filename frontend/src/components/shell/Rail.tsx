@@ -136,6 +136,13 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'AI',
     items: [
       { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
+    ],
+  },
+  {
+    // Audit trail / oversight — its OWN group, separate from AI. SUPERADMIN-only,
+    // so the whole group only renders for superadmins.
+    title: 'Audit',
+    items: [
       { id: 'activity-log', label: 'Activity Log', to: '/admin/activity-log', icon: 'shield', requireRoles: ['SUPERADMIN'] },
     ],
   },
