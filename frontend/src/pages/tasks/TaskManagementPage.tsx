@@ -173,7 +173,9 @@ export function TaskManagementPage() {
         return Math.round((d.getTime() - Date.now()) / 60000);
       };
       const apiTasks: Task[] = (response?.tasks || []).map((t: any) => ({
-        id: t.id,
+        // The tasks API emits `task_id`; falling back keeps Reassign / row keys
+        // working (a bare `t.id` left the id empty -> Reassign 404'd).
+        id: t.task_id || t.id || '',
         title: t.title || '',
         description: t.description || '',
         assignedTo: t.assigned_to || '',
