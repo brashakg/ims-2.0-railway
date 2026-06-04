@@ -870,16 +870,24 @@ function ManualPicker({
     }
   };
 
-  const memberIds = useMemo(() => new Set(members.map((m) => m.product_id)), [members]);
+  // Membership is keyed on SKU at the backend, so de-dupe + identify by SKU.
+  const memberSkus = useMemo(
+    () => new Set(members.map((m) => m.sku).filter(Boolean) as string[]),
+    [members],
+  );
 
   const add = async (p: CatalogPick) => {
     if (!collectionId) {
       toast.info('Save the collection first, then add products');
       return;
     }
-    if (memberIds.has(p.product_id)) return;
+    if (!p.sku) {
+      toast.error('This product has no SKU and cannot be added');
+      return;
+    }
+    if (memberSkus.has(p.sku)) return;
     try {
-      await collectionsApi.addProduct(collectionId, p.product_id);
+      await collectionsApi.addProduct(collectionId, p.sku);
       // optimistic append
       setMembers((prev) => [
         ...prev,
@@ -899,11 +907,11 @@ function ManualPicker({
     }
   };
 
-  const remove = async (productId: string) => {
-    if (!collectionId) return;
+  const remove = async (sku: string | null | undefined) => {
+    if (!collectionId || !sku) return;
     try {
-      await collectionsApi.removeProduct(collectionId, productId);
-      setMembers((prev) => prev.filter((m) => m.product_id !== productId));
+      await collectionsApi.removeProduct(collectionId, sku);
+      setMembers((prev) => prev.filter((m) => m.sku !== sku));
       toast.success('Removed from collection');
     } catch (e: any) {
       toast.error(e?.message || 'Could not remove product');
@@ -920,7 +928,7 @@ function ManualPicker({
     try {
       await collectionsApi.reorder(
         collectionId,
-        reordered.map((m) => m.product_id),
+        reordered.map((m) => m.sku).filter(Boolean) as string[],
       );
     } catch (e: any) {
       // revert by reloading the source of truth
@@ -976,7 +984,7 @@ function ManualPicker({
         {results.length > 0 && (
           <ul className="mt-3 max-h-56 overflow-y-auto divide-y divide-gray-100 border-t border-gray-100">
             {results.map((p) => {
-              const already = memberIds.has(p.product_id);
+              const already = !!p.sku && memberSkus.has(p.sku);
               return (
                 <li key={p.product_id} className="flex items-center justify-between gap-2 py-2">
                   <div className="min-w-0">
@@ -1053,7 +1061,7 @@ function ManualPicker({
                   </button>
                   <button
                     type="button"
-                    onClick={() => remove(m.product_id)}
+                    onClick={() => remove(m.sku)}
                     className="p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
                     title="Remove"
                   >
@@ -1112,10 +1120,16 @@ function SmartRulesEditor({
       toast.info('Add at least one rule with a value to preview');
       return;
     }
+    // The backend resolves a SAVED collection by id (there is no ad-hoc resolver),
+    // so the preview reflects the rules as last saved. Prompt the user to save.
+    if (!collectionId) {
+      toast.info('Save the collection first to preview the products its rules match.');
+      return;
+    }
     setPreviewing(true);
     try {
       const res = await collectionsApi.resolvedProducts({
-        id: collectionId ?? undefined,
+        id: collectionId,
         rules: { disjunctive, rules: clean },
         limit: 50,
       });

@@ -99,6 +99,24 @@ def _require_repo():
     return repo
 
 
+def _with_id(doc):
+    """Mirror the stored image fields onto the keys the FE Design Queue reads:
+    `image_id` -> `id`, the lifecycle `status` -> `design_status`, and the owner
+    `assigned_to` -> `assignee_id`. Additive + non-destructive (only fills a key
+    that is absent/None) so the canonical snake_case fields stay intact. Tolerates
+    a list (maps each element) or a non-dict (returned untouched). Fail-soft."""
+    if isinstance(doc, list):
+        return [_with_id(d) for d in doc]
+    if isinstance(doc, dict):
+        if doc.get("id") is None and doc.get("image_id") is not None:
+            doc["id"] = doc["image_id"]
+        if doc.get("design_status") is None and doc.get("status") is not None:
+            doc["design_status"] = doc["status"]
+        if doc.get("assignee_id") is None and doc.get("assigned_to") is not None:
+            doc["assignee_id"] = doc["assigned_to"]
+    return doc
+
+
 def _write_audit(image: Dict, current_user: dict) -> None:
     """Write a chained audit row for an image APPROVAL (go-live gate -- Audit
     Everything). Fail-soft: any audit error is swallowed so it can never undo the
@@ -228,7 +246,7 @@ async def list_images(
         skip=skip,
         limit=limit,
     )
-    return {"images": rows, "count": len(rows), "db_connected": True}
+    return {"images": _with_id(rows), "count": len(rows), "db_connected": True}
 
 
 @router.post("", status_code=201)
@@ -263,7 +281,7 @@ async def create_image(
     created = repo.create(data)
     if created is None:
         raise HTTPException(status_code=500, detail="Failed to create image")
-    return {"image": created}
+    return {"image": _with_id(created)}
 
 
 @router.get("/{image_id}")
@@ -275,7 +293,7 @@ async def get_image(
     doc = repo.get_by_id(image_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Image not found")
-    return {"image": doc}
+    return {"image": _with_id(doc)}
 
 
 @router.put("/{image_id}")
@@ -297,10 +315,10 @@ async def update_image(
         data["source"] = _validate_enum(data["source"], _SOURCES, "source")
     if not data:
         # Nothing to change -> return the unchanged doc (idempotent no-op).
-        return {"image": repo.get_by_id(image_id), "updated": False}
+        return {"image": _with_id(repo.get_by_id(image_id)), "updated": False}
 
     repo.update(image_id, data)
-    return {"image": repo.get_by_id(image_id), "updated": True}
+    return {"image": _with_id(repo.get_by_id(image_id)), "updated": True}
 
 
 @router.delete("/{image_id}")
@@ -335,7 +353,7 @@ async def assign_image(
     updated = repo.assign(image_id, payload.assigned_to)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to assign image")
-    return {"image": updated}
+    return {"image": _with_id(updated)}
 
 
 @router.post("/{image_id}/status")
@@ -370,7 +388,7 @@ async def set_image_status(
     # Approval gates go-live -> chained audit row.
     if target == "APPROVED":
         _write_audit(updated, current_user)
-    return {"image": updated}
+    return {"image": _with_id(updated)}
 
 
 @router.post("/{image_id}/edited")
@@ -400,4 +418,4 @@ async def attach_edited_image(
                 f"(current: {existing.get('status')})"
             ),
         )
-    return {"image": updated}
+    return {"image": _with_id(updated)}

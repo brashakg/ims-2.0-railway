@@ -176,6 +176,77 @@ function _isUnavailable(err: unknown): boolean {
   return status === 404 || status === 501;
 }
 
+// Map the backend smart-rule relation vocabulary <-> the FE `op` vocabulary.
+// The backend stores rules flat (top-level `rules:[{field,relation,value}]` +
+// `disjunctive`); the FE editor works in `smart_rules:{disjunctive,rules:[{...op}]}`.
+const _RELATION_TO_OP: Record<string, string> = {
+  EQUALS: 'equals',
+  NOT_EQUALS: 'not_equals',
+  CONTAINS: 'contains',
+  STARTS_WITH: 'starts_with',
+  ENDS_WITH: 'ends_with',
+  GREATER_THAN: 'greater_than',
+  LESS_THAN: 'less_than',
+};
+const _OP_TO_RELATION: Record<string, string> = {
+  equals: 'EQUALS',
+  not_equals: 'NOT_EQUALS',
+  contains: 'CONTAINS',
+  starts_with: 'STARTS_WITH',
+  ends_with: 'ENDS_WITH',
+  greater_than: 'GREATER_THAN',
+  less_than: 'LESS_THAN',
+};
+
+/** FE op -> backend relation (defaults to EQUALS for an unknown op). */
+function opToRelation(op: string | null | undefined): string {
+  return _OP_TO_RELATION[(op || '').toLowerCase()] ?? 'EQUALS';
+}
+
+/** Normalise a single collection payload: unwrap the {collection:{...}} envelope
+ *  the get/create/update routes return, mirror the stable `id`, and rebuild the
+ *  FE-shaped `smart_rules` ({disjunctive, rules:[{field,op,value}]}) from the
+ *  backend's flat top-level `rules` + `disjunctive`. Tolerates a bare object. */
+function _normCollection(data: any): EcomCollection {
+  const c = (data && typeof data === 'object' && data.collection) ? data.collection : data;
+  const row = (c ?? {}) as Record<string, any>;
+  // Stable id (backend mirrors collection_id -> id, but fall back defensively).
+  const id = String(row.id ?? row.collection_id ?? '');
+  // Rebuild smart_rules from the flat backend shape when present.
+  let smart_rules: SmartRules | null = null;
+  if (Array.isArray(row.rules)) {
+    smart_rules = {
+      disjunctive: !!row.disjunctive,
+      rules: row.rules.map((r: any) => ({
+        field: String(r.field ?? ''),
+        op: _RELATION_TO_OP[String(r.relation ?? '').toUpperCase()] ?? 'equals',
+        value: String(r.value ?? ''),
+      })),
+    };
+  } else if (row.smart_rules && typeof row.smart_rules === 'object') {
+    smart_rules = row.smart_rules as SmartRules;
+  }
+  return { ...row, id, smart_rules } as EcomCollection;
+}
+
+/** Translate the FE create/update payload into the backend's flat shape: lift the
+ *  nested `smart_rules` into top-level `rules` (with FE op -> backend relation) +
+ *  `disjunctive` so smart-collection rules actually persist. Non-smart payloads
+ *  pass through unchanged (minus the `smart_rules` key, which the backend rejects). */
+function _toBackendUpsert(payload: CollectionUpsert): Record<string, any> {
+  const { smart_rules, ...rest } = payload as CollectionUpsert & { smart_rules?: SmartRules };
+  const out: Record<string, any> = { ...rest };
+  if (smart_rules) {
+    out.disjunctive = !!smart_rules.disjunctive;
+    out.rules = (smart_rules.rules ?? []).map((r) => ({
+      field: r.field,
+      relation: opToRelation(r.op),
+      value: r.value,
+    }));
+  }
+  return out;
+}
+
 export const collectionsApi = {
   /** List all collections. Fail-soft: any error -> [] so the list renders. */
   list: async (): Promise<EcomCollection[]> => {
@@ -196,7 +267,7 @@ export const collectionsApi = {
   get: async (id: string): Promise<EcomCollection | null> => {
     try {
       const res = await api.get(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}`);
-      return (res?.data ?? null) as EcomCollection | null;
+      return res?.data ? _normCollection(res.data) : null;
     } catch {
       return null;
     }
@@ -204,14 +275,14 @@ export const collectionsApi = {
 
   /** Create a collection. Throws on failure (caller toasts the message). */
   create: async (payload: CollectionUpsert): Promise<EcomCollection> => {
-    const res = await api.post(COLLECTIONS_BASE, payload);
-    return res.data as EcomCollection;
+    const res = await api.post(COLLECTIONS_BASE, _toBackendUpsert(payload));
+    return _normCollection(res.data);
   },
 
   /** Update a collection (partial merge). Throws on failure. */
   update: async (id: string, payload: CollectionUpsert): Promise<EcomCollection> => {
-    const res = await api.put(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}`, payload);
-    return res.data as EcomCollection;
+    const res = await api.put(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}`, _toBackendUpsert(payload));
+    return _normCollection(res.data);
   },
 
   /** Toggle/set the published flag. Throws on failure. */
@@ -239,48 +310,57 @@ export const collectionsApi = {
     }
   },
 
-  /** Add a product to a CUSTOM collection. Throws on failure. */
-  addProduct: async (id: string, productId: string): Promise<void> => {
+  /** Add a product (by SKU) to a CUSTOM collection. Throws on failure. The
+   *  backend keys manual membership on `sku`, not the internal product id. */
+  addProduct: async (id: string, sku: string): Promise<void> => {
     await api.post(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/products`, {
-      product_id: productId,
+      sku,
     });
   },
 
-  /** Remove a product from a CUSTOM collection. Throws on failure. */
-  removeProduct: async (id: string, productId: string): Promise<void> => {
+  /** Remove a product (by SKU) from a CUSTOM collection. Throws on failure. */
+  removeProduct: async (id: string, sku: string): Promise<void> => {
     await api.delete(
-      `${COLLECTIONS_BASE}/${encodeURIComponent(id)}/products/${encodeURIComponent(productId)}`,
+      `${COLLECTIONS_BASE}/${encodeURIComponent(id)}/products/${encodeURIComponent(sku)}`,
     );
   },
 
-  /** Persist the manual member order (array of product_ids, first = position 0).
+  /** Persist the manual member order (array of SKUs, first = position 0).
    *  Throws on failure. */
-  reorder: async (id: string, productIds: string[]): Promise<void> => {
+  reorder: async (id: string, skus: string[]): Promise<void> => {
     await api.put(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/products/reorder`, {
-      product_ids: productIds,
+      skus,
     });
   },
 
   // --- Smart (SMART) resolution --------------------------------------------
 
-  /** Resolve which products a smart-rule set matches (preview, no save).
-   *  Posts the rules so the editor can preview BEFORE persisting them. For an
-   *  already-saved SMART collection the backend may also resolve by id.
-   *  Fail-soft: returns {products:[], total:0, available:false} when the
-   *  Phase-2 backend isn't deployed, so the preview button never crashes. */
+  /** Resolve which products a saved collection's rules match (preview, no save).
+   *  The backend exposes only GET /{id}/resolved-products (resolve a SAVED
+   *  collection by id) — there is no ad-hoc rule-resolver — so preview requires
+   *  the collection to have been saved at least once. The endpoint returns
+   *  {skus:[...], count}; we map each SKU to a slim CollectionProduct row.
+   *  Fail-soft: returns {products:[], total:0, available:false} when there is no
+   *  saved id or the Phase-2 backend isn't deployed, so the button never crashes. */
   resolvedProducts: async (
     args: { id?: string; rules?: SmartRules; limit?: number },
   ): Promise<{ products: CollectionProduct[]; total: number; available: boolean }> => {
+    // No saved id -> nothing to resolve (the GET route is keyed on a stored id).
+    if (!args.id) {
+      return { products: [], total: 0, available: false };
+    }
     try {
-      const res = await api.post(`${COLLECTIONS_BASE}/resolve`, {
-        collection_id: args.id ?? null,
-        smart_rules: args.rules ?? null,
-        limit: args.limit ?? 50,
-      });
+      const res = await api.get(
+        `${COLLECTIONS_BASE}/${encodeURIComponent(args.id)}/resolved-products`,
+        { params: { limit: args.limit ?? 50 } },
+      );
       const data = res?.data ?? {};
-      const arr = Array.isArray(data) ? data : (data.products ?? data.items ?? []);
-      const products = (Array.isArray(arr) ? arr : []) as CollectionProduct[];
-      const total = typeof data.total === 'number' ? data.total : products.length;
+      const skus = (Array.isArray(data.skus) ? data.skus : []) as string[];
+      const products: CollectionProduct[] = skus.map((sku) => ({
+        product_id: sku,
+        sku,
+      }));
+      const total = typeof data.count === 'number' ? data.count : products.length;
       return { products, total, available: true };
     } catch (err) {
       // 404/501 = backend not live yet -> degrade to an empty, "unavailable"
@@ -696,17 +776,27 @@ export interface ImageListFilters {
 const IMAGES_BASE = '/online-store/images';
 
 /** Normalise an images list payload into EcomProductImage[] (accepts a bare
- *  array or an envelope {images:[...]} / {items:[...]}). */
+ *  array or an envelope {images:[...]} / {items:[...]}), mapping each row's
+ *  backend keys (status / assigned_to / image_id) onto the FE-shaped ones. */
 function _imagesFrom(data: any): EcomProductImage[] {
   const arr = Array.isArray(data) ? data : (data?.images ?? data?.items ?? []);
-  return (Array.isArray(arr) ? arr : []) as EcomProductImage[];
+  const rows = (Array.isArray(arr) ? arr : []) as any[];
+  return rows.map((r) => _imageFrom(r)).filter(Boolean) as EcomProductImage[];
 }
 
-/** Unwrap a single-image payload (accepts {image:{...}} or a bare object). */
+/** Unwrap a single-image payload (accepts {image:{...}} or a bare object) and
+ *  map the backend's stored keys onto the ones the Design Queue reads:
+ *  image_id -> id, status -> design_status, assigned_to -> assignee_id. Each map
+ *  only fills an absent key, so a backend that already mirrors them is untouched. */
 function _imageFrom(data: any): EcomProductImage | null {
   if (!data) return null;
-  const m = data.image ?? data;
-  return (m && typeof m === 'object' ? m : null) as EcomProductImage | null;
+  const raw = data.image ?? data;
+  if (!raw || typeof raw !== 'object') return null;
+  const m = { ...raw } as Record<string, any>;
+  if (m.id == null && m.image_id != null) m.id = m.image_id;
+  if (m.design_status == null && m.status != null) m.design_status = m.status;
+  if (m.assignee_id == null && m.assigned_to != null) m.assignee_id = m.assigned_to;
+  return m as EcomProductImage;
 }
 
 export const imagesApi = {
@@ -757,10 +847,11 @@ export const imagesApi = {
   },
 
   /** Assign the image to a user (the designer who will work it). Pass null to
-   *  unassign. Convenience wrapper over `update`. Throws on failure. */
+   *  unassign. Hits the dedicated POST /{id}/assign route (the generic PUT does
+   *  NOT accept lifecycle fields). Throws on failure. */
   assign: async (id: string, assigneeId: string | null): Promise<EcomProductImage> => {
-    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, {
-      assignee_id: assigneeId,
+    const res = await api.post(`${IMAGES_BASE}/${encodeURIComponent(id)}/assign`, {
+      assigned_to: assigneeId,
     });
     const m = _imageFrom(res?.data);
     if (!m) throw new Error('Assign image returned no record');
@@ -768,16 +859,22 @@ export const imagesApi = {
   },
 
   /** Move the image to a new lifecycle status (Start -> IN_PROGRESS, Approve ->
-   *  APPROVED, Reject -> REJECTED, ...). `note` carries a reject/review reason.
-   *  Throws on failure. Returns the updated record. */
+   *  APPROVED, Reject -> REJECTED, ...) via the dedicated POST /{id}/status route
+   *  (which enforces the valid-transition guard). `note` (e.g. a reject reason)
+   *  is persisted first via the patchable `design_notes` field, since /status
+   *  itself carries only the target status. Throws on failure. */
   setStatus: async (
     id: string,
     status: ImageDesignStatus,
     note?: string,
   ): Promise<EcomProductImage> => {
-    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, {
-      design_status: status,
-      ...(note !== undefined ? { note } : {}),
+    if (note !== undefined && note !== '') {
+      // design_notes IS patchable on the generic PUT; record the reason before
+      // the status transition so it survives on the card.
+      await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, { design_notes: note });
+    }
+    const res = await api.post(`${IMAGES_BASE}/${encodeURIComponent(id)}/status`, {
+      status,
     });
     const m = _imageFrom(res?.data);
     if (!m) throw new Error('Set image status returned no record');
@@ -785,14 +882,12 @@ export const imagesApi = {
   },
 
   /** Attach the designer's edited image URL and advance the record to REVIEW
-   *  (awaiting approver sign-off), mirroring BVI's "upload edited -> publish"
-   *  step but stopping at REVIEW (the approve gate is a separate action).
+   *  (awaiting approver sign-off) via the dedicated POST /{id}/edited route
+   *  (which requires the image to be IN_PROGRESS and moves it to REVIEW).
    *  Throws on failure. Returns the updated record. */
   attachEdited: async (id: string, editedUrl: string): Promise<EcomProductImage> => {
-    const res = await api.put(`${IMAGES_BASE}/${encodeURIComponent(id)}`, {
+    const res = await api.post(`${IMAGES_BASE}/${encodeURIComponent(id)}/edited`, {
       edited_url: editedUrl,
-      role: 'EDITED' as ImageRole,
-      design_status: 'REVIEW' as ImageDesignStatus,
     });
     const m = _imageFrom(res?.data);
     if (!m) throw new Error('Attach edited image returned no record');

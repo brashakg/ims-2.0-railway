@@ -100,6 +100,20 @@ def _require_repo():
     return repo
 
 
+def _with_id(doc):
+    """Mirror the internal `menu_id` onto a stable `id` key so every FE consumer
+    (which reads `row.id`) gets the same handle regardless of entity. Additive +
+    non-destructive: leaves an existing `id` alone, tolerates a list (maps each
+    element) or a non-dict (returned untouched). Item-tree node ids already use
+    their own `id`, so only the menu envelope needs this. Fail-soft."""
+    if isinstance(doc, list):
+        return [_with_id(d) for d in doc]
+    if isinstance(doc, dict):
+        if doc.get("id") is None and doc.get("menu_id") is not None:
+            doc["id"] = doc["menu_id"]
+    return doc
+
+
 # ---------------------------------------------------------------------------
 # Pydantic payloads
 # ---------------------------------------------------------------------------
@@ -229,7 +243,7 @@ async def list_menus(
     if repo is None:
         return {"menus": [], "count": 0, "db_connected": False}
     rows = repo.list(active=active, is_default=is_default, skip=skip, limit=limit)
-    return {"menus": rows, "count": len(rows), "db_connected": True}
+    return {"menus": _with_id(rows), "count": len(rows), "db_connected": True}
 
 
 @router.post("", status_code=201)
@@ -261,7 +275,7 @@ async def create_menu(
     created = repo.create(data)
     if created is None:
         raise HTTPException(status_code=500, detail="Failed to create menu")
-    return {"menu": created}
+    return {"menu": _with_id(created)}
 
 
 @router.get("/{menu_id}")
@@ -273,7 +287,7 @@ async def get_menu(
     doc = repo.get_by_id(menu_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Menu not found")
-    return {"menu": doc}
+    return {"menu": _with_id(doc)}
 
 
 @router.put("/{menu_id}")
@@ -305,10 +319,10 @@ async def update_menu(
 
     if not data:
         # Nothing to change -> return the unchanged doc (idempotent no-op).
-        return {"menu": existing, "updated": False}
+        return {"menu": _with_id(existing), "updated": False}
 
     repo.update(menu_id, data)
-    return {"menu": repo.get_by_id(menu_id), "updated": True}
+    return {"menu": _with_id(repo.get_by_id(menu_id)), "updated": True}
 
 
 @router.delete("/{menu_id}")
@@ -345,7 +359,7 @@ async def add_menu_item(
     if updated is None:
         # add_item returns None for an unknown parent (caller error) too.
         raise HTTPException(status_code=400, detail="Failed to add item (unknown parent_id?)")
-    return {"menu": updated}
+    return {"menu": _with_id(updated)}
 
 
 @router.put("/{menu_id}/items/reorder")
@@ -361,7 +375,7 @@ async def reorder_menu_items(
         raise HTTPException(status_code=404, detail="Menu not found")
     items = [_item_to_dict(i) for i in (payload.items or [])]
     ok = repo.update(menu_id, {"items": items})
-    return {"menu": repo.get_by_id(menu_id), "updated": bool(ok)}
+    return {"menu": _with_id(repo.get_by_id(menu_id)), "updated": bool(ok)}
 
 
 @router.put("/{menu_id}/items/{item_id}/move")
@@ -384,7 +398,7 @@ async def move_menu_item(
             status_code=400,
             detail="Failed to move item (unknown item/parent or illegal cycle)",
         )
-    return {"menu": updated}
+    return {"menu": _with_id(updated)}
 
 
 @router.put("/{menu_id}/items/{item_id}")
@@ -408,7 +422,7 @@ async def update_menu_item(
     updated = repo.update_item(menu_id, item_id, fields)
     if updated is None:
         raise HTTPException(status_code=404, detail="Menu item not found")
-    return {"menu": updated}
+    return {"menu": _with_id(updated)}
 
 
 @router.delete("/{menu_id}/items/{item_id}")
@@ -424,4 +438,4 @@ async def remove_menu_item(
     updated = repo.remove_item(menu_id, item_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to remove item")
-    return {"menu": updated}
+    return {"menu": _with_id(updated)}
