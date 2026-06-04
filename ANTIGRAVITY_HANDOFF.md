@@ -144,6 +144,37 @@ There is also a **second concurrent Claude Code session** that runs alongside th
 shipped go-live features e.g. PR #450 opening-stock importer, #451 readiness checklist). When two
 agents work the same repo, take non-colliding lanes and rebase before merge.
 
+### 4a. EXACT local transcript inventory (these are NOT in the git repo — read them on disk)
+
+The IMS 2.0 work lives in **local Claude Code session transcripts** (JSONL) under **TWO** project
+folders (Claude Code encodes the working dir into the folder name). Antigravity has no context for
+these unless it reads them:
+
+**A) `C:\Users\avina\.claude\projects\C--Users-avina-IMS-2-0-CLAUDE-COWORK\`  — 12 IMS 2.0 sessions**
+- `349ecee1-b396-4d57-a9f8-a536c41f485e.jsonl` (~7.8 MB, 2026-06-04) — **LATEST marathon**: BVI Phases 2–5+3b, Purchase Invoice (council), Campaigns rebuild, Catalog Autopilot AI fix, attendance fix, audit-chain CI-flake fix, app-wide stub audit, this handoff.
+- `a9b59c44-fad3-4cb5-9423-b01c9bb5192b.jsonl` (~12.5 MB, 2026-06-01)
+- `12b5aaa5-f957-46aa-93b7-32f4aecf18db.jsonl` (~125 MB, 2026-05-29) — **huge**, heavy multi-agent run
+- `b97c0752-…` (~11.3 MB, 05-29), `18770f2f-…` (~7.8 MB, 05-29), `795d57de-…` (05-28), `5eb75fab-…` (05-28), `cd85526d-…` (05-24), `875f56eb-…` (05-24), `f630a051-…` (05-31), `ef94c629-…`/`feecdee2-…` (05-29) — smaller.
+
+**B) `C:\Users\avina\.claude\projects\C--Users-avina-INVENTORY-MODULE\`  — 1 earlier session**
+- `a3492fcc-3ede-41d6-b0ba-a02f1a445ea7.jsonl` (~25.6 MB, 2026-06-01) — the **inventory-module root BEFORE it became IMS 2.0**; read for origin context.
+
+(Sub-agent transcripts are under `<sessionId>\subagents\*.jsonl` — skip unless you need tool-level detail.)
+
+**How to read (large files — be selective):** each line is one JSON event
+`{"type":"user"|"assistant","message":{"content":...},...}`. Extract the owner's intent fast with:
+```powershell
+Get-Content "<path>.jsonl" | ForEach-Object {
+  try { $o = $_ | ConvertFrom-Json
+        if ($o.type -eq 'user' -and $o.message.content) {
+          if ($o.message.content -is [string]) { $o.message.content }
+          else { ($o.message.content | Where-Object { $_.type -eq 'text' }).text } } } catch {} }
+```
+(swap `'user'`→`'assistant'` to read what the agent concluded.) **Read the `memory/session_2026_05_*.md`
+recaps first** (they summarize several of these); only open a raw JSONL for a session the recaps don't
+cover (notably the INVENTORY-MODULE one) or to trace a specific decision/error. Start with `349ecee1`
+(latest = current state), then go backward by date as needed.
+
 ---
 
 ## 5. Non-negotiable rules + working preferences
