@@ -4,10 +4,40 @@
 // End-to-end authentication flow testing
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { vi } from 'vitest';
 import axios from 'axios';
 import { mockUsers } from '../../utils/test-fixtures';
 
-jest.mock('axios');
+// Mock axios so its verbs are vi.fn() spies the tests can drive per-case.
+vi.mock('axios', () => ({
+  default: {
+    get: vi.fn(),
+    post: vi.fn(),
+    put: vi.fn(),
+    delete: vi.fn(),
+  },
+}));
+
+// vitest has no global `fail()` (jest did). Provide a tiny shim so the
+// negative-path assertion below keeps its original intent.
+const fail = (msg: string): never => {
+  throw new Error(msg);
+};
+
+// The jsdom build under this runner exposes only a partial localStorage
+// (getItem/setItem present, removeItem/clear missing). These tests exercise the
+// full auth-token lifecycle, so install a complete in-memory Storage so
+// removeItem/clear behave. Scoped to this file; does not touch app source.
+class MemoryStorage implements Storage {
+  private store = new Map<string, string>();
+  get length() { return this.store.size; }
+  clear() { this.store.clear(); }
+  getItem(key: string) { return this.store.has(key) ? this.store.get(key)! : null; }
+  key(index: number) { return Array.from(this.store.keys())[index] ?? null; }
+  removeItem(key: string) { this.store.delete(key); }
+  setItem(key: string, value: string) { this.store.set(key, String(value)); }
+}
+vi.stubGlobal('localStorage', new MemoryStorage());
 
 describe('Authentication Integration', () => {
   let queryClient: QueryClient;
@@ -19,7 +49,10 @@ describe('Authentication Integration', () => {
         mutations: { retry: false },
       },
     });
-    jest.clearAllMocks();
+    vi.clearAllMocks();
+    // jsdom's localStorage shim in this runner has no .clear(); remove the keys
+    // these tests touch so each case starts from a clean, unauthenticated state.
+    ['auth_token', 'refresh_token', 'user'].forEach((k) => localStorage.removeItem(k));
   });
 
   const _wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -30,8 +63,8 @@ describe('Authentication Integration', () => {
 
   describe('Login Flow', () => {
     it('should complete successful login flow', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
-      mockAxios.post = jest.fn().mockResolvedValue({
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
+      mockAxios.post = vi.fn().mockResolvedValue({
         data: {
           success: true,
           data: {
@@ -67,14 +100,14 @@ describe('Authentication Integration', () => {
     });
 
     it('should handle login failure with invalid credentials', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
       const error = new Error('Invalid credentials');
       (error as any).response = {
         status: 401,
         data: { success: false, error: 'Invalid email or password' },
       };
 
-      mockAxios.post = jest.fn().mockRejectedValue(error);
+      mockAxios.post = vi.fn().mockRejectedValue(error);
 
       const loginData = {
         email: 'invalid@ims.local',
@@ -110,13 +143,13 @@ describe('Authentication Integration', () => {
     });
 
     it('should validate token on app initialization', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
       const token = 'test-token-123';
 
       localStorage.setItem('auth_token', token);
 
       // Mock token validation endpoint
-      mockAxios.get = jest.fn().mockResolvedValue({
+      mockAxios.get = vi.fn().mockResolvedValue({
         data: {
           success: true,
           data: { valid: true, user: mockUsers.admin },
@@ -151,7 +184,7 @@ describe('Authentication Integration', () => {
 
   describe('Logout Flow', () => {
     it('should complete logout flow', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
 
       // 1. Setup authenticated state
       const token = 'test-token-123';
@@ -159,7 +192,7 @@ describe('Authentication Integration', () => {
       localStorage.setItem('user', JSON.stringify(mockUsers.admin));
 
       // 2. Call logout endpoint
-      mockAxios.post = jest.fn().mockResolvedValue({
+      mockAxios.post = vi.fn().mockResolvedValue({
         data: { success: true },
       });
 
@@ -183,7 +216,7 @@ describe('Authentication Integration', () => {
 
   describe('Token Refresh', () => {
     it('should refresh expired token using refresh token', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
 
       // 1. Setup expired token scenario
       const expiredToken = 'expired-token';
@@ -195,7 +228,7 @@ describe('Authentication Integration', () => {
       const firstError = new Error('Token Expired');
       (firstError as any).response = { status: 401 };
 
-      mockAxios.post = jest.fn()
+      mockAxios.post = vi.fn()
         .mockRejectedValueOnce(firstError)
         .mockResolvedValueOnce({
           data: {
@@ -224,7 +257,7 @@ describe('Authentication Integration', () => {
     });
 
     it('should force logout on failed token refresh', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
 
       const refreshToken = 'invalid-refresh-token';
       localStorage.setItem('auth_token', 'expired-token');
@@ -234,7 +267,7 @@ describe('Authentication Integration', () => {
       const error = new Error('Invalid refresh token');
       (error as any).response = { status: 401 };
 
-      mockAxios.post = jest.fn().mockRejectedValue(error);
+      mockAxios.post = vi.fn().mockRejectedValue(error);
 
       try {
         await mockAxios.post('/api/v1/auth/refresh', { refreshToken });
@@ -292,10 +325,10 @@ describe('Authentication Integration', () => {
 
   describe('Error Handling', () => {
     it('should handle network errors gracefully', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
       const networkError = new Error('Network Error');
 
-      mockAxios.post = jest.fn().mockRejectedValue(networkError);
+      mockAxios.post = vi.fn().mockRejectedValue(networkError);
 
       try {
         await mockAxios.post('/api/v1/auth/login', {
@@ -312,9 +345,9 @@ describe('Authentication Integration', () => {
     });
 
     it('should handle malformed responses', async () => {
-      const mockAxios = axios as jest.Mocked<typeof axios>;
+      const mockAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
 
-      mockAxios.post = jest.fn().mockResolvedValue({
+      mockAxios.post = vi.fn().mockResolvedValue({
         data: { /* missing required fields */ },
       });
 
