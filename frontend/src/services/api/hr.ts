@@ -7,7 +7,21 @@ import api from './client';
 export const hrApi = {
   getAttendance: async (storeId: string, date?: string) => {
     const response = await api.get('/hr/attendance', { params: { store_id: storeId, date } });
-    return response.data;
+    const data = response.data;
+    // Backend (GET /hr/attendance) returns camelCase keys attendanceId /
+    // employeeId / employeeName / checkIn / checkOut. The HR page + self-service
+    // view read id / userId / userName / checkInTime / checkOutTime. Map the
+    // seam here while keeping the raw fields so both shapes resolve.
+    const rawRecords = Array.isArray(data?.records) ? data.records : Array.isArray(data) ? data : [];
+    const records = rawRecords.map((r: any) => ({
+      ...r,
+      id: r.attendanceId ?? r.id ?? '',
+      userId: r.employeeId ?? r.userId ?? '',
+      userName: r.employeeName ?? r.userName ?? '',
+      checkInTime: r.checkIn ?? r.checkInTime ?? null,
+      checkOutTime: r.checkOut ?? r.checkOutTime ?? null,
+    }));
+    return { ...(data && typeof data === 'object' ? data : {}), records };
   },
 
   // Geo-fenced, late-mark-aware check-in. The backend reads store_id /
@@ -33,7 +47,38 @@ export const hrApi = {
 
   getLeaves: async (params?: { userId?: string; status?: string }) => {
     const response = await api.get('/hr/leaves', { params });
-    return response.data;
+    const data = response.data;
+    // Backend (GET /hr/leaves) returns RAW snake_case leave docs:
+    // leave_id / employee_id / employee_name / leave_type / from_date /
+    // to_date / reason / status / applied_at / approved_by. The FE reads
+    // id / userId / userName / leaveType / startDate / endDate / days /
+    // appliedAt / approvedBy. Map the seam (and compute inclusive day count)
+    // while keeping the raw fields so approveLeave gets a valid leave_id.
+    const rawLeaves = Array.isArray(data?.leaves) ? data.leaves : Array.isArray(data) ? data : [];
+    const leaves = rawLeaves.map((l: any) => {
+      const startDate = l.from_date ?? l.startDate ?? null;
+      const endDate = l.to_date ?? l.endDate ?? startDate;
+      let days = l.days;
+      if (days == null && startDate) {
+        const s = new Date(startDate);
+        const e = new Date(endDate || startDate);
+        const diff = Math.floor((e.getTime() - s.getTime()) / 86400000) + 1;
+        days = Number.isFinite(diff) && diff > 0 ? diff : 1;
+      }
+      return {
+        ...l,
+        id: l.leave_id ?? l.id ?? '',
+        userId: l.employee_id ?? l.userId ?? '',
+        userName: l.employee_name ?? l.userName ?? '',
+        leaveType: l.leave_type ?? l.leaveType ?? '',
+        startDate,
+        endDate,
+        days: days ?? 1,
+        appliedAt: l.applied_at ?? l.appliedAt ?? null,
+        approvedBy: l.approved_by ?? l.approvedBy ?? null,
+      };
+    });
+    return { ...(data && typeof data === 'object' ? data : {}), leaves };
   },
 
   applyLeave: async (data: Partial<import('../../types').Leave>) => {

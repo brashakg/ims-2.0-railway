@@ -55,10 +55,12 @@ export function EmployeeSelfService() {
       
       const now = new Date();
       const monthRecords = records.filter((r: any) => {
-        const checkInDate = new Date(r.checkInTime || now);
-        return checkInDate.getMonth() === now.getMonth() && 
-               checkInDate.getFullYear() === now.getFullYear() &&
-               r.userId === user.id;
+        // getAttendance maps backend keys; fall back to the record date when
+        // there is no check-in time (e.g. LEAVE / ABSENT rows).
+        const refDate = new Date(r.checkInTime || r.checkIn || r.date || now);
+        return refDate.getMonth() === now.getMonth() &&
+               refDate.getFullYear() === now.getFullYear() &&
+               (r.userId || r.employeeId) === user.id;
       });
 
       const attSummary: AttendanceSummary = {

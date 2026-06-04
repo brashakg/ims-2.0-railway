@@ -516,7 +516,7 @@ export function POSLayout() {
               <div className="step-num">
                 {isComplete ? '' : <Icon className="w-3 h-3" />}
               </div>
-              <div style={{ minWidth: 0, flex: 1 }}>
+              <div className="min-w-0 flex-1">
                 <div className="step-title">{step.label}</div>
                 <div className="step-sub">
                   {step.id === 'customer' && (store.customer?.name ?? 'Pick customer')}
@@ -545,13 +545,13 @@ export function POSLayout() {
           <button
             type="button"
             onClick={() => setShowRecallPanel(true)}
-            className="btn sm"
-            style={{ position: 'relative' }}
+            className="btn sm relative"
             title="Recall held bill"
           >
             <Play className="w-4 h-4" /> Recall
             {getHeldBills().length > 0 && (
               <span
+                className="grid place-items-center"
                 style={{
                   position: 'absolute',
                   top: -6,
@@ -565,8 +565,6 @@ export function POSLayout() {
                   fontFamily: 'var(--font-mono)',
                   fontSize: 10,
                   fontWeight: 600,
-                  display: 'grid',
-                  placeItems: 'center',
                 }}
               >
                 {getHeldBills().length}
@@ -655,7 +653,7 @@ export function POSLayout() {
         <div className="pos-work">
           {/* Editorial header */}
           <div className="work-head">
-            <div className="eyebrow" style={{ marginBottom: 6 }}>
+            <div className="eyebrow mb-1.5">
               {/* DELTAS Critical #5: showed "Step 0/4" when
                   store.current_step wasn't in activeSteps yet (indexOf
                   returns -1 → 0 with the +1). Clamp to 1. */}
@@ -668,20 +666,18 @@ export function POSLayout() {
           {/* Error banner */}
           {errorMsg && (
             <div
-              className="s-section"
+              className="s-section flex items-center"
               style={{
                 padding: 12,
                 borderColor: 'var(--err-50)',
                 background: 'var(--err-50)',
-                display: 'flex',
-                alignItems: 'center',
                 gap: 8,
                 marginBottom: 14,
               }}
             >
               <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
-              <span style={{ color: 'var(--err)', flex: 1 }}>{errorMsg}</span>
-              <button onClick={() => setErrorMsg(null)} className="btn sm ghost">
+              <span className="flex-1" style={{ color: 'var(--err)' }}>{errorMsg}</span>
+              <button onClick={() => setErrorMsg(null)} className="btn sm ghost" aria-label="Dismiss error" title="Dismiss error">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -691,7 +687,7 @@ export function POSLayout() {
               Audit 2026-04-21 flagged sticky-footer overlapping row-3
               products on Step 2 at 900px viewport. paddingBottom below
               gives the last row scroll clearance past the footer. */}
-          <div style={{ flex: 1, minHeight: 0, paddingBottom: '80px', overflowY: 'auto' }}>
+          <div className="flex-1 min-h-0 pb-20 overflow-y-auto">
             {store.current_step === 'customer' && <StepCustomer />}
             {store.current_step === 'prescription' && (
               <StepPrescription
@@ -743,11 +739,10 @@ export function POSLayout() {
                 {store.is_processing ? (
                   <>
                     <span
-                      className="w-4 h-4 animate-spin"
+                      className="w-4 h-4 animate-spin rounded-full"
                       style={{
                         border: '2px solid rgba(255,255,255,.3)',
                         borderTopColor: '#fff',
-                        borderRadius: '50%',
                       }}
                     />
                     Processing…
@@ -813,13 +808,13 @@ export function POSLayout() {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">New Prescription</h3>
-              <button onClick={() => { setShowNewPrescription(false); setErrorMsg(null); }} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
+              <button onClick={() => { setShowNewPrescription(false); setErrorMsg(null); }} className="p-1 hover:bg-gray-100 rounded" aria-label="Close" title="Close"><X className="w-5 h-5" /></button>
             </div>
             {errorMsg && (
               <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                 <div><p className="font-medium">Failed to save prescription</p><p className="text-xs mt-0.5">{errorMsg}</p></div>
-                <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
+                <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600" aria-label="Dismiss error" title="Dismiss error"><X className="w-4 h-4" /></button>
               </div>
             )}
             <div className="p-4">
@@ -956,7 +951,7 @@ export function POSLayout() {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[70vh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">Held Bills ({getHeldBills().length})</h3>
-              <button onClick={() => setShowRecallPanel(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
+              <button onClick={() => setShowRecallPanel(false)} className="p-1 hover:bg-gray-100 rounded" aria-label="Close" title="Close"><X className="w-5 h-5" /></button>
             </div>
             <div className="p-4 space-y-2">
               {getHeldBills().length === 0 ? (
@@ -1680,7 +1675,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2 text-sm text-red-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{blockMsg}</span>
-          <button onClick={() => setBlockMsg(null)} className="text-red-400 hover:text-red-600"><X className="w-3.5 h-3.5" /></button>
+          <button onClick={() => setBlockMsg(null)} className="text-red-400 hover:text-red-600" aria-label="Dismiss" title="Dismiss"><X className="w-3.5 h-3.5" /></button>
         </div>
       )}
       <div className="flex gap-3">
@@ -1928,7 +1923,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                 </td>
                 <td className="text-center px-2 text-xs text-gray-500">{gstRate}%</td>
                 <td className="text-right px-4 font-semibold">{fc(item.line_total)}</td>
-                <td><button onClick={() => store.removeFromCart(item.id)} className="p-1 text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></td>
+                <td><button onClick={() => store.removeFromCart(item.id)} className="p-1 text-gray-500 hover:text-red-500" aria-label="Remove item" title="Remove item"><X className="w-4 h-4" /></button></td>
               </tr>
               );
             })}
@@ -2015,6 +2010,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
             <label className="text-xs text-gray-500 block mb-1">Date</label>
             <input
               type="date"
+              title="Delivery / collection date"
               value={store.delivery_date || ''}
               onChange={(e) => store.setDeliveryDate(e.target.value || null)}
               className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
@@ -2023,6 +2019,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           <div>
             <label className="text-xs text-gray-500 block mb-1">Time slot</label>
             <select
+              title="Delivery time slot"
               value={store.delivery_time_slot || ''}
               onChange={(e) => store.setDeliveryTimeSlot(e.target.value || null)}
               className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
@@ -2038,6 +2035,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           <div>
             <label className="text-xs text-gray-500 block mb-1">Priority</label>
             <select
+              title="Delivery priority"
               value={store.delivery_priority || 'NORMAL'}
               onChange={(e) => store.setDeliveryPriority(e.target.value as 'NORMAL' | 'EXPRESS' | 'URGENT')}
               className={`w-full px-2 py-1.5 border rounded text-sm font-medium ${

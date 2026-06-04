@@ -230,7 +230,23 @@ export function QuickAddPage() {
 
       setIsSubmitting(true);
       try {
-        await productApi.createProduct(buildProductPayload(values));
+        const created = await productApi.createProduct(buildProductPayload(values));
+        // ProductCreate does NOT model barcode/reorder_point (only ProductUpdate
+        // does), so persist the Inventory-section fields via a follow-up update
+        // on the new product_id. Fail-soft: a bad/duplicate barcode (PUT runs the
+        // EAN-13 + uniqueness guard) must not fail the create the user just did.
+        const newId = created?.product_id || created?.id;
+        const reorderNum = Number(reorderLevel);
+        const inventoryPatch: { barcode?: string; reorder_point?: number } = {};
+        if (barcode.trim()) inventoryPatch.barcode = barcode.trim();
+        if (Number.isFinite(reorderNum) && reorderNum >= 0) inventoryPatch.reorder_point = reorderNum;
+        if (newId && Object.keys(inventoryPatch).length > 0) {
+          try {
+            await productApi.updateProduct(newId, inventoryPatch);
+          } catch {
+            toast.warning('Product created, but the barcode / reorder level could not be saved.');
+          }
+        }
         toast.success('Product created successfully!');
         if (saveAndNew) {
           resetForm(true);
@@ -465,6 +481,7 @@ export function QuickAddPage() {
       {field.type === 'select' ? (
         <select
           ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
+          title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
           className="input-field w-full"
@@ -478,9 +495,10 @@ export function QuickAddPage() {
         <input
           ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
           type={field.type}
+          title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
-          placeholder={field.placeholder}
+          placeholder={field.placeholder || field.label}
           className="input-field w-full"
         />
       )}
@@ -506,7 +524,7 @@ export function QuickAddPage() {
           type="button"
           onClick={() => toggleSection(id)}
           className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-50 transition-colors"
-          aria-expanded={open}
+          aria-expanded={open ? "true" : "false"}
         >
           <span className="flex items-center gap-3">
             <span className="text-bv">{icon}</span>
@@ -529,7 +547,7 @@ export function QuickAddPage() {
       {/* Editorial header (mode toggle is rendered by the route shell) */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Catalog · Add product</div>
+          <div className="eyebrow mb-1.5">Catalog · Add product</div>
           <h1>One screen. One SKU. Fast.</h1>
           <div className="hint">
             Fill the essentials and hit <kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> to save.
@@ -543,7 +561,7 @@ export function QuickAddPage() {
             type="button"
             onClick={() => setTemplatesOpen((v) => !v)}
             className="btn-secondary flex items-center gap-2"
-            aria-expanded={templatesOpen}
+            aria-expanded={templatesOpen ? "true" : "false"}
             aria-haspopup="dialog"
           >
             <LayoutTemplate className="w-4 h-4" />
@@ -779,6 +797,7 @@ export function QuickAddPage() {
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">HSN Code</label>
                           <select
+                            title="HSN Code"
                             value={hsnCode}
                             onChange={(e) => {
                               setHsnCode(e.target.value);
@@ -797,6 +816,7 @@ export function QuickAddPage() {
                           <label className="block text-sm font-medium text-gray-700 mb-1">GST Rate (%)</label>
                           <input
                             type="text"
+                            title="GST Rate (auto-filled from HSN)"
                             value={`${gstRate}%`}
                             readOnly
                             className="input-field w-full bg-gray-50 cursor-not-allowed"
@@ -883,6 +903,7 @@ export function QuickAddPage() {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Discount Category</label>
                 <select
+                  title="Discount Category"
                   value={discountCategory}
                   onChange={(e) => setDiscountCategory(e.target.value)}
                   className="input-field w-full"
@@ -907,6 +928,8 @@ export function QuickAddPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Initial Quantity</label>
                 <input
                   type="number"
+                  title="Initial Quantity"
+                  placeholder="0"
                   value={initialQuantity}
                   onChange={(e) => setInitialQuantity(e.target.value)}
                   className="input-field w-full"
@@ -927,6 +950,8 @@ export function QuickAddPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Reorder Level</label>
                 <input
                   type="number"
+                  title="Reorder Level"
+                  placeholder="5"
                   value={reorderLevel}
                   onChange={(e) => setReorderLevel(e.target.value)}
                   className="input-field w-full"
@@ -954,6 +979,8 @@ export function QuickAddPage() {
               <label className="relative inline-flex items-center cursor-pointer">
                 <input
                   type="checkbox"
+                  title="Sync to Shopify"
+                  aria-label="Sync to Shopify"
                   checked={syncToShopify}
                   onChange={(e) => setSyncToShopify(e.target.checked)}
                   className="sr-only peer"
@@ -971,6 +998,8 @@ export function QuickAddPage() {
                   </div>
                   <input
                     type="checkbox"
+                    title="Publish to Shopify POS"
+                    aria-label="Publish to Shopify POS"
                     checked={publishPOS}
                     onChange={(e) => setPublishPOS(e.target.checked)}
                     className="w-5 h-5 rounded border-gray-300"
@@ -1003,6 +1032,8 @@ export function QuickAddPage() {
                             type="button"
                             onClick={() => setShopifyTags(shopifyTags.filter((t) => t !== tag))}
                             className="ml-1 text-gray-500 hover:text-gray-700"
+                            aria-label={`Remove tag ${tag}`}
+                            title={`Remove tag ${tag}`}
                           >
                             <X className="w-3 h-3" />
                           </button>
@@ -1111,10 +1142,10 @@ export function QuickAddPage() {
 // Review rail row.
 function ReviewRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <dl className="flex items-center justify-between gap-3">
       <dt className="text-gray-500 shrink-0">{label}</dt>
       <dd className="font-medium text-gray-900 text-right truncate">{value}</dd>
-    </div>
+    </dl>
   );
 }
 

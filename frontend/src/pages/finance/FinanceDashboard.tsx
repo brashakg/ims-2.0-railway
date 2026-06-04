@@ -82,7 +82,7 @@ function mapOutstanding(d: any): OutstandingReceivable[] {
     customer_name: o.customer_name || 'Unknown',
     amount: Number(o.amount || 0),
     gst_amount: 0,
-    due_date: '',
+    due_date: o.due_date || '',
     days_overdue: Number(o.days_overdue || 0),
     status: (Number(o.days_overdue || 0) > 30 ? 'overdue' : 'active') as OutstandingReceivable['status'],
   }));
@@ -354,7 +354,7 @@ export default function FinanceDashboard() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Finance &amp; Accounting</div>
+          <div className="eyebrow mb-1.5">Finance &amp; Accounting</div>
           <h1>The books, in real time.</h1>
           <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
         </div>

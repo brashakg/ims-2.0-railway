@@ -170,7 +170,7 @@ export function HRPage() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>HR &amp; Attendance</div>
+          <div className="eyebrow mb-1.5">HR &amp; Attendance</div>
           <h1>Who's on the floor.</h1>
           <div className="hint">Geo-fenced check-in, leave management, shift roster, payroll prep. Late marks auto-calculated from shift start.</div>
         </div>
@@ -230,15 +230,21 @@ export function HRPage() {
           <button
             onClick={async () => {
               try {
-                // Get latest attendance to find the ID
+                // Get latest attendance to find the ID. getAttendance now maps
+                // the backend camel keys, so userId / checkOutTime / id resolve.
                 const data = await hrApi.getAttendance(user?.activeStoreId || '');
                 const records = data?.records || data || [];
-                const today = records.find((r: any) => r.userId === user?.id && !r.checkOut);
+                const today = records.find((r: any) => r.userId === user?.id && !r.checkOutTime);
                 if (today?.id) {
                   await hrApi.checkOut(today.id);
+                  toast.success('Checked out successfully');
                   await loadData();
+                } else {
+                  toast.warning('No open check-in found to check out.');
                 }
-              } catch { /* ignore */ }
+              } catch {
+                toast.error('Check-out failed. Please try again.');
+              }
             }}
             className="btn-outline flex items-center gap-2 text-sm"
           >

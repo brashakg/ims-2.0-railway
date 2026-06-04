@@ -442,11 +442,11 @@ export function TaskManagementPage() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Tasks &amp; SOPs</div>
+          <div className="eyebrow mb-1.5">Tasks &amp; SOPs</div>
           <h1>The shift, by priority.</h1>
           <div className="hint">P0–P4 priorities with countdown timers and auto-escalation tied to SOPs. 40-person ops coordination.</div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
+        <div className="row gap-2">
           <button
             onClick={() => {
               if (activeTab === 'sop') {
@@ -511,6 +511,7 @@ export function TaskManagementPage() {
           {activeTab !== 'sop' && (
             <>
               <select
+                title="Filter by status"
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as any)}
                 className="input-field w-auto"
@@ -522,6 +523,7 @@ export function TaskManagementPage() {
                 <option value="OVERDUE">Overdue</option>
               </select>
               <select
+                title="Filter by priority"
                 value={priorityFilter}
                 onChange={(e) => setPriorityFilter(e.target.value as any)}
                 className="input-field w-auto"
@@ -539,10 +541,10 @@ export function TaskManagementPage() {
 
       {/* Error banner */}
       {error && (
-        <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8, marginTop: 14 }}>
+        <div className="s-section flex items-center gap-2 mt-3.5" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)' }}>
           <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
           <span style={{ color: 'var(--err)' }}>{error}</span>
-          <button onClick={loadData} className="btn sm" style={{ marginLeft: 'auto' }}>Retry</button>
+          <button onClick={loadData} className="btn sm ml-auto">Retry</button>
         </div>
       )}
 
@@ -623,6 +625,7 @@ export function TaskManagementPage() {
                     }}
                     className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
                     aria-label="View SOP"
+                    title="View SOP"
                   >
                     <Eye className="w-4 h-4 text-gray-600" />
                   </button>
@@ -648,6 +651,7 @@ export function TaskManagementPage() {
                     }}
                     className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
                     aria-label="Edit SOP"
+                    title="Edit SOP"
                   >
                     <Edit className="w-4 h-4 text-gray-600" />
                   </button>
@@ -1030,6 +1034,23 @@ function isSaneDue(min: number): boolean {
 }
 
 function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
+  const toast = useToast();
+  // Interim reassign: prompt for the new owner's user id + an optional reason,
+  // then POST through the existing tasksApi.reassignTask seam. A full owner-
+  // picker modal is a follow-up; this unblocks the previously-dead button.
+  const handleReassign = async () => {
+    const newAssignee = window.prompt('Reassign to (user id):', task.assignedTo || '');
+    if (!newAssignee || !newAssignee.trim()) return;
+    const reason = window.prompt('Reason (optional):', '') || undefined;
+    try {
+      await tasksApi.reassignTask(task.id, newAssignee.trim(), reason);
+      toast.success('Task reassigned');
+      onClose();
+    } catch (e) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === 'string' ? msg : 'Failed to reassign task');
+    }
+  };
   const dueSane = isSaneDue(task.dueInMin);
   const minLeft = dueSane ? Math.max(0, task.dueInMin) : 0;
   const minLeftLabel = dueSane ? humanizeMinutes(minLeft) : '—';
@@ -1046,10 +1067,10 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
   return (
     <>
       <div className="d-head">
-        <div className="row" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <div className="row flex items-center gap-2 mb-2.5">
           <span className={'pill-' + task.pCode}>{task.pCode}</span>
           <span className="mono" style={{ fontSize: 11, color: 'var(--ink-4)' }}>{task.id}</span>
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           <button
             type="button"
             className="btn sm"
@@ -1058,7 +1079,7 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
           >
             <ArrowLeft className="w-3 h-3" /> Back
           </button>
-          <button type="button" className="btn sm">
+          <button type="button" className="btn sm" onClick={handleReassign}>
             <User className="w-3 h-3" /> Reassign
           </button>
         </div>
@@ -1141,7 +1162,7 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
               <div className="sid">{task.sopId}</div>
               Open the SOP for the full step-by-step trigger / owner / approver
               breakdown and checkpoints.
-              <div style={{ marginTop: 10 }}>
+              <div className="mt-2.5">
                 <button type="button" className="btn sm">Open full SOP</button>
               </div>
             </div>

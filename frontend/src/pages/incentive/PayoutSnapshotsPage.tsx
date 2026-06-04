@@ -112,13 +112,14 @@ export function PayoutSnapshotsPage() {
                   {s.paid_at && <div>Paid {new Date(s.paid_at).toLocaleDateString()}</div>}
                 </td>
                 <td className="px-3 py-2 text-right">
-                  <a
-                    href={payoutApi.csvUrl(s.snapshot_id)}
+                  <button
+                    type="button"
+                    onClick={() => { payoutApi.downloadCsv(s.snapshot_id).catch(() => {}); }}
                     className="text-xs text-bv-red-600 hover:underline inline-flex items-center gap-1"
-                    target="_blank" rel="noreferrer"
+                    title="Download CSV"
                   >
                     <Download className="w-3 h-3" /> CSV
-                  </a>
+                  </button>
                 </td>
               </tr>
             ))}

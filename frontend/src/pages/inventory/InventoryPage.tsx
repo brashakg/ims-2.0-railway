@@ -610,7 +610,7 @@ export function InventoryPage() {
   }> = [
     { id: 'catalog',  label: 'Catalog',     icon: Package,         members: ['catalog', 'display-layout'] },
     { id: 'health',   label: 'Stock health',icon: AlertTriangle,   members: ['low-stock', 'non-moving', 'aging', 'alerts'] },
-    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'movements', 'stock-count'] },
+    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'stock-count'] },
     { id: 'optical',  label: 'Optical',     icon: Eye,             members: ['serial-numbers', 'contact-lens', 'power-grid'] },
     { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock'] },
   ];
@@ -629,11 +629,11 @@ export function InventoryPage() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Inventory</div>
+          <div className="eyebrow mb-1.5">Inventory</div>
           <h1>What's on the floor.</h1>
           <div className="hint">Live stock by SKU across {CATEGORIES.length} categories · cycle count · transfers · non-moving flags.</div>
         </div>
-        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <div className="row gap-2 flex-wrap">
           <button
             onClick={loadInventory}
             disabled={isLoading}
@@ -670,7 +670,7 @@ export function InventoryPage() {
         <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
           <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
           <span style={{ color: 'var(--err)' }}>{error}</span>
-          <button onClick={loadInventory} className="btn sm" style={{ marginLeft: 'auto' }}>Retry</button>
+          <button onClick={loadInventory} className="btn sm ml-auto">Retry</button>
         </div>
       )}
 
@@ -735,7 +735,7 @@ export function InventoryPage() {
 
       {/* Sub-nav for the active group — only renders when there is >1 child */}
       {subTabs.length > 1 && (
-        <div className="inv-tabs" style={{ marginTop: -6, paddingLeft: 4, gap: 14 }}>
+        <div className="inv-tabs -mt-1.5 pl-1 gap-3.5">
           {subTabs.map((tab) => {
             const TabIcon = tab.icon;
             return (
@@ -1014,6 +1014,7 @@ export function InventoryPage() {
                                 onClick={() => openBarcodeModal(item)}
                                 className="p-2 text-gray-500 hover:text-blue-600 transition-colors"
                                 title="Manage Barcode"
+                                aria-label="Manage Barcode"
                               >
                                 <Barcode className="w-4 h-4" />
                               </button>
@@ -1022,6 +1023,7 @@ export function InventoryPage() {
                               onClick={() => setDetailItem(item)}
                               className="p-2 text-gray-500 hover:text-bv-red-600 transition-colors"
                               title="View Details"
+                              aria-label="View Details"
                             >
                               <Eye className="w-4 h-4" />
                             </button>
@@ -1344,7 +1346,7 @@ export function InventoryPage() {
                   <h2 className="font-semibold text-gray-900 truncate">{detailItem.name}</h2>
                   <p className="text-sm text-gray-500">{detailItem.brand}</p>
                 </div>
-                <button onClick={() => setDetailItem(null)} className="text-gray-500 hover:text-gray-700 shrink-0">
+                <button onClick={() => setDetailItem(null)} className="text-gray-500 hover:text-gray-700 shrink-0" aria-label="Close" title="Close">
                   <X className="w-5 h-5" />
                 </button>
               </div>
@@ -1354,10 +1356,10 @@ export function InventoryPage() {
                 </div>
                 <dl className="divide-y divide-gray-100">
                   {rows.map(([label, value]) => (
-                    <div key={label} className="flex items-center justify-between py-2 text-sm">
+                    <dl key={label} className="flex items-center justify-between py-2 text-sm">
                       <dt className="text-gray-500">{label}</dt>
                       <dd className="text-gray-900 font-medium text-right">{value}</dd>
-                    </div>
+                    </dl>
                   ))}
                 </dl>
               </div>
@@ -1394,7 +1396,7 @@ export function InventoryPage() {
                   <p className="text-sm text-gray-500">Upload a CSV file with product data</p>
                 </div>
               </div>
-              <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); setCsvRows([]); }} className="text-gray-500 hover:text-gray-900">
+              <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); setCsvRows([]); }} className="text-gray-500 hover:text-gray-900" aria-label="Close" title="Close">
                 <X className="w-5 h-5" />
               </button>
             </div>
