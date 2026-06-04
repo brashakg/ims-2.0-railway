@@ -48,6 +48,9 @@ const PAYMENT_STATUS_CONFIG: Record<PaymentStatus, { label: string; color: strin
   PENDING: { label: 'Pending', color: 'text-red-600', bgColor: 'bg-red-100' },
   PARTIAL: { label: 'Partial', color: 'text-yellow-600', bgColor: 'bg-yellow-100' },
   PAID: { label: 'Paid', color: 'text-green-600', bgColor: 'bg-green-100' },
+  UNPAID: { label: 'Unpaid', color: 'text-red-600', bgColor: 'bg-red-100' },
+  CREDIT: { label: 'On Credit', color: 'text-orange-600', bgColor: 'bg-orange-100' },
+  REFUNDED: { label: 'Refunded', color: 'text-gray-600', bgColor: 'bg-gray-100' },
 };
 
 export function OrdersPage() {
@@ -462,7 +465,11 @@ export function OrdersPage() {
           <div className="divide-y divide-gray-200">
             {paginatedOrders.map(order => {
               const statusConfig = ORDER_STATUS_CONFIG[order.orderStatus];
-              const paymentConfig = PAYMENT_STATUS_CONFIG[order.paymentStatus];
+              // Fallback so an unmapped/legacy status still renders a badge
+              // (was blank for UNPAID/CREDIT/REFUNDED before they were mapped).
+              const paymentConfig =
+                PAYMENT_STATUS_CONFIG[order.paymentStatus] ||
+                { label: order.paymentStatus || '—', color: 'text-gray-600', bgColor: 'bg-gray-100' };
               const StatusIcon = statusConfig?.icon || FileText;
 
               return (

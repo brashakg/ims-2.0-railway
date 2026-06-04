@@ -249,7 +249,7 @@ export type OrderStatus =
   | 'DELIVERED'
   | 'CANCELLED';
 
-export type PaymentStatus = 'PENDING' | 'PARTIAL' | 'PAID';
+export type PaymentStatus = 'PENDING' | 'PARTIAL' | 'PAID' | 'UNPAID' | 'CREDIT' | 'REFUNDED';
 
 export type PaymentMode =
   | 'CASH'
