@@ -16,7 +16,22 @@
       "Bash(railway list:*)",
       "Bash(railway whoami:*)",
       "Bash(npx tsc:*)",
-      "Bash(npx vite build:*)"
+      "Bash(npx vite build:*)",
+      "WebFetch(domain:www.opticalcrm.com)",
+      "WebFetch(domain:www.zestylabs.in)",
+      "WebFetch(domain:www.gofrugal.com)",
+      "WebFetch(domain:techcherry.in)",
+      "WebFetch(domain:lenorix.com)",
+      "WebFetch(domain:www.eyefinity.com)",
+      "WebFetch(domain:www.optix.co.uk)",
+      "WebFetch(domain:www.saasworthy.com)",
+      "WebFetch(domain:www.softwaresuggest.com)",
+      "WebFetch(domain:optisoftvision.com)",
+      "WebFetch(domain:www.techjockey.com)",
+      "WebFetch(domain:www.optosoft.in)",
+      "Bash(cd \"c:/Users/avina/IMS 2.0 CLAUDE COWORK/ims-2.0-railway-1\" && echo \"=== wave1 workflow output dir ===\" && ls -la \"C:\\\\Users\\\\avina\\\\.claude\\\\projects\\\\c--Users-avina-IMS-2-0-CLAUDE-COWORK-ims-2-0-railway-1\\\\7c31ded4-19d6-4c5a-b253-38ae77c5dbc4\\\\subagents\\\\workflows\\\\wf_51990753-2ec\" 2>/dev/null | head; echo \"=== competitor workflow output dir ===\" && ls -la \"C:\\\\Users\\\\avina\\\\.claude\\\\projects\\\\c--Users-avina-IMS-2-0-CLAUDE-COWORK-ims-2-0-railway-1\\\\7c31ded4-19d6-4c5a-b253-38ae77c5dbc4\\\\subagents\\\\workflows\\\\wf_1b5dd4ba-c06\" 2>/dev/null | head)",
+      "Read(//c/Users/avina/.claude/projects/c--Users-avina-IMS-2-0-CLAUDE-COWORK-ims-2-0-railway-1/7c31ded4-19d6-4c5a-b253-38ae77c5dbc4/subagents/workflows/wf_51990753-2ec/**)",
+      "Read(//c/Users/avina/.claude/projects/c--Users-avina-IMS-2-0-CLAUDE-COWORK-ims-2-0-railway-1/7c31ded4-19d6-4c5a-b253-38ae77c5dbc4/subagents/workflows/wf_1b5dd4ba-c06/**)"
     ]
   },
   "hooks": {

@@ -469,8 +469,10 @@ export const vendorsApi = {
   },
 
   revokePortalToken: async (vendorId: string, tokenId: string) => {
+    // Backend route is singular `/portal-token/{token_id}` (the list GET is the
+    // plural `/portal-tokens`); the plural path here 404'd every revoke.
     const response = await api.delete(
-      `/vendors/${vendorId}/portal-tokens/${tokenId}`,
+      `/vendors/${vendorId}/portal-token/${tokenId}`,
     );
     return response.data;
   },

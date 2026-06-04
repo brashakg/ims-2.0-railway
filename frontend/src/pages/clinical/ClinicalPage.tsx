@@ -553,7 +553,7 @@ export function ClinicalPage() {
       )}
 
       {/* 3-card stat strip */}
-      <div className="stat-strip grid grid-cols-1 tablet:grid-cols-3 gap-4">
+      <div className="stat-strip stat-strip-3">
         <div>
           <div className="l">Waiting</div>
           <div className="v" style={{ color: waitingCount > 0 ? 'var(--warn)' : 'var(--ink)' }}>{waitingCount}</div>
@@ -566,8 +566,8 @@ export function ClinicalPage() {
         </div>
         <div>
           <div className="l">Completed today</div>
-          <div className="v" style={{ color: 'var(--ok)' }}>{completedCount}</div>
-          <div className="d good">{completedCount === 1 ? 'eye test' : 'eye tests'}</div>
+          <div className="v" style={{ color: completedCount > 0 ? 'var(--ok)' : 'var(--ink)' }}>{completedCount}</div>
+          <div className={clsx('d', completedCount > 0 && 'good')}>{completedCount === 1 ? 'eye test' : 'eye tests'}</div>
         </div>
       </div>
 

@@ -209,7 +209,7 @@ export function TestHistoryPage() {
       <div className="card overflow-hidden">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-8 h-8 animate-spin text-purple-600" />
+            <Loader2 className="w-8 h-8 animate-spin text-teal-600" />
           </div>
         ) : filteredTests.length === 0 ? (
           <div className="text-center py-12 text-gray-500">
@@ -226,8 +226,8 @@ export function TestHistoryPage() {
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
-                      <User className="w-5 h-5 text-purple-600" />
+                    <div className="w-10 h-10 bg-teal-100 rounded-full flex items-center justify-center">
+                      <User className="w-5 h-5 text-teal-600" />
                     </div>
                     <div>
                       <p className="font-medium text-gray-900">{test.patientName}</p>
@@ -257,8 +257,8 @@ export function TestHistoryPage() {
 
       {/* Test Detail Modal */}
       {selectedTest && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="scrim modal-overlay">
+          <div className="dialog modal max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-bold text-gray-900">Prescription Details</h2>

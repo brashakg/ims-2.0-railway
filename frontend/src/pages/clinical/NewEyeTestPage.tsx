@@ -22,8 +22,8 @@ export function NewEyeTestPage() {
   return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="text-center space-y-6 max-w-md">
-        <div className="w-24 h-24 bg-purple-100 rounded-full flex items-center justify-center mx-auto">
-          <Eye className="w-12 h-12 text-purple-600" />
+        <div className="w-24 h-24 bg-teal-100 rounded-full flex items-center justify-center mx-auto">
+          <Eye className="w-12 h-12 text-teal-600" />
         </div>
         <div>
           <h1 className="text-2xl font-bold text-gray-900 mb-2">Start New Eye Test</h1>

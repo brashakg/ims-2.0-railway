@@ -290,8 +290,8 @@ export function ContactLensFittingPage() {
         <div className="card">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              <div className="w-9 h-9 bg-purple-100 rounded-full flex items-center justify-center">
-                <User className="w-5 h-5 text-purple-600" />
+              <div className="w-9 h-9 bg-teal-100 rounded-full flex items-center justify-center">
+                <User className="w-5 h-5 text-teal-600" />
               </div>
               <div>
                 <p className="font-medium text-gray-900">{selected.name}</p>
@@ -353,7 +353,7 @@ export function ContactLensFittingPage() {
                         <td className="py-2 pr-3 text-right">
                           <button
                             onClick={() => printFitting(rx.prescription_id || rx.id)}
-                            className="text-purple-600 hover:text-purple-800 inline-flex items-center gap-1"
+                            className="text-teal-600 hover:text-teal-800 inline-flex items-center gap-1"
                           >
                             <Printer className="w-4 h-4" /> Print
                           </button>
@@ -370,7 +370,7 @@ export function ContactLensFittingPage() {
 
       {/* New fitting form */}
       {selected && showForm && (
-        <div className="card border-purple-200">
+        <div className="card border-teal-200">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-medium text-gray-900">New Contact Lens Fitting</h3>
             <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
