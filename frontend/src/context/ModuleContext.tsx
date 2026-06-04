@@ -204,6 +204,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'inv-movements', label: 'Stock Movements', path: '/inventory?tab=movements' },
       { id: 'inv-audit', label: 'Stock Audit', path: '/inventory/audit', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'inv-opening', label: 'Opening Stock Import', path: '/inventory/opening-stock', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
     ],
   },
   {

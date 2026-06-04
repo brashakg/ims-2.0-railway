@@ -77,6 +77,7 @@ const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').
 const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
+const OpeningStockImport = lazy(() => import('./pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const ActivityLogPage = lazy(() => import('./pages/admin/ActivityLogPage'));
 // /catalog/add — mode-switching shell: defaults to fast Quick Add (Single);
@@ -674,6 +675,15 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
                         <StockAudit />
+                      </ProtectedRoute>
+                    }
+                  />
+                  {/* Go-live: Opening-Stock Importer */}
+                  <Route
+                    path="inventory/opening-stock"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
+                        <OpeningStockImport />
                       </ProtectedRoute>
                     }
                   />
