@@ -57,6 +57,51 @@ export const settingsApi = {
     return response.data;
   },
 
+  /**
+   * Upload a company/brand logo image. Returns a stable `logo_url`
+   * (`/api/v1/settings/business/logo/{file_id}`) that should be saved
+   * onto the business settings doc so it persists across reloads.
+   * ADMIN / SUPERADMIN only (enforced server-side).
+   */
+  uploadLogo: async (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await api.post('/settings/business/logo', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data as {
+      message: string;
+      logo_url: string;
+      url: string;
+      file_id: string;
+      filename: string;
+      mime_type: string;
+      size_bytes: number;
+    };
+  },
+
+  /**
+   * Fetch the stored logo bytes (the serve endpoint requires the JWT, so
+   * an <img src> can't hit it directly) and hand back an object URL for
+   * inline rendering. Caller is responsible for URL.revokeObjectURL.
+   * Accepts either the full `/api/v1/settings/business/logo/{id}` path or
+   * a bare file id.
+   */
+  getLogoObjectUrl: async (logoUrlOrId: string): Promise<string> => {
+    // The shared axios instance is already based at `/api/v1`, so strip a
+    // leading `/api/v1` if the caller passed the absolute stored URL.
+    let path = logoUrlOrId;
+    const marker = '/settings/business/logo/';
+    const idx = path.indexOf(marker);
+    if (idx >= 0) {
+      path = path.slice(idx); // -> /settings/business/logo/{id}
+    } else if (!path.startsWith('/')) {
+      path = `${marker}${path}`; // bare file id
+    }
+    const response = await api.get<Blob>(path, { responseType: 'blob' });
+    return URL.createObjectURL(response.data);
+  },
+
   // Tax Settings
   getTaxSettings: async () => {
     const response = await api.get('/settings/tax');

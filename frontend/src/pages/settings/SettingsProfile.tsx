@@ -2,10 +2,10 @@
 // IMS 2.0 - Settings: Profile & Business Settings
 // ============================================================================
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   User, Building2, Save, Lock,
-  ToggleLeft, ToggleRight,
+  ToggleLeft, ToggleRight, Upload, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -304,9 +304,44 @@ export function BusinessSection() {
     address: string;
   } | null>(null);
 
+  // Logo upload + inline preview. The serve endpoint needs the JWT, so we
+  // fetch the bytes as a blob and render an object URL (not a raw <img src>).
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     loadBusiness();
   }, []);
+
+  // Whenever logo_url changes, (re)load the preview blob. Revoke the old
+  // object URL on cleanup to avoid leaking blobs.
+  useEffect(() => {
+    const url = businessSettings?.logo_url;
+    if (!url) {
+      setLogoPreview(null);
+      return;
+    }
+    let revoked: string | null = null;
+    let active = true;
+    settingsApi
+      .getLogoObjectUrl(url)
+      .then((objUrl) => {
+        if (active) {
+          revoked = objUrl;
+          setLogoPreview(objUrl);
+        } else {
+          URL.revokeObjectURL(objUrl);
+        }
+      })
+      .catch(() => {
+        if (active) setLogoPreview(null);
+      });
+    return () => {
+      active = false;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [businessSettings?.logo_url]);
 
   const loadBusiness = async () => {
     try {
@@ -319,27 +354,77 @@ export function BusinessSection() {
     }
   };
 
+  const handleLogoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset the input so re-selecting the same file fires onChange again.
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please choose an image file (PNG, JPG, SVG, WebP)');
+      return;
+    }
+    setUploadingLogo(true);
+    try {
+      const res = await settingsApi.uploadLogo(file);
+      // Persist the new logo_url onto the business settings doc immediately
+      // so it survives a reload (the backend also best-effort persists it).
+      const next = { ...(businessSettings || {}), logo_url: res.logo_url } as NonNullable<typeof businessSettings>;
+      setBusinessSettings(next);
+      try {
+        await settingsApi.updateBusinessSettings({ logo_url: res.logo_url });
+      } catch {
+        // Non-fatal: the upload already persisted server-side; the explicit
+        // "Save Settings" button can still re-persist the rest of the form.
+      }
+      toast.success('Logo uploaded');
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(detail || 'Failed to upload logo');
+    } finally {
+      setUploadingLogo(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Company Profile</h2>
         <div className="space-y-4">
           <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
-            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center">
-              <Building2 className="w-8 h-8 text-gray-500" />
+            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center overflow-hidden">
+              {logoPreview ? (
+                <img
+                  src={logoPreview}
+                  alt="Company logo"
+                  className="w-full h-full object-contain"
+                />
+              ) : (
+                <Building2 className="w-8 h-8 text-gray-500" />
+              )}
             </div>
             <div>
-              <p className="text-sm text-gray-500">Company Logo</p>
-              {/* Logo file upload is not wired yet (no upload API endpoint).
-                  Disabled rather than left as a dead button. */}
+              <p className="text-sm text-gray-500 mb-1">Company Logo</p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/svg+xml,image/gif"
+                onChange={handleLogoSelected}
+                className="hidden"
+              />
               <button
                 type="button"
-                disabled
-                title="Logo file upload is coming soon."
-                className="text-sm text-gray-400 cursor-not-allowed"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingLogo}
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-bv-red-600 hover:text-bv-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Upload new logo (coming soon)
+                {uploadingLogo ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                {logoPreview ? 'Replace logo' : 'Upload new logo'}
               </button>
+              <p className="text-xs text-gray-400 mt-1">PNG, JPG, SVG or WebP, up to 5 MB</p>
             </div>
           </div>
 
