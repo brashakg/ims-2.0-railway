@@ -48,6 +48,8 @@ def _headers(roles):
 # (method, path)
 WRITES = [
     ("post", "/api/v1/inventory/stock/add"),
+    ("post", "/api/v1/inventory/opening-stock/preview"),
+    ("post", "/api/v1/inventory/opening-stock/commit"),
     ("post", "/api/v1/inventory/stock-count/start"),
     ("post", "/api/v1/inventory/stock-count/c1/items"),
     ("post", "/api/v1/inventory/stock-count/c1/complete"),

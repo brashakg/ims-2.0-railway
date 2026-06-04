@@ -670,6 +670,203 @@ async def add_stock(
 
 
 # ============================================================================
+# OPENING-STOCK IMPORTER (go-live)
+# ============================================================================
+# Bulk-seed shelf quantities at go-live: the owner uploads a CSV (parsed to JSON
+# rows client-side) of {product_id|sku, quantity, [location_code, batch_code,
+# expiry_date]}. PREVIEW validates every row and (critically) flags products
+# that ALREADY hold stock so a re-run can't silently double inventory. COMMIT
+# mints the serialized stock_units rows via the same path as /stock/add, with a
+# skip_if_existing guard. Control-over-convenience: preview is the default; the
+# owner sees exactly what will happen before any write.
+
+
+class OpeningStockRow(BaseModel):
+    # Identify the product by EITHER product_id or sku (sku is what owners have
+    # in their spreadsheets). At least one must be present; product_id wins.
+    product_id: Optional[str] = None
+    sku: Optional[str] = None
+    quantity: int = Field(..., ge=1, le=10000)
+    location_code: Optional[str] = None
+    batch_code: Optional[str] = None
+    expiry_date: Optional[date] = None
+
+
+class OpeningStockImport(BaseModel):
+    rows: List[OpeningStockRow] = Field(..., min_length=1, max_length=5000)
+    # When True, a product that already has AVAILABLE stock is SKIPPED (not
+    # added to) — the safe default so a double-submit never doubles stock.
+    skip_if_existing: bool = True
+
+
+def _resolve_opening_stock_row(row, product_repo, stock_repo, active_store):
+    """Return (product, existing_qty, error) for one import row. error is a
+    human string when the row can't be imported; product is the matched doc."""
+    ident = (row.product_id or "").strip() or (row.sku or "").strip()
+    if not ident:
+        return None, 0, "Row has neither product_id nor sku."
+    product = None
+    if row.product_id:
+        product = product_repo.find_by_id(row.product_id.strip())
+    if product is None and row.sku:
+        product = product_repo.find_by_sku(row.sku.strip())
+    if product is None:
+        return None, 0, f"No product matches '{ident}'."
+    pid = product.get("product_id")
+    existing = stock_repo.find_available(pid, active_store)
+    return product, existing, None
+
+
+@router.post("/opening-stock/preview")
+async def opening_stock_preview(
+    payload: OpeningStockImport,
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """Dry-run an opening-stock import: validate every row and report what COMMIT
+    would do. Never writes. Flags rows whose product already holds stock (the
+    re-import / double-count risk) so the owner decides before committing."""
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
+    active_store = current_user.get("active_store_id")
+    if stock_repo is None or product_repo is None:
+        raise HTTPException(status_code=503, detail="Inventory store not available")
+
+    results = []
+    to_add = 0
+    will_skip = 0
+    errors = 0
+    for i, row in enumerate(payload.rows):
+        product, existing, err = _resolve_opening_stock_row(
+            row, product_repo, stock_repo, active_store
+        )
+        if err:
+            errors += 1
+            results.append(
+                {"index": i, "status": "ERROR", "identifier": row.product_id or row.sku,
+                 "message": err}
+            )
+            continue
+        already = existing > 0
+        if already and payload.skip_if_existing:
+            will_skip += 1
+            status = "SKIP_EXISTING"
+            msg = f"Already has {existing} in stock — will be skipped."
+        else:
+            to_add += row.quantity
+            status = "WILL_ADD" if not already else "WILL_ADD_ON_TOP"
+            msg = (
+                f"Will add {row.quantity}."
+                if not already
+                else f"Already has {existing}; will ADD {row.quantity} on top."
+            )
+        results.append(
+            {
+                "index": i,
+                "status": status,
+                "product_id": product.get("product_id"),
+                "sku": product.get("sku"),
+                "name": product.get("model") or product.get("name") or "",
+                "quantity": row.quantity,
+                "existing": existing,
+                "message": msg,
+            }
+        )
+
+    return {
+        "rows": results,
+        "summary": {
+            "total_rows": len(payload.rows),
+            "units_to_add": to_add,
+            "rows_to_skip": will_skip,
+            "rows_with_errors": errors,
+            "skip_if_existing": payload.skip_if_existing,
+        },
+    }
+
+
+@router.post("/opening-stock/commit")
+async def opening_stock_commit(
+    payload: OpeningStockImport,
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """Commit an opening-stock import: mint serialized stock_units rows (same as
+    /stock/add) for every valid row. Per-row errors never abort the batch. With
+    skip_if_existing=True (default) a product that already holds stock is left
+    untouched, so a double-submit can't double inventory."""
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
+    active_store = current_user.get("active_store_id")
+    if stock_repo is None or product_repo is None:
+        raise HTTPException(status_code=503, detail="Inventory store not available")
+
+    _db = _get_db()
+    _counter = _db.get_collection("counters") if _db is not None else None
+
+    results = []
+    units_added = 0
+    rows_skipped = 0
+    rows_errored = 0
+    for i, row in enumerate(payload.rows):
+        product, existing, err = _resolve_opening_stock_row(
+            row, product_repo, stock_repo, active_store
+        )
+        if err:
+            rows_errored += 1
+            results.append(
+                {"index": i, "status": "ERROR", "identifier": row.product_id or row.sku,
+                 "message": err}
+            )
+            continue
+        if existing > 0 and payload.skip_if_existing:
+            rows_skipped += 1
+            results.append(
+                {"index": i, "status": "SKIPPED", "product_id": product.get("product_id"),
+                 "sku": product.get("sku"), "existing": existing,
+                 "message": f"Skipped — already has {existing} in stock."}
+            )
+            continue
+
+        pid = product.get("product_id")
+        created_count = 0
+        for _ in range(row.quantity):
+            barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
+                active_store or "STR", pid
+            )
+            stock_data = {
+                "product_id": pid,
+                "store_id": active_store,
+                "barcode": barcode,
+                "quantity": 1,
+                "location_code": row.location_code or "DEFAULT",
+                "batch_code": row.batch_code,
+                "expiry_date": row.expiry_date.isoformat() if row.expiry_date else None,
+                "status": "AVAILABLE",
+                "is_reserved": False,
+                "barcode_printed": False,
+                "created_by": current_user.get("user_id"),
+                "source": "OPENING_STOCK",
+            }
+            if stock_repo.create(stock_data):
+                created_count += 1
+        units_added += created_count
+        results.append(
+            {"index": i, "status": "ADDED", "product_id": pid, "sku": product.get("sku"),
+             "added": created_count,
+             "message": f"Added {created_count} unit(s)."}
+        )
+
+    return {
+        "rows": results,
+        "summary": {
+            "total_rows": len(payload.rows),
+            "units_added": units_added,
+            "rows_skipped": rows_skipped,
+            "rows_with_errors": rows_errored,
+        },
+    }
+
+
+# ============================================================================
 # STOCK AGING / NON-MOVING REPORT
 # ============================================================================
 

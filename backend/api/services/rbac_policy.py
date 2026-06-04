@@ -500,6 +500,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/inventory/lenses/power-grid', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/inventory/low-stock', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'GET', "path": '/api/v1/inventory/non-moving', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/inventory/opening-stock/commit', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
+    {"method": 'POST', "path": '/api/v1/inventory/opening-stock/preview', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
     {"method": 'GET', "path": '/api/v1/inventory/overstock-analysis', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/inventory/sell-through-analysis', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/inventory/serials', "allowed": 'AUTHENTICATED', "store_scoped": True},
