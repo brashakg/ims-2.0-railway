@@ -518,25 +518,99 @@ async def get_queue_stats(
 # ============================================================================
 
 
+def _resolve_test_date_range(
+    range_kw: Optional[str],
+    from_str: Optional[str],
+    to_str: Optional[str],
+) -> tuple:
+    """Resolve the Test-History date filter into an inclusive (from, to) pair of
+    ISO ``YYYY-MM-DD`` strings (or None for an open bound).
+
+    Precedence: an explicit ``from``/``to`` wins; otherwise a ``range`` keyword
+    (today | week | month | all) is expanded relative to today. ``all`` (and an
+    unknown / empty keyword) yields (None, None) = the store's whole history.
+    Kept pure so it can be unit-tested without a DB. The Week window is the last
+    7 calendar days inclusive and Month the last ~30, matching the windows the
+    Test-History page previously computed in the browser.
+    """
+    from datetime import timedelta
+
+    # Explicit bounds take priority over a keyword.
+    if from_str or to_str:
+        return (from_str or None, to_str or None)
+
+    kw = (range_kw or "").strip().lower()
+    today = date.today()
+    if kw == "today":
+        iso = today.isoformat()
+        return (iso, iso)
+    if kw == "week":
+        return ((today - timedelta(days=6)).isoformat(), today.isoformat())
+    if kw == "month":
+        return ((today - timedelta(days=29)).isoformat(), today.isoformat())
+    # "all" / unknown / empty -> whole history.
+    return (None, None)
+
+
 @router.get("/tests")
 async def get_tests(
     store_id: str = Query(..., alias="store_id"),
     date: Optional[str] = Query(None),
+    range: Optional[str] = Query(
+        None,
+        description="Date window keyword: today | week | month | all. "
+        "Ignored when from/to are supplied.",
+    ),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get eye tests for a store"""
+    """Get eye tests for a store, optionally over a date RANGE (server-side).
+
+    Date selection (first match wins):
+      * ``date=today`` -- legacy shortcut: only TODAY's COMPLETED tests
+        (unchanged behaviour the dashboard / older callers rely on).
+      * ``from`` and/or ``to`` (ISO YYYY-MM-DD) -- explicit inclusive window.
+      * ``range=today|week|month|all`` -- expanded relative to today.
+      * none of the above -- the store's whole history (newest first).
+
+    Previously the Test-History page could only fetch ``date=today`` and then
+    filtered Week / Month / All-Time in the browser, so those filters never
+    actually queried older rows. The range/from/to params let the filter run on
+    the server. Each COMPLETED test is annotated with ``prescriptionId`` (the Rx
+    auto-created on completion, looked up by ``eye_test_id``) so the page's Print
+    button can open the A5 Rx card without a second lookup. Fail-soft: the Rx
+    lookup never blocks the list.
+    """
     test_repo = get_eye_test_repository()
 
     if test_repo is not None:
         if date == "today":
             tests = test_repo.get_today_completed_tests(store_id)
         else:
-            tests = test_repo.get_store_tests(store_id)
+            r_from, r_to = _resolve_test_date_range(range, from_date, to_date)
+            if r_from is None and r_to is None:
+                tests = test_repo.get_store_tests(store_id)
+            else:
+                tests = test_repo.get_store_tests_in_range(
+                    store_id, from_date=r_from, to_date=r_to
+                )
 
+        rx_repo = get_prescription_repository()
         result = []
         for test in tests:
             converted = _convert_to_camel(test)
             converted["id"] = test.get("test_id")
+            # Surface the linked auto-created Rx id so the FE can print the A5
+            # card directly. Best-effort: a missing Rx (legacy / not-yet-created)
+            # just leaves prescriptionId unset and the print button degrades.
+            if rx_repo is not None and test.get("test_id"):
+                try:
+                    linked = rx_repo.find_by_eye_test(test.get("test_id"))
+                    if linked:
+                        converted["prescriptionId"] = linked.get("prescription_id")
+                except Exception:  # noqa: BLE001 - never break the list
+                    pass
             result.append(converted)
         return {"tests": result}
 

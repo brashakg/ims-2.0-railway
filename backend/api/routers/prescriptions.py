@@ -447,9 +447,16 @@ async def list_prescriptions(
     limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """List prescriptions with filters. Pass rx_kind=CONTACT_LENS (or SPECTACLE)
-    to return only that kind; omitting it returns every prescription as before.
-    A doc with no stored rx_kind is treated as SPECTACLE (back-compat)."""
+    """List prescriptions with filters -- the real Rx library across dates.
+
+    This is the store-scoped, role-gated (AUTHENTICATED) list the Prescriptions
+    page reads to show the whole Rx library, not just today's eye-tests. When no
+    patient/customer/optometrist filter is given it scopes to the caller's active
+    store (or an explicit ``store_id``) and honours an inclusive ``from_date`` /
+    ``to_date`` window on prescription_date. ``rx_kind=CONTACT_LENS`` (or
+    SPECTACLE) narrows by kind; a doc with no stored rx_kind is treated as
+    SPECTACLE (back-compat). ``skip`` / ``limit`` paginate. ``total`` reflects
+    the page (the repo applies the window before slicing)."""
     repo = get_prescription_repository()
     active_store = store_id or current_user.get("active_store_id")
 
@@ -470,7 +477,15 @@ async def list_prescriptions(
                 p for p in prescriptions if (p.get("rx_kind") or "SPECTACLE") == rx_kind
             ]
 
-        return {"prescriptions": prescriptions, "total": len(prescriptions)}
+        # Pagination: the repo helpers (find_by_store / find_by_customer /
+        # find_by_patient) don't take skip/limit, so apply the page window here
+        # so a large Rx library doesn't ship every row to the browser at once.
+        # The bare find_many({}) branch already paged at the DB; re-slicing it
+        # by the same skip/limit is a no-op (idempotent), so this stays correct
+        # for every branch.
+        total = len(prescriptions)
+        paged = prescriptions[skip : skip + limit]
+        return {"prescriptions": paged, "total": total}
 
     return {"prescriptions": [], "total": 0}
 

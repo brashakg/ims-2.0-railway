@@ -15,7 +15,7 @@ import {
   Printer,
   RotateCcw,
 } from 'lucide-react';
-import { clinicalApi, storeApi } from '../../services/api';
+import { clinicalApi, prescriptionApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionPrint } from '../../components/clinical/PrescriptionPrint';
@@ -53,6 +53,10 @@ export function PrescriptionsPage() {
 
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  // Date window for the Rx library. 'all' (default) shows the full library
+  // across dates; the narrower windows query the server-side date range so the
+  // page is no longer limited to today's eye-tests.
+  const [dateFilter, setDateFilter] = useState<'today' | 'week' | 'month' | 'all'>('all');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPrescription, setSelectedPrescription] = useState<Prescription | null>(null);
@@ -60,11 +64,13 @@ export function PrescriptionsPage() {
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
 
   // user?.activeStoreId in deps so topbar store-switch triggers re-fetch.
+  // dateFilter in deps so changing the window re-queries the server-side range.
   // Both loadPrescriptions and loadStoreInfo read user.activeStoreId.
   useEffect(() => {
     loadPrescriptions();
     loadStoreInfo();
-  }, [user?.activeStoreId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.activeStoreId, dateFilter]);
 
   const loadStoreInfo = async () => {
     try {
@@ -163,19 +169,63 @@ export function PrescriptionsPage() {
     }
   };
 
+  // Resolve the selected window into inclusive from/to ISO dates (YYYY-MM-DD).
+  // 'all' -> no bounds (whole library). Week = last 7 days, Month = last ~30,
+  // matching the Test-History windows.
+  const rangeToDates = (
+    range: 'today' | 'week' | 'month' | 'all',
+  ): { from?: string; to?: string } => {
+    if (range === 'all') return {};
+    const now = new Date();
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    if (range === 'today') return { from: iso(now), to: iso(now) };
+    const start = new Date(now);
+    start.setDate(start.getDate() - (range === 'week' ? 6 : 29));
+    return { from: iso(start), to: iso(now) };
+  };
+
   const loadPrescriptions = async () => {
     setIsLoading(true);
     setError(null);
     try {
-      // Using getTodayTests as a temporary solution
-      // In production, you'd have a dedicated prescriptions API endpoint
-      const response = await clinicalApi.getTodayTests(user?.activeStoreId || '');
-      const data = response?.tests || response || [];
+      // Real Rx-library list across dates (store-scoped, role-gated), replacing
+      // the old "map today's eye-tests" hack. Server applies the date window +
+      // store scope; rows come back in the canonical camelCase Prescription
+      // shape (via prescriptionApi.mapRx).
+      const { from, to } = rangeToDates(dateFilter);
+      const res = await prescriptionApi.listPrescriptions({
+        storeId: user?.activeStoreId || undefined,
+        from,
+        to,
+        limit: 200,
+      });
+      const rows = Array.isArray(res?.prescriptions) ? res.prescriptions : [];
 
-      // Map tests to prescriptions format
-      const prescriptionsData = (Array.isArray(data) ? data : []).map((test: any) => ({
-        ...test,
-        prescribedAt: test.completedAt,
+      // Normalise display fields the cards/modal read. Rx docs vary in shape:
+      // the auto-created Rx stores patient_id/customer_id (no name/phone), a
+      // POS/clinic Rx may carry patient_name/customer_phone. Surface whatever
+      // is present without fabricating data.
+      const prescriptionsData: Prescription[] = rows.map((rx: any) => ({
+        ...rx,
+        id: rx.id ?? rx.prescription_id ?? rx.prescriptionId,
+        prescriptionId: rx.prescriptionId ?? rx.prescription_id ?? rx.id,
+        patientName:
+          rx.patientName ||
+          rx.patient_name ||
+          rx.customer_name ||
+          rx.customerName ||
+          rx.customerPhone ||
+          rx.customer_phone ||
+          '(unnamed patient)',
+        customerPhone: rx.customerPhone ?? rx.customer_phone ?? '',
+        prescribedAt:
+          rx.prescribedAt ||
+          rx.prescription_date ||
+          rx.testDate ||
+          rx.test_date ||
+          rx.created_at ||
+          '',
+        optometristName: rx.optometristName ?? rx.optometrist_name,
       }));
 
       setPrescriptions(prescriptionsData);
@@ -229,28 +279,41 @@ export function PrescriptionsPage() {
         </button>
       </div>
 
-      {/* Search */}
+      {/* Search + date window */}
       <div className="card">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="input-field pl-10"
-            placeholder="Search by patient name or phone..."
-            list="rx-search-suggestions"
-          />
-          {searchQuery.length >= 1 && (
-            <datalist id="rx-search-suggestions">
-              {prescriptions.filter(rx =>
-                rx.patientName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                rx.customerPhone?.includes(searchQuery)
-              ).slice(0, 8).map((rx: any, i: number) => (
-                <option key={rx.id || i} value={rx.patientName}>{rx.customerPhone} · {new Date(rx.date || '').toLocaleDateString('en-IN')}</option>
-              ))}
-            </datalist>
-          )}
+        <div className="flex flex-col tablet:flex-row gap-4">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="input-field pl-10"
+              placeholder="Search by patient name or phone..."
+              list="rx-search-suggestions"
+            />
+            {searchQuery.length >= 1 && (
+              <datalist id="rx-search-suggestions">
+                {prescriptions.filter(rx =>
+                  rx.patientName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  rx.customerPhone?.includes(searchQuery)
+                ).slice(0, 8).map((rx: any, i: number) => (
+                  <option key={rx.id || i} value={rx.patientName}>{rx.customerPhone} · {rx.prescribedAt ? new Date(rx.prescribedAt).toLocaleDateString('en-IN') : ''}</option>
+                ))}
+              </datalist>
+            )}
+          </div>
+          <select
+            value={dateFilter}
+            onChange={e => setDateFilter(e.target.value as 'today' | 'week' | 'month' | 'all')}
+            className="input-field tablet:w-48"
+            aria-label="Date range"
+          >
+            <option value="today">Today</option>
+            <option value="week">This Week</option>
+            <option value="month">This Month</option>
+            <option value="all">All Time</option>
+          </select>
         </div>
       </div>
 
@@ -275,7 +338,13 @@ export function PrescriptionsPage() {
       ) : filteredPrescriptions.length === 0 ? (
         <div className="card text-center py-12 text-gray-500">
           <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
-          <p>{searchQuery ? 'No prescriptions found matching your search' : 'No prescriptions found'}</p>
+          <p>
+            {searchQuery
+              ? 'No prescriptions found matching your search'
+              : dateFilter === 'all'
+                ? 'No prescriptions found'
+                : 'No prescriptions in this date range. Try a wider window (All Time).'}
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">

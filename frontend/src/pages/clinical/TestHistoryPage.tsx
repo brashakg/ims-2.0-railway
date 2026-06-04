@@ -22,6 +22,9 @@ interface CompletedTest {
   patientName: string;
   customerPhone: string;
   completedAt: string;
+  // The Rx auto-created on completion (looked up server-side by eye_test_id).
+  // Drives the "Print" button -> A5 Rx card. Absent for legacy/not-yet-created.
+  prescriptionId?: string;
   rightEye: {
     sphere: number | null;
     cylinder: number | null;
@@ -59,32 +62,14 @@ export function TestHistoryPage() {
     setIsLoading(true);
     setError(null);
     try {
-      const response = await clinicalApi.getTodayTests(user?.activeStoreId || '');
+      // Query the date window on the SERVER (range keyword), instead of pulling
+      // only today's tests and filtering Week / Month / All-Time in the browser.
+      const response = await clinicalApi.getTests(user?.activeStoreId || '', {
+        range: dateFilter,
+      });
       const testsData = response?.tests || response || [];
       const allTests = Array.isArray(testsData) ? testsData : [];
-
-      // Client-side date filtering since API only returns today's tests
-      const now = new Date();
-      const filtered = allTests.filter((test: CompletedTest) => {
-        if (dateFilter === 'all') return true;
-        const testDate = new Date(test.completedAt);
-        if (dateFilter === 'today') {
-          return testDate.toDateString() === now.toDateString();
-        }
-        if (dateFilter === 'week') {
-          const weekAgo = new Date(now);
-          weekAgo.setDate(weekAgo.getDate() - 7);
-          return testDate >= weekAgo;
-        }
-        if (dateFilter === 'month') {
-          const monthAgo = new Date(now);
-          monthAgo.setMonth(monthAgo.getMonth() - 1);
-          return testDate >= monthAgo;
-        }
-        return true;
-      });
-
-      setTests(filtered);
+      setTests(allTests);
     } catch {
       setError('Failed to load test history');
       setTests([]);
@@ -99,6 +84,34 @@ export function TestHistoryPage() {
       test.customerPhone?.includes(searchQuery);
     return matchesSearch;
   });
+
+  // Print the A5 Rx card for a completed test, via the prescription that was
+  // auto-created on completion (prescriptionId surfaced by GET /clinical/tests).
+  // Fetched through the authenticated client (window.open(url) would not carry
+  // the Bearer token), then written into a blank window which self-prints —
+  // mirrors PrescriptionsPage's Print Rx (A5) flow.
+  const handlePrint = async (test: CompletedTest) => {
+    const rxId = test.prescriptionId;
+    if (!rxId) {
+      toast.error(
+        'No prescription is linked to this test yet, so there is nothing to print.',
+      );
+      return;
+    }
+    try {
+      const html = await clinicalApi.getPrescriptionPrintHtml(rxId);
+      const w = window.open('', '_blank');
+      if (w) {
+        w.document.write(html);
+        w.document.close();
+        w.focus();
+      } else {
+        toast.error('Pop-up blocked. Please allow pop-ups to print.');
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to print prescription.');
+    }
+  };
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleDateString('en-IN', {
@@ -161,7 +174,7 @@ export function TestHistoryPage() {
                   t.patientName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
                   t.customerPhone?.includes(searchQuery)
                 ).slice(0, 8).map((t: any, i: number) => (
-                  <option key={t.id || i} value={t.patientName}>{t.customerPhone} · {new Date(t.testDate || '').toLocaleDateString('en-IN')}</option>
+                  <option key={t.id || i} value={t.patientName}>{t.customerPhone} · {t.completedAt ? new Date(t.completedAt).toLocaleDateString('en-IN') : ''}</option>
                 ))}
               </datalist>
             )}
@@ -347,8 +360,8 @@ export function TestHistoryPage() {
 
                 <div className="flex gap-2">
                   <button
-                    onClick={() => toast.info('Print functionality coming soon')}
-                    className="btn-primary flex-1"
+                    onClick={() => handlePrint(selectedTest)}
+                    className="btn-primary flex-1 flex items-center justify-center"
                   >
                     <FileText className="w-4 h-4 mr-2" />
                     Print Prescription

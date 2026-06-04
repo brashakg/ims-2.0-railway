@@ -173,6 +173,35 @@ function toPrescriptionCreatePayload(data: any): any {
 }
 
 export const prescriptionApi = {
+  // The real Rx library list (store-scoped, role-gated AUTHENTICATED). Powers
+  // the Prescriptions page across DATES, replacing the old "map today's
+  // eye-tests" hack. Filters: store, inclusive date window (from/to as ISO
+  // YYYY-MM-DD), optional customer_id, pagination. Rows are normalised to the
+  // camelCase Prescription shape via mapRx. Returns { prescriptions, total }.
+  listPrescriptions: async (opts?: {
+    storeId?: string;
+    customerId?: string;
+    from?: string;
+    to?: string;
+    skip?: number;
+    limit?: number;
+  }) => {
+    const params: Record<string, string | number> = {};
+    if (opts?.storeId) params.store_id = opts.storeId;
+    if (opts?.customerId) params.customer_id = opts.customerId;
+    if (opts?.from) params.from_date = opts.from;
+    if (opts?.to) params.to_date = opts.to;
+    if (opts?.skip !== undefined) params.skip = opts.skip;
+    if (opts?.limit !== undefined) params.limit = opts.limit;
+    const response = await api.get('/prescriptions', { params });
+    const data = response.data;
+    const list = Array.isArray(data?.prescriptions) ? data.prescriptions : [];
+    return {
+      prescriptions: list.map(mapRx),
+      total: typeof data?.total === 'number' ? data.total : list.length,
+    };
+  },
+
   getPrescriptions: async (patientOrCustomerId: string) => {
     // Try patient_id first; if empty, fall back to customer_id
     let response = await api.get('/prescriptions', { params: { patient_id: patientOrCustomerId } });
