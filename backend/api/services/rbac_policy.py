@@ -826,6 +826,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/reports/inventory/brand-sellthrough', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/reports/inventory/non-moving-stock', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/reports/inventory/summary', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/reports/inventory/tax-code-audit', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/reports/inventory/valuation', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
     {"method": 'GET', "path": '/api/v1/reports/profit/by-category', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/reports/profit/by-store', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},

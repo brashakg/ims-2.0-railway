@@ -88,6 +88,36 @@ export const reportsApi = {
     };
   },
 
+  // Go-live readiness — flag products whose stored HSN / GST rate disagrees
+  // with the canonical table for their category (read-only worklist).
+  getTaxCodeAudit: async (storeId?: string) => {
+    const response = await api.get('/reports/inventory/tax-code-audit', {
+      params: { ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data as {
+      data: Array<{
+        product_id: string;
+        sku: string;
+        name: string;
+        category: string | null;
+        stored_hsn: string | null;
+        stored_gst: number | null;
+        expected_hsn: string | null;
+        expected_gst: number | null;
+        issues: string[];
+        severity: 'CRITICAL' | 'HIGH';
+      }>;
+      summary: {
+        total_products: number;
+        flagged: number;
+        ok: number;
+        uncategorized: number;
+        gst_mismatch: number;
+        hsn_mismatch: number;
+      };
+    };
+  },
+
   // Phase 6.3 — MoM / YoY growth (endpoint already existed, surfacing it)
   getSalesGrowth: async (storeId: string | undefined, year: number, month: number) => {
     const response = await api.get('/reports/sales/growth', {

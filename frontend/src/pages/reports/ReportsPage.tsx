@@ -28,6 +28,7 @@ import { GSTR3BReport } from '../../components/reports/GSTR3BReport';
 import { DemandForecast } from '../../components/reports/DemandForecast';
 import { exportToCSV, SALES_REPORT_COLUMNS, INVENTORY_REPORT_COLUMNS, CUSTOMER_REPORT_COLUMNS, GST_REPORT_COLUMNS } from '../../utils/exportUtils';
 import { FootfallAuditCard } from './sections/FootfallAuditCard';
+import { TaxCodeAuditCard } from './sections/TaxCodeAuditCard';
 import { PriceBandCard } from './sections/PriceBandCard';
 import { LensDeepDiveCard } from './sections/LensDeepDiveCard';
 import { SeasonalityCard } from './sections/SeasonalityCard';
@@ -792,6 +793,12 @@ export function ReportsPage() {
             {/* Inventory Tab Content */}
       {activeTab === 'inventory' && (
         <div className="grid grid-cols-1 laptop:grid-cols-2 gap-4">
+          {/* Tax-Code Audit — go-live readiness (full width, finance roles) */}
+          {canExport && (
+            <div className="laptop:col-span-2">
+              <TaxCodeAuditCard storeId={user?.activeStoreId} canExport={canExport} />
+            </div>
+          )}
           {/* Stock Count Card */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">

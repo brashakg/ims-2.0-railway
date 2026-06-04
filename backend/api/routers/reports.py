@@ -571,9 +571,159 @@ async def inventory_valuation(
     }
 
 
-# ============================================================================
-# CLINICAL REPORTS
-# ============================================================================
+@router.get("/inventory/tax-code-audit")
+async def tax_code_audit(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+):
+    """Go-live readiness check: flag every product whose stored HSN code or GST
+    rate disagrees with the canonical table for its category.
+
+    Why: products may have been bulk-loaded with the wrong tax code (the classic
+    case is a sunglass tagged 5% when non-corrective sunglasses are 18%, or a
+    blank/unknown category that silently falls back to 5%). POS bills whatever is
+    on the product, so a wrong code here means wrong GST on every sale of it.
+    This is READ-ONLY — it never edits a product; it produces the worklist the
+    catalog manager fixes before the first live invoice.
+
+    A product is flagged when, for its category:
+      * `category` is blank/unknown (not in the canonical table) -> needs a
+        category before it can be tax-checked at all; or
+      * stored `gst_rate` != the canonical rate for that category; or
+      * stored `hsn_code` != the canonical 6-digit HSN for that category
+        (a 4-digit prefix of the canonical code is accepted: small businesses
+        <=Rs 5 Cr may legitimately use 4-digit HSNs).
+
+    Response:
+        {
+          "data": [ { product_id, sku, name, category, stored_hsn, stored_gst,
+                      expected_hsn, expected_gst, issues: [str], severity } ],
+          "summary": { total_products, flagged, ok, by_issue: {...},
+                       uncategorized, gst_mismatch, hsn_mismatch },
+        }
+    """
+    from ..services.gst_rates import (
+        GST_CATEGORY_TABLE,
+        gst_rate_for_category,
+        hsn_for_category,
+    )
+
+    db = get_db()
+    empty = {
+        "data": [],
+        "summary": {
+            "total_products": 0,
+            "flagged": 0,
+            "ok": 0,
+            "uncategorized": 0,
+            "gst_mismatch": 0,
+            "hsn_mismatch": 0,
+        },
+    }
+    if db is None or not getattr(db, "is_connected", True):
+        return empty
+
+    products = db.get_collection("products")
+    if products is None:
+        return empty
+
+    query: Dict[str, Any] = {"is_active": {"$ne": False}}
+    if store_id:
+        # Products are catalog-global, but some deployments scope by store; honour
+        # it when present without excluding global rows.
+        query = {
+            "is_active": {"$ne": False},
+            "$or": [{"store_id": store_id}, {"store_id": {"$exists": False}}, {"store_id": None}],
+        }
+
+    data = []
+    total = 0
+    gst_mismatch = 0
+    hsn_mismatch = 0
+    uncategorized = 0
+
+    for p in products.find(query):
+        total += 1
+        category = (p.get("category") or "").strip()
+        stored_hsn = str(p.get("hsn_code") or "").strip()
+        stored_gst = p.get("gst_rate")
+
+        issues = []
+        known = bool(category) and category.strip().upper() in GST_CATEGORY_TABLE
+        expected_gst = gst_rate_for_category(category) if known else None
+        expected_hsn = hsn_for_category(category) if known else None
+
+        if not known:
+            uncategorized += 1
+            issues.append(
+                "Blank or unrecognized category — set a category so the tax code "
+                "can be verified."
+            )
+        else:
+            # GST rate mismatch (tolerate float vs int: 5 == 5.0).
+            try:
+                stored_gst_f = float(stored_gst) if stored_gst is not None else None
+            except (TypeError, ValueError):
+                stored_gst_f = None
+            if stored_gst_f is None:
+                gst_mismatch += 1
+                issues.append(f"No GST rate set (expected {expected_gst}%).")
+            elif abs(stored_gst_f - float(expected_gst)) > 0.001:
+                gst_mismatch += 1
+                issues.append(
+                    f"GST rate {stored_gst_f}% does not match the {expected_gst}% "
+                    f"expected for {category}."
+                )
+
+            # HSN mismatch — accept a 4-digit prefix of the canonical 6-digit code.
+            if expected_hsn:
+                if not stored_hsn:
+                    hsn_mismatch += 1
+                    issues.append(f"No HSN code set (expected {expected_hsn}).")
+                elif stored_hsn != expected_hsn and not expected_hsn.startswith(
+                    stored_hsn
+                ):
+                    hsn_mismatch += 1
+                    issues.append(
+                        f"HSN {stored_hsn} does not match the expected "
+                        f"{expected_hsn} for {category}."
+                    )
+
+        if issues:
+            # Severity: a wrong/blank GST rate is the costly one (bills wrong tax);
+            # an HSN-only or category issue is high but slightly less urgent.
+            has_gst_issue = any("GST" in i for i in issues)
+            data.append(
+                {
+                    "product_id": p.get("product_id") or str(p.get("_id", "")),
+                    "sku": p.get("sku") or p.get("barcode") or "",
+                    "name": p.get("name") or p.get("product_name") or "",
+                    "category": category or None,
+                    "stored_hsn": stored_hsn or None,
+                    "stored_gst": stored_gst,
+                    "expected_hsn": expected_hsn,
+                    "expected_gst": expected_gst,
+                    "issues": issues,
+                    "severity": "CRITICAL" if has_gst_issue else "HIGH",
+                }
+            )
+
+    # Worst first: CRITICAL (wrong GST) above HIGH (HSN/category only).
+    data.sort(key=lambda r: (r["severity"] != "CRITICAL", r["category"] or ""))
+
+    flagged = len(data)
+    return {
+        "data": data,
+        "summary": {
+            "total_products": total,
+            "flagged": flagged,
+            "ok": total - flagged,
+            "uncategorized": uncategorized,
+            "gst_mismatch": gst_mismatch,
+            "hsn_mismatch": hsn_mismatch,
+        },
+    }
+
 
 
 @router.get("/clinical/eye-tests")
