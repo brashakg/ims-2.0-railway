@@ -98,6 +98,31 @@ def _catalog_products() -> List[Dict]:
         return []
 
 
+def _products_by_sku(skus: List[str]) -> Dict[str, Dict]:
+    """Map sku -> product detail doc, looking in catalog_products then products.
+
+    Used to render a CUSTOM collection's manual membership (stored SKU-only) as
+    rich rows for the editor. Fail-soft -> {} (the route then returns sku-only
+    rows so a catalog gap never hides a member)."""
+    out: Dict[str, Dict] = {}
+    if not skus:
+        return out
+    db = _get_db()
+    if db is None:
+        return out
+    for coll_name in ("catalog_products", "products"):
+        try:
+            coll = db[coll_name]
+            for d in coll.find({"sku": {"$in": skus}}):
+                sku = d.get("sku")
+                if sku and sku not in out:
+                    d.pop("_id", None)
+                    out[sku] = d
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def _require_repo():
     repo = _repo()
     if repo is None:
@@ -381,6 +406,56 @@ async def reorder_collection_products(
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to reorder products")
     return {"collection": _with_id(updated)}
+
+
+@router.get("/{collection_id}/products")
+async def list_collection_products(
+    collection_id: str,
+    current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
+) -> Dict:
+    """Return a CUSTOM collection's ordered manual membership as rich rows.
+
+    Membership is stored as an embedded `products: [{sku, position}]` array
+    (SKU-keyed). The editor needs title/brand/category/image to render the list,
+    so we join the catalog (catalog_products, then products) by SKU, ordered by
+    position. Fail-soft: an unknown SKU still appears (sku-only) so a catalog gap
+    never hides a member. A SMART collection has no manual membership here -> []
+    (its set is served by GET /{id}/resolved-products). This is the read the FE
+    collectionsApi.members() expects; without it the list 404'd and rendered
+    EMPTY after a drawer reopen even though the writes persisted.
+    """
+    repo = _require_repo()
+    doc = repo.get_by_id(collection_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    members = sorted(
+        (doc.get("products") or []),
+        key=lambda p: int(p.get("position", 0)),
+    )
+    skus = [p.get("sku") for p in members if p.get("sku")]
+    detail = _products_by_sku(skus)
+
+    rows: List[Dict] = []
+    for p in members:
+        sku = p.get("sku")
+        if not sku:
+            continue
+        d = detail.get(sku, {})
+        images = d.get("images")
+        image = images[0] if isinstance(images, list) and images else d.get("image")
+        rows.append(
+            {
+                "product_id": d.get("product_id") or d.get("id") or sku,
+                "sku": sku,
+                "title": d.get("title") or d.get("name") or d.get("model"),
+                "brand": d.get("brand"),
+                "category": d.get("category"),
+                "image": image,
+                "position": int(p.get("position", 0)),
+            }
+        )
+    return {"products": rows, "count": len(rows)}
 
 
 # ---------------------------------------------------------------------------

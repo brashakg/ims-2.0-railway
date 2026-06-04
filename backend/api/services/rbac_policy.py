@@ -651,6 +651,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/online-store/collections/{collection_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/online-store/collections/{collection_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'DELETE', "path": '/api/v1/online-store/collections/{collection_id}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/online-store/collections/{collection_id}/products', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/collections/{collection_id}/products', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'DELETE', "path": '/api/v1/online-store/collections/{collection_id}/products/{sku}', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'PUT', "path": '/api/v1/online-store/collections/{collection_id}/products/reorder', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
