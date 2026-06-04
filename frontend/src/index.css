@@ -2745,14 +2745,14 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   max-width: 200px;       /* desktop cap */
   min-width: 0;
 }
-.store-pill .store-pill-name {
+.store-pill .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
 /* Mobile: hide the long name, show the code (e.g. BV-BOK-01) */
-.store-pill .store-pill-code { display: none; }
+.store-pill .code { display: none; }
 
 /* ---- Backdrop ---- */
 .mobile-nav-backdrop {
@@ -2787,8 +2787,8 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   .topbar .cmdk .kbd { display: none; }               /* hide ⌘K badge */
 
   /* 3. Show store code, hide full name on small screens */
-  .store-pill .store-pill-name { display: none; }
-  .store-pill .store-pill-code { display: inline; }
+  .store-pill .name { display: none; }
+  .store-pill .code { display: inline; }
 
   /* 4. Show backdrop when drawer is open */
   .mobile-nav-backdrop { display: block; }
