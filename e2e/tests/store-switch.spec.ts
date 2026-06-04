@@ -43,7 +43,9 @@ test.describe('Store switcher', () => {
     const listbox = page.getByRole('listbox');
     await expect(listbox).toBeVisible();
     // Each option shows the store id (e.g. "BV-BOK-02") as its mono sub-line.
-    await listbox.getByRole('button', { name: new RegExp(target) }).click();
+    // The listbox entries carry role="option" (added with the a11y pass), which
+    // overrides the <button>'s implicit role -- so query by 'option', not 'button'.
+    await listbox.getByRole('option', { name: new RegExp(target) }).click();
 
     // #327: the token must be re-issued with the new active_store_id.
     await expect
