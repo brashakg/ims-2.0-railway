@@ -2,17 +2,17 @@
 # ===============================
 
 # Web Framework
-fastapi==0.136.1
-uvicorn[standard]==0.46.0
+fastapi==0.136.3
+uvicorn[standard]==0.49.0
 
 # Data Validation
 pydantic==2.13.4
 pydantic-settings==2.14.1
 
 # Authentication & Security
-pyjwt==2.12.1
+pyjwt==2.13.0
 bcrypt==4.2.0
-python-multipart==0.0.29
+python-multipart==0.0.30
 # RSA-SHA256 signing for QZ Tray silent label printing (labels.py). The
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
 # 44.0.1 is a security patch (no API change) over 44.0.0: it ships an OpenSSL
@@ -26,7 +26,7 @@ cryptography==44.0.1
 # Database
 pymongo==4.17.0
 # Read-only bridge to the e-commerce (BVI) Postgres for online catalog/stock
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.12
 
 # HTTP Client (for JARVIS AI)
 httpx==0.28.1
@@ -35,6 +35,9 @@ httpx==0.28.1
 apscheduler==3.11.2
 
 # Caching
+# redis 8.x is a major rebranding release (no redis 6/7); API-compatible for
+# our usage (basic get/set/pub-sub via event_bus.py). Staying on 5.x until
+# Railway confirms their managed Redis supports the new RESP3 defaults.
 redis==5.3.1
 
 # Utilities

@@ -137,5 +137,5 @@ class AdvanceRepository(BaseRepository):
                 }
             )
             return True
-        except:
+        except Exception:
             return False

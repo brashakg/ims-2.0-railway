@@ -7,9 +7,24 @@ far-future period so the shared test DB stays isolated.
 """
 
 import os
+import pytest
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
+
+# Skip this integration test when MongoDB is not available (e.g. web CI containers).
+def _mongo_available() -> bool:
+    import socket
+    try:
+        socket.create_connection(("localhost", 27017), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+pytestmark = pytest.mark.skipif(
+    not _mongo_available(),
+    reason="MongoDB not available on localhost:27017"
+)
 
 
 def test_locked_period_blocks_expense_create(client, auth_headers):

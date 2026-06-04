@@ -976,7 +976,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Test mock database
-    print("\n📦 Testing Mock Database")
+    print("\n[DB] Testing Mock Database")
     mock_db = get_mock_db()
 
     # Insert

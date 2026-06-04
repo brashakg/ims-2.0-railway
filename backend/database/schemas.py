@@ -816,12 +816,12 @@ if __name__ == "__main__":
     print("IMS 2.0 DATABASE SCHEMAS")
     print("=" * 60)
     
-    print(f"\n📦 Collections: {len(COLLECTIONS)}")
+    print(f"\n[DB] Collections: {len(COLLECTIONS)}")
     for name, config in COLLECTIONS.items():
-        print(f"  • {name}: {len(config['indexes'])} indexes")
-    
+        print(f"  - {name}: {len(config['indexes'])} indexes")
+
     total_indexes = sum(len(c["indexes"]) for c in COLLECTIONS.values())
-    print(f"\n📊 Total Indexes: {total_indexes}")
+    print(f"\n[DB] Total Indexes: {total_indexes}")
 
 
 # Additional schemas for complete coverage
