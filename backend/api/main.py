@@ -172,6 +172,31 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("[INFO] Running without database (stub mode)")
 
+    # ── Single-writer (Shopify) startup assertion ───────────────────────
+    # BVI_MERGE_PLAN invariant: Shopify must have EXACTLY ONE writer. By default
+    # IMS pushes are DARK (IMS_SHOPIFY_WRITES off) and BVI is the writer. When
+    # the owner flips IMS_SHOPIFY_WRITES=1 for the cutover, IMS becomes the live
+    # writer -- log a LOUD banner so a stray / duplicate writer is impossible to
+    # miss in the boot log. Fail-loud LOG only (the real guard is the runtime
+    # triple-gate in services/shopify_push.py); this never crashes the worker.
+    try:
+        from agents.nexus_providers import ims_shopify_writes_enabled
+
+        if ims_shopify_writes_enabled():
+            logger.warning(
+                "[SINGLE-WRITER] IMS_SHOPIFY_WRITES=1 -- IMS IS NOW THE LIVE "
+                "SHOPIFY WRITER. Confirm the BVI e-commerce writer is OFF "
+                "(scaled to 0 / read-only). Two live writers WILL corrupt "
+                "Shopify inventory + listings (BVI single-writer invariant)."
+            )
+        else:
+            logger.info(
+                "[SINGLE-WRITER] IMS_SHOPIFY_WRITES off (default) -- IMS Shopify "
+                "pushes are DARK/simulated; BVI remains the single live writer."
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[SINGLE-WRITER] writer-gate check skipped: {e}")
+
     # ── Agent System startup ────────────────────────────────────────────
     # Split into independent try/except blocks so one step's failure
     # doesn't silently kill the rest (audit Run #2 found the whole block
