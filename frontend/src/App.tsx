@@ -43,6 +43,7 @@ const OnlineStorePage = lazy(() => import('./pages/online-store/OnlineStorePage'
 const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
+const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -359,6 +360,21 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <DesignQueuePage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Online orders (BVI Phase 3b). Read-only list
+                      of storefront orders flowing into the IMS books; the in-page
+                      Re-map action is further gated to SUPERADMIN/ADMIN. Same
+                      catalog/design role gate as the module shell. */}
+                  <Route
+                    path="online-store/orders"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <OnlineOrdersPage />
                       </ProtectedRoute>
                     }
                   />
