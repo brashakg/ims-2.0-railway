@@ -289,6 +289,37 @@ def gst_reconciliation(
     }
 
 
+def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dict):
+    """Split output tax into (cgst, sgst, igst), paise-balanced.
+
+    inter-state (seller state != buyer state) -> IGST; intra-state OR unknown
+    state on either side -> CGST + SGST (tax/2 each) -- the SAME rule as
+    gst_reconciliation()/GSTR-1, so the GST-summary cards reconcile with the
+    reconciliation report instead of the prior blind 50/50 split that mis-stated
+    every inter-state sale. The residual goes on SGST so cgst + sgst == the intra
+    portion exactly and cgst + sgst + igst == the total (no paise drift). Pure.
+    Tax field resolves tax_amount, else tax_total (mirrors _TAX_EXPR)."""
+    igst = 0.0
+    total = 0.0
+    for o in orders:
+        t = o.get("tax_amount")
+        if t is None:
+            t = o.get("tax_total")
+        tax = float(t or 0)
+        total += tax
+        seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
+        buyer = str(
+            customer_state_by_id.get(o.get("customer_id"), "") or ""
+        ).strip().lower()
+        if seller and buyer and seller != buyer:
+            igst += tax
+    igst = round(igst, 2)
+    intra = round(total - igst, 2)
+    cgst = round(intra / 2, 2)
+    sgst = round(intra - cgst, 2)
+    return cgst, sgst, igst
+
+
 def _store_maps(db):
     """Return (store_id -> entity_id, entity_id -> entity_name)."""
     s2e, enames = {}, {}
@@ -663,21 +694,16 @@ async def get_gst_summary(
         "created_at": {"$gte": start, "$lt": end},
         "status": _REAL_ORDER_STATUS_FILTER,
     }
-    collected = list(
-        db.get_collection("orders").aggregate(
-            [
-                {"$match": sales_match},
-                {
-                    "$group": {
-                        "_id": None,
-                        "total_tax": {"$sum": _TAX_EXPR},
-                        "total_sales": {"$sum": _REVENUE_EXPR},
-                    }
-                },
-            ]
+    # Fetch the matched sales rows once with the fields the CGST/SGST/IGST
+    # classifier needs (the split happens below). The prior aggregation summed
+    # total_tax then split it 50/50, which mis-stated every inter-state sale and
+    # never reported IGST.
+    _sales_orders = list(
+        db.get_collection("orders").find(
+            sales_match,
+            {"_id": 0, "store_id": 1, "customer_id": 1, "tax_amount": 1, "tax_total": 1},
         )
     )
-    gst_collected = collected[0]["total_tax"] if collected else 0
 
     # GST paid (Input Tax Credit). ITC is claimable on PURCHASES recorded as
     # vendor BILLS (GRN-backed), NOT purchase_orders. Read vendor_bills.bill_date
@@ -714,9 +740,15 @@ async def get_gst_summary(
     gst_paid = round(gst_paid, 2)
     gst_paid_excluded = round(gst_paid_excluded, 2)
 
-    cgst = gst_collected / 2
-    sgst = gst_collected / 2
-    net_payable = gst_collected - gst_paid
+    # Classify output tax into CGST/SGST (intra-state) vs IGST (inter-state) by
+    # the same store-state-vs-customer-state rule as gst_reconciliation()/GSTR-1
+    # (unknown state either side -> intra-state). gst_collected is the sum of the
+    # three, so the summary cards reconcile to the period total.
+    cgst, sgst, igst = _split_output_tax(
+        _sales_orders, _store_state_map(db), _customer_state_map(db)
+    )
+    gst_collected = round(cgst + sgst + igst, 2)
+    net_payable = round(gst_collected - gst_paid, 2)
 
     # Filing status. GSTR-1 is due the 11th and GSTR-3B the 20th of the month
     # AFTER the tax period. For December (m==12) that is January of the NEXT
@@ -733,6 +765,7 @@ async def get_gst_summary(
         "gst_collected": gst_collected,
         "cgst": cgst,
         "sgst": sgst,
+        "igst": igst,
         "gst_input_credit": gst_paid,
         # ITC held back this period (not-yet-received or 17(5)-blocked bills) so
         # the CA can see what was excluded rather than wonder why ITC dropped.
