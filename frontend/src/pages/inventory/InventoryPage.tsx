@@ -180,6 +180,9 @@ export function InventoryPage() {
   const [showBarcodeModal, setShowBarcodeModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<StockItem | null>(null);
 
+  // Read-only product detail drawer (opened from the row "View Details" eye).
+  const [detailItem, setDetailItem] = useState<StockItem | null>(null);
+
   // Transfer modal state
   const [showTransferModal, setShowTransferModal] = useState(false);
 
@@ -413,6 +416,61 @@ export function InventoryPage() {
     }).format(amount);
   };
 
+  // Client-side CSV export of the currently-loaded inventory rows.
+  // Honest + offline: serialises the same real fields the Stock ledger shows
+  // (respecting the active search / category / availability filters), no
+  // backend round-trip. Empty -> no-op with a toast.
+  const exportInventoryCsv = () => {
+    const rows = filteredInventory;
+    if (rows.length === 0) {
+      toast.info('Nothing to export for the current filters.');
+      return;
+    }
+    const headers = [
+      'Product', 'Brand', 'SKU', 'Barcode', 'Category',
+      'MRP', 'Offer Price', 'In Stock', 'Reserved', 'Available',
+      'Online', 'Online Stock', 'Location', 'Status',
+    ];
+    // RFC-4180 escaping: wrap in quotes and double any embedded quotes so
+    // commas / quotes / newlines in names don't corrupt the file.
+    const esc = (v: unknown) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [headers.join(',')];
+    for (const item of rows) {
+      const category = CATEGORIES.find(c => c.code === item.category)?.label || item.category;
+      const online = getOnline(item);
+      const status = getStockStatus(item).label;
+      const available = (item.stock || 0) - (item.reserved || 0);
+      lines.push([
+        esc(item.name),
+        esc(item.brand),
+        esc(item.sku),
+        esc((item as any).barcode || ''),
+        esc(category),
+        esc(item.mrp ?? ''),
+        esc(item.offerPrice ?? item.mrp ?? ''),
+        esc(item.stock ?? 0),
+        esc(item.reserved ?? 0),
+        esc(available),
+        esc(online?.online ? 'Yes' : 'No'),
+        esc(online?.online ? (online.online_stock ?? '') : ''),
+        esc(item.location || ''),
+        esc(status),
+      ].join(','));
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.download = `inventory_${stamp}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${rows.length} row${rows.length === 1 ? '' : 's'} to CSV`);
+  };
+
   // Handle CSV import.
   // Parses the (already-parsed) CSV rows into the canonical CreateProductPayload
   // shape and creates them through the SINGLE validated path
@@ -585,7 +643,7 @@ export function InventoryPage() {
             Refresh
           </button>
           {canExport && (
-            <button onClick={() => toast.info('Export feature coming soon')} className="btn sm">
+            <button onClick={exportInventoryCsv} className="btn sm">
               <Download className="w-4 h-4" /> Export
             </button>
           )}
@@ -961,7 +1019,7 @@ export function InventoryPage() {
                               </button>
                             )}
                             <button
-                              onClick={() => toast.info(`View details for ${item.name}`)}
+                              onClick={() => setDetailItem(item)}
                               className="p-2 text-gray-500 hover:text-bv-red-600 transition-colors"
                               title="View Details"
                             >
@@ -1258,6 +1316,71 @@ export function InventoryPage() {
           }
         }}
       />
+
+      {/* Product Detail Drawer — read-only snapshot of the row's real fields.
+          No backend call: every value shown is already loaded in the row. */}
+      {detailItem && (() => {
+        const cat = CATEGORIES.find(c => c.code === detailItem.category);
+        const online = getOnline(detailItem);
+        const status = getStockStatus(detailItem);
+        const available = (detailItem.stock || 0) - (detailItem.reserved || 0);
+        const rows: Array<[string, string]> = [
+          ['SKU', detailItem.sku || '-'],
+          ['Barcode', (detailItem as any).barcode || 'Not set'],
+          ['Category', cat?.label || detailItem.category],
+          ['MRP', formatCurrency(detailItem.mrp || 0)],
+          ['Offer price', formatCurrency(detailItem.offerPrice || detailItem.mrp || 0)],
+          ['In stock', String(detailItem.stock ?? 0)],
+          ['Reserved', String(detailItem.reserved ?? 0)],
+          ['Available', String(available)],
+          ['Online', online?.online ? `Yes (${online.online_stock ?? 0} online)` : 'In-store only'],
+          ['Location', detailItem.location || '-'],
+        ];
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetailItem(null)}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+              <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="font-semibold text-gray-900 truncate">{detailItem.name}</h2>
+                  <p className="text-sm text-gray-500">{detailItem.brand}</p>
+                </div>
+                <button onClick={() => setDetailItem(null)} className="text-gray-500 hover:text-gray-700 shrink-0">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-5">
+                <div className="mb-4">
+                  <span className={status.class}>{status.label}</span>
+                </div>
+                <dl className="divide-y divide-gray-100">
+                  {rows.map(([label, value]) => (
+                    <div key={label} className="flex items-center justify-between py-2 text-sm">
+                      <dt className="text-gray-500">{label}</dt>
+                      <dd className="text-gray-900 font-medium text-right">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+              <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-2">
+                {canManageBarcode && (
+                  <button
+                    onClick={() => { openBarcodeModal(detailItem); setDetailItem(null); }}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg flex items-center gap-1.5"
+                  >
+                    <Barcode className="w-4 h-4" /> Manage barcode
+                  </button>
+                )}
+                <button
+                  onClick={() => setDetailItem(null)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* CSV Import Modal */}
       {showCSVImport && (
