@@ -106,6 +106,19 @@ def _require_repo():
     return repo
 
 
+def _with_id(doc):
+    """Mirror the internal `collection_id` onto a stable `id` key so every FE
+    consumer (which reads `row.id`) gets the same handle regardless of entity.
+    Additive + non-destructive: leaves an existing `id` alone, tolerates a list
+    (maps each element) or a non-dict (returned untouched). Fail-soft."""
+    if isinstance(doc, list):
+        return [_with_id(d) for d in doc]
+    if isinstance(doc, dict):
+        if doc.get("id") is None and doc.get("collection_id") is not None:
+            doc["id"] = doc["collection_id"]
+    return doc
+
+
 # ---------------------------------------------------------------------------
 # Pydantic payloads
 # ---------------------------------------------------------------------------
@@ -216,7 +229,7 @@ async def list_collections(
         skip=skip,
         limit=limit,
     )
-    return {"collections": rows, "count": len(rows), "db_connected": True}
+    return {"collections": _with_id(rows), "count": len(rows), "db_connected": True}
 
 
 @router.post("", status_code=201)
@@ -248,7 +261,7 @@ async def create_collection(
     created = repo.create(data)
     if created is None:
         raise HTTPException(status_code=500, detail="Failed to create collection")
-    return {"collection": created}
+    return {"collection": _with_id(created)}
 
 
 @router.get("/{collection_id}")
@@ -260,7 +273,7 @@ async def get_collection(
     doc = repo.get_by_id(collection_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
-    return {"collection": doc}
+    return {"collection": _with_id(doc)}
 
 
 @router.put("/{collection_id}")
@@ -292,10 +305,10 @@ async def update_collection(
 
     if not data:
         # Nothing to change -> return the unchanged doc (idempotent no-op).
-        return {"collection": existing, "updated": False}
+        return {"collection": _with_id(existing), "updated": False}
 
     repo.update(collection_id, data)
-    return {"collection": repo.get_by_id(collection_id), "updated": True}
+    return {"collection": _with_id(repo.get_by_id(collection_id)), "updated": True}
 
 
 @router.delete("/{collection_id}")
@@ -333,7 +346,7 @@ async def add_collection_product(
     updated = repo.add_product(collection_id, sku, payload.position)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to add product")
-    return {"collection": updated}
+    return {"collection": _with_id(updated)}
 
 
 @router.delete("/{collection_id}/products/{sku}")
@@ -350,7 +363,7 @@ async def remove_collection_product(
     updated = repo.remove_product(collection_id, sku)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to remove product")
-    return {"collection": updated}
+    return {"collection": _with_id(updated)}
 
 
 @router.put("/{collection_id}/products/reorder")
@@ -367,7 +380,7 @@ async def reorder_collection_products(
     updated = repo.reorder_products(collection_id, payload.skus or [])
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to reorder products")
-    return {"collection": updated}
+    return {"collection": _with_id(updated)}
 
 
 # ---------------------------------------------------------------------------
