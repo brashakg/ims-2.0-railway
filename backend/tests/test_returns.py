@@ -479,7 +479,7 @@ def test_create_credit_note_issues_store_credit(ctx):
     assert ctx["customer_repo"].customers["CUST-1"]["store_credit"] == 2000.0
 
 
-def test_exchange_collect(ctx):
+def test_exchange_collect_does_not_issue_credit(ctx):
     tok = _staff_token(["SALES_CASHIER"])
     payload = _payload(
         return_type="EXCHANGE",
