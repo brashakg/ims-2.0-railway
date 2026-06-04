@@ -2,8 +2,6 @@
 // IMS 2.0 - Budget Tracking Tab
 // ============================================================================
 
-import { useState } from 'react';
-import { Plus, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { BudgetData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
@@ -11,23 +9,11 @@ import { formatCurrency } from './financeUtils';
 interface BudgetPanelProps {
   budgets: BudgetData[];
   selectedYear: string;
-  onAllocateBudget: (category: string, amount: string) => void;
 }
 
-export default function BudgetPanel({ budgets, selectedYear, onAllocateBudget }: BudgetPanelProps) {
-  const [showModal, setShowModal] = useState(false);
-  const [budgetCategory, setBudgetCategory] = useState('');
-  const [budgetAmount, setBudgetAmount] = useState('');
-
+export default function BudgetPanel({ budgets, selectedYear }: BudgetPanelProps) {
   const totalAllocated = budgets.reduce((s, b) => s + b.allocated, 0);
   const totalSpent = budgets.reduce((s, b) => s + b.spent, 0);
-
-  const handleSubmit = () => {
-    onAllocateBudget(budgetCategory, budgetAmount);
-    setShowModal(false);
-    setBudgetCategory('');
-    setBudgetAmount('');
-  };
 
   return (
     <div className="space-y-6">
@@ -49,15 +35,12 @@ export default function BudgetPanel({ budgets, selectedYear, onAllocateBudget }:
         </div>
       </div>
 
-      {/* Budget Allocation Button */}
+      {/* Budget allocations are planned in the dedicated Budgets module
+          (/budgets, per store + period). The toast-only "Allocate Budget"
+          button that previously sat here did not persist anything, so it was
+          removed (SYSTEM_INTENT: fail loudly, never fake success). */}
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-semibold text-gray-900">Budget Allocations -- FY {selectedYear}</h3>
-        <button
-          onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-        >
-          <Plus className="w-4 h-4" /> Allocate Budget
-        </button>
       </div>
 
       {/* Budget Table */}
@@ -120,58 +103,6 @@ export default function BudgetPanel({ budgets, selectedYear, onAllocateBudget }:
           </tbody>
         </table>
       </div>
-
-      {/* Budget Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-white border border-slate-700 rounded-xl p-6 w-full max-w-md">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Allocate Budget</h3>
-              <button
-                onClick={() => setShowModal(false)}
-                className="text-slate-600 hover:text-gray-900"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-slate-700 mb-1">Category</label>
-                <select
-                  value={budgetCategory}
-                  onChange={(e) => setBudgetCategory(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-600 text-gray-900 rounded-lg px-3 py-2 text-sm"
-                >
-                  <option value="">Select category...</option>
-                  <option value="Employee Salaries">Employee Salaries</option>
-                  <option value="Rent & Utilities">Rent & Utilities</option>
-                  <option value="Marketing">Marketing</option>
-                  <option value="Inventory">Inventory</option>
-                  <option value="Maintenance">Maintenance</option>
-                  <option value="Technology">Technology</option>
-                  <option value="Miscellaneous">Miscellaneous</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm text-slate-700 mb-1">Amount (INR)</label>
-                <input
-                  type="number"
-                  value={budgetAmount}
-                  onChange={(e) => setBudgetAmount(e.target.value)}
-                  placeholder="e.g. 50000"
-                  className="w-full bg-slate-50 border border-slate-600 text-gray-900 rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <button
-                onClick={handleSubmit}
-                className="w-full py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
-              >
-                Save Allocation
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

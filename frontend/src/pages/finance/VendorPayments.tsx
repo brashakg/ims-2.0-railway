@@ -2,17 +2,15 @@
 // IMS 2.0 - Vendor Payments Tab
 // ============================================================================
 
-import { Wallet } from 'lucide-react';
 import clsx from 'clsx';
 import type { VendorPaymentData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 
 interface VendorPaymentsProps {
   vendorPayments: VendorPaymentData[];
-  onPayVendor: (vendorName: string) => void;
 }
 
-export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPaymentsProps) {
+export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) {
   const totalDue = vendorPayments.reduce((s, v) => s + v.amount_due, 0);
   const overdueCount = vendorPayments.filter((v) => v.days_overdue > 0).length;
 
@@ -45,7 +43,6 @@ export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPa
               <th className="px-4 py-3">Due Date</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3 text-right">Overdue</th>
-              <th className="px-4 py-3">Action</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700">
@@ -83,14 +80,6 @@ export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPa
                   )}
                 >
                   {v.days_overdue > 0 ? `${v.days_overdue} days` : '--'}
-                </td>
-                <td className="px-4 py-3">
-                  <button
-                    onClick={() => onPayVendor(v.vendor_name)}
-                    className="px-3 py-1.5 bg-green-600 text-white rounded text-xs hover:bg-green-700"
-                  >
-                    <Wallet className="w-3 h-3 inline mr-1" /> Pay
-                  </button>
                 </td>
               </tr>
             ))}

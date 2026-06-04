@@ -826,6 +826,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/reports/clinical/eye-tests', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/reports/customers/acquisition', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/reports/dashboard', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/reports/day-end-close', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'CASHIER', 'SALES_CASHIER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/reports/day-end-close', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'CASHIER', 'SALES_CASHIER', 'STORE_MANAGER'], "store_scoped": True},
     {"method": 'GET', "path": '/api/v1/reports/discount/analysis', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/reports/finance/expense-vs-revenue', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/reports/finance/gst', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},

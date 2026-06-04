@@ -8,12 +8,35 @@ interface PeriodManagementProps {
   periodLocked: boolean;
   onLockPeriod: () => void;
   onUnlockPeriod: () => void;
+  dateFrom: string;
+  dateTo: string;
+}
+
+// Derive a human period label + financial-year tag from the real selected
+// date range (was hardcoded "April - June 2025"). Indian FY runs Apr 1 -> Mar 31.
+function fyLabel(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const fyStart = d.getMonth() >= 3 ? y : y - 1; // months are 0-indexed; Apr = 3
+  return `${fyStart}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
+}
+
+function periodLabel(from: string, to: string): string {
+  const f = new Date(from);
+  const t = new Date(to);
+  if (isNaN(f.getTime()) || isNaN(t.getTime())) return 'Selected period';
+  const fmt = (d: Date) =>
+    d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  return `${fmt(f)} - ${fmt(t)}`;
 }
 
 export default function PeriodManagement({
   periodLocked,
   onLockPeriod,
   onUnlockPeriod,
+  dateFrom,
+  dateTo,
 }: PeriodManagementProps) {
   return (
     <div className="space-y-6">
@@ -26,11 +49,11 @@ export default function PeriodManagement({
           </h3>
         </div>
         <div className="p-6 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-slate-50 p-4 rounded border border-slate-700">
               <p className="text-slate-600 text-sm">Current Period</p>
-              <p className="text-gray-900 text-lg font-semibold mt-2">April - June 2025</p>
-              <p className="text-xs text-slate-500 mt-1">Financial Year: 2025-26</p>
+              <p className="text-gray-900 text-lg font-semibold mt-2">{periodLabel(dateFrom, dateTo)}</p>
+              <p className="text-xs text-slate-500 mt-1">Financial Year: {fyLabel(dateTo)}</p>
             </div>
             <div className="bg-slate-50 p-4 rounded border border-slate-700">
               <p className="text-slate-600 text-sm">Period Status</p>
@@ -47,11 +70,6 @@ export default function PeriodManagement({
               <p className="text-xs text-slate-500 mt-1">
                 {periodLocked ? 'No transactions allowed' : 'Editable'}
               </p>
-            </div>
-            <div className="bg-slate-50 p-4 rounded border border-slate-700">
-              <p className="text-slate-600 text-sm">Last Reconciliation</p>
-              <p className="text-gray-900 text-lg font-semibold mt-2">2025-06-27</p>
-              <p className="text-xs text-green-600 mt-1">Current</p>
             </div>
           </div>
 
