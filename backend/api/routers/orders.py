@@ -367,6 +367,14 @@ class PaymentMethod(str, Enum):
     EMI = "EMI"
     CREDIT = "CREDIT"
     GIFT_VOUCHER = "GIFT_VOUCHER"
+    # Loyalty-points redemption recorded as an internal tender. The points are
+    # already atomically debited by POST /loyalty/redeem BEFORE this payment is
+    # recorded, so add_payment does NOT re-redeem -- it just records the rupee
+    # value so it counts toward amount_paid (non-CREDIT) and reduces balance_due.
+    # Previously absent from the enum: the POS LOYALTY tender 422'd and was
+    # swallowed, so the customer's points were burned yet the order still showed
+    # that amount as owing (a double charge).
+    LOYALTY = "LOYALTY"
 
 
 class OrderItemCreate(BaseModel):
@@ -1341,15 +1349,40 @@ async def create_order(
         # built with key "item_total". The per-category math is now in
         # `_compute_per_category_gst`, used by create + add + remove.
         cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
-        # Order-level cart discount must honour the SAME role cap as per-item
-        # discounts. It was only clamped to [0,100], so any role could apply up
-        # to 100% off via the cart discount, bypassing the per-item cap above.
-        if not is_admin and cart_discount_percent > user_discount_cap:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Cart discount {cart_discount_percent}% exceeds your limit of "
-                f"{user_discount_cap}%. Contact a manager for approval.",
+        # Order-level cart discount must honour the SAME caps as per-item
+        # discounts: the role cap AND the strictest category / luxury-brand cap
+        # across the cart's real product lines. It used to be clamped only to the
+        # role cap, so a cart discount could land >cap on a Cartier (2%) or
+        # NON_DISCOUNTABLE (0%) line the per-item path above would block.
+        if not is_admin and cart_discount_percent > 0:
+            cart_cap = user_discount_cap
+            from api.services.pricing_caps import (
+                effective_discount_cap as _line_discount_cap,
             )
+
+            _cap_repo = get_product_repository()
+            for _it in order.items:
+                _pid = getattr(_it, "product_id", None)
+                if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
+                    continue
+                try:
+                    _prod = _cap_repo.find_by_id(_pid) if _cap_repo is not None else None
+                except Exception:
+                    _prod = None
+                if _prod:
+                    cart_cap = min(
+                        cart_cap,
+                        _line_discount_cap(
+                            _prod.get("discount_category"), _prod.get("brand")
+                        ),
+                    )
+            if cart_discount_percent > cart_cap + 1e-9:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Cart discount {cart_discount_percent}% exceeds the "
+                    f"maximum {cart_cap}% allowed for these items "
+                    f"(role + category/brand caps). Contact a manager for approval.",
+                )
         gst = _compute_per_category_gst(items_data, cart_discount_percent)
         taxable_after_cart_discount = gst["taxable"]
         tax_amount = gst["tax"]

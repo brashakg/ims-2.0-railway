@@ -365,7 +365,20 @@ export function POSLayout() {
         idempotencyKeyRef.current = null;
         for (const p of (store.payments || [])) {
           try {
-            await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference, voucher_code: p.voucherCode } as any);
+            const body: Record<string, unknown> = {
+              method: p.method,
+              amount: p.amount,
+              reference: p.reference,
+              voucher_code: p.voucherCode,
+            };
+            // EMI requires emi_months on the backend (else 400). Forward the
+            // tenure/provider the POS already captured — without this every EMI
+            // payment silently failed and the order stayed unpaid.
+            if (p.method === 'EMI') {
+              body.emi_months = p.emiTenure;
+              body.emi_provider = p.emiProvider;
+            }
+            await orderApi.addPayment(result.order_id, body as any);
           } catch {
             // Don't block order — payment can be recorded later
           }
