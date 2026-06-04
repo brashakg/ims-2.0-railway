@@ -73,8 +73,9 @@ const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
 const GoLiveChecklistPage = lazy(() => import('./pages/settings/GoLiveChecklistPage').then(m => ({ default: m.GoLiveChecklistPage })));
 
 // Phase 4: Supply Chain & Procurement
-const PurchaseOrderDashboard = lazy(() => import('./pages/purchase/PurchaseOrderDashboard').then(m => ({ default: m.PurchaseOrderDashboard })));
-const VendorManagement = lazy(() => import('./pages/purchase/VendorManagement').then(m => ({ default: m.VendorManagement })));
+// NOTE: PurchaseOrderDashboard + VendorManagement were dead duplicates (read-only
+// stubs with no working actions). Retired — /purchase/orders and /purchase/vendors
+// now redirect to the real PurchaseManagementPage tabs below.
 const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
 const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
@@ -636,24 +637,18 @@ function App() {
                     }
                   />
 
-                  {/* Phase 4: Purchase Orders */}
+                  {/* Phase 4: Purchase Orders — retired dead-duplicate dashboard.
+                      Redirect to the real Purchase Management module (POs tab). */}
                   <Route
                     path="purchase/orders"
-                    element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-                        <PurchaseOrderDashboard />
-                      </ProtectedRoute>
-                    }
+                    element={<Navigate to="/purchase?tab=purchase-orders" replace />}
                   />
 
-                  {/* Phase 4: Vendor Management */}
+                  {/* Phase 4: Vendor Management — retired dead-duplicate page.
+                      Redirect to the real Purchase Management module (Suppliers tab). */}
                   <Route
                     path="purchase/vendors"
-                    element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
-                        <VendorManagement />
-                      </ProtectedRoute>
-                    }
+                    element={<Navigate to="/purchase?tab=suppliers" replace />}
                   />
 
                   {/* Phase 4: Goods Receipt Notes */}

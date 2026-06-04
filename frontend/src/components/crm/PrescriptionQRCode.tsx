@@ -1,9 +1,12 @@
 // ============================================================================
 // Prescription QR Code Generator
 // ============================================================================
-// Generates QR code that links to customer's Rx detail page
+// Generates a real, scannable QR code that links to the customer's Rx detail
+// page. Uses the qrcode.react dependency (QRCodeSVG) rather than a hand-rolled
+// placeholder SVG, so the code actually decodes to the prescription URL.
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import type { Prescription } from '../../types';
 import { QrCode, Download, Copy } from 'lucide-react';
 
@@ -15,31 +18,8 @@ interface PrescriptionQRCodeProps {
 export function PrescriptionQRCode({ prescription, customerName }: PrescriptionQRCodeProps) {
   const qrContainerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    // Generate QR code using a simple SVG-based approach
-    // In production, use a library like qrcode.react
-    const generateSimpleQRSVG = (_text: string) => {
-      // For simplicity, create a placeholder QR code SVG
-      // In production, use: import QRCode from 'qrcode.react'
-      return `
-        <svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
-          <rect width="200" height="200" fill="white"/>
-          <rect x="10" y="10" width="30" height="30" fill="black"/>
-          <rect x="160" y="10" width="30" height="30" fill="black"/>
-          <rect x="10" y="160" width="30" height="30" fill="black"/>
-          <text x="100" y="100" text-anchor="middle" dy=".3em" font-size="10" fill="black">
-            QR: ${prescription.id}
-          </text>
-        </svg>
-      `;
-    };
-
-    if (qrContainerRef.current) {
-      const qrSVG = generateSimpleQRSVG(prescription.id);
-      qrContainerRef.current.innerHTML = qrSVG;
-    }
-  }, [prescription.id]);
-
+  // The QR encodes the public prescription URL so a phone camera lands the
+  // customer straight on their Rx detail page.
   const prescriptionUrl = `${window.location.origin}/rx/${prescription.id}`;
 
   const copyToClipboard = () => {
@@ -66,8 +46,16 @@ export function PrescriptionQRCode({ prescription, customerName }: PrescriptionQ
       </h3>
 
       <div className="bg-white rounded-lg p-6 flex flex-col items-center gap-4 border border-purple-100">
-        <div ref={qrContainerRef} className="flex items-center justify-center bg-white rounded-lg p-2"></div>
-        
+        <div ref={qrContainerRef} className="flex items-center justify-center bg-white rounded-lg p-2">
+          <QRCodeSVG
+            value={prescriptionUrl}
+            size={200}
+            level="M"
+            marginSize={2}
+            title={`Prescription ${prescription.id}`}
+          />
+        </div>
+
         <div className="text-center text-sm">
           <p className="text-gray-600 mb-1">Rx ID: {prescription.id}</p>
           {customerName && <p className="text-gray-500 text-xs">{customerName}</p>}

@@ -4,7 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams, useNavigate, Navigate } from 'react-router-dom';
 import {
   Plus,
   Users,
@@ -39,7 +39,6 @@ import {
 } from '../../utils/patientFromCustomer';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import { RecallManager } from '../../components/crm/RecallManager';
-import { PromotionEngine } from '../../components/crm/PromotionEngine';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
 import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
 import { PrescriptionForm } from '../../components/pos/PrescriptionForm';
@@ -574,7 +573,11 @@ export function CustomersPage() {
     return <RecallManager />;
   }
   if (activeTab === 'campaigns') {
-    return <PromotionEngine />;
+    // The old ?tab=campaigns view rendered a dead-duplicate promotion builder
+    // (no backend). The real, fully-wired campaign tooling lives at
+    // /customers/campaigns (CampaignManager). Redirect there so a single
+    // source of truth handles campaigns.
+    return <Navigate to="/customers/campaigns" replace />;
   }
 
   // Customer Detail View
