@@ -1,74 +1,59 @@
 // ============================================================================
 // IMS 2.0 - Loyalty Program Management
 // ============================================================================
-// 5-tier loyalty system: Bronze/Silver/Gold/Platinum/Diamond
+// 4-tier loyalty system: Bronze/Silver/Gold/Platinum (driven by the engine)
 
 import { useState, useEffect } from 'react';
 import { Plus, Settings } from 'lucide-react';
 import clsx from 'clsx';
-import { loyaltyApi, type LoyaltyProgramStats } from '../../services/api/loyalty';
+import { loyaltyApi, type LoyaltyProgramStats, type LoyaltySettings } from '../../services/api/loyalty';
 
-interface LoyaltyTier {
+// Visual metadata only (badge / colour / benefits). The real numeric
+// thresholds + point multipliers come from the loyalty engine
+// (loyaltyApi.getSettings -> tier_thresholds / tier_multipliers), so the UI
+// never disagrees with what actually earns/tiers a customer. 4 tiers — the
+// engine has no "Diamond".
+interface LoyaltyTierMeta {
   name: string;
-  minValue: number;
-  maxValue: number;
+  key: string; // engine tier key (UPPER) for thresholds/multipliers lookup
   color: string;
   bgColor: string;
   badge: string;
   benefits: string[];
-  pointsMultiplier: number;
 }
 
-const LOYALTY_TIERS: LoyaltyTier[] = [
+const LOYALTY_TIERS: LoyaltyTierMeta[] = [
   {
     name: 'Bronze',
-    minValue: 0,
-    maxValue: 10000,
+    key: 'BRONZE',
     color: 'text-amber-600',
     bgColor: 'bg-amber-50 border-amber-200',
     badge: '🥉',
-    benefits: ['1x points per purchase', 'Monthly newsletter', 'Email promotions'],
-    pointsMultiplier: 1,
+    benefits: ['Base points per purchase', 'Monthly newsletter', 'Email promotions'],
   },
   {
     name: 'Silver',
-    minValue: 10000,
-    maxValue: 25000,
+    key: 'SILVER',
     color: 'text-slate-700',
     bgColor: 'bg-slate-50 border-slate-200',
     badge: '🥈',
-    benefits: ['1.25x points', 'Birthday offer', 'Priority support', 'Free shipping'],
-    pointsMultiplier: 1.25,
+    benefits: ['Birthday offer', 'Priority support', 'Free shipping'],
   },
   {
     name: 'Gold',
-    minValue: 25000,
-    maxValue: 50000,
+    key: 'GOLD',
     color: 'text-yellow-600',
     bgColor: 'bg-yellow-50 border-yellow-200',
     badge: '🥇',
-    benefits: ['1.5x points', 'Exclusive sales', '10% loyalty discount', 'VIP support'],
-    pointsMultiplier: 1.5,
+    benefits: ['Exclusive sales', 'Loyalty discount', 'VIP support'],
   },
   {
     name: 'Platinum',
-    minValue: 50000,
-    maxValue: 100000,
+    key: 'PLATINUM',
     color: 'text-blue-600',
     bgColor: 'bg-blue-50 border-blue-200',
     badge: '💎',
-    benefits: ['2x points', '15% loyalty discount', 'Personal account manager', 'Event invites'],
-    pointsMultiplier: 2,
-  },
-  {
-    name: 'Diamond',
-    minValue: 100000,
-    maxValue: Infinity,
-    color: 'text-purple-600',
-    bgColor: 'bg-purple-50 border-purple-200',
-    badge: '👑',
-    benefits: ['3x points', '20% loyalty discount', 'Concierge service', 'Exclusive products'],
-    pointsMultiplier: 3,
+    benefits: ['Top loyalty discount', 'Personal account manager', 'Event invites'],
   },
 ];
 
@@ -80,14 +65,17 @@ const tierCount = (stats: LoyaltyProgramStats | null, tierName: string) =>
 export function LoyaltyProgram() {
   const [activeTab, setActiveTab] = useState<'overview' | 'tiers' | 'rewards' | 'promotions'>('overview');
   const [stats, setStats] = useState<LoyaltyProgramStats | null>(null);
+  const [settings, setSettings] = useState<LoyaltySettings | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
-    loyaltyApi
-      .getProgramStats()
-      .then((s) => { if (alive) setStats(s); })
-      .catch(() => { if (alive) setStats(null); })
+    Promise.allSettled([loyaltyApi.getProgramStats(), loyaltyApi.getSettings()])
+      .then(([statsRes, settingsRes]) => {
+        if (!alive) return;
+        setStats(statsRes.status === 'fulfilled' ? statsRes.value : null);
+        setSettings(settingsRes.status === 'fulfilled' ? settingsRes.value : null);
+      })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
@@ -99,7 +87,7 @@ export function LoyaltyProgram() {
         <div>
           <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Loyalty</div>
           <h1>Reward what comes back.</h1>
-          <div className="hint">5-tier system (Silver / Gold / Platinum / Diamond / VIP). Points on ₹100 spend, redeemable at POS with cap.</div>
+          <div className="hint">4-tier system (Bronze / Silver / Gold / Platinum). Points earned on spend, redeemable at POS with cap.</div>
         </div>
         <button className="btn sm">
           <Settings className="w-4 h-4" /> Program settings
@@ -201,33 +189,42 @@ export function LoyaltyProgram() {
       )}
 
       {activeTab === 'tiers' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-          {LOYALTY_TIERS.map((tier) => (
-            <div key={tier.name} className={clsx('rounded-lg p-4 border', tier.bgColor)}>
-              <div className="text-3xl mb-2">{tier.badge}</div>
-              <h3 className={clsx('text-lg font-bold mb-2', tier.color)}>{tier.name}</h3>
-              <p className="text-xs text-gray-500 mb-3">
-                ₹{tier.minValue.toLocaleString('en-IN')} - ₹{tier.maxValue === Infinity ? '∞' : tier.maxValue.toLocaleString('en-IN')}
-              </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {LOYALTY_TIERS.map((tier) => {
+            // Threshold + multiplier come from the engine config, not hardcoded.
+            const threshold = settings?.tier_thresholds?.[tier.key];
+            const multiplier = settings?.tier_multipliers?.[tier.key];
+            return (
+              <div key={tier.name} className={clsx('rounded-lg p-4 border', tier.bgColor)}>
+                <div className="text-3xl mb-2">{tier.badge}</div>
+                <h3 className={clsx('text-lg font-bold mb-2', tier.color)}>{tier.name}</h3>
+                <p className="text-xs text-gray-500 mb-3">
+                  {threshold !== undefined
+                    ? `${threshold.toLocaleString('en-IN')}+ lifetime points`
+                    : 'Threshold from program settings'}
+                </p>
 
-              <div className="space-y-2 mb-4 pb-4 border-b border-gray-200">
-                {tier.benefits.map((benefit, idx) => (
-                  <p key={idx} className="text-xs text-gray-600">✓ {benefit}</p>
-                ))}
-              </div>
+                <div className="space-y-2 mb-4 pb-4 border-b border-gray-200">
+                  {tier.benefits.map((benefit, idx) => (
+                    <p key={idx} className="text-xs text-gray-600">✓ {benefit}</p>
+                  ))}
+                </div>
 
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-500">Members</span>
-                  <span className="text-gray-900 font-semibold">{tierCount(stats, tier.name)}</span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-500">Points 3x</span>
-                  <span className="text-green-600 font-semibold">{tier.pointsMultiplier}x</span>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-500">Members</span>
+                    <span className="text-gray-900 font-semibold">{tierCount(stats, tier.name)}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-500">Points multiplier</span>
+                    <span className="text-green-600 font-semibold">
+                      {multiplier !== undefined ? `${multiplier}x` : '—'}
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import type { Customer } from '../../types';
 import { customerApi, orderApi, prescriptionApi } from '../../services/api';
+import { loyaltyApi } from '../../services/api/loyalty';
 import StoreCreditLedgerCard from '../../components/customers/StoreCreditLedgerCard';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
@@ -39,7 +40,7 @@ import clsx from 'clsx';
 
 type Customer360Tab = 'overview' | 'prescriptions' | 'orders' | 'interactions' | 'loyalty' | 'preferences';
 
-type LoyaltyTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
+type LoyaltyTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
 
 interface CustomerStats {
   totalLifetimeValue: number;
@@ -218,16 +219,28 @@ export function Customer360Dashboard() {
       };
       setStats(calculatedStats);
 
-      // Set loyalty data
-      const loyaltyTier = calculateLoyaltyTier(calculatedStats.totalLifetimeValue);
-      setLoyaltyData({
-        tier: loyaltyTier,
-        points: Math.floor(calculatedStats.totalLifetimeValue),
-        pointsToNextTier: getPointsToNextTier(loyaltyTier, calculatedStats.totalLifetimeValue),
-        redeemedPoints: 0,
-        totalPointsEarned: Math.floor(calculatedStats.totalLifetimeValue),
-        memberSince: customerData.created_at,
-      });
+      // Set loyalty data from the real loyalty engine (not fabricated from
+      // rupee totals). getAccount returns the canonical balance/tier/earned/
+      // redeemed + the engine's tier thresholds so "points to next tier" is
+      // honest. On failure (not enrolled / no engine), leave loyaltyData null
+      // so the UI shows a "not enrolled" empty state instead of inventing one.
+      try {
+        const loyaltyResp = await loyaltyApi.getAccount(customerId!);
+        const acct = loyaltyResp.account;
+        const tierLabel = titleCaseTier(acct.tier);
+        const thresholds = loyaltyResp.settings?.tier_thresholds || {};
+        setLoyaltyData({
+          tier: tierLabel,
+          points: acct.balance_points ?? 0,
+          pointsToNextTier: pointsToNextTierFromSettings(acct.tier, acct.lifetime_earned ?? 0, thresholds),
+          redeemedPoints: acct.lifetime_redeemed ?? 0,
+          totalPointsEarned: acct.lifetime_earned ?? 0,
+          memberSince: acct.created_at || customerData.created_at,
+        });
+      } catch {
+        // Customer not enrolled or loyalty engine unavailable — empty state.
+        setLoyaltyData(null);
+      }
 
       // Fetch real prescription data for this customer
       try {
@@ -292,24 +305,28 @@ export function Customer360Dashboard() {
     return (now.getFullYear() - date.getFullYear()) * 12 + (now.getMonth() - date.getMonth());
   };
 
-  const calculateLoyaltyTier = (lifetimeValue: number): LoyaltyTier => {
-    if (lifetimeValue >= 100000) return 'Diamond';
-    if (lifetimeValue >= 50000) return 'Platinum';
-    if (lifetimeValue >= 25000) return 'Gold';
-    if (lifetimeValue >= 10000) return 'Silver';
+  // Map the engine's UPPER_SNAKE tier to the Title-case label this view uses.
+  const titleCaseTier = (tier: string): LoyaltyTier => {
+    const t = (tier || 'BRONZE').toUpperCase();
+    if (t === 'PLATINUM') return 'Platinum';
+    if (t === 'GOLD') return 'Gold';
+    if (t === 'SILVER') return 'Silver';
     return 'Bronze';
   };
 
-  const getPointsToNextTier = (tier: LoyaltyTier, currentValue: number): number => {
-    const thresholds = {
-      Bronze: 10000,
-      Silver: 25000,
-      Gold: 50000,
-      Platinum: 100000,
-      Diamond: 100000,
-    };
-    const nextThreshold = thresholds[tier];
-    return Math.max(0, nextThreshold - currentValue);
+  // "Points to next tier" computed from the engine's own tier_thresholds
+  // (lifetime-earned-points based), not invented rupee bands. Returns 0 at the
+  // top tier or when thresholds are unavailable.
+  const pointsToNextTierFromSettings = (
+    tier: string,
+    lifetimeEarned: number,
+    thresholds: Record<string, number>,
+  ): number => {
+    const order = ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM'];
+    const idx = order.indexOf((tier || 'BRONZE').toUpperCase());
+    const nextKey = idx >= 0 && idx < order.length - 1 ? order[idx + 1] : null;
+    if (!nextKey || thresholds[nextKey] === undefined) return 0;
+    return Math.max(0, thresholds[nextKey] - lifetimeEarned);
   };
 
   if (isLoading) {
@@ -386,7 +403,15 @@ export function Customer360Dashboard() {
         {activeTab === 'interactions' && <InteractionsTab interactions={interactions} />}
         {activeTab === 'loyalty' && (
           <div className="space-y-4">
-            {loyaltyData && <LoyaltyTab loyaltyData={loyaltyData} />}
+            {loyaltyData ? (
+              <LoyaltyTab loyaltyData={loyaltyData} />
+            ) : (
+              <div className="text-center py-12 text-gray-500">
+                <Award className="w-12 h-12 mx-auto mb-3 opacity-40" />
+                <p>Not enrolled in the loyalty program yet.</p>
+                <p className="text-sm">Points are earned automatically on qualifying purchases.</p>
+              </div>
+            )}
             {customerId && <StoreCreditLedgerCard customerId={customerId} />}
           </div>
         )}
@@ -413,7 +438,6 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
       Silver: 'bg-gray-100 text-slate-700',
       Gold: 'bg-yellow-700 text-yellow-700',
       Platinum: 'bg-blue-700 text-blue-700',
-      Diamond: 'bg-purple-700 text-purple-700',
     };
     return colors[tier];
   };
@@ -771,19 +795,16 @@ interface LoyaltyTabProps {
 }
 
 function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
-  const getTierThreshold = (tier: LoyaltyTier): number => {
-    const thresholds = {
-      Bronze: 0,
-      Silver: 10000,
-      Gold: 25000,
-      Platinum: 50000,
-      Diamond: 100000,
-    };
-    return thresholds[tier];
-  };
-
-  const nextTierThreshold = loyaltyData.tier === 'Diamond' ? 100000 : getTierThreshold(loyaltyData.tier) * 2.5;
-  const progress = ((loyaltyData.points - getTierThreshold(loyaltyData.tier)) / (nextTierThreshold - getTierThreshold(loyaltyData.tier))) * 100;
+  // Progress toward the next tier is driven by the engine-supplied
+  // pointsToNextTier (lifetime-earned vs the next threshold), not invented
+  // rupee bands. At the top tier pointsToNextTier is 0 -> bar full.
+  const atTopTier = loyaltyData.tier === 'Platinum';
+  const nextTierTotal = loyaltyData.totalPointsEarned + loyaltyData.pointsToNextTier;
+  const progress = atTopTier
+    ? 100
+    : nextTierTotal > 0
+      ? (loyaltyData.totalPointsEarned / nextTierTotal) * 100
+      : 0;
 
   return (
     <div className="space-y-6">
@@ -802,23 +823,25 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
         <h3 className="text-lg font-semibold text-gray-900">Points Progress</h3>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-gray-500">Current Points</span>
-            <span className="text-gray-900 font-semibold">{loyaltyData.points}</span>
+            <span className="text-gray-500">Current Balance</span>
+            <span className="text-gray-900 font-semibold">{loyaltyData.points.toLocaleString('en-IN')} pts</span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
             <div className="bg-gradient-to-r from-blue-500 to-purple-500 h-full" style={{ width: `${Math.min(progress, 100)}%` }} />
           </div>
           <div className="flex items-center justify-between text-xs">
             <span className="text-gray-500">
-              {getTierThreshold(loyaltyData.tier).toLocaleString('en-IN')}
+              {loyaltyData.totalPointsEarned.toLocaleString('en-IN')} earned
             </span>
             <span className="text-gray-500">
-              {nextTierThreshold.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              {nextTierTotal.toLocaleString('en-IN')}
             </span>
           </div>
         </div>
         <p className="text-gray-500 text-sm pt-2 border-t border-gray-200">
-          {loyaltyData.pointsToNextTier} points needed to reach next tier
+          {atTopTier
+            ? 'Top tier reached.'
+            : `${loyaltyData.pointsToNextTier.toLocaleString('en-IN')} points needed to reach next tier`}
         </p>
       </div>
 

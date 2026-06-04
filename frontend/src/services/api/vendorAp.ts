@@ -319,14 +319,38 @@ export const vendorApApi = {
   },
 };
 
+// The stored vendor_bills doc uses invoice_number / bill_number for the
+// supplier invoice no, invoice_date / bill_date for the date, cgst_total /
+// sgst_total / igst_total for the GST split, and `interstate` for the tax-type
+// flag. The FE list + drawer read vendor_invoice_no / vendor_invoice_date /
+// cgst / sgst / igst / is_interstate. Map the API doc onto those keys so the
+// list shows the invoice no/date + GST amounts and labels CGST+SGST vs IGST
+// correctly (instead of blanks + dashes).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapInvoiceFromApi(doc: Record<string, any>): PurchaseInvoice {
+  const cgst = doc.cgst ?? doc.cgst_total ?? 0;
+  const sgst = doc.sgst ?? doc.sgst_total ?? 0;
+  const igst = doc.igst ?? doc.igst_total ?? 0;
+  return {
+    ...doc,
+    vendor_invoice_no: doc.vendor_invoice_no ?? doc.invoice_number ?? doc.bill_number ?? '',
+    vendor_invoice_date: doc.vendor_invoice_date ?? doc.invoice_date ?? doc.bill_date ?? '',
+    cgst,
+    sgst,
+    igst,
+    is_interstate: doc.is_interstate ?? doc.interstate ?? igst > 0,
+  } as PurchaseInvoice;
+}
+
 export const purchaseInvoicesApi = {
   // Reads are fail-soft: a backend that hasn't shipped the route yet (404/500)
   // returns an empty list so the Purchase page renders instead of erroring.
   list: async (params?: { vendor_id?: string; store_id?: string; status?: string }) => {
     try {
       const res = await api.get('/vendors/purchase-invoices', { params });
-      const d = res.data as { purchase_invoices?: PurchaseInvoice[]; total?: number };
-      return { purchase_invoices: d.purchase_invoices ?? [], total: d.total ?? (d.purchase_invoices?.length ?? 0) };
+      const d = res.data as { purchase_invoices?: Record<string, unknown>[]; total?: number };
+      const rows = (d.purchase_invoices ?? []).map(mapInvoiceFromApi);
+      return { purchase_invoices: rows, total: d.total ?? rows.length };
     } catch {
       return { purchase_invoices: [] as PurchaseInvoice[], total: 0 };
     }
@@ -337,15 +361,48 @@ export const purchaseInvoicesApi = {
   },
   // Writes THROW so booking failures (validation, missing GRN, period lock) are
   // surfaced loudly to the user rather than silently swallowed.
+  // The FE form uses display-friendly keys (vendor_invoice_no / quantity /
+  // product_name / hsn_code); the backend PurchaseInvoiceCreate schema wants
+  // invoice_number / invoice_date and per-line description / qty / hsn. Map at
+  // this seam so the form code + TS types stay stable and the POST never 422s.
   create: async (payload: PurchaseInvoiceCreate) => {
-    const res = await api.post('/vendors/purchase-invoices', payload);
-    return res.data as PurchaseInvoice;
+    const wire = {
+      vendor_id: payload.vendor_id,
+      invoice_number: payload.vendor_invoice_no,
+      invoice_date: payload.vendor_invoice_date,
+      place_of_supply: payload.place_of_supply,
+      recipient_gstin: payload.recipient_gstin,
+      po_id: payload.po_id,
+      grn_id: payload.grn_id,
+      store_id: payload.store_id,
+      notes: payload.notes,
+      lines: payload.lines.map((l) => ({
+        product_id: l.product_id,
+        description: l.product_name,
+        hsn: l.hsn_code,
+        qty: l.quantity,
+        unit_price: l.unit_price,
+        gst_rate: l.gst_rate,
+        taxable: l.taxable_amount,
+      })),
+    };
+    const res = await api.post('/vendors/purchase-invoices', wire);
+    return mapInvoiceFromApi(res.data as Record<string, unknown>);
   },
   // Returns a server-prepared DRAFT prefilled from the ACCEPTED GRN (+ its PO).
   // Nothing is booked until create() is called with the reviewed draft.
+  // Backend route is GET /from-grn/{grn_id} (it doesn't persist) -- a POST 405s.
+  // The draft uses invoice_number / invoice_date; alias them to the FE's
+  // vendor_invoice_no / vendor_invoice_date so the form prefill works.
   createFromGrn: async (grnId: string) => {
-    const res = await api.post('/vendors/purchase-invoices/from-grn', { grn_id: grnId });
-    return res.data as PurchaseInvoiceDraft;
+    const res = await api.get(`/vendors/purchase-invoices/from-grn/${grnId}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const d = res.data as Record<string, any>;
+    return {
+      ...d,
+      vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
+      vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
+    } as PurchaseInvoiceDraft;
   },
   // Phase 2: the 3-way match breakdown for one invoice. The backend returns an
   // envelope { invoice_id, match_status, match_detail, po_id, grn_id }; we unwrap

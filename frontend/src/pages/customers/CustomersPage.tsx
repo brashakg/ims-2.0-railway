@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
+import { loyaltyApi, type LoyaltyAccount } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -80,6 +81,9 @@ export function CustomersPage() {
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
   const [purchaseHistory, setPurchaseHistory] = useState<Array<{ id: string; orderNumber: string; date: string; total: number; items: number }>>([]);
+  // Real loyalty account for the selected customer (null = not enrolled / no
+  // loyalty engine). Replaces the old fabricated spend/100 + rupee-band tier.
+  const [loyaltyAccount, setLoyaltyAccount] = useState<LoyaltyAccount | null>(null);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -172,6 +176,17 @@ export function CustomersPage() {
     }
   }, []);
 
+  // Load the real loyalty account (engine of record) for the selected customer.
+  // Honest empty state on failure: not enrolled / no loyalty engine -> null.
+  const loadLoyalty = useCallback(async (customerId: string) => {
+    try {
+      const resp = await loyaltyApi.getAccount(customerId);
+      setLoyaltyAccount(resp.account || null);
+    } catch {
+      setLoyaltyAccount(null);
+    }
+  }, []);
+
   // Filter customers locally.
   // DEFENSIVE: server rows occasionally have null/missing name or phone (data-import
   // residue, legacy customers without a phone, B2B-only entries). Bare
@@ -204,7 +219,9 @@ export function CustomersPage() {
     setSelectedCustomer(customer);
     setSelectedPatient(customer.patients?.[0] || null);
     setViewMode('detail');
+    setLoyaltyAccount(null);
     loadPurchaseHistory(customer.id);
+    loadLoyalty(customer.id);
     if (customer.patients?.[0]) {
       loadPrescriptions(customer.patients[0].id);
     }
@@ -220,6 +237,7 @@ export function CustomersPage() {
     setSelectedPatient(null);
     setPrescriptions([]);
     setPurchaseHistory([]);
+    setLoyaltyAccount(null);
     setViewMode('list');
   };
 
@@ -540,14 +558,17 @@ export function CustomersPage() {
     ? Math.floor((Date.now() - new Date(selectedCustomer.createdAt).getTime()) / (1000 * 60 * 60 * 24))
     : 0;
 
-  // Loyalty: ₹100 = 1 point
-  const loyaltyPoints = Math.floor(totalSpend / 100);
-  const loyaltyTier = loyaltyPoints >= 5000 ? 'Diamond' : loyaltyPoints >= 2000 ? 'Platinum' : loyaltyPoints >= 500 ? 'Gold' : 'Silver';
+  // Loyalty: values come from the real loyalty engine (loyaltyAccount), not
+  // fabricated from rupee spend. null = customer not enrolled -> empty state.
+  const loyaltyPoints = loyaltyAccount?.balance_points ?? 0;
+  const loyaltyTier = loyaltyAccount
+    ? loyaltyAccount.tier.charAt(0) + loyaltyAccount.tier.slice(1).toLowerCase()
+    : null;
   const tierColors: Record<string, { bg: string; text: string; border: string }> = {
+    Bronze: { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-300' },
     Silver: { bg: 'bg-gray-100', text: 'text-gray-700', border: 'border-gray-300' },
     Gold: { bg: 'bg-yellow-50', text: 'text-yellow-700', border: 'border-yellow-300' },
     Platinum: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-300' },
-    Diamond: { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-300' },
   };
 
   // No communication-log API exists yet. This used to render fabricated rows
@@ -721,37 +742,32 @@ export function CustomersPage() {
               );
             })()}
 
-            {/* Loyalty Points */}
-            <div className={`mt-3 p-3 rounded-lg border ${tierColors[loyaltyTier].border} ${tierColors[loyaltyTier].bg}`}>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-1.5">
-                  <Award className={`w-4 h-4 ${tierColors[loyaltyTier].text}`} />
-                  <span className={`text-sm font-semibold ${tierColors[loyaltyTier].text}`}>{loyaltyTier}</span>
+            {/* Loyalty Points — real engine values, honest empty state if not enrolled */}
+            {loyaltyTier ? (
+              <div className={`mt-3 p-3 rounded-lg border ${(tierColors[loyaltyTier] || tierColors.Bronze).border} ${(tierColors[loyaltyTier] || tierColors.Bronze).bg}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Award className={`w-4 h-4 ${(tierColors[loyaltyTier] || tierColors.Bronze).text}`} />
+                    <span className={`text-sm font-semibold ${(tierColors[loyaltyTier] || tierColors.Bronze).text}`}>{loyaltyTier}</span>
+                  </div>
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${(tierColors[loyaltyTier] || tierColors.Bronze).bg} ${(tierColors[loyaltyTier] || tierColors.Bronze).text} border ${(tierColors[loyaltyTier] || tierColors.Bronze).border}`}>
+                    {loyaltyPoints.toLocaleString('en-IN')} pts
+                  </span>
                 </div>
-                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${tierColors[loyaltyTier].bg} ${tierColors[loyaltyTier].text} border ${tierColors[loyaltyTier].border}`}>
-                  {loyaltyPoints.toLocaleString('en-IN')} pts
-                </span>
+                {loyaltyAccount && (
+                  <p className="text-xs text-gray-500 mt-1">
+                    {(loyaltyAccount.lifetime_earned ?? 0).toLocaleString('en-IN')} earned · {(loyaltyAccount.lifetime_redeemed ?? 0).toLocaleString('en-IN')} redeemed
+                  </p>
+                )}
               </div>
-              <div className="w-full bg-white/60 rounded-full h-1.5">
-                <div
-                  className={clsx(
-                    'h-1.5 rounded-full transition-all',
-                    loyaltyTier === 'Silver' && 'bg-gray-400',
-                    loyaltyTier === 'Gold' && 'bg-yellow-500',
-                    loyaltyTier === 'Platinum' && 'bg-blue-500',
-                    loyaltyTier === 'Diamond' && 'bg-purple-500',
-                  )}
-                  style={{
-                    width: `${Math.min(100, loyaltyTier === 'Diamond' ? 100 : loyaltyTier === 'Platinum' ? (loyaltyPoints / 5000) * 100 : loyaltyTier === 'Gold' ? (loyaltyPoints / 2000) * 100 : (loyaltyPoints / 500) * 100)}%`,
-                  }}
-                />
+            ) : (
+              <div className="mt-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <div className="flex items-center gap-1.5 text-gray-500">
+                  <Award className="w-4 h-4" />
+                  <span className="text-sm">Not enrolled in loyalty</span>
+                </div>
               </div>
-              <p className="text-xs text-gray-500 mt-1">
-                {loyaltyTier === 'Diamond'
-                  ? 'Top tier reached!'
-                  : `${(loyaltyTier === 'Platinum' ? 5000 : loyaltyTier === 'Gold' ? 2000 : 500) - loyaltyPoints} pts to next tier`}
-              </p>
-            </div>
+            )}
 
             {selectedCustomer?.customerType === 'B2B' && selectedCustomer.gstNumber && (
               <div className="flex items-center gap-2 text-sm">
