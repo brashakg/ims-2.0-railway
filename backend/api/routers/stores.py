@@ -9,11 +9,12 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_store_repository,
     get_user_repository,
     get_order_repository,
+    get_db,
     validate_store_access,
 )
 from ..services import org_validation as ov
@@ -250,6 +251,145 @@ async def get_store_summary(current_user: dict = Depends(get_current_user)):
         return {"summary": summary}
 
     return {"summary": {}}
+
+
+def _count(db, collection: str, query: dict) -> int:
+    """Mock-safe count_documents; 0 on any error / missing collection."""
+    try:
+        coll = db.get_collection(collection)
+        if coll is None:
+            return 0
+        return coll.count_documents(query)
+    except Exception:
+        return 0
+
+
+@router.get("/go-live-checklist")
+async def go_live_checklist(current_user: dict = Depends(require_roles("ADMIN"))):
+    """Go-live readiness checklist. Aggregates the real prerequisites for the
+    first live sale into one payload so the owner sees what's done vs still
+    missing, each with a 'do this next' route. Read-only; never mutates.
+
+    Checks (each: key, label, status PASS/WARN/FAIL, count, hint, route):
+      * stores      — at least one active store exists (GST invoice + geo-fence
+                      login both need a store on file).
+      * store_gstin — every active store has a GSTIN (B2B/GST invoice needs it).
+      * staff       — at least one active non-admin login exists to run a till.
+      * products    — catalog has active products to sell.
+      * tax_codes   — products carry an HSN + GST rate (deep check is the
+                      tax-code audit report; here we just flag blanks).
+      * invoice     — invoice numbering settings are configured.
+    A FAIL is a hard blocker; WARN is 'should fix'; PASS is ready.
+    """
+    db = get_db()
+    checks = []
+
+    def add(key, label, status, count, hint, route):
+        checks.append(
+            {"key": key, "label": label, "status": status, "count": count,
+             "hint": hint, "route": route}
+        )
+
+    if db is None or not getattr(db, "is_connected", True):
+        # No DB reachable — report unknown rather than a false green.
+        return {
+            "ready": False,
+            "checks": [
+                {"key": "database", "label": "Database connection",
+                 "status": "FAIL", "count": 0,
+                 "hint": "Backend can't reach the database. Check the server.",
+                 "route": None}
+            ],
+            "summary": {"pass": 0, "warn": 0, "fail": 1, "total": 1},
+        }
+
+    # 1. Active stores
+    active_stores = _count(db, "stores", {"is_active": {"$ne": False}})
+    add(
+        "stores", "Stores set up",
+        "PASS" if active_stores > 0 else "FAIL", active_stores,
+        "Add at least one store — GST invoices and staff geo-fenced login both "
+        "need a store on file." if active_stores == 0 else
+        f"{active_stores} active store(s).",
+        "/settings?tab=stores",
+    )
+
+    # 2. Stores missing a GSTIN
+    stores_no_gstin = _count(
+        db, "stores",
+        {"is_active": {"$ne": False},
+         "$or": [{"gstin": {"$in": [None, ""]}}, {"gstin": {"$exists": False}}]},
+    )
+    if active_stores > 0:
+        add(
+            "store_gstin", "Store GSTIN on file",
+            "PASS" if stores_no_gstin == 0 else "WARN", stores_no_gstin,
+            "Every store has a GSTIN." if stores_no_gstin == 0 else
+            f"{stores_no_gstin} store(s) have no GSTIN — required on a GST tax invoice.",
+            "/settings?tab=stores",
+        )
+
+    # 3. Staff logins (active, non-superadmin/admin — someone to run a till)
+    staff = _count(
+        db, "users",
+        {"is_active": {"$ne": False},
+         "roles": {"$nin": ["SUPERADMIN", "ADMIN"]}},
+    )
+    add(
+        "staff", "Staff logins created",
+        "PASS" if staff > 0 else "WARN", staff,
+        "Create store staff logins (cashier / optometrist / manager) so they can "
+        "sign in and bill." if staff == 0 else f"{staff} staff login(s).",
+        "/settings?tab=users",
+    )
+
+    # 4. Active products
+    products = _count(db, "products", {"is_active": {"$ne": False}})
+    add(
+        "products", "Products loaded",
+        "PASS" if products > 0 else "FAIL", products,
+        "Load your catalog — there's nothing to sell yet." if products == 0 else
+        f"{products} active product(s).",
+        "/catalog/add",
+    )
+
+    # 5. Products missing a tax code (blank HSN or no GST rate)
+    if products > 0:
+        bad_tax = _count(
+            db, "products",
+            {"is_active": {"$ne": False},
+             "$or": [{"hsn_code": {"$in": [None, ""]}},
+                     {"hsn_code": {"$exists": False}},
+                     {"gst_rate": {"$in": [None]}},
+                     {"gst_rate": {"$exists": False}}]},
+        )
+        add(
+            "tax_codes", "Product tax codes set",
+            "PASS" if bad_tax == 0 else "WARN", bad_tax,
+            "All products have an HSN + GST rate. Run the Tax-Code Audit to "
+            "confirm they're correct." if bad_tax == 0 else
+            f"{bad_tax} product(s) have a blank HSN or GST rate — fix before billing.",
+            "/reports?tab=inventory",
+        )
+
+    # 6. Invoice numbering configured
+    has_invoice = _count(db, "invoice_settings", {}) > 0
+    add(
+        "invoice", "Invoice numbering configured",
+        "PASS" if has_invoice else "WARN", 1 if has_invoice else 0,
+        "Invoice prefix + starting number are set." if has_invoice else
+        "Set your invoice prefix and starting number before the first bill.",
+        "/settings?tab=tax-invoice",
+    )
+
+    n_pass = sum(1 for c in checks if c["status"] == "PASS")
+    n_warn = sum(1 for c in checks if c["status"] == "WARN")
+    n_fail = sum(1 for c in checks if c["status"] == "FAIL")
+    return {
+        "ready": n_fail == 0,
+        "checks": checks,
+        "summary": {"pass": n_pass, "warn": n_warn, "fail": n_fail, "total": len(checks)},
+    }
 
 
 @router.get("")

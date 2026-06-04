@@ -329,6 +329,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'set-setup', label: 'Store & Employee Setup', path: '/setup', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-golive', label: 'Go-Live Readiness', path: '/go-live', roles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'set-profile', label: 'My Profile', path: '/settings?tab=profile' },
       { id: 'set-business', label: 'Business Profile', path: '/settings?tab=business', roles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'set-stores', label: 'Store Management', path: '/settings?tab=stores', roles: ['SUPERADMIN', 'ADMIN'] },
