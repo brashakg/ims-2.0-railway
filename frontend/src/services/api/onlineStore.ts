@@ -957,3 +957,189 @@ export const pushApi = {
     return _pushResultFrom(res?.data);
   },
 };
+
+// ============================================================================
+// ORDERS sub-api  (BVI Phase 3b — online-order ingestion into the IMS books)
+// ----------------------------------------------------------------------------
+// The READ side of the Shopify -> IMS order flow. A Shopify ORDER webhook lands
+// in the generic `webhook_inbox` collection (api/routers/webhooks.py, HMAC
+// verified) and the Phase-3b mapper (drained by NEXUS) turns it into a CANONICAL
+// IMS order tagged `channel: "ONLINE"` so online sales flow into Orders + Finance
+// exactly once (count-once / idempotent on the Shopify order id). This sub-api
+// surfaces those mapped orders read-only + a re-map action for any Shopify order
+// that FAILED to map (so an operator can retry after a fix), served by the
+// Phase-3b backend router:
+//   - GET  /api/v1/online-store/orders                       (list, channel=ONLINE)
+//   - POST /api/v1/online-store/orders/remap/{shopify_order_id}  (retry one)
+//
+// GRACEFUL DEGRADATION: the Phase-3b backend may not be deployed yet (it ships
+// separately) — every read resolves to a safe empty value rather than throwing,
+// so the Online Orders screen always renders ("backend not yet available" rather
+// than a crash). The remap write DOES throw on failure so the screen can toast
+// it. Import this service DIRECTLY from this module (NOT the api barrel — the
+// barrel re-export fails to resolve, TS2614, per past sessions).
+// ============================================================================
+
+/** Whether an online order was successfully mapped into the IMS books, or is
+ *  stuck. MAPPED = a canonical IMS order exists; FAILED = the mapper could not
+ *  build one (surfaces the Re-map action); PENDING = ingested, not yet drained. */
+export type OnlineOrderMapStatus = 'MAPPED' | 'FAILED' | 'PENDING';
+
+/** One online order as surfaced to the Online Orders screen. This mirrors the
+ *  canonical IMS order fields the Phase-3b mapper writes (snake_case from the
+ *  backend), PLUS the Shopify provenance + the map outcome. Every field is
+ *  optional + nullable so a partial backend payload never breaks rendering. */
+export interface OnlineOrder {
+  /** The canonical IMS order id once mapped (absent on a FAILED/PENDING row). */
+  id?: string | null;
+  /** The IMS order number (e.g. ORD-...) once mapped. */
+  order_number?: string | null;
+  /** Shopify provenance — the numeric/gid order id + the human #1001 name. */
+  shopify_order_id?: string | null;
+  shopify_order_name?: string | null;
+  /** Channel tag — always "ONLINE" for these rows (the count-once discriminator). */
+  channel?: string | null;
+  // --- Customer (mapper upserts the unified IMS customer) ---
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  customer_email?: string | null;
+  // --- Money (canonical IMS order totals; GST-inclusive grand total) ---
+  items_count?: number | null;
+  grand_total?: number | null;
+  currency?: string | null;
+  // --- Status ---
+  /** Canonical IMS order status (DRAFT/CONFIRMED/...) when mapped. */
+  order_status?: string | null;
+  /** Payment posture — either the IMS PAID/PARTIAL/PENDING or Shopify's
+   *  financial_status (paid/pending/refunded/...). Rendered as-is, humanised. */
+  payment_status?: string | null;
+  /** Shopify fulfillment_status (fulfilled/partial/unfulfilled/null). */
+  fulfillment_status?: string | null;
+  // --- The map outcome (drives the Re-map affordance) ---
+  map_status?: OnlineOrderMapStatus | null;
+  /** Why a FAILED row failed (shown on the row so the operator knows the fix). */
+  map_error?: string | null;
+  // --- Timestamps (ISO strings; placed = Shopify created_at) ---
+  placed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Filters for the online-orders list. All optional — omit for "everything". */
+export interface OnlineOrderListFilters {
+  /** Narrow to one map outcome (e.g. only the FAILED ones needing a re-map). */
+  map_status?: OnlineOrderMapStatus;
+  /** free-text over order number / shopify name / customer (backend-side). */
+  search?: string;
+  limit?: number;
+}
+
+/** The list envelope. `available=false` => the Phase-3b backend isn't deployed
+ *  yet (orders is []), so the screen shows the friendly "coming online" note
+ *  rather than an empty "no orders" state that would imply there are genuinely
+ *  none. `failed_count` lets the screen badge the re-map queue without scanning. */
+export interface OnlineOrdersResult {
+  orders: OnlineOrder[];
+  total: number;
+  failed_count: number;
+  available: boolean;
+}
+
+const ORDERS_BASE = '/online-store/orders';
+
+/** Normalise one raw backend order row into OnlineOrder. Tolerates both the
+ *  canonical IMS field names and a few common aliases (camelCase / Shopify
+ *  names) so the screen renders whatever shape the mapper emits. */
+function _onlineOrderFrom(o: Record<string, any>): OnlineOrder {
+  const itemsCount =
+    typeof o.items_count === 'number'
+      ? o.items_count
+      : Array.isArray(o.items)
+        ? o.items.length
+        : Array.isArray(o.line_items)
+          ? o.line_items.length
+          : null;
+  // Map outcome: explicit field wins; otherwise infer from whether a canonical
+  // IMS order id/number exists (mapped) vs a recorded error (failed).
+  let mapStatus: OnlineOrderMapStatus | null =
+    (o.map_status ?? o.mapping_status ?? null) as OnlineOrderMapStatus | null;
+  if (!mapStatus) {
+    if (o.id ?? o.order_id ?? o.order_number ?? o.orderNumber) mapStatus = 'MAPPED';
+    else if (o.map_error ?? o.error) mapStatus = 'FAILED';
+    else mapStatus = 'PENDING';
+  }
+  return {
+    id: (o.id ?? o.order_id ?? o._id) != null ? String(o.id ?? o.order_id ?? o._id) : null,
+    order_number: o.order_number ?? o.orderNumber ?? null,
+    shopify_order_id:
+      (o.shopify_order_id ?? o.shopifyOrderId ?? o.source_order_id) != null
+        ? String(o.shopify_order_id ?? o.shopifyOrderId ?? o.source_order_id)
+        : null,
+    shopify_order_name: o.shopify_order_name ?? o.shopify_name ?? o.name ?? null,
+    channel: o.channel ?? 'ONLINE',
+    customer_name: o.customer_name ?? o.customerName ?? null,
+    customer_phone: o.customer_phone ?? o.customerPhone ?? null,
+    customer_email: o.customer_email ?? o.customerEmail ?? o.email ?? null,
+    items_count: itemsCount,
+    grand_total:
+      typeof o.grand_total === 'number'
+        ? o.grand_total
+        : typeof o.grandTotal === 'number'
+          ? o.grandTotal
+          : typeof o.total_price === 'number'
+            ? o.total_price
+            : null,
+    currency: o.currency ?? 'INR',
+    order_status: o.order_status ?? o.orderStatus ?? o.status ?? null,
+    payment_status: o.payment_status ?? o.paymentStatus ?? o.financial_status ?? null,
+    fulfillment_status: o.fulfillment_status ?? o.fulfillmentStatus ?? null,
+    map_status: mapStatus,
+    map_error: o.map_error ?? o.error ?? o.mapping_error ?? null,
+    placed_at: o.placed_at ?? o.processed_at ?? o.shopify_created_at ?? o.createdAt ?? o.created_at ?? null,
+    created_at: o.created_at ?? o.createdAt ?? null,
+    updated_at: o.updated_at ?? o.updatedAt ?? null,
+  };
+}
+
+export const ordersApi = {
+  /** List online orders (channel=ONLINE), optionally filtered by map outcome /
+   *  search. NEVER throws: any error (incl. a 404 on a stale deploy, or a 403
+   *  for a viewer outside the gate) resolves to an empty, unavailable result so
+   *  the Online Orders screen always renders. */
+  listOnline: async (filters: OnlineOrderListFilters = {}): Promise<OnlineOrdersResult> => {
+    try {
+      const params: Record<string, string | number> = {};
+      if (filters.map_status) params.map_status = filters.map_status;
+      if (filters.search) params.search = filters.search;
+      if (typeof filters.limit === 'number') params.limit = filters.limit;
+      const res = await api.get(ORDERS_BASE, { params });
+      const data = res?.data;
+      const arr = Array.isArray(data) ? data : (data?.orders ?? data?.items ?? []);
+      const rows = (Array.isArray(arr) ? arr : []) as Array<Record<string, any>>;
+      const orders = rows.map(_onlineOrderFrom);
+      const total =
+        typeof data?.total === 'number' ? data.total : orders.length;
+      const failed_count =
+        typeof data?.failed_count === 'number'
+          ? data.failed_count
+          : orders.filter((o) => o.map_status === 'FAILED').length;
+      return { orders, total, failed_count, available: true };
+    } catch {
+      return { orders: [], total: 0, failed_count: 0, available: false };
+    }
+  },
+
+  /** Re-run the mapper for ONE Shopify order that failed to map (after a fix).
+   *  Throws on failure so the caller can toast it; the re-mapped IMS order is
+   *  returned (normalised) on success. SUPERADMIN / ADMIN only at the backend. */
+  remap: async (shopifyOrderId: string): Promise<OnlineOrder> => {
+    const res = await api.post(
+      `${ORDERS_BASE}/remap/${encodeURIComponent(shopifyOrderId)}`,
+    );
+    const data = res?.data;
+    const row = (data && typeof data === 'object' && (data.order ?? data.result))
+      ? (data.order ?? data.result)
+      : data;
+    return _onlineOrderFrom((row ?? {}) as Record<string, any>);
+  },
+};

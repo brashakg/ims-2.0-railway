@@ -122,6 +122,8 @@ const SECTIONS: Section[] = [
     phase: 'Phase 3',
     countKey: 'orders',
     countLabel: 'online orders',
+    // Phase 3b shipped: the Online orders view is live in-app.
+    href: '/online-store/orders',
   },
   {
     key: 'stock-tally',
