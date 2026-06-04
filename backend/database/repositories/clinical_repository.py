@@ -205,6 +205,44 @@ class EyeTestRepository(BaseRepository):
         today = date.today().isoformat()
         return self.get_store_tests(store_id, test_date=today, status="COMPLETED")
 
+    def get_store_tests_in_range(
+        self,
+        store_id: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 200,
+    ) -> List[Dict]:
+        """Get a store's eye tests within an inclusive [from_date, to_date]
+        date window (server-side), newest first.
+
+        ``test_date`` is stored as an ISO ``YYYY-MM-DD`` string (set in
+        ``create_test`` via ``date.today().isoformat()``), so a lexicographic
+        ``$gte`` / ``$lte`` string range is equivalent to a real date range and
+        needs no type coercion. Either bound may be omitted for an open-ended
+        range; omitting both returns the store's whole history (capped by
+        ``limit``) -- this is what powers the Test-History page's
+        Today / Week / Month / All-Time filters querying the range on the server
+        instead of pulling only today's rows and filtering in the browser.
+        """
+        filter_dict: Dict = {"store_id": store_id}
+        if status:
+            filter_dict["status"] = status
+        date_range: Dict = {}
+        if from_date:
+            date_range["$gte"] = from_date
+        if to_date:
+            date_range["$lte"] = to_date
+        if date_range:
+            filter_dict["test_date"] = date_range
+        return self.find_many(
+            filter_dict,
+            sort=[("created_at", -1)],
+            skip=skip,
+            limit=limit,
+        )
+
     def get_optometrist_tests(
         self,
         optometrist_id: str,

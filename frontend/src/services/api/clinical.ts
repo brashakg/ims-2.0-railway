@@ -76,6 +76,24 @@ export const clinicalApi = {
     return response.data;
   },
 
+  // Eye tests over a date RANGE (server-side). Pass a `range` keyword
+  // (today | week | month | all) or explicit `from`/`to` (ISO YYYY-MM-DD).
+  // Replaces the old getTodayTests + client-side filtering on Test History, so
+  // Week / Month / All-Time actually query older rows. Each COMPLETED test row
+  // carries `prescriptionId` (the auto-created Rx) so the Print button can open
+  // the A5 card directly.
+  getTests: async (
+    storeId: string,
+    opts?: { range?: 'today' | 'week' | 'month' | 'all'; from?: string; to?: string },
+  ) => {
+    const params: Record<string, string> = { store_id: storeId };
+    if (opts?.from) params.from = opts.from;
+    if (opts?.to) params.to = opts.to;
+    if (opts?.range && !opts?.from && !opts?.to) params.range = opts.range;
+    const response = await api.get('/clinical/tests', { params });
+    return response.data;
+  },
+
   getTest: async (testId: string) => {
     const response = await api.get(`/clinical/tests/${testId}`);
     return response.data;
