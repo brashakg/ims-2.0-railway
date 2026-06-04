@@ -1,0 +1,612 @@
+"""
+IMS 2.0 - Online-order MAPPER (Shopify order -> canonical IMS order)  [BVI Phase 3b]
+====================================================================================
+THE GAP this closes: the signed `/webhooks/shopify` receiver verifies + persists
+a Shopify order to `webhook_inbox`, and NEXUS drains it -- but until now there was
+NO single, authoritative MAPPER that turns an ingested Shopify ORDER into a
+canonical IMS order so online sales flow into Orders / Finance / P&L. This is it.
+
+DESIGN: count-once, do NOT fork.
+  * The GST math + invoice-serial allocation + the hard idempotency guards already
+    live in `api.services.shopify_ingest.ingest_shopify_order` (Council B10). This
+    mapper REUSES that create path verbatim -- it never re-implements the line
+    mapping, the inclusive GST extraction, the place-of-supply CGST/SGST/IGST split
+    or the per-(store,FY) invoice counter. One create path = revenue counted ONCE.
+  * On top of ingest, the mapper adds the three things Phase 3b requires that the
+    raw ingest does not do:
+      1. VARIANT RESOLUTION -- map each Shopify line's `variant_id` ->
+         `catalog_variants` -> the IMS `sku` (then product_id), so the existing
+         SKU->product-master HSN/GST resolution inside ingest fires. Fallback order:
+         variant_id -> sku already on the line -> title. A pre-pass enriches the
+         payload line_items in place; ingest then bills against the real SKU.
+      2. CUSTOMER MATCH/CREATE -- match an IMS `customers` row by phone then email,
+         else CREATE a minimal customer (channel ONLINE). The order is then stamped
+         with the resolved `customer_id` so CRM / loyalty / AR see the same buyer.
+      3. STATUS SYNC on re-ingest -- a replayed / updated / cancelled Shopify order
+         for an EXISTING IMS order does NOT create a 2nd order; instead it UPDATES
+         payment_status / fulfillment_status / status in place (orders/updated,
+         orders/cancelled). The hard order-id guard in ingest already prevents the
+         double-create; the mapper layers the status update on the duplicate path.
+
+  * STORE bucket: the online channel bills under a configured store. Resolution
+    order: explicit `_ims_online_store_id` on the payload -> the `shopify`
+    integration config (`online_store_id`) -> ONLINE_STORE_ID env -> a SETTINGS
+    value (`online_store_id`) -> the first/primary ACTIVE store -> the stable
+    virtual default "BV-ONLINE-01". (shopify_ingest reads the payload field, so the
+    mapper resolves the rest and stamps the payload before delegating.)
+
+FAIL-SOFT, end to end: a bad / partial payload yields a logged SKIP result and NEVER
+raises (the NEXUS drain loop must keep ticking). No DB -> the underlying ingest
+SIMULATES. Every helper swallows its own errors.
+
+PUBLIC API:
+    map_shopify_order(payload, db, *, webhook_id=None, topic=None) -> dict
+        Idempotently create-or-sync the IMS order for one Shopify order payload.
+        Returns the ingest result dict, augmented with the resolved
+        {"customer_id", "store_id"} and (on a re-ingest) {"status_synced": bool}.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+# Shopify financial_status -> canonical IMS payment_status.
+# (Shopify: pending | authorized | partially_paid | paid | partially_refunded |
+#  refunded | voided.) Anything unknown -> UNPAID (safe: it shows as a receivable).
+_PAYMENT_STATUS_MAP = {
+    "paid": "PAID",
+    "partially_paid": "PARTIAL",
+    "authorized": "UNPAID",
+    "pending": "UNPAID",
+    "voided": "CANCELLED",
+    "refunded": "REFUNDED",
+    "partially_refunded": "PARTIAL_REFUND",
+}
+
+# Shopify fulfillment_status -> canonical IMS fulfillment_status.
+# (Shopify: null (unfulfilled) | partial | fulfilled | restocked.)
+_FULFILLMENT_STATUS_MAP = {
+    "fulfilled": "FULFILLED",
+    "partial": "PARTIAL",
+    "restocked": "RESTOCKED",
+    "": "UNFULFILLED",
+}
+
+# Shopify cancelled / fulfilled -> the IMS order lifecycle `status`.
+# A cancelled Shopify order maps the IMS order to CANCELLED so finance excludes it.
+_DELIVERED_FULFILLMENT = {"fulfilled"}
+
+
+def _f(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _norm(value: Any) -> str:
+    return str(value or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# 1) Variant resolution -- enrich each Shopify line with its IMS sku.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_variant_sku(line: Dict[str, Any], variant_repo) -> str:
+    """Resolve the IMS `sku` for one Shopify line item.
+
+    Priority:
+      1. the line's Shopify `variant_id` -> a `catalog_variants` row carrying that
+         `shopify_variant_id` -> its `sku` (the authoritative Online-Store mapping);
+      2. the `sku` Shopify already sent on the line (offline POS bills this SKU too);
+      3. '' -> ingest then falls back to the product_type/title GST category hint.
+
+    Best-effort: any repo error returns '' so ingest degrades to the hint path.
+    """
+    existing_sku = _norm(line.get("sku"))
+
+    variant_id = _norm(line.get("variant_id"))
+    if variant_id and variant_repo is not None:
+        try:
+            row = variant_repo.find_one({"shopify_variant_id": variant_id})
+            if not row:
+                # Shopify GIDs ("gid://shopify/ProductVariant/123") vs bare numeric
+                # ids: try the other shape so a mapping stored either way resolves.
+                alt = (
+                    variant_id.rsplit("/", 1)[-1]
+                    if variant_id.startswith("gid://")
+                    else f"gid://shopify/ProductVariant/{variant_id}"
+                )
+                if alt and alt != variant_id:
+                    row = variant_repo.find_one({"shopify_variant_id": alt})
+            if row and _norm(row.get("sku")):
+                return _norm(row.get("sku"))
+        except Exception:  # noqa: BLE001 - variant lookup is best-effort
+            logger.debug("[ONLINE_MAP] variant lookup failed", exc_info=True)
+
+    # Fall back to the SKU Shopify already put on the line.
+    return existing_sku
+
+
+def _enrich_line_items_with_sku(payload: Dict[str, Any], variant_repo) -> int:
+    """Mutate payload['line_items'] in place: stamp the resolved IMS `sku` on each
+    line so the downstream ingest resolves the real product master + HSN/GST.
+    Returns the count of lines whose sku was filled in from a variant mapping
+    (purely for logging). Never raises."""
+    filled = 0
+    for line in payload.get("line_items") or []:
+        if not isinstance(line, dict):
+            continue
+        before = _norm(line.get("sku"))
+        resolved = _resolve_variant_sku(line, variant_repo)
+        if resolved and resolved != before:
+            line["sku"] = resolved
+            filled += 1
+        elif resolved:
+            line["sku"] = resolved
+    return filled
+
+
+def _get_variant_repo(db):
+    """A CatalogVariantRepository bound to the live `catalog_variants` collection,
+    or None. Fail-soft (no DB / import error -> None -> ingest uses the hint path)."""
+    if db is None:
+        return None
+    try:
+        from database.repositories import CatalogVariantRepository
+
+        coll = db.get_collection("catalog_variants")
+        if coll is None:
+            return None
+        return CatalogVariantRepository(coll)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 2) Store bucket resolution (settings / primary-store fallback).
+# ---------------------------------------------------------------------------
+
+
+def _resolve_online_store_id(payload: Dict[str, Any], db) -> str:
+    """The store the online channel bills under. Resolution order:
+      1. explicit `_ims_online_store_id` on the payload (test / manual override);
+      2. the `shopify` integration config `online_store_id`;
+      3. the ONLINE_STORE_ID env var;
+      4. a settings value (`settings` collection, key `online_store_id`);
+      5. the first/primary ACTIVE store (store directory);
+      6. the stable virtual default "BV-ONLINE-01".
+    Never raises; each lookup is independently fail-soft."""
+    explicit = _norm(payload.get("_ims_online_store_id"))
+    if explicit:
+        return explicit
+
+    if db is not None:
+        # (2) integration config
+        try:
+            integ = db.get_collection("integrations")
+            if integ is not None:
+                doc = integ.find_one({"type": "shopify"})
+                cfg = (doc or {}).get("config") or {}
+                cand = _norm(cfg.get("online_store_id"))
+                if cand:
+                    return cand
+        except Exception:  # noqa: BLE001
+            pass
+
+    env_val = _norm(os.getenv("ONLINE_STORE_ID"))
+    if env_val:
+        return env_val
+
+    if db is not None:
+        # (4) settings collection -- a single settings doc may carry the key.
+        try:
+            settings = db.get_collection("settings")
+            if settings is not None:
+                row = settings.find_one({"key": "online_store_id"})
+                cand = _norm((row or {}).get("value"))
+                if cand:
+                    return cand
+                # Some deployments keep one settings singleton doc.
+                singleton = settings.find_one({})
+                cand = _norm((singleton or {}).get("online_store_id"))
+                if cand:
+                    return cand
+        except Exception:  # noqa: BLE001
+            pass
+
+        # (5) first/primary active store.
+        try:
+            from ..dependencies import get_store_repository
+
+            store_repo = get_store_repository()
+            if store_repo is not None:
+                actives = store_repo.find_active() or []
+                if actives:
+                    primary = next(
+                        (s for s in actives if s.get("is_primary") or s.get("primary")),
+                        actives[0],
+                    )
+                    cand = _norm(primary.get("store_id"))
+                    if cand:
+                        return cand
+        except Exception:  # noqa: BLE001
+            pass
+
+    return "BV-ONLINE-01"
+
+
+# ---------------------------------------------------------------------------
+# 3) Customer match / create.
+# ---------------------------------------------------------------------------
+
+
+def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Pull a normalized buyer (name / phone / email / state) out of a Shopify
+    order payload, looking at the nested customer object then the top-level
+    contact fields + the shipping/billing address."""
+    cust = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
+
+    name = " ".join(
+        _norm(p) for p in (cust.get("first_name"), cust.get("last_name")) if _norm(p)
+    ).strip()
+
+    phone = (
+        _norm(cust.get("phone"))
+        or _norm(payload.get("phone"))
+    )
+    email = (
+        _norm(cust.get("email"))
+        or _norm(payload.get("email"))
+        or _norm(payload.get("contact_email"))
+    )
+
+    # Address fallbacks for phone + a human name.
+    for key in ("shipping_address", "billing_address", "default_address"):
+        addr = cust.get(key) if isinstance(cust.get(key), dict) else payload.get(key)
+        if isinstance(addr, dict):
+            if not phone:
+                phone = _norm(addr.get("phone"))
+            if not name:
+                name = _norm(addr.get("name")) or " ".join(
+                    _norm(p)
+                    for p in (addr.get("first_name"), addr.get("last_name"))
+                    if _norm(p)
+                ).strip()
+
+    if not name:
+        name = email or phone or "Online Customer"
+
+    return {
+        "name": name,
+        "phone": phone,
+        "email": email,
+        "shopify_customer_id": _norm(cust.get("id")),
+    }
+
+
+def _normalize_indian_mobile(phone: str) -> str:
+    """Reduce a Shopify phone (often '+91 98xxxxxxxx' / '0098...') to the bare
+    10-digit Indian mobile IMS stores, so a match against an existing customer
+    works. Returns '' when no 10-digit mobile can be derived."""
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return ""
+    # Strip a leading country / trunk prefix down to the last 10 digits.
+    if len(digits) > 10:
+        digits = digits[-10:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    return ""
+
+
+def _match_or_create_customer(db, buyer: Dict[str, str], store_id: str) -> Optional[str]:
+    """Return the IMS `customer_id` for this online buyer -- matching an existing
+    customer by phone then email, else creating a minimal ONLINE customer.
+
+    Fully fail-soft: no DB / repo error / nothing to key on -> returns None and the
+    order is still created (carrying the buyer's name+phone on the order doc, exactly
+    as before). NEVER raises.
+    """
+    if db is None:
+        return None
+    try:
+        from ..dependencies import get_customer_repository
+
+        repo = get_customer_repository()
+    except Exception:  # noqa: BLE001
+        repo = None
+    if repo is None:
+        return None
+
+    phone = _normalize_indian_mobile(buyer.get("phone", "")) or _norm(buyer.get("phone"))
+    email = _norm(buyer.get("email"))
+
+    # --- match by phone, then email -------------------------------------------
+    try:
+        if phone:
+            found = repo.find_by_mobile(phone)
+            if found and _norm(found.get("customer_id")):
+                return _norm(found.get("customer_id"))
+        if email:
+            found = repo.find_by_email(email)
+            if found and _norm(found.get("customer_id")):
+                return _norm(found.get("customer_id"))
+    except Exception:  # noqa: BLE001
+        logger.debug("[ONLINE_MAP] customer match failed", exc_info=True)
+
+    # Nothing to identify the buyer by -> don't mint an orphan keyless customer.
+    if not phone and not email:
+        return None
+
+    # --- create a minimal customer --------------------------------------------
+    now = datetime.now(timezone.utc).isoformat()
+    customer_id = str(uuid.uuid4())
+    doc = {
+        "customer_id": customer_id,
+        "name": buyer.get("name") or "Online Customer",
+        "mobile": phone,
+        "phone": phone,
+        "email": email,
+        "customer_type": "B2C",
+        "source": "shopify",
+        "channel": "ONLINE",
+        "home_store_id": store_id,
+        "shopify_customer_id": buyer.get("shopify_customer_id") or "",
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        created = repo.create(doc)
+        if created and _norm(created.get("customer_id")):
+            return _norm(created.get("customer_id"))
+        return customer_id
+    except Exception:  # noqa: BLE001
+        # A racing create (unique mobile) -> re-read by phone/email.
+        try:
+            if phone:
+                found = repo.find_by_mobile(phone)
+                if found and _norm(found.get("customer_id")):
+                    return _norm(found.get("customer_id"))
+            if email:
+                found = repo.find_by_email(email)
+                if found and _norm(found.get("customer_id")):
+                    return _norm(found.get("customer_id"))
+        except Exception:  # noqa: BLE001
+            pass
+        logger.debug("[ONLINE_MAP] customer create failed", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 4) Status sync (orders/updated, orders/cancelled re-ingest).
+# ---------------------------------------------------------------------------
+
+
+def _derive_statuses(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Canonical (payment_status, fulfillment_status, order_status) from a Shopify
+    payload's financial_status / fulfillment_status / cancelled_at."""
+    fin = _norm(payload.get("financial_status")).lower()
+    ful = _norm(payload.get("fulfillment_status")).lower()
+    cancelled_at = payload.get("cancelled_at")
+
+    payment_status = _PAYMENT_STATUS_MAP.get(fin, "UNPAID")
+    fulfillment_status = _FULFILLMENT_STATUS_MAP.get(ful, "UNFULFILLED")
+
+    if cancelled_at:
+        order_status = "CANCELLED"
+    elif fin == "refunded":
+        order_status = "REFUNDED"
+    elif ful in _DELIVERED_FULFILLMENT:
+        order_status = "DELIVERED"
+    else:
+        order_status = "CONFIRMED"
+
+    return {
+        "payment_status": payment_status,
+        "fulfillment_status": fulfillment_status,
+        "order_status": order_status,
+        "cancelled": bool(cancelled_at),
+    }
+
+
+def _sync_existing_order_status(
+    db, shopify_order_id: str, payload: Dict[str, Any]
+) -> bool:
+    """Update an EXISTING IMS order's status fields from a re-ingested Shopify
+    payload (orders/updated, orders/paid, orders/cancelled). Does NOT touch money
+    lines / the GST invoice (those are immutable once minted) -- only the lifecycle
+    status, payment_status, fulfillment_status, balance_due + amount_paid on a
+    paid transition, and cancelled_at. Returns True on a write. Fail-soft."""
+    if db is None or not shopify_order_id:
+        return False
+    try:
+        orders_coll = db.get_collection("orders")
+    except Exception:  # noqa: BLE001
+        orders_coll = None
+    if orders_coll is None:
+        return False
+
+    try:
+        existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
+    except Exception:  # noqa: BLE001
+        existing = None
+    if not existing:
+        return False
+
+    st = _derive_statuses(payload)
+    grand_total = _f(existing.get("grand_total"))
+    update: Dict[str, Any] = {
+        "payment_status": st["payment_status"],
+        "fulfillment_status": st["fulfillment_status"],
+        "status": st["order_status"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if st["payment_status"] == "PAID":
+        update["amount_paid"] = grand_total
+        update["balance_due"] = 0.0
+    if st["cancelled"]:
+        update["cancelled_at"] = _norm(payload.get("cancelled_at"))
+
+    try:
+        orders_coll.update_one(
+            {"shopify_order_id": shopify_order_id}, {"$set": update}
+        )
+        logger.info(
+            "[ONLINE_MAP] synced status for shopify_order=%s -> status=%s payment=%s "
+            "fulfillment=%s",
+            shopify_order_id,
+            st["order_status"],
+            st["payment_status"],
+            st["fulfillment_status"],
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.debug("[ONLINE_MAP] status sync write failed", exc_info=True)
+        return False
+
+
+def _stamp_order_customer(db, shopify_order_id: str, customer_id: str) -> None:
+    """Best-effort: stamp the resolved customer_id onto the freshly created order
+    doc (ingest doesn't know about the matched IMS customer). Fail-soft."""
+    if db is None or not shopify_order_id or not customer_id:
+        return
+    try:
+        orders_coll = db.get_collection("orders")
+        if orders_coll is None:
+            return
+        orders_coll.update_one(
+            {"shopify_order_id": shopify_order_id},
+            {"$set": {"customer_id": customer_id}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[ONLINE_MAP] customer_id stamp failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC: map_shopify_order
+# ---------------------------------------------------------------------------
+
+
+def map_shopify_order(
+    payload: Dict[str, Any],
+    db,
+    *,
+    webhook_id: Optional[str] = None,
+    topic: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Idempotently create-or-sync the canonical IMS order for one Shopify order.
+
+    Steps (count-once):
+      1. Resolve the online store bucket (settings / primary-store fallback) and
+         stamp it on the payload so the shared ingest bills under it.
+      2. Pre-pass: resolve each line's variant_id -> catalog_variants -> IMS sku
+         (fallback sku-on-line, then title) and stamp it on the line.
+      3. Match/create the IMS customer (phone -> email -> minimal create).
+      4. Delegate to shopify_ingest.ingest_shopify_order (the ONE create path with
+         GST + invoice serial + hard order-id/webhook-id idempotency).
+         * created -> stamp the resolved customer_id on the order.
+         * duplicate/replayed -> the order already exists; SYNC its status fields
+           from this (possibly updated/cancelled) payload instead of re-creating.
+
+    Returns the ingest result dict, augmented:
+      {... , "customer_id": <id or None>, "store_id": <bucket>,
+       "status_synced": <bool, only on a re-ingest>}.
+
+    NEVER raises -- a bad payload yields {"status": "skipped", "reason": ...}. The
+    NEXUS drain loop relies on this.
+    """
+    try:
+        payload = payload if isinstance(payload, dict) else {}
+
+        shopify_order_id = _norm(payload.get("id")) or _norm(payload.get("order_id"))
+        # A cancelled / updated webhook for an order we already booked may not carry
+        # line_items; in that case we still want to SYNC status. Otherwise (no id, or
+        # a create with no lines) there is nothing to do.
+        if not shopify_order_id:
+            return {"status": "skipped", "reason": "no_shopify_order_id"}
+
+        # (1) store bucket -> stamp on the payload (ingest reads _ims_online_store_id).
+        store_id = _resolve_online_store_id(payload, db)
+        payload["_ims_online_store_id"] = store_id
+
+        # If this is a status-only re-ingest (no line_items) of an order we already
+        # have, sync status and return without touching the create path.
+        if not payload.get("line_items"):
+            synced = _sync_existing_order_status(db, shopify_order_id, payload)
+            if synced:
+                return {
+                    "status": "status_synced",
+                    "shopify_order_id": shopify_order_id,
+                    "store_id": store_id,
+                    "status_synced": True,
+                }
+            return {
+                "status": "skipped",
+                "reason": "no_line_items",
+                "shopify_order_id": shopify_order_id,
+                "store_id": store_id,
+            }
+
+        # (2) variant -> sku enrichment.
+        variant_repo = _get_variant_repo(db)
+        filled = _enrich_line_items_with_sku(payload, variant_repo)
+        if filled:
+            logger.info(
+                "[ONLINE_MAP] resolved %d Shopify variant(s) -> IMS sku for order %s",
+                filled,
+                shopify_order_id,
+            )
+
+        # (3) customer match/create.
+        buyer = _extract_buyer(payload)
+        customer_id = _match_or_create_customer(db, buyer, store_id)
+
+        # (4) delegate to the single, idempotent create path.
+        # The shared ingest only creates on orders/create | orders/paid. When THIS
+        # delivery is an orders/updated / orders/cancelled that still carries
+        # line_items for an order we have NOT yet booked (we missed the create
+        # webhook), we still want the order created exactly once -- so we normalize
+        # the topic to a create for ingest. The real lifecycle status (paid /
+        # cancelled / fulfilled) is then applied from the actual payload by the
+        # status-sync below, independent of the Shopify topic name.
+        from .shopify_ingest import ingest_shopify_order
+
+        ingest_topic = topic
+        norm_topic = _norm(topic).lower()
+        if norm_topic and norm_topic not in ("orders/create", "orders/paid"):
+            ingest_topic = "orders/create"
+
+        result = ingest_shopify_order(
+            db, payload, webhook_id=webhook_id, topic=ingest_topic
+        )
+        result = result if isinstance(result, dict) else {"status": "error"}
+        status = result.get("status")
+
+        if status == "created" and customer_id:
+            _stamp_order_customer(db, shopify_order_id, customer_id)
+
+        # On a duplicate / replayed delivery the order already exists -> SYNC its
+        # status from this payload (it may be an orders/updated or orders/paid that
+        # advanced financial_status / fulfillment since the first ingest).
+        status_synced = False
+        if status in ("duplicate", "replayed"):
+            status_synced = _sync_existing_order_status(db, shopify_order_id, payload)
+
+        result["customer_id"] = customer_id
+        result["store_id"] = store_id
+        if status in ("duplicate", "replayed"):
+            result["status_synced"] = status_synced
+        return result
+    except Exception as exc:  # noqa: BLE001 - the drain loop must never die here
+        logger.warning("[ONLINE_MAP] map_shopify_order failed soft: %s", exc)
+        return {"status": "skipped", "reason": f"exception:{type(exc).__name__}"}

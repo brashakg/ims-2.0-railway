@@ -527,25 +527,42 @@ class NexusAgent(JarvisAgent):
         evt = payload.get("event") or payload.get("type") or "unknown"
         logger.info(f"[NEXUS] razorpay webhook event={evt}")
 
-    async def _handle_shopify_webhook(self, payload: Dict[str, Any]):
-        """Translate a verified Shopify webhook into an IMS-side mutation.
+    # Shopify ORDER topics the mapper handles. orders/create + orders/paid create
+    # the IMS order (count-once); orders/updated + orders/cancelled SYNC the status
+    # of the order already booked (the mapper never creates a 2nd for the same id).
+    _SHOPIFY_ORDER_TOPICS = (
+        "orders/create",
+        "orders/paid",
+        "orders/updated",
+        "orders/cancelled",
+        "orders/fulfilled",
+        "orders/partially_fulfilled",
+    )
 
-        For `orders/create` (the seller's own bettervision.in storefront), IMS
-        becomes the GST invoice system-of-record: we idempotently create an IMS
-        order tagged channel='ONLINE' and mint a consecutive GST tax invoice
-        (per-line HSN + taxable + tax, IGST vs CGST+SGST by place of supply) via
-        api.services.shopify_ingest. A replayed delivery (same Shopify order id
-        or same X-Shopify-Webhook-Id) creates NOTHING further -- so revenue is
-        never double-counted. Other topics just log (catalog is owned by BVI).
+    async def _handle_shopify_webhook(self, payload: Dict[str, Any]):
+        """Translate a verified Shopify ORDER webhook into a canonical IMS order.
+
+        For the seller's own bettervision.in storefront, IMS is the GST invoice
+        system-of-record. This routes through api.services.online_order_mapper
+        (Phase 3b), the SINGLE authoritative Shopify-order -> IMS-order mapper:
+          * orders/create + orders/paid -> idempotently create an IMS order tagged
+            channel='ONLINE' with a consecutive GST tax invoice (per-line HSN +
+            taxable + tax, IGST vs CGST+SGST by place of supply), AFTER resolving
+            each Shopify variant -> catalog_variants -> the IMS sku and matching /
+            creating the IMS customer.
+          * orders/updated + orders/cancelled -> SYNC the existing order's
+            payment / fulfillment / lifecycle status (NEVER a 2nd order).
+        A replayed delivery (same Shopify order id or same X-Shopify-Webhook-Id)
+        creates NOTHING further -- revenue is never double-counted. Non-order
+        topics just log (the catalog is owned by BVI).
 
         The Shopify topic + X-Shopify-Webhook-Id are read from the inbox headers
         stashed on `self._current_webhook_headers` by `_handle_inbox_webhook`
         (kept off the call signature so the existing 1-arg handler contract is
         preserved). They also fall back to fields on the payload body.
 
-        Fail-soft: any error here is swallowed by the caller's try/except; the
-        ingestion service itself never raises on its normal paths and SIMULATES
-        when the DB is unavailable.
+        Fail-soft: the mapper never raises on its normal paths and SIMULATES when
+        the DB is unavailable; any residual error is swallowed by the caller.
         """
         headers = getattr(self, "_current_webhook_headers", None)
         headers = headers if isinstance(headers, dict) else {}
@@ -557,26 +574,29 @@ class NexusAgent(JarvisAgent):
         )
         logger.info(f"[NEXUS] shopify webhook topic={topic}")
 
-        if str(topic).strip().lower() not in ("orders/create", "orders/paid"):
+        if str(topic).strip().lower() not in self._SHOPIFY_ORDER_TOPICS:
             return
 
         try:
-            from api.services.shopify_ingest import ingest_shopify_order
+            from api.services.online_order_mapper import map_shopify_order
 
-            result = ingest_shopify_order(
-                self.db,
+            result = map_shopify_order(
                 payload,
+                self.db,
                 webhook_id=headers.get("x-shopify-webhook-id"),
                 topic=str(topic),
             )
             logger.info(
-                "[NEXUS] shopify order ingest -> status=%s ims_order=%s invoice=%s",
+                "[NEXUS] shopify order map -> status=%s ims_order=%s invoice=%s "
+                "customer=%s store=%s",
                 result.get("status"),
                 result.get("order_id"),
                 result.get("invoice_number"),
+                result.get("customer_id"),
+                result.get("store_id"),
             )
-        except Exception as e:  # noqa: BLE001 - never let ingestion crash the loop
-            logger.warning(f"[NEXUS] shopify order ingestion failed: {e}")
+        except Exception as e:  # noqa: BLE001 - never let mapping crash the loop
+            logger.warning(f"[NEXUS] shopify order mapping failed: {e}")
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
         evt = payload.get("current_status") or payload.get("event") or "unknown"
