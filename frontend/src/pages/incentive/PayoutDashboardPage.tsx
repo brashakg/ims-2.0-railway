@@ -184,13 +184,14 @@ export function PayoutDashboardPage() {
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </button>
           {snapshot && (
-            <a
-              href={payoutApi.csvUrl(snapshot.snapshot_id)}
+            <button
+              type="button"
+              onClick={() => { payoutApi.downloadCsv(snapshot.snapshot_id).catch(() => {}); }}
               className="btn-secondary inline-flex items-center gap-2"
-              target="_blank" rel="noreferrer"
+              title="Download CSV"
             >
               <Download className="w-4 h-4" /> CSV
-            </a>
+            </button>
           )}
           {isSuperadmin && !isLocked && (
             <button

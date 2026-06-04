@@ -58,9 +58,25 @@ export const payoutApi = {
     return r.data;
   },
 
-  /** Build a CSV-download URL the browser can open directly. */
-  csvUrl: (snapshotId: string): string => {
-    return `/api/v1/payout/export/${snapshotId}.csv`;
+  /** Download a snapshot's per-staff CSV via the AUTHENTICATED axios instance.
+   *  The old `csvUrl` returned a bare relative path used as an <a href>, which on
+   *  the Vercel frontend origin 404s (no backend there) and carries no JWT (401),
+   *  so the export never worked in production. This fetches the CSV as a blob
+   *  through `api` (correct base URL + the auth-header interceptor) and triggers a
+   *  browser save. Throws on failure so the caller can surface it. */
+  downloadCsv: async (snapshotId: string, filename?: string): Promise<void> => {
+    const r = await api.get(`/payout/export/${snapshotId}.csv`, {
+      responseType: 'blob',
+    });
+    const blob = new Blob([r.data], { type: 'text/csv;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || `payout-${snapshotId}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
   },
 };
 
