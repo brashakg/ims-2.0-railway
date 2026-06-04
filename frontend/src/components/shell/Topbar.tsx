@@ -132,17 +132,6 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
 
       <div className="spacer" />
 
-      <button
-        className="cmdk"
-        type="button"
-        aria-label="Search or jump to…"
-        onClick={openGlobalSearch}
-      >
-        <Icon.search width={14} height={14} />
-        <span>Search or jump to…</span>
-        <span className="kbd">⌘K</span>
-      </button>
-
       {multiStore && (
         <div ref={storeRef} style={{ position: 'relative' }}>
           <button
@@ -155,8 +144,8 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             <span className="dot" />
             {/* On mobile (<sm) show just the store code to prevent wrapping;
                 on desktop show the full store name + code. */}
-            <span className="store-pill-name">{activeStoreName}</span>
-            <span className="store-pill-code">{user?.activeStoreId || ''}</span>
+            <span className="name">{activeStoreName}</span>
+            <span className="code">{user?.activeStoreId || ''}</span>
             <Icon.chevronDown width={12} height={12} />
           </button>
           {storeOpen && (
@@ -165,7 +154,8 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
               style={{
                 position: 'absolute',
                 top: '100%',
-                right: 0,
+                left: '50%',
+                transform: 'translateX(-50%)',
                 marginTop: 6,
                 width: 240,
                 maxWidth: 'calc(100vw - 16px)',
@@ -210,6 +200,19 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
           )}
         </div>
       )}
+
+      {multiStore && <div className="spacer" />}
+
+      <button
+        className="cmdk"
+        type="button"
+        aria-label="Search or jump to…"
+        onClick={openGlobalSearch}
+      >
+        <Icon.search width={14} height={14} />
+        <span>Search or jump to…</span>
+        <span className="kbd">⌘K</span>
+      </button>
 
       {user && (user.roles?.length ?? 0) > 1 ? (
         <div ref={roleRef} style={{ position: 'relative' }}>

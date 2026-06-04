@@ -206,6 +206,29 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     }
   }, [isOpen]);
 
+  // Sync customer details to newPatient when relation is "Self"
+  useEffect(() => {
+    if (newPatient.relation === 'Self') {
+      setNewPatient(prev => {
+        if (
+          prev.name !== formData.fullName ||
+          prev.mobile !== formData.mobileNumber ||
+          prev.email !== formData.email ||
+          prev.dateOfBirth !== formData.dateOfBirth
+        ) {
+          return {
+            ...prev,
+            name: formData.fullName,
+            mobile: formData.mobileNumber,
+            email: formData.email,
+            dateOfBirth: formData.dateOfBirth,
+          };
+        }
+        return prev;
+      });
+    }
+  }, [formData.fullName, formData.mobileNumber, formData.email, formData.dateOfBirth, newPatient.relation]);
+
   // GST Verification — validates format locally (no external GST API available)
   const verifyGST = () => {
     if (!formData.gstNumber || formData.gstNumber.length !== 15) {
@@ -850,7 +873,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                       value={newPatient.name}
                       onChange={e => setNewPatient(prev => ({ ...prev, name: e.target.value }))}
                       placeholder="Patient name"
-                      className="input-field"
+                      className={clsx("input-field", newPatient.relation === 'Self' && "bg-gray-100 cursor-not-allowed text-gray-500")}
+                      disabled={newPatient.relation === 'Self'}
                     />
                   </div>
                   <div>
@@ -862,7 +886,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                       value={newPatient.mobile}
                       onChange={e => setNewPatient(prev => ({ ...prev, mobile: e.target.value }))}
                       placeholder="9876543210"
-                      className="input-field"
+                      className={clsx("input-field", newPatient.relation === 'Self' && "bg-gray-100 cursor-not-allowed text-gray-500")}
+                      disabled={newPatient.relation === 'Self'}
                     />
                   </div>
                   <div>
@@ -874,7 +899,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                       value={newPatient.email}
                       onChange={e => setNewPatient(prev => ({ ...prev, email: e.target.value }))}
                       placeholder="email@example.com"
-                      className="input-field"
+                      className={clsx("input-field", newPatient.relation === 'Self' && "bg-gray-100 cursor-not-allowed text-gray-500")}
+                      disabled={newPatient.relation === 'Self'}
                     />
                   </div>
                   <div>
@@ -885,7 +911,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                       type="date"
                       value={newPatient.dateOfBirth}
                       onChange={e => setNewPatient(prev => ({ ...prev, dateOfBirth: e.target.value }))}
-                      className="input-field"
+                      className={clsx("input-field", newPatient.relation === 'Self' && "bg-gray-100 cursor-not-allowed text-gray-500")}
+                      disabled={newPatient.relation === 'Self'}
                     />
                   </div>
                   <div className="col-span-2">
