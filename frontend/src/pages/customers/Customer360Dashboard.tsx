@@ -358,7 +358,7 @@ export function Customer360Dashboard() {
     <div className="inv-body">
       {/* Editorial header */}
       <div className="inv-head">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="flex items-center gap-3">
           <button
             onClick={() => navigate('/customers')}
             className="btn icon ghost sm"
@@ -367,7 +367,7 @@ export function Customer360Dashboard() {
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
-            <div className="eyebrow" style={{ marginBottom: 6 }}>Customer 360</div>
+            <div className="eyebrow mb-1.5">Customer 360</div>
             <h1>{customer?.name || 'Customer profile'}</h1>
             <div className="hint">Full story: purchases, prescriptions, patients, loyalty, follow-ups, communication log.</div>
           </div>
@@ -935,7 +935,7 @@ function PreferenceRow({ label, status, onToggle, saving }: PreferenceRowProps) 
       <button
         type="button"
         role="switch"
-        aria-checked={status}
+        aria-checked={status ? "true" : "false"}
         aria-label={label}
         disabled={!onToggle || saving}
         onClick={onToggle}

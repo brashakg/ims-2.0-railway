@@ -380,7 +380,7 @@ export function CustomersPage() {
         {/* Editorial header */}
         <div className="inv-head">
           <div>
-            <div className="eyebrow" style={{ marginBottom: 6 }}>Customers</div>
+            <div className="eyebrow mb-1.5">Customers</div>
             <h1>Every person who walked through.</h1>
             <div className="hint">Unified profiles with patients, Rx history, loyalty tier, and follow-up reminders.</div>
           </div>
@@ -609,6 +609,8 @@ export function CustomersPage() {
         <button
           onClick={handleBack}
           className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          aria-label="Back to customer list"
+          title="Back to customer list"
         >
           <X className="w-5 h-5" />
         </button>
@@ -641,6 +643,7 @@ export function CustomersPage() {
             onClick={() => navigate('/customers?tab=recalls')}
             className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors"
             title="Send Recall"
+            aria-label="Send Recall"
           >
             <Bell className="w-4 h-4" />
           </button>
@@ -648,6 +651,7 @@ export function CustomersPage() {
             onClick={() => navigate('/pos')}
             className="p-2 rounded-lg bg-green-50 text-green-600 hover:bg-green-100 transition-colors"
             title="New Order"
+            aria-label="New Order"
           >
             <ShoppingCart className="w-4 h-4" />
           </button>
@@ -655,6 +659,7 @@ export function CustomersPage() {
             onClick={() => navigate('/clinical')}
             className="p-2 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
             title="Book Eye Test"
+            aria-label="Book Eye Test"
           >
             <Eye className="w-4 h-4" />
           </button>
@@ -728,7 +733,7 @@ export function CustomersPage() {
               };
               const rfm = calculateRFMScore(rfmData);
               return (
-                <div className="mt-3 p-3 rounded-lg border" style={{ borderColor: 'currentColor' }}>
+                <div className="mt-3 p-3 rounded-lg border border-current">
                   <div className="flex items-center justify-between mb-1">
                     <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${rfm.bgColor} ${rfm.color}`}>
                       {rfm.label}
@@ -974,7 +979,7 @@ export function CustomersPage() {
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-bold text-gray-900">Add Patient</h2>
-                <button onClick={() => setShowAddPatientModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                <button onClick={() => setShowAddPatientModal(false)} className="p-2 hover:bg-gray-100 rounded-lg" aria-label="Close" title="Close">
                   <X className="w-5 h-5" />
                 </button>
               </div>
@@ -1008,6 +1013,7 @@ export function CustomersPage() {
                     value={patientForm.relation}
                     onChange={e => handlePatientRelationChange(e.target.value)}
                     className="input-field"
+                    title="Patient's relation to the customer"
                   >
                     {['Self', 'Spouse', 'Child', 'Parent', 'Sibling', 'Other'].map(r => (
                       <option key={r} value={r}>{r}</option>
@@ -1037,6 +1043,8 @@ export function CustomersPage() {
                     value={patientForm.dateOfBirth}
                     onChange={e => setPatientForm(f => ({ ...f, dateOfBirth: e.target.value }))}
                     className="input-field"
+                    title="Patient's date of birth"
+                    placeholder="Date of birth"
                   />
                 </div>
                 <button
@@ -1066,7 +1074,7 @@ export function CustomersPage() {
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-bold text-gray-900">Edit Customer</h2>
-                <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-gray-100 rounded-lg" aria-label="Close" title="Close">
                   <X className="w-5 h-5" />
                 </button>
               </div>
@@ -1078,6 +1086,8 @@ export function CustomersPage() {
                     value={editForm.name}
                     onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
                     className="input-field"
+                    title="Customer full name"
+                    placeholder="Customer full name"
                   />
                 </div>
                 <div>
@@ -1088,6 +1098,8 @@ export function CustomersPage() {
                     onChange={e => setEditForm(f => ({ ...f, phone: e.target.value }))}
                     className="input-field"
                     maxLength={10}
+                    title="Customer 10-digit mobile number"
+                    placeholder="10-digit mobile"
                   />
                 </div>
                 <div>
@@ -1097,6 +1109,8 @@ export function CustomersPage() {
                     value={editForm.email}
                     onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
                     className="input-field"
+                    title="Customer email address"
+                    placeholder="name@example.com"
                   />
                 </div>
                 <div>
@@ -1106,6 +1120,8 @@ export function CustomersPage() {
                     onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
                     className="input-field"
                     rows={2}
+                    title="Customer billing address"
+                    placeholder="Street, city, state, pincode"
                   />
                 </div>
                 <button

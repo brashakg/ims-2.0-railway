@@ -357,7 +357,7 @@ export function OrdersPage() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Orders</div>
+          <div className="eyebrow mb-1.5">Orders</div>
           <h1>What's in flight.</h1>
           <div className="hint">Draft · confirmed · workshop · ready · delivered. Status moves only with role-gated transitions.</div>
         </div>
@@ -408,6 +408,7 @@ export function OrdersPage() {
               value={statusFilter}
               onChange={e => setStatusFilter(e.target.value as OrderStatus | 'ALL')}
               className="input-field"
+              title="Filter orders by status"
             >
               <option value="ALL">All Status</option>
               <option value="DRAFT">Draft</option>
@@ -421,6 +422,7 @@ export function OrdersPage() {
               value={dateFilter}
               onChange={e => setDateFilter(e.target.value as 'today' | 'week' | 'month' | 'all')}
               className="input-field"
+              title="Filter orders by date range"
             >
               <option value="all">All Time</option>
               <option value="today">Today</option>
@@ -580,6 +582,8 @@ export function OrdersPage() {
                 <button
                   onClick={() => setSelectedOrder(null)}
                   className="p-2 hover:bg-gray-100 rounded-lg"
+                  aria-label="Close"
+                  title="Close"
                 >
                   <XCircle className="w-5 h-5 text-gray-500" />
                 </button>

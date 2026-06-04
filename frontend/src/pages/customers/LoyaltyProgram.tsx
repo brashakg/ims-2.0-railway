@@ -81,11 +81,11 @@ export function LoyaltyProgram() {
   }, []);
 
   return (
-    <div className="inv-body" aria-busy={loading}>
+    <div className="inv-body" aria-busy={loading ? "true" : "false"}>
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Loyalty</div>
+          <div className="eyebrow mb-1.5">CRM · Loyalty</div>
           <h1>Reward what comes back.</h1>
           <div className="hint">4-tier system (Bronze / Silver / Gold / Platinum). Points earned on spend, redeemable at POS with cap.</div>
         </div>

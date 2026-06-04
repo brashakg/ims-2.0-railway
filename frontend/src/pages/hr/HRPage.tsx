@@ -170,7 +170,7 @@ export function HRPage() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>HR &amp; Attendance</div>
+          <div className="eyebrow mb-1.5">HR &amp; Attendance</div>
           <h1>Who's on the floor.</h1>
           <div className="hint">Geo-fenced check-in, leave management, shift roster, payroll prep. Late marks auto-calculated from shift start.</div>
         </div>

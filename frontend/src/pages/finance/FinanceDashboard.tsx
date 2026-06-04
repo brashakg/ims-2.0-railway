@@ -354,7 +354,7 @@ export default function FinanceDashboard() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Finance &amp; Accounting</div>
+          <div className="eyebrow mb-1.5">Finance &amp; Accounting</div>
           <h1>The books, in real time.</h1>
           <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
         </div>

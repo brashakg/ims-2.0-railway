@@ -217,7 +217,7 @@ export function PayrollDashboard() {
       {/* Editorial header */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Payroll</div>
+          <div className="eyebrow mb-1.5">Payroll</div>
           <h1>Month-end, by the rupee.</h1>
           <div className="hint">Basic + HRA + allowances − PF − ESI − PT − TDS − advances. Payslips, salary sheet export, month-lock after close.</div>
         </div>
@@ -282,6 +282,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedMonth}
                   onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                  title="Select payroll month"
                   className="bg-white border border-gray-300 text-gray-900 px-3 py-1 rounded text-sm"
                 >
                   {MONTHS.map((m, i) => (
@@ -293,6 +294,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedYear}
                   onChange={(e) => setSelectedYear(Number(e.target.value))}
+                  title="Select payroll year"
                   className="bg-white border border-gray-300 text-gray-900 px-3 py-1 rounded text-sm"
                 >
                   {[currentYear - 1, currentYear, currentYear + 1].map((year) => (
@@ -394,6 +396,7 @@ export function PayrollDashboard() {
                     loadAdvances(e.target.value);
                   }
                 }}
+                title="Select employee for advances"
                 className="bg-white border border-gray-300 text-gray-900 px-4 py-2 rounded flex-1"
               >
                 <option value="">Select employee...</option>
@@ -511,6 +514,7 @@ export function PayrollDashboard() {
                     loadPayslip(e.target.value);
                   }
                 }}
+                title="Select employee for payslip"
                 className="bg-white border border-gray-300 text-gray-900 px-4 py-2 rounded flex-1"
               >
                 <option value="">Select employee...</option>
@@ -524,6 +528,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedMonth}
                   onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                  title="Select payslip month"
                   className="bg-white border border-gray-300 text-gray-900 px-3 py-2 rounded"
                 >
                   {MONTHS.map((m, i) => (
@@ -535,6 +540,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedYear}
                   onChange={(e) => setSelectedYear(Number(e.target.value))}
+                  title="Select payslip year"
                   className="bg-white border border-gray-300 text-gray-900 px-3 py-2 rounded"
                 >
                   {[currentYear - 1, currentYear, currentYear + 1].map((year) => (
