@@ -12,6 +12,29 @@ interface FinanceSummaryProps {
 }
 
 export default function FinanceSummary({ revenueData, plStatement }: FinanceSummaryProps) {
+  // The four KPI cards bind to the real P&L statement (finance.py /pnl). When no
+  // P&L has loaded for the selected period we show an honest dash rather than a
+  // fabricated number (SYSTEM_INTENT: never display invented money). Sub-labels
+  // are derived from the same real figures (margin %, % of revenue).
+  const revenue = plStatement?.revenue ?? null;
+  const grossProfit = plStatement?.gross_profit ?? null;
+  const netProfit = plStatement?.net_profit ?? null;
+  const operatingExpenses = plStatement?.operating_expenses ?? null;
+  const dash = '—';
+  const money = (v: number | null) => (v === null ? dash : formatCurrency(v));
+  const grossMarginPct =
+    revenue && revenue > 0 && grossProfit !== null
+      ? `${((grossProfit / revenue) * 100).toFixed(1)}% margin`
+      : 'Gross profit';
+  const netMarginPct =
+    revenue && revenue > 0 && netProfit !== null
+      ? `${((netProfit / revenue) * 100).toFixed(1)}% margin`
+      : 'After tax & opex';
+  const opexPct =
+    revenue && revenue > 0 && operatingExpenses !== null
+      ? `${((operatingExpenses / revenue) * 100).toFixed(1)}% of revenue`
+      : 'Operating costs';
+
   return (
     <div className="space-y-6">
       {/* Revenue Summary Cards */}
@@ -20,8 +43,8 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           <div className="flex items-center justify-between">
             <div>
               <p className="text-green-200 text-sm font-medium">Total Revenue</p>
-              <p className="text-2xl font-bold mt-2">{formatCurrency(1401000)}</p>
-              <p className="text-xs text-green-700 mt-2">Apr - Jun 2025</p>
+              <p className="text-2xl font-bold mt-2">{money(revenue)}</p>
+              <p className="text-xs text-green-700 mt-2">Selected period</p>
             </div>
             <TrendingUp className="w-10 h-10 text-green-600 opacity-50" />
           </div>
@@ -31,8 +54,8 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           <div className="flex items-center justify-between">
             <div>
               <p className="text-blue-200 text-sm font-medium">Gross Profit</p>
-              <p className="text-2xl font-bold mt-2">{formatCurrency(840600)}</p>
-              <p className="text-xs text-blue-700 mt-2">59.9% margin</p>
+              <p className="text-2xl font-bold mt-2">{money(grossProfit)}</p>
+              <p className="text-xs text-blue-700 mt-2">{grossMarginPct}</p>
             </div>
             <BarChart3 className="w-10 h-10 text-blue-600 opacity-50" />
           </div>
@@ -42,8 +65,8 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           <div className="flex items-center justify-between">
             <div>
               <p className="text-purple-200 text-sm font-medium">Net Profit</p>
-              <p className="text-2xl font-bold mt-2">{formatCurrency(516969)}</p>
-              <p className="text-xs text-purple-700 mt-2">36.9% margin</p>
+              <p className="text-2xl font-bold mt-2">{money(netProfit)}</p>
+              <p className="text-xs text-purple-700 mt-2">{netMarginPct}</p>
             </div>
             <TrendingUp className="w-10 h-10 text-purple-600 opacity-50" />
           </div>
@@ -53,8 +76,8 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           <div className="flex items-center justify-between">
             <div>
               <p className="text-orange-200 text-sm font-medium">Operating Expense</p>
-              <p className="text-2xl font-bold mt-2">{formatCurrency(210150)}</p>
-              <p className="text-xs text-orange-700 mt-2">15% of revenue</p>
+              <p className="text-2xl font-bold mt-2">{money(operatingExpenses)}</p>
+              <p className="text-xs text-orange-700 mt-2">{opexPct}</p>
             </div>
             <TrendingDown className="w-10 h-10 text-orange-600 opacity-50" />
           </div>

@@ -19,7 +19,6 @@ import type {
   CashFlowData,
   BudgetData,
   VendorPaymentData,
-  ReconciliationData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
 
@@ -135,17 +134,11 @@ function mapVendorPayments(d: any): VendorPaymentData[] {
   });
 }
 
-function mapReconciliation(d: any): ReconciliationData[] {
-  const list = Array.isArray(d?.transfers) ? d.transfers : [];
-  return list.map((t: any) => ({
-    id: t.transfer_id || '',
-    date: t.created_at || '',
-    bank_amount: 0,
-    system_amount: 0,
-    difference: 0,
-    status: 'pending' as ReconciliationData['status'],
-  }));
-}
+// NOTE: the old mapReconciliation() fabricated bank_amount/system_amount/
+// difference as 0 from inter-store transfer rows — there is no bank-statement
+// reconciliation backend, so it has been removed (SYSTEM_INTENT: never show
+// fabricated money). The Reconciliation tab + the Cash Flow "Bank Reconciliation
+// Status" block that consumed it are gone too.
 
 import FinanceFilters from './FinanceFilters';
 import FinanceSummary from './FinanceSummary';
@@ -155,7 +148,6 @@ import CashFlowPanel from './CashFlowPanel';
 import PeriodManagement from './PeriodManagement';
 import BudgetPanel from './BudgetPanel';
 import VendorPayments from './VendorPayments';
-import ReconciliationPanel from './ReconciliationPanel';
 
 export default function FinanceDashboard() {
   const { user } = useAuth();
@@ -178,7 +170,6 @@ export default function FinanceDashboard() {
   const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
-  const [reconciliation, setReconciliation] = useState<ReconciliationData[]>([]);
   const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
   // own sort) but every column header is clickable to re-sort.
@@ -204,7 +195,7 @@ export default function FinanceDashboard() {
       // Real finance.py endpoints, fetched in parallel. Each section
       // fail-soft independently so one slow/empty endpoint doesn't blank
       // the whole dashboard.
-      const [rev, pnl, gst, out, cf, bud, vend, recon] = await Promise.allSettled([
+      const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
         financeApi.getGstSummary(),
@@ -212,7 +203,6 @@ export default function FinanceDashboard() {
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
         financeApi.getVendorPayments(),
-        financeApi.getReconciliation(),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -222,7 +212,6 @@ export default function FinanceDashboard() {
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
-      setReconciliation(recon.status === 'fulfilled' ? mapReconciliation(recon.value) : []);
 
       // Reflect the real period-lock state for the selected month.
       try {
@@ -343,25 +332,10 @@ export default function FinanceDashboard() {
     }
   };
 
-  const handleAllocateBudget = (category: string, amount: string) => {
-    if (!category || !amount) {
-      toast.error('Please fill all budget fields');
-      return;
-    }
-    toast.success(`Budget allocated for ${category}`);
-  };
-
-  const handleReconcile = (_itemId: string) => {
-    toast.success('Reconciliation item marked as matched');
-  };
-
-  const handlePayVendor = (vendorName: string) => {
-    toast.success(`Payment recorded for ${vendorName}`);
-  };
-
-  const handleImportStatement = () => {
-    toast.info('Upload bank statement to auto-reconcile');
-  };
+  // NOTE: Budget-allocate, vendor-Pay, Mark-Matched and Import-Statement were
+  // toast-only no-ops (no write path on /finance/*). They've been removed rather
+  // than fake success. Budget planning lives in the dedicated Budgets module
+  // (/budgets) and vendor payments in the Cash Flow vendor ledger.
 
   // Loading state
   if (isLoading) {
@@ -515,36 +489,21 @@ export default function FinanceDashboard() {
           {activeTab === 'outstanding' && (
             <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
           )}
-          {activeTab === 'cash-flow' && (
-            <CashFlowPanel
-              cashFlow={cashFlow}
-              reconciliation={reconciliation}
-              onReconcile={handleReconcile}
-            />
-          )}
+          {activeTab === 'cash-flow' && <CashFlowPanel cashFlow={cashFlow} />}
           {activeTab === 'period' && (
             <PeriodManagement
               periodLocked={periodLocked}
               onLockPeriod={handleLockPeriod}
               onUnlockPeriod={handleUnlockPeriod}
+              dateFrom={dateFrom}
+              dateTo={dateTo}
             />
           )}
           {activeTab === 'budgets' && (
-            <BudgetPanel
-              budgets={budgets}
-              selectedYear={selectedYear}
-              onAllocateBudget={handleAllocateBudget}
-            />
+            <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
           )}
           {activeTab === 'vendor-payments' && (
-            <VendorPayments vendorPayments={vendorPayments} onPayVendor={handlePayVendor} />
-          )}
-          {activeTab === 'reconciliation' && (
-            <ReconciliationPanel
-              reconciliation={reconciliation}
-              onReconcile={handleReconcile}
-              onImportStatement={handleImportStatement}
-            />
+            <VendorPayments vendorPayments={vendorPayments} />
           )}
         </div>
       </div>

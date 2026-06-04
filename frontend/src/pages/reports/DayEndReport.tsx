@@ -3,7 +3,9 @@
 // ============================================================================
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { orderApi } from '../../services/api';
+import { useToast } from '../../context/ToastContext';
+import { orderApi, reportsApi } from '../../services/api';
+import type { DayEndClose } from '../../services/api/reports';
 import {
   IndianRupee, CreditCard, Phone, FileText,
   TrendingUp, Package, Printer,
@@ -32,6 +34,7 @@ interface DaySummary {
 
 export default function DayEndReport() {
   const { user } = useAuth();
+  const toast = useToast();
   const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
   const [orders, setOrders] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -39,12 +42,16 @@ export default function DayEndReport() {
   const [closingCash, setClosingCash] = useState('');
   const [closingNotes, setClosingNotes] = useState('');
   const [isClosed, setIsClosed] = useState(false);
+  const [closeInfo, setCloseInfo] = useState<DayEndClose | null>(null);
+  const [isClosing, setIsClosing] = useState(false);
 
   const storeId = user?.activeStoreId || user?.storeIds?.[0] || '';
 
   useEffect(() => {
     loadDayOrders();
-  }, [reportDate]);
+    loadCloseStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportDate, storeId]);
 
   const loadDayOrders = async () => {
     setIsLoading(true);
@@ -55,6 +62,20 @@ export default function DayEndReport() {
       setOrders([]);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Load any persisted close for this (store, date) so a refresh keeps the day
+  // shown as closed instead of re-opening the close action.
+  const loadCloseStatus = async () => {
+    try {
+      const res = await reportsApi.getDayEndClose(storeId || undefined, reportDate);
+      setIsClosed(!!res.closed);
+      setCloseInfo(res.close ?? null);
+    } catch {
+      // Fail-soft: don't block the report if the status check errors.
+      setIsClosed(false);
+      setCloseInfo(null);
     }
   };
 
@@ -117,9 +138,41 @@ export default function DayEndReport() {
 
   const cashVariance = closingCash ? Math.round(parseFloat(closingCash) - summary.cashCollected) : null;
 
-  const handleCloseDay = () => {
-    // In production: POST to /api/v1/reports/day-end-close
-    setIsClosed(true);
+  const handleCloseDay = async () => {
+    if (isClosing) return;
+    setIsClosing(true);
+    try {
+      const res = await reportsApi.createDayEndClose({
+        date: reportDate,
+        store_id: storeId || undefined,
+        // closing_cash = physically counted; system_cash = POS-computed cash.
+        // Both default sensibly so the close is recordable even if the count
+        // field is left blank.
+        closing_cash: closingCash ? parseFloat(closingCash) : 0,
+        system_cash: summary.cashCollected,
+        notes: closingNotes || undefined,
+      });
+      setIsClosed(true);
+      setCloseInfo(res.close ?? null);
+      toast.success(`Day ${reportDate} closed`);
+    } catch (e: any) {
+      // 409 = already closed: reflect that truthfully (and surface the
+      // existing close) rather than faking a fresh success.
+      const status = e?.response?.status;
+      const existing = e?.response?.data?.detail?.close as DayEndClose | undefined;
+      if (status === 409) {
+        setIsClosed(true);
+        if (existing) setCloseInfo(existing);
+        toast.info('This day was already closed.');
+      } else {
+        const msg =
+          (typeof e?.response?.data?.detail === 'string' && e.response.data.detail) ||
+          'Failed to close day. Please try again.';
+        toast.error(msg);
+      }
+    } finally {
+      setIsClosing(false);
+    }
   };
 
   const handlePrint = () => {
@@ -287,16 +340,33 @@ export default function DayEndReport() {
               <textarea value={closingNotes} onChange={e => setClosingNotes(e.target.value)}
                 placeholder="Add any notes about today's shift (optional)..."
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-20 resize-none mb-3" />
-              <button onClick={handleCloseDay}
-                className="w-full py-3 bg-bv-red-600 text-white rounded-lg font-semibold hover:bg-bv-red-700 flex items-center justify-center gap-2">
-                <CheckCircle className="w-5 h-5" /> Confirm Day Closing
+              <button onClick={handleCloseDay} disabled={isClosing}
+                className="w-full py-3 bg-bv-red-600 text-white rounded-lg font-semibold hover:bg-bv-red-700 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+                <CheckCircle className="w-5 h-5" /> {isClosing ? 'Closing...' : 'Confirm Day Closing'}
               </button>
             </div>
           ) : (
             <div className="bg-green-50 border border-green-200 rounded-xl p-5 text-center">
               <CheckCircle className="w-8 h-8 text-green-500 mx-auto mb-2" />
-              <p className="font-semibold text-green-700">Day Closed Successfully</p>
-              <p className="text-sm text-green-600 mt-1">{new Date().toLocaleString('en-IN')}</p>
+              <p className="font-semibold text-green-700">Day Closed</p>
+              {closeInfo ? (
+                <>
+                  <p className="text-sm text-green-600 mt-1">
+                    Closed {new Date(closeInfo.closed_at).toLocaleString('en-IN')}
+                  </p>
+                  <p className="text-sm mt-1 text-gray-600">
+                    Counted {fc(closeInfo.closing_cash)} vs system {fc(closeInfo.system_cash)}
+                    {closeInfo.variance !== 0 && (
+                      <span className={clsx('font-semibold ml-1', closeInfo.variance > 0 ? 'text-amber-600' : 'text-red-600')}>
+                        ({closeInfo.variance > 0 ? '+' : ''}{fc(closeInfo.variance)})
+                      </span>
+                    )}
+                  </p>
+                  {closeInfo.notes && <p className="text-xs text-gray-500 mt-1 italic">{closeInfo.notes}</p>}
+                </>
+              ) : (
+                <p className="text-sm text-green-600 mt-1">This day has been reconciled and closed.</p>
+              )}
             </div>
           )}
         </>

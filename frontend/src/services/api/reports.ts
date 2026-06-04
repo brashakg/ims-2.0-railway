@@ -4,6 +4,17 @@
 
 import api from './client';
 
+export interface DayEndClose {
+  store_id: string;
+  date: string;
+  closing_cash: number;
+  system_cash: number;
+  variance: number;
+  notes: string | null;
+  closed_by: string | null;
+  closed_at: string;
+}
+
 export const reportsApi = {
   getSalesSummary: async (storeId: string, startDate: string, endDate: string) => {
     const response = await api.get('/reports/sales/summary', {
@@ -177,6 +188,35 @@ export const reportsApi = {
       returning_customers: number;
       total_customers: number;
       retention_percent: number;
+    };
+  },
+
+  // --- Day-End cash-drawer close (persisted + audited) ---
+  getDayEndClose: async (storeId: string | undefined, date: string) => {
+    const r = await api.get('/reports/day-end-close', {
+      params: { date, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data as {
+      closed: boolean;
+      store_id: string | null;
+      date: string;
+      close: DayEndClose | null;
+    };
+  },
+
+  createDayEndClose: async (body: {
+    date: string;
+    store_id?: string;
+    closing_cash: number;
+    system_cash: number;
+    notes?: string;
+  }) => {
+    const r = await api.post('/reports/day-end-close', body);
+    return r.data as {
+      closed: boolean;
+      store_id: string | null;
+      date: string;
+      close: DayEndClose;
     };
   },
 

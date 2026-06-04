@@ -47,25 +47,25 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
         <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
           <h3 className="text-gray-900 font-semibold flex items-center gap-2">
             <Percent className="w-5 h-5 text-indigo-600" />
-            GST Breakdown (18% standard rate)
+            GST Breakdown
           </h3>
         </div>
         <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-4">
             <div className="flex justify-between items-center p-4 bg-slate-50 rounded border border-slate-700">
-              <span className="text-slate-700">CGST (9%)</span>
+              <span className="text-slate-700">CGST</span>
               <span className="text-indigo-600 font-semibold">
                 {formatCurrency(gstSummary.cgst_collected)}
               </span>
             </div>
             <div className="flex justify-between items-center p-4 bg-slate-50 rounded border border-slate-700">
-              <span className="text-slate-700">SGST (9%)</span>
+              <span className="text-slate-700">SGST</span>
               <span className="text-violet-400 font-semibold">
                 {formatCurrency(gstSummary.sgst_collected)}
               </span>
             </div>
             <div className="flex justify-between items-center p-4 bg-slate-50 rounded border border-slate-700">
-              <span className="text-slate-700">IGST (0%)</span>
+              <span className="text-slate-700">IGST (inter-state)</span>
               <span className="text-cyan-600 font-semibold">
                 {formatCurrency(gstSummary.igst_collected)}
               </span>

@@ -22,19 +22,23 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '../../context/AuthContext';
-import { reportsApi } from '../../services/api';
+import { reportsApi, analyticsApi } from '../../services/api';
+// financeApi isn't re-exported from the api barrel — import it directly (the
+// barrel re-export resolves to undefined for this module; see prior sessions).
+import { financeApi } from '../../services/api/finance';
 
 interface StorePerformance {
   storeId: string;
   storeName: string;
   revenue: number;
   orders: number;
-  profit: number;
-  profitMargin: number;
+  // These derived metrics are null when the backend can't source them
+  // (margin needs per-item COGS; sqft + headcount aren't stored). They render
+  // as a dash rather than a fabricated number (SYSTEM_INTENT: fail loudly).
+  profitMargin: number | null;
   inventoryValue: number;
-  deadStockValue: number;
-  salesPerSqFt: number;
-  staffCount: number;
+  salesPerSqFt: number | null;
+  staffCount: number | null;
   trend: 'up' | 'down' | 'stable';
   trendPercentage: number;
 }
@@ -42,6 +46,9 @@ interface StorePerformance {
 interface BusinessMetrics {
   totalRevenue: number;
   totalProfit: number;
+  // True when net profit was sourced from the analytics summary; false for
+  // viewers without analytics access (the card then shows a dash, not 0).
+  profitKnown: boolean;
   totalOrders: number;
   totalCustomers: number;
   averageOrderValue: number;
@@ -120,32 +127,75 @@ export function ExecutiveDashboard() {
       const storeId = user?.activeStoreId || '';
       const { startDate, endDate } = getDateRange(timeRange);
 
-      const [dashboardRes, inventoryRes, salesRes] = await Promise.all([
-        reportsApi.getDashboardStats(storeId).catch(() => null),
-        reportsApi.getInventoryReport(storeId).catch(() => null),
-        reportsApi.getSalesSummary(storeId, startDate, endDate).catch(() => null),
-      ]);
+      // Real backend sources, all fail-soft & independent:
+      //  - reports/* : revenue, inventory, sales summary (open to all roles)
+      //  - analytics/dashboard-summary : profit, inventory turnover, top-5,
+      //    cash register (admin-gated -> null for non-admins, handled honestly)
+      //  - analytics/store-performance : per-store comparison (admin-gated)
+      //  - finance/cash-flow : real net cash flow for the cash-flow card
+      const [dashboardRes, inventoryRes, salesRes, summaryRes, storePerfRes, cashFlowRes] =
+        await Promise.all([
+          reportsApi.getDashboardStats(storeId).catch(() => null),
+          reportsApi.getInventoryReport(storeId).catch(() => null),
+          reportsApi.getSalesSummary(storeId, startDate, endDate).catch(() => null),
+          analyticsApi.getDashboardSummary(timeRange, storeId).catch(() => null),
+          analyticsApi.getStorePerformance(timeRange).catch(() => null),
+          financeApi.getCashFlow({ period: 'month', store_id: storeId || undefined }).catch(() => null),
+        ]);
 
       // Business Metrics
       const salesSummary = salesRes?.summary;
       const totalItems = inventoryRes?.totalItems ?? 0;
       const outOfStock = inventoryRes?.outOfStock ?? 0;
 
+      // Profit + inventory turnover come from the analytics summary (real
+      // figures); cash flow prefers the dedicated finance endpoint's
+      // net_cash_flow, falling back to the summary's closing balance.
+      const netProfit = summaryRes?.margins?.net_profit ?? null;
+      const invTurnover = summaryRes?.inventory?.turnover_ratio ?? 0;
+      const netCashFlow =
+        cashFlowRes?.net_cash_flow ?? summaryRes?.cash_register?.closing_balance ?? 0;
+
       setMetrics({
-        totalRevenue: salesSummary?.total_sales ?? dashboardRes?.totalSales ?? 0,
-        totalProfit: 0,
-        totalOrders: salesSummary?.total_orders ?? 0,
-        totalCustomers: 0,
-        averageOrderValue: salesSummary?.avg_order_value ?? 0,
-        inventoryTurnover: 0,
+        totalRevenue:
+          salesSummary?.total_sales ??
+          summaryRes?.revenue?.total ??
+          dashboardRes?.totalSales ??
+          0,
+        totalProfit: netProfit ?? 0,
+        profitKnown: netProfit !== null,
+        totalOrders: salesSummary?.total_orders ?? summaryRes?.revenue?.total_orders ?? 0,
+        totalCustomers: summaryRes?.customers?.footfall ?? 0,
+        averageOrderValue:
+          salesSummary?.avg_order_value ?? summaryRes?.revenue?.avg_transaction_value ?? 0,
+        inventoryTurnover: Number(invTurnover) || 0,
         deadStockPercentage: totalItems > 0 ? (outOfStock / totalItems) * 100 : 0,
-        cashFlow: 0,
-        revenueGrowth: dashboardRes?.change ?? 0,
+        cashFlow: Number(netCashFlow) || 0,
+        revenueGrowth: dashboardRes?.change ?? summaryRes?.revenue?.change_percent ?? 0,
         profitGrowth: 0,
       });
 
-      // Store Performance - no multi-store API available
-      setStores([]);
+      // Store Performance — real per-store comparison from analytics/store-performance.
+      // margin_percent / staff_count / revenue_per_sqft are null from the API
+      // (not fabricated); kept null here so the UI shows a dash.
+      const perfStores: any[] = storePerfRes?.stores ?? [];
+      setStores(
+        perfStores.map((s: any) => {
+          const trendPct = Number(s.revenue_trend ?? 0);
+          return {
+            storeId: s.store_id ?? '',
+            storeName: s.store_name ?? s.store_id ?? 'Store',
+            revenue: Number(s.revenue ?? 0),
+            orders: Number(s.orders ?? 0),
+            profitMargin: s.margin_percent ?? null,
+            inventoryValue: Number(s.stock_value ?? 0),
+            salesPerSqFt: s.revenue_per_sqft ?? null,
+            staffCount: s.staff_count ?? null,
+            trend: trendPct > 0.5 ? 'up' : trendPct < -0.5 ? 'down' : 'stable',
+            trendPercentage: Math.round(trendPct * 10) / 10,
+          };
+        })
+      );
 
       // Category Performance from inventory categories
       const inventoryCategories: any[] = inventoryRes?.categories ?? [];
@@ -160,8 +210,18 @@ export function ExecutiveDashboard() {
         }))
       );
 
-      // Top Products - no top-products API available
-      setTopProducts([]);
+      // Top 5 Products — real revenue-ranked list from the analytics summary.
+      const tp: any[] = summaryRes?.top_products ?? [];
+      setTopProducts(
+        tp.map((p: any) => ({
+          id: p.product_id ?? p.sku ?? p.name ?? '',
+          name: p.name ?? 'Unknown',
+          category: p.category ?? '',
+          revenue: Number(p.revenue ?? 0),
+          quantity: Number(p.units ?? p.quantity ?? 0),
+          margin: 0,
+        }))
+      );
 
     } catch {
       setError('Failed to load dashboard data. Please try again.');
@@ -237,7 +297,7 @@ export function ExecutiveDashboard() {
 
       {/* Key Metrics */}
       {metrics && (
-        <div className="grid grid-cols-1 tablet:grid-cols-2 desktop:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 tablet:grid-cols-2 desktop:grid-cols-5 gap-4">
           {/* Total Revenue */}
           <div className="card">
             <div className="flex items-center justify-between">
@@ -274,6 +334,33 @@ export function ExecutiveDashboard() {
               </div>
               <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
                 <TrendingUp className="w-6 h-6 text-purple-600" />
+              </div>
+            </div>
+          </div>
+
+          {/* Net Profit — real net_profit from the analytics summary. Shows a
+              dash (not a fabricated 0) when the viewer can't access analytics. */}
+          <div className="card">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-sm text-gray-600 mb-1">Net Profit</p>
+                <p className={`text-2xl font-bold ${
+                  !metrics.profitKnown ? 'text-gray-400' : metrics.totalProfit < 0 ? 'text-red-700' : 'text-gray-900'
+                }`}>
+                  {!metrics.profitKnown ? '—' : formatCurrency(metrics.totalProfit)}
+                </p>
+                <div className="flex items-center gap-1 mt-2">
+                  <span className="text-xs text-gray-500">
+                    {!metrics.profitKnown
+                      ? 'Requires analytics access'
+                      : metrics.totalRevenue > 0
+                        ? `${((metrics.totalProfit / metrics.totalRevenue) * 100).toFixed(1)}% net margin`
+                        : 'This period'}
+                  </span>
+                </div>
+              </div>
+              <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
+                <BarChart3 className="w-6 h-6 text-blue-600" />
               </div>
             </div>
           </div>
@@ -358,7 +445,9 @@ export function ExecutiveDashboard() {
                   </div>
                   <div>
                     <h3 className="font-semibold text-gray-900">{store.storeName}</h3>
-                    <p className="text-sm text-gray-600">{store.staffCount} staff members</p>
+                    <p className="text-sm text-gray-600">
+                      {store.orders} orders this period
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -378,36 +467,34 @@ export function ExecutiveDashboard() {
                   <p className="text-sm font-semibold text-gray-900">{formatCurrency(store.revenue)}</p>
                 </div>
                 <div>
+                  <p className="text-xs text-gray-600">Avg Order</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {store.orders > 0 ? formatCurrency(Math.round(store.revenue / store.orders)) : '—'}
+                  </p>
+                </div>
+                <div>
                   <p className="text-xs text-gray-600">Profit Margin</p>
-                  <p className="text-sm font-semibold text-gray-900">{store.profitMargin}%</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {store.profitMargin === null ? '—' : `${store.profitMargin}%`}
+                  </p>
                 </div>
                 <div>
-                  <p className="text-xs text-gray-600">Sales/Sq.Ft</p>
-                  <p className="text-sm font-semibold text-gray-900">₹{store.salesPerSqFt}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-600">Dead Stock</p>
-                  <p className={`text-sm font-semibold ${
-                    store.inventoryValue > 0 && (store.deadStockValue / store.inventoryValue) * 100 > 20 ? 'text-red-600' : 'text-gray-900'
-                  }`}>
-                    {formatCurrency(store.deadStockValue)}
+                  <p className="text-xs text-gray-600">Stock Value</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {store.inventoryValue > 0 ? formatCurrency(store.inventoryValue) : '—'}
                   </p>
                 </div>
               </div>
 
-              {/* Problem Indicators for underperforming stores */}
-              {index >= 3 && (
+              {/* Problem Indicators for underperforming stores. Only fire on
+                  signals we actually have (declining trend / low margin when
+                  margin is known) — never on the null/dashed metrics. */}
+              {index >= 3 && (store.trend === 'down' || (store.profitMargin !== null && store.profitMargin < 15)) && (
                 <div className="mt-3 p-3 bg-white rounded border border-red-200">
                   <p className="text-xs font-medium text-red-800 mb-2">Performance Issues:</p>
                   <div className="flex flex-wrap gap-2">
-                    {store.profitMargin < 15 && (
+                    {store.profitMargin !== null && store.profitMargin < 15 && (
                       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Low Margin</span>
-                    )}
-                    {store.salesPerSqFt < 1500 && (
-                      <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Low Sales Density</span>
-                    )}
-                    {store.inventoryValue > 0 && (store.deadStockValue / store.inventoryValue) * 100 > 25 && (
-                      <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">High Dead Stock</span>
                     )}
                     {store.trend === 'down' && (
                       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Declining Trend</span>
@@ -479,7 +566,7 @@ export function ExecutiveDashboard() {
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-semibold text-gray-900">{formatCurrency(product.revenue)}</p>
-                  <p className="text-xs text-gray-600">{product.quantity} units • {product.margin}% margin</p>
+                  <p className="text-xs text-gray-600">{product.quantity} units sold</p>
                 </div>
               </div>
             ))}

@@ -5,6 +5,7 @@ Real database queries for dashboard and reports
 """
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
 from calendar import monthrange
@@ -16,6 +17,7 @@ from ..dependencies import (
     get_customer_repository,
     get_task_repository,
     get_attendance_repository,
+    get_audit_repository,
     get_db,
     validate_store_access,
 )
@@ -4077,3 +4079,147 @@ async def growth_blueprint(
         "generated_at": generated_at.isoformat(),
         "from_cache": False,
     }
+
+
+# ============================================================================
+# Day-End Close (cash-drawer reconciliation persistence)
+# ============================================================================
+# The Day-End Closing Report (frontend reports/DayEndReport.tsx) lets a store
+# reconcile the physical cash drawer against system cash and "Close Day". That
+# action previously only flipped a local React flag (no persistence), so a page
+# refresh lost the close and there was no audit record. These endpoints persist
+# one immutable close per (store_id, date) and audit it.
+#
+# SYSTEM_INTENT: Audit Everything + Fail Loudly -> closing a day is a recorded,
+# idempotent event; a second close of the same day is rejected (409), not
+# silently re-written.
+
+_DAY_END_CLOSE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT", "SALES_CASHIER", "CASHIER")
+
+
+class DayEndCloseBody(BaseModel):
+    """Body for POST /reports/day-end-close. closing_cash = physically counted
+    cash in the drawer; system_cash = cash the POS expects. variance is derived
+    server-side (never trusted from the client)."""
+
+    date: str = Field(..., description="Business date being closed (YYYY-MM-DD)")
+    store_id: Optional[str] = Field(None, description="Store; defaults to the user's active store")
+    closing_cash: float = Field(0.0, description="Physically counted cash in drawer")
+    system_cash: float = Field(0.0, description="System-expected cash (from POS)")
+    notes: Optional[str] = Field(None, max_length=2000)
+
+
+def _day_end_doc_public(doc: dict) -> dict:
+    """Strip the Mongo _id for a JSON-safe response."""
+    if not doc:
+        return {}
+    out = dict(doc)
+    out.pop("_id", None)
+    return out
+
+
+@router.get("/day-end-close")
+async def get_day_end_close(
+    date: str = Query(..., description="Business date (YYYY-MM-DD)"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_DAY_END_CLOSE_ROLES)),
+):
+    """Return the day-end close status for (store_id, date). `closed` is False
+    with `close: null` when the day hasn't been closed yet (honest empty state,
+    not a fabricated record)."""
+    sid = validate_store_access(store_id, current_user)
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", False):
+        # No DB -> we genuinely don't know; report not-closed rather than fake.
+        return {"closed": False, "store_id": sid, "date": date, "close": None}
+
+    doc = db.get_collection("day_end_closes").find_one({"store_id": sid, "date": date})
+    return {
+        "closed": bool(doc),
+        "store_id": sid,
+        "date": date,
+        "close": _day_end_doc_public(doc) if doc else None,
+    }
+
+
+@router.post("/day-end-close")
+async def create_day_end_close(
+    body: DayEndCloseBody,
+    current_user: dict = Depends(require_roles(*_DAY_END_CLOSE_ROLES)),
+):
+    """Persist a day-end cash-drawer close. Idempotent per (store_id, date): a
+    repeat close of an already-closed day returns 409 (the existing close is in
+    the error so the UI can surface it). Variance is computed server-side."""
+    from fastapi import HTTPException
+
+    sid = validate_store_access(body.store_id, current_user)
+    if not sid:
+        raise HTTPException(status_code=400, detail="No store selected for day-end close")
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", False):
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    closes = db.get_collection("day_end_closes")
+    existing = closes.find_one({"store_id": sid, "date": body.date})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"Day {body.date} already closed for store {sid}",
+                "close": _day_end_doc_public(existing),
+            },
+        )
+
+    variance = round(float(body.closing_cash) - float(body.system_cash), 2)
+    now = datetime.utcnow()
+    doc = {
+        "store_id": sid,
+        "date": body.date,
+        "closing_cash": round(float(body.closing_cash), 2),
+        "system_cash": round(float(body.system_cash), 2),
+        "variance": variance,
+        "notes": (body.notes or "").strip() or None,
+        "closed_by": current_user.get("user_id"),
+        "closed_at": now.isoformat(),
+    }
+
+    try:
+        closes.insert_one(dict(doc))
+    except Exception as e:  # pragma: no cover - surfaced as 500 by FastAPI
+        # A duplicate-key race (two closes at once) lands here too; re-read and
+        # report the winner as a 409 rather than a 500.
+        winner = closes.find_one({"store_id": sid, "date": body.date})
+        if winner:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"Day {body.date} already closed for store {sid}",
+                    "close": _day_end_doc_public(winner),
+                },
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to record day-end close: {e}")
+
+    # Audit (fail-soft: an audit hiccup must not undo the business record).
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "DAY_END_CLOSED",
+                    "entity_type": "day_end_close",
+                    "entity_id": f"{sid}:{body.date}",
+                    "store_id": sid,
+                    "user_id": current_user.get("user_id"),
+                    "severity": "WARNING" if variance != 0 else "INFO",
+                    "details": {
+                        "date": body.date,
+                        "closing_cash": doc["closing_cash"],
+                        "system_cash": doc["system_cash"],
+                        "variance": variance,
+                    },
+                }
+            )
+    except Exception:
+        pass
+
+    return {"closed": True, "store_id": sid, "date": body.date, "close": _day_end_doc_public(doc)}

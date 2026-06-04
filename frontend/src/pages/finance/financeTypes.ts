@@ -9,11 +9,9 @@ export type TabType =
   | 'cash-flow'
   | 'period'
   | 'budgets'
-  | 'vendor-payments'
-  | 'reconciliation';
+  | 'vendor-payments';
 
 export type GSTType = 'CGST_SGST' | 'IGST' | 'EXEMPT';
-export type ReconciliationStatus = 'pending' | 'matched' | 'discrepancy';
 
 export interface RevenueData {
   period: string;
@@ -82,13 +80,4 @@ export interface VendorPaymentData {
   due_date: string;
   days_overdue: number;
   status: 'pending' | 'partial' | 'paid';
-}
-
-export interface ReconciliationData {
-  id: string;
-  date: string;
-  bank_amount: number;
-  system_amount: number;
-  difference: number;
-  status: ReconciliationStatus;
 }
