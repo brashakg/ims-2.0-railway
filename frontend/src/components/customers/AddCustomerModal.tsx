@@ -456,6 +456,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
           <button
             onClick={onClose}
             className="p-2 text-gray-500 hover:text-gray-600 transition-colors"
+            title="Close"
+            aria-label="Close"
           >
             <X className="w-5 h-5" />
           </button>
@@ -598,24 +600,30 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
               {gstVerified && (
                 <>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label htmlFor="business-name" className="block text-sm font-medium text-gray-700 mb-1">
                       Business Name
                     </label>
                     <input
+                      id="business-name"
                       type="text"
                       value={formData.businessName}
                       onChange={e => setFormData(prev => ({ ...prev, businessName: e.target.value }))}
+                      title="Business Name"
+                      placeholder="Business Name"
                       className="input-field bg-gray-50"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label htmlFor="pan-number" className="block text-sm font-medium text-gray-700 mb-1">
                       PAN Number
                     </label>
                     <input
+                      id="pan-number"
                       type="text"
                       value={formData.panNumber}
                       readOnly
+                      title="PAN Number"
+                      placeholder="PAN Number"
                       className="input-field bg-gray-100"
                     />
                   </div>
@@ -685,24 +693,30 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="customer-dob" className="block text-sm font-medium text-gray-700 mb-1">
                   Date of Birth
                 </label>
                 <input
+                  id="customer-dob"
                   type="date"
                   value={formData.dateOfBirth}
                   onChange={e => setFormData(prev => ({ ...prev, dateOfBirth: e.target.value }))}
+                  title="Date of Birth"
+                  placeholder="Date of Birth"
                   className="input-field"
                 />
               </div>
               <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label htmlFor="customer-anniversary" className="block text-sm font-medium text-gray-700 mb-1">
                   Anniversary
                 </label>
                 <input
+                  id="customer-anniversary"
                   type="date"
                   value={formData.anniversary}
                   onChange={e => setFormData(prev => ({ ...prev, anniversary: e.target.value }))}
+                  title="Anniversary"
+                  placeholder="Anniversary"
                   className="input-field"
                 />
               </div>
@@ -790,13 +804,15 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label htmlFor="customer-state" className="block text-sm font-medium text-gray-700 mb-1">
                     State
                   </label>
                   <select
+                    id="customer-state"
                     value={formData.state}
                     onChange={e => setFormData(prev => ({ ...prev, state: e.target.value }))}
                     className="input-field"
+                    title="State"
                   >
                     <option value="">Select State</option>
                     {INDIAN_STATES.map(state => (
@@ -852,6 +868,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                       type="button"
                       onClick={() => handleRemovePatient(patient.id)}
                       className="p-1 text-red-500 hover:text-red-700"
+                      title="Remove patient"
+                      aria-label="Remove patient"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -904,13 +922,16 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label htmlFor="patient-dob" className="block text-sm font-medium text-gray-700 mb-1">
                       Date of Birth
                     </label>
                     <input
+                      id="patient-dob"
                       type="date"
                       value={newPatient.dateOfBirth}
                       onChange={e => setNewPatient(prev => ({ ...prev, dateOfBirth: e.target.value }))}
+                      title="Patient Date of Birth"
+                      placeholder="Patient Date of Birth"
                       className={clsx("input-field", newPatient.relation === 'Self' && "bg-gray-100 cursor-not-allowed text-gray-500")}
                       disabled={newPatient.relation === 'Self'}
                     />
@@ -933,9 +954,11 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                       )}
                     </div>
                     <select
+                      id="patient-relation"
                       value={newPatient.relation}
                       onChange={e => handleRelationChange(e.target.value)}
                       className="input-field"
+                      title="Relation"
                     >
                       {RELATIONS.map(rel => (
                         <option key={rel} value={rel}>{rel}</option>

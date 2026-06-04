@@ -697,6 +697,7 @@
 .scrim {
   position: fixed; inset: 0; background: rgba(17,17,17,.28);
   display: grid; place-items: center; z-index: 100;
+  -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
 }
 .dialog {
@@ -1051,6 +1052,7 @@
   cursor: pointer;
   color: var(--ink-2);
   font-size: 13px;
+  -webkit-user-select: none;
   user-select: none;
 }
 .cmdk-item:hover,

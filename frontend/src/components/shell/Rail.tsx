@@ -288,6 +288,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
 
   return (
     <aside
+      id="rail-drawer"
       className={'rail' + (expanded ? ' expanded' : '') + (mobileOpen ? ' rail-mobile-open' : '')}
       role={mobileOpen ? 'dialog' : undefined}
       aria-modal={mobileOpen ? true : undefined}

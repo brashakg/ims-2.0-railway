@@ -227,7 +227,7 @@ export function ClinicPrescriptionHistory({
               <p className="text-sm text-gray-500">{customerName || 'Customer'} · grouped by family member</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-colors" title="Close" aria-label="Close">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
@@ -365,7 +365,7 @@ export function ClinicPrescriptionHistory({
                   <p className="font-medium">{editingRx ? 'Failed to update prescription' : 'Failed to create prescription'}</p>
                   <p className="text-xs mt-0.5">{formError}</p>
                 </div>
-                <button onClick={() => setFormError(null)} className="ml-auto text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
+                <button onClick={() => setFormError(null)} className="ml-auto text-red-400 hover:text-red-600" title="Dismiss" aria-label="Dismiss error"><X className="w-4 h-4" /></button>
               </div>
             </div>
           )}

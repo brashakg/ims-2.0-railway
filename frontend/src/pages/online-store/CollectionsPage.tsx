@@ -483,7 +483,7 @@ export default function CollectionsPage() {
                     <button
                       type="button"
                       role="switch"
-                      aria-checked={!!c.published}
+                      aria-checked={c.published ? "true" : "false"}
                       onClick={() => togglePublished(c)}
                       className={
                         'relative inline-flex h-5 w-9 items-center rounded-full transition-colors ' +
@@ -624,6 +624,8 @@ function CollectionDrawer({
             onClick={onClose}
             disabled={saving}
             className="p-2 hover:bg-gray-100 rounded-lg"
+            title="Close"
+            aria-label="Close"
           >
             <X className="w-5 h-5 text-gray-500" />
           </button>
@@ -709,12 +711,15 @@ function CollectionDrawer({
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Sort priority</label>
+                <label htmlFor="sort-priority" className="block text-sm font-medium text-gray-700 mb-1">Sort priority</label>
                 <input
+                  id="sort-priority"
                   type="number"
                   value={draft.sort_priority}
                   onChange={(e) => set('sort_priority', parseInt(e.target.value, 10) || 0)}
                   className="input-field w-full"
+                  title="Sort Priority"
+                  placeholder="Sort Priority"
                 />
                 <p className="text-xs text-gray-400 mt-1">Lower sorts first.</p>
               </div>
@@ -1184,6 +1189,8 @@ function SmartRulesEditor({
               value={r.field}
               onChange={(e) => setRule(idx, { field: e.target.value })}
               className="input-field flex-1"
+              title="Rule field select"
+              aria-label="Rule field select"
             >
               {RULE_FIELDS.map((f) => (
                 <option key={f.value} value={f.value}>
@@ -1195,6 +1202,8 @@ function SmartRulesEditor({
               value={r.op}
               onChange={(e) => setRule(idx, { op: e.target.value })}
               className="input-field flex-1"
+              title="Rule operator select"
+              aria-label="Rule operator select"
             >
               {RULE_OPS.map((o) => (
                 <option key={o.value} value={o.value}>

@@ -373,7 +373,7 @@ export function ContactLensFittingPage() {
         <div className="card border-teal-200">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-medium text-gray-900">New Contact Lens Fitting</h3>
-            <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+            <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600" title="Close" aria-label="Close"><X className="w-5 h-5" /></button>
           </div>
 
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">

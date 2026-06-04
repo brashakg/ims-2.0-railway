@@ -97,7 +97,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
         type="button"
         className="topbar-hamburger"
         aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
-        aria-expanded={navOpen}
+        aria-expanded={navOpen ? "true" : "false"}
         aria-controls="rail-drawer"
         onClick={onHamburgerClick}
       >
@@ -139,7 +139,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             className="store-pill"
             onClick={() => setStoreOpen((o) => !o)}
             aria-haspopup="listbox"
-            aria-expanded={storeOpen}
+            aria-expanded={storeOpen ? "true" : "false"}
           >
             <span className="dot" />
             {/* On mobile (<sm) show just the store code to prevent wrapping;
@@ -151,6 +151,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
           {storeOpen && (
             <div
               role="listbox"
+              aria-label="Select store"
               style={{
                 position: 'absolute',
                 top: '100%',
@@ -173,6 +174,8 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                 <button
                   key={id}
                   type="button"
+                  role="option"
+                  aria-selected={id === user?.activeStoreId ? "true" : "false"}
                   onClick={() => {
                     setActiveStore(id);
                     setStoreOpen(false);
@@ -222,7 +225,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             onClick={() => setRoleOpen((o) => !o)}
             style={{ cursor: 'pointer', border: 0 }}
             aria-haspopup="listbox"
-            aria-expanded={roleOpen}
+            aria-expanded={roleOpen ? "true" : "false"}
           >
             <span className="k">Role</span>
             {roleLabel}
@@ -231,6 +234,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
           {roleOpen && (
             <div
               role="listbox"
+              aria-label="Select role"
               style={{
                 position: 'absolute',
                 top: '100%',
@@ -249,6 +253,8 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                 <button
                   key={r}
                   type="button"
+                  role="option"
+                  aria-selected={r === user.activeRole ? "true" : "false"}
                   onClick={() => {
                     setActiveRole(r);
                     setRoleOpen(false);

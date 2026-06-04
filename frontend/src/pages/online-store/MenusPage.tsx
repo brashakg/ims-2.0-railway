@@ -669,7 +669,7 @@ export default function MenusPage() {
                         <button
                           type="button"
                           role="switch"
-                          aria-checked={active}
+                          aria-checked={active ? "true" : "false"}
                           onClick={(e) => {
                             e.stopPropagation();
                             toggleActive(m);
@@ -1046,7 +1046,7 @@ function ItemEditorDrawer({
               <p className="text-xs text-gray-500 truncate">{item.title || '(untitled)'}</p>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+          <button type="button" onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg" title="Close" aria-label="Close">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
@@ -1067,11 +1067,13 @@ function ItemEditorDrawer({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Links to</label>
+              <label htmlFor="item-type-select" className="block text-sm font-medium text-gray-700 mb-1">Links to</label>
               <select
+                id="item-type-select"
                 value={item.item_type}
                 onChange={(e) => onChange({ item_type: e.target.value as MenuItemType })}
                 className="input-field w-full"
+                title="Link type select"
               >
                 {ITEM_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>

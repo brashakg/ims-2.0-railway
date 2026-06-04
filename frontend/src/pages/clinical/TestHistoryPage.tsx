@@ -183,6 +183,8 @@ export function TestHistoryPage() {
             value={dateFilter}
             onChange={e => setDateFilter(e.target.value as 'today' | 'week' | 'month' | 'all')}
             className="input-field"
+            title="Filter by date range"
+            aria-label="Filter by date range"
           >
             <option value="today">Today</option>
             <option value="week">This Week</option>

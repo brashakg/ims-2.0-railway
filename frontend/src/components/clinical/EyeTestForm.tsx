@@ -227,6 +227,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
             <button
               onClick={onClose}
               className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Close"
+              aria-label="Close"
             >
               <X className="w-5 h-5 text-gray-500" />
             </button>
@@ -237,13 +239,16 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
         <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
           <div className="grid grid-cols-4 gap-4">
             <div>
-              <label className="text-xs text-gray-500 flex items-center gap-1 mb-1">
+              <label htmlFor="exam-date" className="text-xs text-gray-500 flex items-center gap-1 mb-1">
                 <Calendar className="w-3 h-3" /> Exam Date
               </label>
               <input
+                id="exam-date"
                 type="date"
                 value={examDate}
                 onChange={(e) => setExamDate(e.target.value)}
+                title="Exam Date"
+                placeholder="YYYY-MM-DD"
                 className="input-field text-sm"
               />
             </div>
@@ -272,12 +277,14 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
               />
             </div>
             <div>
-              <label className="text-xs text-gray-500 flex items-center gap-1 mb-1">
+              <label htmlFor="vdu-usage" className="text-xs text-gray-500 flex items-center gap-1 mb-1">
                 <Monitor className="w-3 h-3" /> VDU Usage
               </label>
               <select
+                id="vdu-usage"
                 value={vduUsage}
                 onChange={(e) => setVduUsage(e.target.value)}
+                title="VDU Usage"
                 className="input-field text-sm"
               >
                 {VDU_OPTIONS.map(opt => (
