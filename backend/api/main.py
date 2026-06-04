@@ -101,6 +101,7 @@ from .routers import (
     online_store_menus_router,
     online_store_images_router,
     online_store_push_router,
+    online_store_orders_router,
 )
 from .routers.auth import require_roles
 
@@ -1040,6 +1041,19 @@ app.include_router(
     online_store_push_router,
     prefix="/api/v1/online-store/push",
     tags=["Online Store - Push"],
+)
+# Online ORDERS sub-module (BVI Phase 3b). The read + recovery surface over the
+# canonical IMS orders that online_order_mapper creates from Shopify orders (one
+# create path -> online sales flow into the SAME orders collection as POS, tagged
+# channel='ONLINE' with a GST tax invoice, so Finance/P&L count them once). Mounted
+# at /api/v1/online-store/orders. Role-gated INSIDE the router (GET list ->
+# SUPERADMIN/ADMIN/ACCOUNTANT; POST remap -> SUPERADMIN/ADMIN) + catalogued in
+# rbac_policy.POLICY. A remap writes a chained audit_logs row. See
+# docs/reference/BVI_MERGE_PLAN.md Phase 3.
+app.include_router(
+    online_store_orders_router,
+    prefix="/api/v1/online-store/orders",
+    tags=["Online Store - Orders"],
 )
 
 

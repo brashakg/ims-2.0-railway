@@ -700,6 +700,17 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/online-store/push/collection/{collection_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/push/menu/{menu_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/push/image/{image_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
+    # --- /api/v1/online-store/orders ---  (BVI Phase 3b: online sales into IMS books)
+    # The read + recovery surface over the canonical IMS orders that
+    # online_order_mapper creates from Shopify orders (channel='ONLINE', GST invoice
+    # minted, counted once by Finance/P&L). GET list is also for the ACCOUNTANT (it
+    # reads the books); POST remap MUTATES/re-creates an order so it is narrowed to
+    # SUPERADMIN/ADMIN. The router mounts the list at both ''/'/' so both concrete
+    # paths are catalogued. A remap writes a chained audit_logs row. See
+    # routers/online_store_orders.py + BVI_MERGE_PLAN.md Phase 3.
+    {"method": 'GET', "path": '/api/v1/online-store/orders', "allowed": ['ADMIN', 'ACCOUNTANT', 'SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/online-store/orders/', "allowed": ['ADMIN', 'ACCOUNTANT', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/orders/remap/{shopify_order_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     # --- /api/v1/orders ---
     {"method": 'GET', "path": '/api/v1/orders', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders', "allowed": ['ADMIN', 'AREA_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},

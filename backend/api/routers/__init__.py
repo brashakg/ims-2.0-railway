@@ -68,6 +68,7 @@ from .online_store_collections import router as online_store_collections_router
 from .online_store_menus import router as online_store_menus_router
 from .online_store_images import router as online_store_images_router
 from .online_store_push import router as online_store_push_router
+from .online_store_orders import router as online_store_orders_router
 
 __all__ = [
     "auth_router",
@@ -135,4 +136,5 @@ __all__ = [
     "online_store_menus_router",
     "online_store_images_router",
     "online_store_push_router",
+    "online_store_orders_router",
 ]
