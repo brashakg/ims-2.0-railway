@@ -161,63 +161,45 @@ class DatabaseConnection:
             self._connected = False
             return False
 
-    def _safe_index(self, collection, keys, **kwargs):
-        """Build ONE index in isolation so a single dirty collection can never
-        abort the others.
-
-        Before this, ensure_indexes wrapped ALL ~80 create_index calls in one
-        try/except, so the FIRST failing index (e.g. a unique index rejected by
-        a legacy duplicate/null key) aborted every later build -- one dirty
-        collection silently left the whole database unindexed. This actually bit
-        prod: orders.order_id was null on 322/343 rows, so its unique build threw
-        and took out every index AFTER it, including the GST uniq_invoice_number
-        backstop. Now each index stands or falls alone.
-
-        Fail LOUDLY (log the skip with the index name + error) per SYSTEM_INTENT
-        'Fail Loudly', but keep going. Idempotent: MongoDB no-ops an index that
-        already exists. Returns True on success/already-exists, False on a skip.
-        """
-        try:
-            collection.create_index(keys, **kwargs)
-            self._index_ok += 1
-            return True
-        except Exception as exc:  # noqa: BLE001 -- one bad index must not abort the rest
-            label = kwargs.get("name") or keys
-            self._index_skipped.append(f"{collection.name}.{label}")
-            print(f"[WARN] index build skipped: {collection.name}.{label}: {exc}")
-            return False
-
     def ensure_indexes(self):
         """Create MongoDB indexes for query performance.
 
-        Safe to call multiple times -- MongoDB skips existing indexes. Every
-        index is built in ISOLATION via _safe_index, so a dirty collection only
-        loses its OWN constrained index, never the rest of the database's. A
-        final summary line reports how many built vs were skipped (fail-loud).
+        Safe to call multiple times -- MongoDB skips existing indexes. Each index
+        is built in its OWN try/except (via `_idx`) so a single failing index
+        (e.g. a UNIQUE index blocked by pre-existing duplicate/null data, or a TTL
+        index that needs free disk) can NEVER abort the rest. PREVIOUSLY all of
+        these shared one outer try, so the FIRST failure (historically the
+        orders.order_id unique build on legacy null order_ids) silently took out
+        every later collection's indexes too. Failures are collected and logged
+        once at the end; this method never raises.
         """
         if not self._connected or self._db is None:
             return
 
-        self._index_ok = 0
-        self._index_skipped = []
-        si = self._safe_index
+        failures: list = []
 
-        # Orders -- most queried collection
-        orders = self._db["orders"]
-        si(orders, "order_id", unique=True, background=True)
-        si(orders, "store_id", background=True)
-        si(orders, "customer_id", background=True)
-        si(orders, [("store_id", 1), ("status", 1)], background=True)
-        si(orders, [("store_id", 1), ("created_at", -1)], background=True)
-        si(orders, "order_number", unique=True, sparse=True, background=True)
-        si(orders, [("store_id", 1), ("balance_due", 1)], background=True)
-        # GST invoice serial (Rule 46(b)): UNIQUE so a duplicate invoice number
-        # can never be written -- the per-(prefix, FY) atomic counter already
-        # hands out unique serials; this is the DB-level backstop that makes a
-        # duplicate physically impossible. PARTIAL so the many legacy / DRAFT
-        # orders with NO invoice_number (field absent) aren't indexed.
-        si(
-            orders,
+        def _idx(coll_name, keys, **kw):
+            try:
+                self._db[coll_name].create_index(keys, **kw)
+            except Exception as e:  # noqa: BLE001
+                label = kw.get("name") or (
+                    keys if isinstance(keys, str) else str(keys)
+                )
+                failures.append("%s/%s: %s" % (coll_name, label, str(e)[:160]))
+
+        # Orders -- most queried collection.
+        _idx("orders", "order_id", unique=True, background=True)
+        _idx("orders", "store_id", background=True)
+        _idx("orders", "customer_id", background=True)
+        _idx("orders", [("store_id", 1), ("status", 1)], background=True)
+        _idx("orders", [("store_id", 1), ("created_at", -1)], background=True)
+        _idx("orders", "order_number", unique=True, sparse=True, background=True)
+        _idx("orders", [("store_id", 1), ("balance_due", 1)], background=True)
+        # GST invoice serial (Rule 46(b)): UNIQUE backstop so a duplicate invoice
+        # number can never be written. PARTIAL so legacy / DRAFT orders with no
+        # invoice_number aren't indexed and can't collide on a missing value.
+        _idx(
+            "orders",
             "invoice_number",
             unique=True,
             partialFilterExpression={"invoice_number": {"$type": "string"}},
@@ -226,214 +208,193 @@ class DatabaseConnection:
         )
 
         # Customers
-        customers = self._db["customers"]
-        si(customers, "customer_id", unique=True, background=True)
-        si(customers, "mobile", unique=True, sparse=True, background=True)
-        si(customers, "email", sparse=True, background=True)
-        si(customers, [("store_ids", 1)], background=True)
-        si(customers, "name", background=True)
+        _idx("customers", "customer_id", unique=True, background=True)
+        _idx("customers", "mobile", unique=True, sparse=True, background=True)
+        _idx("customers", "email", sparse=True, background=True)
+        _idx("customers", [("store_ids", 1)], background=True)
+        _idx("customers", "name", background=True)
 
-        # Products / Stock
-        products = self._db["products"]
-        si(products, "product_id", unique=True, background=True)
-        si(products, "sku", unique=True, sparse=True, background=True)
-        # UNIQUE + sparse: a scan-to-sell product barcode must resolve to exactly
-        # one product (two sharing a barcode make a POS scan ambiguous). Sparse so
-        # products WITHOUT a master barcode are exempt. The PUT /products
-        # validation rejects dupes before the write; this is the DB-level backstop.
-        si(products, "barcode", unique=True, sparse=True, background=True)
-        si(products, [("store_id", 1), ("category", 1)], background=True)
+        # Products / Stock. barcode is UNIQUE+sparse: a scan-to-sell barcode must
+        # resolve to exactly one product; sparse exempts products without one.
+        _idx("products", "product_id", unique=True, background=True)
+        _idx("products", "sku", unique=True, sparse=True, background=True)
+        _idx("products", "barcode", unique=True, sparse=True, background=True)
+        _idx("products", [("store_id", 1), ("category", 1)], background=True)
 
         # Users
-        users = self._db["users"]
-        si(users, "user_id", unique=True, background=True)
-        si(users, "username", unique=True, background=True)
-        si(users, "email", unique=True, sparse=True, background=True)
+        _idx("users", "user_id", unique=True, background=True)
+        _idx("users", "username", unique=True, background=True)
+        _idx("users", "email", unique=True, sparse=True, background=True)
 
         # Workshop jobs
-        jobs = self._db["workshop_jobs"]
-        si(jobs, "job_id", unique=True, background=True)
-        si(jobs, "job_number", unique=True, background=True)
-        si(jobs, [("store_id", 1), ("status", 1)], background=True)
+        _idx("workshop_jobs", "job_id", unique=True, background=True)
+        _idx("workshop_jobs", "job_number", unique=True, background=True)
+        _idx("workshop_jobs", [("store_id", 1), ("status", 1)], background=True)
 
-        # Attendance -- one row PER (employee, day). The UNIQUE index on
-        # (employee_id, date) is the DB-level backstop against the "same user
-        # recorded twice" bug: check-in / mark de-dupe via find-then-update keyed
-        # on (employee_id, date) where `date` is the date-only ISO STRING, and
-        # this index makes a duplicate physically impossible even under a race or
-        # a stray datetime-vs-string `date` write. Mirrors schemas.ATTENDANCE.
-        attendance = self._db["attendance"]
-        si(
-            attendance,
+        # Attendance -- one row PER (employee, day). The UNIQUE (employee_id, date)
+        # index is the DB-level backstop against the "same user recorded twice"
+        # bug. Mirrors schemas.ATTENDANCE. (Pre-existing duplicate rows must be
+        # de-duped before this can build; failure here no longer blocks the rest.)
+        _idx(
+            "attendance",
             [("employee_id", 1), ("date", 1)],
             unique=True,
             name="uniq_employee_date",
             background=True,
         )
-        si(attendance, [("store_id", 1), ("date", 1)], background=True)
-        si(attendance, [("date", -1)], background=True)
+        _idx("attendance", [("store_id", 1), ("date", 1)], background=True)
+        _idx("attendance", [("date", -1)], background=True)
 
         # Prescriptions
-        rx = self._db["prescriptions"]
-        si(rx, "prescription_id", unique=True, background=True)
-        si(rx, "customer_id", background=True)
-        si(rx, [("store_id", 1), ("created_at", -1)], background=True)
+        _idx("prescriptions", "prescription_id", unique=True, background=True)
+        _idx("prescriptions", "customer_id", background=True)
+        _idx("prescriptions", [("store_id", 1), ("created_at", -1)], background=True)
 
         # Stores
-        stores = self._db["stores"]
-        si(stores, "store_id", unique=True, background=True)
-        si(stores, "store_code", unique=True, background=True)
+        _idx("stores", "store_id", unique=True, background=True)
+        _idx("stores", "store_code", unique=True, background=True)
 
-        # Walkouts (Pune Incentive Module i -- Phase 1)
-        walkouts = self._db["walkouts"]
-        si(walkouts, "walkout_id", unique=True, background=True)
-        si(walkouts, [("store_id", 1), ("date_str", -1)], background=True)
-        si(
-            walkouts,
+        # Walkouts (Pune Incentive Module i)
+        _idx("walkouts", "walkout_id", unique=True, background=True)
+        _idx("walkouts", [("store_id", 1), ("date_str", -1)], background=True)
+        _idx(
+            "walkouts",
             [("store_id", 1), ("sales_person_id", 1), ("date_str", -1)],
             background=True,
         )
-        si(walkouts, "mobile", background=True)
-        si(walkouts, "customer_id", background=True)
+        _idx("walkouts", "mobile", background=True)
+        _idx("walkouts", "customer_id", background=True)
+        _idx("walk_in_counters", [("store_id", 1), ("date_str", -1)], background=True)
 
-        # Walk-in counters (Pune Incentive Module i -- Phase 4)
-        walkins = self._db["walk_in_counters"]
-        si(walkins, [("store_id", 1), ("date_str", -1)], background=True)
-
-        # Points log (Pune Incentive Module ii). The unique partial index on
-        # (store, date_str, staff) where deleted_at is null is the DB-level
-        # enforcement of "refuse second save" -- DELETE the existing row first,
-        # then re-POST.
-        points = self._db["points_log"]
-        si(
-            points,
+        # Points log (Pune Incentive Module ii). UNIQUE partial on
+        # (store, date_str, staff) where deleted_at is null = "refuse second save".
+        _idx(
+            "points_log",
             [("store_id", 1), ("date_str", -1), ("staff_id", 1)],
             unique=True,
             partialFilterExpression={"deleted_at": None},
             background=True,
         )
-        si(points, [("store_id", 1), ("staff_id", 1), ("date_str", -1)], background=True)
-        si(points, [("store_id", 1), ("deleted_at", 1)], background=True)
-
-        settings = self._db["incentive_settings"]
-        si(settings, "store_id", unique=True, background=True)
-
-        # Per-store-per-month manual incentive inputs (last_year_sale, etc.)
-        inputs = self._db["incentive_inputs"]
-        si(
-            inputs,
+        _idx(
+            "points_log",
+            [("store_id", 1), ("staff_id", 1), ("date_str", -1)],
+            background=True,
+        )
+        _idx("points_log", [("store_id", 1), ("deleted_at", 1)], background=True)
+        _idx("incentive_settings", "store_id", unique=True, background=True)
+        _idx(
+            "incentive_inputs",
             [("store_id", 1), ("year", 1), ("month", 1)],
             unique=True,
             background=True,
         )
 
-        # Payout snapshots (Pune Incentive Module iii). Multiple DRAFTs allowed;
-        # only one LOCKED per (store, year, month).
-        payouts = self._db["payout_snapshots"]
-        si(
-            payouts,
+        # Payout snapshots (Pune Incentive Module iii). One LOCKED per (store,
+        # year, month); multiple DRAFTs allowed.
+        _idx(
+            "payout_snapshots",
             [("store_id", 1), ("year", 1), ("month", 1)],
             unique=True,
             partialFilterExpression={"status": "LOCKED"},
             background=True,
         )
-        si(payouts, [("store_id", 1), ("year", -1), ("month", -1)], background=True)
+        _idx(
+            "payout_snapshots",
+            [("store_id", 1), ("year", -1), ("month", -1)],
+            background=True,
+        )
 
-        # Audit logs (SYSTEM_INTENT 10 -- immutable, hash-chained trail). The
-        # UNIQUE index on `seq` is the DB-level guard against two writers ever
-        # committing the same sequence number. SPARSE on purpose: the chain is
-        # fail-soft and writes UNCHAINED rows (no `seq`) when the head can't be
-        # advanced -- sparse excludes those so multiple seq-less rows coexist
-        # instead of colliding on a single null key.
-        audit = self._db["audit_logs"]
-        si(audit, "seq", unique=True, sparse=True, background=True)
-        si(audit, "log_id", unique=True, sparse=True, background=True)
-        si(audit, [("timestamp", -1)], background=True)
-        si(audit, [("user_id", 1), ("timestamp", -1)], background=True)
-        si(audit, [("store_id", 1), ("timestamp", -1)], background=True)
-        si(audit, [("action", 1), ("timestamp", -1)], background=True)
-        si(audit, [("entity_type", 1), ("entity_id", 1)], background=True)
-        si(audit, [("severity", 1), ("timestamp", -1)], background=True)
+        # Audit logs (SYSTEM_INTENT 10 -- immutable, hash-chained trail). UNIQUE
+        # sparse `seq` is the belt-and-braces against a forked tamper-evident
+        # chain; sparse excludes the fail-soft UNCHAINED (seq-less) rows.
+        _idx("audit_logs", "seq", unique=True, sparse=True, background=True)
+        _idx("audit_logs", "log_id", unique=True, sparse=True, background=True)
+        _idx("audit_logs", [("timestamp", -1)], background=True)
+        _idx("audit_logs", [("user_id", 1), ("timestamp", -1)], background=True)
+        _idx("audit_logs", [("store_id", 1), ("timestamp", -1)], background=True)
+        _idx("audit_logs", [("action", 1), ("timestamp", -1)], background=True)
+        _idx("audit_logs", [("entity_type", 1), ("entity_id", 1)], background=True)
+        _idx("audit_logs", [("severity", 1), ("timestamp", -1)], background=True)
+        _idx("audit_chain_head", "seq", background=True)
 
-        # Audit chain head -- single-document control row keyed by _id
-        # ("primary"). We index `seq` so the guarded head-advance reads stay cheap.
-        audit_head = self._db["audit_chain_head"]
-        si(audit_head, "seq", background=True)
+        # Catalog variants (BVI Phase 1). UNIQUE sparse Shopify/barcode reverse
+        # lookups so a Shopify variant / physical unit resolves to one IMS variant.
+        _idx("catalog_variants", "sku", unique=True, sparse=True, background=True)
+        _idx("catalog_variants", "parent_product_id", sparse=True, background=True)
+        _idx(
+            "catalog_variants",
+            "shopify_variant_id",
+            unique=True,
+            sparse=True,
+            background=True,
+        )
+        _idx(
+            "catalog_variants",
+            "store_barcode",
+            unique=True,
+            sparse=True,
+            background=True,
+        )
 
-        # Catalog variants (BVI Phase 1 -- Online Store module). `sku` is the
-        # primary identity + the physical-stock join handle; the Shopify GID +
-        # store_barcode reverse-lookups are UNIQUE so a Shopify variant / physical
-        # unit resolves to exactly one IMS variant. All SPARSE so partial imports
-        # (rows not yet mapped to Shopify) aren't constrained on absent keys.
-        catalog_variants = self._db["catalog_variants"]
-        si(catalog_variants, "sku", unique=True, sparse=True, background=True)
-        si(catalog_variants, "parent_product_id", sparse=True, background=True)
-        si(catalog_variants, "shopify_variant_id", unique=True, sparse=True, background=True)
-        si(catalog_variants, "store_barcode", unique=True, sparse=True, background=True)
+        # E-commerce collections / menus (BVI Phases 2-3). UNIQUE sparse handle +
+        # Shopify GID so a PUSH-DARK row (handle present, GID absent) isn't
+        # constrained on the missing key.
+        _idx("ecom_collections", "handle", unique=True, sparse=True, background=True)
+        _idx(
+            "ecom_collections",
+            "shopify_collection_id",
+            unique=True,
+            sparse=True,
+            background=True,
+        )
+        _idx("ecom_collections", "auto_source", sparse=True, background=True)
+        _idx("ecom_collections", "category_anchor", sparse=True, background=True)
+        _idx("ecom_menus", "handle", unique=True, sparse=True, background=True)
+        _idx(
+            "ecom_menus",
+            "shopify_menu_id",
+            unique=True,
+            sparse=True,
+            background=True,
+        )
 
-        # E-commerce collections (BVI Phase 2). `handle` is the unique storefront
-        # slug + idempotent re-import key; `shopify_collection_id` is the
-        # Shopify-side reverse-lookup. Both UNIQUE SPARSE so a PUSH-DARK row not
-        # yet mapped to Shopify isn't constrained on the missing key.
-        ecom_collections = self._db["ecom_collections"]
-        si(ecom_collections, "handle", unique=True, sparse=True, background=True)
-        si(ecom_collections, "shopify_collection_id", unique=True, sparse=True, background=True)
-        si(ecom_collections, "auto_source", sparse=True, background=True)
-        si(ecom_collections, "category_anchor", sparse=True, background=True)
+        # Product images / image design queue (BVI Phase 4). Non-unique -- a
+        # product has many images (RAW + EDITED rows of the same asset).
+        _idx("product_images", "product_id", background=True)
+        _idx("product_images", "status", background=True)
+        _idx("product_images", "assigned_to", sparse=True, background=True)
 
-        # E-commerce menus / mega-menu (BVI Phase 3). `handle` is the unique menu
-        # slug + idempotent re-import key; `shopify_menu_id` is the Shopify-side
-        # reverse-lookup. Both UNIQUE SPARSE for the same PUSH-DARK reason.
-        ecom_menus = self._db["ecom_menus"]
-        si(ecom_menus, "handle", unique=True, sparse=True, background=True)
-        si(ecom_menus, "shopify_menu_id", unique=True, sparse=True, background=True)
+        # Vendor bills / purchase invoices (AP + ITC). bill_id UNIQUE sparse;
+        # (vendor_id, bill_number) is NON-unique on purpose -- the duplicate-
+        # invoice guard lives in app code (legacy prod data may already have one).
+        _idx("vendor_bills", "bill_id", unique=True, sparse=True, background=True)
+        _idx("vendor_bills", [("vendor_id", 1), ("bill_number", 1)], background=True)
+        _idx("vendor_bills", "po_id", sparse=True, background=True)
+        _idx("vendor_bills", "grn_id", sparse=True, background=True)
+        _idx("vendor_bills", "status", background=True)
+        _idx("vendor_bills", [("bill_date", -1)], background=True)
 
-        # Product images / image design queue (BVI Phase 4). `product_id` backs a
-        # product's gallery + per-product queue view; `status` backs the
-        # design-queue filter; `assigned_to` backs a designer's "my queue" (SPARSE
-        # so unassigned rows aren't indexed on null). No unique constraint: a
-        # product legitimately has many images.
-        product_images = self._db["product_images"]
-        si(product_images, "product_id", background=True)
-        si(product_images, "status", background=True)
-        si(product_images, "assigned_to", sparse=True, background=True)
-
-        # Vendor bills / purchase invoices (AP + ITC source of truth). `bill_id`
-        # is the canonical id (unique, sparse so legacy rows lacking it don't
-        # collide on null); (vendor_id, bill_number) backs the per-vendor
-        # duplicate-invoice lookup (NON-unique: the dup guard lives in app code
-        # because legacy prod data may already hold a duplicate a unique index
-        # would reject at build time); `po_id` / `grn_id` back the create-from-GRN
-        # + PO/GRN back-links (sparse).
-        vendor_bills = self._db["vendor_bills"]
-        si(vendor_bills, "bill_id", unique=True, sparse=True, background=True)
-        si(vendor_bills, [("vendor_id", 1), ("bill_number", 1)], background=True)
-        si(vendor_bills, "po_id", sparse=True, background=True)
-        si(vendor_bills, "grn_id", sparse=True, background=True)
-        si(vendor_bills, "status", background=True)
-        si(vendor_bills, [("bill_date", -1)], background=True)
-
-        # health_checks (SENTINEL telemetry) -- a row every ~60s tick, so it grows
-        # UNBOUNDED. A TTL index auto-expires rows >14 days old server-side.
-        # Building a TTL index needs >=500MB free disk; on a small/full volume the
-        # build raises OutOfDiskSpace -- isolated by _safe_index so it can't abort
-        # the others. Until it can build, the SENTINEL in-tick prune bounds it.
-        si(
-            self._db["health_checks"],
+        # health_checks (SENTINEL telemetry) grows unbounded; TTL auto-expires
+        # rows >14d. Building a TTL index needs free disk -- already isolated by
+        # _idx so an OutOfDiskSpace here can't abort the others (SENTINEL's in-tick
+        # prune bounds the collection until it builds).
+        _idx(
+            "health_checks",
             "timestamp",
             expireAfterSeconds=14 * 24 * 60 * 60,
             name="ttl_timestamp",
             background=True,
         )
 
-        if self._index_skipped:
+        if failures:
             print(
-                f"[INDEXES] built/verified {self._index_ok}, "
-                f"SKIPPED {len(self._index_skipped)} (dirty data?): "
-                + ", ".join(self._index_skipped)
+                "[WARN] %d index(es) could not build (non-fatal, others OK):"
+                % len(failures)
             )
+            for f in failures:
+                print("   - " + f)
         else:
-            print(f"[OK] MongoDB indexes ensured ({self._index_ok} built/verified)")
+            print("[OK] MongoDB indexes ensured")
 
     def disconnect(self):
         """Close database connection.
