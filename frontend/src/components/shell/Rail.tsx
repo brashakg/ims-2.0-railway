@@ -233,7 +233,9 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
   // Latest active-group title for the auto-group timer (read at fire time so
   // navigating around doesn't restart the countdown).
   const activeGroupTitleRef = useRef(activeGroupTitle);
-  activeGroupTitleRef.current = activeGroupTitle;
+  useEffect(() => {
+    activeGroupTitleRef.current = activeGroupTitle;
+  }, [activeGroupTitle]);
 
   // The rail starts fully expanded after login (all groups open), which makes a
   // long sidebar that can scroll past the main content, leaving empty space on
@@ -333,7 +335,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
                 type="button"
                 className={'rail-group-title' + (isCollapsed ? ' collapsed' : '')}
                 onClick={() => toggleGroup(group.title!)}
-                aria-expanded={!isCollapsed ? "true" : "false"}
+                aria-expanded={!isCollapsed}
                 aria-controls={`rail-group-${gi}-items`}
               >
                 <span className="rail-group-title-label">{group.title}</span>

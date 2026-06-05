@@ -649,7 +649,7 @@ function Thumb({
 
   const inner = has ? (
     <>
-      {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+
       <img
         src={url as string}
         alt={`${label} image`}

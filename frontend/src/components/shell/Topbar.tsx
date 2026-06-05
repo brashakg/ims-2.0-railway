@@ -97,7 +97,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
         type="button"
         className="topbar-hamburger"
         aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
-        aria-expanded={navOpen ? "true" : "false"}
+        aria-expanded={navOpen}
         aria-controls="rail-drawer"
         onClick={onHamburgerClick}
       >
@@ -140,7 +140,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             style={{ height: 42, padding: '0 16px', borderRadius: 12 }}
             onClick={() => setStoreOpen((o) => !o)}
             aria-haspopup="listbox"
-            aria-expanded={storeOpen ? "true" : "false"}
+            aria-expanded={storeOpen}
           >
             <span className="dot" style={{ width: 10, height: 10 }} />
             {/* On mobile (<sm) show just the store code to prevent wrapping;
@@ -176,7 +176,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                   key={id}
                   type="button"
                   role="option"
-                  aria-selected={id === user?.activeStoreId ? "true" : "false"}
+                  aria-selected={id === user?.activeStoreId}
                   onClick={() => {
                     setActiveStore(id);
                     setStoreOpen(false);
@@ -224,7 +224,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             onClick={() => setRoleOpen((o) => !o)}
             style={{ cursor: 'pointer', border: 0 }}
             aria-haspopup="listbox"
-            aria-expanded={roleOpen ? "true" : "false"}
+            aria-expanded={roleOpen}
           >
             <span className="k">Role</span>
             {roleLabel}
@@ -253,7 +253,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                   key={r}
                   type="button"
                   role="option"
-                  aria-selected={r === user.activeRole ? "true" : "false"}
+                  aria-selected={r === user.activeRole}
                   onClick={() => {
                     setActiveRole(r);
                     setRoleOpen(false);

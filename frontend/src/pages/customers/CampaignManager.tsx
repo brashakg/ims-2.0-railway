@@ -490,6 +490,7 @@ function CampaignBuilder({
               value={segmentKey}
               onChange={(e) => setSegmentKey(e.target.value)}
               className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
+              title="Target audience segment"
             >
               {segmentOptions.map((s) => (
                 <option key={s.key} value={s.key}>
@@ -524,6 +525,7 @@ function CampaignBuilder({
               value={templateId}
               onChange={(e) => setTemplateId(e.target.value)}
               className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
+              title="Message template"
             >
               {TEMPLATE_OPTIONS.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -541,6 +543,7 @@ function CampaignBuilder({
               value={scheduleKind}
               onChange={(e) => setScheduleKind(e.target.value as ScheduleKind | 'NONE')}
               className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
+              title="Schedule kind"
             >
               <option value="NONE">No schedule (save as draft / send manually)</option>
               <option value="ONE_TIME">One-time (specific date/time)</option>
@@ -555,6 +558,7 @@ function CampaignBuilder({
                   value={sendAt}
                   onChange={(e) => setSendAt(e.target.value)}
                   className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  title="Send at"
                 />
               </div>
             )}
@@ -565,6 +569,7 @@ function CampaignBuilder({
                   value={frequency}
                   onChange={(e) => setFrequency(e.target.value)}
                   className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  title="Frequency"
                 >
                   <option value="DAILY">Daily</option>
                   <option value="WEEKLY">Weekly</option>
@@ -613,7 +618,7 @@ function AnalyticsModal({ analytics, onClose }: { analytics: CampaignAnalytics; 
             <h3 className="text-lg font-semibold text-gray-900">{analytics.name || 'Campaign'} — analytics</h3>
             <p className="text-gray-500 text-sm">{analytics.status}</p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600" aria-label="Close analytics modal">
             <X className="w-5 h-5" />
           </button>
         </div>

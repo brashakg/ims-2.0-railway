@@ -253,12 +253,12 @@ export default function ExpenseTracker() {
                 className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-bv-red-500" />
             </div>
             <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-bv-red-500">
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-bv-red-500" title="Filter by status">
               <option value="all">All status</option>
               {Object.entries(STATUS_META).filter(([k]) => k !== 'DRAFT').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
             </select>
             <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-bv-red-500">
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-bv-red-500" title="Filter by category">
               <option value="all">All categories</option>
               {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </select>
@@ -422,31 +422,31 @@ export default function ExpenseTracker() {
           <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full max-h-[90vh] overflow-y-auto">
             <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Add expense</h2>
-              <button onClick={() => setShowSubmitModal(false)} className="text-gray-500 hover:text-gray-700"><XIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowSubmitModal(false)} className="text-gray-500 hover:text-gray-700" aria-label="Close modal"><XIcon className="w-5 h-5" /></button>
             </div>
             <div className="p-6 space-y-4">
               <Labeled label="Type of expense">
-                <select value={formCategory} onChange={(e) => setFormCategory(e.target.value)} className="input-field">
+                <select value={formCategory} onChange={(e) => setFormCategory(e.target.value)} className="input-field" title="Category">
                   {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
               </Labeled>
               <Labeled label="Amount (₹)">
-                <input type="number" value={formAmount} onChange={(e) => setFormAmount(e.target.value)} placeholder="0" className="input-field" />
+                <input type="number" value={formAmount} onChange={(e) => setFormAmount(e.target.value)} placeholder="0" className="input-field" title="Amount" />
               </Labeled>
               <Labeled label="Mode of payment">
-                <select value={formPaymentMode} onChange={(e) => setFormPaymentMode(e.target.value)} className="input-field">
+                <select value={formPaymentMode} onChange={(e) => setFormPaymentMode(e.target.value)} className="input-field" title="Payment mode">
                   {PAYMENT_MODES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </select>
               </Labeled>
               <Labeled label="Description">
-                <textarea value={formDescription} onChange={(e) => setFormDescription(e.target.value)} rows={3} placeholder="What was this for?" className="input-field" />
+                <textarea value={formDescription} onChange={(e) => setFormDescription(e.target.value)} rows={3} placeholder="What was this for?" className="input-field" title="Description" />
               </Labeled>
               <Labeled label="Date">
-                <input type="date" value={formDate} onChange={(e) => setFormDate(e.target.value)} className="input-field" />
+                <input type="date" value={formDate} onChange={(e) => setFormDate(e.target.value)} className="input-field" title="Date" />
               </Labeled>
               <Labeled label="Bill / receipt (optional)">
                 <input type="file" accept="image/*,application/pdf" onChange={(e) => setFormBill(e.target.files?.[0] || null)}
-                  className="block w-full text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-gray-100 file:text-gray-700" />
+                  className="block w-full text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-gray-100 file:text-gray-700" title="Bill or receipt" />
               </Labeled>
             </div>
             <div className="border-t border-gray-200 px-6 py-4 flex gap-3 justify-end">
@@ -465,7 +465,7 @@ export default function ExpenseTracker() {
           <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full">
             <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Reject expense</h2>
-              <button onClick={() => { setShowRejectModal(false); setRejectionReason(''); }} className="text-gray-500 hover:text-gray-700"><XIcon className="w-5 h-5" /></button>
+              <button onClick={() => { setShowRejectModal(false); setRejectionReason(''); }} className="text-gray-500 hover:text-gray-700" aria-label="Close modal"><XIcon className="w-5 h-5" /></button>
             </div>
             <div className="p-6 space-y-4">
               <p className="text-gray-600 text-sm"><strong>Expense:</strong> {selected.description} · {fc(selected.amount)}</p>

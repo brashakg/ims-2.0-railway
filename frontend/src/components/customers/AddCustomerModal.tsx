@@ -334,6 +334,26 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     });
   };
 
+  // Automatically sync customer details to the patient if relation is "Self".
+  // This prevents the user from having to manually click "Copy from customer details"
+  // or manually typing the same thing twice.
+  useEffect(() => {
+    if (newPatient.relation === 'Self') {
+      const customerForCopy = {
+        name: formData.fullName,
+        mobile: formData.mobileNumber,
+        email: formData.email,
+        dateOfBirth: formData.dateOfBirth,
+      };
+      if (hasCopyableCustomerFields(customerForCopy)) {
+        setNewPatient(prev => applyCustomerToPatient(prev, customerForCopy, true));
+      } else {
+        // If customer fields are cleared, clear the patient fields too to stay in sync
+        setNewPatient(prev => ({ ...prev, name: '', mobile: '', email: '', dateOfBirth: '' }));
+      }
+    }
+  }, [formData.fullName, formData.mobileNumber, formData.email, formData.dateOfBirth, newPatient.relation]);
+
   // Search API call
   const performSearch = useCallback(async (query: string) => {
     if (query.length < 2) { setSearchResults([]); return; }
