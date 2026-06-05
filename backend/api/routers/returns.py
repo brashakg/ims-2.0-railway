@@ -31,7 +31,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 try:
@@ -869,12 +869,54 @@ def _reason_summary(items: List[ReturnLine]) -> str:
 async def create_return(
     body: ReturnCreate = Body(...),
     current_user: dict = Depends(require_roles(*_RETURN_ROLES)),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     """Create a customer return / exchange / credit-note.
 
     Money is RECORDED, never executed. Returns the new return_id plus the
     computed amounts for the chosen return_type.
+
+    POS-14: supports an optional ``Idempotency-Key`` header. When a non-empty
+    key is supplied and a return with that key already exists in the
+    ``returns`` collection, the EXISTING return_id is returned without
+    duplicating the financial record. Fail-soft: any lookup failure falls
+    through to the normal (non-idempotent) path.
     """
+    # POS-14: idempotency guard -- look for an existing return with this key.
+    idem_key = (idempotency_key or "").strip()
+    if idem_key:
+        try:
+            coll = _returns_coll()
+            if coll is not None:
+                existing = coll.find_one({"idempotency_key": idem_key})
+                if existing:
+                    logger.info(
+                        "[RETURNS] idempotency replay for key %s -> return %s",
+                        idem_key,
+                        existing.get("return_id"),
+                    )
+                    return {
+                        "return_id": existing.get("return_id"),
+                        "return_type": existing.get("return_type"),
+                        "returned_value": existing.get("returned_value"),
+                        "gross_refund": existing.get("gross_refund"),
+                        "restocking_fee": existing.get("restocking_fee"),
+                        "net_refund": existing.get("net_refund"),
+                        "gst_breakup": existing.get("gst_breakup"),
+                        "refund_amount": existing.get("refund_amount"),
+                        "refund_method": existing.get("refund_method"),
+                        "credit_amount": existing.get("credit_amount"),
+                        "collect_amount": existing.get("collect_amount"),
+                        "settlement": existing.get("settlement"),
+                        "restocked": existing.get("restocked", []),
+                        "restock_applied": existing.get("restock_applied", False),
+                        "restock_stock_ids": existing.get("restock_stock_ids", []),
+                        "message": "Return already recorded (idempotent replay)",
+                        "_idempotent_replay": True,
+                    }
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("[RETURNS] idempotency lookup skipped: %s", _exc)
+
     active_lines = [it for it in body.items if it.return_qty > 0]
     if not active_lines:
         raise HTTPException(
@@ -1147,6 +1189,9 @@ async def create_return(
             "full_name", current_user.get("username", "")
         ),
         "created_at": now,
+        # POS-14: stamp the idempotency key so a duplicate POST with the same key
+        # is caught by the guard at the top of this handler without double-refunding.
+        "idempotency_key": (idem_key or None),
     }
 
     coll = _returns_coll()
