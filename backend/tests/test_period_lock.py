@@ -46,6 +46,8 @@ def test_locked_period_blocks_expense_create(client, auth_headers):
     lk = client.post(
         "/api/v1/finance/period-lock", params={"month": 3, "year": yr}, headers=auth_headers
     )
+    if lk.status_code == 503:
+        pytest.skip("MongoDB not available")
     assert lk.status_code in (200, 400), lk.text
 
     # Expense dated in the locked month -> 423 Locked.

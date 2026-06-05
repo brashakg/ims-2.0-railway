@@ -5,7 +5,7 @@ Sales order management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Header
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
@@ -452,9 +452,7 @@ class PaymentCreate(BaseModel):
     # financed balance, not just the down-payment recorded in `amount`.
     emi_principal: Optional[float] = Field(None, gt=0)
 
-    class Config:
-        # Permit both "method" (native) and "mode" (legacy alias) in JSON.
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
     def __init__(self, **data):
         # pydantic 2 validation_alias is restrictive; accept "mode" as a
