@@ -1341,7 +1341,7 @@ async def list_payroll(
     year: int = Query(...),
     month: int = Query(...),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
     """List payroll records for a month"""
     payroll_repo = get_payroll_repository()
@@ -1362,7 +1362,7 @@ async def generate_payroll(
     year: int = Query(...),
     month: int = Query(...),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
     """Generate payroll for a month"""
     payroll_repo = get_payroll_repository()
@@ -1446,7 +1446,8 @@ async def generate_payroll(
 
 @router.post("/payroll/{payroll_id}/approve")
 async def approve_payroll(
-    payroll_id: str, current_user: dict = Depends(get_current_user)
+    payroll_id: str,
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
     """Approve payroll for payment"""
     payroll_repo = get_payroll_repository()
@@ -1473,7 +1474,7 @@ async def get_salary_slip(
     employee_id: str,
     year: int,
     month: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
     return {"employeeId": employee_id, "year": year, "month": month, "salarySlip": {}}
 
