@@ -51,8 +51,10 @@ export const inventoryApi = {
     return response.data;
   },
 
-  getTransfers: async (storeId: string, direction: 'incoming' | 'outgoing') => {
-    const response = await api.get('/transfers', { params: { store_id: storeId, direction } });
+  // INV-5: backend /transfers has no "direction" param; uses store_id (either side).
+  // Direction filtering is done client-side by comparing from_location_id.
+  getTransfers: async (storeId: string, _direction?: string) => {
+    const response = await api.get('/transfers', { params: { store_id: storeId } });
     return response.data;
   },
 
