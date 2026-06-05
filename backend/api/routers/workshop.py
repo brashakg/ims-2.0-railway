@@ -100,6 +100,18 @@ class FittingDetails(BaseModel):
     optional individually, but `confirmed_by_sales` must be True for
     the workshop to accept the job (sales explicitly confirming that
     power + product details are correct).
+
+    CLI-6 adds the four progressive-lens fitting parameters that matter
+    for high-index / progressive / occupational lenses and directly
+    impact remake rates when mis-measured:
+      - segment_height: seg height (mm) — distance from bottom of lens to
+        the optical centre / progression start. Critical for progressives.
+      - pantoscopic_tilt: degrees the frame tilts toward the face (typical
+        8-12 deg). Mis-tilt shifts the effective Rx by ~0.25D.
+      - vertex_distance: mm from the back surface to the cornea (standard
+        12 mm). Every mm deviation shifts effective power for strong Rx.
+      - wrap_angle: frame wrap / face-form angle (degrees). High wrap shifts
+        the effective cylinder axis on peripheral gaze.
     """
 
     dia: Optional[str] = None  # Lens diameter (e.g. "65", "70")
@@ -123,6 +135,14 @@ class FittingDetails(BaseModel):
     vendor_order_id: Optional[str] = None
     confirmed_by_sales: bool = False  # Must be True to submit
     confirmed_at: Optional[str] = None  # ISO timestamp
+
+    # CLI-6 — progressive lens fitting parameters (all optional; only
+    # relevant for progressive / high-index / occupational lenses but stored
+    # even for single-vision so the data is available for lab scorecards)
+    segment_height: Optional[str] = None   # mm, e.g. "19", "22"
+    pantoscopic_tilt: Optional[str] = None  # degrees, e.g. "10"
+    vertex_distance: Optional[str] = None   # mm, e.g. "12", "13.5"
+    wrap_angle: Optional[str] = None        # degrees (face-form), e.g. "5"
 
 
 class WorkshopJobCreate(BaseModel):

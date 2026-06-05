@@ -30,11 +30,27 @@ interface RxRow {
   status?: string;
 }
 
+// CLI-10 fix: backend progression_diffs() returns keys with `_delta` suffix
+// (sphere_delta, cylinder_delta, axis_delta, addition_delta) and date fields
+// as from_visit_at / to_visit_at.  The old interface matched neither, causing
+// the delta section to render entirely blank.
 interface Delta {
-  from_date: string;
-  to_date: string;
-  right_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
-  left_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
+  from_date?: string;         // alias accepted for backwards-compat
+  to_date?: string;           // alias accepted for backwards-compat
+  from_visit_at?: string;     // actual backend key
+  to_visit_at?: string;       // actual backend key
+  right_eye: {
+    sphere?: number | null;   sphere_delta?: number | null;
+    cylinder?: number | null; cylinder_delta?: number | null;
+    axis?: number | null;     axis_delta?: number | null;
+    addition?: number | null; addition_delta?: number | null;
+  };
+  left_eye: {
+    sphere?: number | null;   sphere_delta?: number | null;
+    cylinder?: number | null; cylinder_delta?: number | null;
+    axis?: number | null;     axis_delta?: number | null;
+    addition?: number | null; addition_delta?: number | null;
+  };
   pd?: number | null;
 }
 
@@ -277,46 +293,53 @@ function DeltaRow({ delta }: { delta: Delta }) {
     );
   };
 
+  // CLI-10: read `_delta`-suffixed keys (backend) OR bare keys (old shape)
+  const rd = (eye: Delta['right_eye'] | Delta['left_eye'], field: 'sphere' | 'cylinder' | 'axis' | 'addition') => {
+    const withSuffix = (eye as any)[`${field}_delta`];
+    const bare = (eye as any)[field];
+    const v = withSuffix !== undefined ? withSuffix : bare;
+    return (v === null || v === undefined) ? null : Number(v);
+  };
+
   const fmtDate = (s?: string) =>
     s
       ? new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })
       : '—';
 
+  // Accept both from_date (old) and from_visit_at (current backend)
+  const fromDate = delta.from_date ?? delta.from_visit_at;
+  const toDate   = delta.to_date   ?? delta.to_visit_at;
+
+  const rSph = rd(delta.right_eye, 'sphere');
+  const rCyl = rd(delta.right_eye, 'cylinder');
+  const rAdd = rd(delta.right_eye, 'addition');
+  const lSph = rd(delta.left_eye, 'sphere');
+  const lCyl = rd(delta.left_eye, 'cylinder');
+  const lAdd = rd(delta.left_eye, 'addition');
+
   return (
     <div className="border border-gray-200 rounded-lg p-2.5 bg-white">
       <p className="text-xs text-gray-500 mb-2">
-        {fmtDate(delta.from_date)} → {fmtDate(delta.to_date)}
+        {fmtDate(fromDate)} &rarr; {fmtDate(toDate)}
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
         <div className="bg-gray-50 rounded px-2 py-1.5">
           <p className="text-gray-500 mb-0.5">Right (OD)</p>
           <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-            <span>
-              <span className="text-gray-400">SPH</span> {fmtArrow(delta.right_eye.sphere)}
-            </span>
-            <span>
-              <span className="text-gray-400">CYL</span> {fmtCyl(delta.right_eye.cylinder)}
-            </span>
-            {delta.right_eye.addition !== null && delta.right_eye.addition !== undefined && (
-              <span>
-                <span className="text-gray-400">ADD</span> {fmtArrow(delta.right_eye.addition)}
-              </span>
+            <span><span className="text-gray-400">SPH</span> {fmtArrow(rSph)}</span>
+            <span><span className="text-gray-400">CYL</span> {fmtCyl(rCyl)}</span>
+            {rAdd !== null && rAdd !== undefined && (
+              <span><span className="text-gray-400">ADD</span> {fmtArrow(rAdd)}</span>
             )}
           </div>
         </div>
         <div className="bg-gray-50 rounded px-2 py-1.5">
           <p className="text-gray-500 mb-0.5">Left (OS)</p>
           <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-            <span>
-              <span className="text-gray-400">SPH</span> {fmtArrow(delta.left_eye.sphere)}
-            </span>
-            <span>
-              <span className="text-gray-400">CYL</span> {fmtCyl(delta.left_eye.cylinder)}
-            </span>
-            {delta.left_eye.addition !== null && delta.left_eye.addition !== undefined && (
-              <span>
-                <span className="text-gray-400">ADD</span> {fmtArrow(delta.left_eye.addition)}
-              </span>
+            <span><span className="text-gray-400">SPH</span> {fmtArrow(lSph)}</span>
+            <span><span className="text-gray-400">CYL</span> {fmtCyl(lCyl)}</span>
+            {lAdd !== null && lAdd !== undefined && (
+              <span><span className="text-gray-400">ADD</span> {fmtArrow(lAdd)}</span>
             )}
           </div>
         </div>
