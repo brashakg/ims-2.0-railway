@@ -175,7 +175,7 @@ export function StockReplenishment() {
         {selectedItems.length > 0 && (
           <button
             onClick={() => openCreatePO(selectedSuggestions)}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2"
+            className="px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-semibold flex items-center gap-2"
           >
             <Plus className="w-5 h-5" />
             Create PO for {selectedItems.length} items
@@ -310,7 +310,7 @@ export function StockReplenishment() {
                           e.stopPropagation();
                           openCreatePO([item]);
                         }}
-                        className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded font-semibold"
+                        className="px-3 py-1 bg-bv-red-600 hover:bg-bv-red-700 text-white text-sm rounded font-semibold"
                       >
                         Create PO
                       </button>
@@ -628,7 +628,7 @@ function CreatePOModal({
           <button
             onClick={submit}
             disabled={submitting || loadingVendors || !vendorId}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
             Create PO
