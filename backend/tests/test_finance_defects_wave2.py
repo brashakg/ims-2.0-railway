@@ -52,7 +52,11 @@ def test_cogs_with_flag_mixed():
         {
             "items": [
                 {"product_id": "P1", "quantity": 1},  # known
-                {"product_id": "PX", "quantity": 1, "total": 500},  # unknown -> fallback
+                {
+                    "product_id": "PX",
+                    "quantity": 1,
+                    "total": 500,
+                },  # unknown -> fallback
             ]
         }
     ]
@@ -156,7 +160,10 @@ def test_analytics_excluded_statuses_constant():
 
 def test_fetch_orders_in_window_filter_shape():
     """_fetch_orders_in_window builds a filter with status $nin exclusions."""
-    from api.routers.analytics import _fetch_orders_in_window, _ANALYTICS_EXCLUDED_STATUSES
+    from api.routers.analytics import (
+        _fetch_orders_in_window,
+        _ANALYTICS_EXCLUDED_STATUSES,
+    )
     from datetime import datetime
 
     captured_filters = []
@@ -208,7 +215,9 @@ def test_budget_empty_state_has_no_budget_set_flag():
     }
     assert budget["no_budget_set"] is True
     for cat, vals in budget["categories"].items():
-        assert vals["budget"] == 0, f"category {cat} has fabricated budget {vals['budget']}"
+        assert (
+            vals["budget"] == 0
+        ), f"category {cat} has fabricated budget {vals['budget']}"
 
 
 def test_budget_empty_state_not_fabricated():

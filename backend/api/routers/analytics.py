@@ -24,6 +24,7 @@ def _get_db():
     """Fail-soft DB accessor for analytics joins (store/customer names)."""
     try:
         from database.connection import get_db
+
         return get_db()
     except Exception:
         return None
@@ -36,7 +37,9 @@ def _store_name_map(db) -> Dict[str, str]:
     try:
         return {
             s["store_id"]: (s.get("store_name") or s.get("name") or s["store_id"])
-            for s in db.get_collection("stores").find({}, {"store_id": 1, "store_name": 1, "name": 1})
+            for s in db.get_collection("stores").find(
+                {}, {"store_id": 1, "store_name": 1, "name": 1}
+            )
             if s.get("store_id")
         }
     except Exception:
@@ -51,7 +54,13 @@ def _customer_name_map(db, customer_ids) -> Dict[str, str]:
         result = {}
         for c in db.get_collection("customers").find(
             {"customer_id": {"$in": list(customer_ids)}},
-            {"customer_id": 1, "name": 1, "full_name": 1, "first_name": 1, "last_name": 1},
+            {
+                "customer_id": 1,
+                "name": 1,
+                "full_name": 1,
+                "first_name": 1,
+                "last_name": 1,
+            },
         ):
             cid = c.get("customer_id")
             if not cid:
@@ -68,6 +77,7 @@ def _customer_name_map(db, customer_ids) -> Dict[str, str]:
         return result
     except Exception:
         return {}
+
 
 router = APIRouter(prefix="", tags=["Analytics"])
 
@@ -824,9 +834,13 @@ async def get_customer_insights(
 
         # Top customers by spend. Use date-bounded, uncapped fetch that also
         # excludes CANCELLED/DRAFT so revenue is consistent with finance P&L.
-        orders = _fetch_orders_in_window(
-            order_repo, store_id=store_id, start=start_date, end=end_date
-        ) if order_repo is not None else []
+        orders = (
+            _fetch_orders_in_window(
+                order_repo, store_id=store_id, start=start_date, end=end_date
+            )
+            if order_repo is not None
+            else []
+        )
 
         customer_spend = {}
         for order in orders:
@@ -847,7 +861,9 @@ async def get_customer_insights(
 
         # Join real customer names from DB (avoids "Unknown" on the dashboard).
         db = _get_db()
-        _cname_map = _customer_name_map(db, [c["customer_id"] for c in sorted_customers])
+        _cname_map = _customer_name_map(
+            db, [c["customer_id"] for c in sorted_customers]
+        )
         top_customers = [
             {**c, "customer_name": _cname_map.get(c["customer_id"], c["customer_id"])}
             for c in sorted_customers

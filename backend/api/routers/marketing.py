@@ -119,6 +119,7 @@ def _enforce_promo_window(template_id: str) -> None:
             ),
         )
 
+
 # Indian mobile: 10 digits starting with 6-9.
 _INDIA_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
 
@@ -153,9 +154,7 @@ class SendNotificationRequest(BaseModel):
     def validate_channel(cls, v: str) -> str:
         val = v.upper().strip()
         if val not in VALID_CHANNELS:
-            raise ValueError(
-                f"channel must be one of {sorted(VALID_CHANNELS)}"
-            )
+            raise ValueError(f"channel must be one of {sorted(VALID_CHANNELS)}")
         return val
 
     @field_validator("customer_phone")
@@ -267,9 +266,7 @@ class SendBulkRequest(BaseModel):
     def validate_channel(cls, v: str) -> str:
         val = v.upper().strip()
         if val not in VALID_CHANNELS:
-            raise ValueError(
-                f"channel must be one of {sorted(VALID_CHANNELS)}"
-            )
+            raise ValueError(f"channel must be one of {sorted(VALID_CHANNELS)}")
         return val
 
 
@@ -303,7 +300,9 @@ async def send_bulk_notifications(
             cust = cust_coll.find_one({"customer_id": r.customer_id}) or {}
             if cust.get("marketing_consent") is False:
                 skipped += 1
-                results.append({"phone": r.phone, "status": "skipped", "reason": "opted_out"})
+                results.append(
+                    {"phone": r.phone, "status": "skipped", "reason": "opted_out"}
+                )
                 continue
         try:
             res = await send_notification(
@@ -503,7 +502,9 @@ async def send_rx_reminder(
     try:
         phone = _validate_phone(phone)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid customer phone: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"Invalid customer phone: {exc}"
+        ) from exc
 
     store_id = current_user.get("active_store_id", "")
     store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
@@ -898,7 +899,9 @@ async def submit_nps_response(
                 "type": "general",
                 "notes": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
                 # scheduled_date is the field the follow_ups router sorts/filters on
-                "scheduled_date": (datetime.now() + timedelta(days=1)).date().isoformat(),
+                "scheduled_date": (datetime.now() + timedelta(days=1))
+                .date()
+                .isoformat(),
                 "status": "pending",
                 "created_at": datetime.now().isoformat(),
             }
@@ -1111,7 +1114,9 @@ async def record_walkout(
     recovery_status = "skipped (opted out)"
     if send_recovery_msg:
         # Schedule recovery message (log as SCHEDULED for now)
-        frame_names = ", ".join(req.frames_tried[:3]) if req.frames_tried else "some frames"
+        frame_names = (
+            ", ".join(req.frames_tried[:3]) if req.frames_tried else "some frames"
+        )
         validity = (datetime.now() + timedelta(days=7)).strftime("%d %b %Y")
 
         await send_notification(

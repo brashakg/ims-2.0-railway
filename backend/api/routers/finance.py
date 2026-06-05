@@ -268,9 +268,11 @@ def gst_reconciliation(
         eid = _ent(o.get("store_id"))
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = str(
-            customer_state_by_id.get(o.get("customer_id"), "") or ""
-        ).strip().lower()
+        buyer = (
+            str(customer_state_by_id.get(o.get("customer_id"), "") or "")
+            .strip()
+            .lower()
+        )
         is_inter_state = bool(seller and buyer and seller != buyer)
         bucket = acc.setdefault(eid, _blank())
         if is_inter_state:
@@ -331,9 +333,11 @@ def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dic
         tax = float(t or 0)
         total += tax
         seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = str(
-            customer_state_by_id.get(o.get("customer_id"), "") or ""
-        ).strip().lower()
+        buyer = (
+            str(customer_state_by_id.get(o.get("customer_id"), "") or "")
+            .strip()
+            .lower()
+        )
         if seller and buyer and seller != buyer:
             igst += tax
     igst = round(igst, 2)
@@ -735,7 +739,13 @@ async def get_gst_summary(
     _sales_orders = list(
         db.get_collection("orders").find(
             sales_match,
-            {"_id": 0, "store_id": 1, "customer_id": 1, "tax_amount": 1, "tax_total": 1},
+            {
+                "_id": 0,
+                "store_id": 1,
+                "customer_id": 1,
+                "tax_amount": 1,
+                "tax_total": 1,
+            },
         )
     )
 
@@ -756,8 +766,14 @@ async def get_gst_summary(
         for _b in db.get_collection("vendor_bills").find(
             {},
             {
-                "_id": 0, "bill_date": 1, "tax_amount": 1, "gst_amount": 1,
-                "status": 1, "itc_blocked": 1, "received": 1, "itc_eligible": 1,
+                "_id": 0,
+                "bill_date": 1,
+                "tax_amount": 1,
+                "gst_amount": 1,
+                "status": 1,
+                "itc_blocked": 1,
+                "received": 1,
+                "itc_eligible": 1,
             },
         ):
             _bd = ap_engine.parse_date(_b.get("bill_date"))
@@ -1076,7 +1092,10 @@ async def get_cash_flow(
     # start.date().isoformat() (date-only) so it compares cleanly with the
     # stored date-only strings and INCLUDES 1st-of-month expenses (a datetime
     # 'YYYY-MM-01T00:00:00' boundary would sort AFTER the bare 'YYYY-MM-01').
-    exp_match = {"expense_date": {"$gte": start.date().isoformat()}, "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
+    exp_match = {
+        "expense_date": {"$gte": start.date().isoformat()},
+        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+    }
     if active_store:
         exp_match["store_id"] = active_store
     exp_out = list(
@@ -1935,7 +1954,9 @@ async def get_tally_sales_jv(
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
         seller = str(_store_states.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = str(_customer_states.get(o.get("customer_id"), "") or "").strip().lower()
+        buyer = (
+            str(_customer_states.get(o.get("customer_id"), "") or "").strip().lower()
+        )
         is_inter_state = bool(seller and buyer and seller != buyer)
         if is_inter_state:
             o["igst_amount"] = round(tax, 2)
@@ -2027,9 +2048,14 @@ async def get_pnl_by_store(
         exp_match.setdefault("expense_date", {})["$gte"] = from_date
     if to_date:
         exp_match.setdefault("expense_date", {})["$lte"] = to_date
-    exp = list(db.get_collection("expenses").aggregate(
-        [{"$match": exp_match}, {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}}]
-    ))
+    exp = list(
+        db.get_collection("expenses").aggregate(
+            [
+                {"$match": exp_match},
+                {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}},
+            ]
+        )
+    )
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
 
     pay_by_store = _payroll_by_store(db, from_date, to_date)
