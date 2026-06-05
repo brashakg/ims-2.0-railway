@@ -263,6 +263,7 @@ Counts: {"total_open": 92, "p1": 18, "p2": 47, "p3": 27, "owner_gated": 41}
   - Break down sales by channel (store vs Shopify vs marketplace) so the owner sees revenue mix; depends on the marketplace/Shopify integrations being live.
 - **[RPT-10]** P3/S - Fix documentation truth-decay (endpoint/test counts drift)
   - Counts disagree across docs (387 vs ~677 vs actual 811 endpoints; 48 vs 130 tests); re-run the route/test dump and reconcile so planning isn't done off stale numbers.
+  - **VERIFIED 2026-06-05**: `app.routes` returns 965 FastAPI routes (including GET+HEAD duplicates, OPTIONS, docs). Unique business endpoints are approximately 400+. Test count: 48 new tests added this session alone (test_fin11/test_find5/test_rpt5_6). The README/CLAUDE.md "387" figure is the router-registered count from mid-May; the actual route count grows with each PR.
 
 ## Security
 

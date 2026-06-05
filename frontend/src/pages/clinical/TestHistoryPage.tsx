@@ -12,8 +12,12 @@ import {
   RefreshCw,
   Loader2,
   AlertCircle,
+  Stethoscope,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { clinicalApi } from '../../services/api';
+import type { SoapNotePayload } from '../../services/api/clinical';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { readEyePower } from '../../utils/rxEye';
@@ -52,6 +56,10 @@ export function TestHistoryPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTest, setSelectedTest] = useState<CompletedTest | null>(null);
+  // CLI-11: SOAP note for the selected test (loaded on demand).
+  const [soapNote, setSoapNote] = useState<SoapNotePayload | null>(null);
+  const [soapNoteLoading, setSoapNoteLoading] = useState(false);
+  const [showSoap, setShowSoap] = useState(false);
 
   // user?.activeStoreId in deps so topbar store-switch triggers re-fetch
   // (loadTests reads user.activeStoreId for the per-store eye-test list).
@@ -132,6 +140,24 @@ export function TestHistoryPage() {
   const formatPower = (value: number | null) => {
     if (value === null || value === undefined) return '-';
     return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
+  };
+
+  // CLI-11: load the SOAP note for a test on-demand when the detail modal opens.
+  const handleSelectTest = async (test: CompletedTest) => {
+    setSelectedTest(test);
+    setSoapNote(null);
+    setShowSoap(false);
+    if (!test.id) return;
+    setSoapNoteLoading(true);
+    try {
+      const result = await clinicalApi.getSoapNote(test.id);
+      setSoapNote(result.soapNote);
+    } catch {
+      // Fail-soft: a missing SOAP note is fine (refraction-only test).
+      setSoapNote(null);
+    } finally {
+      setSoapNoteLoading(false);
+    }
   };
 
   return (
@@ -225,7 +251,7 @@ export function TestHistoryPage() {
               <div
                 key={test.id}
                 className="p-4 hover:bg-gray-50 transition-colors cursor-pointer"
-                onClick={() => setSelectedTest(test)}
+                onClick={() => handleSelectTest(test)}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-4">
@@ -360,6 +386,117 @@ export function TestHistoryPage() {
                     </div>
                   </div>
                 )}
+
+                {/* CLI-11: SOAP exam note (collapsible) */}
+                <div className="border border-gray-200 rounded-lg overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setShowSoap(v => !v)}
+                    className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+                  >
+                    <span className="flex items-center gap-2 font-medium text-gray-800">
+                      <Stethoscope className="w-4 h-4 text-teal-600" />
+                      SOAP Exam Note
+                      {soapNote && (
+                        <span className="text-xs bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full">
+                          Recorded
+                        </span>
+                      )}
+                    </span>
+                    {soapNoteLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+                    ) : showSoap ? (
+                      <ChevronUp className="w-4 h-4 text-gray-400" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-gray-400" />
+                    )}
+                  </button>
+
+                  {showSoap && (
+                    <div className="p-4 text-sm space-y-4">
+                      {!soapNote ? (
+                        <p className="text-gray-400 italic text-center py-4">
+                          No SOAP note was recorded for this test.
+                        </p>
+                      ) : (
+                        <>
+                          {/* S: Subjective */}
+                          {(soapNote.chiefComplaint || soapNote.historyPresentIllness || soapNote.ocularHistory || soapNote.systemicHistory) && (
+                            <div>
+                              <h4 className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">S — Subjective</h4>
+                              <div className="space-y-1 text-gray-700">
+                                {soapNote.chiefComplaint && <p><span className="text-gray-500">CC:</span> {soapNote.chiefComplaint}</p>}
+                                {soapNote.historyPresentIllness && <p><span className="text-gray-500">HPI:</span> {soapNote.historyPresentIllness}</p>}
+                                {soapNote.ocularHistory && <p><span className="text-gray-500">Ocular Hx:</span> {soapNote.ocularHistory}</p>}
+                                {soapNote.systemicHistory && <p><span className="text-gray-500">Systemic Hx:</span> {soapNote.systemicHistory}</p>}
+                                {soapNote.familyHistory && <p><span className="text-gray-500">Family Hx:</span> {soapNote.familyHistory}</p>}
+                                {soapNote.medications && <p><span className="text-gray-500">Medications:</span> {soapNote.medications}</p>}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* O: Objective */}
+                          {(soapNote.vaRightUnaided || soapNote.iopRight || soapNote.colourVision || soapNote.coverTest || soapNote.slitLampSummary) && (
+                            <div>
+                              <h4 className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">O — Objective</h4>
+                              <div className="space-y-1 text-gray-700">
+                                {(soapNote.vaRightUnaided || soapNote.vaLeftUnaided) && (
+                                  <p><span className="text-gray-500">VA (unaided):</span> R {soapNote.vaRightUnaided || '—'} / L {soapNote.vaLeftUnaided || '—'}</p>
+                                )}
+                                {(soapNote.vaRightAided || soapNote.vaLeftAided) && (
+                                  <p><span className="text-gray-500">VA (aided):</span> R {soapNote.vaRightAided || '—'} / L {soapNote.vaLeftAided || '—'}</p>
+                                )}
+                                {(soapNote.iopRight || soapNote.iopLeft) && (
+                                  <p><span className="text-gray-500">IOP:</span> R {soapNote.iopRight ?? '—'} / L {soapNote.iopLeft ?? '—'} mmHg</p>
+                                )}
+                                {soapNote.colourVision && <p><span className="text-gray-500">Colour vision:</span> {soapNote.colourVision}</p>}
+                                {soapNote.coverTest && <p><span className="text-gray-500">Cover test:</span> {soapNote.coverTest}</p>}
+                                {soapNote.pupils && <p><span className="text-gray-500">Pupils:</span> {soapNote.pupils}</p>}
+                                {soapNote.slitLampSummary && <p><span className="text-gray-500">Slit lamp:</span> {soapNote.slitLampSummary}</p>}
+                                {soapNote.fundusSummary && <p><span className="text-gray-500">Fundus:</span> {soapNote.fundusSummary}</p>}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* A: Assessment */}
+                          {(soapNote.assessment || (soapNote.dxCodes && soapNote.dxCodes.length > 0)) && (
+                            <div>
+                              <h4 className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">A — Assessment</h4>
+                              {soapNote.assessment && <p className="text-gray-700 mb-2">{soapNote.assessment}</p>}
+                              {soapNote.dxCodes && soapNote.dxCodes.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {soapNote.dxCodes.map((dx, i) => (
+                                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-teal-50 text-teal-800 border border-teal-200 rounded text-xs font-mono">
+                                      {dx.code}
+                                      {dx.description && <span className="font-sans font-normal text-teal-600">— {dx.description}</span>}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* P: Plan */}
+                          {(soapNote.plan || soapNote.planReferral || soapNote.planFollowUp || soapNote.patientInstructions) && (
+                            <div>
+                              <h4 className="font-semibold text-gray-700 mb-2 uppercase tracking-wide text-xs">P — Plan</h4>
+                              <div className="space-y-1 text-gray-700">
+                                {soapNote.plan && <p>{soapNote.plan}</p>}
+                                {soapNote.planReferral && <p className="text-orange-700">Referred to: {soapNote.planReferralTo || 'specialist'}</p>}
+                                {soapNote.planFollowUp && (
+                                  <p>Follow-up: {soapNote.planFollowUpWeeks ? `in ${soapNote.planFollowUpWeeks} weeks` : 'required'}</p>
+                                )}
+                                {soapNote.patientInstructions && (
+                                  <p><span className="text-gray-500">Patient instructions:</span> {soapNote.patientInstructions}</p>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 <div className="flex gap-2">
                   <button

@@ -265,6 +265,59 @@ export function ClinicalPage() {
           }
           return Object.keys(cf).length > 0 ? cf : undefined;
         })(),
+        // CLI-11: forward the structured SOAP note when the optometrist filled
+        // at least one field. An entirely empty SOAP note is omitted so the
+        // backend keeps the test as a refraction-only record (unchanged).
+        soapNote: (() => {
+          const sn = data.soapNote;
+          if (!sn) return undefined;
+          const hasText =
+            sn.chiefComplaint || sn.historyPresentIllness || sn.ocularHistory ||
+            sn.systemicHistory || sn.familyHistory || sn.medications || sn.allergies ||
+            sn.vduUsage || sn.vaRightUnaided || sn.vaLeftUnaided || sn.vaRightAided ||
+            sn.vaLeftAided || sn.vaBinocular || sn.iopRight || sn.iopLeft ||
+            sn.colourVision || sn.coverTest || sn.dominantEye || sn.pupils ||
+            sn.ocularMotility || sn.slitLampSummary || sn.fundusSummary ||
+            sn.assessment || (sn.dxCodes && sn.dxCodes.length > 0) ||
+            sn.plan || sn.planReferral || sn.planFollowUp || sn.patientInstructions;
+          if (!hasText) return undefined;
+          // Shape matches the backend SoapNote camelCase aliases.
+          return {
+            chiefComplaint: sn.chiefComplaint || undefined,
+            historyPresentIllness: sn.historyPresentIllness || undefined,
+            ocularHistory: sn.ocularHistory || undefined,
+            systemicHistory: sn.systemicHistory || undefined,
+            familyHistory: sn.familyHistory || undefined,
+            medications: sn.medications || undefined,
+            allergies: sn.allergies || undefined,
+            vduUsage: sn.vduUsage || undefined,
+            vaRightUnaided: sn.vaRightUnaided || undefined,
+            vaLeftUnaided: sn.vaLeftUnaided || undefined,
+            vaRightAided: sn.vaRightAided || undefined,
+            vaLeftAided: sn.vaLeftAided || undefined,
+            vaBinocular: sn.vaBinocular || undefined,
+            iopRight: sn.iopRight ? parseFloat(sn.iopRight) : undefined,
+            iopLeft: sn.iopLeft ? parseFloat(sn.iopLeft) : undefined,
+            colourVision: sn.colourVision || undefined,
+            coverTest: sn.coverTest || undefined,
+            dominantEye: sn.dominantEye || undefined,
+            pupils: sn.pupils || undefined,
+            ocularMotility: sn.ocularMotility || undefined,
+            slitLampSummary: sn.slitLampSummary || undefined,
+            fundusSummary: sn.fundusSummary || undefined,
+            assessment: sn.assessment || undefined,
+            dxCodes:
+              sn.dxCodes && sn.dxCodes.length > 0
+                ? sn.dxCodes.map(d => ({ code: d.code, description: d.description, system: d.system }))
+                : undefined,
+            plan: sn.plan || undefined,
+            planReferral: sn.planReferral || undefined,
+            planReferralTo: sn.planReferralTo || undefined,
+            planFollowUp: sn.planFollowUp || undefined,
+            planFollowUpWeeks: sn.planFollowUpWeeks || undefined,
+            patientInstructions: sn.patientInstructions || undefined,
+          };
+        })(),
       });
 
       toast.success('Eye test saved successfully');
