@@ -823,3 +823,221 @@ async def campaign_analytics(
     analytics["name"] = doc.get("name")
     analytics["status"] = doc.get("status")
     return analytics
+
+
+# ============================================================================
+# CRM-8: PROMO OFFER-TEMPLATE LIBRARY (BOGO / COMBO / THRESHOLD)
+# ============================================================================
+# Reusable promo templates that a STORE_MANAGER/ADMIN creates once and then
+# attaches to campaigns or applies at POS checkout.  They sit on top of the
+# voucher engine: the template carries the *shape* of the offer; a voucher is
+# the *instance* minted when the offer fires.
+#
+# Template types
+#   BOGO         – "buy N of <sku_group>, get M free"
+#   COMBO        – "buy all of <sku_list>, get <discount_pct>% off the bundle"
+#   THRESHOLD    – "spend >= <min_value>, get <discount_pct>% off the order"
+#
+# The template DOES NOT generate vouchers; it is a reusable definition that
+# the campaign engine or a future POS check can evaluate and apply.  All money
+# rules are validated server-side; the FE is display-only.
+# ============================================================================
+
+_PROMO_TEMPLATE_TYPES = {"BOGO", "COMBO", "THRESHOLD"}
+_PROMO_TEMPLATE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+class PromoTemplateCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    type: Literal["BOGO", "COMBO", "THRESHOLD"]
+    description: Optional[str] = None
+    # BOGO fields
+    buy_quantity: Optional[int] = Field(None, ge=1)
+    get_quantity: Optional[int] = Field(None, ge=1)
+    sku_group: Optional[List[str]] = None
+    # COMBO fields
+    sku_list: Optional[List[str]] = None
+    combo_discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    # THRESHOLD fields
+    min_order_value: Optional[float] = Field(None, ge=0)
+    threshold_discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    # Common
+    store_id: Optional[str] = None
+    active: bool = True
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+
+
+class PromoTemplateUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=120)
+    description: Optional[str] = None
+    buy_quantity: Optional[int] = Field(None, ge=1)
+    get_quantity: Optional[int] = Field(None, ge=1)
+    sku_group: Optional[List[str]] = None
+    sku_list: Optional[List[str]] = None
+    combo_discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    min_order_value: Optional[float] = Field(None, ge=0)
+    threshold_discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    store_id: Optional[str] = None
+    active: Optional[bool] = None
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+
+
+def _validate_promo_template(req: PromoTemplateCreate) -> None:
+    """Business-rule validation for each promo type."""
+    if req.type == "BOGO":
+        if not req.buy_quantity or not req.get_quantity:
+            raise HTTPException(
+                status_code=422,
+                detail="BOGO template requires buy_quantity and get_quantity",
+            )
+    elif req.type == "COMBO":
+        if not req.sku_list or len(req.sku_list) < 2:
+            raise HTTPException(
+                status_code=422,
+                detail="COMBO template requires at least 2 SKUs in sku_list",
+            )
+        if req.combo_discount_pct is None:
+            raise HTTPException(
+                status_code=422,
+                detail="COMBO template requires combo_discount_pct",
+            )
+    elif req.type == "THRESHOLD":
+        if req.min_order_value is None:
+            raise HTTPException(
+                status_code=422,
+                detail="THRESHOLD template requires min_order_value",
+            )
+        if req.threshold_discount_pct is None:
+            raise HTTPException(
+                status_code=422,
+                detail="THRESHOLD template requires threshold_discount_pct",
+            )
+
+
+@router.get("/promo-templates")
+async def list_promo_templates(
+    store_id: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    active_only: bool = Query(True),
+    limit: int = Query(100, le=500),
+    current_user: dict = Depends(require_roles(*_PROMO_TEMPLATE_ROLES)),
+):
+    """List reusable promo offer templates."""
+    db = _marketing_get_db()
+    if db is None:
+        return {"templates": [], "total": 0}
+    query: Dict[str, Any] = {}
+    if store_id:
+        query["store_id"] = store_id
+    if type and type.upper() in _PROMO_TEMPLATE_TYPES:
+        query["type"] = type.upper()
+    if active_only:
+        query["active"] = True
+    coll = db.get_collection("promo_templates")
+    docs = list(coll.find(query).sort("created_at", -1).limit(limit))
+    for d in docs:
+        d.pop("_id", None)
+    return {"templates": docs, "total": len(docs)}
+
+
+@router.post("/promo-templates")
+async def create_promo_template(
+    req: PromoTemplateCreate,
+    current_user: dict = Depends(require_roles(*_PROMO_TEMPLATE_ROLES)),
+):
+    """Create a reusable promo offer template (BOGO / COMBO / THRESHOLD)."""
+    _validate_promo_template(req)
+    db = _marketing_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if req.store_id:
+        _enforce_store_scope({"store_id": req.store_id}, current_user)
+    template_id = f"PT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    doc = {
+        "template_id": template_id,
+        "name": req.name,
+        "type": req.type,
+        "description": req.description,
+        "buy_quantity": req.buy_quantity,
+        "get_quantity": req.get_quantity,
+        "sku_group": req.sku_group,
+        "sku_list": req.sku_list,
+        "combo_discount_pct": req.combo_discount_pct,
+        "min_order_value": req.min_order_value,
+        "threshold_discount_pct": req.threshold_discount_pct,
+        "store_id": req.store_id,
+        "active": req.active,
+        "valid_from": req.valid_from,
+        "valid_until": req.valid_until,
+        "created_by": current_user.get("user_id", "unknown"),
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    db.get_collection("promo_templates").insert_one(doc)
+    _audit(db, template_id, "CREATE_PROMO_TEMPLATE", current_user, {"name": req.name, "type": req.type})
+    return {"message": "Promo template created", "template": _strip(dict(doc))}
+
+
+@router.get("/promo-templates/{template_id}")
+async def get_promo_template(
+    template_id: str,
+    current_user: dict = Depends(require_roles(*_PROMO_TEMPLATE_ROLES)),
+):
+    """Get a single promo template."""
+    db = _marketing_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    doc = db.get_collection("promo_templates").find_one({"template_id": template_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Promo template not found")
+    if doc.get("store_id"):
+        _enforce_store_scope(doc, current_user)
+    return _strip(dict(doc))
+
+
+@router.put("/promo-templates/{template_id}")
+async def update_promo_template(
+    template_id: str,
+    req: PromoTemplateUpdate,
+    current_user: dict = Depends(require_roles(*_PROMO_TEMPLATE_ROLES)),
+):
+    """Update a promo template."""
+    db = _marketing_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    doc = db.get_collection("promo_templates").find_one({"template_id": template_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Promo template not found")
+    if doc.get("store_id"):
+        _enforce_store_scope(doc, current_user)
+    updates = req.model_dump(exclude_unset=True, exclude_none=True)
+    if not updates:
+        return _strip(dict(doc))
+    updates["updated_at"] = _now_iso()
+    db.get_collection("promo_templates").update_one(
+        {"template_id": template_id}, {"$set": updates}
+    )
+    _audit(db, template_id, "UPDATE_PROMO_TEMPLATE", current_user, {"fields": list(updates.keys())})
+    fresh = db.get_collection("promo_templates").find_one({"template_id": template_id})
+    return {"message": "Promo template updated", "template": _strip(fresh)}
+
+
+@router.delete("/promo-templates/{template_id}")
+async def delete_promo_template(
+    template_id: str,
+    current_user: dict = Depends(require_roles(*_PROMO_TEMPLATE_ROLES)),
+):
+    """Delete a promo template (soft-delete by setting active=False, or hard-delete)."""
+    db = _marketing_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    doc = db.get_collection("promo_templates").find_one({"template_id": template_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Promo template not found")
+    if doc.get("store_id"):
+        _enforce_store_scope(doc, current_user)
+    db.get_collection("promo_templates").delete_one({"template_id": template_id})
+    _audit(db, template_id, "DELETE_PROMO_TEMPLATE", current_user, {"name": doc.get("name")})
+    return {"message": "Promo template deleted", "template_id": template_id}

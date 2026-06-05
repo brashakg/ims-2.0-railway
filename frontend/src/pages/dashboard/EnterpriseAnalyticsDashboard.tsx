@@ -22,6 +22,7 @@ import { reportsApi, analyticsApi, adminStoreApi } from '../../services/api';
 import { EnterpriseKpiCard } from '../../components/dashboard/EnterpriseKpiCard';
 import { LineChart, formatChartValue } from '../../components/dashboard/AdvancedCharts';
 import { MultiStorePerformanceTable } from '../../components/dashboard/MultiStorePerformanceTable';
+import { exportToCSV } from '../../utils/exportUtils';
 import clsx from 'clsx';
 
 // ============================================================================
@@ -360,8 +361,62 @@ export default function EnterpriseAnalyticsDashboard() {
     loadDashboardData();
   }, [loadDashboardData]);
 
+  // RPT-8: Export the currently-loaded enterprise KPI snapshot as CSV.
+  // Exports KPIs + per-store rows so finance/ops have an offline copy.
   const handleExportReport = () => {
-    toast.info('Export feature coming soon');
+    if (!metrics) {
+      toast.warning('No data loaded yet — refresh and try again');
+      return;
+    }
+
+    // Build KPI rows
+    const kpiRows: Record<string, string | number>[] = [
+      { metric: 'Total Revenue (Rs)', value: metrics.totalRevenue.toFixed(2) },
+      { metric: 'Revenue Change (%)', value: metrics.revenueChange.toFixed(1) },
+      { metric: 'Total Orders', value: metrics.totalOrders },
+      { metric: 'Avg Order Value (Rs)', value: metrics.averageOrderValue.toFixed(2) },
+      ...(metrics.grossMarginPercent !== null
+        ? [{ metric: 'Gross Margin (%)', value: metrics.grossMarginPercent.toFixed(1) }]
+        : []),
+      ...(metrics.inventoryTurnover !== null
+        ? [{ metric: 'Inventory Turnover', value: metrics.inventoryTurnover.toFixed(2) }]
+        : []),
+      ...(metrics.newCustomers !== null
+        ? [{ metric: 'New Customers', value: metrics.newCustomers }]
+        : []),
+      ...(metrics.returningCustomers !== null
+        ? [{ metric: 'Returning Customers', value: metrics.returningCustomers }]
+        : []),
+      { metric: 'Low Stock Items', value: metrics.lowStockItems },
+    ];
+
+    exportToCSV(kpiRows, `enterprise_kpis_${timeRange}`, [
+      { key: 'metric', label: 'Metric' },
+      { key: 'value', label: 'Value' },
+    ]);
+
+    // Also export per-store rows if available
+    if (stores.length > 0) {
+      exportToCSV(
+        stores.map(s => ({
+          store: s.storeName,
+          revenue: s.revenue.toFixed(2),
+          orders: s.orders,
+          avg_order_value: s.averageOrderValue.toFixed(2),
+          trend_pct: s.trend.toFixed(1),
+        })),
+        `store_performance_${timeRange}`,
+        [
+          { key: 'store', label: 'Store' },
+          { key: 'revenue', label: 'Revenue (Rs)' },
+          { key: 'orders', label: 'Orders' },
+          { key: 'avg_order_value', label: 'Avg Order (Rs)' },
+          { key: 'trend_pct', label: 'Trend (%)' },
+        ]
+      );
+    }
+
+    toast.success('Dashboard exported to CSV');
   };
 
   const handleQuickAction = (action: string) => {

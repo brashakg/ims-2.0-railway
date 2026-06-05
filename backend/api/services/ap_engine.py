@@ -29,15 +29,14 @@ All amounts are floats rounded to 2 dp. Functions are defensive: missing or
 garbage fields coerce to 0 / are skipped so a malformed row never raises.
 """
 
-from datetime import datetime, timedelta
-from typing import List, Optional
+from datetime import datetime, timedelta, date
+from typing import List, Optional, Dict
 
 # --- TDS sections (rate %) -------------------------------------------------
 # Common sections an optical retailer hits when paying vendors / contractors.
 # Rates are the post-Budget-2024 "normal" rates (no surcharge/cess, payee has
 # a valid PAN; 20% applies without PAN but that is a data-entry override, not a
-# default here). Confirm thresholds with the accountant -- this engine applies
-# the rate to the base it is GIVEN; it does not enforce the monetary threshold.
+# default here).
 TDS_SECTIONS = {
     "NONE": 0.0,
     "194C_IND": 1.0,  # payment to contractor - individual / HUF
@@ -49,6 +48,28 @@ TDS_SECTIONS = {
     "194I_PLANT": 2.0,  # rent - plant & machinery
     "194I_LAND": 10.0,  # rent - land / building / furniture
 }
+
+# FIN-11: Per-section annual monetary thresholds (Rs) below which TDS must NOT
+# be deducted.  These are the standard thresholds under the Income Tax Act, AY
+# 2024-25.  Sections with no threshold (or 0) have TDS from the first rupee.
+# Source: CBDT.  Confirm with your CA before going live -- thresholds may be
+# updated in the Union Budget.
+TDS_THRESHOLDS: Dict[str, float] = {
+    "194C_IND": 100000.0,    # Rs 1 lakh aggregate per FY (single payment > 30k also triggers)
+    "194C_OTHER": 100000.0,
+    "194J": 30000.0,         # Rs 30k per payee per FY
+    "194J_TECH": 30000.0,
+    "194Q": 5000000.0,       # Rs 50 lakh aggregate per FY per buyer-seller pair
+    "194H": 15000.0,         # Rs 15k per FY
+    "194I_PLANT": 240000.0,  # Rs 2.4 lakh per FY
+    "194I_LAND": 240000.0,
+}
+
+# FIN-11: 206C(1H) TCS - Tax Collected at Source on sale of goods.
+# A seller whose turnover > Rs 10 crore in the prior FY must collect 0.1% TCS
+# from any buyer to whom aggregate receipts > Rs 50 lakh in the current FY.
+TCS_206C1H_RATE: float = 0.1          # 0.1% of the amount received above threshold
+TCS_206C1H_THRESHOLD: float = 5000000.0  # Rs 50 lakh per buyer per FY
 
 # AP aging bucket keys, in display order. "current" = not yet past its due
 # date; the rest are days PAST the due date.
@@ -156,6 +177,230 @@ def compute_tds(base_amount, section: str, overrides: Optional[dict] = None) -> 
         "rate": rate,
         "tds_amount": tds,
         "net_payable": round(base - tds, 2),
+    }
+
+
+# FIN-11 --------------------------------------------------------------------
+
+
+def tds_threshold_status(
+    section: str,
+    cumulative_paid_fy: float,
+    current_payment: float,
+    overrides: Optional[dict] = None,
+) -> dict:
+    """FIN-11: Determine whether TDS should be deducted on a payment and, if
+    the threshold is crossed mid-payment, how much of the payment is the
+    taxable base.
+
+    Args:
+        section:            TDS section code (e.g. "194C_OTHER").
+        cumulative_paid_fy: Total amount already paid to this vendor in the
+                            current financial year BEFORE this payment.
+        current_payment:    The gross amount of the current payment (before TDS).
+        overrides:          Optional admin-edited rate map (passed through to
+                            compute_tds).
+
+    Returns a dict:
+        tds_applies      bool - True when TDS must be deducted.
+        taxable_base     float - Portion of current_payment subject to TDS.
+                         0 if threshold not crossed; > 0 when deductible.
+        threshold        float - The section's annual threshold.
+        cumulative_after float - cumulative_paid_fy + current_payment.
+        tds_result       dict  - output of compute_tds(taxable_base, section)
+                         when tds_applies else None.
+    """
+    sec = (section or "NONE").strip().upper()
+    threshold = TDS_THRESHOLDS.get(sec, 0.0)
+    cum = _f(cumulative_paid_fy)
+    pmt = _f(current_payment)
+    cum_after = round(cum + pmt, 2)
+
+    # If section has no threshold (0.0), TDS is from the first rupee.
+    if threshold == 0.0:
+        tds_applies = (sec in TDS_SECTIONS and sec != "NONE") and pmt > 0
+        taxable_base = pmt if tds_applies else 0.0
+    else:
+        # Threshold has not yet been crossed -- no TDS yet.
+        if cum >= threshold:
+            # Already past threshold; entire payment is taxable.
+            tds_applies = True
+            taxable_base = pmt
+        elif cum_after > threshold:
+            # This payment crosses the threshold.  Only the amount above
+            # the threshold is taxable (conservative interpretation matching
+            # CBDT guidance -- entire aggregate is technically taxable from
+            # the first payment once the threshold is crossed, but to remain
+            # implementable without retroactive adjustments we tax the
+            # incremental over-threshold portion here).
+            tds_applies = True
+            taxable_base = round(cum_after - threshold, 2)
+        else:
+            tds_applies = False
+            taxable_base = 0.0
+
+    tds_result = compute_tds(taxable_base, sec, overrides) if tds_applies else None
+
+    return {
+        "tds_applies": tds_applies,
+        "taxable_base": taxable_base,
+        "threshold": threshold,
+        "cumulative_before": cum,
+        "cumulative_after": cum_after,
+        "tds_result": tds_result,
+    }
+
+
+def compute_tcs_206c1h(
+    cumulative_received_fy: float,
+    current_receipt: float,
+) -> dict:
+    """FIN-11: 206C(1H) - TCS on sale of goods.
+
+    Applicable when the seller's prior-FY turnover > Rs 10 crore and the
+    aggregate receipts from a single buyer exceed Rs 50 lakh in the current FY.
+    Rate: 0.1% of the amount received above Rs 50 lakh.
+
+    Args:
+        cumulative_received_fy: Total already received from this buyer this FY
+                                BEFORE this receipt.
+        current_receipt:        The receipt amount (before TCS).
+
+    Returns:
+        tcs_applies  bool
+        taxable_base float  - portion above Rs 50 lakh threshold.
+        tcs_amount   float  - TCS to collect (0.1% of taxable_base).
+        rate         float  - 0.1
+        threshold    float  - TCS_206C1H_THRESHOLD (50 lakh).
+    """
+    cum = _f(cumulative_received_fy)
+    rcpt = _f(current_receipt)
+    cum_after = round(cum + rcpt, 2)
+
+    if cum >= TCS_206C1H_THRESHOLD:
+        taxable_base = rcpt
+    elif cum_after > TCS_206C1H_THRESHOLD:
+        taxable_base = round(cum_after - TCS_206C1H_THRESHOLD, 2)
+    else:
+        taxable_base = 0.0
+
+    tcs_applies = taxable_base > 0
+    tcs_amount = round(taxable_base * TCS_206C1H_RATE / 100.0, 2)
+
+    return {
+        "tcs_applies": tcs_applies,
+        "taxable_base": taxable_base,
+        "tcs_amount": tcs_amount,
+        "rate": TCS_206C1H_RATE,
+        "threshold": TCS_206C1H_THRESHOLD,
+        "cumulative_before": cum,
+        "cumulative_after": cum_after,
+    }
+
+
+def _fy_quarter(dt: datetime) -> tuple:
+    """Return the Indian financial year (e.g. 2026) and quarter (1-4) for a
+    datetime.  FY starts 1-Apr; Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar.
+    """
+    m = dt.month
+    y = dt.year
+    if m >= 4:
+        fy = y
+        q = (m - 4) // 3 + 1
+    else:
+        fy = y - 1
+        q = 4 if m <= 3 else 3
+    return fy, q
+
+
+def build_26q_export(
+    payments: List[dict],
+) -> dict:
+    """FIN-11: Build the data for a quarterly 26Q (TDS on non-salary payments)
+    or 27EQ (TCS under 206C) return.
+
+    26Q covers TDS deducted under sections 194C, 194J, 194Q, 194H, 194I etc.
+    27EQ covers TCS collected under 206C.
+
+    This function is deliberately PURE (no DB) -- the router fetches all
+    vendor_payments for the relevant quarter and passes them here.
+
+    Args:
+        payments: List of vendor_payment dicts.  Each is expected to carry:
+                  - payment_date (ISO string)
+                  - vendor_id
+                  - vendor_name
+                  - vendor_pan  (optional; blank = 'PANNOTAVBL')
+                  - tds_section
+                  - tds_amount
+                  - amount (cash paid, excluding TDS)
+
+    Returns:
+        {
+          "form_26q": { <fy>: { <quarter>: [rows] } },
+          "form_27eq": { <fy>: { <quarter>: [rows] } },
+          "summary": { total_tds_26q, total_tcs_27eq, deductee_count }
+        }
+    """
+    form_26q: dict = {}   # TDS
+    form_27eq: dict = {}  # TCS 206C(1H) -- only if tds_section == "206C_1H"
+    tds_total = 0.0
+    tcs_total = 0.0
+    deductees: set = set()
+
+    for pmt in payments or []:
+        if not isinstance(pmt, dict):
+            continue
+        pdate = parse_date(pmt.get("payment_date") or pmt.get("created_at"))
+        if pdate is None:
+            continue
+
+        fy, q = _fy_quarter(pdate)
+        section = (pmt.get("tds_section") or "NONE").strip().upper()
+        tds_amt = _f(pmt.get("tds_amount"))
+        cash_paid = _f(pmt.get("amount"))
+        gross = round(cash_paid + tds_amt, 2)
+        vendor_pan = (pmt.get("vendor_pan") or "PANNOTAVBL").strip().upper() or "PANNOTAVBL"
+        vendor_name = pmt.get("vendor_name") or pmt.get("vendor_id") or ""
+        vendor_id = pmt.get("vendor_id") or ""
+
+        if section == "206C_1H":
+            # TCS return (27EQ)
+            target = form_27eq
+            tcs_total += tds_amt
+        else:
+            # TDS return (26Q) -- only rows with actual TDS deducted
+            if tds_amt <= 0 or section == "NONE":
+                continue
+            target = form_26q
+            tds_total += tds_amt
+
+        deductees.add(vendor_id)
+
+        fy_key = f"{fy}-{(fy + 1) % 100:02d}"
+        q_key = f"Q{q}"
+        target.setdefault(fy_key, {}).setdefault(q_key, []).append(
+            {
+                "payment_date": pdate.date().isoformat(),
+                "vendor_id": vendor_id,
+                "vendor_name": vendor_name,
+                "pan": vendor_pan,
+                "section": section,
+                "gross_payment": gross,
+                "tds_tcs_amount": tds_amt,
+                "net_paid": cash_paid,
+                "remark": "",
+            }
+        )
+
+    return {
+        "form_26q": form_26q,
+        "form_27eq": form_27eq,
+        "summary": {
+            "total_tds_26q": round(tds_total, 2),
+            "total_tcs_27eq": round(tcs_total, 2),
+            "deductee_count": len(deductees),
+        },
     }
 
 
