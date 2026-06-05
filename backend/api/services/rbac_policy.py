@@ -689,6 +689,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/assign', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/status', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/edited', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/online-store/images/{image_id}/auto-edit', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER', 'SUPERADMIN']},
     # --- /api/v1/online-store/push ---  (BVI Phase 5: IMS -> Shopify GraphQL PUSH)
     # The IMS->Shopify push for product/collection/menu/image + a status surface.
     # BUILT DARK: every push is SIMULATED (dry-run, no network) unless
