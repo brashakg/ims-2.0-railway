@@ -1135,6 +1135,12 @@ async def complete_transfer(
     )
 
     _save_transfer(transfer)
+
+    # FIN-3: If this transfer crosses entity boundaries, write the mirror
+    # purchase (vendor_bills) in the receiving entity so it can claim ITC.
+    # Fail-soft -- never blocks the status flip.
+    _book_mirror_purchase(transfer)
+
     return {"transfer": transfer, "message": "Transfer completed"}
 
 
@@ -1283,6 +1289,254 @@ async def get_location_transfer_analytics(
             "value": sum(t.get("total_value", 0) for t in incoming),
         },
     }
+
+
+# ============================================================================
+# INTER-GSTIN MIRROR PURCHASE  (FIN-3)
+# ============================================================================
+# An inter-entity transfer is a taxable supply: the sending entity issues a
+# tax invoice to the receiving entity, and the receiving entity claims ITC on
+# it.  `transfers.py` moves the physical stock; this helper writes the matching
+# `vendor_bills` document in the receiving entity's books so the ITC register
+# picks it up automatically.
+#
+# Triggered at COMPLETE (goods physically arrived + verified by the receiver).
+# Fail-soft: a DB error here NEVER blocks the status flip -- the transfer is
+# marked COMPLETED and the error is logged. The accountant can back-fill the
+# bill manually.
+#
+# GST rule: intra-state supply = CGST + SGST; inter-state supply = IGST.
+# We detect the states from the `stores` collection.  When state data is
+# missing we default to intra-state (conservative -- never misroutes IGST).
+
+
+def _store_state_code(db, store_id: str) -> str:
+    """Return the 2-digit GST state code for a store; '' on miss/DB absent."""
+    if db is None or not store_id:
+        return ""
+    try:
+        store = db.get_collection("stores").find_one(
+            {"store_id": store_id},
+            {"_id": 0, "state": 1, "state_code": 1, "gstin": 1},
+        )
+        if not store:
+            return ""
+        # Prefer explicit state_code field.
+        sc = str(store.get("state_code") or "").strip()
+        if sc:
+            return sc[:2]
+        # Fall back to first 2 chars of the store's GSTIN.
+        gstin = str(store.get("gstin") or "").strip()
+        if len(gstin) >= 2:
+            return gstin[:2]
+    except Exception as exc:  # noqa: BLE001 - fail-soft
+        logger.warning("[TRANSFER] state lookup failed for %s: %s", store_id, exc)
+    return ""
+
+
+def _store_entity(db, store_id: str) -> str:
+    """Return the entity_id the store belongs to; '' on miss/DB absent."""
+    if db is None or not store_id:
+        return ""
+    try:
+        store = db.get_collection("stores").find_one(
+            {"store_id": store_id},
+            {"_id": 0, "entity_id": 1},
+        )
+        if store:
+            return str(store.get("entity_id") or "")
+    except Exception as exc:  # noqa: BLE001 - fail-soft
+        logger.warning("[TRANSFER] entity lookup failed for %s: %s", store_id, exc)
+    return ""
+
+
+def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
+    """Return the GSTIN the entity bills under in `state_code`; '' on miss."""
+    if db is None or not entity_id:
+        return ""
+    try:
+        entity = db.get_collection("entities").find_one(
+            {"entity_id": entity_id},
+            {"_id": 0, "gstins": 1},
+        )
+        if not entity:
+            return ""
+        for g in entity.get("gstins") or []:
+            if str(g.get("state_code") or g.get("state") or "")[:2] == state_code:
+                return str(g.get("gstin") or "")
+        # Fall back to any GSTIN registered under this entity.
+        gstins = entity.get("gstins") or []
+        if gstins:
+            return str(gstins[0].get("gstin") or "")
+    except Exception as exc:  # noqa: BLE001 - fail-soft
+        logger.warning(
+            "[TRANSFER] GSTIN lookup failed entity=%s state=%s: %s",
+            entity_id, state_code, exc,
+        )
+    return ""
+
+
+def _tax_split(tax: float, interstate: bool):
+    """Return (cgst, sgst, igst) for a tax amount.
+
+    Intra-state: CGST = SGST = half each (residual trick avoids +/-1 paisa drift).
+    Inter-state: IGST = full tax, CGST = SGST = 0.
+    Pure, no I/O.
+    """
+    tax = round(float(tax or 0), 2)
+    if interstate:
+        return 0.0, 0.0, tax
+    half = round(tax / 2, 2)
+    sgst = round(tax - half, 2)
+    return half, sgst, 0.0
+
+
+def _book_mirror_purchase(transfer: Dict) -> None:
+    """Write a vendor_bills document for an inter-entity transfer.
+
+    Only writes when:
+      * DB is available
+      * from_store and to_store belong to DIFFERENT entity_ids
+      * The bill has not already been written (idempotent on transfer_id)
+
+    Fail-soft: any exception is logged; the caller (complete_transfer) is never
+    interrupted.
+    """
+    db = _get_db()
+    if db is None:
+        return
+
+    from_store_id = transfer.get("from_location_id") or ""
+    to_store_id = transfer.get("to_location_id") or ""
+    if not from_store_id or not to_store_id:
+        return
+
+    from_entity = _store_entity(db, from_store_id)
+    to_entity = _store_entity(db, to_store_id)
+
+    # Only inter-entity transfers need the mirror purchase.
+    if not from_entity or not to_entity or from_entity == to_entity:
+        return
+
+    # Idempotent: skip if we already wrote the bill for this transfer.
+    try:
+        if db.get_collection("vendor_bills").find_one(
+            {"source_transfer_id": transfer.get("id")},
+            {"_id": 1},
+        ):
+            logger.info(
+                "[TRANSFER] mirror bill already exists for transfer %s -- skipping",
+                transfer.get("id"),
+            )
+            return
+    except Exception as exc:  # noqa: BLE001 - fail-soft
+        logger.warning("[TRANSFER] mirror bill idempotency check failed: %s", exc)
+        return
+
+    try:
+        # Value = total_value on the transfer (sum of unit_cost * qty for each line).
+        # Tax is computed at a fixed 18% (optics default: sunglasses/accessories) if
+        # no per-line tax rate is captured; the CA can correct the bill if needed.
+        # We store taxable_amount + tax_amount separately so the ITC register picks
+        # them up correctly via itc_reconcile.build_itc_register.
+        transfer_value = float(transfer.get("total_value") or 0)
+        # Fall back: compute from items if total_value is zero.
+        if transfer_value == 0:
+            for item in transfer.get("items") or []:
+                qty = int(float(item.get("quantity_received") or item.get("quantity_requested") or 0))
+                cost = float(item.get("unit_cost") or 0)
+                transfer_value += qty * cost
+        transfer_value = round(transfer_value, 2)
+
+        # GST: detect intra/inter-state from the sending (supply) store's state
+        # vs the receiving store's state (consistent with GST Act -- place of
+        # supply = location of goods at time of supply for stock transfers within
+        # the same taxpayer group treated as deemed sale under Sch I Entry 2).
+        from_state = _store_state_code(db, from_store_id)
+        to_state = _store_state_code(db, to_store_id)
+        interstate = bool(from_state and to_state and from_state != to_state)
+
+        # Standard 18% GST rate for accessories; the CA adjusts if different.
+        # Using 18% = 9+9 CGST+SGST (intra) or 18 IGST (inter).
+        # If no cost data, taxable = 0 and no tax either.
+        gst_rate = 0.18
+        taxable = transfer_value  # transfer_value is cost (ex-GST)
+        tax = round(taxable * gst_rate, 2)
+        cgst, sgst, igst = _tax_split(tax, interstate)
+
+        # Sending entity's GSTIN (acts as the "vendor" for the receiving entity).
+        from_gstin = _entity_gstin_for_state(db, from_entity, from_state) or ""
+
+        # Receiving entity's GSTIN (determines place_of_supply for ITC).
+        to_gstin = _entity_gstin_for_state(db, to_entity, to_state) or ""
+
+        bill_id = f"mbill_{uuid.uuid4().hex[:12]}"
+        # Bill number mirrors the transfer number so it is traceable.
+        bill_number = f"TRF/{transfer.get('transfer_number', transfer.get('id', ''))}"
+        now_iso = datetime.now().isoformat()
+
+        doc = {
+            "bill_id": bill_id,
+            "bill_number": bill_number,
+            "invoice_number": bill_number,
+            "bill_date": transfer.get("completed_at") or now_iso,
+            "invoice_date": transfer.get("completed_at") or now_iso,
+            # Link back to the transfer for traceability.
+            "source_transfer_id": transfer.get("id"),
+            "source_transfer_number": transfer.get("transfer_number"),
+            # The "vendor" is the sending entity.
+            "vendor_id": from_entity,
+            "vendor_name": transfer.get("from_location_name") or from_entity,
+            "vendor_gstin": from_gstin,
+            # Receiving entity's details.
+            "entity_id": to_entity,
+            "recipient_gstin": to_gstin,
+            # GST place-of-supply: the sending store's state (Sch I deemed supply).
+            "place_of_supply": from_state,
+            "interstate": interstate,
+            # Amounts.
+            "taxable_amount": taxable,
+            "tax_amount": tax,
+            "taxable_total": taxable,
+            "cgst_total": cgst,
+            "sgst_total": sgst,
+            "igst_total": igst,
+            "total_amount": round(taxable + tax, 2),
+            "total": round(taxable + tax, 2),
+            # ITC eligibility: inter-entity transfers are stock-in-trade, so
+            # eligible by default. The CA can flag itc_blocked if needed.
+            "itc_eligible": True,
+            "itc_blocked": False,
+            "status": "OUTSTANDING",
+            "auto_generated": True,
+            "notes": (
+                f"Auto-generated mirror purchase for inter-entity stock transfer "
+                f"{transfer.get('transfer_number', transfer.get('id', ''))} "
+                f"from {transfer.get('from_location_name', from_entity)} "
+                f"to {transfer.get('to_location_name', to_entity)}."
+            ),
+            "created_by": "SYSTEM",
+            "created_at": now_iso,
+        }
+
+        db.get_collection("vendor_bills").insert_one(doc)
+        logger.info(
+            "[TRANSFER] mirror purchase bill %s written for inter-entity transfer %s "
+            "(entities: %s -> %s, taxable=%.2f, tax=%.2f, interstate=%s)",
+            bill_id,
+            transfer.get("id"),
+            from_entity,
+            to_entity,
+            taxable,
+            tax,
+            interstate,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-soft; never block COMPLETE
+        logger.error(
+            "[TRANSFER] mirror purchase write failed for transfer %s: %s",
+            transfer.get("id"),
+            exc,
+        )
 
 
 # ============================================================================
