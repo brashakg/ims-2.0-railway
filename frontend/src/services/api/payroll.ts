@@ -39,6 +39,8 @@ export interface SalaryConfig {
   bank_ifsc?: string;
   bank_name?: string;
   is_active?: boolean;
+  // Commission (HR-3)
+  commission_rate_percent?: number;
 }
 
 export interface PtSlab {
@@ -146,6 +148,25 @@ export const payrollApi = {
     });
     return res.data as string;
   },
+
+  // --- Commission ledger (HR-3) --------------------------------------------
+  getCommissionSummary: async (params: {
+    month: number;
+    year: number;
+    store_id?: string;
+    employee_id?: string;
+  }) => {
+    const res = await api.get('/payroll/commission/summary', { params });
+    return res.data as CommissionSummary;
+  },
+
+  getCommissionLeaderboard: async (params?: {
+    period?: 'today' | 'week' | 'month';
+    store_id?: string;
+  }) => {
+    const res = await api.get('/payroll/commission/leaderboard', { params });
+    return res.data as CommissionLeaderboard;
+  },
 };
 
 export interface StatutorySummary {
@@ -240,4 +261,47 @@ export interface PayrollRunResponse {
   dry_run: boolean;
   rows: PayrollRow[];
   totals: PayrollTotals;
+}
+
+// --- Commission types (HR-3) ------------------------------------------------
+
+export interface CommissionOrder {
+  order_id: string;
+  date: string;
+  amount: number;
+}
+
+export interface CommissionItem {
+  employee_id: string;
+  name: string;
+  store_id?: string;
+  sales_count: number;
+  revenue: number;
+  commission_rate_percent: number;
+  commission_amount: number;
+  rank: number;
+  recent_orders?: CommissionOrder[];
+}
+
+export interface CommissionSummary {
+  month: number;
+  year: number;
+  store_id?: string;
+  items: CommissionItem[];
+  total_commission: number;
+}
+
+export interface LeaderboardEntry {
+  staff_id: string;
+  name: string;
+  sales_count: number;
+  revenue: number;
+  rank: number;
+  badge: string;
+  is_self?: boolean;
+}
+
+export interface CommissionLeaderboard {
+  leaderboard: LeaderboardEntry[];
+  period: string;
 }

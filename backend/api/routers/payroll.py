@@ -102,6 +102,12 @@ class SalaryConfig(BaseModel):
     bank_account_no: Optional[str] = None
     bank_ifsc: Optional[str] = None
     bank_name: Optional[str] = None
+    # Commission (HR-3): percentage of closed-order revenue earned as commission.
+    # Default 0 means commission is not applicable for this employee.
+    commission_rate_percent: float = Field(
+        default=0.0, ge=0, le=100,
+        description="Commission rate (%) applied to closed order revenue"
+    )
 
 
 class SalaryConfigUpdate(BaseModel):
@@ -130,6 +136,7 @@ class SalaryConfigUpdate(BaseModel):
     bank_ifsc: Optional[str] = None
     bank_name: Optional[str] = None
     is_active: Optional[bool] = None
+    commission_rate_percent: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 class SalaryAdvance(BaseModel):
@@ -574,6 +581,79 @@ async def bulk_upsert_salary_config(
 # ============================================================================
 
 
+def _flatten_payroll_row(record: dict) -> dict:
+    """Convert a ``payroll`` collection row (written by the run engine) to the
+    flat shape the salary-sheet and payslip endpoints return to the FE.
+
+    The run engine stores a nested ``breakdown.earnings.*`` /
+    ``breakdown.deductions.*`` structure.  The legacy ``salary_records``
+    collection used a flat breakdown dict.  This helper bridges both so the FE
+    never sees empty rows.
+    """
+    bd = record.get("breakdown") or {}
+    earn = bd.get("earnings") or {}
+    ded = bd.get("deductions") or {}
+
+    basic = float(earn.get("basic", 0))
+    hra = float(earn.get("hra", 0))
+    conveyance = float(earn.get("conveyance", 0))
+    medical = float(earn.get("medical", 0))
+    special = float(earn.get("special_allowance", 0) or earn.get("other_allowances", 0))
+    earned_gross = float(earn.get("earned_gross", 0) or earn.get("full_gross", 0))
+    pf_emp = float(ded.get("pf_employee", 0))
+    esi_emp = float(ded.get("esi_employee", 0) or ded.get("esi", 0))
+    pt = float(ded.get("professional_tax", 0))
+    tds = float(ded.get("tds", 0))
+    lwp_ded = float(ded.get("lwp_deduction", 0) or ded.get("advance_recovery", 0) * 0)
+    adv_ded = float(ded.get("advance_recovery", 0) or ded.get("advance_deduction", 0))
+    net = float(bd.get("net_pay", 0) or record.get("net_salary", 0))
+
+    return {
+        # ID field: payroll rows use payroll_id; legacy used salary_record_id.
+        # Expose both so the FE key always resolves.
+        "salary_record_id": record.get("payroll_id") or record.get("salary_record_id") or "",
+        "payroll_id": record.get("payroll_id") or "",
+        "employee_id": record.get("employee_id", ""),
+        "employee_name": record.get("employee_name", ""),
+        "basic": basic,
+        "hra": hra,
+        "conveyance": conveyance,
+        "medical": medical,
+        "allowances": conveyance + medical + special,
+        "gross_salary": earned_gross,
+        "pf_employee": pf_emp,
+        "esi": esi_emp,
+        "professional_tax": pt,
+        "tds": tds,
+        "lwp_deduction": lwp_ded,
+        "advance_deduction": adv_ded,
+        "net_pay": net,
+        "status": record.get("status", "DRAFT"),
+        # Keep the nested breakdown so the print endpoint / Tally export still work.
+        "breakdown": {
+            "basic": basic,
+            "hra": hra,
+            "conveyance": conveyance,
+            "medical": medical,
+            "special_allowance": special,
+            "gross_salary": earned_gross,
+            "pf_employee": pf_emp,
+            "pf_employer": float(
+                (record.get("breakdown") or {})
+                .get("employer_contributions", {})
+                .get("pf_employer_total", 0)
+            ),
+            "esi": esi_emp,
+            "professional_tax": pt,
+            "tds": tds,
+            "lwp_deduction": lwp_ded,
+            "advance_deduction": adv_ded,
+            "total_deductions": float(ded.get("total_deductions", 0)),
+            "net_pay": net,
+        },
+    }
+
+
 @router.get("/salary-sheet")
 async def get_salary_sheet(
     month: int,
@@ -581,7 +661,12 @@ async def get_salary_sheet(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get monthly salary sheet for all employees in a store"""
+    """Get monthly salary sheet for all employees in a store.
+
+    Reads from the ``payroll`` collection (written by POST /payroll/run).
+    Falls back to the legacy ``salary_records`` collection so data is never
+    silently missing on installs that still have the old schema.
+    """
     db = _get_db()
     if not db:
         return {"salaries": [], "total": 0, "store_id": store_id}
@@ -589,41 +674,18 @@ async def get_salary_sheet(
     active_store = store_id or current_user.get("active_store_id")
 
     try:
-        salary_records_coll = db.get_collection("salary_records")
+        query: dict = {"month": month, "year": year}
+        if active_store:
+            query["store_id"] = active_store
 
-        # Query salary records for the month
-        records = salary_records_coll.find(
-            {"month": month, "year": year, "store_id": active_store}
-        )
+        # Primary: payroll collection (run engine output)
+        records = list(db.get_collection("payroll").find(query))
 
-        salary_data = []
-        for record in records:
-            salary_data.append(
-                {
-                    "salary_record_id": record.get("salary_record_id"),
-                    "employee_id": record.get("employee_id"),
-                    "employee_name": record.get("employee_name"),
-                    "basic": record.get("breakdown", {}).get("basic", 0),
-                    "hra": record.get("breakdown", {}).get("hra", 0),
-                    "allowances": record.get("breakdown", {}).get("conveyance", 0)
-                    + record.get("breakdown", {}).get("medical", 0),
-                    "gross_salary": record.get("breakdown", {}).get("gross_salary", 0),
-                    "pf_employee": record.get("breakdown", {}).get("pf_employee", 0),
-                    "esi": record.get("breakdown", {}).get("esi", 0),
-                    "professional_tax": record.get("breakdown", {}).get(
-                        "professional_tax", 0
-                    ),
-                    "tds": record.get("breakdown", {}).get("tds", 0),
-                    "lwp_deduction": record.get("breakdown", {}).get(
-                        "lwp_deduction", 0
-                    ),
-                    "advance_deduction": record.get("breakdown", {}).get(
-                        "advance_deduction", 0
-                    ),
-                    "net_pay": record.get("breakdown", {}).get("net_pay", 0),
-                    "status": record.get("status", "draft"),
-                }
-            )
+        # Fallback: legacy salary_records
+        if not records:
+            records = list(db.get_collection("salary_records").find(query))
+
+        salary_data = [_flatten_payroll_row(r) for r in records]
 
         return {
             "month": month,
@@ -894,6 +956,30 @@ async def settle_salary_advance(
 # ============================================================================
 
 
+def _build_payslip_from_run_row(run_row: dict, employee: dict, db: object) -> dict:
+    """Build a payslip dict from a ``payroll`` collection run row.
+
+    Returns the flat breakdown shape the FE payslip display expects.
+    """
+    flat = _flatten_payroll_row(run_row)
+    cfg = _get_salary_config(db, run_row.get("employee_id", ""))
+    return {
+        "payslip_id": run_row.get("payroll_id") or str(uuid.uuid4()),
+        "employee_id": run_row.get("employee_id", ""),
+        "employee_name": employee.get("full_name", "") or run_row.get("employee_name", ""),
+        "employee_number": employee.get("employee_number", ""),
+        "designation": employee.get("designation", ""),
+        "department": employee.get("department", ""),
+        "month": run_row.get("month"),
+        "year": run_row.get("year"),
+        "breakdown": flat["breakdown"],
+        "bank_account": cfg.get("bank_account") if cfg else None,
+        "generated_at": run_row.get("updated_at") or run_row.get("created_at") or datetime.now().isoformat(),
+        # Include payroll status so FE can show DRAFT/APPROVED/PAID badge.
+        "status": run_row.get("status", "DRAFT"),
+    }
+
+
 @router.get("/payslip/{employee_id}/{month}/{year}")
 async def get_payslip(
     employee_id: str,
@@ -901,54 +987,63 @@ async def get_payslip(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Generate or retrieve payslip for an employee"""
+    """Generate or retrieve payslip for an employee.
+
+    Reads from the ``payroll`` collection (run engine output) first, then falls
+    back to the legacy ``salary_records`` collection so existing data is never
+    lost.  A payslip record is materialised in ``payslips`` collection only
+    once; subsequent calls return the cached version.
+    """
     db = _get_db()
     if not db:
         return {"payslip": None}
 
     try:
-        salary_records_coll = db.get_collection("salary_records")
         payslips_coll = db.get_collection("payslips")
 
-        # Get salary record
-        salary_record = salary_records_coll.find_one(
-            {"employee_id": employee_id, "month": month, "year": year}
-        )
-
-        if not salary_record:
-            raise HTTPException(
-                status_code=404, detail="Salary record not found for this month"
-            )
-
-        # Check if payslip already exists
+        # Return cached payslip if one already exists.
         payslip = payslips_coll.find_one(
             {"employee_id": employee_id, "month": month, "year": year}
         )
+        if payslip:
+            return {"payslip": _strip_id(payslip)}
 
         employee = _get_employee_details(db, employee_id)
 
-        if not payslip:
-            # Create payslip
-            payslip = {
-                "payslip_id": str(uuid.uuid4()),
-                "employee_id": employee_id,
-                "employee_name": employee.get("full_name", ""),
-                "employee_number": employee.get("employee_number", ""),
-                "designation": employee.get("designation", ""),
-                "department": employee.get("department", ""),
-                "month": month,
-                "year": year,
-                "breakdown": salary_record.get("breakdown", {}),
-                "bank_account": (
-                    _get_salary_config(db, employee_id).get("bank_account")
-                    if _get_salary_config(db, employee_id)
-                    else None
-                ),
-                "generated_at": datetime.now().isoformat(),
-            }
-            payslips_coll.insert_one(payslip)
+        # Try the run-engine ``payroll`` collection first.
+        run_row = db.get_collection("payroll").find_one(
+            {"employee_id": employee_id, "month": month, "year": year}
+        )
+        if run_row:
+            payslip = _build_payslip_from_run_row(run_row, employee, db)
+            payslips_coll.insert_one({**payslip})
+            return {"payslip": _strip_id(payslip)}
 
-        return {"payslip": payslip}
+        # Legacy fallback: salary_records collection.
+        salary_record = db.get_collection("salary_records").find_one(
+            {"employee_id": employee_id, "month": month, "year": year}
+        )
+        if not salary_record:
+            return {"payslip": None}
+
+        cfg = _get_salary_config(db, employee_id)
+        payslip = {
+            "payslip_id": str(uuid.uuid4()),
+            "employee_id": employee_id,
+            "employee_name": employee.get("full_name", ""),
+            "employee_number": employee.get("employee_number", ""),
+            "designation": employee.get("designation", ""),
+            "department": employee.get("department", ""),
+            "month": month,
+            "year": year,
+            "breakdown": salary_record.get("breakdown", {}),
+            "bank_account": cfg.get("bank_account") if cfg else None,
+            "generated_at": datetime.now().isoformat(),
+        }
+        payslips_coll.insert_one({**payslip})
+        return {"payslip": _strip_id(payslip)}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -960,7 +1055,11 @@ async def get_payslip(
 async def get_latest_payslip(
     employee_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get latest payslip for an employee"""
+    """Get the most recent payslip for an employee.
+
+    Searches ``payslips`` cache, then the ``payroll`` run collection, so staff
+    see their slip even before a manager has clicked 'generate payslip'.
+    """
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -968,13 +1067,33 @@ async def get_latest_payslip(
     try:
         payslips_coll = db.get_collection("payslips")
 
-        payslips = list(
+        # Cached payslips (newest first).
+        cached = list(
             payslips_coll.find({"employee_id": employee_id})
-            .sort("generated_at", -1)
+            .sort([("year", -1), ("month", -1)])
             .limit(1)
         )
+        if cached:
+            return {"payslip": _strip_id(cached[0])}
 
-        return {"payslip": payslips[0] if payslips else None}
+        # Fall through to the run collection and synthesise a payslip.
+        run_row = (
+            list(
+                db.get_collection("payroll")
+                .find({"employee_id": employee_id})
+                .sort([("year", -1), ("month", -1)])
+                .limit(1)
+            )
+            or [None]
+        )[0]
+        if not run_row:
+            return {"payslip": None}
+
+        employee = _get_employee_details(db, employee_id)
+        payslip = _build_payslip_from_run_row(run_row, employee, db)
+        # Persist so the next call is instant.
+        payslips_coll.insert_one({**payslip})
+        return {"payslip": _strip_id(payslip)}
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -1617,6 +1736,227 @@ async def payslip_print(
         logger.error("Payslip print failed: %s", e)
         raise HTTPException(
             status_code=500, detail="Payslip print failed. Please try again."
+        )
+
+
+# ============================================================================
+# COMMISSION LEDGER  (HR-3 -- per-sale commission + staff leaderboard)
+# ============================================================================
+# Commission is derived from completed orders attributed to each staff member.
+# We do NOT store a separate commission document -- we aggregate live from the
+# ``orders`` collection on-demand.  The rate is read from salary_config
+# (commission_rate_percent, default 0).  If the store has no per-staff rates
+# configured the response returns zero commission but still shows the sales
+# tally -- useful as a leaderboard even before commission rates are set up.
+#
+# Roles: any manager tier + accountant (same as salary-sheet).
+_COMMISSION_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+
+
+@router.get("/commission/summary")
+async def get_commission_summary(
+    month: int = Query(..., ge=1, le=12, description="Calendar month (1-12)"),
+    year: int = Query(..., ge=2020, le=2100, description="Calendar year"),
+    store_id: Optional[str] = Query(None, description="Filter to a single store"),
+    employee_id: Optional[str] = Query(None, description="Filter to a single employee (self-service)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Per-staff commission ledger for a month.
+
+    Returns each staff member's: sales count, revenue, computed commission
+    amount (revenue * commission_rate_percent / 100), and rank within the store.
+
+    Any authenticated user may fetch their OWN commission (employee_id == their
+    user_id).  Manager-tier roles see all staff in scope.
+    """
+    db = _get_db()
+    caller_id = current_user.get("user_id") or current_user.get("id")
+    caller_roles = current_user.get("roles") or []
+
+    # Self-service gate: staff may only read their own data.
+    is_manager = any(r in caller_roles for r in ("SUPERADMIN", *_COMMISSION_ROLES))
+    if not is_manager:
+        # Non-manager: restrict to self only.
+        employee_id = caller_id
+
+    if db is None:
+        return {"items": [], "month": month, "year": year, "total_commission": 0}
+
+    try:
+        # Date range for the requested month.
+        days_in_month = monthrange(year, month)[1]
+        from_dt = datetime(year, month, 1)
+        to_dt = datetime(year, month, days_in_month, 23, 59, 59)
+
+        # Build order query.
+        order_query: dict = {
+            "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+            "created_at": {"$gte": from_dt, "$lte": to_dt},
+        }
+        active_store = store_id or current_user.get("active_store_id")
+        if active_store:
+            order_query["store_id"] = active_store
+        if employee_id:
+            order_query["$or"] = [
+                {"sales_staff_id": employee_id},
+                {"created_by": employee_id},
+            ]
+
+        orders = list(db.get_collection("orders").find(order_query).limit(50000))
+
+        # Aggregate by staff.
+        staff_map: dict = {}
+        for o in orders:
+            sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
+            sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
+            store = o.get("store_id", "")
+            if sid not in staff_map:
+                staff_map[sid] = {
+                    "employee_id": sid,
+                    "name": sname,
+                    "store_id": store,
+                    "sales_count": 0,
+                    "revenue": 0.0,
+                    "orders": [],
+                }
+            amount = float(o.get("total_amount") or o.get("grand_total") or 0)
+            staff_map[sid]["sales_count"] += 1
+            staff_map[sid]["revenue"] += amount
+            staff_map[sid]["orders"].append({
+                "order_id": o.get("order_id") or o.get("_id", ""),
+                "date": str(o.get("created_at", ""))[:10],
+                "amount": amount,
+            })
+
+        # Fetch commission rates from salary_config.
+        emp_ids = list(staff_map.keys())
+        rate_map: dict = {}
+        if emp_ids:
+            for cfg in db.get_collection("salary_config").find(
+                {"employee_id": {"$in": emp_ids}},
+                {"employee_id": 1, "commission_rate_percent": 1},
+            ):
+                rate_map[cfg["employee_id"]] = float(
+                    cfg.get("commission_rate_percent") or 0
+                )
+
+        # Build result rows and rank by revenue.
+        items = []
+        for sid, stats in staff_map.items():
+            rate = rate_map.get(sid, 0.0)
+            commission = round(stats["revenue"] * rate / 100, 2)
+            items.append({
+                "employee_id": sid,
+                "name": stats["name"],
+                "store_id": stats["store_id"],
+                "sales_count": stats["sales_count"],
+                "revenue": round(stats["revenue"], 2),
+                "commission_rate_percent": rate,
+                "commission_amount": commission,
+                "rank": 0,
+                # Include last 10 orders for the detail drilldown.
+                "recent_orders": sorted(
+                    stats["orders"], key=lambda x: x["date"], reverse=True
+                )[:10],
+            })
+
+        items.sort(key=lambda x: x["revenue"], reverse=True)
+        for i, item in enumerate(items):
+            item["rank"] = i + 1
+
+        total_commission = round(sum(x["commission_amount"] for x in items), 2)
+        return {
+            "month": month,
+            "year": year,
+            "store_id": active_store,
+            "items": items,
+            "total_commission": total_commission,
+        }
+    except Exception as e:
+        logger.error("Commission summary failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Commission summary failed. Please try again."
+        )
+
+
+@router.get("/commission/leaderboard")
+async def get_commission_leaderboard(
+    period: str = Query("month", description="today | week | month"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Staff sales leaderboard (revenue-ranked) for today/week/month.
+
+    All authenticated users can view the leaderboard -- it motivates staff.
+    SUPERADMIN and manager roles see names; non-managers see anonymised ranks
+    (their own name is always revealed).
+    """
+    db = _get_db()
+    if db is None:
+        return {"leaderboard": [], "period": period}
+
+    try:
+        now = datetime.now()
+        if period == "today":
+            from_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "week":
+            from_dt = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+        else:  # month
+            from_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        active_store = store_id or current_user.get("active_store_id")
+        query: dict = {
+            "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+            "created_at": {"$gte": from_dt},
+        }
+        if active_store:
+            query["store_id"] = active_store
+
+        orders = list(db.get_collection("orders").find(query).limit(50000))
+
+        staff_map: dict = {}
+        for o in orders:
+            sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
+            sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
+            if sid not in staff_map:
+                staff_map[sid] = {"name": sname, "sales_count": 0, "revenue": 0.0}
+            staff_map[sid]["sales_count"] += 1
+            staff_map[sid]["revenue"] += float(
+                o.get("total_amount") or o.get("grand_total") or 0
+            )
+
+        caller_id = current_user.get("user_id") or current_user.get("id")
+        caller_roles = current_user.get("roles") or []
+        is_manager = any(
+            r in caller_roles for r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+        )
+
+        leaderboard = []
+        for sid, stats in staff_map.items():
+            reveal_name = is_manager or sid == caller_id
+            leaderboard.append({
+                "staff_id": sid,
+                "name": stats["name"] if reveal_name else "Staff Member",
+                "sales_count": stats["sales_count"],
+                "revenue": round(stats["revenue"], 2),
+                "rank": 0,
+                "badge": "",
+                "is_self": sid == caller_id,
+            })
+
+        leaderboard.sort(key=lambda x: x["revenue"], reverse=True)
+        badges = ["Champion", "Star Performer", "Rising Star"]
+        for i, entry in enumerate(leaderboard):
+            entry["rank"] = i + 1
+            entry["badge"] = badges[i] if i < 3 else "Team Player"
+
+        return {"leaderboard": leaderboard, "period": period}
+    except Exception as e:
+        logger.error("Commission leaderboard failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Commission leaderboard failed. Please try again."
         )
 
 

@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Settings,
   CalendarSync,
+  Trophy,
 } from 'lucide-react';
 import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -27,6 +28,7 @@ import { AttendanceSummaryCard } from '../../components/hr/AttendanceSummaryCard
 import { EmployeeSelfService } from '../../components/hr/EmployeeSelfService';
 import { ShiftSetup } from '../../components/hr/ShiftSetup';
 import { WeekOffSwap } from '../../components/hr/WeekOffSwap';
+import { CommissionLeaderboard } from '../../components/hr/CommissionLeaderboard';
 
 type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LEAVE' | 'LATE';
 type LeaveStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
@@ -86,7 +88,7 @@ export function HRPage() {
 
   // UI state
   const [activeTab, setActiveTab] = useState<
-    'attendance' | 'leave' | 'monthly_grid' | 'shifts' | 'weekoff_swaps' | 'self_service'
+    'attendance' | 'leave' | 'monthly_grid' | 'shifts' | 'weekoff_swaps' | 'self_service' | 'leaderboard'
   >('attendance');
 
   // Sync active tab from URL query params (e.g. /hr?tab=leave)
@@ -407,6 +409,18 @@ export function HRPage() {
           <User className="w-4 h-4" />
           My Dashboard
         </button>
+        <button
+          onClick={() => setActiveTab('leaderboard')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
+            activeTab === 'leaderboard'
+              ? 'border-bv-red-600 text-bv-red-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          )}
+        >
+          <Trophy className="w-4 h-4" />
+          Leaderboard
+        </button>
       </div>
 
       {/* Attendance Tab */}
@@ -591,6 +605,13 @@ export function HRPage() {
       {activeTab === 'self_service' && (
         <div>
           <EmployeeSelfService />
+        </div>
+      )}
+
+      {/* Commission Leaderboard Tab (HR-3) */}
+      {activeTab === 'leaderboard' && (
+        <div className="card p-4">
+          <CommissionLeaderboard storeId={user?.activeStoreId} />
         </div>
       )}
     </div>
