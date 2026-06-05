@@ -4,6 +4,7 @@ IMS 2.0 - Vendors Router
 Real database queries for vendor and purchase order management
 """
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -23,6 +24,7 @@ from ..dependencies import (
 from ..services import ap_engine
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
@@ -547,6 +549,175 @@ async def update_vendor(
 
 
 # ============================================================================
+# INV-7: VENDOR SKU ALIAS — maps vendor-specific codes to IMS master products
+# ============================================================================
+# Problem: the same lens/frame arrives from different suppliers under different
+# catalogue codes.  Without an alias map, staff must search the product master
+# each time, leading to duplicate entries at goods-inward.  With this, they
+# register the vendor code once and the GRN workflow can resolve it to the
+# canonical IMS product_id automatically.
+
+
+class VendorSkuAliasCreate(BaseModel):
+    product_id: str           # IMS master product_id
+    vendor_sku: str           # vendor's own catalogue / item code
+    description: Optional[str] = None   # optional free-text note
+
+
+@router.get("/sku-alias-lookup")
+async def lookup_vendor_sku(
+    vendor_id: str = Query(...),
+    vendor_sku: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Resolve a vendor's SKU code to the IMS master product_id (INV-7).
+
+    Called during GRN / goods-inward so staff never have to manually search
+    the product master when receiving stock.
+    """
+    db = _get_db()
+    if db is None:
+        return {"product_id": None, "vendor_id": vendor_id, "vendor_sku": vendor_sku}
+
+    try:
+        coll = db.get_collection("vendor_sku_aliases")
+        doc = coll.find_one({"vendor_id": vendor_id, "vendor_sku": vendor_sku})
+        if not doc:
+            return {
+                "product_id": None,
+                "vendor_id": vendor_id,
+                "vendor_sku": vendor_sku,
+                "message": "No alias found",
+            }
+        doc.pop("_id", None)
+        return {
+            "product_id": doc.get("product_id"),
+            "vendor_id": vendor_id,
+            "vendor_sku": vendor_sku,
+            "description": doc.get("description"),
+            "alias_id": doc.get("alias_id"),
+        }
+    except Exception as e:
+        logger.warning(f"lookup_vendor_sku error: {e}")
+        return {"product_id": None, "vendor_id": vendor_id, "vendor_sku": vendor_sku}
+
+
+@router.get("/{vendor_id}/sku-aliases")
+async def list_vendor_sku_aliases(
+    vendor_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List all SKU aliases registered for a vendor (INV-7)."""
+    db = _get_db()
+    if db is None:
+        return {"aliases": [], "vendor_id": vendor_id}
+
+    try:
+        coll = db.get_collection("vendor_sku_aliases")
+        docs = list(coll.find({"vendor_id": vendor_id}, {"_id": 0}))
+        return {"aliases": docs, "vendor_id": vendor_id, "total": len(docs)}
+    except Exception as e:
+        logger.warning(f"list_vendor_sku_aliases error: {e}")
+        return {"aliases": [], "vendor_id": vendor_id}
+
+
+@router.post("/{vendor_id}/sku-aliases", status_code=201)
+async def create_vendor_sku_alias(
+    vendor_id: str,
+    body: VendorSkuAliasCreate,
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """Register a vendor SKU code to an IMS master product (INV-7).
+
+    Idempotent on (vendor_id, vendor_sku): re-posting an existing alias
+    updates the product_id and description rather than creating a duplicate.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        vendor_repo = get_vendor_repository()
+        if vendor_repo is not None:
+            vendor = vendor_repo.find_by_id(vendor_id)
+            if vendor is None:
+                raise HTTPException(status_code=404, detail="Vendor not found")
+
+        coll = db.get_collection("vendor_sku_aliases")
+        now = datetime.now()
+
+        # Upsert on (vendor_id, vendor_sku) — idempotent
+        existing = coll.find_one({"vendor_id": vendor_id, "vendor_sku": body.vendor_sku})
+        if existing:
+            coll.update_one(
+                {"vendor_id": vendor_id, "vendor_sku": body.vendor_sku},
+                {
+                    "$set": {
+                        "product_id": body.product_id,
+                        "description": body.description,
+                        "updated_at": now.isoformat(),
+                        "updated_by": current_user.get("user_id", ""),
+                    }
+                },
+            )
+            alias_id = existing.get("alias_id", "")
+            action = "updated"
+        else:
+            alias_id = str(uuid.uuid4())
+            coll.insert_one(
+                {
+                    "alias_id": alias_id,
+                    "vendor_id": vendor_id,
+                    "vendor_sku": body.vendor_sku,
+                    "product_id": body.product_id,
+                    "description": body.description,
+                    "created_at": now.isoformat(),
+                    "created_by": current_user.get("user_id", ""),
+                }
+            )
+            action = "created"
+
+        return {
+            "alias_id": alias_id,
+            "vendor_id": vendor_id,
+            "vendor_sku": body.vendor_sku,
+            "product_id": body.product_id,
+            "action": action,
+            "message": f"Vendor SKU alias {action}",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"create_vendor_sku_alias error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save vendor SKU alias")
+
+
+@router.delete("/{vendor_id}/sku-aliases/{alias_id}", status_code=200)
+async def delete_vendor_sku_alias(
+    vendor_id: str,
+    alias_id: str,
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """Remove a vendor SKU alias (INV-7)."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        coll = db.get_collection("vendor_sku_aliases")
+        result = coll.delete_one({"alias_id": alias_id, "vendor_id": vendor_id})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Alias not found")
+        return {"alias_id": alias_id, "vendor_id": vendor_id, "message": "Alias deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"delete_vendor_sku_alias error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete alias")
+
+
+# ============================================================================
 # PURCHASE ORDER ENDPOINTS
 # ============================================================================
 
@@ -578,6 +749,235 @@ async def list_pos(
     pos = po_repo.find_many(filter_dict, skip=skip, limit=limit)
 
     return {"purchase_orders": pos or [], "total": len(pos) if pos else 0}
+
+
+# INV-9: Demand forecast -> nightly draft-PO suggestions
+# Reads the analytics-v2 demand-forecast data for the caller's store and
+# creates a DRAFT purchase order for each product that needs reorder,
+# grouped by the product's preferred_vendor_id.  If no vendor is attached to
+# a product, the item is placed on a catch-all "unassigned" suggestions list.
+# Only SUPERADMIN / ADMIN / AREA_MANAGER / STORE_MANAGER may trigger this
+# (mirrors the PO create gate).  Fail-soft: if the demand data can't be read
+# the endpoint returns an empty result rather than 500.
+
+
+class ForecastPoRequest(BaseModel):
+    store_id: Optional[str] = None          # defaults to caller's active store
+    horizon_days: int = Field(30, ge=7, le=90)  # forecast window
+    safety_stock_days: int = Field(7, ge=0, le=30)  # extra buffer days
+    # If True a real DRAFT PO doc is persisted per vendor; otherwise returns
+    # suggestions only (dry_run=True is safe for the nightly ORACLE cron).
+    dry_run: bool = False
+
+
+@router.post("/purchase-orders/from-forecast", status_code=201)
+async def create_pos_from_forecast(
+    body: ForecastPoRequest,
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """Generate DRAFT purchase orders from the demand forecast (INV-9).
+
+    Algorithm:
+    1. Pull 90-day sales velocity per product for the store.
+    2. For each product where predicted demand > current_stock + safety_stock,
+       compute the recommended order quantity.
+    3. Group by preferred_vendor_id (stored on the product doc).
+    4. Create one DRAFT PO per vendor group (unless dry_run=True).
+
+    Returns a summary and the list of created (or would-be-created) POs.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    active_store = body.store_id or current_user.get("active_store_id") or ""
+    if not active_store:
+        raise HTTPException(status_code=400, detail="store_id is required")
+
+    horizon = body.horizon_days
+    safety = body.safety_stock_days
+
+    try:
+        from datetime import timedelta
+
+        now = datetime.now()
+        ninety_days_ago = now - timedelta(days=90)
+
+        # --- Step 1: compute sales velocity per product (last 90 days) ---
+        orders = list(
+            db.get_collection("orders").find(
+                {
+                    "store_id": active_store,
+                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                    "created_at": {"$gte": ninety_days_ago},
+                },
+                {"items": 1, "order_items": 1},
+            ).limit(10000)
+        )
+
+        product_sales: dict = {}
+        for o in orders:
+            for item in (o.get("items") or o.get("order_items") or []):
+                pid = item.get("product_id", "")
+                if not pid:
+                    continue
+                qty = int(item.get("quantity", 1) or 1)
+                if pid not in product_sales:
+                    product_sales[pid] = {
+                        "product_name": item.get("product_name") or item.get("name", ""),
+                        "sku": item.get("sku", ""),
+                        "qty_90d": 0,
+                    }
+                product_sales[pid]["qty_90d"] += qty
+
+        if not product_sales:
+            return {
+                "store_id": active_store,
+                "dry_run": body.dry_run,
+                "pos_created": 0,
+                "suggestions": [],
+                "message": "No sales data found for the last 90 days",
+            }
+
+        # --- Step 2: join with products for stock + vendor ---
+        products_coll = db.get_collection("products")
+        product_ids = list(product_sales.keys())
+        prod_docs = {
+            p.get("product_id"): p
+            for p in products_coll.find({"product_id": {"$in": product_ids}})
+            if p.get("product_id")
+        }
+
+        reorder_items: dict = {}  # vendor_id -> list of line items
+        suggestions = []
+
+        for pid, sales in product_sales.items():
+            avg_daily = sales["qty_90d"] / 90.0
+            predicted = avg_daily * horizon
+            buffer = avg_daily * safety
+            need = predicted + buffer
+
+            prod = prod_docs.get(pid, {})
+            current_stock = int(
+                prod.get("quantity", 0) or prod.get("stock", 0) or 0
+            )
+            reorder_qty = max(0, round(need - current_stock))
+            if reorder_qty == 0:
+                continue
+
+            vendor_id = prod.get("preferred_vendor_id") or "UNASSIGNED"
+            unit_price = float(
+                prod.get("cost_price", 0) or prod.get("purchase_price", 0) or 0
+            )
+            sku = sales.get("sku") or prod.get("sku", "")
+            product_name = sales.get("product_name") or prod.get("name", "")
+
+            suggestion = {
+                "product_id": pid,
+                "product_name": product_name,
+                "sku": sku,
+                "vendor_id": vendor_id,
+                "current_stock": current_stock,
+                "avg_daily_sales": round(avg_daily, 2),
+                "predicted_demand": round(predicted, 1),
+                "safety_buffer": round(buffer, 1),
+                "reorder_quantity": reorder_qty,
+                "estimated_unit_price": unit_price,
+            }
+            suggestions.append(suggestion)
+
+            if vendor_id != "UNASSIGNED":
+                reorder_items.setdefault(vendor_id, []).append(
+                    {
+                        "product_id": pid,
+                        "product_name": product_name,
+                        "sku": sku,
+                        "quantity": reorder_qty,
+                        "unit_price": unit_price,
+                    }
+                )
+
+        # --- Step 3: create DRAFT POs per vendor group ---
+        created_pos = []
+        if not body.dry_run and reorder_items:
+            po_repo = get_purchase_order_repository()
+            vendor_repo = get_vendor_repository()
+
+            for v_id, lines in reorder_items.items():
+                vendor = None
+                if vendor_repo is not None:
+                    vendor = vendor_repo.find_by_id(v_id)
+                if vendor is None:
+                    # Skip if vendor not found; include in suggestions only
+                    continue
+
+                po_id = str(uuid.uuid4())
+                po_number = generate_po_number(active_store)
+                subtotal = sum(
+                    ln["quantity"] * ln["unit_price"] for ln in lines
+                )
+                tax = subtotal * 0.18
+                total = subtotal + tax
+
+                po_doc = {
+                    "po_id": po_id,
+                    "po_number": po_number,
+                    "vendor_id": v_id,
+                    "vendor_name": vendor.get("trade_name") or vendor.get("legal_name"),
+                    "delivery_store_id": active_store,
+                    "items": lines,
+                    "subtotal": round(subtotal, 2),
+                    "tax_amount": round(tax, 2),
+                    "total_amount": round(total, 2),
+                    "status": "DRAFT",
+                    "source": "demand_forecast",
+                    "forecast_horizon_days": horizon,
+                    "created_by": current_user.get("user_id"),
+                    "created_at": now.isoformat(),
+                    "notes": (
+                        f"Auto-generated from {horizon}-day demand forecast "
+                        f"(safety stock {safety} days)"
+                    ),
+                }
+
+                if po_repo is not None:
+                    try:
+                        po_repo.create(po_doc)
+                        created_pos.append(
+                            {
+                                "po_id": po_id,
+                                "po_number": po_number,
+                                "vendor_id": v_id,
+                                "vendor_name": po_doc["vendor_name"],
+                                "lines": len(lines),
+                                "total_amount": round(total, 2),
+                            }
+                        )
+                    except Exception as _e:
+                        logger.warning(f"[INV-9] PO create failed for vendor {v_id}: {_e}")
+
+        return {
+            "store_id": active_store,
+            "dry_run": body.dry_run,
+            "horizon_days": horizon,
+            "safety_stock_days": safety,
+            "products_needing_reorder": len(suggestions),
+            "pos_created": len(created_pos),
+            "created_pos": created_pos,
+            "suggestions": suggestions,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"create_pos_from_forecast error: {e}")
+        return {
+            "store_id": active_store,
+            "dry_run": body.dry_run,
+            "pos_created": 0,
+            "suggestions": [],
+            "message": "Forecast data unavailable",
+        }
 
 
 @router.post("/purchase-orders", status_code=201)
