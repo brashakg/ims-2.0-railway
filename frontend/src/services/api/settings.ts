@@ -433,7 +433,14 @@ export const adminIntegrationApi = {
   },
 
   setRazorpayConfig: async (data: { keyId: string; keySecret: string; webhookSecret?: string; enabled: boolean }) => {
-    const response = await api.post('/admin/integrations/razorpay', data);
+    // SEC-5: backend RazorpayConfig model uses snake_case field names.
+    const payload: Record<string, unknown> = {
+      key_id: data.keyId,
+      key_secret: data.keySecret,
+      enabled: data.enabled,
+    };
+    if (data.webhookSecret !== undefined) payload.webhook_secret = data.webhookSecret;
+    const response = await api.post('/admin/integrations/razorpay', payload);
     return response.data;
   },
 
@@ -449,7 +456,13 @@ export const adminIntegrationApi = {
   },
 
   setWhatsappConfig: async (data: { apiKey: string; phoneNumberId: string; businessId: string; enabled: boolean }) => {
-    const response = await api.post('/admin/integrations/whatsapp', data);
+    // SEC-5: backend WhatsappConfig uses snake_case field names.
+    const response = await api.post('/admin/integrations/whatsapp', {
+      api_key: data.apiKey,
+      phone_number_id: data.phoneNumberId,
+      business_id: data.businessId,
+      enabled: data.enabled,
+    });
     return response.data;
   },
 
@@ -465,7 +478,13 @@ export const adminIntegrationApi = {
   },
 
   setTallyConfig: async (data: { serverUrl: string; companyName: string; syncInterval: number; enabled: boolean }) => {
-    const response = await api.post('/admin/integrations/tally', data);
+    // SEC-5: backend TallyConfig uses snake_case field names.
+    const response = await api.post('/admin/integrations/tally', {
+      server_url: data.serverUrl,
+      company_name: data.companyName,
+      sync_interval: data.syncInterval,
+      enabled: data.enabled,
+    });
     return response.data;
   },
 
@@ -542,7 +561,14 @@ export const adminIntegrationApi = {
   },
 
   setShopifyConfig: async (data: { shopUrl: string; apiKey: string; apiSecret: string; accessToken: string; enabled: boolean }) => {
-    const response = await api.post('/admin/integrations/shopify', data);
+    // SEC-5: backend ShopifyConfig uses snake_case field names.
+    const response = await api.post('/admin/integrations/shopify', {
+      shop_url: data.shopUrl,
+      api_key: data.apiKey,
+      api_secret: data.apiSecret,
+      access_token: data.accessToken,
+      enabled: data.enabled,
+    });
     return response.data;
   },
 
@@ -558,7 +584,13 @@ export const adminIntegrationApi = {
   },
 
   setSmsConfig: async (data: { provider: string; apiKey: string; senderId: string; enabled: boolean }) => {
-    const response = await api.post('/admin/integrations/sms', data);
+    // SEC-5: backend SmsConfig uses snake_case field names.
+    const response = await api.post('/admin/integrations/sms', {
+      provider: data.provider,
+      api_key: data.apiKey,
+      sender_id: data.senderId,
+      enabled: data.enabled,
+    });
     return response.data;
   },
 };

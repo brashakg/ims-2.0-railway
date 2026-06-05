@@ -232,7 +232,7 @@ export function LoyaltyProgram() {
         <div>
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-gray-900">Available Rewards</h3>
-            <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold flex items-center gap-2">
+            <button className="px-3 py-1 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded text-sm font-semibold flex items-center gap-2">
               <Plus className="w-4 h-4" />
               Add Reward
             </button>
@@ -247,7 +247,7 @@ export function LoyaltyProgram() {
         <div>
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-gray-900">Active Promotions</h3>
-            <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold">
+            <button className="px-3 py-1 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded text-sm font-semibold">
               Create Campaign
             </button>
           </div>

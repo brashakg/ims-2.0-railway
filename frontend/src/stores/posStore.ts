@@ -663,9 +663,24 @@ export const usePOSStore = create<POSState>()(
     {
       name: 'ims-pos-draft',
       storage: createJSONStorage(() => debouncedLocalStorage),
-      // Only persist cart-critical fields, not UI state
+      // SEC-4: Only persist cart-critical fields. Strip customer PII and
+      // prescription data so a shared POS terminal never leaves a prior
+      // customer's personal data (name, DOB, mobile, Rx values) readable
+      // via DevTools -> Application -> Local Storage. The cart (products +
+      // discounts), payments, and delivery details are safe to keep because
+      // they contain no identity data and the cashier needs them on refresh.
       partialize: (state: POSState) => ({
         ...state,
+        // Strip PII / sensitive clinical data
+        customer: null,
+        patient: null,
+        prescription: null,
+        customerLoyaltyPoints: 0,
+        customerLastOrder: undefined,
+        customerLastRx: undefined,
+        appliedVoucher: undefined,
+        loyaltyPointsRedeemed: 0,
+        pendingLoyaltyRedeem: null,
         // Reset transient state
         is_processing: false,
         order_id: null,
