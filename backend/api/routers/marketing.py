@@ -1321,3 +1321,120 @@ async def update_consent_text(
         upsert=True,
     )
     return {"message": "Consent text updated", "version": new_version}
+
+
+# ============================================================================
+# CRM-16 — Ad Performance (Google Ads + Meta Ads agency oversight dashboard)
+# ============================================================================
+
+# Roles allowed to view ad spend / ROAS data. SUPERADMIN auto-passes via
+# require_roles. This is finance-sensitive data (actual spend figures) so we
+# restrict to ADMIN and up -- store managers do not typically have agency access.
+_AD_PERF_ROLES = ("ADMIN",)
+
+
+class CampaignRowOut(BaseModel):
+    channel: str
+    campaign_id: str
+    campaign_name: str
+    spend: float
+    impressions: int
+    clicks: int
+    conversions: int
+    ctr: float
+    cpl: float
+    roas: float
+    currency: str
+    status: str
+
+
+class AdPerformanceOut(BaseModel):
+    rows: List[CampaignRowOut]
+    total_spend: float
+    total_impressions: int
+    total_clicks: int
+    total_conversions: int
+    blended_roas: float
+    total_cpl: float
+    google_configured: bool
+    meta_configured: bool
+    fetched_at: str
+    note: str
+
+
+@router.get(
+    "/ad-performance",
+    response_model=AdPerformanceOut,
+    summary="Agency ad performance (Google + Meta)",
+    description=(
+        "Returns merged Google Ads and Meta Ads campaign metrics for the given date "
+        "range. When credentials are not configured the response still returns 200 "
+        "with google_configured/meta_configured=false and an explanatory note -- "
+        "the frontend shows a 'connect your ad account' empty-state instead of an "
+        "error. Gated to SUPERADMIN/ADMIN."
+    ),
+)
+async def get_ad_performance(
+    from_date: str = Query(..., alias="from", description="Start date YYYY-MM-DD"),
+    to_date: str = Query(..., alias="to", description="End date YYYY-MM-DD"),
+    channel: Optional[str] = Query(
+        None, description="Filter to 'google' or 'meta'; omit for both"
+    ),
+    current_user: dict = Depends(require_roles("SUPERADMIN", *_AD_PERF_ROLES)),
+):
+    """
+    Merged Google + Meta ad performance. Fail-soft: missing creds -> 200 with
+    google_configured=false / meta_configured=false rather than 500/404.
+    """
+    # Lightweight date validation (avoids injection into the GAQL query)
+    import re as _re
+    _DATE_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if not _DATE_RE.match(from_date) or not _DATE_RE.match(to_date):
+        raise HTTPException(status_code=422, detail="Dates must be in YYYY-MM-DD format")
+    if channel and channel not in ("google", "meta"):
+        raise HTTPException(status_code=422, detail="channel must be 'google' or 'meta'")
+
+    db = _get_db()
+
+    try:
+        from ..services.ad_providers import fetch_ad_performance
+
+        result = await fetch_ad_performance(db, from_date, to_date, channel)
+    except Exception as exc:
+        logger.error("[MARKETING] ad-performance unexpected error (fail-soft): %s", exc)
+        # Return a safe empty envelope rather than 500
+        from ..services.ad_providers import AdPerformanceResult
+
+        result = AdPerformanceResult(
+            note=f"Service temporarily unavailable: {exc}",
+        )
+
+    return AdPerformanceOut(
+        rows=[
+            CampaignRowOut(
+                channel=r.channel,
+                campaign_id=r.campaign_id,
+                campaign_name=r.campaign_name,
+                spend=r.spend,
+                impressions=r.impressions,
+                clicks=r.clicks,
+                conversions=r.conversions,
+                ctr=r.ctr,
+                cpl=r.cpl,
+                roas=r.roas,
+                currency=r.currency,
+                status=r.status,
+            )
+            for r in result.rows
+        ],
+        total_spend=result.total_spend,
+        total_impressions=result.total_impressions,
+        total_clicks=result.total_clicks,
+        total_conversions=result.total_conversions,
+        blended_roas=result.blended_roas,
+        total_cpl=result.total_cpl,
+        google_configured=result.google_configured,
+        meta_configured=result.meta_configured,
+        fetched_at=result.fetched_at,
+        note=result.note,
+    )
