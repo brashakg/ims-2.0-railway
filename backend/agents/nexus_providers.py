@@ -438,6 +438,7 @@ def tally_build_day_voucher_xml(
         subtotal = float(o.get("subtotal", 0) or 0)
         cgst = float(o.get("cgst_amount", 0) or 0)
         sgst = float(o.get("sgst_amount", 0) or 0)
+        igst = float(o.get("igst_amount", 0) or 0)
         total = float(o.get("grand_total", 0) or 0)
 
         narration_block = (
@@ -448,6 +449,29 @@ def tally_build_day_voucher_xml(
             if store_code
             else ""
         )
+
+        # Build tax ledger entries. Inter-state sales carry igst_amount > 0 and
+        # zero cgst/sgst; intra-state the opposite. Emit the right ledger(s) so
+        # the voucher doesn't imbalance in Tally on import.
+        if igst > 0:
+            tax_entries = f"""
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>IGST Output</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>{igst:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>"""
+        else:
+            tax_entries = f"""
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>CGST Output</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>{cgst:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>SGST Output</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>{sgst:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>"""
 
         voucher = f"""
   <VOUCHER VCHTYPE="Sales" ACTION="Create">
@@ -464,17 +488,7 @@ def tally_build_day_voucher_xml(
       <LEDGERNAME>Sales A/c</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <AMOUNT>{subtotal:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>
-    <ALLLEDGERENTRIES.LIST>
-      <LEDGERNAME>CGST Output</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <AMOUNT>{cgst:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>
-    <ALLLEDGERENTRIES.LIST>
-      <LEDGERNAME>SGST Output</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <AMOUNT>{sgst:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>
+    </ALLLEDGERENTRIES.LIST>{tax_entries}
   </VOUCHER>"""
         vouchers.append(voucher)
 

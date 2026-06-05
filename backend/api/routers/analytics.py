@@ -19,6 +19,56 @@ from ..dependencies import (
     get_task_repository,
 )
 
+
+def _get_db():
+    """Fail-soft DB accessor for analytics joins (store/customer names)."""
+    try:
+        from database.connection import get_db
+        return get_db()
+    except Exception:
+        return None
+
+
+def _store_name_map(db) -> Dict[str, str]:
+    """Return {store_id: store_name} from the stores collection. Fail-soft."""
+    if db is None:
+        return {}
+    try:
+        return {
+            s["store_id"]: (s.get("store_name") or s.get("name") or s["store_id"])
+            for s in db.get_collection("stores").find({}, {"store_id": 1, "store_name": 1, "name": 1})
+            if s.get("store_id")
+        }
+    except Exception:
+        return {}
+
+
+def _customer_name_map(db, customer_ids) -> Dict[str, str]:
+    """Return {customer_id: full_name} for the given ids. Fail-soft."""
+    if db is None or not customer_ids:
+        return {}
+    try:
+        result = {}
+        for c in db.get_collection("customers").find(
+            {"customer_id": {"$in": list(customer_ids)}},
+            {"customer_id": 1, "name": 1, "full_name": 1, "first_name": 1, "last_name": 1},
+        ):
+            cid = c.get("customer_id")
+            if not cid:
+                continue
+            name = (
+                c.get("name")
+                or c.get("full_name")
+                or " ".join(
+                    filter(None, [c.get("first_name"), c.get("last_name")])
+                ).strip()
+                or cid
+            )
+            result[cid] = name
+        return result
+    except Exception:
+        return {}
+
 router = APIRouter(prefix="", tags=["Analytics"])
 
 # Roles allowed to read enterprise analytics / KPI dashboards. These surface
@@ -93,6 +143,11 @@ def _filter_orders_by_date(orders: list, start: datetime, end: datetime) -> list
     return result
 
 
+# Statuses that are never real revenue: DRAFT was never booked, CANCELLED was
+# reversed. Analytics must exclude them so dashboard KPIs match finance P&L.
+_ANALYTICS_EXCLUDED_STATUSES = ["CANCELLED", "DRAFT", "cancelled", "draft"]
+
+
 def _fetch_orders_in_window(
     order_repo,
     *,
@@ -109,6 +164,9 @@ def _fetch_orders_in_window(
     created_at, returned 0. This queries with real datetime objects and
     `limit=0` (no cap), then normalizes. `store_id=None` => all stores.
 
+    CANCELLED and DRAFT orders are excluded: they are not real revenue and
+    including them causes analytics KPIs to diverge from finance P&L.
+
     Falls back to the repo's find_many(filter) when the underlying collection
     isn't reachable (mock/stub mode) so it degrades the same as before.
     """
@@ -118,6 +176,8 @@ def _fetch_orders_in_window(
     flt: dict = {
         # Real datetime objects -- a BSON Date range that actually matches.
         "created_at": {"$gte": start, "$lte": end},
+        # Exclude CANCELLED/DRAFT so revenue counts match finance P&L.
+        "status": {"$nin": _ANALYTICS_EXCLUDED_STATUSES},
     }
     if store_id:
         flt["store_id"] = store_id
@@ -217,32 +277,20 @@ def calculate_metrics_for_period(
             "period_end": end_date.isoformat(),
         }
 
-    # Get all orders and filter in memory
-    all_orders = _norm_orders(order_repo.find_by_store(store_id)) if store_id else []
-
-    # Filter by date range
-    orders = [
-        o
-        for o in all_orders
-        if _safe_parse_date(o.get("created_at")) is not None
-        and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
-    ]
+    # Use date-bounded, uncapped Mongo query (not the 500-capped find_by_store)
+    # and exclude CANCELLED/DRAFT so revenue matches finance P&L.
+    prev_start = start_date - (end_date - start_date)
+    orders = _fetch_orders_in_window(
+        order_repo, store_id=store_id, start=start_date, end=end_date
+    )
+    prev_orders = _fetch_orders_in_window(
+        order_repo, store_id=store_id, start=prev_start, end=start_date
+    )
 
     # Calculate metrics
     total_revenue = sum(_safe_float(o.get("total_amount")) for o in orders)
     total_orders = len(orders)
     avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
-
-    # Calculate previous period for comparison
-    prev_start = start_date - (end_date - start_date)
-    prev_end = start_date
-
-    prev_orders = [
-        o
-        for o in all_orders
-        if _safe_parse_date(o.get("created_at")) is not None
-        and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
-    ]
 
     prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
 
@@ -502,6 +550,9 @@ async def get_store_performance(
 
         order_repo = get_order_repository()
         stock_repo = get_stock_repository()
+        db = _get_db()
+        # Real store names from the stores collection (not "Store store-001").
+        _sname_map = _store_name_map(db)
 
         # Date-bounded, all-store fetch pushed into Mongo (no 100/500 cap).
         # The previous find_many({}) capped at 100 arbitrary recent rows AND
@@ -522,7 +573,9 @@ async def get_store_performance(
             if store_id not in stores:
                 stores[store_id] = {
                     "store_id": store_id,
-                    "store_name": f"Store {store_id}",
+                    # Use real name from stores collection; fall back to store_id
+                    # rather than the synthetic "Store <id>" that was there before.
+                    "store_name": _sname_map.get(store_id, store_id),
                 }
 
         store_metrics = []
@@ -769,12 +822,11 @@ async def get_customer_insights(
             if to_date_str(c.get("created_at")) < start_date.date().isoformat()
         ]
 
-        # Top customers by spend
-        orders = (
-            _norm_orders(order_repo.find_by_store(store_id))
-            if order_repo is not None
-            else []
-        )
+        # Top customers by spend. Use date-bounded, uncapped fetch that also
+        # excludes CANCELLED/DRAFT so revenue is consistent with finance P&L.
+        orders = _fetch_orders_in_window(
+            order_repo, store_id=store_id, start=start_date, end=end_date
+        ) if order_repo is not None else []
 
         customer_spend = {}
         for order in orders:
@@ -787,11 +839,19 @@ async def get_customer_insights(
                 )
                 customer_spend[customer_id]["orders"] += 1
 
-        top_customers = sorted(
+        sorted_customers = sorted(
             [{"customer_id": cid, **data} for cid, data in customer_spend.items()],
             key=lambda x: x["spend"],
             reverse=True,
         )[:10]
+
+        # Join real customer names from DB (avoids "Unknown" on the dashboard).
+        db = _get_db()
+        _cname_map = _customer_name_map(db, [c["customer_id"] for c in sorted_customers])
+        top_customers = [
+            {**c, "customer_name": _cname_map.get(c["customer_id"], c["customer_id"])}
+            for c in sorted_customers
+        ]
 
         return {
             "period": period,

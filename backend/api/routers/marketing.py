@@ -867,18 +867,38 @@ async def submit_nps_response(
         },
     )
 
-    # If detractor (score <= 6), create follow-up task for manager
+    # If detractor (score <= 6), create follow-up task for manager.
+    # Uses the field names expected by the follow_ups router (_to_response):
+    # scheduled_date (not due_date) and customer_phone (required by the schema).
     if req.score <= 6:
         nps = coll.find_one({"nps_id": req.nps_id}) or {}
+        # Try to resolve the customer's phone from the customers collection so
+        # the follow-up appears correctly in the follow-ups dashboard.
+        _customer = (
+            db.get_collection("customers").find_one(
+                {"customer_id": nps.get("customer_id")},
+                {"mobile": 1, "phone": 1, "mobile_number": 1},
+            )
+            if nps.get("customer_id")
+            else {}
+        ) or {}
+        _phone = (
+            _customer.get("mobile")
+            or _customer.get("phone")
+            or _customer.get("mobile_number")
+            or ""
+        )
         db.get_collection("follow_ups").insert_one(
             {
                 "follow_up_id": f"FU-{uuid.uuid4().hex[:8].upper()}",
                 "store_id": nps.get("store_id", ""),
                 "customer_id": nps.get("customer_id", ""),
                 "customer_name": nps.get("customer_name", ""),
+                "customer_phone": _phone,
                 "type": "general",
-                "reason": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
-                "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
+                "notes": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
+                # scheduled_date is the field the follow_ups router sorts/filters on
+                "scheduled_date": (datetime.now() + timedelta(days=1)).date().isoformat(),
                 "status": "pending",
                 "created_at": datetime.now().isoformat(),
             }
