@@ -428,6 +428,10 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/finance/summary-month', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/finance/tally/sales-jv', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/finance/vendor-payments', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    # FIN-1: GST e-invoice (IRN generation). Narrower than the router-level finance
+    # gate (no AREA_MANAGER / STORE_MANAGER; matching the inline role check in
+    # the handler). DARK by default -- returns SIMULATED until owner enables.
+    {"method": 'POST', "path": '/api/v1/finance/einvoice/{order_id}', "allowed": ['ACCOUNTANT', 'ADMIN', 'SUPERADMIN']},
     # --- /api/v1/follow-ups ---
     {"method": 'POST', "path": '/api/v1/follow-ups', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/follow-ups/', "allowed": 'AUTHENTICATED'},
@@ -750,6 +754,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/orders/{order_id}/invoice', "allowed": 'AUTHENTICATED'},
     # POS-7: BOPIS ship-from-store transfer creation
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/bopis-transfer', "allowed": 'AUTHENTICATED'},
+    # POS-6: UPI QR code for an order (any authenticated POS user may request it)
+    {"method": 'GET', "path": '/api/v1/orders/{order_id}/upi-qr', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/items', "allowed": 'AUTHENTICATED'},
     {"method": 'DELETE', "path": '/api/v1/orders/{order_id}/items/{item_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/payments', "allowed": 'AUTHENTICATED'},
