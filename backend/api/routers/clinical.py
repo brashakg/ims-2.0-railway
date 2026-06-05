@@ -6,7 +6,7 @@ Eye test queue and clinical management endpoints with database persistence
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, date
 from html import escape as _html_escape
@@ -97,8 +97,7 @@ class QueueItemCreate(BaseModel):
     customer_id: Optional[str] = Field(None, alias="customerId")
     patient_id: Optional[str] = Field(None, alias="patientId")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ClinicalFindings(BaseModel):
@@ -143,8 +142,7 @@ class ClinicalFindings(BaseModel):
             raise ValueError("dominant_eye must be RIGHT or LEFT")
         return "RIGHT" if up in ("RIGHT", "R") else "LEFT"
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SoapDxCode(BaseModel):
@@ -271,8 +269,7 @@ class EyeTestData(BaseModel):
     # exactly as before; present -> stored under ``soap_note`` on the test doc.
     soap_note: Optional[SoapNote] = Field(None, alias="soapNote")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class StatusUpdate(BaseModel):

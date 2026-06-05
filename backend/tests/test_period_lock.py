@@ -8,16 +8,46 @@ far-future period so the shared test DB stays isolated.
 
 import os
 
+import pytest
+
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
+# Skip this integration test when MongoDB is not available (e.g. web CI containers).
+def _mongo_available() -> bool:
+    import socket
+    try:
+        socket.create_connection(("localhost", 27017), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+pytestmark = pytest.mark.skipif(
+    not _mongo_available(),
+    reason="MongoDB not available on localhost:27017"
+)
+
+
+def _db_available(client) -> bool:
+    """Return True only when the shared MongoDB is actually reachable."""
+    try:
+        from database.connection import get_db
+        db = get_db()
+        return bool(db and getattr(db, "is_connected", False))
+    except Exception:
+        return False
 
 def test_locked_period_blocks_expense_create(client, auth_headers):
+    if not _db_available(client):
+        pytest.skip("MongoDB not available in this environment")
+
     yr = 2098
     # Lock a unique far-future period (idempotent: 400 if a prior run locked it).
     lk = client.post(
         "/api/v1/finance/period-lock", params={"month": 3, "year": yr}, headers=auth_headers
     )
+    if lk.status_code == 503:
+        pytest.skip("MongoDB not available")
     assert lk.status_code in (200, 400), lk.text
 
     # Expense dated in the locked month -> 423 Locked.

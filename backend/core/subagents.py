@@ -133,7 +133,7 @@ class PaymentCollectionAgent(BaseAgent):
             if isinstance(created, str):
                 try:
                     created = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                except:
+                except (ValueError, AttributeError):
                     created = now
 
             days_old = (now - created).days

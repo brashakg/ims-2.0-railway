@@ -47,7 +47,7 @@ class VendorRepository(BaseRepository):
                 {"$inc": {"current_balance": change}}
             )
             return True
-        except:
+        except Exception:
             return False
 
 
@@ -93,7 +93,7 @@ class PurchaseOrderRepository(BaseRepository):
                 {"$push": {"items": item}}
             )
             return True
-        except:
+        except Exception:
             return False
 
 

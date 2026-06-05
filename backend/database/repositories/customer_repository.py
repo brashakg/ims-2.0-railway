@@ -70,7 +70,7 @@ class CustomerRepository(BaseRepository):
                 {"$push": {"patients": patient}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def find_patient(self, customer_id: str, patient_id: str) -> Optional[Dict]:
@@ -89,7 +89,7 @@ class CustomerRepository(BaseRepository):
                 {"$inc": {"loyalty_points": points}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def add_store_credit(self, customer_id: str, amount: float) -> bool:
@@ -99,7 +99,7 @@ class CustomerRepository(BaseRepository):
                 {"$inc": {"store_credit": amount}}
             )
             return True
-        except:
+        except Exception:
             return False
 
     # Sentinel: the collection had no atomic-guard support (minimal/mock coll),
@@ -158,5 +158,17 @@ class CustomerRepository(BaseRepository):
                 {"$inc": {"total_purchases": amount}}
             )
             return True
-        except:
+        except Exception:
             return False
+
+    def increment_loyalty_points(self, customer_id: str, delta: int) -> dict | None:
+        """Atomically add (or subtract) loyalty points. Returns updated doc or None."""
+        from bson import ObjectId
+        try:
+            return self.collection.find_one_and_update(
+                {"_id": ObjectId(customer_id)},
+                {"$inc": {"loyalty_points": delta}},
+                return_document=True,
+            )
+        except Exception:
+            return None
