@@ -419,3 +419,109 @@ async def attach_edited_image(
             ),
         )
     return {"image": _with_id(updated)}
+
+
+async def _fetch_image_bytes(url: str) -> bytes:
+    """Fetch the RAW image bytes from its stored url -- an http(s) URL (durable
+    storage / Shopify CDN) or a local server path. Raises on failure (the
+    auto-edit route fail-softs)."""
+    u = (url or "").strip()
+    if not u:
+        raise RuntimeError("image has no source url")
+    if u.startswith("http://") or u.startswith("https://"):
+        import httpx
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(u)
+        if resp.status_code != 200:
+            raise RuntimeError(f"could not fetch raw image ({resp.status_code})")
+        return resp.content
+    with open(u.lstrip("/"), "rb") as fh:  # local path, e.g. /uploads/...
+        return fh.read()
+
+
+@router.post("/{image_id}/auto-edit")
+async def auto_edit_image(
+    image_id: str,
+    current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
+) -> Dict:
+    """Auto-clean a RAW product photo via the configured DETERMINISTIC image
+    editor (background -> fixed backdrop, auto-crop, synthetic shadow; product
+    pixels preserved) and submit it for human review. The `council-implement`
+    step of the image-editing integration.
+
+    Slots into the existing queue: QUEUED/REJECTED -> IN_PROGRESS -> (edit) ->
+    attach_edited -> REVIEW. The human APPROVE gate is untouched.
+
+    SAFE BY DESIGN:
+      * Idempotent -- an APPROVED image is never re-edited (409); one already
+        EDITED + in REVIEW is returned as-is (no double-spend).
+      * Fail-soft -- no provider configured, or a provider/storage/fetch error,
+        KEEPS the RAW image and returns a clear status (HTTP 200, never a 500);
+        the work simply stays available for manual editing.
+      * Non-generative -- services/image_editor.py only does cut-out + static
+        backdrop + synthetic shadow; it cannot repaint the product.
+    """
+    repo = _require_repo()
+    img = repo.get_by_id(image_id)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    status = (img.get("status") or "").upper()
+    if status == "APPROVED":
+        raise HTTPException(
+            status_code=409, detail="Image is APPROVED -- it will not be re-edited."
+        )
+    if status == "REVIEW" and img.get("edited_url"):
+        return {
+            "auto_edit": "skipped",
+            "reason": "already edited and awaiting review",
+            "image": _with_id(img),
+        }
+
+    from ..services.image_editor import EditSpec, get_image_editor
+    from ..services.object_storage import get_object_storage
+
+    editor = get_image_editor()
+    if not editor.available():
+        return {
+            "auto_edit": "skipped",
+            "reason": (
+                "No image editor configured. Set IMAGE_EDIT_PROVIDER=photoroom + "
+                "PHOTOROOM_API_KEY (or install the self-host rembg provider)."
+            ),
+            "image": _with_id(img),
+        }
+
+    storage = get_object_storage()
+    user_id = current_user.get("user_id")
+    try:
+        # attach_edited requires IN_PROGRESS; move there only from a legal state.
+        if status in ("QUEUED", "REJECTED"):
+            repo.set_status(image_id, "IN_PROGRESS", by=user_id)
+
+        raw = await _fetch_image_bytes(img.get("url"))
+        edited = await editor.edit(raw, EditSpec.from_env())
+        key = f"{img.get('product_id') or 'product'}/{image_id}.png"
+        edited_url = storage.put(key, edited, "image/png")
+
+        updated = repo.attach_edited(image_id, edited_url, by=user_id)
+        if updated is None:
+            return {
+                "auto_edit": "failed",
+                "reason": "could not attach edited asset (image not IN_PROGRESS)",
+                "edited_url": edited_url,
+                "image": _with_id(img),
+            }
+        return {
+            "auto_edit": "ok",
+            "provider": editor.name,
+            "storage": storage.name,
+            "image": _with_id(updated),
+        }
+    except Exception as e:  # noqa: BLE001 -- auto-edit must never break the queue
+        return {
+            "auto_edit": "failed",
+            "reason": str(e)[:300],
+            "image": _with_id(repo.get_by_id(image_id) or img),
+        }
