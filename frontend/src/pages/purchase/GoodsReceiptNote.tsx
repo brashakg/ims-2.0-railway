@@ -14,6 +14,7 @@ import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { GRNPrint } from '../../components/print/GRNPrint';
 
 interface GRNLineItem {
   po_item_id: string;
@@ -136,6 +137,8 @@ export function GoodsReceiptNote() {
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // Print state: which GRN is currently being previewed (null = no print modal).
+  const [printGrn, setPrintGrn] = useState<GRN | null>(null);
 
   const storeId = user?.activeStoreId || '';
 
@@ -334,7 +337,54 @@ export function GoodsReceiptNote() {
     ],
   ];
 
+  // Build the GRNPrint-compatible data shape from a history GRN record.
+  const buildGrnPrintData = (grn: GRN) => ({
+    grn_id: grn.id,
+    grn_number: grn.grn_number,
+    grn_date: grn.received_at,
+    po_number: grn.po_number,
+    vendor_id: '',
+    vendor_name: '',
+    vendor_address: '',
+    vendor_gstin: '',
+    items: grn.items.map((item) => ({
+      product_id: item.product_id,
+      product_name: item.product_name ?? item.product_id,
+      hsn_code: undefined,
+      ordered_qty: item.accepted_qty + item.rejected_qty,
+      received_qty: item.received_qty,
+      variance: item.received_qty - (item.accepted_qty + item.rejected_qty),
+      remarks: item.rejection_reason,
+    })),
+    quality_inspection:
+      grn.quality_status === 'passed'
+        ? ('accepted' as const)
+        : grn.quality_status === 'failed'
+          ? ('rejected' as const)
+          : ('partially_accepted' as const),
+    inspection_remarks: undefined,
+  });
+
+  // storeName is not available on the User JWT shape; use a static fallback
+  // until store-detail fetch is wired here.
+  const storeInfo = {
+    storeName: 'Better Vision Opticals',
+    address: '',
+    city: '',
+    state: '',
+    pincode: '',
+  };
+
   return (
+    <>
+      {/* GRN print modal — rendered when user clicks Print on a history row */}
+      {printGrn && (
+        <GRNPrint
+          grn={buildGrnPrintData(printGrn)}
+          store={storeInfo}
+          onClose={() => setPrintGrn(null)}
+        />
+      )}
     <div className="inv-body">
       {/* Header */}
       <div className="inv-head">
@@ -681,9 +731,19 @@ export function GoodsReceiptNote() {
                     <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{grn.grn_number}</p>
                     <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {grn.po_number}</p>
                   </div>
-                  <span className={clsx('chip', qualityChip(grn.quality_status))}>
-                    {grn.quality_status.charAt(0).toUpperCase() + grn.quality_status.slice(1)}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={clsx('chip', qualityChip(grn.quality_status))}>
+                      {grn.quality_status.charAt(0).toUpperCase() + grn.quality_status.slice(1)}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={() => setPrintGrn(grn)}
+                      title="Print GRN"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grn-totals" style={{ border: '1px solid var(--line)', borderRadius: 'var(--r-md)' }}>
@@ -775,6 +835,7 @@ export function GoodsReceiptNote() {
         </div>
       )}
     </div>
+    </>
   );
 }
 

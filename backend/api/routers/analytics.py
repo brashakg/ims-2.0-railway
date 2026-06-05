@@ -202,10 +202,27 @@ def _safe_float(val: Any) -> float:
         return 0.0
 
 
+# Statuses that do NOT represent real revenue.  CANCELLED orders were never
+# fulfilled; DRAFT orders were never confirmed.  Including them inflated the
+# dashboard revenue/order-count metrics (RPT-1).
+_EXCLUDED_ORDER_STATUSES = frozenset({"CANCELLED", "DRAFT"})
+
+
+def _is_billable(order: dict) -> bool:
+    """Return True when the order represents real revenue (not cancelled/draft)."""
+    status = str(order.get("status") or "").upper()
+    return status not in _EXCLUDED_ORDER_STATUSES
+
+
 def calculate_metrics_for_period(
     order_repo, store_id: Optional[str], start_date: datetime, end_date: datetime
 ) -> Dict[str, Any]:
-    """Calculate all metrics for a given period"""
+    """Calculate all metrics for a given period.
+
+    [RPT-1] Excludes CANCELLED and DRAFT orders from revenue and order counts.
+    [RPT-2] Uses _fetch_orders_in_window (Mongo-side datetime filter, limit=0)
+            instead of find_by_store (in-memory string filter, 500-row cap).
+    """
 
     if order_repo is None:
         return {
@@ -217,32 +234,26 @@ def calculate_metrics_for_period(
             "period_end": end_date.isoformat(),
         }
 
-    # Get all orders and filter in memory
-    all_orders = _norm_orders(order_repo.find_by_store(store_id)) if store_id else []
-
-    # Filter by date range
+    # Date-bounded, uncapped fetch pushed into Mongo (replaces find_by_store
+    # which string-filtered a BSON Date and hard-capped at 500 rows).
+    prev_start = start_date - (end_date - start_date)
     orders = [
-        o
-        for o in all_orders
-        if _safe_parse_date(o.get("created_at")) is not None
-        and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
+        o for o in _fetch_orders_in_window(
+            order_repo, store_id=store_id, start=start_date, end=end_date
+        )
+        if _is_billable(o)
+    ]
+    prev_orders = [
+        o for o in _fetch_orders_in_window(
+            order_repo, store_id=store_id, start=prev_start, end=start_date
+        )
+        if _is_billable(o)
     ]
 
     # Calculate metrics
     total_revenue = sum(_safe_float(o.get("total_amount")) for o in orders)
     total_orders = len(orders)
     avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
-
-    # Calculate previous period for comparison
-    prev_start = start_date - (end_date - start_date)
-    prev_end = start_date
-
-    prev_orders = [
-        o
-        for o in all_orders
-        if _safe_parse_date(o.get("created_at")) is not None
-        and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
-    ]
 
     prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
 
@@ -851,12 +862,19 @@ async def get_enterprise_kpis(
         # (never matched) and truncated at 500 orders.
         prev_start = start_date - (end_date - start_date)
         prev_end = start_date
-        current_orders = _fetch_orders_in_window(
-            order_repo, store_id=store_id, start=start_date, end=end_date
-        )
-        prev_orders = _fetch_orders_in_window(
-            order_repo, store_id=store_id, start=prev_start, end=prev_end
-        )
+        # [RPT-1] Exclude CANCELLED and DRAFT so only real fulfilled revenue counts.
+        current_orders = [
+            o for o in _fetch_orders_in_window(
+                order_repo, store_id=store_id, start=start_date, end=end_date
+            )
+            if _is_billable(o)
+        ]
+        prev_orders = [
+            o for o in _fetch_orders_in_window(
+                order_repo, store_id=store_id, start=prev_start, end=prev_end
+            )
+            if _is_billable(o)
+        ]
 
         total_revenue = sum(_safe_float(o.get("total_amount")) for o in current_orders)
         total_orders_count = len(current_orders)
@@ -881,12 +899,13 @@ async def get_enterprise_kpis(
             (gross_profit / total_revenue * 100) if total_revenue > 0 else 0
         )
 
-        # Net margin (assuming 10% operating expenses as placeholder)
-        operating_expenses = total_revenue * 0.10
-        net_profit = gross_profit - operating_expenses
-        net_margin_percent = (
-            (net_profit / total_revenue * 100) if total_revenue > 0 else 0
-        )
+        # [RPT-3] Net margin: opex is not yet tracked per-store in the DB.
+        # Return None rather than fabricating a 10% placeholder -- the
+        # frontend renders "—" for null, which is honest.  gross_margin is
+        # still computed from real COGS on the line items; net_margin is null
+        # until opex is wired (see the FIND-7 / dual-mode budgeting backlog).
+        net_profit = None
+        net_margin_percent = None
 
         # ===== TRANSACTION METRICS =====
         avg_transaction_value = (
@@ -960,9 +979,12 @@ async def get_enterprise_kpis(
         # Date-bounded to the SELECTED period window (all stores, no cap).
         # Previously this pulled find_many({}) capped at 100 rows and only
         # tallied same-day orders regardless of the chosen period.
-        all_store_orders = _fetch_orders_in_window(
-            order_repo, store_id=None, start=start_date, end=end_date
-        )
+        all_store_orders = [
+            o for o in _fetch_orders_in_window(
+                order_repo, store_id=None, start=start_date, end=end_date
+            )
+            if _is_billable(o)
+        ]
         store_comparison = []
         stores_by_id = {}
 
@@ -994,12 +1016,19 @@ async def get_enterprise_kpis(
                 "avg_transaction_value": float(avg_transaction_value),
                 "total_orders": total_orders_count,
             },
-            # Margin metrics
+            # Margin metrics.
+            # gross_margin is computed from real line-item COGS.
+            # net_margin is null (not a fabricated constant) because per-store
+            # opex is not yet recorded in the DB -- [RPT-3].
             "margins": {
                 "gross_margin_percent": float(gross_margin_percent),
-                "net_margin_percent": float(net_margin_percent),
+                "net_margin_percent": net_margin_percent,
                 "gross_profit": float(gross_profit),
-                "net_profit": float(net_profit),
+                "net_profit": net_profit,
+                "net_margin_note": (
+                    "Operating expenses not yet tracked per store; "
+                    "net margin is unavailable until opex is wired."
+                ),
             },
             # Customer metrics
             "customers": {
