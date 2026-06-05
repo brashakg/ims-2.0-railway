@@ -18,15 +18,15 @@ export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) 
     <div className="space-y-6">
       {/* Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Total Payable</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(totalDue)}</p>
         </div>
-        <div className="bg-white border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Vendors with Dues</p>
           <p className="text-2xl font-bold text-amber-600 mt-1">{vendorPayments.length}</p>
         </div>
-        <div className="bg-white border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Overdue</p>
           <p className="text-2xl font-bold text-red-600 mt-1">{overdueCount}</p>
         </div>
@@ -45,7 +45,7 @@ export default function VendorPayments({ vendorPayments }: VendorPaymentsProps) 
               <th className="px-4 py-3 text-right">Overdue</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-700">
+          <tbody className="divide-y divide-gray-100">
             {vendorPayments.map((v) => (
               <tr key={v.id} className="text-gray-900">
                 <td className="px-4 py-3 font-medium">{v.vendor_name}</td>

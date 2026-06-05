@@ -41,8 +41,8 @@ export default function PeriodManagement({
   return (
     <div className="space-y-6">
       {/* Period Status */}
-      <div className="bg-white border border-slate-700 rounded-lg overflow-hidden">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold flex items-center gap-2">
             <Calendar className="w-5 h-5 text-cyan-600" />
             Financial Period Management
@@ -50,12 +50,12 @@ export default function PeriodManagement({
         </div>
         <div className="p-6 space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-slate-50 p-4 rounded border border-slate-700">
+            <div className="bg-slate-50 p-4 rounded border border-gray-200">
               <p className="text-slate-600 text-sm">Current Period</p>
               <p className="text-gray-900 text-lg font-semibold mt-2">{periodLabel(dateFrom, dateTo)}</p>
               <p className="text-xs text-slate-500 mt-1">Financial Year: {fyLabel(dateTo)}</p>
             </div>
-            <div className="bg-slate-50 p-4 rounded border border-slate-700">
+            <div className="bg-slate-50 p-4 rounded border border-gray-200">
               <p className="text-slate-600 text-sm">Period Status</p>
               <div className="flex items-center gap-2 mt-2">
                 {periodLocked ? (
@@ -74,11 +74,11 @@ export default function PeriodManagement({
           </div>
 
           {/* Lock/Unlock Actions */}
-          <div className="flex gap-3 pt-4 border-t border-slate-700">
+          <div className="flex gap-3 pt-4 border-t border-gray-200">
             {!periodLocked ? (
               <button
                 onClick={onLockPeriod}
-                className="flex items-center gap-2 px-4 py-2 bg-red-50 hover:bg-red-800 text-red-100 rounded border border-red-700 transition-colors font-medium text-sm"
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded border border-red-700 transition-colors font-medium text-sm"
               >
                 <Lock className="w-4 h-4" />
                 Lock Period
@@ -86,7 +86,7 @@ export default function PeriodManagement({
             ) : (
               <button
                 onClick={onUnlockPeriod}
-                className="flex items-center gap-2 px-4 py-2 bg-green-50 hover:bg-green-800 text-green-100 rounded border border-green-700 transition-colors font-medium text-sm"
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded border border-green-700 transition-colors font-medium text-sm"
               >
                 <Unlock className="w-4 h-4" />
                 Unlock Period

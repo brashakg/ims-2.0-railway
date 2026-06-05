@@ -14,24 +14,24 @@ export default function CashFlowPanel({ cashFlow }: CashFlowPanelProps) {
     <div className="space-y-6">
       {/* Cash Flow Summary */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-emerald-900 to-emerald-800 border border-emerald-700 rounded-lg p-6 text-gray-900">
-          <p className="text-emerald-200 text-sm font-medium">Current Cash Balance</p>
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-6 text-gray-900">
+          <p className="text-emerald-700 text-sm font-medium">Current Cash Balance</p>
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(cashFlow[cashFlow.length - 1]?.closing_balance || 0)}
           </p>
           <p className="text-xs text-emerald-700 mt-2">Latest month closing</p>
         </div>
 
-        <div className="bg-gradient-to-br from-green-900 to-green-800 border border-green-700 rounded-lg p-6 text-gray-900">
-          <p className="text-green-200 text-sm font-medium">Total Cash Inflows</p>
+        <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-gray-900">
+          <p className="text-green-700 text-sm font-medium">Total Cash Inflows</p>
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(cashFlow.reduce((sum, cf) => sum + cf.cash_inflows, 0))}
           </p>
           <p className="text-xs text-green-700 mt-2">3-month period</p>
         </div>
 
-        <div className="bg-gradient-to-br from-red-900 to-red-800 border border-red-700 rounded-lg p-6 text-gray-900">
-          <p className="text-red-200 text-sm font-medium">Total Cash Outflows</p>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-gray-900">
+          <p className="text-red-700 text-sm font-medium">Total Cash Outflows</p>
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(cashFlow.reduce((sum, cf) => sum + cf.cash_outflows, 0))}
           </p>
@@ -40,13 +40,13 @@ export default function CashFlowPanel({ cashFlow }: CashFlowPanelProps) {
       </div>
 
       {/* Cash Flow Trend */}
-      <div className="bg-white border border-slate-700 rounded-lg overflow-hidden">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Cash Flow Analysis</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-slate-700">
-            <thead className="bg-slate-50 border-b border-slate-700">
+            <thead className="bg-slate-50 border-b border-gray-200">
               <tr>
                 <th className="px-6 py-3 text-left text-slate-600">Period</th>
                 <th className="px-6 py-3 text-right text-slate-600">Opening Balance</th>

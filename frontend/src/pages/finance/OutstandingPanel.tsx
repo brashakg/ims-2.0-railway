@@ -16,16 +16,16 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
     <div className="space-y-6">
       {/* Outstanding Summary */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-red-900 to-red-800 border border-red-700 rounded-lg p-6 text-gray-900">
-          <p className="text-red-200 text-sm font-medium">Total Outstanding</p>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-gray-900">
+          <p className="text-red-700 text-sm font-medium">Total Outstanding</p>
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(outstanding.reduce((sum, r) => sum + r.amount, 0))}
           </p>
           <p className="text-xs text-red-700 mt-2">{outstanding.length} customers</p>
         </div>
 
-        <div className="bg-gradient-to-br from-orange-900 to-orange-800 border border-orange-700 rounded-lg p-6 text-gray-900">
-          <p className="text-orange-200 text-sm font-medium">Overdue Amount</p>
+        <div className="bg-orange-50 border border-orange-200 rounded-lg p-6 text-gray-900">
+          <p className="text-orange-700 text-sm font-medium">Overdue Amount</p>
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(
               outstanding
@@ -38,8 +38,8 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
           </p>
         </div>
 
-        <div className="bg-gradient-to-br from-green-900 to-green-800 border border-green-700 rounded-lg p-6 text-gray-900">
-          <p className="text-green-200 text-sm font-medium">With GST</p>
+        <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-gray-900">
+          <p className="text-green-700 text-sm font-medium">With GST</p>
           <p className="text-2xl font-bold mt-2">
             {formatCurrency(outstanding.reduce((sum, r) => sum + r.amount + r.gst_amount, 0))}
           </p>
@@ -48,13 +48,13 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
       </div>
 
       {/* Receivables Table */}
-      <div className="bg-white border border-slate-700 rounded-lg overflow-hidden">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Outstanding Receivables</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-slate-700">
-            <thead className="bg-slate-50 border-b border-slate-700">
+            <thead className="bg-slate-50 border-b border-gray-200">
               <tr>
                 <th className="px-6 py-3 text-left text-slate-600">Customer</th>
                 <th className="px-6 py-3 text-right text-slate-600">Amount</th>
@@ -96,13 +96,13 @@ export default function OutstandingPanel({ outstanding, vendorPayments }: Outsta
       </div>
 
       {/* Vendor Payments */}
-      <div className="bg-white border border-slate-700 rounded-lg overflow-hidden">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Vendor Payment Schedule</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-slate-700">
-            <thead className="bg-slate-50 border-b border-slate-700">
+            <thead className="bg-slate-50 border-b border-gray-200">
               <tr>
                 <th className="px-6 py-3 text-left text-slate-600">Vendor</th>
                 <th className="px-6 py-3 text-right text-slate-600">Amount Due</th>
