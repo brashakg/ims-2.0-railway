@@ -259,9 +259,14 @@
   .chart-row, .dayend { grid-template-columns: 1fr !important; }
   .bars { grid-template-columns: 30px 1fr !important; font-size: 11px; }
 
-  /* SETUP — nav / content / inspector stack */
+  /* SETUP — nav / content stack on phones. The real grid container is
+     `.setup-grid` (240px 1fr); `.s-body` was a stale selector that matched
+     nothing here, so the two columns never collapsed and the detail panel was
+     crushed into a sliver. Collapse to one column: nav on top (scrolls),
+     detail full-width below. */
+  .setup-grid { grid-template-columns: 1fr !important; min-height: 0 !important; }
   .s-body { grid-template-columns: 1fr !important; height: auto !important; }
-  .s-nav { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; max-height: 200px; }
+  .s-nav { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; max-height: 260px; }
   .s-row { grid-template-columns: 1fr !important; gap: 6px !important; }
 
   /* PRINT — paper preview centers, options collapse */
@@ -296,100 +301,4 @@
   .pos-line, .t-item { min-height: 56px; }
 }
 
-/* ─────────────────── Landscape Mobile Layout (max-height: 480px) ─────────────────── */
-@media (max-height: 480px) {
-  /* Reduce Topbar height to save space */
-  .topbar {
-    height: 38px !important;
-    gap: 4px !important;
-    padding: 0 6px !important;
-  }
-  .topbar .crumbs {
-    font-size: 11px !important;
-  }
-  .topbar .btn.sm {
-    height: 28px !important;
-    padding: 0 8px !important;
-    font-size: 11px !important;
-  }
 
-  /* Compress Rail (bottom tab bar) in mobile landscape */
-  .rail {
-    height: 44px !important;
-    padding: 0 2px !important;
-  }
-  .rail .rail-item {
-    height: 36px !important;
-    border-radius: 4px !important;
-    gap: 0px !important;
-  }
-  .rail .rail-item::after {
-    display: none !important; /* Hide labels on short height screen to save room */
-  }
-  .rail .rail-item svg {
-    width: 16px !important;
-    height: 16px !important;
-  }
-
-  /* Adjust App layout to new topbar & rail heights */
-  .t-body {
-    height: calc(100dvh - 38px - 44px) !important;
-  }
-
-  /* Reduce general layout padding and sizes */
-  body {
-    font-size: 12px !important;
-  }
-  h1 {
-    font-size: 20px !important;
-    line-height: 1.2 !important;
-  }
-  .inv-head {
-    padding: 12px 14px 8px !important;
-  }
-  .card-body, .card {
-    padding: 8px !important;
-  }
-  .tbl thead th, .tbl tbody td {
-    padding: 4px 6px !important;
-  }
-
-  /* Modals/Bottom Sheets optimize for landscape screen height */
-  .modal {
-    max-height: 100vh !important;
-    max-height: 100dvh !important;
-    border-radius: 0 !important; /* Fullscreen in landscape */
-  }
-  .modal-head {
-    padding: 8px 12px 6px !important;
-  }
-  .modal-head h2 {
-    font-size: 16px !important;
-  }
-  .modal-form {
-    padding: 8px 12px !important;
-  }
-  .modal-preview {
-    padding: 8px 12px !important;
-  }
-  .modal-foot {
-    padding: 6px 12px !important;
-  }
-  .modal-foot .btn {
-    height: 32px !important;
-  }
-
-  /* Split-panel view optimization */
-  .t-list {
-    padding: 8px 10px 44px !important;
-  }
-  .ladder {
-    padding: 8px 10px !important;
-  }
-  .ladder-step {
-    padding: 4px 0 !important;
-  }
-  .sop-box {
-    padding: 6px 8px !important;
-  }
-}

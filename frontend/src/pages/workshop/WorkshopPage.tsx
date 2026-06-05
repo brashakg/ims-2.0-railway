@@ -596,6 +596,7 @@ const loadJobs = async () => {
               value={statusFilter}
               onChange={e => setStatusFilter(e.target.value as typeof statusFilter)}
               className="input-field w-auto"
+              title="Filter by status"
             >
               <option value="ACTIVE">Active Jobs</option>
               <option value="ALL">All Status</option>
@@ -607,6 +608,7 @@ const loadJobs = async () => {
               value={priorityFilter}
               onChange={e => setPriorityFilter(e.target.value as typeof priorityFilter)}
               className="input-field w-auto"
+              title="Filter by priority"
             >
               <option value="ALL">All Priority</option>
               <option value="URGENT">Urgent</option>
@@ -1113,7 +1115,8 @@ const loadJobs = async () => {
                     <label className="text-xs text-gray-500 block mb-1">Expected Delivery Date</label>
                     <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
-                      className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm" />
+                      className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm"
+                      title="Expected Delivery Date" />
                   </div>
 
                   <div>
@@ -1389,6 +1392,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
 
   // Reset local form state when the user picks a different job
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setVendorId(j.vendor_id || '');
     setVendorOrderId(j.vendor_order_id || '');
     setTrackingUrl(j.vendor_tracking_url || '');
@@ -1490,6 +1494,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
             onChange={(e) => setVendorId(e.target.value)}
             disabled={loadingVendors}
             className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded bg-white"
+            title="Lens lab vendor"
           >
             <option value="">— Select vendor —</option>
             {vendors.map((v) => (
@@ -1550,6 +1555,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
               value={statusValue}
               onChange={(e) => setStatusValue(e.target.value)}
               className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded"
+              title="Vendor status"
             >
               <option value="">— Status —</option>
               {VENDOR_STATUS_OPTIONS.map((s) => (
