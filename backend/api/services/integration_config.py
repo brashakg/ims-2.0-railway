@@ -111,3 +111,24 @@ def get_anthropic_config() -> Dict[str, Any]:
     if api_key:
         return {"api_key": api_key, "model": model}
     return {}
+
+
+def get_whatsapp_config() -> Dict[str, Any]:
+    """Return inbound-WhatsApp (Meta WABA) config.
+
+    DB key  : type="meta_whatsapp" -> config.verify_token, app_secret,
+              phone_number_id, access_token, default_store_id
+    Env vars: WABA_VERIFY_TOKEN, WABA_APP_SECRET, WABA_DEFAULT_STORE_ID
+    Read fresh per-request so a Save in the Settings -> Integrations hub takes
+    effect without a redeploy. Fail-soft (DB absent -> env-only).
+    """
+    cfg = _load_db_config("meta_whatsapp")
+    return {
+        "verify_token": cfg.get("verify_token") or os.getenv("WABA_VERIFY_TOKEN", ""),
+        "app_secret": cfg.get("app_secret") or os.getenv("WABA_APP_SECRET", ""),
+        "phone_number_id": cfg.get("phone_number_id")
+        or os.getenv("WABA_PHONE_NUMBER_ID", ""),
+        "access_token": cfg.get("access_token") or os.getenv("WABA_ACCESS_TOKEN", ""),
+        "default_store_id": cfg.get("default_store_id")
+        or os.getenv("WABA_DEFAULT_STORE_ID", "HQ"),
+    }

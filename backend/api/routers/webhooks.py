@@ -701,17 +701,22 @@ async def whatsapp_verify_challenge(
     if hub_mode != "subscribe":
         raise HTTPException(status_code=400, detail="invalid hub.mode")
 
-    if _WABA_VERIFY_TOKEN:
-        if hub_verify_token != _WABA_VERIFY_TOKEN:
+    # Read the verify token fresh from the Settings -> Integrations hub
+    # (type=meta_whatsapp) first, env fallback -- so a Save takes effect live.
+    from ..services.integration_config import get_whatsapp_config
+
+    _verify_token = get_whatsapp_config().get("verify_token", "")
+    if _verify_token:
+        if hub_verify_token != _verify_token:
             logger.warning(
                 "[WA_INBOUND] verify_token mismatch; expected=%s got=%s",
-                _WABA_VERIFY_TOKEN[:4] + "...",
+                _verify_token[:4] + "...",
                 str(hub_verify_token)[:4] + "...",
             )
             raise HTTPException(status_code=403, detail="forbidden")
     else:
         logger.info(
-            "[WA_INBOUND] WABA_VERIFY_TOKEN not set -- echoing challenge without token check"
+            "[WA_INBOUND] verify_token not set -- echoing challenge without token check"
         )
 
     from fastapi.responses import PlainTextResponse
@@ -738,10 +743,13 @@ async def receive_whatsapp_inbound(request: Request):
         or ""
     )
 
-    if _WABA_APP_SECRET:
+    from ..services.integration_config import get_whatsapp_config
+
+    _app_secret = get_whatsapp_config().get("app_secret", "")
+    if _app_secret:
         if not sig:
             raise HTTPException(status_code=401, detail="invalid signature")
-        if not _verify_waba_signature(raw_body, sig, _WABA_APP_SECRET):
+        if not _verify_waba_signature(raw_body, sig, _app_secret):
             logger.warning("[WA_INBOUND] bad X-Hub-Signature-256")
             raise HTTPException(status_code=401, detail="invalid signature")
     else:
