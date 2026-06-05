@@ -1623,7 +1623,7 @@
   gap: 10px;
 }
 @media (max-width: 1280px) { .fix-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 768px)  { .fix-grid { grid-template-columns: 1fr; } }
+@media (max-width: 768px), (max-height: 500px) and (orientation: landscape) { .fix-grid { grid-template-columns: 1fr; } }
 
 .fix-card {
   background: var(--surface);
@@ -2051,7 +2051,7 @@
   min-height: 0;
   background: var(--bg);
 }
-@media (max-width: 768px) {
+@media (max-width: 768px), (max-height: 500px) and (orientation: landscape) {
   .pos-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
 }
 
@@ -2074,7 +2074,7 @@
   min-height: 0;
 }
 .steps-rail .eyebrow { margin-bottom: 14px; display: block; }
-@media (max-width: 768px) {
+@media (max-width: 768px), (max-height: 500px) and (orientation: landscape) {
   /* On mobile, stepper + actions collapse to one compact horizontal scroller */
   .steps-rail {
     flex-direction: row;
@@ -2292,7 +2292,7 @@
 @media (max-width: 1024px) {
   .pos-cart-col { width: 280px; }
 }
-@media (max-width: 768px) {
+@media (max-width: 768px), (max-height: 500px) and (orientation: landscape) {
   .pos-cart-col { display: none; }
 }
 
@@ -2775,7 +2775,7 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 }
 
 /* ====== MOBILE BREAKPOINT (< 768px) ====== */
-@media (max-width: 767px) {
+@media (max-width: 767px), (max-height: 500px) and (orientation: landscape) {
   /* 1. Collapse the left rail column from the grid */
   .app-shell {
     --rail-width: 0px;
