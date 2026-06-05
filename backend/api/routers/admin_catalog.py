@@ -29,7 +29,8 @@ Conventions:
 import io
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from pydantic import ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
@@ -451,12 +452,43 @@ class LensAddonUpdate(BaseModel):
 
 
 class LensPricingCreate(BaseModel):
-    brandId: str
-    indexId: str
+    """INV-15: accept BOTH the legacy camelCase keys (brandId/indexId/basePrice)
+    that the exact-match pricing master was built on AND the snake_case keys
+    (brand_id/index_id/base_price) used by the newer range-based system.  The
+    validator normalises into the canonical camelCase storage shape so existing
+    DB docs are unchanged.  Callers should prefer snake_case going forward.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    brandId: Optional[str] = Field(None, alias="brandId")
+    brand_id: Optional[str] = Field(None, alias="brand_id")
+    indexId: Optional[str] = Field(None, alias="indexId")
+    index_id: Optional[str] = Field(None, alias="index_id")
     category: str = Field(
         ..., description="Lens category, e.g. SINGLE_VISION, BIFOCAL, PROGRESSIVE"
     )
-    basePrice: float = Field(..., ge=0)
+    basePrice: Optional[float] = Field(None, ge=0, alias="basePrice")
+    base_price: Optional[float] = Field(None, ge=0, alias="base_price")
+
+    @model_validator(mode="after")
+    def _normalise_keys(self):
+        # Prefer snake_case input; camelCase is the legacy / backward-compat form.
+        effective_brand = self.brand_id or self.brandId
+        effective_index = self.index_id or self.indexId
+        effective_price = self.base_price if self.base_price is not None else self.basePrice
+        if not effective_brand:
+            raise ValueError("brand_id (or brandId) is required")
+        if not effective_index:
+            raise ValueError("index_id (or indexId) is required")
+        if effective_price is None:
+            raise ValueError("base_price (or basePrice) is required")
+        # Write back into the camelCase fields so the existing handler code
+        # (and DB doc) stays unchanged.
+        self.brandId = effective_brand
+        self.indexId = effective_index
+        self.basePrice = float(effective_price)
+        return self
 
 
 # ---------------- Lens brands ----------------
@@ -624,7 +656,15 @@ async def upsert_lens_pricing(payload: LensPricingCreate):
         )
         fresh = _scrub(coll.find_one(key))
         return fresh or {}
-    body = payload.model_dump()
+    # Write only the canonical camelCase keys to the DB so existing docs stay
+    # consistent (the model now also carries snake_case aliases which must not
+    # be persisted as separate fields).
+    body = {
+        "brandId": payload.brandId,
+        "indexId": payload.indexId,
+        "category": payload.category,
+        "basePrice": payload.basePrice,
+    }
     body["pricing_id"] = _new_id()
     body["_id"] = body["pricing_id"]
     body["created_at"] = _now()
