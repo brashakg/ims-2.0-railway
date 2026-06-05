@@ -395,13 +395,100 @@ async def receive_msg91_delivery(request: Request):
 
 @router.post("/razorpay")
 async def receive_razorpay(request: Request):
-    """Razorpay webhook receiver. Signed via X-Razorpay-Signature."""
-    return await _ingest(
+    """Razorpay webhook receiver. Signed via X-Razorpay-Signature.
+
+    After the standard ingest pipeline (HMAC verify + inbox persist +
+    event dispatch), attempts a fail-soft UPI auto-reconcile for
+    payment.captured events: matches the payment to an IMS order by
+    order_number (carried in the UPI tn= note) and records the payment.
+    DARK when Razorpay creds are not configured in `integrations`.
+    A reconcile failure never affects the 200 response to Razorpay.
+    """
+    result = await _ingest(
         request,
         vendor="razorpay",
         verifier=webhook_verify.verify_razorpay,
         signature_header_name="X-Razorpay-Signature",
     )
+
+    # POS-6: UPI auto-reconcile on payment.captured.
+    # The payload was already parsed inside _ingest and persisted to the
+    # inbox.  Re-read the body here by going through the inbox row
+    # (we cannot re-read the request body after _ingest drained it).
+    # Instead, _ingest returns the payload via the inbox doc -- but to
+    # keep the pattern simple we rely on the event that was dispatched
+    # to NEXUS for full processing, and add a lightweight inline hook
+    # only for the simple "match by order_number + amount" case.
+    #
+    # We pass the parsed webhook payload via a background best-effort
+    # path.  Fail-soft: any error is caught + logged; never raises.
+    try:
+        _reconcile_razorpay_payment_bg(request)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[WEBHOOKS] razorpay reconcile hook skipped: %s", exc)
+
+    return result
+
+
+def _reconcile_razorpay_payment_bg(request: Request) -> None:
+    """Best-effort UPI reconcile for Razorpay payment.captured.
+
+    The payload has already been consumed by _ingest.  We cannot re-read
+    the raw request body, so we look up the most recent unprocessed inbox
+    row for razorpay (a reasonable proxy for the just-ingested event).
+    Fail-soft: any error is logged + swallowed.  DARK when creds absent.
+    """
+    try:
+        db = _get_db()
+        if db is None:
+            return
+        inbox = db.get_collection("webhook_inbox")
+        if inbox is None:
+            return
+        # Find the most recent razorpay inbox row that we just ingested.
+        doc = inbox.find_one(
+            {"vendor": "razorpay", "processed": False},
+            sort=[("received_at", -1)],
+        )
+        if not doc:
+            return
+        payload = doc.get("payload") or {}
+        event_type = str(payload.get("event") or "").lower()
+        if event_type not in ("payment.captured", "payment.authorized"):
+            return
+
+        payment = (payload.get("payload") or {}).get("payment") or {}
+        entity = payment.get("entity") or {}
+        if not entity:
+            return
+
+        # Razorpay carries the UPI tn= note under description / notes.order_ref.
+        notes = entity.get("notes") or {}
+        order_ref = (
+            notes.get("order_ref")
+            or notes.get("order_number")
+            or entity.get("description")
+            or ""
+        )
+        if not order_ref:
+            return
+
+        # Resolve the IMS order_id from the order_number.
+        orders_coll = db.get_collection("orders")
+        if orders_coll is None:
+            return
+        order = orders_coll.find_one({"order_number": order_ref})
+        if not order:
+            logger.debug(
+                "[WEBHOOKS] razorpay reconcile: no order for ref=%s", order_ref
+            )
+            return
+
+        from ..services.upi_qr import reconcile_upi_payment
+
+        reconcile_upi_payment(db, order.get("order_id") or "", entity)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WEBHOOKS] razorpay reconcile bg failed: %s", exc)
 
 
 @router.post("/shopify")

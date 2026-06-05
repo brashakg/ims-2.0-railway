@@ -754,6 +754,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/orders/{order_id}/invoice', "allowed": 'AUTHENTICATED'},
     # POS-7: BOPIS ship-from-store transfer creation
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/bopis-transfer', "allowed": 'AUTHENTICATED'},
+    # POS-6: UPI QR code for an order (any authenticated POS user may request it)
+    {"method": 'GET', "path": '/api/v1/orders/{order_id}/upi-qr', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/items', "allowed": 'AUTHENTICATED'},
     {"method": 'DELETE', "path": '/api/v1/orders/{order_id}/items/{item_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/payments', "allowed": 'AUTHENTICATED'},
