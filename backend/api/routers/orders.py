@@ -2265,7 +2265,9 @@ async def add_payment(
     if repo is not None:
         # POS-14: idempotency guard — look for an existing payment with this key
         # on the same order before recording another. Fail-soft.
-        idem_key = (idempotency_key or "").strip()
+        # isinstance guard: a direct (non-HTTP) call leaves the Header(...) default
+        # object in idempotency_key, which has no .strip(); treat it as absent.
+        idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
         if idem_key:
             try:
                 order_doc = repo.find_by_id(order_id)

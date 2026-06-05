@@ -632,7 +632,9 @@ async def create_expense(
     expense_id is returned without duplicating the financial record. Fail-soft.
     """
     # POS-14: idempotency guard -- look for an existing expense with this key.
-    idem_key = (idempotency_key or "").strip()
+    # isinstance guard: a direct (non-HTTP) call leaves the Header(...) default
+    # object in idempotency_key, which has no .strip(); treat it as absent.
+    idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
     if idem_key:
         try:
             expense_repo_chk = get_expense_repository()

@@ -883,7 +883,9 @@ async def create_return(
     through to the normal (non-idempotent) path.
     """
     # POS-14: idempotency guard -- look for an existing return with this key.
-    idem_key = (idempotency_key or "").strip()
+    # isinstance guard: when this endpoint is called directly (unit tests), the
+    # default is the FastAPI Header(...) object, not a str -- don't .strip() it.
+    idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
     if idem_key:
         try:
             coll = _returns_coll()
