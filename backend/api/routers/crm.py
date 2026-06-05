@@ -709,22 +709,17 @@ async def add_loyalty_points(
         if not repo:
             raise HTTPException(status_code=500, detail="Database connection failed")
 
-        customer = repo.find_by_id(customer_id)
-        if not customer:
+        if not repo.find_by_id(customer_id):
             raise HTTPException(status_code=404, detail="Customer not found")
 
-        # Update customer loyalty points
-        current_points = customer.get("loyalty_points", 0)
-        new_points = current_points + request.points
+        updated_customer = repo.increment_loyalty_points(customer_id, request.points)
+        if updated_customer is None:
+            raise HTTPException(status_code=500, detail="Failed to update loyalty points")
 
-        if repo.update(customer_id, {"loyalty_points": new_points}):
-            updated_customer = repo.find_by_id(customer_id)
-            return _calculate_loyalty_tier(
-                updated_customer.get("loyalty_points", 0),
-                updated_customer.get("created_at", ""),
-            )
-
-        raise HTTPException(status_code=500, detail="Failed to update loyalty points")
+        return _calculate_loyalty_tier(
+            updated_customer.get("loyalty_points", 0),
+            updated_customer.get("created_at", ""),
+        )
     except HTTPException:
         raise
     except Exception as e:

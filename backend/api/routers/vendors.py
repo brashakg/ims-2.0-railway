@@ -2094,6 +2094,407 @@ async def vendor_ledger(
 
 
 # ============================================================================
+# INV-13: VENDOR PERFORMANCE SCORING + PURCHASE-HISTORY ANALYTICS
+# ============================================================================
+# Score vendors on delivery timeliness and goods quality from GRN data, and
+# surface a purchase-history breakdown so buying decisions are data-driven
+# rather than WhatsApp-tracked.
+#
+# Performance score:
+#   on_time_rate    = GRNs accepted within PO expected_date / total GRNs
+#   acceptance_rate = total_accepted / total_received across GRNs
+#   overall_score   = simple weighted average (40 % timeliness + 60 % quality)
+#
+# All computations are fail-soft: a missing DB or collection returns honest
+# empty states.  No fabricated numbers (SYSTEM_INTENT).
+
+
+@router.get("/{vendor_id}/performance")
+async def vendor_performance(
+    vendor_id: str,
+    months: int = Query(
+        6,
+        ge=1,
+        le=24,
+        description="Number of rolling months to include in the score window.",
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return a performance score for the vendor over the last `months` months (INV-13).
+
+    Score components:
+      - acceptance_rate: fraction of received units accepted (quality signal).
+      - on_time_rate: fraction of GRN accepts that landed on or before the PO
+        expected_date (delivery punctuality signal).
+      - overall_score: 60 % acceptance + 40 % on_time (0-100 index).
+
+    When fewer than 3 GRNs exist in the window the score is flagged
+    ``insufficient_data: true`` so callers know the rating has low confidence.
+    Honest empty state: if the vendor has no GRN history an honest zero is
+    returned, not a fabricated average.
+    """
+    db = _get_db()
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
+
+    empty = {
+        "vendor_id": vendor_id,
+        "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+        "window_months": months,
+        "grns_evaluated": 0,
+        "acceptance_rate": None,
+        "on_time_rate": None,
+        "overall_score": None,
+        "insufficient_data": True,
+        "note": "No GRN data found for this vendor in the selected window.",
+    }
+    if db is None:
+        return empty
+
+    try:
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(days=months * 30)
+
+        grn_coll = db.get_collection("grns")
+        grns = list(
+            grn_coll.find(
+                {
+                    "vendor_id": vendor_id,
+                    "status": "ACCEPTED",
+                    "created_at": {"$gte": cutoff.isoformat()},
+                },
+                {"_id": 0, "grn_id": 1, "po_id": 1, "created_at": 1,
+                 "total_received": 1, "total_accepted": 1, "total_rejected": 1,
+                 "accepted_at": 1},
+            ).limit(500)
+        )
+
+        if not grns:
+            return empty
+
+        total_received = 0
+        total_accepted = 0
+        on_time_count = 0
+        grns_with_po_date = 0
+
+        po_coll = db.get_collection("purchase_orders")
+
+        for grn in grns:
+            recv = int(grn.get("total_received") or 0)
+            acc = int(grn.get("total_accepted") or 0)
+            total_received += recv
+            total_accepted += acc
+
+            # Punctuality: compare GRN accepted_at vs PO expected_date
+            po_id = grn.get("po_id")
+            if po_id:
+                try:
+                    po = po_coll.find_one({"po_id": po_id}, {"_id": 0, "expected_date": 1})
+                    if po and po.get("expected_date"):
+                        expected = str(po["expected_date"])[:10]
+                        accepted_at = str(grn.get("accepted_at") or grn.get("created_at") or "")[:10]
+                        if accepted_at and accepted_at <= expected:
+                            on_time_count += 1
+                        grns_with_po_date += 1
+                except Exception:
+                    pass
+
+        n = len(grns)
+        acceptance_rate = round(total_accepted / total_received, 4) if total_received > 0 else None
+        on_time_rate = round(on_time_count / grns_with_po_date, 4) if grns_with_po_date > 0 else None
+
+        if acceptance_rate is not None and on_time_rate is not None:
+            overall_score = round((acceptance_rate * 0.6 + on_time_rate * 0.4) * 100, 1)
+        elif acceptance_rate is not None:
+            overall_score = round(acceptance_rate * 100, 1)
+        else:
+            overall_score = None
+
+        return {
+            "vendor_id": vendor_id,
+            "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+            "window_months": months,
+            "grns_evaluated": n,
+            "total_received": total_received,
+            "total_accepted": total_accepted,
+            "total_rejected": total_received - total_accepted,
+            "acceptance_rate": acceptance_rate,
+            "on_time_rate": on_time_rate,
+            "on_time_grns": on_time_count,
+            "grns_with_po_date": grns_with_po_date,
+            "overall_score": overall_score,
+            "score_label": (
+                "Excellent" if (overall_score or 0) >= 90
+                else "Good" if (overall_score or 0) >= 75
+                else "Average" if (overall_score or 0) >= 50
+                else "Poor"
+            ) if overall_score is not None else None,
+            "insufficient_data": n < 3,
+        }
+
+    except Exception as exc:
+        logger.warning("[INV-13] vendor_performance failed for %s: %s", vendor_id, exc)
+        return empty
+
+
+@router.get("/{vendor_id}/purchase-history")
+async def vendor_purchase_history(
+    vendor_id: str,
+    months: int = Query(
+        12,
+        ge=1,
+        le=36,
+        description="Rolling-months window for the purchase-history report.",
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return purchase-history analytics for one vendor (INV-13).
+
+    Returns:
+      - monthly breakdown of PO value, received units, and accepted units.
+      - top-5 products ordered from this vendor by spend.
+      - summary totals for the window.
+
+    Honest empty state: no fabricated numbers; all fields are derived from real
+    PO + GRN data or explicitly null.
+    """
+    db = _get_db()
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
+
+    empty = {
+        "vendor_id": vendor_id,
+        "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+        "window_months": months,
+        "total_pos": 0,
+        "total_spend": 0.0,
+        "total_units_received": 0,
+        "monthly": [],
+        "top_products": [],
+    }
+    if db is None:
+        return empty
+
+    try:
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(days=months * 30)
+
+        po_coll = db.get_collection("purchase_orders")
+        grn_coll = db.get_collection("grns")
+
+        pos = list(
+            po_coll.find(
+                {
+                    "vendor_id": vendor_id,
+                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                    "created_at": {"$gte": cutoff.isoformat()},
+                },
+                {"_id": 0, "po_id": 1, "po_number": 1, "created_at": 1,
+                 "total_amount": 1, "items": 1, "status": 1},
+            ).sort("created_at", 1).limit(500)
+        )
+
+        grns = list(
+            grn_coll.find(
+                {
+                    "vendor_id": vendor_id,
+                    "status": "ACCEPTED",
+                    "created_at": {"$gte": cutoff.isoformat()},
+                },
+                {"_id": 0, "created_at": 1, "total_received": 1, "total_accepted": 1,
+                 "po_id": 1},
+            ).limit(1000)
+        )
+
+        # Monthly breakdown keyed by YYYY-MM
+        monthly: dict = {}
+        product_spend: dict = {}
+
+        for po in pos:
+            month = str(po.get("created_at") or "")[:7]
+            if not month:
+                continue
+            bucket = monthly.setdefault(month, {"month": month, "pos": 0, "spend": 0.0, "units_received": 0})
+            bucket["pos"] += 1
+            bucket["spend"] = round(bucket["spend"] + float(po.get("total_amount") or 0), 2)
+            # Accumulate per-product spend
+            for item in po.get("items") or []:
+                pid = item.get("product_id", "")
+                name = item.get("product_name", "") or item.get("name", "")
+                sku = item.get("sku", "")
+                spend = float(item.get("unit_price") or 0) * int(item.get("quantity") or 0)
+                if pid:
+                    if pid not in product_spend:
+                        product_spend[pid] = {"product_id": pid, "name": name, "sku": sku, "spend": 0.0, "units": 0}
+                    product_spend[pid]["spend"] = round(product_spend[pid]["spend"] + spend, 2)
+                    product_spend[pid]["units"] += int(item.get("quantity") or 0)
+
+        for grn in grns:
+            month = str(grn.get("created_at") or "")[:7]
+            if not month:
+                continue
+            bucket = monthly.setdefault(month, {"month": month, "pos": 0, "spend": 0.0, "units_received": 0})
+            bucket["units_received"] += int(grn.get("total_received") or 0)
+
+        monthly_list = sorted(monthly.values(), key=lambda x: x["month"])
+        top_products = sorted(product_spend.values(), key=lambda x: -x["spend"])[:5]
+
+        total_spend = sum(b["spend"] for b in monthly_list)
+        total_units = sum(b["units_received"] for b in monthly_list)
+
+        return {
+            "vendor_id": vendor_id,
+            "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+            "window_months": months,
+            "total_pos": len(pos),
+            "total_spend": round(total_spend, 2),
+            "total_units_received": total_units,
+            "monthly": monthly_list,
+            "top_products": top_products,
+        }
+
+    except Exception as exc:
+        logger.warning("[INV-13] vendor_purchase_history failed for %s: %s", vendor_id, exc)
+        return empty
+
+
+# ============================================================================
+# FIN-11: TDS threshold status + 26Q/27EQ quarterly export
+# ============================================================================
+
+
+@router.get("/tds/threshold-status")
+async def get_tds_threshold_status(
+    vendor_id: str = Query(..., description="Vendor ID to check TDS threshold for"),
+    section: str = Query(..., description="TDS section code e.g. 194C_OTHER"),
+    current_payment: float = Query(..., ge=0, description="Current payment amount (before TDS)"),
+    fy_start: Optional[str] = Query(None, description="Financial year start date (YYYY-MM-DD); defaults to current FY 1-Apr"),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
+):
+    """FIN-11: Check whether TDS applies on a vendor payment given cumulative
+    spend to that vendor in the current financial year.
+
+    Returns the threshold status including whether TDS must be deducted,
+    the taxable base (amount above the threshold), and the computed TDS.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Determine current FY start
+    now = datetime.utcnow()
+    if fy_start:
+        from ..services.ap_engine import parse_date as _pd
+        fy_start_dt = _pd(fy_start) or datetime(now.year if now.month >= 4 else now.year - 1, 4, 1)
+    else:
+        fy_start_dt = datetime(now.year if now.month >= 4 else now.year - 1, 4, 1)
+
+    # Sum all payments to this vendor in the current FY
+    try:
+        past_payments = list(db.get_collection("vendor_payments").find(
+            {
+                "vendor_id": vendor_id,
+                "payment_date": {"$gte": fy_start_dt.isoformat()},
+            },
+            {"amount": 1, "tds_amount": 1, "_id": 0},
+        ))
+    except Exception:
+        past_payments = []
+
+    cumulative_fy = sum(
+        float(p.get("amount") or 0) + float(p.get("tds_amount") or 0)
+        for p in past_payments
+    )
+
+    # Fetch admin-edited TDS rate overrides (fail-soft)
+    overrides = None
+    try:
+        cfg = db.get_collection("tds_rate_config").find_one({}, {"_id": 0})
+        if cfg:
+            overrides = cfg.get("rates")
+    except Exception:
+        pass
+
+    result = ap_engine.tds_threshold_status(
+        section=section,
+        cumulative_paid_fy=cumulative_fy,
+        current_payment=current_payment,
+        overrides=overrides,
+    )
+    result["vendor_id"] = vendor_id
+    result["fy_start"] = fy_start_dt.date().isoformat()
+    result["cumulative_fy_payments"] = round(cumulative_fy, 2)
+    return result
+
+
+@router.get("/tds/26q-export")
+async def export_26q(
+    fy: Optional[int] = Query(None, description="Financial year start (e.g. 2025 for FY 2025-26). Defaults to current FY."),
+    quarter: Optional[int] = Query(None, ge=1, le=4, description="Quarter (1-4). If omitted, returns all quarters of the FY."),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
+):
+    """FIN-11: Export TDS deduction data for quarterly 26Q (TDS on payments)
+    and 27EQ (TCS under 206C) returns.
+
+    Returns structured rows grouped by FY and quarter, plus a summary.
+    Accountant uses this to file the quarterly returns with the Income Tax dept.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    now = datetime.utcnow()
+    target_fy = fy if fy else (now.year if now.month >= 4 else now.year - 1)
+    fy_start = datetime(target_fy, 4, 1)
+    fy_end = datetime(target_fy + 1, 3, 31, 23, 59, 59)
+
+    try:
+        payments = list(db.get_collection("vendor_payments").find(
+            {
+                "payment_date": {
+                    "$gte": fy_start.isoformat(),
+                    "$lte": fy_end.isoformat(),
+                },
+                "tds_amount": {"$gt": 0},
+            },
+            {"_id": 0},
+        ))
+    except Exception:
+        payments = []
+
+    # Enrich with vendor name/PAN from the vendors collection (best-effort).
+    try:
+        vendor_ids = list({p.get("vendor_id") for p in payments if p.get("vendor_id")})
+        vendor_docs = list(db.get_collection("vendors").find(
+            {"vendor_id": {"$in": vendor_ids}},
+            {"vendor_id": 1, "name": 1, "pan": 1, "_id": 0},
+        ))
+        vendor_map = {v["vendor_id"]: v for v in vendor_docs}
+        for p in payments:
+            vdoc = vendor_map.get(p.get("vendor_id"), {})
+            p.setdefault("vendor_name", vdoc.get("name", ""))
+            p.setdefault("vendor_pan", vdoc.get("pan", ""))
+    except Exception:
+        pass
+
+    export = ap_engine.build_26q_export(payments)
+
+    if quarter:
+        fy_key = f"{target_fy}-{(target_fy + 1) % 100:02d}"
+        q_key = f"Q{quarter}"
+        return {
+            "fy": fy_key,
+            "quarter": q_key,
+            "form_26q": export["form_26q"].get(fy_key, {}).get(q_key, []),
+            "form_27eq": export["form_27eq"].get(fy_key, {}).get(q_key, []),
+            "summary": export["summary"],
+        }
+    return export
+
+
+# ============================================================================
 # Catch-all parametric routes — registered LAST so they do not shadow
 # specific paths above (`/purchase-orders`, `/grn`, `/ap-aging`, etc.).
 # FastAPI resolves routes in registration order.

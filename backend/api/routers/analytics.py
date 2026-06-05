@@ -18,6 +18,7 @@ from ..dependencies import (
     get_customer_repository,
     get_task_repository,
     validate_store_access,
+    get_store_repository,
 )
 
 router = APIRouter(prefix="", tags=["Analytics"])
@@ -528,6 +529,7 @@ async def get_store_performance(
 
         order_repo = get_order_repository()
         stock_repo = get_stock_repository()
+        store_repo = get_store_repository()
 
         # Date-bounded, all-store fetch pushed into Mongo (no 100/500 cap).
         # The previous find_many({}) capped at 100 arbitrary recent rows AND
@@ -540,6 +542,27 @@ async def get_store_performance(
             order_repo, store_id=None, start=prev_start, end=start_date
         )
 
+        # RPT-6: build a store_id -> real store_name lookup so the response
+        # never emits synthetic "Store store-001" labels.
+        store_name_cache: dict = {}
+        if store_repo is not None:
+            try:
+                all_stores = store_repo.find_many({}, limit=0)
+                for s in all_stores:
+                    sid = s.get("store_id") or s.get("_id") or s.get("id")
+                    sname = (
+                        s.get("name")
+                        or s.get("store_name")
+                        or s.get("display_name")
+                    )
+                    if sid and sname:
+                        store_name_cache[str(sid)] = sname
+            except Exception:
+                pass  # fail-soft; names fall back below
+
+        def _store_name(sid: str) -> str:
+            return store_name_cache.get(sid) or sid
+
         # Group by store (union of both windows so a store with only prior
         # sales still appears).
         stores = {}
@@ -548,7 +571,7 @@ async def get_store_performance(
             if store_id not in stores:
                 stores[store_id] = {
                     "store_id": store_id,
-                    "store_name": f"Store {store_id}",
+                    "store_name": _store_name(store_id),
                 }
 
         store_metrics = []
@@ -825,11 +848,46 @@ async def get_customer_insights(
                 )
                 customer_spend[customer_id]["orders"] += 1
 
-        top_customers = sorted(
+        top_customers_raw = sorted(
             [{"customer_id": cid, **data} for cid, data in customer_spend.items()],
             key=lambda x: x["spend"],
             reverse=True,
         )[:10]
+
+        # RPT-5: join customer name so top-customers never shows "Unknown".
+        # Build a set of IDs then do one find_many with an $in filter to avoid
+        # N individual round-trips. Fall back to "Unknown" only when the record
+        # genuinely can't be found (deleted customer, test data, etc.).
+        cid_set = [c["customer_id"] for c in top_customers_raw]
+        name_map: dict = {}
+        if customer_repo is not None and cid_set:
+            try:
+                cust_docs = customer_repo.find_many(
+                    {"customer_id": {"$in": cid_set}},
+                    limit=len(cid_set) + 5,
+                )
+                for doc in cust_docs:
+                    cid = doc.get("customer_id")
+                    raw_name = (
+                        doc.get("name")
+                        or doc.get("full_name")
+                        or (
+                            f"{doc.get('first_name', '')} {doc.get('last_name', '')}".strip()
+                            or None
+                        )
+                    )
+                    if cid and raw_name:
+                        name_map[cid] = raw_name
+            except Exception:
+                pass  # fail-soft; names default to customer_id
+
+        top_customers = [
+            {
+                **c,
+                "name": name_map.get(c["customer_id"]) or c["customer_id"],
+            }
+            for c in top_customers_raw
+        ]
 
         return {
             "period": period,

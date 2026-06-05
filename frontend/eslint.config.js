@@ -31,6 +31,7 @@ export default defineConfig([
       // These require significant refactoring; tracked as tech debt
       'react-hooks/immutability': 'warn',
       'react-hooks/purity': 'warn',
+      'react-hooks/refs': 'warn',
       'react-hooks/set-state-in-effect': 'warn',
       'react-hooks/static-components': 'warn',
       'react-hooks/preserve-manual-memoization': 'warn',

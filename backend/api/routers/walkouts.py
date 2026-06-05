@@ -31,7 +31,7 @@ import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import get_current_user
 from ..dependencies import (
@@ -224,8 +224,7 @@ class WalkoutResponse(BaseModel):
     # Phase 1 returns the full doc; downstream phases narrow this.
     # FastAPI will pass through any extra fields we didn't list.
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class UpdateWalkoutRequest(BaseModel):

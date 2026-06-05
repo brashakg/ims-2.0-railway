@@ -91,9 +91,10 @@ export function GSTInvoice({
   const isInterState = !!(storeState && customerState && storeState !== customerState);
 
   // Order-level discount distribution (proportional across line items).
-  const itemDiscountTotal = order.items.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0);
+  const safeItems = order.items ?? [];
+  const itemDiscountTotal = safeItems.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0);
   const orderLevelDiscount = Math.max(0, (order.totalDiscount ?? 0) - itemDiscountTotal);
-  const itemSubtotal = order.items.reduce((sum, item) => sum + item.finalPrice, 0);
+  const itemSubtotal = safeItems.reduce((sum, item) => sum + item.finalPrice, 0);
   const discountRatio = itemSubtotal > 0 && orderLevelDiscount > 0
     ? (itemSubtotal - orderLevelDiscount) / itemSubtotal
     : 1;
@@ -104,7 +105,7 @@ export function GSTInvoice({
   // GST from within it (calculateGST/calculateIGST already extract), so the
   // row total equals the price paid — NOT price + GST on top (which made the
   // invoice total Rs 1,046.57 on a Rs 999 sale).
-  const lineItems: InvoiceLineItem[] = order.items.map(item => {
+  const lineItems: InvoiceLineItem[] = safeItems.map(item => {
     const grossLine = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
     const hsnInfo = getHSNByCategory(category, true);
@@ -231,7 +232,7 @@ export function GSTInvoice({
   };
 
   const handleDownloadPDF = () => {
-    console.info('PDF download will be available with backend wkhtmltopdf integration');
+    window.print();
   };
 
   const amountWords = amountInWords(grandTotal);

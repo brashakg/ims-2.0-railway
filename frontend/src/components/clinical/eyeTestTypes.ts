@@ -2,7 +2,7 @@
 // IMS 2.0 - Eye Test Types & Constants
 // ============================================================================
 
-import { Eye, Glasses, Camera, FileText, Upload } from 'lucide-react';
+import { Eye, Glasses, Camera, FileText, Upload, Stethoscope } from 'lucide-react';
 
 // Types
 export interface PatientInfo {
@@ -125,10 +125,95 @@ export interface EyeTestData {
   // C6-B internal-only exam findings (IOP / diagnosis / colour vision / cover
   // test / dominant eye). Optional — blank for a refraction-only test.
   clinicalFindings: ClinicalFindingsData;
+  // CLI-11: structured SOAP exam note. Optional — blank for a refraction-only
+  // test. Submitted as soapNote to the backend; can also be saved/updated via
+  // the standalone POST /tests/{id}/soap-note endpoint.
+  soapNote: SoapNoteData;
   uploads: UploadedFile[];
 }
 
-export type TabId = 'lensometer' | 'slitlamp' | 'autoref' | 'subjective' | 'final' | 'uploads';
+// CLI-11: Structured SOAP exam note types.
+// Each section is a flat set of optional strings/booleans; Dx codes are a
+// separate list. All fields mirror the backend SoapNote Pydantic model
+// (camelCase aliases).
+
+export interface SoapDxCodeData {
+  code: string;
+  description: string;
+  system: string;  // "ICD-10" by default
+}
+
+export interface SoapNoteData {
+  // Subjective
+  chiefComplaint: string;
+  historyPresentIllness: string;
+  ocularHistory: string;
+  systemicHistory: string;
+  familyHistory: string;
+  medications: string;
+  allergies: string;
+  vduUsage: string;
+  // Objective
+  vaRightUnaided: string;
+  vaLeftUnaided: string;
+  vaRightAided: string;
+  vaLeftAided: string;
+  vaBinocular: string;
+  iopRight: string;
+  iopLeft: string;
+  colourVision: string;
+  coverTest: string;
+  dominantEye: '' | 'RIGHT' | 'LEFT';
+  pupils: string;
+  ocularMotility: string;
+  slitLampSummary: string;
+  fundusSummary: string;
+  // Assessment
+  assessment: string;
+  dxCodes: SoapDxCodeData[];
+  // Plan
+  plan: string;
+  planReferral: boolean;
+  planReferralTo: string;
+  planFollowUp: boolean;
+  planFollowUpWeeks: number | undefined;
+  patientInstructions: string;
+}
+
+export const createEmptySoapNote = (): SoapNoteData => ({
+  chiefComplaint: '',
+  historyPresentIllness: '',
+  ocularHistory: '',
+  systemicHistory: '',
+  familyHistory: '',
+  medications: '',
+  allergies: '',
+  vduUsage: '',
+  vaRightUnaided: '',
+  vaLeftUnaided: '',
+  vaRightAided: '',
+  vaLeftAided: '',
+  vaBinocular: '',
+  iopRight: '',
+  iopLeft: '',
+  colourVision: '',
+  coverTest: '',
+  dominantEye: '',
+  pupils: '',
+  ocularMotility: '',
+  slitLampSummary: '',
+  fundusSummary: '',
+  assessment: '',
+  dxCodes: [],
+  plan: '',
+  planReferral: false,
+  planReferralTo: '',
+  planFollowUp: false,
+  planFollowUpWeeks: undefined,
+  patientInstructions: '',
+});
+
+export type TabId = 'lensometer' | 'slitlamp' | 'autoref' | 'subjective' | 'final' | 'soap' | 'uploads';
 
 export const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'lensometer', label: 'Lensometer', icon: Glasses },
@@ -136,6 +221,8 @@ export const TABS: { id: TabId; label: string; icon: React.ComponentType<{ class
   { id: 'autoref', label: 'Auto-Ref', icon: Camera },
   { id: 'subjective', label: 'Subjective Rx', icon: Eye },
   { id: 'final', label: 'Final Rx', icon: FileText },
+  // CLI-11: SOAP exam note tab — structured EHR charting.
+  { id: 'soap', label: 'SOAP Note', icon: Stethoscope },
   { id: 'uploads', label: 'Uploads', icon: Upload },
 ];
 

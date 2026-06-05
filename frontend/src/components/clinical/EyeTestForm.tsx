@@ -2,7 +2,8 @@
 // IMS 2.0 - Eye Test Form Component
 // ============================================================================
 // Comprehensive eye examination form with multiple tabs:
-// Lensometer, Slit Lamp, Auto-Refractometer, Subjective Rx, Final Rx, Uploads
+// Lensometer, Slit Lamp, Auto-Refractometer, Subjective Rx, Final Rx,
+// SOAP Note (CLI-11 structured EHR), Uploads
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -30,6 +31,7 @@ import type {
   SubjectiveRxData,
   FinalRxData,
   ClinicalFindingsData,
+  SoapNoteData,
   UploadedFile,
   TabId,
 } from './eyeTestTypes';
@@ -39,6 +41,7 @@ import {
   createEmptyPowerReading,
   createEmptySlitLampEye,
   createEmptyClinicalFindings,
+  createEmptySoapNote,
 } from './eyeTestTypes';
 
 import { LensometerTab } from './LensometerTab';
@@ -47,6 +50,7 @@ import { AutoRefTab } from './AutoRefTab';
 import { SubjectiveRxTab } from './SubjectiveRxTab';
 import { FinalRxTab } from './FinalRxTab';
 import { UploadsTab } from './UploadsTab';
+import { SoapNoteForm } from './SoapNoteForm';
 
 // Re-export for backward compatibility
 export type { EyeTestData } from './eyeTestTypes';
@@ -102,6 +106,9 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
   const [clinicalFindings, setClinicalFindings] =
     useState<ClinicalFindingsData>(createEmptyClinicalFindings());
 
+  // CLI-11: structured SOAP exam note.
+  const [soapNote, setSoapNote] = useState<SoapNoteData>(createEmptySoapNote());
+
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
 
   if (!isOpen || !patient) return null;
@@ -150,6 +157,10 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
         subjectiveRx: subjectiveRxData,
         finalRx: finalRxData,
         clinicalFindings,
+        // CLI-11: include the SOAP note so the parent's onSave can forward it
+        // to the backend. An empty note (all blank / no Dx codes) is still
+        // included -- the backend omits it when all fields are None.
+        soapNote,
         uploads,
       };
       await onSave(data);
@@ -336,6 +347,10 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
               findings={clinicalFindings}
               onFindingsChange={setClinicalFindings}
             />
+          )}
+          {/* CLI-11: structured SOAP exam note */}
+          {activeTab === 'soap' && (
+            <SoapNoteForm data={soapNote} onChange={setSoapNote} />
           )}
           {activeTab === 'uploads' && (
             <UploadsTab uploads={uploads} onUpload={handleFileUpload} onRemove={removeUpload} />

@@ -68,8 +68,14 @@ export const orderApi = {
     return response.data;
   },
 
+  // POS-11: the backend cancel endpoint reads `reason` as a query param
+  // (reason: str = Query(..., min_length=10)), not from the request body.
+  // Sending { reason } as a JSON body was silently ignored and the endpoint
+  // failed with "field required" for the query param. Pass it correctly.
   cancelOrder: async (orderId: string, reason: string) => {
-    const response = await api.post(`/orders/${orderId}/cancel`, { reason });
+    const response = await api.post(`/orders/${orderId}/cancel`, null, {
+      params: { reason },
+    });
     return response.data;
   },
 };
@@ -291,13 +297,30 @@ export const prescriptionApi = {
 
   getProgression: async (customerId: string) => {
     const response = await api.get(`/prescriptions/customer/${customerId}/progression`);
+    // CLI-10: backend progression_diffs() uses `_delta` suffixes
+    // (sphere_delta / cylinder_delta / axis_delta / addition_delta) and
+    // date keys from_visit_at / to_visit_at.  The old type said `from_date`
+    // and bare field names — that mismatch caused the delta rows to render
+    // blank.  The type now reflects the actual wire shape.
     return response.data as {
       customer_id: string;
       deltas: Array<{
-        from_date: string;
-        to_date: string;
-        right_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
-        left_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
+        from_visit_at?: string;
+        to_visit_at?: string;
+        from_prescription_id?: string;
+        to_prescription_id?: string;
+        right_eye: {
+          sphere_delta?: number | null;
+          cylinder_delta?: number | null;
+          axis_delta?: number | null;
+          addition_delta?: number | null;
+        };
+        left_eye: {
+          sphere_delta?: number | null;
+          cylinder_delta?: number | null;
+          axis_delta?: number | null;
+          addition_delta?: number | null;
+        };
         pd?: number | null;
       }>;
       visits: number;
@@ -509,6 +532,11 @@ export const workshopApi = {
       expected_lens_receive_date?: string;
       confirmed_by_sales: boolean;
       confirmed_at?: string;
+      // CLI-6 — progressive fitting params
+      segment_height?: string;
+      pantoscopic_tilt?: string;
+      vertex_distance?: string;
+      wrap_angle?: string;
     },
   ) => {
     const response = await api.patch(`/workshop/jobs/${jobId}/fitting-details`, {

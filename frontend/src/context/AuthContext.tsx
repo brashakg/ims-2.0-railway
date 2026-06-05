@@ -328,7 +328,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Set active role
   const setActiveRole = (role: UserRole) => {
-    if (state.user?.roles.includes(role)) {
+    if (state.user?.roles?.includes(role)) {
       dispatch({ type: 'SET_ACTIVE_ROLE', payload: role });
       // Persist to localStorage
       const userJson = localStorage.getItem('ims_user');

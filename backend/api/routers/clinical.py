@@ -6,7 +6,7 @@ Eye test queue and clinical management endpoints with database persistence
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, date
 from html import escape as _html_escape
@@ -97,8 +97,7 @@ class QueueItemCreate(BaseModel):
     customer_id: Optional[str] = Field(None, alias="customerId")
     patient_id: Optional[str] = Field(None, alias="patientId")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ClinicalFindings(BaseModel):
@@ -143,6 +142,108 @@ class ClinicalFindings(BaseModel):
             raise ValueError("dominant_eye must be RIGHT or LEFT")
         return "RIGHT" if up in ("RIGHT", "R") else "LEFT"
 
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SoapDxCode(BaseModel):
+    """A single ICD-10 / ICPC-2 diagnosis code entry on the exam SOAP note.
+
+    ``code`` is the structured code (e.g. "H52.1" for myopia); ``description``
+    is the human label that should always accompany it so the chart is readable
+    without a code lookup; ``system`` defaults to "ICD-10" but is stored so we
+    can layer in ICPC-2 or custom ophthalmological codes later without a schema
+    change.  Both fields are free-text (no server-side code lookup -- the
+    optometrist types the code); the constraint is just that `code` is present.
+    """
+
+    code: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    system: str = Field("ICD-10")
+
+    class Config:
+        populate_by_name = True
+
+
+class SoapNote(BaseModel):
+    """Structured SOAP (Subjective / Objective / Assessment / Plan) exam record.
+
+    CLI-11: a templated SOAP exam note layer AROUND the existing refraction
+    capture.  All four sections are optional text blocks -- a quick refraction-
+    only test leaves them all blank and behaves exactly as before.  The note is
+    stored on the eye_test document under the key ``soap_note``; a standalone
+    POST endpoint also lets an optometrist save / update it after the test is
+    completed (so late charting is possible without re-opening the completion
+    flow).
+
+    Design decisions:
+    * Free-text strings inside each section -- no premature enums that fight the
+      optometrist mid-consult.
+    * ``dx_codes`` carries a list of structured Dx entries (code + description +
+      coding system) so reports can be filtered by diagnosis without parsing the
+      free-text assessment.
+    * ``plan_referral`` and ``plan_follow_up`` are pulled out as first-class
+      booleans so the scheduling module can query them (future integration point).
+    * All aliases are camelCase to match the frontend naming convention.
+    """
+
+    # -- Subjective (patient-reported history + presenting problem) --
+    chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
+    history_present_illness: Optional[str] = Field(
+        None, alias="historyPresentIllness"
+    )
+    ocular_history: Optional[str] = Field(None, alias="ocularHistory")
+    systemic_history: Optional[str] = Field(None, alias="systemicHistory")
+    family_history: Optional[str] = Field(None, alias="familyHistory")
+    medications: Optional[str] = None
+    allergies: Optional[str] = None
+    vdu_usage: Optional[str] = Field(None, alias="vduUsage")
+
+    # -- Objective (clinician-measured findings) --
+    # Visual acuity: mirrors ClinicalFindings VA fields so both paths are
+    # consistent; the full SOAP note supersedes them when both are present.
+    va_right_unaided: Optional[str] = Field(None, alias="vaRightUnaided")
+    va_left_unaided: Optional[str] = Field(None, alias="vaLeftUnaided")
+    va_right_aided: Optional[str] = Field(None, alias="vaRightAided")
+    va_left_aided: Optional[str] = Field(None, alias="vaLeftAided")
+    va_binocular: Optional[str] = Field(None, alias="vaBinocular")
+    # Intra-ocular pressure (tonometry), mmHg, per eye.
+    iop_right: Optional[float] = Field(None, ge=0, le=80, alias="iopRight")
+    iop_left: Optional[float] = Field(None, ge=0, le=80, alias="iopLeft")
+    colour_vision: Optional[str] = Field(None, alias="colourVision")
+    cover_test: Optional[str] = Field(None, alias="coverTest")
+    dominant_eye: Optional[str] = Field(None, alias="dominantEye")
+    pupils: Optional[str] = None           # e.g. "PERRL", "APD right"
+    ocular_motility: Optional[str] = Field(None, alias="ocularMotility")
+    slit_lamp_summary: Optional[str] = Field(None, alias="slitLampSummary")
+    fundus_summary: Optional[str] = Field(None, alias="fundusSummary")
+    additional_objective: Optional[str] = Field(None, alias="additionalObjective")
+
+    # -- Assessment (diagnosis narrative + structured Dx codes) --
+    assessment: Optional[str] = None       # free-text clinical impression
+    dx_codes: Optional[List[SoapDxCode]] = Field(None, alias="dxCodes")
+
+    # -- Plan (management + follow-up instructions) --
+    plan: Optional[str] = None             # free-text plan narrative
+    plan_referral: Optional[bool] = Field(None, alias="planReferral")
+    plan_referral_to: Optional[str] = Field(None, alias="planReferralTo")
+    plan_follow_up: Optional[bool] = Field(None, alias="planFollowUp")
+    plan_follow_up_weeks: Optional[int] = Field(None, alias="planFollowUpWeeks", ge=1, le=104)
+    patient_instructions: Optional[str] = Field(None, alias="patientInstructions")
+
+    # -- Metadata --
+    recorded_by: Optional[str] = Field(None, alias="recordedBy")
+    recorded_at: Optional[str] = Field(None, alias="recordedAt")
+
+    @field_validator("dominant_eye", mode="after")
+    @classmethod
+    def _v_dominant(cls, v):
+        if v is None or v == "":
+            return None
+        up = str(v).strip().upper()
+        if up not in ("RIGHT", "LEFT", "R", "L"):
+            raise ValueError("dominant_eye must be RIGHT or LEFT")
+        return "RIGHT" if up in ("RIGHT", "R") else "LEFT"
+
     class Config:
         populate_by_name = True
 
@@ -164,9 +265,11 @@ class EyeTestData(BaseModel):
     clinical_findings: Optional[ClinicalFindings] = Field(
         None, alias="clinicalFindings"
     )
+    # CLI-11: optional structured SOAP exam note.  Absent -> refraction-only test
+    # exactly as before; present -> stored under ``soap_note`` on the test doc.
+    soap_note: Optional[SoapNote] = Field(None, alias="soapNote")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class StatusUpdate(BaseModel):
@@ -686,6 +789,14 @@ async def complete_test(
         # (VA / IOP / history / diagnosis / ...) so a complete optometric exam
         # is recorded, not just the refraction. by_alias=False keeps the stored
         # keys snake_case (consistent with the rest of the test doc).
+        # CLI-11: also persist the structured SOAP note when provided.
+        now_iso = datetime.utcnow().isoformat()
+        soap_note_dict = None
+        if data.soap_note is not None:
+            soap_note_dict = data.soap_note.model_dump(exclude_none=True)
+            soap_note_dict.setdefault("recorded_by", current_user.get("user_id", ""))
+            soap_note_dict.setdefault("recorded_at", now_iso)
+
         success = test_repo.complete_test(
             test_id=test_id,
             right_eye=data.right_eye,
@@ -699,6 +810,7 @@ async def complete_test(
                 if data.clinical_findings
                 else None
             ),
+            soap_note=soap_note_dict,
         )
 
         if success:
@@ -896,6 +1008,95 @@ async def get_optometrist_stats(
         return test_repo.get_optometrist_stats(optometrist_id, from_date, to_date)
 
     return {"total_tests": 0, "completed_tests": 0, "completion_rate": 0}
+
+
+# ============================================================================
+# SOAP NOTE ENDPOINTS (CLI-11)
+# ============================================================================
+
+
+@router.get("/tests/{test_id}/soap-note")
+async def get_soap_note(
+    test_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the structured SOAP exam note for a completed eye test.
+
+    CLI-11: the SOAP note (Subjective / Objective / Assessment / Plan + Dx
+    codes) is stored under the ``soap_note`` key on the eye_test document.
+    Returns the note as-is (snake_case) wrapped in ``{soapNote: {...}}``.
+    Returns 404 when the test does not exist; returns ``{soapNote: null}`` when
+    the test exists but no SOAP note has been saved yet (a refraction-only
+    test).  Accessible to any AUTHENTICATED clinical user.
+    """
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        return {"soapNote": None}
+
+    test = test_repo.find_by_id(test_id)
+    if test is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    raw = test.get("soap_note")
+    if not raw:
+        return {"soapNote": None}
+
+    # Convert to camelCase for the frontend before returning.
+    return {"soapNote": _convert_to_camel(raw)}
+
+
+@router.post("/tests/{test_id}/soap-note")
+async def save_soap_note(
+    test_id: str,
+    note: SoapNote,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
+):
+    """Save (or replace) the SOAP exam note on an existing eye test.
+
+    CLI-11: allows post-completion charting without re-opening the test
+    completion flow.  The whole note is replaced atomically; send the full
+    document including unchanged fields.  Stamps ``recorded_by`` /
+    ``recorded_at`` automatically from the current user + now when not already
+    present in the payload.
+
+    Gated to the same roles that can complete a test
+    (OPTOMETRIST / STORE_MANAGER / ADMIN / SUPERADMIN).
+    """
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        raise HTTPException(
+            status_code=503, detail="Clinical service unavailable"
+        )
+
+    test = test_repo.find_by_id(test_id)
+    if test is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    now_iso = datetime.utcnow().isoformat()
+    note_dict = note.model_dump(exclude_none=True)
+    note_dict.setdefault("recorded_by", current_user.get("user_id", ""))
+    note_dict.setdefault("recorded_at", now_iso)
+
+    ok = test_repo.save_soap_note(test_id, note_dict)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save SOAP note")
+
+    _audit_clinical(
+        "SOAP_NOTE_SAVED",
+        test_id,
+        current_user,
+        store_id=test.get("store_id"),
+        detail={
+            "customer_id": test.get("customer_id"),
+            "dx_codes": [d.get("code") for d in note_dict.get("dx_codes") or []],
+        },
+    )
+
+    return {
+        "message": "SOAP note saved",
+        "testId": test_id,
+        "soapNote": _convert_to_camel(note_dict),
+    }
 
 
 # ============================================================================
@@ -1491,3 +1692,273 @@ async def get_abuse_detection(
         alerts = []
 
     return {"alerts": alerts, "generated_at": generated_at}
+
+
+# ============================================================================
+# CLI-9 — Named lens-power combos (save-and-reuse Rx templates)
+# ============================================================================
+# Optometrists frequently reuse the same lens-power combination for a type of
+# patient (e.g. "Myopia mild SVS: -1.00/-0.50x180 both eyes" or "Bifocal
+# standard: +2.00 ADD +1.50"). Saving these as named combos speeds up repeat
+# Rx entry and reduces transcription errors.
+#
+# Storage: `lens_power_combos` Mongo collection, per-store, per-creator.
+# Schema: { combo_id, store_id, created_by, name, right_eye{}, left_eye{}, pd,
+#           notes, created_at, updated_at }
+# No sensitive data; fail-soft if DB is absent.
+# ============================================================================
+
+
+class LensPowerComboCreate(BaseModel):
+    """Payload for POST /clinical/lens-power-combos."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    right_eye: Optional[dict] = None
+    left_eye: Optional[dict] = None
+    pd: Optional[str] = None
+    notes: Optional[str] = Field(None, max_length=500)
+
+    class Config:
+        populate_by_name = True
+
+
+def _get_lens_power_combos_col():
+    """Fail-soft collection accessor."""
+    try:
+        db = get_db()
+        if db is None:
+            return None
+        return db.get_collection("lens_power_combos")
+    except Exception:
+        return None
+
+
+@router.get("/lens-power-combos")
+async def list_lens_power_combos(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """List saved lens-power combos visible to the caller.
+
+    Returns the caller's own combos plus any combos created by anyone in the
+    same store — so shared institutional templates surface automatically.
+    Fail-soft: empty list if DB absent.
+    """
+    col = _get_lens_power_combos_col()
+    if col is None:
+        return {"combos": [], "total": 0}
+    active_store = store_id or current_user.get("active_store_id")
+    flt: dict = {}
+    if active_store:
+        flt["store_id"] = active_store
+    try:
+        docs = list(col.find(flt, {"_id": 0}).sort("created_at", -1).limit(200))
+    except Exception:
+        docs = []
+    return {"combos": docs, "total": len(docs)}
+
+
+@router.post("/lens-power-combos")
+async def create_lens_power_combo(
+    payload: LensPowerComboCreate,
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(_CLINICAL_ROLES)),
+):
+    """Save a named lens-power combination for reuse.
+
+    Gated to clinical roles (OPTOMETRIST / STORE_MANAGER / ADMIN / SUPERADMIN).
+    The combo is visible to everyone in the same store so institutional
+    templates can be shared without per-user configuration.
+    """
+    col = _get_lens_power_combos_col()
+    if col is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    active_store = store_id or current_user.get("active_store_id")
+    now_iso = datetime.utcnow().isoformat()
+    combo_id = str(uuid.uuid4())
+
+    doc = {
+        "combo_id": combo_id,
+        "store_id": active_store,
+        "created_by": current_user.get("user_id"),
+        "created_by_name": current_user.get("full_name") or current_user.get("username"),
+        "name": payload.name.strip(),
+        "right_eye": payload.right_eye or {},
+        "left_eye": payload.left_eye or {},
+        "pd": payload.pd,
+        "notes": payload.notes,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    try:
+        col.insert_one(doc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Could not save combo") from exc
+
+    # Return without the Mongo _id
+    doc.pop("_id", None)
+    return doc
+
+
+@router.delete("/lens-power-combos/{combo_id}")
+async def delete_lens_power_combo(
+    combo_id: str,
+    current_user: dict = Depends(require_roles(_CLINICAL_ROLES)),
+):
+    """Delete a named lens-power combo.
+
+    Only the creator or a manager/admin may delete. Fail-soft 404 if the
+    combo doesn't exist (idempotent).
+    """
+    col = _get_lens_power_combos_col()
+    if col is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        result = col.delete_one({"combo_id": combo_id})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Could not delete combo") from exc
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Combo not found")
+    return {"deleted": combo_id}
+
+
+# ============================================================================
+# CLI-7 — Frame + lens + Rx manufacturability pre-check
+# ============================================================================
+# Before a workshop job is created the sales staff can ask "can we actually
+# make this?".  The check compares the customer's Rx powers against the
+# selected lens line's sph_range / cyl_range / add_range from the lens_catalog
+# collection, and validates the frame's B-size / min-fitting-height against the
+# prescribed segment-height if a segment height is known.
+#
+# All checks are SOFT — they return warnings/flags, never block the save.
+# This is a *decision-support* tool, not an enforcement gate.  The lab may
+# have an up-to-date stock beyond what the catalog records.
+# Fail-soft: if lens_catalog is absent or the lens_line_id is unknown, return
+# an informational "cannot verify" result rather than an error.
+# ============================================================================
+
+
+class ManufacturabilityRequest(BaseModel):
+    """Payload for POST /clinical/manufacturability-check."""
+
+    lens_line_id: Optional[str] = None  # ID of the lens line from lens_catalog
+    right_eye: Optional[dict] = None    # Rx right eye {sph, cyl, axis, add}
+    left_eye: Optional[dict] = None     # Rx left eye
+    frame_b_size: Optional[str] = None  # vertical frame measurement (mm)
+    segment_height: Optional[str] = None  # requested seg height (mm)
+
+    class Config:
+        populate_by_name = True
+
+
+def _parse_float_safe(v) -> Optional[float]:
+    """Parse a numeric field that may arrive as str or number."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _check_power_in_range(label: str, value: Optional[float], rng: dict, issues: list) -> None:
+    """Append a warning to `issues` when `value` falls outside [rng.min, rng.max]."""
+    if value is None or not rng:
+        return
+    lo = _parse_float_safe(rng.get("min"))
+    hi = _parse_float_safe(rng.get("max"))
+    if lo is not None and value < lo:
+        issues.append(f"{label} {value:+.2f} is below the lens line minimum ({lo:+.2f})")
+    if hi is not None and value > hi:
+        issues.append(f"{label} {value:+.2f} exceeds the lens line maximum ({hi:+.2f})")
+
+
+@router.post("/manufacturability-check")
+async def manufacturability_check(
+    payload: ManufacturabilityRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Pre-check whether a frame + lens + Rx combination is manufacturable.
+
+    Returns:
+      { feasible: bool, warnings: [str], info: str }
+
+    `feasible` is True when no definite out-of-range issues were found.
+    A True result does NOT guarantee stock availability; it only means the
+    lens line's catalogue range can cover the Rx.  Fail-soft: if the lens
+    line is unknown or the catalog is unavailable, returns feasible=null
+    (cannot determine) with an explanatory info string.
+    """
+    warnings: list = []
+    info_parts: list = []
+    feasible = True  # optimistic default; flipped to False on hard issues
+    lens_line: Optional[dict] = None
+
+    # -- 1. Look up the lens line from the catalog (fail-soft) ----------------
+    if payload.lens_line_id:
+        try:
+            db = get_db()
+            if db is not None:
+                col = db.get_collection("lens_catalog")
+                lens_line = col.find_one({"lens_line_id": payload.lens_line_id}, {"_id": 0})
+        except Exception:
+            lens_line = None
+
+        if lens_line is None:
+            info_parts.append(f"Lens line '{payload.lens_line_id}' not found in catalog — power range cannot be verified.")
+            feasible = None  # indeterminate
+        else:
+            info_parts.append(f"Lens: {lens_line.get('brand', '')} {lens_line.get('series', '')} {lens_line.get('index', '')}x")
+    else:
+        info_parts.append("No lens line selected — skipping power-range check.")
+
+    # -- 2. Eye power range checks against the lens line ----------------------
+    if lens_line:
+        sph_range = lens_line.get("sph_range") or {}
+        cyl_range = lens_line.get("cyl_range") or {}
+        add_range  = lens_line.get("add_range") or {}
+        has_add    = lens_line.get("has_add", False)
+
+        for eye_label, eye in (("Right (OD)", payload.right_eye), ("Left (OS)", payload.left_eye)):
+            if not eye:
+                continue
+            sph = _parse_float_safe(eye.get("sph") or eye.get("sphere"))
+            cyl = _parse_float_safe(eye.get("cyl") or eye.get("cylinder"))
+            add = _parse_float_safe(eye.get("add") or eye.get("addition"))
+
+            _check_power_in_range(f"{eye_label} SPH", sph, sph_range, warnings)
+            _check_power_in_range(f"{eye_label} CYL", cyl, cyl_range, warnings)
+            if has_add and add is not None:
+                _check_power_in_range(f"{eye_label} ADD", add, add_range, warnings)
+            elif not has_add and add is not None and abs(add) > 0.01:
+                warnings.append(
+                    f"{eye_label}: ADD {add:+.2f} prescribed but selected lens line is single-vision (has_add=False)"
+                )
+
+    # -- 3. Frame / fitting geometry check ------------------------------------
+    if payload.frame_b_size and payload.segment_height:
+        b = _parse_float_safe(payload.frame_b_size)
+        sh = _parse_float_safe(payload.segment_height)
+        if b is not None and sh is not None:
+            # Ophthalmic rule: min frame B = (2 x seg_height) + 2 mm safety
+            min_b = sh * 2 + 2
+            if b < min_b:
+                warnings.append(
+                    f"Frame B-size {b:.1f} mm may be too small for seg height {sh:.1f} mm "
+                    f"(minimum recommended B = {min_b:.1f} mm)"
+                )
+            else:
+                info_parts.append(f"Frame geometry OK: B {b:.1f} mm fits seg ht {sh:.1f} mm")
+
+    # Any warnings flip feasible to False (when we had enough data to check)
+    if warnings and feasible is True:
+        feasible = False
+
+    return {
+        "feasible": feasible,
+        "warnings": warnings,
+        "info": "; ".join(info_parts) if info_parts else "Check complete.",
+    }

@@ -188,4 +188,83 @@ export const loyaltyApi = {
     const r = await api.post('/loyalty/expire');
     return r.data;
   },
+
+  // =========================================================================
+  // CRM-13: Loyalty Reward Catalog
+  // =========================================================================
+
+  /** List the reward catalog (optionally filter by store / active). */
+  listRewards: async (params?: {
+    store_id?: string;
+    active_only?: boolean;
+  }): Promise<{ rewards: LoyaltyReward[]; total: number }> => {
+    const r = await api.get('/loyalty/rewards', { params });
+    return r.data;
+  },
+
+  /** Create a new reward. */
+  createReward: async (payload: LoyaltyRewardCreate): Promise<{ message: string; reward: LoyaltyReward }> => {
+    const r = await api.post('/loyalty/rewards', payload);
+    return r.data;
+  },
+
+  /** Get a single reward. */
+  getReward: async (rewardId: string): Promise<LoyaltyReward> => {
+    const r = await api.get(`/loyalty/rewards/${rewardId}`);
+    return r.data;
+  },
+
+  /** Update a reward. */
+  updateReward: async (
+    rewardId: string,
+    payload: Partial<LoyaltyRewardCreate>,
+  ): Promise<{ message: string; reward: LoyaltyReward }> => {
+    const r = await api.put(`/loyalty/rewards/${rewardId}`, payload);
+    return r.data;
+  },
+
+  /** Delete a reward (ADMIN only). */
+  deleteReward: async (rewardId: string): Promise<{ message: string }> => {
+    const r = await api.delete(`/loyalty/rewards/${rewardId}`);
+    return r.data;
+  },
 };
+
+// ============================================================================
+// CRM-13: Reward catalog types
+// ============================================================================
+
+export type RewardType = 'DISCOUNT' | 'FREE_ITEM' | 'VOUCHER' | 'EXPERIENCE';
+
+export interface LoyaltyReward {
+  reward_id: string;
+  name: string;
+  type: RewardType;
+  description?: string;
+  point_cost: number;
+  cash_value?: number;
+  discount_pct?: number;
+  discount_fixed?: number;
+  max_redemptions?: number;
+  redemption_count: number;
+  valid_from?: string;
+  valid_until?: string;
+  active: boolean;
+  store_id?: string;
+  created_at: string;
+}
+
+export interface LoyaltyRewardCreate {
+  name: string;
+  type: RewardType;
+  description?: string;
+  point_cost: number;
+  cash_value?: number;
+  discount_pct?: number;
+  discount_fixed?: number;
+  max_redemptions?: number;
+  valid_from?: string;
+  valid_until?: string;
+  active?: boolean;
+  store_id?: string;
+}
