@@ -3,7 +3,7 @@
 // ============================================================================
 // View, track, and receive stock transfers
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ArrowRightLeft,
   ArrowRight,
@@ -38,11 +38,14 @@ interface TransferItem {
 interface Transfer {
   id: string;
   transfer_number: string;
-  from_store_id: string;
-  from_store_name: string;
-  to_store_id: string;
-  to_store_name: string;
-  status: 'PENDING' | 'SENT' | 'IN_TRANSIT' | 'RECEIVED' | 'PARTIALLY_RECEIVED' | 'CANCELLED';
+  // INV-5: backend uses from_location_id / to_location_id (not from_store_id)
+  from_location_id: string;
+  from_location_name: string;
+  to_location_id: string;
+  to_location_name: string;
+  // Backend status enum is lowercase: draft / pending_approval / approved /
+  // in_transit / partially_received / received / completed / cancelled.
+  status: string;
   items: TransferItem[];
   notes?: string;
   created_by: string;
@@ -72,16 +75,25 @@ export function StockTransferManagement() {
 
     setIsLoading(true);
     try {
-      let data;
-      if (direction === 'all') {
-        // Fetch both incoming and outgoing
-        const [incoming, outgoing] = await Promise.all([
-          inventoryApi.getTransfers(user.activeStoreId, 'incoming'),
-          inventoryApi.getTransfers(user.activeStoreId, 'outgoing'),
-        ]);
-        data = [...incoming, ...outgoing];
+      // INV-5: backend returns {transfers:[...], total:...} envelope; unwrap it.
+      // The getTransfers call uses store_id (convenience param that matches either
+      // side) because the backend has no "direction" parameter; incoming/outgoing
+      // distinction is done client-side by comparing from_location_id.
+      const envelope = await inventoryApi.getTransfers(user.activeStoreId, direction);
+      const all: Transfer[] = Array.isArray(envelope)
+        ? envelope
+        : Array.isArray(envelope?.transfers)
+        ? envelope.transfers
+        : [];
+
+      // Apply direction filter locally using the real field name.
+      let data: Transfer[];
+      if (direction === 'outgoing') {
+        data = all.filter(t => t.from_location_id === user.activeStoreId);
+      } else if (direction === 'incoming') {
+        data = all.filter(t => t.to_location_id === user.activeStoreId);
       } else {
-        data = await inventoryApi.getTransfers(user.activeStoreId, direction);
+        data = all;
       }
       setTransfers(data);
     } catch (error: any) {
@@ -121,26 +133,44 @@ export function StockTransferManagement() {
     }
   };
 
-  const getStatusBadge = (status: Transfer['status']) => {
-    const statusConfig = {
-      PENDING: { label: 'Pending', color: 'yellow' as const, icon: Clock },
-      SENT: { label: 'Sent', color: 'blue' as const, icon: ArrowRight },
-      IN_TRANSIT: { label: 'In Transit', color: 'purple' as const, icon: Package },
-      RECEIVED: { label: 'Received', color: 'green' as const, icon: CheckCircle },
-      PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'orange' as const, icon: AlertCircle },
-      CANCELLED: { label: 'Cancelled', color: 'red' as const, icon: X },
+  const getStatusBadge = (status: string) => {
+    // INV-5: backend status enum is lowercase (draft / pending_approval /
+    // approved / in_transit / partially_received / received / completed /
+    // cancelled). Map both upper and lower variants so the badge never crashes.
+    type StatusColor = 'yellow' | 'blue' | 'purple' | 'green' | 'orange' | 'red' | 'gray';
+    const statusConfig: Record<string, { label: string; color: StatusColor; icon: React.ElementType }> = {
+      // Uppercase legacy values (kept for backward compatibility)
+      PENDING: { label: 'Pending', color: 'yellow', icon: Clock },
+      SENT: { label: 'Sent', color: 'blue', icon: ArrowRight },
+      IN_TRANSIT: { label: 'In Transit', color: 'purple', icon: Package },
+      RECEIVED: { label: 'Received', color: 'green', icon: CheckCircle },
+      PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'orange', icon: AlertCircle },
+      CANCELLED: { label: 'Cancelled', color: 'red', icon: X },
+      // Lowercase values from the backend TransferStatus enum
+      draft: { label: 'Draft', color: 'gray', icon: Clock },
+      pending_approval: { label: 'Pending Approval', color: 'yellow', icon: Clock },
+      approved: { label: 'Approved', color: 'blue', icon: CheckCircle },
+      rejected: { label: 'Rejected', color: 'red', icon: X },
+      picking: { label: 'Picking', color: 'purple', icon: Package },
+      packed: { label: 'Packed', color: 'blue', icon: Package },
+      in_transit: { label: 'In Transit', color: 'purple', icon: Package },
+      partially_received: { label: 'Partially Received', color: 'orange', icon: AlertCircle },
+      received: { label: 'Received', color: 'green', icon: CheckCircle },
+      completed: { label: 'Completed', color: 'green', icon: CheckCircle },
+      cancelled: { label: 'Cancelled', color: 'red', icon: X },
     };
 
-    const config = statusConfig[status];
+    const config = statusConfig[status] ?? { label: status, color: 'gray' as StatusColor, icon: Clock };
     const Icon = config.icon;
 
-    const colorClasses: Record<typeof config.color, string> = {
+    const colorClasses: Record<StatusColor, string> = {
       yellow: 'bg-yellow-100 text-yellow-800 border-yellow-200',
       blue: 'bg-blue-100 text-blue-800 border-blue-200',
       purple: 'bg-purple-100 text-purple-800 border-purple-200',
       green: 'bg-green-100 text-green-800 border-green-200',
       orange: 'bg-orange-100 text-orange-800 border-orange-200',
       red: 'bg-red-100 text-red-800 border-red-200',
+      gray: 'bg-gray-100 text-gray-800 border-gray-200',
     };
 
     return (
@@ -156,7 +186,8 @@ export function StockTransferManagement() {
   };
 
   const getDirectionIcon = (transfer: Transfer) => {
-    const isOutgoing = transfer.from_store_id === user?.activeStoreId;
+    // INV-5: use from_location_id (the actual backend field)
+    const isOutgoing = transfer.from_location_id === user?.activeStoreId;
     return isOutgoing ? (
       <ArrowRight className="w-5 h-5 text-red-500" />
     ) : (
@@ -228,10 +259,13 @@ export function StockTransferManagement() {
       ) : (
         <div className="space-y-3">
           {filteredTransfers.map((transfer) => {
-            const isOutgoing = transfer.from_store_id === user?.activeStoreId;
+            // INV-5: use from_location_id; canReceive covers both lower/uppercase statuses
+            const isOutgoing = transfer.from_location_id === user?.activeStoreId;
             const canReceive =
               !isOutgoing &&
-              (transfer.status === 'SENT' || transfer.status === 'IN_TRANSIT');
+              (transfer.status === 'SENT' || transfer.status === 'sent' ||
+               transfer.status === 'IN_TRANSIT' || transfer.status === 'in_transit' ||
+               transfer.status === 'approved' || transfer.status === 'APPROVED');
 
             return (
               <div
@@ -256,7 +290,8 @@ export function StockTransferManagement() {
                       <div className="flex items-center gap-1.5">
                         <Building2 className="w-4 h-4" />
                         <span>
-                          {isOutgoing ? 'To' : 'From'}: {isOutgoing ? transfer.to_store_name : transfer.from_store_name}
+                          {/* INV-5: use from_location_name / to_location_name */}
+                          {isOutgoing ? 'To' : 'From'}: {isOutgoing ? transfer.to_location_name : transfer.from_location_name}
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5">
@@ -336,13 +371,14 @@ export function StockTransferManagement() {
                   <div>
                     <p className="text-sm text-gray-600 mb-1">From Store</p>
                     <p className="font-medium text-gray-900">
-                      {selectedTransfer.from_store_name}
+                      {/* INV-5: from_location_name is the actual backend field */}
+                      {selectedTransfer.from_location_name}
                     </p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-600 mb-1">To Store</p>
                     <p className="font-medium text-gray-900">
-                      {selectedTransfer.to_store_name}
+                      {selectedTransfer.to_location_name}
                     </p>
                   </div>
                 </div>
@@ -407,7 +443,9 @@ export function StockTransferManagement() {
                         <td className="px-4 py-3 text-sm text-gray-900 text-right">
                           {item.quantity}
                         </td>
-                        {selectedTransfer.status === 'PARTIALLY_RECEIVED' && (
+                        {/* Handle both upper and lowercase from backend */}
+                        {(selectedTransfer.status === 'PARTIALLY_RECEIVED' ||
+                          selectedTransfer.status === 'partially_received') && (
                           <td className="px-4 py-3 text-sm text-gray-900 text-right">
                             {item.quantity_received || 0}
                           </td>
@@ -419,10 +457,11 @@ export function StockTransferManagement() {
               </div>
             </div>
 
-            {/* Modal Footer */}
-            {selectedTransfer.from_store_id !== user?.activeStoreId &&
-              (selectedTransfer.status === 'SENT' ||
-                selectedTransfer.status === 'IN_TRANSIT') && (
+            {/* Modal Footer — INV-5: use from_location_id; cover both case variants */}
+            {selectedTransfer.from_location_id !== user?.activeStoreId &&
+              (selectedTransfer.status === 'SENT' || selectedTransfer.status === 'sent' ||
+               selectedTransfer.status === 'IN_TRANSIT' || selectedTransfer.status === 'in_transit' ||
+               selectedTransfer.status === 'approved' || selectedTransfer.status === 'APPROVED') && (
                 <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200 bg-gray-50">
                   <button
                     onClick={() => setShowDetails(false)}

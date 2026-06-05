@@ -1115,24 +1115,52 @@ async def start_stock_count(
     now = datetime.utcnow()
     audit_number = f"AUDIT-{now.strftime('%y%m%d')}-{count_id[:6].upper()}"
 
-    # Get system quantities for the category/store so we can calculate variances later
+    # Get system quantities for the category/store so we can calculate variances later.
+    # INV-6: stock_units docs don't carry a `category` field (that lives on
+    # the products collection), so we cannot filter the aggregation directly.
+    # When a category is requested, first resolve the product_ids that belong
+    # to it, then scope the stock aggregation to those ids. This ensures that
+    # a category-limited count only snapshots the right products.
     system_quantities: Dict[str, int] = {}
     if stock_repo is not None:
-        pipeline = [
-            {
-                "$match": {
-                    "store_id": active_store,
-                    "status": {"$in": ["AVAILABLE", "RESERVED"]},
-                }
-            },
-        ]
+        # Resolve category -> product_ids when filtering is requested.
+        category_product_ids: Optional[List[str]] = None
         if request.category:
-            # Need to join with products to filter by category — use direct match if stock has category
-            pipeline[0]["$match"]["category"] = request.category
+            product_repo = get_product_repository()
+            if product_repo is not None:
+                try:
+                    cat_products = product_repo.find_many(
+                        {"category": request.category, "is_active": True}, limit=5000
+                    )
+                    category_product_ids = [
+                        str(p.get("product_id") or p.get("_id") or "")
+                        for p in (cat_products or [])
+                        if p.get("product_id") or p.get("_id")
+                    ]
+                except Exception as _exc:
+                    logger.warning(
+                        "[INVENTORY] category product lookup failed: %s", _exc
+                    )
 
-        pipeline.append({"$group": {"_id": "$product_id", "qty": {"$sum": 1}}})
-        for r in stock_repo.aggregate(pipeline):
-            system_quantities[r["_id"]] = r["qty"]
+        match_clause: dict = {
+            "store_id": active_store,
+            "status": {"$in": ["AVAILABLE", "RESERVED"]},
+        }
+        if category_product_ids is not None:
+            # Empty list means no products match -- yield no system quantities
+            # rather than counting all products (which would be wrong).
+            if not category_product_ids:
+                pass  # system_quantities stays empty; skip the aggregation
+            else:
+                match_clause["product_id"] = {"$in": category_product_ids}
+
+        if category_product_ids is None or category_product_ids:
+            pipeline = [
+                {"$match": match_clause},
+                {"$group": {"_id": "$product_id", "qty": {"$sum": 1}}},
+            ]
+            for r in stock_repo.aggregate(pipeline):
+                system_quantities[r["_id"]] = r["qty"]
 
     count_doc = {
         "count_id": count_id,

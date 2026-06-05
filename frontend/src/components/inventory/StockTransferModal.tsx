@@ -114,21 +114,37 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
 
     setIsSearching(true);
     try {
-      // Get all stock for the store and filter client-side
-      // In production, the API should support search parameter
-      const stock = await inventoryApi.getStock(user?.activeStoreId || '');
+      // INV-5: getStock returns {items:[...], total:...} envelope — unwrap it.
+      const rawStock = await inventoryApi.getStock(user?.activeStoreId || '');
+      const stockList: StockItem[] = Array.isArray(rawStock)
+        ? rawStock
+        : Array.isArray(rawStock?.items)
+        ? rawStock.items
+        : [];
 
-      // Filter by search query and availability
-      const availableStock = stock.filter((item: StockItem) => {
-        const matchesSearch =
-          item.productName?.toLowerCase().includes(query.toLowerCase()) ||
-          item.sku?.toLowerCase().includes(query.toLowerCase());
+      // Filter by search query and availability. Map ledger row fields to
+      // the StockItem interface used locally (backend returns snake_case).
+      const availableStock = stockList
+        .map((item: any) => ({
+          id: item.id || item.product_id || item.stock_id || '',
+          productId: item.product_id || item.id || '',
+          productName: item.productName || item.name || item.product_name || '',
+          sku: item.sku || '',
+          brand: item.brand || '',
+          quantity: Number(item.stock ?? item.quantity ?? 0),
+          reservedQuantity: Number(item.reservedQuantity ?? item.reserved_quantity ?? item.reserved ?? 0),
+          locationCode: item.location || item.location_code || '',
+        } as StockItem))
+        .filter((item: StockItem) => {
+          const matchesSearch =
+            item.productName?.toLowerCase().includes(query.toLowerCase()) ||
+            item.sku?.toLowerCase().includes(query.toLowerCase());
 
-        const notInTransfer = !transferItems.some(ti => ti.productId === item.productId);
-        const hasAvailableQty = (item.quantity - item.reservedQuantity) > 0;
+          const notInTransfer = !transferItems.some(ti => ti.productId === item.productId);
+          const hasAvailableQty = (item.quantity - item.reservedQuantity) > 0;
 
-        return matchesSearch && notInTransfer && hasAvailableQty;
-      });
+          return matchesSearch && notInTransfer && hasAvailableQty;
+        });
 
       setSearchResults(availableStock);
     } catch (error: any) {
