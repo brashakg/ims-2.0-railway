@@ -2,15 +2,18 @@
 // IMS 2.0 - Purchase Order Detail Modal
 // ============================================================================
 
+import { useState } from 'react';
 import {
   FileText,
   CheckCircle,
   X as XIcon,
   Truck,
   Package,
+  Printer,
 } from 'lucide-react';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
+import { POPrint } from '../../components/print/POPrint';
 
 interface PurchaseOrderDetailProps {
   po: PurchaseOrder;
@@ -19,7 +22,53 @@ interface PurchaseOrderDetailProps {
 }
 
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
+  const [showPrint, setShowPrint] = useState(false);
+
+  // Build the minimal StoreInfo shape POPrint needs.
+  // storeName is not on the User JWT shape; use the user's name or a fallback.
+  // Full store address can be wired once a store-detail fetch is available.
+  const storeInfo = {
+    storeName: 'Better Vision Opticals',
+    address: '',
+    city: '',
+    state: '',
+    pincode: '',
+    phone: undefined as string | undefined,
+    gstin: undefined as string | undefined,
+  };
+
+  // Build the POPrintData shape from the PurchaseOrder.
+  const poPrintData = {
+    po_id: po.id,
+    po_number: po.poNumber,
+    po_date: po.date,
+    expected_delivery: po.expectedDelivery ?? '',
+    vendor_id: po.supplierId,
+    vendor_name: po.supplierName,
+    vendor_address: '',
+    vendor_gstin: '',
+    items: po.items.map((item) => ({
+      product_id: item.productId,
+      product_name: item.productName,
+      quantity: item.quantity,
+      unit_price: item.unitCost,
+      total: item.total,
+    })),
+    subtotal: po.subtotal,
+    tax_amount: po.taxAmount,
+    grand_total: po.total,
+    terms_conditions: po.notes,
+  };
+
   return (
+    <>
+    {showPrint && (
+      <POPrint
+        po={poPrintData}
+        store={storeInfo}
+        onClose={() => setShowPrint(false)}
+      />
+    )}
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl my-8">
         {/* Header */}
@@ -32,7 +81,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
             <p className="text-sm text-gray-500 mt-1">{po.supplierName}</p>
           </div>
           <button
+            type="button"
             onClick={onClose}
+            aria-label="Close"
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <XIcon className="w-5 h-5 text-gray-500" />
@@ -126,14 +177,25 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
         {/* Footer - Action Buttons */}
         <div className="flex items-center justify-between p-6 border-t border-gray-200">
           <button
+            type="button"
             onClick={onClose}
             className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
           >
             Close
           </button>
           <div className="flex items-center gap-2">
+            {/* Print PO (RPT-4) — available for all statuses */}
+            <button
+              type="button"
+              onClick={() => setShowPrint(true)}
+              className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-2"
+            >
+              <Printer className="w-4 h-4" />
+              Print PO
+            </button>
             {po.status === 'DRAFT' && (
               <button
+                type="button"
                 onClick={() => onAction(po, 'submit')}
                 className="btn-primary flex items-center gap-2"
               >
@@ -144,6 +206,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
             {po.status === 'PENDING' && (
               <>
                 <button
+                  type="button"
                   onClick={() => onAction(po, 'reject')}
                   className="px-4 py-2 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors flex items-center gap-2"
                 >
@@ -151,6 +214,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                   Reject
                 </button>
                 <button
+                  type="button"
                   onClick={() => onAction(po, 'approve')}
                   className="btn-primary flex items-center gap-2"
                 >
@@ -161,6 +225,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
             )}
             {po.status === 'APPROVED' && (
               <button
+                type="button"
                 onClick={() => onAction(po, 'order')}
                 className="btn-primary flex items-center gap-2"
               >
@@ -170,6 +235,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
             )}
             {po.status === 'ORDERED' && (
               <button
+                type="button"
                 onClick={() => onAction(po, 'receive')}
                 className="btn-primary flex items-center gap-2"
               >
@@ -181,5 +247,6 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
         </div>
       </div>
     </div>
+    </>
   );
 }
