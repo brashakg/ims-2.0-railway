@@ -580,11 +580,21 @@ export const menusApi = {
   // collections membership endpoints (which return the updated collection).
 
   /** Add an item under `parent_id` (null/absent = top level). Throws. Returns
-   *  the full updated menu tree. */
-  addItem: async (menuId: string, payload: MenuItemUpsert): Promise<EcomMenu | null> => {
+   *  the full updated menu tree.
+   *  BVI-7 fix: backend AddItem model expects {item: MenuItemIn, parent_id?, position?}
+   *  NOT a flat MenuItemUpsert — wrap the payload in the {item} key. */
+  addItem: async (
+    menuId: string,
+    payload: MenuItemUpsert,
+    opts?: { parent_id?: string | null; position?: number },
+  ): Promise<EcomMenu | null> => {
     const res = await api.post(
       `${MENUS_BASE}/${encodeURIComponent(menuId)}/items`,
-      payload,
+      {
+        item: payload,
+        parent_id: opts?.parent_id ?? null,
+        ...(opts?.position !== undefined ? { position: opts.position } : {}),
+      },
     );
     return _menuFrom(res?.data);
   },
@@ -613,7 +623,8 @@ export const menusApi = {
 
   /** Move an item: change its parent and/or position. The backend resequences
    *  siblings. Throws. Returns the updated menu tree. Used by the up/down
-   *  reorder + (optional) re-parent controls. */
+   *  reorder + (optional) re-parent controls.
+   *  BVI-8 fix: backend MoveItem model uses `new_parent_id` (not `parent_id`). */
   moveItem: async (
     menuId: string,
     itemId: string,
@@ -621,7 +632,7 @@ export const menusApi = {
   ): Promise<EcomMenu | null> => {
     const res = await api.put(
       `${MENUS_BASE}/${encodeURIComponent(menuId)}/items/${encodeURIComponent(itemId)}/move`,
-      { parent_id: args.parent_id ?? null, position: args.position },
+      { new_parent_id: args.parent_id ?? null, position: args.position },
     );
     return _menuFrom(res?.data);
   },

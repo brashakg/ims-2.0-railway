@@ -82,24 +82,37 @@ def _safe_count(db, name: str, filter_: Optional[Dict] = None) -> int:
 async def online_store_summary(
     current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
 ) -> Dict:
-    """Module status + planned feature list + live foundation counts.
+    """Module status + planned feature list + live counts.
 
-    Phase-1 STUB. `catalog_variants` is the count of variant-identity rows;
-    `products_with_ecom` is the count of catalog_products carrying the optional
-    embedded `ecom` sub-doc. Both are 0 until later phases populate them; the
-    endpoint is fail-soft (no DB -> zeros, never a 500).
+    BVI-9 fix: returns the full count set the FE OnlineStoreCounts interface
+    reads (`products`, `variants`, `collections`, `menus`,
+    `images_pending_design`, `customers`, `orders`). Each _safe_count is 0 if
+    the collection doesn't exist yet (fail-soft, no 500).
     """
     db = _get_db()
-    counts = {
-        "catalog_variants": _safe_count(db, "catalog_variants"),
-        # catalog_products that have the optional embedded `ecom` sub-doc.
-        "products_with_ecom": _safe_count(
-            db, "catalog_products", {"ecom": {"$exists": True}}
+    counts: Dict = {
+        # Products / PIM card -- catalog_products with ecom sub-doc.
+        "products": _safe_count(db, "catalog_products", {"ecom": {"$exists": True}}),
+        # Variant tier (catalog_variants collection).
+        "variants": _safe_count(db, "catalog_variants"),
+        # Collections (Phase 2 -- ecom_collections).
+        "collections": _safe_count(db, "ecom_collections"),
+        # Menus / mega-menu (Phase 3 -- ecom_menus).
+        "menus": _safe_count(db, "ecom_menus"),
+        # Images awaiting design work (Phase 4 -- product_images, QUEUED status).
+        "images_pending_design": _safe_count(
+            db, "product_images", {"design_status": "QUEUED"}
         ),
+        # Online customers (joined from Shopify -- have shopify_customer_id set).
+        "customers": _safe_count(
+            db, "customers", {"shopify_customer_id": {"$exists": True, "$ne": None}}
+        ),
+        # Online orders (Phase 3b -- orders ingested from Shopify webhooks).
+        "orders": _safe_count(db, "orders", {"channel": "ONLINE"}),
     }
     return {
         "module": "online_store",
-        "status": "foundation",  # Phase 1: skeleton live, features planned
+        "status": "foundation",
         "phase": 1,
         "db_connected": db is not None,
         "shopify_writes_enabled": False,  # IMS_SHOPIFY_WRITES default OFF (gated)

@@ -5,7 +5,7 @@ Product catalog management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime
 import logging
@@ -25,6 +25,13 @@ _CATALOG_ROLES = ("ADMIN", "CATALOG_MANAGER")
 # revenue-sensitive, so it is restricted to the catalog-mutation roles
 # (ADMIN, CATALOG_MANAGER); SUPERADMIN auto-passes via require_roles.
 _BULK_PRICING_ROLES = ("ADMIN", "CATALOG_MANAGER")
+
+# Valid discount cap tiers (BVI-10). Mirrors pricing_caps.CATEGORY_DISCOUNT_CAPS.
+# Validated on create/update so an unknown tier is rejected loudly instead of
+# silently defaulting to MASS (15%) at POS -- which would over-permit LUXURY.
+_VALID_DISCOUNT_CATEGORIES = frozenset(
+    {"MASS", "PREMIUM", "LUXURY", "SERVICE", "NON_DISCOUNTABLE"}
+)
 
 
 # ============================================================================
@@ -213,6 +220,10 @@ def _validate_product_barcode_or_400(barcode, repo, this_product_id: str) -> Non
 # Fields persisted top-level on the product doc only when provided (additive).
 # Shared by the single + bulk create paths so neither drifts.
 _OPTIONAL_PRODUCT_FIELDS = (
+    # BVI-10: discount_category is optional but must be persisted when provided
+    # so POS pricing-cap logic can read the right tier (MASS/PREMIUM/LUXURY/…)
+    # rather than falling back to MASS 15% on every product.
+    "discount_category",
     "cl_series",
     "modality",
     "base_curve",
@@ -288,6 +299,25 @@ class ProductCreate(BaseModel):
     # read. Was previously `tax_rate`, which no reader looked at.
     gst_rate: Optional[float] = None
     attributes: Optional[dict] = None
+    # BVI-10 fix: discount_category drives the pricing-cap tier (MASS/PREMIUM/
+    # LUXURY/NON_DISCOUNTABLE). Was silently dropped on create so POS always
+    # fell back to MASS 15% even for LUXURY products. Optional + additive;
+    # None means the POS fallback reads the product's `category` field instead.
+    discount_category: Optional[str] = None
+
+    @field_validator("discount_category", mode="before")
+    @classmethod
+    def _validate_discount_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        normed = str(v).strip().upper()
+        if normed not in _VALID_DISCOUNT_CATEGORIES:
+            raise ValueError(
+                f"Invalid discount_category '{v}'. "
+                f"Allowed: {sorted(_VALID_DISCOUNT_CATEGORIES)}"
+            )
+        return normed
+
     # ---- Contact-lens (CL) identity fields. All optional + additive. ----
     cl_series: Optional[str] = None
     modality: Optional[str] = None
@@ -315,6 +345,22 @@ class ProductUpdate(BaseModel):
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     is_active: Optional[bool] = None
+    # BVI-10 fix: allow updating the discount cap tier on existing products.
+    discount_category: Optional[str] = None
+
+    @field_validator("discount_category", mode="before")
+    @classmethod
+    def _validate_discount_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        normed = str(v).strip().upper()
+        if normed not in _VALID_DISCOUNT_CATEGORIES:
+            raise ValueError(
+                f"Invalid discount_category '{v}'. "
+                f"Allowed: {sorted(_VALID_DISCOUNT_CATEGORIES)}"
+            )
+        return normed
+
     # Scan-to-sell barcode persisted on the product master. Moved here from the
     # retired (unvalidated) /admin/products PUT so the Inventory "Save barcode"
     # action writes through the SAME validated update path as every other field.
