@@ -31,6 +31,7 @@ import {
 import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
 import { FeatureToggles } from '../../components/settings/FeatureToggles';
 import { IntegrationSettings } from '../../components/settings/IntegrationSettings';
+import { IntegrationsHub } from '../../components/settings/IntegrationsHub';
 import { NotificationSettings } from '../../components/settings/NotificationSettings';
 import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
 import { AgentControlPanel } from '../../components/settings/AgentControlPanel';
@@ -405,7 +406,16 @@ export function SettingsPage() {
           {activeTab === 'discounts' && <DiscountSection />}
 
           {/* ---- Existing component delegates ---- */}
-          {activeTab === 'integrations' && <div><IntegrationSettings /></div>}
+          {activeTab === 'integrations' && (
+            <div>
+              {/* SUPERADMIN gets the full catalog hub; everyone else gets the
+                  existing card list (ADMIN can still configure the 5 legacy types). */}
+              {user?.activeRole === 'SUPERADMIN'
+                ? <IntegrationsHub />
+                : <IntegrationSettings />
+              }
+            </div>
+          )}
           {activeTab === 'notifications' && <div><NotificationSettings /></div>}
           {activeTab === 'approvals' && <div><ApprovalWorkflows /></div>}
           {activeTab === 'agents' && <div><AgentControlPanel /></div>}

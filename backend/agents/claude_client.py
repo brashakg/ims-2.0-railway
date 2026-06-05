@@ -27,22 +27,61 @@ logger = logging.getLogger(__name__)
 
 
 ANTHROPIC_API_URL = os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-DEFAULT_MODEL = os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
 DEFAULT_MAX_TOKENS = int(os.getenv("AGENT_CLAUDE_MAX_TOKENS", "1024"))
 DEFAULT_TIMEOUT = float(os.getenv("AGENT_CLAUDE_TIMEOUT", "30.0"))
 
 
+def _get_anthropic_key() -> str:
+    """Return the Anthropic API key.
+
+    Priority:
+      1. DB integrations doc (type="anthropic", enabled=True) -- allows the
+         owner to set/rotate the key via Settings -> Integrations without
+         touching Railway env vars.
+      2. Legacy ANTHROPIC_API_KEY env var (always works as override/fallback).
+    """
+    try:
+        from api.services.integration_config import get_anthropic_config
+        cfg = get_anthropic_config()
+        if cfg.get("api_key"):
+            return cfg["api_key"]
+    except Exception:  # noqa: BLE001
+        pass
+    return os.getenv("ANTHROPIC_API_KEY", "")
+
+
+def _get_default_model() -> str:
+    """Return the Claude model to use (DB -> env -> haiku default)."""
+    try:
+        from api.services.integration_config import get_anthropic_config
+        cfg = get_anthropic_config()
+        if cfg.get("model"):
+            return cfg["model"]
+    except Exception:  # noqa: BLE001
+        pass
+    return os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
+
+
+# Module-level defaults (resolved at import time for callers that reference
+# these directly, e.g. is_claude_available). They will reflect the env-var
+# path; DB-sourced keys are resolved per-call in _get_anthropic_key().
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+DEFAULT_MODEL = os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
+
+
 def is_claude_available() -> bool:
-    """True if ANY LLM (local OSS or Claude) is configured. Agents call
-    this to decide whether to attempt an LLM completion at all. Now
-    delegates to the pluggable provider registry so a self-hosted local
-    model counts even without an Anthropic key."""
+    """True if ANY LLM (local OSS or Claude) is configured.
+
+    Checks the pluggable provider registry first (covers local OSS models).
+    Falls back to checking both the DB integration doc and the legacy env var
+    so the DB-sourced key is recognised here too.
+    """
     try:
         from . import llm_provider
         return llm_provider.any_available()
     except Exception:
-        return bool(ANTHROPIC_API_KEY)
+        pass
+    return bool(_get_anthropic_key())
 
 
 async def call_claude(
