@@ -829,12 +829,13 @@ async def get_agent_activity(
             ts_fields = [ts_fields]
         clauses: List[Dict[str, Any]] = []
         for f in ts_fields:
-            clauses.append({f: {"$gte": since}})       # BSON datetime rows
-            clauses.append({f: {"$gte": since_iso}})   # ISO string rows
+            clauses.append({f: {"$gte": since}})  # BSON datetime rows
+            clauses.append({f: {"$gte": since_iso}})  # ISO string rows
         return {"$or": clauses}
 
-    def _safe_find(coll_name: str, ts_field, match_extra: Dict = None,
-                   sort_field: str = None):
+    def _safe_find(
+        coll_name: str, ts_field, match_extra: Dict = None, sort_field: str = None
+    ):
         """Find docs with ts >= since. Tolerates missing collection.
 
         `ts_field` may be a single field name or a list of candidate fields

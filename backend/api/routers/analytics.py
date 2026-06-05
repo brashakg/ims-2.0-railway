@@ -238,13 +238,15 @@ def calculate_metrics_for_period(
     # which string-filtered a BSON Date and hard-capped at 500 rows).
     prev_start = start_date - (end_date - start_date)
     orders = [
-        o for o in _fetch_orders_in_window(
+        o
+        for o in _fetch_orders_in_window(
             order_repo, store_id=store_id, start=start_date, end=end_date
         )
         if _is_billable(o)
     ]
     prev_orders = [
-        o for o in _fetch_orders_in_window(
+        o
+        for o in _fetch_orders_in_window(
             order_repo, store_id=store_id, start=prev_start, end=start_date
         )
         if _is_billable(o)
@@ -864,13 +866,15 @@ async def get_enterprise_kpis(
         prev_end = start_date
         # [RPT-1] Exclude CANCELLED and DRAFT so only real fulfilled revenue counts.
         current_orders = [
-            o for o in _fetch_orders_in_window(
+            o
+            for o in _fetch_orders_in_window(
                 order_repo, store_id=store_id, start=start_date, end=end_date
             )
             if _is_billable(o)
         ]
         prev_orders = [
-            o for o in _fetch_orders_in_window(
+            o
+            for o in _fetch_orders_in_window(
                 order_repo, store_id=store_id, start=prev_start, end=prev_end
             )
             if _is_billable(o)
@@ -980,7 +984,8 @@ async def get_enterprise_kpis(
         # Previously this pulled find_many({}) capped at 100 rows and only
         # tallied same-day orders regardless of the chosen period.
         all_store_orders = [
-            o for o in _fetch_orders_in_window(
+            o
+            for o in _fetch_orders_in_window(
                 order_repo, store_id=None, start=start_date, end=end_date
             )
             if _is_billable(o)

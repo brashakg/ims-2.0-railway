@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import os
 
-
 # ----------------------------------------------------------------------------
 # Integration registry - the single source of truth for what we report on.
 # Each entry declares where its credentials come from and what is required.

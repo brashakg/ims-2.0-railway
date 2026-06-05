@@ -699,7 +699,9 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         except Exception:
             rec = None
         if needs_pwd:
-            me["must_change_password"] = bool((rec or {}).get("must_change_password", False))
+            me["must_change_password"] = bool(
+                (rec or {}).get("must_change_password", False)
+            )
         if needs_modules:
             me["module_access"] = (rec or {}).get("module_access") or {}
     return me

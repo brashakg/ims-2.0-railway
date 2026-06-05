@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-
 # Canonical denomination ladder, highest first. (face, kind).
 # Notes Rs 500..10, then coins Rs 10..1. The UI renders rows in this order.
 NOTE_FACES = (500, 200, 100, 50, 20, 10)

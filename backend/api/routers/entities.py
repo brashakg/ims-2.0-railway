@@ -271,6 +271,7 @@ def _validate_entity_payload(data: dict) -> None:
     email = data.get("registered_email")
     if email:
         import re as _re
+
         _EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
         if not _EMAIL_RE.match(email.strip()):
             raise HTTPException(
@@ -500,9 +501,7 @@ async def assign_store_to_entity(
         # update_one returns a stub without that attribute, which 500'd here.
         if stores.find_one({"store_id": store_id}) is None:
             raise HTTPException(status_code=404, detail="Store not found")
-        stores.update_one(
-            {"store_id": store_id}, {"$set": {"entity_id": entity_id}}
-        )
+        stores.update_one({"store_id": store_id}, {"$set": {"entity_id": entity_id}})
         return {"status": "success", "entity_id": entity_id, "store_id": store_id}
     except HTTPException:
         raise

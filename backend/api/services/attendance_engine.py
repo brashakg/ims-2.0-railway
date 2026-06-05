@@ -20,7 +20,6 @@ import math
 from datetime import date, datetime, time
 from typing import Iterable, Optional
 
-
 # Default geo-fence radius in metres when a store has none configured. Mirrors
 # the LOGIN geo-fence default in api/routers/auth.py / routers/stores.py.
 DEFAULT_GEOFENCE_RADIUS_M = 500
@@ -315,7 +314,7 @@ def compute_lwp_days(
     a payroll run. Pure / deterministic. Days are de-duplicated so an ABSENT
     record and an overlapping unpaid-leave row count once.
     """
-    lwp_day_set: set = set()       # day-of-month flagged unpaid (from any source)
+    lwp_day_set: set = set()  # day-of-month flagged unpaid (from any source)
     half_day_set: set = set()
     absent_days = 0
     marked_lwp_days = 0

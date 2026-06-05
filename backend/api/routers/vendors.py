@@ -164,9 +164,7 @@ class GRNItemCreate(BaseModel):
         acc = self.accepted_qty
         rej = self.rejected_qty
         if acc > rec:
-            raise ValueError(
-                f"accepted_qty ({acc}) cannot exceed received_qty ({rec})"
-            )
+            raise ValueError(f"accepted_qty ({acc}) cannot exceed received_qty ({rec})")
         if acc + rej != rec:
             raise ValueError(
                 f"accepted_qty ({acc}) + rejected_qty ({rej}) must equal "
@@ -559,9 +557,9 @@ async def update_vendor(
 
 
 class VendorSkuAliasCreate(BaseModel):
-    product_id: str           # IMS master product_id
-    vendor_sku: str           # vendor's own catalogue / item code
-    description: Optional[str] = None   # optional free-text note
+    product_id: str  # IMS master product_id
+    vendor_sku: str  # vendor's own catalogue / item code
+    description: Optional[str] = None  # optional free-text note
 
 
 @router.get("/sku-alias-lookup")
@@ -647,7 +645,9 @@ async def create_vendor_sku_alias(
         now = datetime.now()
 
         # Upsert on (vendor_id, vendor_sku) — idempotent
-        existing = coll.find_one({"vendor_id": vendor_id, "vendor_sku": body.vendor_sku})
+        existing = coll.find_one(
+            {"vendor_id": vendor_id, "vendor_sku": body.vendor_sku}
+        )
         if existing:
             coll.update_one(
                 {"vendor_id": vendor_id, "vendor_sku": body.vendor_sku},
@@ -709,7 +709,11 @@ async def delete_vendor_sku_alias(
         result = coll.delete_one({"alias_id": alias_id, "vendor_id": vendor_id})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Alias not found")
-        return {"alias_id": alias_id, "vendor_id": vendor_id, "message": "Alias deleted"}
+        return {
+            "alias_id": alias_id,
+            "vendor_id": vendor_id,
+            "message": "Alias deleted",
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -762,7 +766,7 @@ async def list_pos(
 
 
 class ForecastPoRequest(BaseModel):
-    store_id: Optional[str] = None          # defaults to caller's active store
+    store_id: Optional[str] = None  # defaults to caller's active store
     horizon_days: int = Field(30, ge=7, le=90)  # forecast window
     safety_stock_days: int = Field(7, ge=0, le=30)  # extra buffer days
     # If True a real DRAFT PO doc is persisted per vendor; otherwise returns
@@ -805,26 +809,29 @@ async def create_pos_from_forecast(
 
         # --- Step 1: compute sales velocity per product (last 90 days) ---
         orders = list(
-            db.get_collection("orders").find(
+            db.get_collection("orders")
+            .find(
                 {
                     "store_id": active_store,
                     "status": {"$nin": ["CANCELLED", "DRAFT"]},
                     "created_at": {"$gte": ninety_days_ago},
                 },
                 {"items": 1, "order_items": 1},
-            ).limit(10000)
+            )
+            .limit(10000)
         )
 
         product_sales: dict = {}
         for o in orders:
-            for item in (o.get("items") or o.get("order_items") or []):
+            for item in o.get("items") or o.get("order_items") or []:
                 pid = item.get("product_id", "")
                 if not pid:
                     continue
                 qty = int(item.get("quantity", 1) or 1)
                 if pid not in product_sales:
                     product_sales[pid] = {
-                        "product_name": item.get("product_name") or item.get("name", ""),
+                        "product_name": item.get("product_name")
+                        or item.get("name", ""),
                         "sku": item.get("sku", ""),
                         "qty_90d": 0,
                     }
@@ -858,9 +865,7 @@ async def create_pos_from_forecast(
             need = predicted + buffer
 
             prod = prod_docs.get(pid, {})
-            current_stock = int(
-                prod.get("quantity", 0) or prod.get("stock", 0) or 0
-            )
+            current_stock = int(prod.get("quantity", 0) or prod.get("stock", 0) or 0)
             reorder_qty = max(0, round(need - current_stock))
             if reorder_qty == 0:
                 continue
@@ -913,9 +918,7 @@ async def create_pos_from_forecast(
 
                 po_id = str(uuid.uuid4())
                 po_number = generate_po_number(active_store)
-                subtotal = sum(
-                    ln["quantity"] * ln["unit_price"] for ln in lines
-                )
+                subtotal = sum(ln["quantity"] * ln["unit_price"] for ln in lines)
                 tax = subtotal * 0.18
                 total = subtotal + tax
 
@@ -954,7 +957,9 @@ async def create_pos_from_forecast(
                             }
                         )
                     except Exception as _e:
-                        logger.warning(f"[INV-9] PO create failed for vendor {v_id}: {_e}")
+                        logger.warning(
+                            f"[INV-9] PO create failed for vendor {v_id}: {_e}"
+                        )
 
         return {
             "store_id": active_store,

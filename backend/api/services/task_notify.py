@@ -56,7 +56,9 @@ _INAPP_TRIGGER = "TASK_ESCALATION_INAPP"
 _WHATSAPP_TRIGGER = "TASK_ESCALATION_WHATSAPP"
 
 
-def _resolve_escalation_body(trigger: str, default: str, variables: Dict[str, Any]) -> str:
+def _resolve_escalation_body(
+    trigger: str, default: str, variables: Dict[str, Any]
+) -> str:
     """Resolve an escalation body through the saved-template resolver, falling
     back to the hard-coded default. Fail-soft: any error -> the default text
     (an escalation is never suppressed by a template problem)."""

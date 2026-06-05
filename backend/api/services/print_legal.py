@@ -997,9 +997,11 @@ def einvoice_qr_block(order: Dict[str, Any]) -> Dict[str, Any]:
         # Lazy import: render_signed_qr_png is import-guarded inside einvoice.py
         try:
             from api.services.einvoice import render_signed_qr_png
+
             png_bytes = render_signed_qr_png(signed_qr)
             if png_bytes:
                 import base64
+
                 b64 = base64.b64encode(png_bytes).decode("ascii")
                 qr_data_uri = f"data:image/png;base64,{b64}"
             else:
@@ -1018,7 +1020,7 @@ def einvoice_qr_block(order: Dict[str, Any]) -> Dict[str, Any]:
         "irn": irn,
         "ack_no": ack_no,
         "ack_date": ack_date,
-        "qr_data_uri": qr_data_uri,       # base64 PNG data URI when qrcode installed
+        "qr_data_uri": qr_data_uri,  # base64 PNG data URI when qrcode installed
         "signed_qr_raw": signed_qr or None,  # raw string for client-side render
         "render_note": render_note,
     }

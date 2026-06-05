@@ -301,7 +301,9 @@ _MSG91_STATUS_MAP = {
 
 
 def _canonical_dlr_status(raw: str) -> str:
-    return _MSG91_STATUS_MAP.get(str(raw or "").strip().lower(), str(raw or "").upper() or "UNKNOWN")
+    return _MSG91_STATUS_MAP.get(
+        str(raw or "").strip().lower(), str(raw or "").upper() or "UNKNOWN"
+    )
 
 
 @router.post("/msg91/delivery")
@@ -323,7 +325,9 @@ async def receive_msg91_delivery(request: Request):
 
     secret = _load_secret("msg91")
     if not secret:
-        logger.info("[WEBHOOKS] msg91: no webhook_secret configured -- skipping verification")
+        logger.info(
+            "[WEBHOOKS] msg91: no webhook_secret configured -- skipping verification"
+        )
         return {"status": "skipped", "reason": "secret_not_configured"}
 
     if not sig or not webhook_verify.verify_msg91(raw_body, sig, secret):
@@ -345,10 +349,9 @@ async def receive_msg91_delivery(request: Request):
 
     body_obj = payload if isinstance(payload, dict) else {}
     data_obj = body_obj.get("data") if isinstance(body_obj.get("data"), dict) else {}
-    request_id = (
-        _first(body_obj, "request_id", "requestId", "messageId", "message_id")
-        or _first(data_obj, "request_id", "requestId", "messageId", "message_id")
-    )
+    request_id = _first(
+        body_obj, "request_id", "requestId", "messageId", "message_id"
+    ) or _first(data_obj, "request_id", "requestId", "messageId", "message_id")
     raw_status = (
         _first(body_obj, "status", "deliveryStatus", "delivery_status", "event")
         or _first(data_obj, "status", "deliveryStatus", "delivery_status", "event")

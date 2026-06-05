@@ -37,6 +37,7 @@ Routes:
 
 Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 """
+
 from __future__ import annotations
 
 from typing import Dict, Optional
@@ -62,6 +63,7 @@ _STATUSES = {"QUEUED", "IN_PROGRESS", "REVIEW", "APPROVED", "REJECTED"}
 # ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_menus.py)
 # ---------------------------------------------------------------------------
+
 
 def _get_db():
     """Underlying DB object (real pymongo Database or seeded MockDatabase) when
@@ -149,11 +151,15 @@ def _write_audit(image: Dict, current_user: dict) -> None:
 # Pydantic payloads
 # ---------------------------------------------------------------------------
 
+
 class ImageCreate(BaseModel):
     """Register/queue an image. `product_id` + `url` are required; everything
     else is optional/additive. A fresh image enters the queue as kind=RAW,
     status=QUEUED, source=UPLOAD (repository defaults)."""
-    product_id: str = Field(..., description="catalog_products id this image belongs to")
+
+    product_id: str = Field(
+        ..., description="catalog_products id this image belongs to"
+    )
     url: str = Field(..., description="Asset URL (the raw/source image)")
     variant_id: Optional[str] = Field(
         None, description="catalog_variants id (null = a product-level image)"
@@ -171,6 +177,7 @@ class ImageUpdate(BaseModel):
     """Patch an image's presentation/linkage fields. Lifecycle fields (status /
     assigned_to / edited_url / reviewed_by / approved_at) are NOT patchable here
     -- use the dedicated action routes. Only provided keys change."""
+
     url: Optional[str] = None
     kind: Optional[str] = None
     source: Optional[str] = None
@@ -182,6 +189,7 @@ class ImageUpdate(BaseModel):
 
 class AssignIn(BaseModel):
     """Assign (or, with null, unassign) the image to a DESIGN_MANAGER."""
+
     assigned_to: Optional[str] = Field(
         None, description="User id of the DESIGN_MANAGER (null = unassign)"
     )
@@ -190,17 +198,20 @@ class AssignIn(BaseModel):
 class StatusIn(BaseModel):
     """Transition the image's lifecycle status. Guarded by the valid-transition
     graph -- an illegal move is a 409."""
+
     status: str = Field(..., description="Target status (see lifecycle graph)")
 
 
 class EditedIn(BaseModel):
     """Attach the designer's edited asset + move IN_PROGRESS -> REVIEW."""
+
     edited_url: str = Field(..., description="URL of the designer's edited asset")
 
 
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
+
 
 def _validate_enum(value: Optional[str], allowed: set, label: str) -> Optional[str]:
     """Uppercase + validate an enum value, or 400. None passes through."""
@@ -217,6 +228,7 @@ def _validate_enum(value: Optional[str], allowed: set, label: str) -> Optional[s
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
+
 
 @router.get("")
 async def list_images(
@@ -339,6 +351,7 @@ async def delete_image(
 # Lifecycle action routes (literal sub-paths -- out-rank the {image_id} param)
 # ---------------------------------------------------------------------------
 
+
 @router.post("/{image_id}/assign")
 async def assign_image(
     image_id: str,
@@ -381,8 +394,7 @@ async def set_image_status(
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Illegal status transition: "
-                f"{existing.get('status')} -> {target}"
+                f"Illegal status transition: " f"{existing.get('status')} -> {target}"
             ),
         )
     # Approval gates go-live -> chained audit row.

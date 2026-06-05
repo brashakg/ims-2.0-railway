@@ -37,6 +37,7 @@ valid rules, ``matches_product`` returns False (an empty SMART collection rather
 than accidentally matching everything) -- the caller surfaces the empty result.
 No exceptions escape; all inputs are defensively coerced.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -141,7 +142,9 @@ def _rule_matches(doc: Dict, rule: Dict) -> Optional[bool]:
     return any(c == needle for c in candidates)
 
 
-def matches_product(product: Dict, rules: List[Dict], disjunctive: bool = False) -> bool:
+def matches_product(
+    product: Dict, rules: List[Dict], disjunctive: bool = False
+) -> bool:
     """True if `product` satisfies the SMART `rules` under the given combinator.
 
     disjunctive=True  -> OR  (any valid rule matches)

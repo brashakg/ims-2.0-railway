@@ -260,10 +260,7 @@ def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
         _norm(p) for p in (cust.get("first_name"), cust.get("last_name")) if _norm(p)
     ).strip()
 
-    phone = (
-        _norm(cust.get("phone"))
-        or _norm(payload.get("phone"))
-    )
+    phone = _norm(cust.get("phone")) or _norm(payload.get("phone"))
     email = (
         _norm(cust.get("email"))
         or _norm(payload.get("email"))
@@ -277,11 +274,14 @@ def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
             if not phone:
                 phone = _norm(addr.get("phone"))
             if not name:
-                name = _norm(addr.get("name")) or " ".join(
-                    _norm(p)
-                    for p in (addr.get("first_name"), addr.get("last_name"))
-                    if _norm(p)
-                ).strip()
+                name = (
+                    _norm(addr.get("name"))
+                    or " ".join(
+                        _norm(p)
+                        for p in (addr.get("first_name"), addr.get("last_name"))
+                        if _norm(p)
+                    ).strip()
+                )
 
     if not name:
         name = email or phone or "Online Customer"
@@ -309,7 +309,9 @@ def _normalize_indian_mobile(phone: str) -> str:
     return ""
 
 
-def _match_or_create_customer(db, buyer: Dict[str, str], store_id: str) -> Optional[str]:
+def _match_or_create_customer(
+    db, buyer: Dict[str, str], store_id: str
+) -> Optional[str]:
     """Return the IMS `customer_id` for this online buyer -- matching an existing
     customer by phone then email, else creating a minimal ONLINE customer.
 
@@ -328,7 +330,9 @@ def _match_or_create_customer(db, buyer: Dict[str, str], store_id: str) -> Optio
     if repo is None:
         return None
 
-    phone = _normalize_indian_mobile(buyer.get("phone", "")) or _norm(buyer.get("phone"))
+    phone = _normalize_indian_mobile(buyer.get("phone", "")) or _norm(
+        buyer.get("phone")
+    )
     email = _norm(buyer.get("email"))
 
     # --- match by phone, then email -------------------------------------------
@@ -458,9 +462,7 @@ def _sync_existing_order_status(
         update["cancelled_at"] = _norm(payload.get("cancelled_at"))
 
     try:
-        orders_coll.update_one(
-            {"shopify_order_id": shopify_order_id}, {"$set": update}
-        )
+        orders_coll.update_one({"shopify_order_id": shopify_order_id}, {"$set": update})
         logger.info(
             "[ONLINE_MAP] synced status for shopify_order=%s -> status=%s payment=%s "
             "fulfillment=%s",

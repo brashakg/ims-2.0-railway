@@ -78,8 +78,11 @@ def einvoice_enabled(db, gstin: str = "") -> bool:
     if not _env_enabled():
         return False
     cfg = _load_creds(db, gstin)
-    return bool(cfg.get("gsp_url") and cfg.get("username") and
-                (cfg.get("password") or cfg.get("client_id")))
+    return bool(
+        cfg.get("gsp_url")
+        and cfg.get("username")
+        and (cfg.get("password") or cfg.get("client_id"))
+    )
 
 
 def _env_enabled() -> bool:
@@ -133,6 +136,7 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns a dict. Never raises (malformed input -> best-effort partial doc).
     """
+
     def _s(val: Any, default: str = "") -> str:
         return str(val or default).strip()
 
@@ -147,8 +151,9 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
     supply_type = "B2B" if cust_gstin else "B2C"
 
     # Document identity
-    inv_no = _s(order.get("invoice_number") or order.get("order_number") or
-                order.get("id"))
+    inv_no = _s(
+        order.get("invoice_number") or order.get("order_number") or order.get("id")
+    )
     inv_date_raw = order.get("invoice_date") or order.get("created_at") or ""
     inv_date = _fmt_date_ddmmyyyy(inv_date_raw)
 
@@ -156,8 +161,11 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
     seller_gstin = _s(order.get("store_gstin") or order.get("billing_gstin"))
 
     # Place of supply (2-digit state code)
-    pos = _s(order.get("place_of_supply") or order.get("state_code") or
-             seller_gstin[:2] if len(seller_gstin) >= 2 else "20")
+    pos = _s(
+        order.get("place_of_supply") or order.get("state_code") or seller_gstin[:2]
+        if len(seller_gstin) >= 2
+        else "20"
+    )
 
     # Tax classification: inter-state -> IGST, else CGST+SGST
     igst = _n(order.get("igst") or order.get("igst_amount"))
@@ -215,10 +223,13 @@ def _build_einvoice_json(order: Dict[str, Any]) -> Dict[str, Any]:
     buyer: Dict[str, Any] = {
         "Gstin": cust_gstin or "URP",  # URP = Unregistered Person
         "LglNm": _s(order.get("customer_name") or "Consumer"),
-        "TrdNm": _s(order.get("customer_trade_name") or
-                    order.get("customer_name") or "Consumer"),
+        "TrdNm": _s(
+            order.get("customer_trade_name") or order.get("customer_name") or "Consumer"
+        ),
         "Pos": pos,
-        "Addr1": _s(order.get("billing_address") or order.get("customer_address") or "."),
+        "Addr1": _s(
+            order.get("billing_address") or order.get("customer_address") or "."
+        ),
         "Addr2": "",
         "Loc": _s(order.get("billing_city") or order.get("customer_city") or ""),
         "Pin": _s(order.get("billing_pin") or order.get("customer_pin") or "000000"),
@@ -267,48 +278,58 @@ def _build_item_list(items: list) -> list:
         if not isinstance(item, dict):
             continue
         try:
+
             def _n(val: Any) -> float:
                 try:
                     return round(float(val or 0), 2)
                 except (TypeError, ValueError):
                     return 0.0
 
-            taxable = _n(item.get("taxable_amount") or item.get("price") or
-                         item.get("subtotal"))
+            taxable = _n(
+                item.get("taxable_amount") or item.get("price") or item.get("subtotal")
+            )
             qty = _n(item.get("quantity") or 1)
-            unit_price = _n(item.get("unit_price") or
-                            (taxable / qty if qty else taxable))
+            unit_price = _n(
+                item.get("unit_price") or (taxable / qty if qty else taxable)
+            )
             discount = _n(item.get("discount") or item.get("discount_amount"))
             igst = _n(item.get("igst") or item.get("igst_amount"))
             cgst = _n(item.get("cgst") or item.get("cgst_amount"))
             sgst = _n(item.get("sgst") or item.get("sgst_amount"))
             gst_rate = _n(item.get("gst_rate") or item.get("tax_rate"))
-            line_total = _n(item.get("total") or item.get("item_total") or
-                            taxable + igst + cgst + sgst)
-            out.append({
-                "SlNo": str(idx),
-                "PrdDesc": str(item.get("name") or item.get("product_name") or "Item")[:300],
-                "IsServc": "N",
-                "HsnCd": str(item.get("hsn_code") or item.get("hsn") or "9004"),
-                "Qty": qty,
-                "Unit": "PCS",
-                "UnitPrice": unit_price,
-                "TotAmt": taxable,
-                "Discount": discount,
-                "AssAmt": taxable,
-                "GstRt": gst_rate,
-                "IgstAmt": igst,
-                "CgstAmt": cgst,
-                "SgstAmt": sgst,
-                "CesRt": 0.0,
-                "CesAmt": 0.0,
-                "CesNonAdvlAmt": 0.0,
-                "StateCesRt": 0.0,
-                "StateCesAmt": 0.0,
-                "StateCesNonAdvlAmt": 0.0,
-                "OthChrg": 0.0,
-                "TotItemVal": line_total,
-            })
+            line_total = _n(
+                item.get("total")
+                or item.get("item_total")
+                or taxable + igst + cgst + sgst
+            )
+            out.append(
+                {
+                    "SlNo": str(idx),
+                    "PrdDesc": str(
+                        item.get("name") or item.get("product_name") or "Item"
+                    )[:300],
+                    "IsServc": "N",
+                    "HsnCd": str(item.get("hsn_code") or item.get("hsn") or "9004"),
+                    "Qty": qty,
+                    "Unit": "PCS",
+                    "UnitPrice": unit_price,
+                    "TotAmt": taxable,
+                    "Discount": discount,
+                    "AssAmt": taxable,
+                    "GstRt": gst_rate,
+                    "IgstAmt": igst,
+                    "CgstAmt": cgst,
+                    "SgstAmt": sgst,
+                    "CesRt": 0.0,
+                    "CesAmt": 0.0,
+                    "CesNonAdvlAmt": 0.0,
+                    "StateCesRt": 0.0,
+                    "StateCesAmt": 0.0,
+                    "StateCesNonAdvlAmt": 0.0,
+                    "OthChrg": 0.0,
+                    "TotItemVal": line_total,
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("[EINVOICE] skipping malformed item %d: %s", idx, exc)
     return out
@@ -365,17 +386,15 @@ async def _call_irp(cfg: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, A
         headers["Authorization"] = f"Bearer {bearer}"
     elif username and password:
         import base64
+
         cred = base64.b64encode(f"{username}:{password}".encode()).decode()
         headers["Authorization"] = f"Basic {cred}"
 
     async with httpx.AsyncClient(timeout=_EINVOICE_TIMEOUT) as client:
-        resp = await client.post(endpoint, headers=headers,
-                                 content=json.dumps(payload))
+        resp = await client.post(endpoint, headers=headers, content=json.dumps(payload))
 
     if resp.status_code not in (200, 201):
-        raise ValueError(
-            f"IRP responded {resp.status_code}: {resp.text[:400]}"
-        )
+        raise ValueError(f"IRP responded {resp.status_code}: {resp.text[:400]}")
     return resp.json()
 
 
@@ -407,7 +426,7 @@ def _parse_irp_response(body: Dict[str, Any]) -> Dict[str, Any]:
     # Shape 1: NIC standard InfoDtls
     info_list = body.get("InfoDtls") or []
     if isinstance(info_list, list) and info_list:
-        desc = (info_list[0].get("Desc") or {})
+        desc = info_list[0].get("Desc") or {}
         if isinstance(desc, dict) and desc.get("Irn"):
             return {
                 "irn": desc.get("Irn") or "",
@@ -426,9 +445,15 @@ def _parse_irp_response(body: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "irn": str(irn),
                 "ack_no": str(container.get("AckNo") or container.get("ack_no") or ""),
-                "ack_date": str(container.get("AckDt") or container.get("ack_date") or ""),
-                "signed_qr": container.get("SignedQRCode") or container.get("signed_qr") or "",
-                "signed_invoice": container.get("SignedInvoice") or container.get("signed_invoice") or "",
+                "ack_date": str(
+                    container.get("AckDt") or container.get("ack_date") or ""
+                ),
+                "signed_qr": container.get("SignedQRCode")
+                or container.get("signed_qr")
+                or "",
+                "signed_invoice": container.get("SignedInvoice")
+                or container.get("signed_invoice")
+                or "",
             }
 
     return {}
@@ -459,16 +484,26 @@ def _persist_irn(db, order_id: str, irn_fields: Dict[str, Any]) -> None:
         for collection_name in ("orders", "invoices"):
             coll = db.get_collection(collection_name)
             result = coll.update_one(
-                {"$or": [{"id": order_id}, {"order_id": order_id},
-                          {"invoice_id": order_id}]},
+                {
+                    "$or": [
+                        {"id": order_id},
+                        {"order_id": order_id},
+                        {"invoice_id": order_id},
+                    ]
+                },
                 {"$set": update},
             )
             if result.matched_count > 0:
-                logger.info("[EINVOICE] persisted IRN %s on %s/%s",
-                            irn_fields.get("irn"), collection_name, order_id)
+                logger.info(
+                    "[EINVOICE] persisted IRN %s on %s/%s",
+                    irn_fields.get("irn"),
+                    collection_name,
+                    order_id,
+                )
                 return
-        logger.warning("[EINVOICE] order/invoice %s not found for IRN persist",
-                       order_id)
+        logger.warning(
+            "[EINVOICE] order/invoice %s not found for IRN persist", order_id
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EINVOICE] persist_irn failed for %s: %s", order_id, exc)
 
@@ -530,8 +565,9 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
     FAILED    -- gate was up but IRP call failed; order is unchanged.
     """
     order = order or {}
-    order_id = str(order.get("id") or order.get("order_id") or
-                   order.get("invoice_id") or "")
+    order_id = str(
+        order.get("id") or order.get("order_id") or order.get("invoice_id") or ""
+    )
 
     # ── Idempotency: skip if IRN already on the doc ──────────────────────
     existing_irn = order.get("irn") or order.get("einvoice_irn")
@@ -565,8 +601,11 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     cfg = _load_creds(db, gstin)
-    if not (cfg.get("gsp_url") and cfg.get("username") and
-            (cfg.get("password") or cfg.get("client_id"))):
+    if not (
+        cfg.get("gsp_url")
+        and cfg.get("username")
+        and (cfg.get("password") or cfg.get("client_id"))
+    ):
         return {
             "status": STATUS_SIMULATED,
             "irn": None,
@@ -633,9 +672,9 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def cancel_irn(db, order: Dict[str, Any],
-                     cancel_reason_code: int = 1,
-                     cancel_remark: str = "") -> Dict[str, Any]:
+async def cancel_irn(
+    db, order: Dict[str, Any], cancel_reason_code: int = 1, cancel_remark: str = ""
+) -> Dict[str, Any]:
     """Cancel an IRN within 24 hours of generation via the IRP cancel API.
 
     cancel_reason_code: 1=Duplicate, 2=Data Entry Mistake, 3=Order cancelled,
@@ -685,12 +724,14 @@ async def cancel_irn(db, order: Dict[str, Any],
             headers["Authorization"] = f"Bearer {bearer}"
         elif username and password:
             import base64
+
             cred = base64.b64encode(f"{username}:{password}".encode()).decode()
             headers["Authorization"] = f"Basic {cred}"
 
         async with httpx.AsyncClient(timeout=_EINVOICE_TIMEOUT) as client:
-            resp = await client.post(endpoint, headers=headers,
-                                     content=json.dumps(cancel_payload))
+            resp = await client.post(
+                endpoint, headers=headers, content=json.dumps(cancel_payload)
+            )
 
         if resp.status_code not in (200, 201):
             return {
@@ -707,8 +748,12 @@ async def cancel_irn(db, order: Dict[str, Any],
                     for cn in ("orders", "invoices"):
                         result = db.get_collection(cn).update_one(
                             {"$or": [{"id": order_id}, {"order_id": order_id}]},
-                            {"$set": {"einvoice_status": "CANCELLED",
-                                      "einvoice_cancelled_at": datetime.now(timezone.utc)}},
+                            {
+                                "$set": {
+                                    "einvoice_status": "CANCELLED",
+                                    "einvoice_cancelled_at": datetime.now(timezone.utc),
+                                }
+                            },
                         )
                         if result.matched_count > 0:
                             break

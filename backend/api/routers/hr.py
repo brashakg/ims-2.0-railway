@@ -55,8 +55,15 @@ _VALID_STATUSES = frozenset(
 # Leave types accepted by apply_leave.
 _VALID_LEAVE_TYPES = frozenset(
     {
-        "CASUAL", "SICK", "EARNED", "PRIVILEGE",
-        "MATERNITY", "PATERNITY", "UNPAID", "LWP", "LOP",
+        "CASUAL",
+        "SICK",
+        "EARNED",
+        "PRIVILEGE",
+        "MATERNITY",
+        "PATERNITY",
+        "UNPAID",
+        "LWP",
+        "LOP",
     }
 )
 
@@ -658,7 +665,9 @@ def _store_coords(store_id: Optional[str]) -> dict:
     return out
 
 
-def _resolve_employee_shift(employee_id: str, store_id: Optional[str]) -> Optional[dict]:
+def _resolve_employee_shift(
+    employee_id: str, store_id: Optional[str]
+) -> Optional[dict]:
     """Resolve the shift assigned to an employee.
 
     Lookup order: explicit per-user assignment (users.shift_id) -> the store's
@@ -681,13 +690,15 @@ def _resolve_employee_shift(employee_id: str, store_id: Optional[str]) -> Option
         shift_id = None
     try:
         if shift_id:
-            return db.get_collection("shifts").find_one({"shift_id": shift_id}, {"_id": 0})
+            return db.get_collection("shifts").find_one(
+                {"shift_id": shift_id}, {"_id": 0}
+            )
         # Fall back to the store's lone active shift, if unambiguous.
         if store_id:
             active = list(
-                db.get_collection("shifts").find(
-                    {"store_id": store_id, "is_active": True}, {"_id": 0}
-                ).limit(2)
+                db.get_collection("shifts")
+                .find({"store_id": store_id, "is_active": True}, {"_id": 0})
+                .limit(2)
             )
             if len(active) == 1:
                 return active[0]
@@ -696,7 +707,9 @@ def _resolve_employee_shift(employee_id: str, store_id: Optional[str]) -> Option
     return None
 
 
-def _find_day_row(attendance_repo, employee_id: str, store_id: Optional[str], date_iso: str):
+def _find_day_row(
+    attendance_repo, employee_id: str, store_id: Optional[str], date_iso: str
+):
     """Find an employee's single attendance row for a given day.
 
     The canonical key is (employee_id, date) where `date` is the date-only ISO
@@ -707,9 +720,7 @@ def _find_day_row(attendance_repo, employee_id: str, store_id: Optional[str], da
     check-in would fail to see it and mint a duplicate, which is the exact bug
     being fixed. Fail-soft: any repo error -> None (treated as 'no row')."""
     try:
-        row = attendance_repo.find_one(
-            {"employee_id": employee_id, "date": date_iso}
-        )
+        row = attendance_repo.find_one({"employee_id": employee_id, "date": date_iso})
         if row is not None:
             return row
     except Exception:
@@ -741,10 +752,17 @@ def _create_day_row_safe(attendance_repo, data: dict):
         attendance_repo.create(data)
     except Exception:  # noqa: BLE001 - includes pymongo DuplicateKeyError
         existing = _find_day_row(
-            attendance_repo, data.get("employee_id"), data.get("store_id"), data.get("date")
+            attendance_repo,
+            data.get("employee_id"),
+            data.get("store_id"),
+            data.get("date"),
         )
         if existing is not None:
-            patch = {k: v for k, v in data.items() if k not in ("attendance_id", "date", "employee_id")}
+            patch = {
+                k: v
+                for k, v in data.items()
+                if k not in ("attendance_id", "date", "employee_id")
+            }
             attendance_repo.update(
                 existing.get("attendance_id") or existing.get("_id"), patch
             )
@@ -832,9 +850,14 @@ async def check_in(
             # of the day is the system of record. A repeat tap just keeps the row
             # PRESENT and never duplicates.
             update_data = {
-                "employee_name": current_user.get("full_name") or current_user.get("username"),
+                "employee_name": current_user.get("full_name")
+                or current_user.get("username"),
                 "store_id": existing.get("store_id") or active_store,
-                "status": existing.get("status") if existing.get("status") in ("PRESENT", "HALF_DAY") else "PRESENT",
+                "status": (
+                    existing.get("status")
+                    if existing.get("status") in ("PRESENT", "HALF_DAY")
+                    else "PRESENT"
+                ),
                 "shift_id": (shift or {}).get("shift_id") or existing.get("shift_id"),
                 "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
             }
@@ -851,7 +874,8 @@ async def check_in(
             data = {
                 "attendance_id": str(uuid.uuid4()),
                 "employee_id": employee_id,
-                "employee_name": current_user.get("full_name") or current_user.get("username"),
+                "employee_name": current_user.get("full_name")
+                or current_user.get("username"),
                 "store_id": active_store,
                 "date": today_iso,
                 "status": "PRESENT",
@@ -866,12 +890,17 @@ async def check_in(
             _create_day_row_safe(attendance_repo, data)
 
     return {
-        "message": "Already checked in today" if already_checked_in else "Check-in recorded",
+        "message": (
+            "Already checked in today" if already_checked_in else "Check-in recorded"
+        ),
         "checkInTime": now.isoformat(),
         "already_checked_in": already_checked_in,
         "is_late": late["is_late"],
         "late_minutes": late["late_minutes"],
-        "geo": {"verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"), "reason": geo["reason"]},
+        "geo": {
+            "verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
+            "reason": geo["reason"],
+        },
     }
 
 
@@ -1035,9 +1064,11 @@ def _audit_attendance_edit(current_user, attendance_id, before, after, changed):
                 "action": "ATTENDANCE_EDIT",
                 "entity_type": "ATTENDANCE",
                 "entity_id": attendance_id,
-                "store_id": (after or {}).get("store_id") or (before or {}).get("store_id"),
+                "store_id": (after or {}).get("store_id")
+                or (before or {}).get("store_id"),
                 "user_id": current_user.get("user_id"),
-                "user_name": current_user.get("full_name") or current_user.get("username"),
+                "user_name": current_user.get("full_name")
+                or current_user.get("username"),
                 "timestamp": datetime.utcnow(),
                 "severity": "INFO",
                 "source": "domain",
@@ -1094,17 +1125,23 @@ async def edit_attendance(
     if "check_in" in sent:
         updates["check_in"] = request.check_in.isoformat() if request.check_in else None
     if "check_out" in sent:
-        updates["check_out"] = request.check_out.isoformat() if request.check_out else None
+        updates["check_out"] = (
+            request.check_out.isoformat() if request.check_out else None
+        )
 
     # Cross-field guard: the resulting check_out must still be after check_in,
     # accounting for the side NOT being edited (the model only validated the two
     # when both were sent in the same request).
-    eff_ci = updates.get("check_in", existing.get("check_in")) if (
-        "check_in" in sent or existing.get("check_in")
-    ) else None
-    eff_co = updates.get("check_out", existing.get("check_out")) if (
-        "check_out" in sent or existing.get("check_out")
-    ) else None
+    eff_ci = (
+        updates.get("check_in", existing.get("check_in"))
+        if ("check_in" in sent or existing.get("check_in"))
+        else None
+    )
+    eff_co = (
+        updates.get("check_out", existing.get("check_out"))
+        if ("check_out" in sent or existing.get("check_out"))
+        else None
+    )
     if eff_ci and eff_co:
         ci_dt = attendance_engine._coerce_check_in(eff_ci)
         co_dt = attendance_engine._coerce_check_in(eff_co)
@@ -1213,12 +1250,15 @@ async def apply_leave(
 
     if leave_repo is not None and employee_id:
         # Check for overlapping active (APPROVED or PENDING) leaves.
-        existing_leaves = leave_repo.find_many(
-            {
-                "employee_id": employee_id,
-                "status": {"$in": ["APPROVED", "PENDING"]},
-            }
-        ) or []
+        existing_leaves = (
+            leave_repo.find_many(
+                {
+                    "employee_id": employee_id,
+                    "status": {"$in": ["APPROVED", "PENDING"]},
+                }
+            )
+            or []
+        )
         for ex in existing_leaves:
             ex_from = ex.get("from_date")
             ex_to = ex.get("to_date") or ex_from
@@ -1256,7 +1296,11 @@ async def apply_leave(
     if leave_repo is not None:
         leave_repo.create(doc)
 
-    return {"leaveId": doc["leave_id"], "message": "Leave application submitted", "status": "PENDING"}
+    return {
+        "leaveId": doc["leave_id"],
+        "message": "Leave application submitted",
+        "status": "PENDING",
+    }
 
 
 @router.post("/leaves/{leave_id}/approve")
@@ -1506,7 +1550,9 @@ class ShiftAssignRequest(BaseModel):
 
 def _clean_weekly_off(days: List[int]) -> List[int]:
     """Keep only valid weekday ints (0-6), de-duplicated + sorted."""
-    return sorted({int(d) for d in (days or []) if isinstance(d, int) and 0 <= int(d) <= 6})
+    return sorted(
+        {int(d) for d in (days or []) if isinstance(d, int) and 0 <= int(d) <= 6}
+    )
 
 
 @router.post("/shifts", status_code=201)
@@ -1582,7 +1628,11 @@ async def assign_shift(
     except Exception:
         db = None
     if db is None:
-        return {"message": "Shift assigned", "employee_id": req.employee_id, "shift_id": req.shift_id}
+        return {
+            "message": "Shift assigned",
+            "employee_id": req.employee_id,
+            "shift_id": req.shift_id,
+        }
 
     shift = db.get_collection("shifts").find_one({"shift_id": req.shift_id}, {"_id": 0})
     if shift is None:
@@ -1596,7 +1646,11 @@ async def assign_shift(
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return {"message": "Shift assigned", "employee_id": req.employee_id, "shift_id": req.shift_id}
+    return {
+        "message": "Shift assigned",
+        "employee_id": req.employee_id,
+        "shift_id": req.shift_id,
+    }
 
 
 # ============================================================================
@@ -1620,7 +1674,11 @@ async def late_marks_report(
     active_store = validate_store_access(store_id, current_user)
     attendance_repo = get_attendance_repository()
     if attendance_repo is None:
-        return {"month": f"{year:04d}-{mon:02d}", "employees": [], "total_late_marks": 0}
+        return {
+            "month": f"{year:04d}-{mon:02d}",
+            "employees": [],
+            "total_late_marks": 0,
+        }
 
     n_days = _days_in_month(year, mon)
     start = f"{year:04d}-{mon:02d}-01"
@@ -1796,11 +1854,14 @@ async def approve_weekoff_swap(
     if not decision["allowed"]:
         if decision["reason"] == "SELF_APPROVAL":
             raise HTTPException(
-                status_code=403, detail="You cannot approve your own week-off swap request"
+                status_code=403,
+                detail="You cannot approve your own week-off swap request",
             )
         if decision["reason"] == "NOT_PENDING":
             raise HTTPException(status_code=400, detail="Swap request is not pending")
-        raise HTTPException(status_code=403, detail="Not permitted to approve this request")
+        raise HTTPException(
+            status_code=403, detail="Not permitted to approve this request"
+        )
 
     db.get_collection("weekoff_swaps").update_one(
         {"swap_id": swap_id},
@@ -1845,11 +1906,14 @@ async def reject_weekoff_swap(
     if not decision["allowed"]:
         if decision["reason"] == "SELF_APPROVAL":
             raise HTTPException(
-                status_code=403, detail="You cannot act on your own week-off swap request"
+                status_code=403,
+                detail="You cannot act on your own week-off swap request",
             )
         if decision["reason"] == "NOT_PENDING":
             raise HTTPException(status_code=400, detail="Swap request is not pending")
-        raise HTTPException(status_code=403, detail="Not permitted to reject this request")
+        raise HTTPException(
+            status_code=403, detail="Not permitted to reject this request"
+        )
 
     db.get_collection("weekoff_swaps").update_one(
         {"swap_id": swap_id},

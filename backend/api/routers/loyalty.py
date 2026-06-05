@@ -361,9 +361,7 @@ async def redeem(
         # Re-read for an accurate "available" in the message (best-effort).
         try:
             current = int(
-                (accounts.find_by_id(body.customer_id) or {}).get(
-                    "balance_points", 0
-                )
+                (accounts.find_by_id(body.customer_id) or {}).get("balance_points", 0)
             )
         except Exception:  # noqa: BLE001
             current = int(account.get("balance_points", 0))

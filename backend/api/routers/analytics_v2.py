@@ -62,7 +62,9 @@ def _safe_div(a, b, ndigits=2):
 # These two helpers centralise the correct datetime filter + a safe day-key.
 
 
-def _created_range(gte: Optional[datetime] = None, lte: Optional[datetime] = None) -> dict:
+def _created_range(
+    gte: Optional[datetime] = None, lte: Optional[datetime] = None
+) -> dict:
     """Build a `created_at` Mongo range using real datetime objects (BSON
     Date), so the comparison actually matches stored orders. Pass naive
     datetimes; tz is stripped to match how the orders are written."""

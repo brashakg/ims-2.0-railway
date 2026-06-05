@@ -392,7 +392,9 @@ def _release_returnable_qty(
         return
     item_id = orig_line.get("item_id") or orig_line.get("id")
     product_id = orig_line.get("product_id")
-    elem: Dict[str, Any] = {"item_id": item_id} if item_id else {"product_id": product_id}
+    elem: Dict[str, Any] = (
+        {"item_id": item_id} if item_id else {"product_id": product_id}
+    )
     try:
         coll.find_one_and_update(
             {"order_id": order_id, "items": {"$elemMatch": elem}},

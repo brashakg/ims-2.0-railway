@@ -485,9 +485,7 @@ def valuation_trueup_for_invoice(
             # cost. (The stock_units carry their own per-unit unit_cost.)
             new_cost = recv_unit_cost if recv_unit_cost > 0 else old_cost
         else:
-            new_cost = moving_average_cost(
-                old_qty, old_cost, recv_qty, recv_unit_cost
-            )
+            new_cost = moving_average_cost(old_qty, old_cost, recv_qty, recv_unit_cost)
         updates.append(
             {
                 "product_id": pid,

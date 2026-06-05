@@ -315,8 +315,12 @@ async def owner_digest(
                 if isinstance(pays, list) and pays:
                     for p in pays:
                         pp = p or {}
-                        mode = str(pp.get("method") or pp.get("payment_method") or "OTHER").upper()
-                        pay_modes[mode] = pay_modes.get(mode, 0.0) + float(pp.get("amount") or 0)
+                        mode = str(
+                            pp.get("method") or pp.get("payment_method") or "OTHER"
+                        ).upper()
+                        pay_modes[mode] = pay_modes.get(mode, 0.0) + float(
+                            pp.get("amount") or 0
+                        )
                 elif o.get("payment_method"):
                     mode = str(o.get("payment_method")).upper()
                     pay_modes[mode] = pay_modes.get(mode, 0.0) + paid
@@ -355,13 +359,15 @@ async def owner_digest(
         try:
             pending_tasks = tasks.count_documents(tq)
             for r in tasks.find(tq).limit(10):
-                task_list.append({
-                    "title": r.get("title") or "Task",
-                    "priority": r.get("priority") or "P3",
-                    "status": r.get("status"),
-                    "due_at": r.get("due_at"),
-                    "store_id": r.get("store_id"),
-                })
+                task_list.append(
+                    {
+                        "title": r.get("title") or "Task",
+                        "priority": r.get("priority") or "P3",
+                        "status": r.get("status"),
+                        "due_at": r.get("due_at"),
+                        "store_id": r.get("store_id"),
+                    }
+                )
         except Exception:
             pass
 
@@ -383,13 +389,15 @@ async def owner_digest(
             elif rp and qty <= rp:
                 low += 1
             if is_low and len(low_items) < 10:
-                low_items.append({
-                    "name": p.get("name") or p.get("title") or p.get("sku"),
-                    "sku": p.get("sku"),
-                    "qty": qty,
-                    "reorder_point": rp,
-                    "store_id": p.get("store_id"),
-                })
+                low_items.append(
+                    {
+                        "name": p.get("name") or p.get("title") or p.get("sku"),
+                        "sku": p.get("sku"),
+                        "qty": qty,
+                        "reorder_point": rp,
+                        "store_id": p.get("store_id"),
+                    }
+                )
 
     total_staff = present_today = 0
     users = _coll("users")
@@ -436,7 +444,11 @@ async def owner_digest(
         },
         "expanded": {
             "by_store": [
-                {"store_id": k, "sales": round(v["sales"], 2), "orders": int(v["orders"])}
+                {
+                    "store_id": k,
+                    "sales": round(v["sales"], 2),
+                    "orders": int(v["orders"]),
+                }
                 for k, v in sorted(by_store.items(), key=lambda kv: -kv[1]["sales"])
             ],
             "payment_modes": {
@@ -535,7 +547,9 @@ async def admin_escalations(
 
 
 @router.get("/admin/system-health")
-async def admin_system_health(current_user: dict = Depends(require_roles(*_WIDGET_ADMIN_ROLES))):
+async def admin_system_health(
+    current_user: dict = Depends(require_roles(*_WIDGET_ADMIN_ROLES)),
+):
     from database.connection import get_db
 
     status = {"api": "healthy", "checked_at": datetime.now().isoformat()}

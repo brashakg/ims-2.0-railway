@@ -490,9 +490,7 @@ class OrderCreate(BaseModel):
         allowed = {"NORMAL", "EXPRESS", "URGENT"}
         upper = str(v).strip().upper()
         if upper not in allowed:
-            raise ValueError(
-                "delivery_priority must be one of NORMAL, EXPRESS, URGENT"
-            )
+            raise ValueError("delivery_priority must be one of NORMAL, EXPRESS, URGENT")
         return upper
 
     @field_validator("delivery_date")
@@ -1370,7 +1368,9 @@ async def create_order(
                 if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
                     continue
                 try:
-                    _prod = _cap_repo.find_by_id(_pid) if _cap_repo is not None else None
+                    _prod = (
+                        _cap_repo.find_by_id(_pid) if _cap_repo is not None else None
+                    )
                 except Exception:
                     _prod = None
                 if _prod:
@@ -1505,9 +1505,7 @@ async def create_order(
             if float((it or {}).get("discount_percent") or 0) >= 100.0
         ]
         has_full_line_discount = bool(full_line_items)
-        cart_level_zero = (
-            round(grand_total, 2) <= 0.0 or cart_discount_percent >= 100.0
-        )
+        cart_level_zero = round(grand_total, 2) <= 0.0 or cart_discount_percent >= 100.0
         is_zero_total = cart_level_zero or has_full_line_discount
 
         cart_discount_approved_by = order.cart_discount_approved_by
@@ -1521,9 +1519,7 @@ async def create_order(
                 if _nonempty(cart_discount_approved_by)
                 else None
             )
-            reason = (
-                cart_discount_reason if _nonempty(cart_discount_reason) else None
-            )
+            reason = cart_discount_reason if _nonempty(cart_discount_reason) else None
             if approver is None and has_full_line_discount:
                 for it in full_line_items:
                     if _nonempty((it or {}).get("discount_approved_by")):
@@ -1873,7 +1869,9 @@ async def add_order_item(
                 if (
                     pr is not None
                     and item.product_id
-                    and not item.product_id.startswith(("custom-", "lens-", "lens-sug-"))
+                    and not item.product_id.startswith(
+                        ("custom-", "lens-", "lens-sug-")
+                    )
                 ):
                     product = pr.find_by_id(item.product_id)
                     if product:
@@ -2013,8 +2011,13 @@ async def remove_order_item(
 # workshop/lab job. Mirrors the POS client's Phase-6.8 gate so the safety-net and
 # the client agree on what "a fitting order" is.
 _WORKSHOP_LENS_TYPES = {
-    "LENS", "OPTICAL_LENS", "OPTICAL_LENSES", "SPECTACLE_LENS",
-    "SPECTACLE_LENSES", "RX_LENSES", "LENSES",
+    "LENS",
+    "OPTICAL_LENS",
+    "OPTICAL_LENSES",
+    "SPECTACLE_LENS",
+    "SPECTACLE_LENSES",
+    "RX_LENSES",
+    "LENSES",
 }
 _WORKSHOP_FRAME_TYPES = {"FRAME", "FRAMES", "SPECTACLE_FRAME", "SUNGLASS", "SUNGLASSES"}
 
@@ -2041,7 +2044,9 @@ def _order_needs_fitting(order: dict) -> bool:
     return bool(has_frame and has_rx)
 
 
-def _ensure_workshop_job_for_order(order: dict, by_user: Optional[str]) -> Optional[str]:
+def _ensure_workshop_job_for_order(
+    order: dict, by_user: Optional[str]
+) -> Optional[str]:
     """Idempotently ensure a CONFIRMED fitting order has a workshop/lab job, and
     that the order carries the reverse `workshop_job_id` pointer.
 
@@ -2091,7 +2096,8 @@ def _ensure_workshop_job_for_order(order: dict, by_user: Optional[str]) -> Optio
             (
                 it
                 for it in items
-                if _order_item_kind(it) in _WORKSHOP_LENS_TYPES or it.get("lens_details")
+                if _order_item_kind(it) in _WORKSHOP_LENS_TYPES
+                or it.get("lens_details")
             ),
             None,
         )
@@ -2244,7 +2250,9 @@ async def add_payment(
         # customer record the check is skipped (behaviour-preserving).
         if payment.method == PaymentMethod.CREDIT:
             customer_id_for_limit = order.get("customer_id")
-            if customer_id_for_limit and not customer_id_for_limit.startswith("walkin-"):
+            if customer_id_for_limit and not customer_id_for_limit.startswith(
+                "walkin-"
+            ):
                 try:
                     from .customers import _ar_outstanding
 
@@ -2254,13 +2262,9 @@ async def add_payment(
                         if customer_repo is not None
                         else None
                     )
-                    credit_limit = float(
-                        (customer_doc or {}).get("credit_limit") or 0
-                    )
+                    credit_limit = float((customer_doc or {}).get("credit_limit") or 0)
                     if credit_limit > 0:
-                        ar_now = _ar_outstanding(
-                            customer_id_for_limit, customer_doc
-                        )
+                        ar_now = _ar_outstanding(customer_id_for_limit, customer_doc)
                         if ar_now + payment.amount > credit_limit:
                             raise HTTPException(
                                 status_code=400,
@@ -2563,7 +2567,11 @@ def _invoice_state_code(*candidates) -> str:
     def _valid_code(code) -> str:
         """Accept a 2-digit string only if it's a real GST state code."""
         c = str(code or "").strip()
-        if len(c) == 2 and c.isdigit() and (not INDIAN_STATE_CODES or c in INDIAN_STATE_CODES):
+        if (
+            len(c) == 2
+            and c.isdigit()
+            and (not INDIAN_STATE_CODES or c in INDIAN_STATE_CODES)
+        ):
             return c
         return ""
 
@@ -2831,6 +2839,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
 
 class BOPISLine(BaseModel):
     """One item line that must be fulfilled from another store."""
+
     product_id: str
     sku: str = ""
     product_name: str = ""
@@ -2895,7 +2904,9 @@ async def create_bopis_transfer(
 
         db = get_db()
         transfers_coll = (
-            db.get_collection("stock_transfers") if db is not None and db.is_connected else None
+            db.get_collection("stock_transfers")
+            if db is not None and db.is_connected
+            else None
         )
     except Exception:
         transfers_coll = None

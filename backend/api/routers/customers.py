@@ -31,9 +31,7 @@ def _sanitize_text(value: str) -> str:
 # 15-character Indian GSTIN format.
 # Pattern: 2-digit state code + 5-letter PAN prefix + 4-digit PAN year + 1 PAN check
 #          + 1 entity number + 'Z' + 1 check character.
-_GSTIN_RE = re.compile(
-    r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
-)
+_GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
 
 # Basic e-mail sanity check (no external dependency).
 # Deliberately permissive -- just ensures there is an @, a dot-separated domain,
@@ -127,7 +125,9 @@ def _annotate_customer_matches(customers: List[Dict], query: str) -> List[Dict]:
             c["match"] = {"account": True, "matched_patient_ids": []}
             continue
         try:
-            acct = _all_in(c.get("name"), c.get("mobile"), c.get("phone"), c.get("email"))
+            acct = _all_in(
+                c.get("name"), c.get("mobile"), c.get("phone"), c.get("email")
+            )
             matched_pids = [
                 p.get("patient_id") or p.get("id") or p.get("name")
                 for p in (c.get("patients") or [])
@@ -452,9 +452,8 @@ async def create_customer(
                         ),
                         # Honor the caller-supplied relation; fall back to the
                         # name-heuristic only when the field is absent/blank.
-                        "relation": p.relation or (
-                            "Self" if p.name == customer.name else "Other"
-                        ),
+                        "relation": p.relation
+                        or ("Self" if p.name == customer.name else "Other"),
                     }
                 )
         else:
@@ -571,7 +570,8 @@ async def get_customer_by_mobile(
 @router.get("/consent/pending-purge")
 async def list_pending_purge(
     days_overdue: int = Query(
-        0, ge=0,
+        0,
+        ge=0,
         description=(
             "Return only customers whose erasure was requested >= this many "
             "days ago. 0 = all pending. 30 = overdue by 30 days."
@@ -590,11 +590,16 @@ async def list_pending_purge(
     """
     repo = get_customer_repository()
     if repo is None:
-        return {"customers": [], "total": 0, "retention_windows_days": _PURPOSE_RETENTION_DAYS}
+        return {
+            "customers": [],
+            "total": 0,
+            "retention_windows_days": _PURPOSE_RETENTION_DAYS,
+        }
 
     query: Dict[str, Any] = {"pending_erasure": True}
     if days_overdue > 0:
         from datetime import timedelta
+
         cutoff = (datetime.utcnow() - timedelta(days=days_overdue)).isoformat()
         query["erasure_requested_at"] = {"$lte": cutoff}
 
@@ -872,8 +877,7 @@ def _ar_outstanding(customer_id: str, customer_doc: Optional[dict]) -> float:
             if pstatus == "PAID":
                 continue
             has_credit = any(
-                p.get("method") == "CREDIT"
-                for p in (order.get("payments") or [])
+                p.get("method") == "CREDIT" for p in (order.get("payments") or [])
             )
             if has_credit:
                 total += float(order.get("balance_due") or 0)
@@ -908,7 +912,9 @@ async def get_customer_credit_summary(
 
     credit_limit = float((customer or {}).get("credit_limit") or 0)
     ar_outstanding = _ar_outstanding(customer_id, customer)
-    ar_available = None if credit_limit == 0 else round(credit_limit - ar_outstanding, 2)
+    ar_available = (
+        None if credit_limit == 0 else round(credit_limit - ar_outstanding, 2)
+    )
     limit_exceeded = bool(credit_limit > 0 and ar_outstanding > credit_limit)
 
     return {
@@ -1193,20 +1199,19 @@ async def get_store_credit_ledger(
 #   ANALYTICS          - 30 days  (anonymise within 30 days of withdrawal)
 # ============================================================================
 
-_ALL_PURPOSES = frozenset(
-    {"SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS"}
-)
+_ALL_PURPOSES = frozenset({"SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS"})
 
 _PURPOSE_RETENTION_DAYS: Dict[str, int] = {
-    "SERVICE_DELIVERY": 1095,   # 3 years
+    "SERVICE_DELIVERY": 1095,  # 3 years
     "MARKETING": 0,
-    "RX_HISTORY": 1825,         # 5 years
+    "RX_HISTORY": 1825,  # 5 years
     "ANALYTICS": 30,
 }
 
 
 class ConsentGrantRequest(BaseModel):
     """Body for granting (or re-granting after an update) DPDP consent."""
+
     purposes: List[str] = Field(
         default_factory=lambda: list(_ALL_PURPOSES),
         description=(
@@ -1232,8 +1237,7 @@ class ConsentGrantRequest(BaseModel):
         bad = set(v) - _ALL_PURPOSES
         if bad:
             raise ValueError(
-                f"Unknown purposes: {sorted(bad)}. "
-                f"Valid: {sorted(_ALL_PURPOSES)}"
+                f"Unknown purposes: {sorted(bad)}. " f"Valid: {sorted(_ALL_PURPOSES)}"
             )
         if not v:
             raise ValueError("At least one purpose must be specified")
@@ -1250,12 +1254,13 @@ class ConsentGrantRequest(BaseModel):
 
 class ConsentWithdrawRequest(BaseModel):
     """Body for withdrawing DPDP consent (all or specific purposes)."""
+
     purposes: Optional[List[str]] = Field(
         None,
         description=(
             "Purposes to withdraw. Omit or pass null to withdraw ALL purposes "
             "(full erasure request). To withdraw only marketing consent pass "
-            "[\"MARKETING\"]."
+            '["MARKETING"].'
         ),
     )
     reason: Optional[str] = Field(None, max_length=500)
@@ -1268,7 +1273,9 @@ class ConsentWithdrawRequest(BaseModel):
             if bad:
                 raise ValueError(f"Unknown purposes: {sorted(bad)}")
             if not v:
-                raise ValueError("Provide at least one purpose, or omit to withdraw all")
+                raise ValueError(
+                    "Provide at least one purpose, or omit to withdraw all"
+                )
         return v
 
 
@@ -1287,7 +1294,7 @@ def _consent_ledger_coll():
 
 def _append_consent_event(
     customer_id: str,
-    event_type: str,          # "GRANTED" | "WITHDRAWN" | "UPDATED"
+    event_type: str,  # "GRANTED" | "WITHDRAWN" | "UPDATED"
     purposes: List[str],
     current_user: dict,
     *,
@@ -1330,8 +1337,7 @@ def _active_purposes_from_ledger(customer_id: str) -> List[str]:
         return []
     try:
         rows = list(
-            coll.find({"customer_id": customer_id}, {"_id": 0})
-               .sort("created_at", -1)
+            coll.find({"customer_id": customer_id}, {"_id": 0}).sort("created_at", -1)
         )
     except Exception:  # noqa: BLE001
         return []
@@ -1366,8 +1372,9 @@ async def get_consent_ledger(
     if coll is not None:
         try:
             entries = list(
-                coll.find({"customer_id": customer_id}, {"_id": 0})
-                   .sort("created_at", -1)
+                coll.find({"customer_id": customer_id}, {"_id": 0}).sort(
+                    "created_at", -1
+                )
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1454,9 +1461,7 @@ async def withdraw_consent(
     if repo is not None and customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    purposes_to_withdraw = (
-        list(body.purposes) if body.purposes else list(_ALL_PURPOSES)
-    )
+    purposes_to_withdraw = list(body.purposes) if body.purposes else list(_ALL_PURPOSES)
 
     entry = _append_consent_event(
         customer_id,

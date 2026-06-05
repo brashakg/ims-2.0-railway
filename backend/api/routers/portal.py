@@ -196,7 +196,7 @@ def _category_label(category: Optional[str]) -> str:
 
 
 def _describe_for_customer(item: Dict[str, Any]) -> str:
-    """"Brand Category" line; falls back to subbrand, then product name."""
+    """ "Brand Category" line; falls back to subbrand, then product name."""
     brand = (item.get("brand") or "").strip()
     cat = _category_label(item.get("category") or item.get("item_type"))
     if brand:

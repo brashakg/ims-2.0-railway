@@ -20,6 +20,7 @@ optometrist / workshop staff get 403.
 Everything is FAIL-SOFT: no DB -> counts come back 0 and the module still
 reports its status; the summary never 500s.
 """
+
 from __future__ import annotations
 
 from typing import Dict, Optional
@@ -40,12 +41,42 @@ _ECOM_ROLES = ("ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER")
 # plan even before the screens exist. STATUS is "planned" for all of them in
 # Phase 1 -- the skeleton is live, the features are not.
 _PLANNED_FEATURES = [
-    {"key": "catalog_variants", "name": "Variant identity + Shopify mapping", "phase": 1, "status": "foundation"},
-    {"key": "collections", "name": "Collections (custom + smart, auto-lineage)", "phase": 2, "status": "planned"},
-    {"key": "mega_menu", "name": "Menus / Mega-menu editor", "phase": 3, "status": "planned"},
-    {"key": "online_orders", "name": "Online-order ingestion into IMS books", "phase": 3, "status": "planned"},
-    {"key": "image_design_queue", "name": "Image design workflow (RAW -> EDITED)", "phase": 4, "status": "planned"},
-    {"key": "shopify_push", "name": "Shopify GraphQL push (single-writer, gated)", "phase": 5, "status": "planned"},
+    {
+        "key": "catalog_variants",
+        "name": "Variant identity + Shopify mapping",
+        "phase": 1,
+        "status": "foundation",
+    },
+    {
+        "key": "collections",
+        "name": "Collections (custom + smart, auto-lineage)",
+        "phase": 2,
+        "status": "planned",
+    },
+    {
+        "key": "mega_menu",
+        "name": "Menus / Mega-menu editor",
+        "phase": 3,
+        "status": "planned",
+    },
+    {
+        "key": "online_orders",
+        "name": "Online-order ingestion into IMS books",
+        "phase": 3,
+        "status": "planned",
+    },
+    {
+        "key": "image_design_queue",
+        "name": "Image design workflow (RAW -> EDITED)",
+        "phase": 4,
+        "status": "planned",
+    },
+    {
+        "key": "shopify_push",
+        "name": "Shopify GraphQL push (single-writer, gated)",
+        "phase": 5,
+        "status": "planned",
+    },
 ]
 
 

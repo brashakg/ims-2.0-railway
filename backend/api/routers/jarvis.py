@@ -2472,14 +2472,18 @@ class Jarvis:
                 period = item.get("period") or "upcoming"
                 amount = float(item.get("amount") or 0)
                 if amount:
-                    response += f"- {period}: {self.response_gen.format_currency(amount)}\n"
+                    response += (
+                        f"- {period}: {self.response_gen.format_currency(amount)}\n"
+                    )
             response += "\n"
 
         if demand_forecast:
             response += "**Demand Trends:**\n"
             for pred in demand_forecast[:5]:
                 trend = pred.get("trend") or "stable"
-                emoji = "up" if trend == "up" else ("down" if trend == "down" else "stable")
+                emoji = (
+                    "up" if trend == "up" else ("down" if trend == "down" else "stable")
+                )
                 cat = pred.get("category") or pred.get("product") or "?"
                 response += f"- {cat}: {emoji}\n"
             response += "\n"

@@ -1243,9 +1243,7 @@ async def update_product(
         # product un-scannable at POS). Only runs when `barcode` is in the
         # payload; a blank value (clear) is allowed.
         if "barcode" in update_data:
-            _validate_product_barcode_or_400(
-                update_data["barcode"], repo, product_id
-            )
+            _validate_product_barcode_or_400(update_data["barcode"], repo, product_id)
 
         # Validate MRP >= Offer Price using the EFFECTIVE post-update values.
         # The old check only fired when BOTH fields were in the payload, so a

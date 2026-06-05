@@ -105,8 +105,10 @@ class SalaryConfig(BaseModel):
     # Commission (HR-3): percentage of closed-order revenue earned as commission.
     # Default 0 means commission is not applicable for this employee.
     commission_rate_percent: float = Field(
-        default=0.0, ge=0, le=100,
-        description="Commission rate (%) applied to closed order revenue"
+        default=0.0,
+        ge=0,
+        le=100,
+        description="Commission rate (%) applied to closed order revenue",
     )
 
 
@@ -611,7 +613,9 @@ def _flatten_payroll_row(record: dict) -> dict:
     return {
         # ID field: payroll rows use payroll_id; legacy used salary_record_id.
         # Expose both so the FE key always resolves.
-        "salary_record_id": record.get("payroll_id") or record.get("salary_record_id") or "",
+        "salary_record_id": record.get("payroll_id")
+        or record.get("salary_record_id")
+        or "",
         "payroll_id": record.get("payroll_id") or "",
         "employee_id": record.get("employee_id", ""),
         "employee_name": record.get("employee_name", ""),
@@ -966,7 +970,8 @@ def _build_payslip_from_run_row(run_row: dict, employee: dict, db: object) -> di
     return {
         "payslip_id": run_row.get("payroll_id") or str(uuid.uuid4()),
         "employee_id": run_row.get("employee_id", ""),
-        "employee_name": employee.get("full_name", "") or run_row.get("employee_name", ""),
+        "employee_name": employee.get("full_name", "")
+        or run_row.get("employee_name", ""),
         "employee_number": employee.get("employee_number", ""),
         "designation": employee.get("designation", ""),
         "department": employee.get("department", ""),
@@ -974,7 +979,9 @@ def _build_payslip_from_run_row(run_row: dict, employee: dict, db: object) -> di
         "year": run_row.get("year"),
         "breakdown": flat["breakdown"],
         "bank_account": cfg.get("bank_account") if cfg else None,
-        "generated_at": run_row.get("updated_at") or run_row.get("created_at") or datetime.now().isoformat(),
+        "generated_at": run_row.get("updated_at")
+        or run_row.get("created_at")
+        or datetime.now().isoformat(),
         # Include payroll status so FE can show DRAFT/APPROVED/PAID badge.
         "status": run_row.get("status", "DRAFT"),
     }
@@ -1205,9 +1212,7 @@ class PtSlabUpsert(BaseModel):
     def _validate_basis(cls, v: str) -> str:
         uv = v.strip().upper()
         if uv not in _VALID_PT_BASIS:
-            raise ValueError(
-                f"basis must be one of {sorted(_VALID_PT_BASIS)}"
-            )
+            raise ValueError(f"basis must be one of {sorted(_VALID_PT_BASIS)}")
         return uv
 
     @field_validator("slabs")
@@ -1758,7 +1763,9 @@ async def get_commission_summary(
     month: int = Query(..., ge=1, le=12, description="Calendar month (1-12)"),
     year: int = Query(..., ge=2020, le=2100, description="Calendar year"),
     store_id: Optional[str] = Query(None, description="Filter to a single store"),
-    employee_id: Optional[str] = Query(None, description="Filter to a single employee (self-service)"),
+    employee_id: Optional[str] = Query(
+        None, description="Filter to a single employee (self-service)"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """Per-staff commission ledger for a month.
@@ -1822,11 +1829,13 @@ async def get_commission_summary(
             amount = float(o.get("total_amount") or o.get("grand_total") or 0)
             staff_map[sid]["sales_count"] += 1
             staff_map[sid]["revenue"] += amount
-            staff_map[sid]["orders"].append({
-                "order_id": o.get("order_id") or o.get("_id", ""),
-                "date": str(o.get("created_at", ""))[:10],
-                "amount": amount,
-            })
+            staff_map[sid]["orders"].append(
+                {
+                    "order_id": o.get("order_id") or o.get("_id", ""),
+                    "date": str(o.get("created_at", ""))[:10],
+                    "amount": amount,
+                }
+            )
 
         # Fetch commission rates from salary_config.
         emp_ids = list(staff_map.keys())
@@ -1845,20 +1854,22 @@ async def get_commission_summary(
         for sid, stats in staff_map.items():
             rate = rate_map.get(sid, 0.0)
             commission = round(stats["revenue"] * rate / 100, 2)
-            items.append({
-                "employee_id": sid,
-                "name": stats["name"],
-                "store_id": stats["store_id"],
-                "sales_count": stats["sales_count"],
-                "revenue": round(stats["revenue"], 2),
-                "commission_rate_percent": rate,
-                "commission_amount": commission,
-                "rank": 0,
-                # Include last 10 orders for the detail drilldown.
-                "recent_orders": sorted(
-                    stats["orders"], key=lambda x: x["date"], reverse=True
-                )[:10],
-            })
+            items.append(
+                {
+                    "employee_id": sid,
+                    "name": stats["name"],
+                    "store_id": stats["store_id"],
+                    "sales_count": stats["sales_count"],
+                    "revenue": round(stats["revenue"], 2),
+                    "commission_rate_percent": rate,
+                    "commission_amount": commission,
+                    "rank": 0,
+                    # Include last 10 orders for the detail drilldown.
+                    "recent_orders": sorted(
+                        stats["orders"], key=lambda x: x["date"], reverse=True
+                    )[:10],
+                }
+            )
 
         items.sort(key=lambda x: x["revenue"], reverse=True)
         for i, item in enumerate(items):
@@ -1930,21 +1941,24 @@ async def get_commission_leaderboard(
         caller_id = current_user.get("user_id") or current_user.get("id")
         caller_roles = current_user.get("roles") or []
         is_manager = any(
-            r in caller_roles for r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+            r in caller_roles
+            for r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
         )
 
         leaderboard = []
         for sid, stats in staff_map.items():
             reveal_name = is_manager or sid == caller_id
-            leaderboard.append({
-                "staff_id": sid,
-                "name": stats["name"] if reveal_name else "Staff Member",
-                "sales_count": stats["sales_count"],
-                "revenue": round(stats["revenue"], 2),
-                "rank": 0,
-                "badge": "",
-                "is_self": sid == caller_id,
-            })
+            leaderboard.append(
+                {
+                    "staff_id": sid,
+                    "name": stats["name"] if reveal_name else "Staff Member",
+                    "sales_count": stats["sales_count"],
+                    "revenue": round(stats["revenue"], 2),
+                    "rank": 0,
+                    "badge": "",
+                    "is_self": sid == caller_id,
+                }
+            )
 
         leaderboard.sort(key=lambda x: x["revenue"], reverse=True)
         badges = ["Champion", "Star Performer", "Rising Star"]

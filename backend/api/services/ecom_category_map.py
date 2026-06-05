@@ -26,6 +26,7 @@ opt into strictness by checking `is_known_*` first.
 The functions are case-insensitive on input and normalise IMS/BVI keys to
 UPPER_SNAKE (the enum convention) while preserving Shopify's human casing.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -41,7 +42,11 @@ _TABLE: List[Dict[str, str]] = [
     {"ims": "SUNGLASS", "bvi": "SUNGLASSES", "shopify": "Sunglasses"},
     {"ims": "OPTICAL_LENS", "bvi": "LENSES", "shopify": "Eyeglass Lenses"},
     {"ims": "CONTACT_LENS", "bvi": "CONTACT_LENSES", "shopify": "Contact Lenses"},
-    {"ims": "COLORED_CONTACT_LENS", "bvi": "COLOR_CONTACT_LENSES", "shopify": "Color Contact Lenses"},
+    {
+        "ims": "COLORED_CONTACT_LENS",
+        "bvi": "COLOR_CONTACT_LENSES",
+        "shopify": "Color Contact Lenses",
+    },
     {"ims": "READING_GLASSES", "bvi": "READING_GLASSES", "shopify": "Reading Glasses"},
     {"ims": "WATCH", "bvi": "WATCHES", "shopify": "Watches"},
     {"ims": "SMARTWATCH", "bvi": "SMARTWATCHES", "shopify": "Smartwatches"},
@@ -78,6 +83,7 @@ for _row in _TABLE:
 # Normalisers
 # ---------------------------------------------------------------------------
 
+
 def _norm_enum(value: Optional[str]) -> str:
     """Normalise an IMS/BVI enum-style key: trim, upper, spaces/hyphens -> '_'."""
     if not value:
@@ -96,6 +102,7 @@ def _norm_shopify(value: Optional[str]) -> str:
 # IMS <-> BVI
 # ---------------------------------------------------------------------------
 
+
 def ims_to_bvi(ims_category: Optional[str]) -> str:
     """IMS category -> BVI category. Unknown -> passthrough (normalised)."""
     key = _norm_enum(ims_category)
@@ -111,6 +118,7 @@ def bvi_to_ims(bvi_category: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 # IMS <-> Shopify productType
 # ---------------------------------------------------------------------------
+
 
 def ims_to_shopify_type(ims_category: Optional[str]) -> str:
     """IMS category -> Shopify productType. Unknown -> passthrough (normalised
@@ -130,6 +138,7 @@ def shopify_type_to_ims(shopify_type: Optional[str]) -> str:
 # BVI <-> Shopify productType
 # ---------------------------------------------------------------------------
 
+
 def bvi_to_shopify_type(bvi_category: Optional[str]) -> str:
     """BVI category -> Shopify productType. Unknown -> passthrough."""
     key = _norm_enum(bvi_category)
@@ -146,6 +155,7 @@ def shopify_type_to_bvi(shopify_type: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 # Introspection helpers (let callers opt into strictness)
 # ---------------------------------------------------------------------------
+
 
 def is_known_ims(ims_category: Optional[str]) -> bool:
     return _norm_enum(ims_category) in _IMS_TO_BVI

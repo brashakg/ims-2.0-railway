@@ -2507,10 +2507,13 @@ async def trigger_einvoice(
     from api.routers.auth import require_roles
     from api.services.einvoice import generate_irn
 
-    role = str(current_user.get("activeRole") or
-               (current_user.get("roles") or [""])[0] or "")
+    role = str(
+        current_user.get("activeRole") or (current_user.get("roles") or [""])[0] or ""
+    )
     if role not in _EINVOICE_ROLES:
-        raise HTTPException(status_code=403, detail="Finance roles required for e-invoice")
+        raise HTTPException(
+            status_code=403, detail="Finance roles required for e-invoice"
+        )
 
     db = _get_db()
 
@@ -2520,8 +2523,13 @@ async def trigger_einvoice(
         try:
             coll = db.get_collection(collection_name)
             doc = coll.find_one(
-                {"$or": [{"id": order_id}, {"order_id": order_id},
-                          {"invoice_id": order_id}]},
+                {
+                    "$or": [
+                        {"id": order_id},
+                        {"order_id": order_id},
+                        {"invoice_id": order_id},
+                    ]
+                },
                 {"_id": 0},
             )
             if doc:
@@ -2531,7 +2539,9 @@ async def trigger_einvoice(
             pass
 
     if order is None:
-        raise HTTPException(status_code=404, detail=f"Order/invoice {order_id!r} not found")
+        raise HTTPException(
+            status_code=404, detail=f"Order/invoice {order_id!r} not found"
+        )
 
     result = await generate_irn(db, order)
     return result

@@ -45,7 +45,6 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user
 from ..services.print_legal import TEMPLATE_KEYS
 
-
 router = APIRouter()
 
 

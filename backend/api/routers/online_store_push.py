@@ -36,6 +36,7 @@ Mounted at /api/v1/online-store/push:
 Everything is FAIL-SOFT: no DB -> writes 503 (not a false 200); reads degrade to
 zeros; a Shopify error becomes a structured {ok:false} result, never a 500.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -57,6 +58,7 @@ _PUSH_ROLES = ("ADMIN",)
 # DB helpers (fail-soft; mirror routers/online_store_collections.py)
 # ---------------------------------------------------------------------------
 
+
 def _get_db():
     """Underlying DB object (real pymongo Database or seeded MockDatabase) when
     connected, else None. Subscript access (db[name]) works on both."""
@@ -75,7 +77,9 @@ def _require_db():
     db = _get_db()
     if db is None:
         # No DB -> the push store is unavailable. 503 (not a false 200).
-        raise HTTPException(status_code=503, detail="Online Store push unavailable (no DB)")
+        raise HTTPException(
+            status_code=503, detail="Online Store push unavailable (no DB)"
+        )
     return db
 
 
@@ -120,6 +124,7 @@ def _write_audit(result: Dict[str, Any], current_user: dict) -> None:
 # Push routes -- one per entity. Each runs the engine + writes a chained audit
 # row + returns the structured PushResult.
 # ---------------------------------------------------------------------------
+
 
 @router.post("/product/{product_id}")
 async def push_product(
@@ -310,6 +315,7 @@ def _empty_counts() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Doc fetch helpers (reuse the Phase 1-4 repositories / catalog access)
 # ---------------------------------------------------------------------------
+
 
 def _get_catalog_product(db, product_id: str) -> Optional[Dict]:
     """Fetch a catalog_products doc by its `id` (the catalog key, never _id).

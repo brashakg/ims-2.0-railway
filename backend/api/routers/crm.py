@@ -497,17 +497,25 @@ async def get_cl_refill_status(
     try:
         # CL categories used across the codebase (see inventory.py _CL_CATEGORIES).
         cl_categories = {
-            "CONTACT_LENS", "CONTACT_LENSES", "CONTACT LENS", "CONTACT LENSES",
-            "CL", "CONTACTS",
+            "CONTACT_LENS",
+            "CONTACT_LENSES",
+            "CONTACT LENS",
+            "CONTACT LENSES",
+            "CL",
+            "CONTACTS",
         }
 
         # Find the customer's most recent order that contains a CL line item.
         # Scan orders newest-first; stop on the first CL hit.
         orders_coll = db_conn.get_collection("orders")
-        cursor = orders_coll.find(
-            {"customer_id": customer_id},
-            {"_id": 0, "order_id": 1, "created_at": 1, "items": 1, "order_date": 1},
-        ).sort("created_at", -1).limit(50)
+        cursor = (
+            orders_coll.find(
+                {"customer_id": customer_id},
+                {"_id": 0, "order_id": 1, "created_at": 1, "items": 1, "order_date": 1},
+            )
+            .sort("created_at", -1)
+            .limit(50)
+        )
 
         cl_line = None
         cl_order = None
@@ -572,10 +580,13 @@ async def get_cl_refill_status(
             "modality": modality or None,
             "pack_size": pack_size or None,
             "note": (
-                "Refill overdue" if days_remaining < 0
-                else "Refill due within 7 days" if days_remaining <= 7
-                else "Refill due within 30 days" if days_remaining <= 30
-                else None
+                "Refill overdue"
+                if days_remaining < 0
+                else (
+                    "Refill due within 7 days"
+                    if days_remaining <= 7
+                    else "Refill due within 30 days" if days_remaining <= 30 else None
+                )
             ),
         }
     except Exception as exc:
@@ -662,7 +673,9 @@ async def get_customer_return_risk(
             "risk_level": risk_level,
             "note": (
                 "Advisory only — does not block transactions. "
-                "Review before issuing refund." if risk_level == "HIGH" else None
+                "Review before issuing refund."
+                if risk_level == "HIGH"
+                else None
             ),
         }
     except Exception as exc:
@@ -1051,9 +1064,9 @@ def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
     """
     # Recency thresholds (days since last purchase).
     THRESHOLDS = {
-        "high": (180, None),   # >= 180 days
-        "medium": (91, 179),   # 91-179 days
-        "low": (31, 90),       # 31-90 days
+        "high": (180, None),  # >= 180 days
+        "medium": (91, 179),  # 91-179 days
+        "low": (31, 90),  # 31-90 days
     }
     bounds = THRESHOLDS.get(risk_level)
     if bounds is None:
@@ -1115,10 +1128,12 @@ def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
             continue
         in_band = days >= lo and (hi is None or days <= hi)
         if in_band:
-            at_risk.append({
-                **customer,
-                "churn_risk_level": risk_level,
-                "days_since_last_purchase": days,
-                "total_orders": count,
-            })
+            at_risk.append(
+                {
+                    **customer,
+                    "churn_risk_level": risk_level,
+                    "days_since_last_purchase": days,
+                    "total_orders": count,
+                }
+            )
     return at_risk

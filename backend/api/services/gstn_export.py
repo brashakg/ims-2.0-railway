@@ -32,7 +32,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-
 # ----------------------------------------------------------------------------
 # State name -> GST state code (first 2 digits of a GSTIN). Lower-cased keys.
 # Not exhaustive of UTs, but covers all mainland states an optical chain bills.

@@ -19,6 +19,7 @@ Env (local): IMAGE_LOCAL_DIR (default ./uploads/edited),
 FAIL-SOFT: `put` raises on a real failure; `available()` lets the caller pick a
 working backend or fail-soft (keep RAW) when none is configured.
 """
+
 from __future__ import annotations
 
 import os
@@ -29,8 +30,7 @@ from typing import Optional, Protocol, runtime_checkable
 class ObjectStorage(Protocol):
     name: str
 
-    def available(self) -> bool:
-        ...
+    def available(self) -> bool: ...
 
     def put(self, key: str, data: bytes, content_type: str = "image/png") -> str:
         """Persist bytes under `key`; return a durable, fetchable URL. Raises on
@@ -46,7 +46,9 @@ class LocalDiskStorage:
 
     def __init__(self, root: Optional[str] = None, base_url: Optional[str] = None):
         self._root = root or os.getenv("IMAGE_LOCAL_DIR", "uploads/edited")
-        self._base_url = (base_url or os.getenv("IMAGE_LOCAL_BASE_URL", "/uploads/edited")).rstrip("/")
+        self._base_url = (
+            base_url or os.getenv("IMAGE_LOCAL_BASE_URL", "/uploads/edited")
+        ).rstrip("/")
 
     def available(self) -> bool:
         return True
