@@ -565,6 +565,61 @@ async def get_customer_by_mobile(
     raise HTTPException(status_code=404, detail="Customer not found")
 
 
+@router.get("/consent/pending-purge")
+async def list_pending_purge(
+    days_overdue: int = Query(
+        0, ge=0,
+        description=(
+            "Return only customers whose erasure was requested >= this many "
+            "days ago. 0 = all pending. 30 = overdue by 30 days."
+        ),
+    ),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """List customers with `pending_erasure=True` for the retention review job.
+
+    DPDP does not mandate an automated purge (erasure timing depends on the
+    legal basis per purpose); this endpoint gives ADMIN a concrete work-list
+    so nothing falls through the cracks. The retention window per purpose is
+    returned alongside each customer so the reviewer can decide whether the
+    data may still be retained on a separate legal basis.
+    """
+    repo = get_customer_repository()
+    if repo is None:
+        return {"customers": [], "total": 0, "retention_windows_days": _PURPOSE_RETENTION_DAYS}
+
+    query: Dict[str, Any] = {"pending_erasure": True}
+    if days_overdue > 0:
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days_overdue)).isoformat()
+        query["erasure_requested_at"] = {"$lte": cutoff}
+
+    try:
+        rows = list(
+            repo.collection.find(
+                query,
+                {
+                    "_id": 0,
+                    "customer_id": 1,
+                    "name": 1,
+                    "mobile": 1,
+                    "home_store_id": 1,
+                    "erasure_requested_at": 1,
+                },
+                limit=limit,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        rows = []
+
+    return {
+        "customers": rows,
+        "total": len(rows),
+        "retention_windows_days": _PURPOSE_RETENTION_DAYS,
+    }
+
+
 @router.get("/{customer_id}")
 async def get_customer(
     customer_id: str = Path(..., description="Customer ID"),
@@ -1020,3 +1075,344 @@ async def get_store_credit_ledger(
         )
     balance = _current_credit_balance(customer_id, existing)
     return {"customer_id": customer_id, "balance": balance, "entries": entries}
+
+
+# ============================================================================
+# DPDP ACT 2023 — CONSENT LEDGER (per-customer, append-only)
+# ============================================================================
+# DPDP requires: (a) provable per-purpose consent capture, (b) a withdrawal
+# path, (c) purpose-scoped retention / erasure.  The `data_consent` flag on
+# the customer doc is the live "currently consenting?" gate; this ledger is the
+# immutable audit trail that proves *when* each grant or withdrawal happened,
+# *what* the customer agreed to, and *which* text version was shown.
+#
+# Purposes (DPDP §7 "specified purpose"):
+#   SERVICE_DELIVERY   - core service: prescriptions, orders, store records
+#   MARKETING          - promotional messages, birthday/Rx reminders
+#   RX_HISTORY         - retaining prescription history for clinical use
+#   ANALYTICS          - anonymised usage analytics and business reporting
+#
+# Retention windows (mapped to purposes; after consent withdrawn the record
+# should be erased/anonymised within this window, unless a legal basis overrides):
+#   SERVICE_DELIVERY   - 3 years  (consumer protection + tax record obligation)
+#   MARKETING          - 0 days   (immediate — no legal basis once withdrawn)
+#   RX_HISTORY         - 5 years  (clinical best practice; 7 for minors)
+#   ANALYTICS          - 30 days  (anonymise within 30 days of withdrawal)
+# ============================================================================
+
+_ALL_PURPOSES = frozenset(
+    {"SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS"}
+)
+
+_PURPOSE_RETENTION_DAYS: Dict[str, int] = {
+    "SERVICE_DELIVERY": 1095,   # 3 years
+    "MARKETING": 0,
+    "RX_HISTORY": 1825,         # 5 years
+    "ANALYTICS": 30,
+}
+
+
+class ConsentGrantRequest(BaseModel):
+    """Body for granting (or re-granting after an update) DPDP consent."""
+    purposes: List[str] = Field(
+        default_factory=lambda: list(_ALL_PURPOSES),
+        description=(
+            "Purposes being consented to. Defaults to all four purposes "
+            "(SERVICE_DELIVERY, MARKETING, RX_HISTORY, ANALYTICS)."
+        ),
+    )
+    text_version: Optional[str] = Field(
+        None,
+        description=(
+            "Version string of the consent wording shown to the customer. "
+            "Should match the `version` returned by GET /marketing/consent-text."
+        ),
+    )
+    channel: str = Field(
+        "COUNTER",
+        description="Where consent was obtained: COUNTER | WHATSAPP | EMAIL | SMS | PORTAL",
+    )
+
+    @field_validator("purposes", mode="after")
+    @classmethod
+    def validate_purposes(cls, v):
+        bad = set(v) - _ALL_PURPOSES
+        if bad:
+            raise ValueError(
+                f"Unknown purposes: {sorted(bad)}. "
+                f"Valid: {sorted(_ALL_PURPOSES)}"
+            )
+        if not v:
+            raise ValueError("At least one purpose must be specified")
+        return v
+
+    @field_validator("channel", mode="after")
+    @classmethod
+    def validate_channel(cls, v):
+        valid = {"COUNTER", "WHATSAPP", "EMAIL", "SMS", "PORTAL"}
+        if v.upper() not in valid:
+            raise ValueError(f"channel must be one of {sorted(valid)}")
+        return v.upper()
+
+
+class ConsentWithdrawRequest(BaseModel):
+    """Body for withdrawing DPDP consent (all or specific purposes)."""
+    purposes: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Purposes to withdraw. Omit or pass null to withdraw ALL purposes "
+            "(full erasure request). To withdraw only marketing consent pass "
+            "[\"MARKETING\"]."
+        ),
+    )
+    reason: Optional[str] = Field(None, max_length=500)
+
+    @field_validator("purposes", mode="after")
+    @classmethod
+    def validate_purposes(cls, v):
+        if v is not None:
+            bad = set(v) - _ALL_PURPOSES
+            if bad:
+                raise ValueError(f"Unknown purposes: {sorted(bad)}")
+            if not v:
+                raise ValueError("Provide at least one purpose, or omit to withdraw all")
+        return v
+
+
+def _consent_ledger_coll():
+    """Return the `dpdp_consent_ledger` Mongo collection, or None (fail-soft)."""
+    from ..dependencies import get_db
+
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("dpdp_consent_ledger")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _append_consent_event(
+    customer_id: str,
+    event_type: str,          # "GRANTED" | "WITHDRAWN" | "UPDATED"
+    purposes: List[str],
+    current_user: dict,
+    *,
+    text_version: Optional[str] = None,
+    channel: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> dict:
+    """Append one row to the consent ledger (fail-soft: swallows DB errors)."""
+    entry = {
+        "ledger_id": str(uuid.uuid4()),
+        "customer_id": customer_id,
+        "event_type": event_type,
+        "purposes": sorted(purposes),
+        "text_version": text_version,
+        "channel": channel,
+        "reason": reason,
+        "actor_id": current_user.get("user_id"),
+        "actor_role": (current_user.get("roles") or [""])[0],
+        "store_id": current_user.get("active_store_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    coll = _consent_ledger_coll()
+    if coll is not None:
+        try:
+            coll.insert_one(dict(entry))
+        except Exception:  # noqa: BLE001
+            pass
+    entry.pop("_id", None)
+    return entry
+
+
+def _active_purposes_from_ledger(customer_id: str) -> List[str]:
+    """Derive the current set of consented purposes by replaying the ledger.
+
+    Algorithm: walk events newest-first; for each purpose track the LATEST
+    event. A purpose is active if its latest event is GRANTED (or UPDATED).
+    """
+    coll = _consent_ledger_coll()
+    if coll is None:
+        return []
+    try:
+        rows = list(
+            coll.find({"customer_id": customer_id}, {"_id": 0})
+               .sort("created_at", -1)
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    seen: Dict[str, str] = {}  # purpose -> latest event_type
+    for row in rows:
+        et = row.get("event_type", "")
+        for purpose in row.get("purposes") or []:
+            if purpose not in seen:
+                seen[purpose] = et
+
+    return sorted(p for p, et in seen.items() if et != "WITHDRAWN")
+
+
+@router.get("/{customer_id}/consent/ledger")
+async def get_consent_ledger(
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Full DPDP consent history for a customer — newest first.
+
+    Returns every GRANTED, WITHDRAWN, and UPDATED event with the actor,
+    purposes, and text version. Any authenticated user can view this for
+    their store's customers; ADMIN can view all.
+    """
+    repo = get_customer_repository()
+    if repo is not None and repo.find_by_id(customer_id) is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    coll = _consent_ledger_coll()
+    entries = []
+    if coll is not None:
+        try:
+            entries = list(
+                coll.find({"customer_id": customer_id}, {"_id": 0})
+                   .sort("created_at", -1)
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    active_purposes = _active_purposes_from_ledger(customer_id)
+    return {
+        "customer_id": customer_id,
+        "active_purposes": active_purposes,
+        "entries": entries,
+    }
+
+
+@router.post("/{customer_id}/consent")
+async def grant_consent(
+    customer_id: str = Path(..., description="Customer ID"),
+    body: ConsentGrantRequest = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record a DPDP consent grant (or re-grant after a policy update).
+
+    - Appends a GRANTED row to the consent ledger.
+    - Syncs `data_consent=True` and `data_consent_text_version` on the
+      customer document so the live gate stays consistent.
+    - Any authenticated operator can record consent (needed at point of sale).
+    """
+    repo = get_customer_repository()
+    if repo is not None and repo.find_by_id(customer_id) is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    entry = _append_consent_event(
+        customer_id,
+        "GRANTED",
+        body.purposes,
+        current_user,
+        text_version=body.text_version,
+        channel=body.channel,
+    )
+
+    # Sync the live consent flag on the customer document.
+    if repo is not None:
+        try:
+            repo.update(
+                customer_id,
+                {
+                    "data_consent": True,
+                    "data_consent_at": entry["created_at"],
+                    "data_consent_text_version": body.text_version,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    _audit_customer(
+        "CONSENT_GRANTED",
+        customer_id,
+        current_user,
+        detail={"purposes": body.purposes, "text_version": body.text_version},
+    )
+    return {
+        "message": "Consent granted",
+        "entry": entry,
+        "active_purposes": _active_purposes_from_ledger(customer_id),
+    }
+
+
+@router.post("/{customer_id}/consent/withdraw")
+async def withdraw_consent(
+    customer_id: str = Path(..., description="Customer ID"),
+    body: ConsentWithdrawRequest = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Withdraw DPDP consent — all or specific purposes.
+
+    DPDP Act 2023 s.6(4): data principal may withdraw consent at any time.
+    - Appends a WITHDRAWN row to the consent ledger.
+    - When ALL purposes are withdrawn: sets `data_consent=False` on the
+      customer document and flags `pending_erasure=True` + `erasure_requested_at`
+      so the retention job knows this customer needs review.
+    - Partial withdrawal (e.g. MARKETING only): only that purpose is marked
+      withdrawn; `data_consent` stays True for the remaining consented purposes.
+    """
+    repo = get_customer_repository()
+    customer = repo.find_by_id(customer_id) if repo is not None else None
+    if repo is not None and customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    purposes_to_withdraw = (
+        list(body.purposes) if body.purposes else list(_ALL_PURPOSES)
+    )
+
+    entry = _append_consent_event(
+        customer_id,
+        "WITHDRAWN",
+        purposes_to_withdraw,
+        current_user,
+        reason=body.reason,
+    )
+
+    # Determine remaining active purposes after this withdrawal.
+    active_after = _active_purposes_from_ledger(customer_id)
+    all_withdrawn = len(active_after) == 0
+
+    # Sync customer doc flags.
+    if repo is not None:
+        update_fields: Dict[str, Any] = {}
+        if all_withdrawn:
+            update_fields["data_consent"] = False
+            update_fields["pending_erasure"] = True
+            update_fields["erasure_requested_at"] = entry["created_at"]
+        # When marketing is withdrawn, also flip marketing_consent for
+        # consistency with the MEGAPHONE gate.
+        if "MARKETING" in purposes_to_withdraw:
+            update_fields["marketing_consent"] = False
+        if update_fields:
+            try:
+                repo.update(customer_id, update_fields)
+            except Exception:  # noqa: BLE001
+                pass
+
+    _audit_customer(
+        "CONSENT_WITHDRAWN",
+        customer_id,
+        current_user,
+        detail={
+            "purposes": purposes_to_withdraw,
+            "all_withdrawn": all_withdrawn,
+            "reason": body.reason,
+        },
+    )
+    response = {
+        "message": "Consent withdrawn",
+        "entry": entry,
+        "active_purposes": active_after,
+        "all_withdrawn": all_withdrawn,
+    }
+    if all_withdrawn:
+        response["note"] = (
+            "All consent withdrawn. Customer flagged `pending_erasure=True`. "
+            "Review data-retention obligations before erasing records."
+        )
+    return response

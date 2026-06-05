@@ -340,6 +340,11 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/issue', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/store-credit/ledger', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/redeem', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    # DPDP Act 2023 — consent ledger endpoints
+    {"method": 'GET', "path": '/api/v1/customers/consent/pending-purge', "allowed": ['ADMIN']},
+    {"method": 'GET', "path": '/api/v1/customers/{customer_id}/consent/ledger', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/customers/{customer_id}/consent', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/customers/{customer_id}/consent/withdraw', "allowed": 'AUTHENTICATED'},
     # --- /api/v1/display-fixtures ---
     {"method": 'GET', "path": '/api/v1/display-fixtures', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'POST', "path": '/api/v1/display-fixtures', "allowed": ['ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
