@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_db as _dep_get_db
+from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.notification_service import send_notification
 
 router = APIRouter()
@@ -133,7 +133,11 @@ async def discount_analysis(
     current_user: dict = Depends(get_current_user),
 ):
     """Analyze discount patterns across orders."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {
@@ -256,7 +260,11 @@ async def demand_forecast(
     if "SUPERADMIN" not in current_user.get("roles", []):
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"forecasts": []}
@@ -357,7 +365,11 @@ async def dead_stock(
     current_user: dict = Depends(get_current_user),
 ):
     """Identify products with zero or declining sales."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"dead_stock": [], "total_value": 0, "total_skus": 0}
@@ -502,7 +514,11 @@ async def loyalty_tiers(
     current_user: dict = Depends(get_current_user),
 ):
     """Get loyalty tier distribution for the store."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"tiers": [], "total_customers": 0, "total_points_circulation": 0}
@@ -650,7 +666,11 @@ async def cl_subscriptions(
     current_user: dict = Depends(get_current_user),
 ):
     """Get contact lens subscription / reorder schedule."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"subscriptions": []}
@@ -771,7 +791,11 @@ async def list_eye_camps(
     current_user: dict = Depends(get_current_user),
 ):
     """List eye camps for the store."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"eye_camps": [], "total": 0}
@@ -795,7 +819,11 @@ async def create_eye_camp(
     current_user: dict = Depends(get_current_user),
 ):
     """Create a new eye camp."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -870,7 +898,11 @@ async def family_deals(
     current_user: dict = Depends(get_current_user),
 ):
     """Identify families with multiple members needing eyewear."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"families": []}
@@ -944,7 +976,11 @@ async def staff_leaderboard(
     current_user: dict = Depends(get_current_user),
 ):
     """Staff performance leaderboard with gamification."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"leaderboard": [], "period": period}
@@ -1043,7 +1079,11 @@ async def churn_prediction(
     if "SUPERADMIN" not in current_user.get("roles", []):
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {
@@ -1147,7 +1187,11 @@ async def anomaly_detection(
     if "SUPERADMIN" not in current_user.get("roles", []):
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"anomalies": [], "summary": {"total_anomalies": 0, "critical_count": 0}}
@@ -1315,7 +1359,11 @@ async def vendor_margins(
     if "SUPERADMIN" not in current_user.get("roles", []):
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
-    active_store = store_id or current_user.get("active_store_id", "")
+    # BUG-062: 403 on cross-store access (no-op for SUPERADMIN/ADMIN, who bypass);
+    # falls back to the caller's active store when store_id is omitted.
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id", ""
+    )
     db = _get_db()
     if db is None:
         return {"vendors": [], "best_margin_products": [], "worst_margin_products": []}

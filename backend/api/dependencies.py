@@ -89,18 +89,70 @@ def validate_store_access(store_id: str, current_user: dict) -> str:
     if is_admin:
         return store_id
 
-    # Area managers can access stores in their region
-    if "AREA_MANAGER" in user_roles:
-        user_store_ids = current_user.get("store_ids", [])
-        if store_id in user_store_ids:
-            return store_id
-        raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
-
-    # Other roles: must be in their store_ids list
-    user_store_ids = current_user.get("store_ids", [])
+    # Store-level roles (incl. AREA_MANAGER) may access any store in their
+    # store_ids OR their current active store. active_store_id is set at login
+    # to one of the caller's own stores, so honouring it is correct -- it is
+    # never the cross-store IDOR this guard exists to stop. (Without this, a
+    # store-scoped token whose active store isn't duplicated into store_ids
+    # would be 403'd from its OWN store.)
+    user_store_ids = set(current_user.get("store_ids") or [])
+    active = current_user.get("active_store_id")
+    if active:
+        user_store_ids.add(active)
     if store_id not in user_store_ids:
         raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
     return store_id
+
+
+def user_store_scope(current_user: dict):
+    """Resolve the caller's store reach for per-OBJECT authorization (BUG-088).
+
+    Returns ``(is_cross_store, allowed_store_ids)``:
+      - SUPERADMIN / ADMIN are cross-store by design -> ``(True, set())``.
+      - Everyone else (AREA_MANAGER + store-level roles) is bounded to the union
+        of their token's ``store_ids`` and ``active_store_id``.
+
+    Mirrors validate_store_access's role model, but is for filtering objects we
+    already hold (a prescription / customer doc) rather than a request param.
+    """
+    roles = set(current_user.get("roles") or [])
+    if "SUPERADMIN" in roles or "ADMIN" in roles:
+        return True, set()
+    stores = set(current_user.get("store_ids") or [])
+    active = current_user.get("active_store_id")
+    if active:
+        stores.add(active)
+    return False, stores
+
+
+def can_access_store_scoped(store_id, current_user: dict) -> bool:
+    """True if the caller may read an object stamped with ``store_id``.
+
+    Cross-store roles always may. For store-level roles the object's store must
+    be one of theirs. An object with NO store_id is treated as out-of-scope for
+    store-level roles -- only full admins may read unattributed records, so a
+    legacy/migration doc that never got a store can never leak to store staff.
+    """
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return True
+    return bool(store_id) and store_id in stores
+
+
+def filter_docs_by_store(docs, current_user: dict, store_key: str = "store_id"):
+    """Filter a list of store-stamped docs to those the caller may read.
+
+    Cross-store roles get the list unchanged; store-level roles get only docs
+    whose ``store_key`` is one of their stores (unattributed docs dropped).
+    """
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return list(docs or [])
+    return [
+        d
+        for d in (docs or [])
+        if isinstance(d, dict) and d.get(store_key) and d.get(store_key) in stores
+    ]
 
 
 def get_customer_repository():

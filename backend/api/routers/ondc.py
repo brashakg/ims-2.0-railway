@@ -148,12 +148,14 @@ def _verify_signature(auth_header: str, body: bytes, ukp: str) -> bool:
 
 
 async def _verify_callback(request: Request, db) -> Optional[Dict[str, Any]]:
-    """Parse + optionally verify an incoming Beckn callback.
+    """Parse + verify an incoming Beckn callback.
 
-    Returns the parsed JSON payload dict on success, None on hard failure
-    (unparse-able body). Signature failure returns the payload too but logs
-    a warning (we ACK either way to maintain protocol compliance -- real
-    rejection happens at the SNP level; we just won't process the order).
+    Returns the parsed JSON payload dict (with a ``_signature_invalid`` flag) on
+    success, or None on a hard failure (unparse-able body). The signature is
+    FAIL CLOSED (BUG-102): a missing signing key OR a bad signature marks the
+    payload ``_signature_invalid=True`` so the state-changing callbacks
+    (on_confirm / on_cancel) reject it instead of ingesting / cancelling a real
+    order on behalf of an unauthenticated caller.
     """
     try:
         body = await request.body()
@@ -170,12 +172,15 @@ async def _verify_callback(request: Request, db) -> Optional[Dict[str, Any]]:
                 "[ONDC] Signature verification failed for %s",
                 request.url.path,
             )
-            # Log and continue -- protocol says always ACK; mark as unverified
             payload["_signature_invalid"] = True
         else:
             payload["_signature_invalid"] = False
     else:
-        payload["_signature_invalid"] = False  # No UKP configured -> skip check
+        # BUG-102: FAIL CLOSED. With no signing key we cannot authenticate the
+        # caller, so the request is UNVERIFIED. Previously this defaulted to
+        # valid (False), letting an unauthenticated attacker create/cancel real
+        # orders against a DARK seller-node.
+        payload["_signature_invalid"] = True
 
     return payload
 
@@ -290,8 +295,15 @@ async def on_confirm(request: Request) -> Dict[str, Any]:
 
     if payload.get("_signature_invalid"):
         logger.warning(
-            "[ONDC] on_confirm: invalid signature -- skipping ingestion"
+            "[ONDC] on_confirm: invalid/absent signature -- rejecting (NACK)"
         )
+        return _beckn_nack(context, message="Invalid signature")
+
+    # BUG-102: only ingest when the seller-node is actually enabled (IMS_ONDC_ENABLED
+    # + creds). When DARK we ACK so the SNP doesn't hang but write NO order -- this
+    # is the contract the module docstring already promised but never enforced.
+    if not ondc_seller.ondc_enabled(db):
+        logger.warning("[ONDC] on_confirm: ONDC disabled (DARK) -- not ingesting order")
         return _beckn_ack(context)
 
     result = ondc_seller.ingest_ondc_order(db, payload)
@@ -356,6 +368,20 @@ async def on_cancel(request: Request) -> Dict[str, Any]:
         return _beckn_nack(message="Malformed request body")
 
     context = payload.get("context") or {}
+
+    # BUG-102: a forged/unsigned on_cancel must NOT flip a real order to CANCELLED.
+    # Previously on_cancel never read _signature_invalid at all, so even with a
+    # signing key configured a bad-signature cancel still executed.
+    if payload.get("_signature_invalid"):
+        logger.warning(
+            "[ONDC] on_cancel: invalid/absent signature -- rejecting (NACK)"
+        )
+        return _beckn_nack(context, message="Invalid signature")
+
+    if not ondc_seller.ondc_enabled(db):
+        logger.warning("[ONDC] on_cancel: ONDC disabled (DARK) -- not cancelling order")
+        return _beckn_ack(context)
+
     order_data = (payload.get("message") or {}).get("order") or {}
     ondc_order_id = _s(order_data.get("id", ""))
 

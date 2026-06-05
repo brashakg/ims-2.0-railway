@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from .auth import get_current_user
 from ..dependencies import validate_store_access
-from ..services import ap_engine, cashflow, itc_reconcile, cash_register
+from ..services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
@@ -1682,11 +1682,13 @@ async def itc_export_csv(
     headers = _ITC_CSV_HEADERS[bucket]
 
     buf = io.StringIO()
-    writer = csv.writer(buf)
+    # BUG-139: neutralize formula-injection -- the GSTR-2B rows are uploaded
+    # client-side, so vendor_name/gstin/invoice_no are fully attacker-controlled.
+    writer = csv_safe.safe_writer(buf)
     writer.writerow(headers)
     for r in bucket_rows:
         writer.writerow([r.get(h, "") for h in headers])
-    csv_bytes = buf.getvalue().encode("utf-8")
+    csv_bytes = (csv_safe.BOM + buf.getvalue()).encode("utf-8")
     fname = f"itc_{bucket}.csv"
     return Response(
         content=csv_bytes,

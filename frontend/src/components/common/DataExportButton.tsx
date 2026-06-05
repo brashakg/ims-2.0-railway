@@ -6,7 +6,7 @@
 import { useState } from 'react';
 import { Download, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
-import { exportToCSV } from '../../utils/exportUtils';
+import { exportToCSV, neutralizeFormula } from '../../utils/exportUtils';
 import { useToast } from '../../context/ToastContext';
 
 export type ExportFormat = 'csv' | 'excel' | 'json';
@@ -50,9 +50,11 @@ export function DataExportButton({
         exportToCSV(exportData, filenameWithTime, columns);
         break;
       case 'excel': {
-        // Excel export using TSV format that Excel can read natively
+        // Excel export using TSV format that Excel can read natively.
+        // BUG-139: convertToTSV neutralizes formula-injection per cell; the
+        // ﻿ BOM makes Excel open it as UTF-8 and keeps quoted cells as text.
         const tsvContent = convertToTSV(exportData, columns);
-        const blob = new Blob([tsvContent], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+        const blob = new Blob(['﻿' + tsvContent], { type: 'application/vnd.ms-excel;charset=utf-8;' });
         downloadBlob(blob, `${filenameWithTime}.xls`);
         break;
       }
@@ -143,7 +145,9 @@ function convertToTSV(
       .map(c => {
         const val = row[c.key];
         if (val === null || val === undefined) return '';
-        return String(val).replace(/\t/g, '  ').replace(/\n/g, ' ');
+        // BUG-139: neutralize formula-injection BEFORE stripping tabs/newlines so
+        // a leading =,+,-,@,TAB,CR can't execute when the .xls opens in Excel.
+        return neutralizeFormula(String(val)).replace(/\t/g, '  ').replace(/\n/g, ' ');
       })
       .join('\t')
   );
