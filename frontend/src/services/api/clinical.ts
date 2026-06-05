@@ -4,6 +4,53 @@
 
 import api from './client';
 
+// CLI-11: single Dx code entry on a SOAP exam note.
+export interface SoapDxCode {
+  code: string;
+  description?: string;
+  system?: string;
+}
+
+// CLI-11: structured SOAP exam note shape sent to/received from the backend.
+// All fields are optional; send undefined (or omit the whole block) for a
+// refraction-only test — the backend treats absence as "no SOAP note".
+export interface SoapNotePayload {
+  // Subjective
+  chiefComplaint?: string;
+  historyPresentIllness?: string;
+  ocularHistory?: string;
+  systemicHistory?: string;
+  familyHistory?: string;
+  medications?: string;
+  allergies?: string;
+  vduUsage?: string;
+  // Objective
+  vaRightUnaided?: string;
+  vaLeftUnaided?: string;
+  vaRightAided?: string;
+  vaLeftAided?: string;
+  vaBinocular?: string;
+  iopRight?: number;
+  iopLeft?: number;
+  colourVision?: string;
+  coverTest?: string;
+  dominantEye?: 'RIGHT' | 'LEFT';
+  pupils?: string;
+  ocularMotility?: string;
+  slitLampSummary?: string;
+  fundusSummary?: string;
+  // Assessment
+  assessment?: string;
+  dxCodes?: SoapDxCode[];
+  // Plan
+  plan?: string;
+  planReferral?: boolean;
+  planReferralTo?: string;
+  planFollowUp?: boolean;
+  planFollowUpWeeks?: number;
+  patientInstructions?: string;
+}
+
 // C6-B: full optometric-exam findings beyond refraction. Mirrors the backend
 // ClinicalFindings model (camelCase aliases). All optional — a refraction-only
 // test omits the whole block.
@@ -126,8 +173,26 @@ export const clinicalApi = {
     // Omit entirely for a quick refraction-only test — the backend stores the
     // test exactly as before when this is absent.
     clinicalFindings?: ClinicalFindings;
+    // CLI-11: optional structured SOAP exam note (S/O/A/P + Dx codes). Omit
+    // entirely for a refraction-only test. Can also be saved/updated after
+    // completion via saveSoapNote().
+    soapNote?: SoapNotePayload;
   }) => {
     const response = await api.post(`/clinical/tests/${testId}/complete`, data);
+    return response.data;
+  },
+
+  // CLI-11: retrieve the structured SOAP exam note for a completed test.
+  // Returns { soapNote: {...} } or { soapNote: null } for refraction-only tests.
+  getSoapNote: async (testId: string) => {
+    const response = await api.get(`/clinical/tests/${testId}/soap-note`);
+    return response.data as { soapNote: SoapNotePayload | null };
+  },
+
+  // CLI-11: save (or replace) the structured SOAP exam note for a test.
+  // Allows post-completion charting without re-opening the test completion flow.
+  saveSoapNote: async (testId: string, note: SoapNotePayload) => {
+    const response = await api.post(`/clinical/tests/${testId}/soap-note`, note);
     return response.data;
   },
 

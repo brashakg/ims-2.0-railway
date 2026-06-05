@@ -147,6 +147,109 @@ class ClinicalFindings(BaseModel):
         populate_by_name = True
 
 
+class SoapDxCode(BaseModel):
+    """A single ICD-10 / ICPC-2 diagnosis code entry on the exam SOAP note.
+
+    ``code`` is the structured code (e.g. "H52.1" for myopia); ``description``
+    is the human label that should always accompany it so the chart is readable
+    without a code lookup; ``system`` defaults to "ICD-10" but is stored so we
+    can layer in ICPC-2 or custom ophthalmological codes later without a schema
+    change.  Both fields are free-text (no server-side code lookup -- the
+    optometrist types the code); the constraint is just that `code` is present.
+    """
+
+    code: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    system: str = Field("ICD-10")
+
+    class Config:
+        populate_by_name = True
+
+
+class SoapNote(BaseModel):
+    """Structured SOAP (Subjective / Objective / Assessment / Plan) exam record.
+
+    CLI-11: a templated SOAP exam note layer AROUND the existing refraction
+    capture.  All four sections are optional text blocks -- a quick refraction-
+    only test leaves them all blank and behaves exactly as before.  The note is
+    stored on the eye_test document under the key ``soap_note``; a standalone
+    POST endpoint also lets an optometrist save / update it after the test is
+    completed (so late charting is possible without re-opening the completion
+    flow).
+
+    Design decisions:
+    * Free-text strings inside each section -- no premature enums that fight the
+      optometrist mid-consult.
+    * ``dx_codes`` carries a list of structured Dx entries (code + description +
+      coding system) so reports can be filtered by diagnosis without parsing the
+      free-text assessment.
+    * ``plan_referral`` and ``plan_follow_up`` are pulled out as first-class
+      booleans so the scheduling module can query them (future integration point).
+    * All aliases are camelCase to match the frontend naming convention.
+    """
+
+    # -- Subjective (patient-reported history + presenting problem) --
+    chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
+    history_present_illness: Optional[str] = Field(
+        None, alias="historyPresentIllness"
+    )
+    ocular_history: Optional[str] = Field(None, alias="ocularHistory")
+    systemic_history: Optional[str] = Field(None, alias="systemicHistory")
+    family_history: Optional[str] = Field(None, alias="familyHistory")
+    medications: Optional[str] = None
+    allergies: Optional[str] = None
+    vdu_usage: Optional[str] = Field(None, alias="vduUsage")
+
+    # -- Objective (clinician-measured findings) --
+    # Visual acuity: mirrors ClinicalFindings VA fields so both paths are
+    # consistent; the full SOAP note supersedes them when both are present.
+    va_right_unaided: Optional[str] = Field(None, alias="vaRightUnaided")
+    va_left_unaided: Optional[str] = Field(None, alias="vaLeftUnaided")
+    va_right_aided: Optional[str] = Field(None, alias="vaRightAided")
+    va_left_aided: Optional[str] = Field(None, alias="vaLeftAided")
+    va_binocular: Optional[str] = Field(None, alias="vaBinocular")
+    # Intra-ocular pressure (tonometry), mmHg, per eye.
+    iop_right: Optional[float] = Field(None, ge=0, le=80, alias="iopRight")
+    iop_left: Optional[float] = Field(None, ge=0, le=80, alias="iopLeft")
+    colour_vision: Optional[str] = Field(None, alias="colourVision")
+    cover_test: Optional[str] = Field(None, alias="coverTest")
+    dominant_eye: Optional[str] = Field(None, alias="dominantEye")
+    pupils: Optional[str] = None           # e.g. "PERRL", "APD right"
+    ocular_motility: Optional[str] = Field(None, alias="ocularMotility")
+    slit_lamp_summary: Optional[str] = Field(None, alias="slitLampSummary")
+    fundus_summary: Optional[str] = Field(None, alias="fundusSummary")
+    additional_objective: Optional[str] = Field(None, alias="additionalObjective")
+
+    # -- Assessment (diagnosis narrative + structured Dx codes) --
+    assessment: Optional[str] = None       # free-text clinical impression
+    dx_codes: Optional[List[SoapDxCode]] = Field(None, alias="dxCodes")
+
+    # -- Plan (management + follow-up instructions) --
+    plan: Optional[str] = None             # free-text plan narrative
+    plan_referral: Optional[bool] = Field(None, alias="planReferral")
+    plan_referral_to: Optional[str] = Field(None, alias="planReferralTo")
+    plan_follow_up: Optional[bool] = Field(None, alias="planFollowUp")
+    plan_follow_up_weeks: Optional[int] = Field(None, alias="planFollowUpWeeks", ge=1, le=104)
+    patient_instructions: Optional[str] = Field(None, alias="patientInstructions")
+
+    # -- Metadata --
+    recorded_by: Optional[str] = Field(None, alias="recordedBy")
+    recorded_at: Optional[str] = Field(None, alias="recordedAt")
+
+    @field_validator("dominant_eye", mode="after")
+    @classmethod
+    def _v_dominant(cls, v):
+        if v is None or v == "":
+            return None
+        up = str(v).strip().upper()
+        if up not in ("RIGHT", "LEFT", "R", "L"):
+            raise ValueError("dominant_eye must be RIGHT or LEFT")
+        return "RIGHT" if up in ("RIGHT", "R") else "LEFT"
+
+    class Config:
+        populate_by_name = True
+
+
 class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
@@ -164,6 +267,9 @@ class EyeTestData(BaseModel):
     clinical_findings: Optional[ClinicalFindings] = Field(
         None, alias="clinicalFindings"
     )
+    # CLI-11: optional structured SOAP exam note.  Absent -> refraction-only test
+    # exactly as before; present -> stored under ``soap_note`` on the test doc.
+    soap_note: Optional[SoapNote] = Field(None, alias="soapNote")
 
     class Config:
         populate_by_name = True
@@ -686,6 +792,14 @@ async def complete_test(
         # (VA / IOP / history / diagnosis / ...) so a complete optometric exam
         # is recorded, not just the refraction. by_alias=False keeps the stored
         # keys snake_case (consistent with the rest of the test doc).
+        # CLI-11: also persist the structured SOAP note when provided.
+        now_iso = datetime.utcnow().isoformat()
+        soap_note_dict = None
+        if data.soap_note is not None:
+            soap_note_dict = data.soap_note.model_dump(exclude_none=True)
+            soap_note_dict.setdefault("recorded_by", current_user.get("user_id", ""))
+            soap_note_dict.setdefault("recorded_at", now_iso)
+
         success = test_repo.complete_test(
             test_id=test_id,
             right_eye=data.right_eye,
@@ -699,6 +813,7 @@ async def complete_test(
                 if data.clinical_findings
                 else None
             ),
+            soap_note=soap_note_dict,
         )
 
         if success:
@@ -896,6 +1011,95 @@ async def get_optometrist_stats(
         return test_repo.get_optometrist_stats(optometrist_id, from_date, to_date)
 
     return {"total_tests": 0, "completed_tests": 0, "completion_rate": 0}
+
+
+# ============================================================================
+# SOAP NOTE ENDPOINTS (CLI-11)
+# ============================================================================
+
+
+@router.get("/tests/{test_id}/soap-note")
+async def get_soap_note(
+    test_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the structured SOAP exam note for a completed eye test.
+
+    CLI-11: the SOAP note (Subjective / Objective / Assessment / Plan + Dx
+    codes) is stored under the ``soap_note`` key on the eye_test document.
+    Returns the note as-is (snake_case) wrapped in ``{soapNote: {...}}``.
+    Returns 404 when the test does not exist; returns ``{soapNote: null}`` when
+    the test exists but no SOAP note has been saved yet (a refraction-only
+    test).  Accessible to any AUTHENTICATED clinical user.
+    """
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        return {"soapNote": None}
+
+    test = test_repo.find_by_id(test_id)
+    if test is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    raw = test.get("soap_note")
+    if not raw:
+        return {"soapNote": None}
+
+    # Convert to camelCase for the frontend before returning.
+    return {"soapNote": _convert_to_camel(raw)}
+
+
+@router.post("/tests/{test_id}/soap-note")
+async def save_soap_note(
+    test_id: str,
+    note: SoapNote,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
+):
+    """Save (or replace) the SOAP exam note on an existing eye test.
+
+    CLI-11: allows post-completion charting without re-opening the test
+    completion flow.  The whole note is replaced atomically; send the full
+    document including unchanged fields.  Stamps ``recorded_by`` /
+    ``recorded_at`` automatically from the current user + now when not already
+    present in the payload.
+
+    Gated to the same roles that can complete a test
+    (OPTOMETRIST / STORE_MANAGER / ADMIN / SUPERADMIN).
+    """
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        raise HTTPException(
+            status_code=503, detail="Clinical service unavailable"
+        )
+
+    test = test_repo.find_by_id(test_id)
+    if test is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    now_iso = datetime.utcnow().isoformat()
+    note_dict = note.model_dump(exclude_none=True)
+    note_dict.setdefault("recorded_by", current_user.get("user_id", ""))
+    note_dict.setdefault("recorded_at", now_iso)
+
+    ok = test_repo.save_soap_note(test_id, note_dict)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save SOAP note")
+
+    _audit_clinical(
+        "SOAP_NOTE_SAVED",
+        test_id,
+        current_user,
+        store_id=test.get("store_id"),
+        detail={
+            "customer_id": test.get("customer_id"),
+            "dx_codes": [d.get("code") for d in note_dict.get("dx_codes") or []],
+        },
+    )
+
+    return {
+        "message": "SOAP note saved",
+        "testId": test_id,
+        "soapNote": _convert_to_camel(note_dict),
+    }
 
 
 # ============================================================================
