@@ -23,7 +23,6 @@ def _db_available(client) -> bool:
     except Exception:
         return False
 
-
 def test_locked_period_blocks_expense_create(client, auth_headers):
     if not _db_available(client):
         pytest.skip("MongoDB not available in this environment")

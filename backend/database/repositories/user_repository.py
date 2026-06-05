@@ -3,9 +3,12 @@ IMS 2.0 - User Repository
 ==========================
 User data access operations
 """
+import logging
 from typing import List, Optional, Dict
 from datetime import datetime
 from .base_repository import BaseRepository
+
+_log = logging.getLogger(__name__)
 
 
 class UserRepository(BaseRepository):
@@ -98,9 +101,10 @@ class UserRepository(BaseRepository):
                 {"$addToSet": {"roles": role}}
             )
             return True
-        except:
+        except Exception as e:
+            _log.error("[user_repo] add_role failed user=%s role=%s: %s", user_id, role, e)
             return False
-    
+
     def remove_role(self, user_id: str, role: str) -> bool:
         """Remove role from user"""
         try:
@@ -109,9 +113,10 @@ class UserRepository(BaseRepository):
                 {"$pull": {"roles": role}}
             )
             return True
-        except:
+        except Exception as e:
+            _log.error("[user_repo] remove_role failed user=%s role=%s: %s", user_id, role, e)
             return False
-    
+
     def add_store(self, user_id: str, store_id: str) -> bool:
         """Add store access to user"""
         try:
@@ -120,9 +125,10 @@ class UserRepository(BaseRepository):
                 {"$addToSet": {"store_ids": store_id}}
             )
             return True
-        except:
+        except Exception as e:
+            _log.error("[user_repo] add_store failed user=%s store=%s: %s", user_id, store_id, e)
             return False
-    
+
     def remove_store(self, user_id: str, store_id: str) -> bool:
         """Remove store access from user"""
         try:
@@ -131,7 +137,8 @@ class UserRepository(BaseRepository):
                 {"$pull": {"store_ids": store_id}}
             )
             return True
-        except:
+        except Exception as e:
+            _log.error("[user_repo] remove_store failed user=%s store=%s: %s", user_id, store_id, e)
             return False
     
     # =========================================================================

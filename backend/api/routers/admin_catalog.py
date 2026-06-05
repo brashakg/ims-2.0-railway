@@ -27,6 +27,7 @@ Conventions:
 """
 
 import io
+import re
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
@@ -1057,10 +1058,11 @@ async def list_products(
     if brand:
         filter_["brand"] = brand
     if search:
+        safe_search = re.escape(search)
         filter_["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"sku": {"$regex": search, "$options": "i"}},
-            {"barcode": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": safe_search, "$options": "i"}},
+            {"sku": {"$regex": safe_search, "$options": "i"}},
+            {"barcode": {"$regex": safe_search, "$options": "i"}},
         ]
     docs = list(coll.find(filter_).limit(200))
     return {"products": [_scrub(d) for d in docs if d], "total": len(docs)}
