@@ -941,6 +941,28 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/tests/{test_id}/complete",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
+    # CLI-7 — frame+lens+Rx manufacturability pre-check
+    {
+        "method": "POST",
+        "path": "/api/v1/clinical/manufacturability-check",
+        "allowed": "AUTHENTICATED",
+    },
+    # CLI-9 — named lens-power combos (save-and-reuse Rx templates)
+    {
+        "method": "GET",
+        "path": "/api/v1/clinical/lens-power-combos",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/clinical/lens-power-combos",
+        "allowed": ["ADMIN", "AREA_MANAGER", "OPTOMETRIST", "STORE_MANAGER"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/clinical/lens-power-combos/{combo_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "OPTOMETRIST", "STORE_MANAGER"],
+    },
     # --- /api/v1/crm ---
     {"method": "GET", "path": "/api/v1/crm", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/crm/", "allowed": "PUBLIC"},
