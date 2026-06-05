@@ -247,6 +247,17 @@ def _build_product_data(product: "ProductCreate", created_by) -> dict:
     else:
         gst_rate = gst_rate_for_category(product.category)
 
+    # Normalise discount_category to upper-case so it matches the cap-resolver
+    # keys (MASS/PREMIUM/LUXURY/SERVICE/NON_DISCOUNTABLE). An unrecognised
+    # value is coerced to MASS so the worst case is a conservative cap,
+    # never a crash. INV-1: field was missing from this dict, so it was
+    # silently dropped on every product create.
+    _raw_dc = getattr(product, "discount_category", None)
+    _disc_cat = (_raw_dc or "MASS").strip().upper()
+    _valid_dc = {"MASS", "PREMIUM", "LUXURY", "SERVICE", "NON_DISCOUNTABLE"}
+    if _disc_cat not in _valid_dc:
+        _disc_cat = "MASS"
+
     product_data = {
         "sku": product.sku,
         "category": product.category,
@@ -259,6 +270,7 @@ def _build_product_data(product: "ProductCreate", created_by) -> dict:
         "offer_price": product.offer_price,
         "hsn_code": hsn_code,
         "gst_rate": gst_rate,
+        "discount_category": _disc_cat,
         "attributes": product.attributes or {},
         "is_active": True,
         "created_by": created_by,
@@ -288,6 +300,14 @@ class ProductCreate(BaseModel):
     # read. Was previously `tax_rate`, which no reader looked at.
     gst_rate: Optional[float] = None
     attributes: Optional[dict] = None
+    # Discount-cap tier (MASS/PREMIUM/LUXURY/SERVICE/NON_DISCOUNTABLE).
+    # Drives the category discount cap applied by pricing_caps at POS.
+    # Defaults to MASS so existing callers that omit the field keep the
+    # current behavior; an explicit value is normalised to upper-case so
+    # the cap resolver (which expects upper-case keys) always matches.
+    # INV-1: was silently dropped on create, causing LUXURY items to fall
+    # back to the MASS 15% cap and be over-discounted.
+    discount_category: str = "MASS"
     # ---- Contact-lens (CL) identity fields. All optional + additive. ----
     cl_series: Optional[str] = None
     modality: Optional[str] = None
@@ -315,6 +335,9 @@ class ProductUpdate(BaseModel):
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     is_active: Optional[bool] = None
+    # INV-1: persist discount_category on update too so a LUXURY product can
+    # have its cap corrected without a full recreate.
+    discount_category: Optional[str] = None
     # Scan-to-sell barcode persisted on the product master. Moved here from the
     # retired (unvalidated) /admin/products PUT so the Inventory "Save barcode"
     # action writes through the SAME validated update path as every other field.
@@ -1200,6 +1223,21 @@ async def update_product(
             _validate_product_barcode_or_400(
                 update_data["barcode"], repo, product_id
             )
+
+        # Normalise discount_category to upper-case so it matches the
+        # cap-resolver keys. An unrecognised value is rejected loudly (400).
+        if "discount_category" in update_data:
+            _raw = (update_data["discount_category"] or "").strip().upper()
+            _valid = {"MASS", "PREMIUM", "LUXURY", "SERVICE", "NON_DISCOUNTABLE"}
+            if _raw not in _valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid discount_category. Allowed: "
+                        + ", ".join(sorted(_valid))
+                    ),
+                )
+            update_data["discount_category"] = _raw
 
         # Validate MRP >= Offer Price using the EFFECTIVE post-update values.
         # The old check only fired when BOTH fields were in the payload, so a
