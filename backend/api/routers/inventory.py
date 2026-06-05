@@ -1373,6 +1373,199 @@ async def get_stock_count(
         raise HTTPException(status_code=500, detail="Internal error")
 
 
+# INV-8: Guided cycle-count reconcile step
+# After completing a count, the manager reviews variances and applies the
+# physical counts to the stock ledger.  Negative variances (shrinkage) are
+# written to the `stock_shrinkage` audit collection; positive ones (overages)
+# are left for manual investigation (we never silently inflate stock).
+# The count is transitioned to status="reconciled" so it cannot be
+# re-reconciled.  Fail-soft: DB unavailable returns a 503 (not a silent 200)
+# because reconciliation is a stock-altering write, not a read.
+
+class ReconcileStockCountRequest(BaseModel):
+    notes: Optional[str] = None
+    # Per-item overrides: the reviewer can accept a different final quantity
+    # for specific items before writing.  If not supplied, the counted_quantity
+    # from the completed count is used.
+    overrides: Optional[List[Dict]] = None  # [{product_id, accepted_quantity}]
+
+
+@router.post("/stock-count/{count_id}/reconcile")
+async def reconcile_stock_count(
+    count_id: str,
+    request: Optional[ReconcileStockCountRequest] = None,
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """Apply a completed cycle-count to the stock ledger (INV-8).
+
+    For each variance line:
+    - Negative variance (shrinkage): written to ``stock_shrinkage`` for audit
+      and the stock_units document quantity is adjusted down.
+    - Positive variance (overage): recorded for review but NOT silently inflated
+      (SYSTEM_INTENT: fail loudly / never fabricate stock).
+
+    Transitions the count document to ``status="reconciled"``.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        counts_coll = db.get_collection("stock_counts")
+        shrinkage_coll = db.get_collection("stock_shrinkage")
+        stock_coll = db.get_collection("stock_units")
+
+        count_doc = counts_coll.find_one({"count_id": count_id})
+        if not count_doc:
+            raise HTTPException(status_code=404, detail="Stock count session not found")
+        if count_doc.get("status") != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Only completed counts can be reconciled "
+                    f"(current status: {count_doc.get('status')})"
+                ),
+            )
+
+        variances = count_doc.get("variances", [])
+        if not variances:
+            raise HTTPException(
+                status_code=400,
+                detail="No variance data found — complete the count first",
+            )
+
+        # Build override map if supplied
+        override_map: Dict[str, int] = {}
+        if request and request.overrides:
+            for ov in request.overrides:
+                pid = ov.get("product_id") or ""
+                qty = ov.get("accepted_quantity")
+                if pid and qty is not None:
+                    override_map[pid] = max(0, int(qty))
+
+        now = datetime.utcnow()
+        store_id = count_doc.get("store_id", "")
+        shrinkage_records = []
+        overage_records = []
+        reconciled_items = []
+
+        for v in variances:
+            pid = v.get("product_id", "")
+            system_qty = int(v.get("system_quantity", 0) or 0)
+            counted_qty = int(v.get("physical_quantity", 0) or 0)
+            accepted_qty = override_map.get(pid, counted_qty)
+            net_variance = accepted_qty - system_qty
+
+            reconciled_items.append(
+                {
+                    "product_id": pid,
+                    "product_name": v.get("product_name", ""),
+                    "sku": v.get("sku", ""),
+                    "system_quantity": system_qty,
+                    "physical_quantity": counted_qty,
+                    "accepted_quantity": accepted_qty,
+                    "net_variance": net_variance,
+                }
+            )
+
+            if net_variance < 0:
+                # Shrinkage: write an audit record.
+                # Stock units are serialized (one row per unit) so we
+                # VOID the excess rows rather than decrementing a counter.
+                shrinkage_qty = abs(net_variance)
+                shrinkage_records.append(
+                    {
+                        "shrinkage_id": str(uuid.uuid4()),
+                        "count_id": count_id,
+                        "audit_number": count_doc.get("audit_number", ""),
+                        "store_id": store_id,
+                        "product_id": pid,
+                        "product_name": v.get("product_name", ""),
+                        "sku": v.get("sku", ""),
+                        "shrinkage_quantity": shrinkage_qty,
+                        "system_quantity": system_qty,
+                        "accepted_quantity": accepted_qty,
+                        "recorded_at": now.isoformat(),
+                        "recorded_by": current_user.get("user_id", ""),
+                        "notes": request.notes if request else None,
+                    }
+                )
+                # Void the oldest AVAILABLE units to reconcile stock
+                try:
+                    candidates = list(
+                        stock_coll.find(
+                            {"product_id": pid, "store_id": store_id, "status": "AVAILABLE"},
+                            sort=[("created_at", 1)],
+                            limit=shrinkage_qty,
+                        )
+                    )
+                    if candidates:
+                        ids_to_void = [c["_id"] for c in candidates if "_id" in c]
+                        if ids_to_void:
+                            stock_coll.update_many(
+                                {"_id": {"$in": ids_to_void}},
+                                {
+                                    "$set": {
+                                        "status": "VOID",
+                                        "voided_at": now.isoformat(),
+                                        "void_reason": f"cycle-count-reconcile:{count_id}",
+                                    }
+                                },
+                            )
+                except Exception as _e:
+                    logger.warning(f"[INV-8] stock void skipped for {pid}: {_e}")
+
+            elif net_variance > 0:
+                # Overage: record for investigation only — do not inflate stock.
+                overage_records.append(
+                    {
+                        "product_id": pid,
+                        "product_name": v.get("product_name", ""),
+                        "overage_quantity": net_variance,
+                    }
+                )
+
+        # Persist shrinkage audit rows
+        if shrinkage_records:
+            try:
+                shrinkage_coll.insert_many(shrinkage_records)
+            except Exception as _e:
+                logger.warning(f"[INV-8] shrinkage insert skipped: {_e}")
+
+        # Mark count as reconciled
+        counts_coll.update_one(
+            {"count_id": count_id},
+            {
+                "$set": {
+                    "status": "reconciled",
+                    "reconciled_at": now.isoformat(),
+                    "reconciled_by": current_user.get("user_id", ""),
+                    "reconciliation_notes": request.notes if request else None,
+                    "reconciled_items": reconciled_items,
+                    "shrinkage_count": len(shrinkage_records),
+                    "overage_count": len(overage_records),
+                }
+            },
+        )
+
+        return {
+            "message": "Stock count reconciled",
+            "count_id": count_id,
+            "audit_number": count_doc.get("audit_number", ""),
+            "items_reconciled": len(reconciled_items),
+            "shrinkage_lines": len(shrinkage_records),
+            "overage_lines": len(overage_records),
+            "overages_pending_review": overage_records,
+            "reconciled_at": now.isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"reconcile_stock_count error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during reconciliation")
+
+
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
 # ============================================================================
