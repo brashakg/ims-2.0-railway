@@ -194,6 +194,8 @@ export interface Customer {
   // PreferencesTab and written by the consent toggle via
   // updateCustomer(id, { marketing_consent }).
   marketing_consent?: boolean;
+  // POS-4: per-customer credit limit (khata). 0 = unlimited.
+  credit_limit?: number;
 }
 
 export interface Patient {

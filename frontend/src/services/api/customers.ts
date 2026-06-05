@@ -75,4 +75,20 @@ export const customerApi = {
     const response = await api.put('/marketing/consent-text', { text });
     return response.data;
   },
+
+  // POS-4: khata / credit-limit summary
+  getCreditSummary: async (customerId: string): Promise<{
+    customer_id: string;
+    credit_limit: number;
+    ar_outstanding: number;
+    ar_available: number | null;
+    limit_exceeded: boolean;
+  }> => {
+    const response = await api.get(`/customers/${customerId}/credit-summary`);
+    return response.data;
+  },
 };
+
+// Named alias used by CreditBillingOption (and future callers) — matches the
+// barrel export name pattern used by the rest of the services layer.
+export const customersApi = customerApi;

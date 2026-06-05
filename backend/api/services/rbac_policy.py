@@ -338,6 +338,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/orders', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/patients', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/prescriptions', "allowed": 'AUTHENTICATED'},
+    # POS-4: credit-limit / khata summary (same gate as orders -- any POS user)
+    {"method": 'GET', "path": '/api/v1/customers/{customer_id}/credit-summary', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/add', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/issue', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/store-credit/ledger', "allowed": 'AUTHENTICATED'},
@@ -532,6 +534,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/inventory/stock/add', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
     {"method": 'GET', "path": '/api/v1/inventory/stock/barcode/{barcode}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/inventory/transfer-recommendations', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
+    # POS-7: BOPIS / ship-from-store cross-store stock lookup
+    {"method": 'GET', "path": '/api/v1/inventory/cross-store-stock', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'STORE_MANAGER', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/inventory/transfers', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/inventory/transfers', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
     {"method": 'POST', "path": '/api/v1/inventory/transfers/{transfer_id}/receive', "allowed": ['ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']},
@@ -744,6 +748,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/confirm', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/deliver', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/orders/{order_id}/invoice', "allowed": 'AUTHENTICATED'},
+    # POS-7: BOPIS ship-from-store transfer creation
+    {"method": 'POST', "path": '/api/v1/orders/{order_id}/bopis-transfer', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/items', "allowed": 'AUTHENTICATED'},
     {"method": 'DELETE', "path": '/api/v1/orders/{order_id}/items/{item_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/orders/{order_id}/payments', "allowed": 'AUTHENTICATED'},
