@@ -2,23 +2,26 @@
 // IMS 2.0 — POS Loyalty Redeem Control
 // ============================================================================
 // Sits inside the Payment step. Reads the customer's current account
-// from /loyalty/account, lets the cashier slide a points-amount, calls
-// /loyalty/redeem, and records the rupee discount as a LOYALTY payment
-// line so it gets reflected in balance_due / change calculations like
-// any other tender.
+// from /loyalty/account, lets the cashier slide a points-amount, and
+// records a DEFERRED redemption intent in posStore so the LOYALTY line
+// is reflected in balance_due / change calculations.
 //
-// Fail-soft: if the account fetch fails or the engine returns a 4xx,
-// the control just shows the error and keeps the rest of the payment
-// step usable. No state held outside the component.
+// POS-3 FIX: The actual /loyalty/redeem call (which atomically debits
+// points) is deferred to POSLayout.handleCreateOrder() AFTER the order
+// is confirmed. This prevents points being burned on a failed order.
+//
+// Fail-soft: if the account fetch fails or validation fails, the control
+// just shows the error and keeps the rest of the payment step usable.
+// No state held outside the component.
 
 import { useEffect, useMemo, useState } from 'react';
 import { Award } from 'lucide-react';
 
 import { usePOSStore } from '../../stores/posStore';
 import {
-  loyaltyApi,
   type LoyaltyAccount,
   type LoyaltySettings,
+  loyaltyApi,
 } from '../../services/api/loyalty';
 
 export function LoyaltyRedeemControl() {
@@ -27,7 +30,6 @@ export function LoyaltyRedeemControl() {
   const [settings, setSettings] = useState<LoyaltySettings | null>(null);
   const [loading, setLoading] = useState(false);
   const [pointsToRedeem, setPointsToRedeem] = useState<number>(0);
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const customerId = store.customer?.id;
@@ -109,42 +111,45 @@ export function LoyaltyRedeemControl() {
   if (!account) return null;
   if (!eligible) return null;
 
-  const apply = async () => {
+  // POS-3: compute expected rupee value client-side using the same formula
+  // as the backend (settings.redeem_rupee_per_point). The actual atomic debit
+  // happens in POSLayout after the order is created, so points are only spent
+  // on a successfully created order.
+  const computeRupeeValue = (points: number): number => {
+    return Math.round(points * rate * 100) / 100;
+  };
+
+  const apply = () => {
     setError(null);
     if (pointsToRedeem < minRedeem) {
       setError(`Minimum redeem is ${minRedeem} points.`);
       return;
     }
-    setSubmitting(true);
-    try {
-      const r = await loyaltyApi.redeem({
-        customer_id: String(customerId),
-        order_id: store.order_id ?? undefined,
-        points: pointsToRedeem,
-        order_value: orderTotal,
-      });
-      // Persist to POS as a LOYALTY tender line
-      store.addPayment({
-        method: 'LOYALTY',
-        amount: r.rupee_value,
-        reference: r.txn_id,
-      });
-      // Reflect on the local widget state
-      setAccount({
-        ...account,
-        balance_points: balance - r.redeemed_points,
-      });
-      store.setCustomerLoyaltyPoints(balance - r.redeemed_points);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setError(
-        typeof detail === 'string'
-          ? detail
-          : detail?.reason || 'Redeem failed. Try a smaller amount.',
-      );
-    } finally {
-      setSubmitting(false);
+    if (pointsToRedeem > maxAllowed) {
+      setError(`Cannot exceed ${maxAllowed} points (balance or order cap).`);
+      return;
     }
+    const rupeeValue = computeRupeeValue(pointsToRedeem);
+    // Record the deferred intent — the actual /loyalty/redeem call (which
+    // atomically debits points) runs in POSLayout after createOrder succeeds.
+    store.setPendingLoyaltyRedeem({
+      points: pointsToRedeem,
+      rupeeValue,
+      orderValue: orderTotal,
+    });
+    // Add the LOYALTY tender line to posStore so balance_due reflects it
+    // before the order is finalized.
+    store.addPayment({
+      method: 'LOYALTY',
+      amount: rupeeValue,
+      reference: `PENDING:${pointsToRedeem}pts`,
+    });
+    // Optimistically reflect the deduction on the widget so it hides itself
+    setAccount({
+      ...account,
+      balance_points: balance - pointsToRedeem,
+    });
+    store.setCustomerLoyaltyPoints(balance - pointsToRedeem);
   };
 
   return (
@@ -193,10 +198,10 @@ export function LoyaltyRedeemControl() {
 
       <button
         onClick={apply}
-        disabled={submitting || pointsToRedeem < minRedeem || pointsToRedeem > maxAllowed}
+        disabled={pointsToRedeem < minRedeem || pointsToRedeem > maxAllowed}
         className="w-full px-4 py-2 rounded-lg text-sm font-semibold bg-bv-red-600 text-white disabled:bg-gray-200 disabled:text-gray-500 hover:bg-bv-red-700"
       >
-        {submitting ? 'Applying…' : `Apply ₹${rupeeForCurrent.toLocaleString('en-IN')} discount`}
+        {`Apply ₹${rupeeForCurrent.toLocaleString('en-IN')} discount`}
       </button>
     </div>
   );

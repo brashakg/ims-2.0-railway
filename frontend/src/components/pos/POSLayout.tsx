@@ -17,7 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi, loyaltyApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // POS Rx auto-attach (clinic initiative C5-A): owner-gated convenience. When the
@@ -363,7 +363,34 @@ export function POSLayout() {
       if (result?.order_id) {
         // C-5: success -> drop the key so the next order gets a fresh one.
         idempotencyKeyRef.current = null;
+
+        // POS-3: loyalty points are only atomically debited AFTER the order
+        // is confirmed. Call /loyalty/redeem now with the real order_id so
+        // the ledger is linked. Fail-soft: if the redeem call fails the order
+        // is still finalized (staff can adjust manually); the pending intent
+        // is cleared regardless.
+        const pendingLoyalty = store.pendingLoyaltyRedeem;
+        if (pendingLoyalty && store.customer?.id) {
+          try {
+            await loyaltyApi.redeem({
+              customer_id: String(store.customer.id),
+              order_id: result.order_id,
+              points: pendingLoyalty.points,
+              order_value: pendingLoyalty.orderValue,
+            });
+          } catch {
+            // Non-fatal: order is created. Log for ops visibility.
+            // eslint-disable-next-line no-console
+            console.warn('[POS] Deferred loyalty redeem failed — points NOT debited; order still saved.');
+          }
+          store.clearPendingLoyaltyRedeem();
+        }
+
         for (const p of (store.payments || [])) {
+          // Skip the LOYALTY tender — it is a UI-only line that tracks the
+          // rupee value of the deferred redeem; the actual ledger entry was
+          // created by /loyalty/redeem above (or skipped on failure).
+          if (p.method === 'LOYALTY') continue;
           try {
             const body: Record<string, unknown> = {
               method: p.method,
@@ -374,9 +401,14 @@ export function POSLayout() {
             // EMI requires emi_months on the backend (else 400). Forward the
             // tenure/provider the POS already captured — without this every EMI
             // payment silently failed and the order stayed unpaid.
+            // POS-2: also pass emi_principal (financed balance) so the backend
+            // builds the schedule on the loan amount, not the down-payment.
             if (p.method === 'EMI') {
               body.emi_months = p.emiTenure;
               body.emi_provider = p.emiProvider;
+              if (p.emiBalance && p.emiBalance > 0) {
+                body.emi_principal = p.emiBalance;
+              }
             }
             await orderApi.addPayment(result.order_id, body as any);
           } catch {

@@ -440,6 +440,10 @@ class PaymentCreate(BaseModel):
     # EMI-specific fields (only required when method=EMI)
     emi_months: Optional[int] = Field(None, ge=3, le=24)
     emi_provider: Optional[str] = None  # e.g., "BAJAJ", "HDFC", "ICICI"
+    # POS-2: the loan principal (order_total - down_payment). When provided,
+    # build_emi_schedule uses this amount so the schedule reflects the full
+    # financed balance, not just the down-payment recorded in `amount`.
+    emi_principal: Optional[float] = Field(None, gt=0)
 
     class Config:
         # Permit both "method" (native) and "mode" (legacy alias) in JSON.
@@ -2291,16 +2295,23 @@ async def add_payment(
             except Exception:
                 pass  # use default
 
-            # P3-C: reconciled schedule -- installments sum EXACTLY to
-            # total_payable (the last one absorbs the rounding remainder),
-            # interest_amount = total_payable - principal. Display-only; the
-            # recorded payment.amount (what reduces balance_due) is unchanged.
+            # POS-2 + P3-C: use emi_principal (financed balance) when the
+            # caller provides it; fall back to payment.amount for backward
+            # compat. This lets the POS record the down-payment in `amount`
+            # (which reduces balance_due correctly) while the schedule
+            # reflects the full loan amount (order_total - down_payment).
+            schedule_principal = payment.emi_principal or payment.amount
             emi_details = build_emi_schedule(
-                principal=payment.amount,
+                principal=schedule_principal,
                 annual_rate=emi_annual_rate,
                 months=payment.emi_months,
             )
             emi_details["provider"] = payment.emi_provider or "STORE"
+            # Record the down-payment separately so the full EMI picture is
+            # on the order document alongside the financed balance.
+            if payment.emi_principal and payment.emi_principal != payment.amount:
+                emi_details["down_payment"] = round(float(payment.amount), 2)
+                emi_details["financed_amount"] = round(float(payment.emi_principal), 2)
 
         payment_data = {
             "payment_id": str(uuid.uuid4()),

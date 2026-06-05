@@ -104,6 +104,7 @@ export interface PaymentEntry {
   emiProvider?: string;          // HDFC, ICICI, Axis, ADITYA BIRLA, etc.
   emiTenure?: number;            // Months: 3, 6, 9, 12, 18, 24
   downPayment?: number;          // Down payment amount in rupees
+  emiBalance?: number;           // POS-2: financed balance (order_total - downPayment)
   monthlyEMI?: number;           // Calculated monthly EMI amount
   processingFee?: number;        // 2% of loan amount
 }
@@ -159,6 +160,11 @@ export interface POSState {
   // Voucher & rewards
   appliedVoucher?: { code: string; discountAmount: number };
   loyaltyPointsRedeemed: number;
+  // POS-3: deferred loyalty redemption intent. Points are NOT debited until
+  // the order is confirmed. The intent is stored here so the payment panel
+  // can show the LOYALTY line; actual /loyalty/redeem call happens in
+  // POSLayout after createOrder succeeds.
+  pendingLoyaltyRedeem: { points: number; rupeeValue: number; orderValue: number } | null;
 
   // UI state
   is_processing: boolean;
@@ -215,6 +221,9 @@ export interface POSState {
   applyVoucher: (code: string, discountAmount: number) => void;
   removeVoucher: () => void;
   redeemLoyaltyPoints: (pointsToRedeem: number) => void;
+  // POS-3: store a deferred redemption intent without debiting points yet.
+  setPendingLoyaltyRedeem: (intent: { points: number; rupeeValue: number; orderValue: number } | null) => void;
+  clearPendingLoyaltyRedeem: () => void;
   // Reset
   resetTransaction: () => void;
   clearAllOnLogout: () => void;
@@ -302,6 +311,7 @@ const initialState = {
   customerLastRx: undefined,
   appliedVoucher: undefined,
   loyaltyPointsRedeemed: 0,
+  pendingLoyaltyRedeem: null,
 };
 
 // ============================================================================
@@ -454,9 +464,16 @@ export const usePOSStore = create<POSState>()(
       },
 
       removePayment: (index: number) => {
-        set((state: POSState) => ({
-          payments: (state.payments || []).filter((_: PaymentEntry, i: number) => i !== index),
-        }));
+        set((state: POSState) => {
+          const removed = (state.payments || [])[index];
+          // POS-3: if cashier removes the LOYALTY tender line, also discard
+          // the pending intent so no redeem call fires on order create.
+          const clearLoyalty = removed?.method === 'LOYALTY';
+          return {
+            payments: (state.payments || []).filter((_: PaymentEntry, i: number) => i !== index),
+            ...(clearLoyalty ? { pendingLoyaltyRedeem: null } : {}),
+          };
+        });
       },
 
       setAdvancePayment: (isAdvance: boolean) => set({ is_advance_payment: isAdvance }),
@@ -504,6 +521,10 @@ export const usePOSStore = create<POSState>()(
       redeemLoyaltyPoints: (pointsToRedeem: number) => set({
         loyaltyPointsRedeemed: pointsToRedeem
       }),
+
+      // POS-3: deferred loyalty redemption (points debited AFTER order create)
+      setPendingLoyaltyRedeem: (intent) => set({ pendingLoyaltyRedeem: intent }),
+      clearPendingLoyaltyRedeem: () => set({ pendingLoyaltyRedeem: null }),
 
       // --- Reset ---
       resetTransaction: () => {

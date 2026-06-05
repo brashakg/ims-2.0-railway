@@ -90,12 +90,16 @@ export function StepPayment() {
   const handleEMISubmit = () => {
     const downPayment = parseFloat(emiDownPayment) || 0;
     if (downPayment < 0 || downPayment >= balance) return;
-    const principal = balance - downPayment;
+    // POS-2: emiBalance is the financed amount (loan principal).
+    // `amount` on the payment entry is the down-payment collected NOW
+    // (which reduces balance_due); emiBalance is forwarded to the backend
+    // as emi_principal so the schedule is computed on the correct base.
+    const emiBalance = balance - downPayment;
     // EMI rate fetched from store settings; falls back to 12% annual
     const annualRate = (store as any).emiAnnualRate ?? 0.12;
     const monthlyRate = annualRate / 12;
-    const monthlyEMI = calculateEMI(principal, monthlyRate, emiTenure);
-    const processingFee = (principal * 0.02);
+    const monthlyEMI = calculateEMI(emiBalance, monthlyRate, emiTenure);
+    const processingFee = (emiBalance * 0.02);
     store.addPayment({
       method: 'EMI',
       amount: downPayment,
@@ -103,6 +107,7 @@ export function StepPayment() {
       emiProvider,
       emiTenure,
       downPayment,
+      emiBalance,
       monthlyEMI: Math.round(monthlyEMI * 100) / 100,
       processingFee: Math.round(processingFee * 100) / 100,
     });
@@ -227,9 +232,27 @@ export function StepPayment() {
 
       {(store.payments || []).length > 0 && <div className="space-y-2">
         {(store.payments || []).map((p, i) => (
-          <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
-            <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-600" /><span className="font-medium text-gray-900">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
-            <div className="flex items-center gap-2"><span className="font-semibold text-gray-900">{'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></div>
+          <div key={i} className="bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-green-600" />
+                <span className="font-medium text-gray-900">{p.method}</span>
+                {p.reference && <span className="text-gray-500">({p.reference})</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-gray-900">
+                  {'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}
+                </span>
+                <button onClick={() => store.removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button>
+              </div>
+            </div>
+            {/* POS-2: show EMI financed balance + monthly installment below the down-payment row */}
+            {p.method === 'EMI' && p.emiBalance && p.emiBalance > 0 && (
+              <div className="mt-1 pl-6 text-xs text-gray-500 space-y-0.5">
+                <div>Loan: {'₹'}{p.emiBalance.toLocaleString('en-IN')} over {p.emiTenure}m via {p.emiProvider}</div>
+                {p.monthlyEMI && <div>Monthly EMI: {'₹'}{p.monthlyEMI.toLocaleString('en-IN')}</div>}
+              </div>
+            )}
           </div>
         ))}
       </div>}

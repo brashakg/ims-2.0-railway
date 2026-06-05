@@ -155,12 +155,16 @@ export function TasksDashboard() {
     }
 
     try {
+      // POS-8: send end-of-day (23:59:59 local) so a "today" default is never
+      // in the past by the time the backend validates it (UTC midnight would
+      // already be past for an IST morning create).
+      const dueAt = new Date(`${newTask.due_date}T23:59:59`);
       await tasksApi.createTask({
         title: newTask.title,
         description: newTask.description,
         priority: newTask.priority,
         assigned_to: newTask.assigned_to || user?.id || '',
-        due_date: new Date(newTask.due_date),
+        due_date: dueAt,
         type: newTask.type,
       });
 
