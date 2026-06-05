@@ -767,12 +767,71 @@ async def redeem_referral(
         }
 
     # We hold the claim — credit the referrer exactly once.
+    referrer_id = referral["referrer_customer_id"]
+    # 1. Store credit: lives on the customers doc (correct canonical field).
     db.get_collection("customers").update_one(
-        {"customer_id": referral["referrer_customer_id"]},
-        {"$inc": {"store_credit": reward, "loyalty_points": int(reward / 10)}},
+        {"customer_id": referrer_id},
+        {"$inc": {"store_credit": reward}},
     )
+    # 2. Loyalty points: must go through the loyalty_accounts ledger, not the
+    #    customers doc (which has a phantom loyalty_points field the real engine
+    #    never reads — fixed CRM-1). Route via adjust_balance so the balance +
+    #    lifetime_earned counters + tier stay in sync. Fail-soft so a loyalty
+    #    failure never rolls back the store-credit that was already written.
+    loyalty_points_awarded = 0
+    try:
+        from ..dependencies import (
+            get_loyalty_account_repository,
+            get_loyalty_transaction_repository,
+            get_loyalty_settings_repository,
+        )
+        from ..services.loyalty_engine import compute_tier, expiry_for_earn
 
-    return {"message": f"Reward of Rs.{reward} credited", "referral_id": referral_id}
+        points = int(reward / 10)
+        if points > 0:
+            accounts = get_loyalty_account_repository()
+            txns = get_loyalty_transaction_repository()
+            settings_repo = get_loyalty_settings_repository()
+            settings = (settings_repo.get() if settings_repo else None) or {}
+            if accounts and txns:
+                account = accounts.find_or_create(referrer_id)
+                txn_id = str(uuid.uuid4())
+                txns.create(
+                    {
+                        "txn_id": txn_id,
+                        "customer_id": referrer_id,
+                        "type": "EARN",
+                        "points": points,
+                        "rupee_value": float(reward),
+                        "order_id": None,
+                        "reason": f"Referral reward {referral_id}",
+                        "expires_at": expiry_for_earn(settings),
+                        "tier_at_earn": account.get("tier", "BRONZE"),
+                        "tier_multiplier": 1.0,
+                        "store_id": referral.get("store_id"),
+                        "created_by": current_user.get("user_id"),
+                        "created_at": datetime.now(),
+                    }
+                )
+                new_lifetime = int(account.get("lifetime_earned", 0)) + points
+                new_tier = compute_tier(new_lifetime, settings)
+                accounts.adjust_balance(
+                    referrer_id,
+                    delta_points=points,
+                    delta_lifetime_earned=points,
+                    new_tier=new_tier if new_tier != account.get("tier") else None,
+                )
+                loyalty_points_awarded = points
+    except Exception as _lp_exc:
+        logger.warning(
+            "[REFERRAL] loyalty points award failed for %s: %s", referrer_id, _lp_exc
+        )
+
+    return {
+        "message": f"Reward of Rs.{reward} credited",
+        "referral_id": referral_id,
+        "loyalty_points_awarded": loyalty_points_awarded,
+    }
 
 
 # ============================================================================
@@ -867,20 +926,37 @@ async def submit_nps_response(
         },
     )
 
-    # If detractor (score <= 6), create follow-up task for manager
+    # If detractor (score <= 6), create follow-up task for manager.
+    # Field names must match the follow_ups collection schema used by
+    # follow_ups.py (scheduled_date, notes, customer_phone).
     if req.score <= 6:
         nps = coll.find_one({"nps_id": req.nps_id}) or {}
+        customer_id = nps.get("customer_id", "")
+        # Attempt to look up the customer's phone for the follow-up list
+        customer_phone = ""
+        if customer_id:
+            try:
+                customer_doc = db.get_collection("customers").find_one(
+                    {"customer_id": customer_id}
+                ) or {}
+                customer_phone = str(customer_doc.get("mobile") or customer_doc.get("phone") or "")
+            except Exception:
+                pass
         db.get_collection("follow_ups").insert_one(
             {
                 "follow_up_id": f"FU-{uuid.uuid4().hex[:8].upper()}",
                 "store_id": nps.get("store_id", ""),
-                "customer_id": nps.get("customer_id", ""),
+                "customer_id": customer_id,
                 "customer_name": nps.get("customer_name", ""),
+                "customer_phone": customer_phone,
                 "type": "general",
-                "reason": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
-                "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
+                "notes": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
+                "scheduled_date": (datetime.now() + timedelta(days=1)).date().isoformat(),
                 "status": "pending",
+                "outcome": None,
                 "created_at": datetime.now().isoformat(),
+                "completed_at": None,
+                "completed_by": None,
             }
         )
 

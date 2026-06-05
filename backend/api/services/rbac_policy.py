@@ -319,11 +319,13 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/crm/customers/360/{customer_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/crm/customers/churn-risk/list', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/crm/customers/segment/rfm', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/crm/customers/{customer_id}/cl-refill-status', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/crm/customers/{customer_id}/interactions', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/crm/customers/{customer_id}/interactions', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/crm/customers/{customer_id}/lifecycle', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/crm/customers/{customer_id}/loyalty-points', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/crm/customers/{customer_id}/prescriptions', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/crm/customers/{customer_id}/return-risk', "allowed": 'AUTHENTICATED'},
     # --- /api/v1/customers ---
     {"method": 'GET', "path": '/api/v1/customers', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/customers', "allowed": 'AUTHENTICATED'},

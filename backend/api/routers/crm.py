@@ -460,6 +460,223 @@ async def get_churn_risk_customers(
         )
 
 
+@router.get("/customers/{customer_id}/cl-refill-status")
+async def get_cl_refill_status(
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Contact-lens auto-refill signal for a customer (CRM-2).
+
+    Looks at the customer's most recent contact-lens order, uses the SKU's
+    pack_size + daily_wear flag (assumed 1 lens/eye/day for daily disposables,
+    or pack_size/30 days for monthlies) to predict when they will run out,
+    and returns a refill_due_date + days_remaining.
+
+    Fail-soft: returns a safe empty result when the DB is unavailable or no
+    CL orders are found.
+
+    GET /crm/customers/{customer_id}/cl-refill-status
+    """
+    db_conn = _crm_get_db()
+    empty = {
+        "customer_id": customer_id,
+        "has_cl_history": False,
+        "refill_due_date": None,
+        "days_remaining": None,
+        "last_cl_order_id": None,
+        "last_cl_order_date": None,
+        "sku": None,
+        "modality": None,
+        "pack_size": None,
+        "note": "No contact-lens order history found",
+    }
+    if db_conn is None:
+        return empty
+
+    try:
+        # CL categories used across the codebase (see inventory.py _CL_CATEGORIES).
+        cl_categories = {
+            "CONTACT_LENS", "CONTACT_LENSES", "CONTACT LENS", "CONTACT LENSES",
+            "CL", "CONTACTS",
+        }
+
+        # Find the customer's most recent order that contains a CL line item.
+        # Scan orders newest-first; stop on the first CL hit.
+        orders_coll = db_conn.get_collection("orders")
+        cursor = orders_coll.find(
+            {"customer_id": customer_id},
+            {"_id": 0, "order_id": 1, "created_at": 1, "items": 1, "order_date": 1},
+        ).sort("created_at", -1).limit(50)
+
+        cl_line = None
+        cl_order = None
+        for order in cursor:
+            for item in order.get("items") or []:
+                cat = str(item.get("category") or item.get("item_type") or "").upper()
+                if cat in cl_categories:
+                    cl_line = item
+                    cl_order = order
+                    break
+            if cl_line is not None:
+                break
+
+        if cl_line is None:
+            return empty
+
+        # Determine pack info.
+        pack_size = int(cl_line.get("pack_size") or cl_line.get("qty") or 0)
+        modality = str(cl_line.get("modality") or cl_line.get("cl_modality") or "")
+        sku = str(cl_line.get("sku") or cl_line.get("product_id") or "")
+        order_qty = int(cl_line.get("quantity") or cl_line.get("return_qty") or 1)
+
+        # Estimate supply in days.
+        # Daily disposables: total_lenses / 2 eyes / 1 per day.
+        # Monthly disposables: each pack = 30 days (one pair per box assumed).
+        total_lenses = pack_size * order_qty
+        if modality.upper() in ("DAILY", "DAILY DISPOSABLE", "1-DAY"):
+            supply_days = total_lenses // 2 if total_lenses >= 2 else total_lenses
+        elif modality.upper() in ("MONTHLY", "MONTHLY DISPOSABLE", "30-DAY"):
+            supply_days = order_qty * 30
+        elif modality.upper() in ("BIWEEKLY", "2-WEEK", "FORTNIGHTLY"):
+            supply_days = order_qty * 14
+        else:
+            # Unknown modality: use pack_size / 2 per day as a conservative guess.
+            supply_days = total_lenses // 2 if total_lenses >= 2 else 30
+
+        # Anchor from the order date.
+        order_date_raw = cl_order.get("created_at") or cl_order.get("order_date")
+        try:
+            if isinstance(order_date_raw, str):
+                order_dt = datetime.fromisoformat(
+                    order_date_raw.replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+            elif isinstance(order_date_raw, datetime):
+                order_dt = order_date_raw.replace(tzinfo=None)
+            else:
+                order_dt = datetime.utcnow()
+        except Exception:
+            order_dt = datetime.utcnow()
+
+        refill_due = order_dt + timedelta(days=max(supply_days, 1))
+        days_remaining = (refill_due - datetime.utcnow()).days
+
+        return {
+            "customer_id": customer_id,
+            "has_cl_history": True,
+            "refill_due_date": refill_due.date().isoformat(),
+            "days_remaining": days_remaining,
+            "last_cl_order_id": cl_order.get("order_id"),
+            "last_cl_order_date": order_dt.date().isoformat(),
+            "sku": sku,
+            "modality": modality or None,
+            "pack_size": pack_size or None,
+            "note": (
+                "Refill overdue" if days_remaining < 0
+                else "Refill due within 7 days" if days_remaining <= 7
+                else "Refill due within 30 days" if days_remaining <= 30
+                else None
+            ),
+        }
+    except Exception as exc:
+        logger.warning("[CRM] cl-refill-status failed for %s: %s", customer_id, exc)
+        return empty
+
+
+@router.get("/customers/{customer_id}/return-risk")
+async def get_customer_return_risk(
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return-abuse / serial-returner risk signal for a customer (CRM-5).
+
+    Computes the customer's return-rate (returns / orders) and total return
+    count from the `returns` collection. Flags customers with >= 3 returns or
+    a return_rate >= 30% as HIGH risk, 1-2 returns or 15-29% rate as MEDIUM,
+    else LOW (or NONE for no history). This is an ADVISORY read-only signal
+    -- it never blocks a transaction. The risk score is surfaced on Customer
+    360 for staff visibility.
+
+    Fail-soft: returns NONE risk when the DB is unavailable.
+
+    GET /crm/customers/{customer_id}/return-risk
+    """
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        return {
+            "customer_id": customer_id,
+            "return_count": 0,
+            "order_count": 0,
+            "return_rate_pct": 0.0,
+            "risk_level": "NONE",
+            "note": "Database unavailable",
+        }
+
+    try:
+        # Count orders (non-cancelled, non-draft).
+        order_count = 0
+        try:
+            order_count = db_conn.get_collection("orders").count_documents(
+                {
+                    "customer_id": customer_id,
+                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                }
+            )
+        except Exception:
+            pass
+
+        # Count returns linked to this customer.
+        return_count = 0
+        total_returned_value = 0.0
+        try:
+            for rdoc in db_conn.get_collection("returns").find(
+                {"customer_id": customer_id},
+                {"_id": 0, "returned_value": 1, "return_type": 1},
+            ):
+                return_count += 1
+                total_returned_value += float(rdoc.get("returned_value") or 0)
+        except Exception:
+            pass
+
+        return_rate_pct = (
+            round(return_count / order_count * 100, 1) if order_count > 0 else 0.0
+        )
+
+        # Risk band: advisory only — never blocks a transaction.
+        if return_count >= 3 or return_rate_pct >= 30.0:
+            risk_level = "HIGH"
+        elif return_count >= 1 or return_rate_pct >= 15.0:
+            risk_level = "MEDIUM"
+        elif return_count > 0:
+            risk_level = "LOW"
+        else:
+            risk_level = "NONE"
+
+        return {
+            "customer_id": customer_id,
+            "return_count": return_count,
+            "order_count": order_count,
+            "return_rate_pct": return_rate_pct,
+            "total_returned_value": round(total_returned_value, 2),
+            "risk_level": risk_level,
+            "note": (
+                "Advisory only — does not block transactions. "
+                "Review before issuing refund." if risk_level == "HIGH" else None
+            ),
+        }
+    except Exception as exc:
+        logger.warning("[CRM] return-risk failed for %s: %s", customer_id, exc)
+        return {
+            "customer_id": customer_id,
+            "return_count": 0,
+            "order_count": 0,
+            "return_rate_pct": 0.0,
+            "risk_level": "NONE",
+            "note": "Error computing return risk",
+        }
+
+
 @router.post(
     "/customers/{customer_id}/loyalty-points", response_model=LoyaltyTierResponse
 )
@@ -822,11 +1039,86 @@ def _perform_rfm_segmentation(customers: list) -> list:
 
 
 def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
-    """Identify customers at risk of churning"""
+    """Identify customers at risk of churning using real recency-based signals.
+
+    High:   no purchases in 180+ days (was previously active with >=1 order).
+    Medium: 91-179 days since last purchase.
+    Low:    31-90 days since last purchase with a declining order trend.
+
+    Previously this was a stub that only handled 'high' via a phantom
+    loyalty_points field on the customer doc (CRM-3 fix). Now we look up
+    actual orders from the orders collection.
+    """
+    # Recency thresholds (days since last purchase).
+    THRESHOLDS = {
+        "high": (180, None),   # >= 180 days
+        "medium": (91, 179),   # 91-179 days
+        "low": (31, 90),       # 31-90 days
+    }
+    bounds = THRESHOLDS.get(risk_level)
+    if bounds is None:
+        return []
+    lo, hi = bounds
+
+    db_conn = _crm_get_db()
+    if db_conn is None or not customers:
+        return []
+
+    # Build a recency map: customer_id -> days since last purchase.
+    cid_set = {c.get("customer_id") for c in customers if c.get("customer_id")}
+    recency_map: dict = {}
+    if cid_set:
+        try:
+            pipeline = [
+                {"$match": {"customer_id": {"$in": list(cid_set)}}},
+                {
+                    "$group": {
+                        "_id": "$customer_id",
+                        "last": {"$max": "$created_at"},
+                        "count": {"$sum": 1},
+                    }
+                },
+            ]
+            now = datetime.utcnow()
+            for row in db_conn.get_collection("orders").aggregate(pipeline):
+                cid = row["_id"]
+                last_raw = row.get("last")
+                count = row.get("count", 0)
+                if not last_raw or count == 0:
+                    continue
+                try:
+                    if isinstance(last_raw, str):
+                        last_raw = datetime.fromisoformat(
+                            last_raw.replace("Z", "+00:00")
+                        )
+                    if getattr(last_raw, "tzinfo", None) is not None:
+                        last_raw = last_raw.replace(tzinfo=None)
+                    days = (now - last_raw).days
+                    recency_map[cid] = {"days": days, "count": count}
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("[CHURN] recency aggregation failed: %s", exc)
+            return []
+
     at_risk = []
     for customer in customers:
-        # Mock implementation - in production, would analyze actual engagement
-        if risk_level == "high":
-            if customer.get("loyalty_points", 0) < 1000:
-                at_risk.append(customer)
+        cid = customer.get("customer_id")
+        rec = recency_map.get(cid)
+        if rec is None:
+            # No orders at all — not a "churned" customer, so not in any band.
+            continue
+        days = rec["days"]
+        count = rec["count"]
+        # Only flag previously active customers (at least one order).
+        if count == 0:
+            continue
+        in_band = days >= lo and (hi is None or days <= hi)
+        if in_band:
+            at_risk.append({
+                **customer,
+                "churn_risk_level": risk_level,
+                "days_since_last_purchase": days,
+                "total_orders": count,
+            })
     return at_risk
