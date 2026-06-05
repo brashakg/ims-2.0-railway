@@ -102,6 +102,7 @@ from .routers import (
     online_store_images_router,
     online_store_push_router,
     online_store_orders_router,
+    ondc_router,
 )
 from .routers.auth import require_roles
 
@@ -1101,6 +1102,19 @@ app.include_router(
     online_store_orders_router,
     prefix="/api/v1/online-store/orders",
     tags=["Online Store - Orders"],
+)
+
+# ── ONDC Seller Node (BVI-20) ─────────────────────────────────────────────
+# India's Open Network for Digital Commerce seller-side scaffolding.
+# DARK by default: all outbound SNP calls are SIMULATED unless
+# IMS_ONDC_ENABLED=1 and ondc integration creds are in MongoDB `integrations`.
+# Callback endpoints (POST /on_*) are PUBLIC (Beckn protocol; SNP-signature
+# gated when config.ukp is set). Admin routes gated to SUPERADMIN / ADMIN.
+# See backend/api/services/ondc_seller.py + docs/reference/BVI_MERGE_PLAN.md.
+app.include_router(
+    ondc_router,
+    prefix="/api/v1/ondc",
+    tags=["ONDC Seller Node"],
 )
 
 

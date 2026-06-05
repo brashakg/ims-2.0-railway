@@ -2730,6 +2730,26 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/orders/remap/{shopify_order_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # --- /api/v1/ondc ---  (BVI-20: ONDC Seller Node scaffolding -- DARK default)
+    # Callback endpoints are PUBLIC (Beckn protocol; SNP signature-gated when
+    # config.ukp is set). Admin routes require SUPERADMIN / ADMIN.
+    # See backend/api/services/ondc_seller.py + backend/api/routers/ondc.py.
+    {"method": "POST", "path": "/api/v1/ondc/on_search", "allowed": "PUBLIC"},
+    {"method": "POST", "path": "/api/v1/ondc/on_select", "allowed": "PUBLIC"},
+    {"method": "POST", "path": "/api/v1/ondc/on_init", "allowed": "PUBLIC"},
+    {"method": "POST", "path": "/api/v1/ondc/on_confirm", "allowed": "PUBLIC"},
+    {"method": "POST", "path": "/api/v1/ondc/on_status", "allowed": "PUBLIC"},
+    {"method": "POST", "path": "/api/v1/ondc/on_cancel", "allowed": "PUBLIC"},
+    {
+        "method": "GET",
+        "path": "/api/v1/ondc/status",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/ondc/publish",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # --- /api/v1/orders ---
     {
         "method": "GET",
