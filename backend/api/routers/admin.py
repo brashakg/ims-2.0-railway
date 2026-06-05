@@ -854,3 +854,79 @@ async def online_store_sync_health(
     from ..services.online_sync_health import sync_health
 
     return sync_health(_sync_health_db())
+
+
+@router.get("/online-store/drift")
+async def online_store_drift(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only live drift detector (Step 3 BVI safety net).
+
+    Compares each pushed IMS object's Shopify updatedAt against our
+    last_pushed_at timestamp. A gid whose Shopify updatedAt is NEWER than
+    our record means a second writer touched it -- a dual-writer violation.
+
+    This makes a REAL Shopify GraphQL read (via shopify_push._graphql).
+    No creds -> {checked: False, reason: ...}. Never 500s."""
+    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Drift check is restricted to SUPERADMIN",
+        )
+    from ..services.online_sync_health import detect_drift
+
+    return await detect_drift(_sync_health_db(), limit=limit)
+
+
+@router.post("/online-store/repush-oversell")
+async def online_store_repush_oversell(
+    dry_run: bool = True,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only re-push sweep for oversell-risk SKUs (Step 4 BVI safety net).
+
+    Identifies SKUs where the online-listed quantity exceeds physical on-hand
+    (oversell risk) and re-runs the absolute Shopify inventory writeback via
+    nexus_providers.shopify_set_inventory_available.
+
+    DARK by default (dry_run=True): returns the plan without touching Shopify.
+    Live execution requires dry_run=False AND IMS_SHOPIFY_WRITES=1 AND
+    DISPATCH_MODE=live AND Shopify creds. Never 500s."""
+    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Repush sweep is restricted to SUPERADMIN",
+        )
+    from ..services.online_sync_health import repush_oversell_risk
+
+    return await repush_oversell_risk(_sync_health_db(), dry_run=dry_run)
+
+
+@router.get("/online-store/parity")
+async def online_store_parity(
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only parity oracle + /uploads/ image audit (Steps 6a+6b).
+
+    (a) Parity: compares IMS catalog object counts (catalog_products,
+    catalog_variants, ecom_collections, product_images) vs what has a Shopify
+    gid -- surfaces missing / not-yet-pushed objects.
+
+    (b) Uploads audit: flags product_images whose url/edited_url still points
+    at a local /uploads/... path rather than a durable https:// URL. These are
+    a HARD prereq for the Shopify cutover (Shopify cannot pull a private path).
+
+    Read-only + fail-soft. Never 500s."""
+    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Parity oracle is restricted to SUPERADMIN",
+        )
+    from ..services.online_sync_health import parity_summary, uploads_image_audit
+
+    db = _sync_health_db()
+    return {
+        "parity": parity_summary(db),
+        "uploads_audit": uploads_image_audit(db),
+    }

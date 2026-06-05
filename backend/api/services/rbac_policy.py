@@ -200,6 +200,11 @@ POLICY: List[Dict[str, object]] = [
     # but the handler narrows to SUPERADMIN inline (online-store admin is a
     # SUPERADMIN concern, matching the Jarvis / ecommerce-SSO posture).
     {"method": 'GET', "path": '/api/v1/admin/online-store/sync-health', "allowed": ['SUPERADMIN']},
+    # BVI safety nets (Steps 3, 4, 6): drift detector, oversell repush, parity oracle.
+    # All narrowed to SUPERADMIN inline (same posture as sync-health above).
+    {"method": 'GET', "path": '/api/v1/admin/online-store/drift', "allowed": ['SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/admin/online-store/repush-oversell', "allowed": ['SUPERADMIN']},
+    {"method": 'GET', "path": '/api/v1/admin/online-store/parity', "allowed": ['SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/products', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/products/bulk-import', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/products/bulk-import/{job_id}/file', "allowed": ['ADMIN', 'SUPERADMIN']},
