@@ -16,6 +16,7 @@ import {
 import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { readEyePower } from '../../utils/rxEye';
 
 interface CompletedTest {
   id: string;
@@ -242,12 +243,12 @@ export function TestHistoryPage() {
                   {/* Quick Rx Preview */}
                   <div className="text-sm text-right">
                     <p className="text-gray-600">
-                      <span className="font-medium">R:</span> {formatPower(test.rightEye.sphere)} /{' '}
-                      {formatPower(test.rightEye.cylinder)}
+                      <span className="font-medium">R:</span> {formatPower(readEyePower(test, 'right', 'sphere'))} /{' '}
+                      {formatPower(readEyePower(test, 'right', 'cylinder'))}
                     </p>
                     <p className="text-gray-600">
-                      <span className="font-medium">L:</span> {formatPower(test.leftEye.sphere)} /{' '}
-                      {formatPower(test.leftEye.cylinder)}
+                      <span className="font-medium">L:</span> {formatPower(readEyePower(test, 'left', 'sphere'))} /{' '}
+                      {formatPower(readEyePower(test, 'left', 'cylinder'))}
                     </p>
                   </div>
                 </div>
@@ -312,31 +313,31 @@ export function TestHistoryPage() {
                         <tr>
                           <td className="border border-gray-200 px-4 py-2 font-medium">Right (OD)</td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedTest.rightEye.sphere)}
+                            {formatPower(readEyePower(selectedTest, 'right', 'sphere'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedTest.rightEye.cylinder)}
+                            {formatPower(readEyePower(selectedTest, 'right', 'cylinder'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedTest.rightEye.axis ?? '-'}
+                            {readEyePower(selectedTest, 'right', 'axis') ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedTest.rightEye.add)}
+                            {formatPower(readEyePower(selectedTest, 'right', 'add'))}
                           </td>
                         </tr>
                         <tr>
                           <td className="border border-gray-200 px-4 py-2 font-medium">Left (OS)</td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedTest.leftEye.sphere)}
+                            {formatPower(readEyePower(selectedTest, 'left', 'sphere'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedTest.leftEye.cylinder)}
+                            {formatPower(readEyePower(selectedTest, 'left', 'cylinder'))}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedTest.leftEye.axis ?? '-'}
+                            {readEyePower(selectedTest, 'left', 'axis') ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {formatPower(selectedTest.leftEye.add)}
+                            {formatPower(readEyePower(selectedTest, 'left', 'add'))}
                           </td>
                         </tr>
                       </tbody>
