@@ -211,7 +211,7 @@ class TestReceiveInbound:
 
     def test_no_secret_configured_returns_200(self, client):
         """Fail-soft: no WABA_APP_SECRET => accept delivery without verification."""
-        with patch("api.routers.webhooks._WABA_APP_SECRET", ""), patch(
+        with patch.dict(os.environ, {"WABA_APP_SECRET": ""}), patch(
             "api.routers.webhooks._upsert_conversation", return_value=None
         ), patch(
             "api.services.whatsapp_intents.dispatch_intent",
@@ -234,7 +234,7 @@ class TestReceiveInbound:
         """When app secret is configured, bad signature => 401."""
         secret = "mysecret"
         body_bytes = json.dumps(_make_meta_body()).encode()
-        with patch("api.routers.webhooks._WABA_APP_SECRET", secret):
+        with patch.dict(os.environ, {"WABA_APP_SECRET": secret}):
             resp = client.post(
                 "/api/v1/webhooks/whatsapp",
                 content=body_bytes,
@@ -247,7 +247,7 @@ class TestReceiveInbound:
 
     def test_missing_signature_returns_401_when_secret_set(self, client):
         """No signature header + secret configured => 401."""
-        with patch("api.routers.webhooks._WABA_APP_SECRET", "real_secret"):
+        with patch.dict(os.environ, {"WABA_APP_SECRET": "real_secret"}):
             resp = client.post(
                 "/api/v1/webhooks/whatsapp",
                 content=json.dumps(_make_meta_body()).encode(),
@@ -260,7 +260,7 @@ class TestReceiveInbound:
         body_bytes = json.dumps(_make_meta_body(text="book eye test")).encode()
         sig = _sign_body(body_bytes, secret)
 
-        with patch("api.routers.webhooks._WABA_APP_SECRET", secret), patch(
+        with patch.dict(os.environ, {"WABA_APP_SECRET": secret}), patch(
             "api.routers.webhooks._upsert_conversation", return_value=None
         ), patch(
             "api.services.whatsapp_intents.dispatch_intent",
@@ -284,7 +284,7 @@ class TestReceiveInbound:
 
     def test_db_absent_still_returns_200(self, client):
         """Fail-soft: Mongo down => 200 (not 5xx)."""
-        with patch("api.routers.webhooks._WABA_APP_SECRET", ""), patch(
+        with patch.dict(os.environ, {"WABA_APP_SECRET": ""}), patch(
             "api.routers.webhooks._get_wa_conversations_collection", return_value=None
         ), patch(
             "api.services.whatsapp_intents._get_db", return_value=None
@@ -309,7 +309,7 @@ class TestReceiveInbound:
             "object": "whatsapp_business_account",
             "entry": [{"changes": [{"value": {"statuses": [{"id": "abc", "status": "delivered"}]}}]}],
         }
-        with patch("api.routers.webhooks._WABA_APP_SECRET", ""):
+        with patch.dict(os.environ, {"WABA_APP_SECRET": ""}):
             resp = client.post(
                 "/api/v1/webhooks/whatsapp",
                 content=json.dumps(status_body).encode(),
