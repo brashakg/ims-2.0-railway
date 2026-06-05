@@ -148,6 +148,18 @@ export function TasksDashboard() {
     }
   };
 
+  /**
+   * Parse the date-only string ("YYYY-MM-DD") from the date input and return a
+   * Date that is always in the future: end-of-the-selected-day (23:59:59 local).
+   * This prevents the backend from rejecting "today" as past-dated — the backend
+   * enforces a 5-minute grace on due_at, so any time past midnight UTC can trigger
+   * a 422 for same-day tasks submitted from IST (UTC+5:30).
+   */
+  const parseDueDate = (dateStr: string): Date => {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, (m || 1) - 1, d || 1, 23, 59, 59);
+  };
+
   const handleCreateTask = async () => {
     if (!newTask.title.trim()) {
       toast.error('Task title is required');
@@ -160,7 +172,7 @@ export function TasksDashboard() {
         description: newTask.description,
         priority: newTask.priority,
         assigned_to: newTask.assigned_to || user?.id || '',
-        due_date: new Date(newTask.due_date),
+        due_date: parseDueDate(newTask.due_date),
         type: newTask.type,
       });
 

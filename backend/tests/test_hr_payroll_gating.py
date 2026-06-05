@@ -60,6 +60,66 @@ class TestHrRouterGating:
         assert resp.status_code in (401, 403)
 
 
+class TestLegacyHrPayrollRouteGating:
+    """SEC-2: The three legacy /hr/payroll/* routes (list, generate, approve)
+    and /hr/employee/{id}/salary-slip must be role-gated to HR_READ_ROLES.
+    Previously they used get_current_user (any authenticated user could call
+    them). This test class confirms the fix is in place."""
+
+    def test_sales_staff_blocked_on_payroll_generate(self, client, staff_headers):
+        """SALES_STAFF must not be able to trigger payroll generation."""
+        resp = client.post(
+            "/api/v1/hr/payroll/generate",
+            headers=staff_headers,
+            params={"year": 2026, "month": 6},
+        )
+        assert resp.status_code == 403
+
+    def test_sales_staff_blocked_on_payroll_approve(self, client, staff_headers):
+        """SALES_STAFF must not be able to approve a payroll record."""
+        resp = client.post(
+            "/api/v1/hr/payroll/fake-id/approve",
+            headers=staff_headers,
+        )
+        assert resp.status_code == 403
+
+    def test_sales_staff_blocked_on_salary_slip(self, client, staff_headers):
+        """SALES_STAFF must not be able to fetch another employee's salary slip."""
+        resp = client.get(
+            "/api/v1/hr/employee/emp-1/salary-slip",
+            headers=staff_headers,
+            params={"year": 2026, "month": 6},
+        )
+        assert resp.status_code == 403
+
+    def test_accountant_allowed_on_payroll_list(self, client):
+        """ACCOUNTANT is in _HR_READ_ROLES and must be allowed to list payroll."""
+        resp = client.get(
+            "/api/v1/hr/payroll",
+            headers=_headers(["ACCOUNTANT"]),
+            params={"year": 2026, "month": 6},
+        )
+        assert resp.status_code != 403
+
+    def test_accountant_allowed_on_payroll_generate(self, client):
+        """ACCOUNTANT should be able to trigger payroll generation."""
+        resp = client.post(
+            "/api/v1/hr/payroll/generate",
+            headers=_headers(["ACCOUNTANT"]),
+            params={"year": 2026, "month": 6},
+        )
+        assert resp.status_code != 403
+
+    def test_superadmin_allowed_on_payroll_approve(self, client, auth_headers):
+        """SUPERADMIN auto-passes require_roles, so should not be 403."""
+        # The route will 404 (no such payroll record) -- that's fine; not 403.
+        resp = client.post(
+            "/api/v1/hr/payroll/nonexistent-id/approve",
+            headers=auth_headers,
+        )
+        assert resp.status_code != 403
+
+
 _CONFIG_BODY = {"employee_id": "emp-test-1", "basic_salary": 25000.0}
 
 
