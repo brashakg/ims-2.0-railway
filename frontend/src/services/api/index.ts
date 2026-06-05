@@ -25,7 +25,7 @@ export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sale
 export type { FamilyRxResponse, FamilyRxMember, FamilyRxPrescription } from './sales';
 
 // Customers
-export { customerApi } from './customers';
+export { customerApi, customersApi } from './customers';
 
 // CRM analytics (RFM segments, churn-risk, lifecycle)
 export { crmApi } from './crm';

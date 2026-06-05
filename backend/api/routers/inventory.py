@@ -1463,6 +1463,74 @@ async def transfer_recommendations(
         return {"recommendations": [], "store_id": active_store}
 
 
+@router.get("/cross-store-stock")
+async def cross_store_stock(
+    product_id: str = Query(..., description="Product ID to look up across stores"),
+    exclude_store_id: Optional[str] = Query(
+        None, description="Omit this store from results (usually the requesting store)"
+    ),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """POS-7 BOPIS / ship-from-store: find which stores hold available stock for
+    a product and how many units each carries.
+
+    Returns stores ordered by available quantity descending so the caller can
+    immediately suggest the best source for a cross-store reservation.
+
+    Fail-soft: empty list on DB unavailable.
+    """
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
+    if stock_repo is None:
+        return {"product_id": product_id, "stores": []}
+
+    try:
+        rows = stock_repo.aggregate([
+            {
+                "$match": {
+                    "product_id": product_id,
+                    "status": "AVAILABLE",
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$store_id",
+                    "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                }
+            },
+        ]) or []
+
+        # Enrich with product name (once)
+        product_name = ""
+        if product_repo is not None:
+            p = product_repo.find_by_id(product_id)
+            if p:
+                product_name = p.get("name") or p.get("product_name") or ""
+
+        stores = []
+        for r in rows:
+            sid = r.get("_id")
+            if not sid:
+                continue
+            if exclude_store_id and sid == exclude_store_id:
+                continue
+            qty = int(r.get("quantity") or 0)
+            if qty <= 0:
+                continue
+            stores.append({"store_id": sid, "available_qty": qty})
+
+        stores.sort(key=lambda x: x["available_qty"], reverse=True)
+
+        return {
+            "product_id": product_id,
+            "product_name": product_name,
+            "stores": stores,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cross_store_stock error: %s", e)
+        return {"product_id": product_id, "stores": []}
+
+
 @router.post("/accountability")
 async def assign_accountability(
     body: AccountabilityAssign,

@@ -296,6 +296,9 @@ class CustomerUpdate(BaseModel):
     billing_address: Optional[dict] = None
     marketing_consent: Optional[bool] = None
     patients: Optional[List[PatientCreate]] = None
+    # POS-4: per-customer credit limit (khata). 0 = no limit (unlimited).
+    # B2B accounts typically carry a non-zero limit; B2C defaults to 0.
+    credit_limit: Optional[float] = Field(default=None, ge=0)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -770,6 +773,96 @@ async def get_customer_orders(
         {"$or": or_clauses}, sort=[("created_at", -1)], limit=500
     )
     return {"orders": orders}
+
+
+def _ar_outstanding(customer_id: str, customer_doc: Optional[dict]) -> float:
+    """Sum of CREDIT-tendered amounts still unpaid for a customer.
+
+    Scans the customer's orders for any payment row with method=CREDIT and
+    accumulates the credited amounts. Subtracts any subsequent real-money
+    payments that reduced balance_due to approximate the true AR balance.
+
+    Fail-soft: returns 0.0 if the DB or order collection is unavailable.
+    """
+    try:
+        from ..dependencies import get_order_repository
+
+        order_repo = get_order_repository()
+        if order_repo is None:
+            return 0.0
+
+        # Match by customer_id (also by phone for TechCherry imports)
+        phone = None
+        if customer_doc is not None:
+            phone = customer_doc.get("phone") or customer_doc.get("mobile")
+        or_clauses: list = [{"customer_id": customer_id}]
+        if phone:
+            or_clauses.append({"customer_phone": phone})
+
+        orders = order_repo.find_many(
+            {
+                "$or": or_clauses,
+                "status": {"$nin": ["CANCELLED"]},
+            },
+            sort=[("created_at", -1)],
+            limit=500,
+        )
+        total = 0.0
+        for order in orders or []:
+            # balance_due on a CREDIT order is the outstanding amount the
+            # customer still owes. We sum balance_due only when the order
+            # has at least one CREDIT payment (meaning it was deliberately
+            # put on account), and the payment_status is not PAID.
+            pstatus = order.get("payment_status", "")
+            if pstatus == "PAID":
+                continue
+            has_credit = any(
+                p.get("method") == "CREDIT"
+                for p in (order.get("payments") or [])
+            )
+            if has_credit:
+                total += float(order.get("balance_due") or 0)
+        return round(total, 2)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+@router.get("/{customer_id}/credit-summary")
+async def get_customer_credit_summary(
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the credit-limit (khata) configuration and current AR outstanding
+    for a customer.
+
+    Response shape:
+      {
+        "customer_id": "...",
+        "credit_limit": 50000.0,  // 0 = unlimited
+        "ar_outstanding": 12500.0,
+        "ar_available": 37500.0,  // limit - outstanding; null when unlimited
+        "limit_exceeded": false
+      }
+
+    Fail-soft: all amounts default to 0 if the DB is unavailable.
+    """
+    repo = get_customer_repository()
+    customer = repo.find_by_id(customer_id) if repo is not None else None
+    if repo is not None and customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    credit_limit = float((customer or {}).get("credit_limit") or 0)
+    ar_outstanding = _ar_outstanding(customer_id, customer)
+    ar_available = None if credit_limit == 0 else round(credit_limit - ar_outstanding, 2)
+    limit_exceeded = bool(credit_limit > 0 and ar_outstanding > credit_limit)
+
+    return {
+        "customer_id": customer_id,
+        "credit_limit": credit_limit,
+        "ar_outstanding": ar_outstanding,
+        "ar_available": ar_available,
+        "limit_exceeded": limit_exceeded,
+    }
 
 
 @router.get("/{customer_id}/prescriptions")
