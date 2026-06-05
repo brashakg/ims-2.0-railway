@@ -171,8 +171,29 @@ def _rembg_editor() -> Optional[ImageEditor]:
 
 
 def get_image_editor() -> ImageEditor:
-    """Resolve the configured editor. Default: photoroom if a key is present,
-    else the self-host editor if its deps are installed, else disabled."""
+    """Resolve the configured editor.
+
+    Priority:
+      1. DB integrations doc (type="photoroom", enabled=True) -- allows the
+         owner to rotate keys in Settings -> Integrations without touching
+         Railway env vars.
+      2. Legacy env vars (IMAGE_EDIT_PROVIDER / PHOTOROOM_API_KEY).
+      3. Self-hosted rembg if the optional dep is installed.
+      4. DisabledEditor (fail-soft -- route keeps RAW image).
+    """
+    # 1. Try DB first (fail-soft: returns {} when DB unavailable)
+    try:
+        from api.services.integration_config import get_photoroom_config
+
+        db_cfg = get_photoroom_config()
+        if db_cfg.get("api_key"):
+            db_provider = (db_cfg.get("provider") or "photoroom").strip().lower()
+            if db_provider == "photoroom":
+                return PhotoroomEditor(api_key=db_cfg["api_key"])
+    except Exception:  # noqa: BLE001 -- never let config lookup break the editor
+        pass
+
+    # 2. Env-var path (legacy / override)
     provider = (os.getenv("IMAGE_EDIT_PROVIDER", "") or "").strip().lower()
     if provider == "photoroom":
         return PhotoroomEditor()

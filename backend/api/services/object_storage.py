@@ -108,8 +108,37 @@ class S3Storage:
 
 
 def get_object_storage() -> ObjectStorage:
-    """Resolve the configured storage backend. Default: s3 if fully configured,
-    else local-disk."""
+    """Resolve the configured storage backend.
+
+    Priority:
+      1. DB integrations doc (type="storage", enabled=True) -- allows the
+         owner to manage S3/R2 creds in Settings -> Integrations without
+         touching Railway env vars.
+      2. Legacy env vars (IMAGE_STORAGE_PROVIDER / IMAGE_S3_*).
+      3. Local-disk fallback (dev / Railway ephemeral; not durable).
+    """
+    # 1. Try DB config first (fail-soft)
+    try:
+        from api.services.integration_config import get_storage_config
+
+        db_cfg = get_storage_config()
+        db_provider = (db_cfg.get("provider") or "").strip().lower()
+        if db_provider == "s3" and db_cfg.get("bucket") and db_cfg.get("access_key"):
+            s = S3Storage()
+            # Override with DB values -- reconstruct with explicit kwargs
+            s._bucket = db_cfg["bucket"]
+            s._access_key = db_cfg["access_key"]
+            s._secret_key = db_cfg.get("secret_key", "")
+            s._endpoint = db_cfg.get("endpoint") or None
+            s._public_base = (db_cfg.get("public_base") or "").rstrip("/")
+            s._region = db_cfg.get("region") or None
+            return s
+        if db_provider in ("local", "disk"):
+            return LocalDiskStorage()
+    except Exception:  # noqa: BLE001 -- never let config lookup break storage
+        pass
+
+    # 2. Env-var path (legacy / override)
     provider = (os.getenv("IMAGE_STORAGE_PROVIDER", "") or "").strip().lower()
     if provider == "s3":
         return S3Storage()

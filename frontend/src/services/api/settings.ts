@@ -4,6 +4,24 @@
 
 import api from './client';
 
+// Catalog types (mirrored from backend _INTEGRATION_CATALOG shape)
+export interface IntegrationFieldDef {
+  key: string;
+  label: string;
+  secret: boolean;
+  placeholder?: string;
+  help?: string;
+  optional?: boolean;
+}
+
+export interface IntegrationCatalogEntry {
+  type: string;
+  name: string;
+  description: string;
+  category: string;
+  fields: IntegrationFieldDef[];
+}
+
 // ============================================================================
 // Settings API - Extended settings management
 // ============================================================================
@@ -290,6 +308,11 @@ export const settingsApi = {
   },
 
   // Integrations
+  getIntegrationsCatalog: async () => {
+    const response = await api.get('/settings/integrations/catalog');
+    return response.data as { catalog: IntegrationCatalogEntry[] };
+  },
+
   getIntegrations: async () => {
     const response = await api.get('/settings/integrations');
     return response.data;

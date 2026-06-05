@@ -95,7 +95,13 @@ _SENSITIVE_FIELDS = {
     "access_token",
     "refresh_token",
     "private_key",
+    "signing_key",
     "webhook_secret",
+    "webhook_url",
+    "app_secret",
+    "verify_token",
+    "developer_token",
+    "client_secret",
     "razorpay_key_secret",
     "shopify_api_secret",
     "whatsapp_api_key",
@@ -347,9 +353,256 @@ class DiscountSettings(BaseModel):
 
 
 class IntegrationConfig(BaseModel):
-    integration_type: str  # SHOPIFY, TALLY, SHIPROCKET, WHATSAPP, RAZORPAY
+    integration_type: str  # any catalog type: shopify/tally/whatsapp/razorpay/
+    # shiprocket/anthropic/photoroom/storage/einvoice/google_ads/meta_ads/
+    # meta_whatsapp/ondc/pagespeed/slack
     enabled: bool
-    config: Dict
+    config: Dict  # free-form per-type dict; sensitive fields encrypted at rest
+
+
+# ---------------------------------------------------------------------------
+# Integration catalog
+# ---------------------------------------------------------------------------
+# Single source of truth consumed by GET /settings/integrations/catalog.
+# Rendered generically on the FE -- adding a new integration = adding a row here.
+# Field shape:
+#   key        -- config dict key stored in Mongo
+#   label      -- display label
+#   secret     -- True -> render password input, mask on read, encrypt at rest
+#   placeholder -- input placeholder hint
+#   help       -- optional sub-label text
+#   optional   -- field may be left blank (not required for the integration to work)
+# ---------------------------------------------------------------------------
+
+_INTEGRATION_CATALOG = [
+    # ---- Commerce ----------------------------------------------------------
+    {
+        "type": "shopify",
+        "name": "Shopify",
+        "description": "Sync products and orders with your Shopify storefront",
+        "category": "Commerce",
+        "fields": [
+            {"key": "shop_url", "label": "Shop URL", "secret": False,
+             "placeholder": "mystore.myshopify.com"},
+            {"key": "access_token", "label": "Admin API Access Token", "secret": True,
+             "placeholder": "shpat_xxxxxxxxxxxx"},
+            {"key": "webhook_secret", "label": "Webhook Secret", "secret": True,
+             "placeholder": "For verifying Shopify webhook signatures",
+             "optional": True},
+            {"key": "location_id", "label": "Location ID", "secret": False,
+             "placeholder": "Shopify location ID for inventory", "optional": True},
+        ],
+    },
+    {
+        "type": "tally",
+        "name": "Tally ERP",
+        "description": "Export vouchers and sync accounts with Tally ERP9/Prime",
+        "category": "Commerce",
+        "fields": [
+            {"key": "server_url", "label": "Tally Server URL", "secret": False,
+             "placeholder": "http://localhost:9000"},
+            {"key": "company_name", "label": "Company Name (in Tally)", "secret": False,
+             "placeholder": "Better Vision Opticals", "optional": True},
+        ],
+    },
+    {
+        "type": "shiprocket",
+        "name": "Shiprocket",
+        "description": "Shipping and logistics management",
+        "category": "Commerce",
+        "fields": [
+            {"key": "email", "label": "Login Email", "secret": False,
+             "placeholder": "ops@bettervision.in"},
+            {"key": "password", "label": "Password", "secret": True,
+             "placeholder": "Shiprocket account password"},
+            {"key": "pickup_postcode", "label": "Default Pickup Postcode", "secret": False,
+             "placeholder": "827006", "optional": True},
+        ],
+    },
+    {
+        "type": "ondc",
+        "name": "ONDC",
+        "description": "Open Network for Digital Commerce seller integration",
+        "category": "Commerce",
+        "fields": [
+            {"key": "subscriber_id", "label": "Subscriber ID", "secret": False,
+             "placeholder": "bettervision.in"},
+            {"key": "signing_key", "label": "Signing Private Key", "secret": True,
+             "placeholder": "Ed25519 private key (base64)"},
+            {"key": "gateway_url", "label": "Gateway URL", "secret": False,
+             "placeholder": "https://preprod.gateway.ondc.org", "optional": True},
+        ],
+    },
+    # ---- Messaging ---------------------------------------------------------
+    {
+        "type": "whatsapp",
+        "name": "WhatsApp Business (MSG91)",
+        "description": "Send customer notifications via WhatsApp and SMS",
+        "category": "Messaging",
+        "fields": [
+            {"key": "api_key", "label": "MSG91 Auth Key", "secret": True,
+             "placeholder": "Your MSG91 API key"},
+            {"key": "whatsapp_number", "label": "WhatsApp Integrated Number", "secret": False,
+             "placeholder": "WhatsApp business number from MSG91"},
+            {"key": "sms_template_id", "label": "SMS Template ID", "secret": False,
+             "placeholder": "DLT-approved template ID", "optional": True},
+            {"key": "sender", "label": "SMS Sender ID", "secret": False,
+             "placeholder": "BVOPTL", "optional": True},
+        ],
+    },
+    {
+        "type": "slack",
+        "name": "Slack",
+        "description": "Alert the team on CRITICAL anomalies detected by ORACLE agent",
+        "category": "Messaging",
+        "fields": [
+            {"key": "webhook_url", "label": "Incoming Webhook URL", "secret": True,
+             "placeholder": "https://hooks.slack.com/services/..."},
+        ],
+    },
+    # ---- AI / ML -----------------------------------------------------------
+    {
+        "type": "anthropic",
+        "name": "Anthropic / Claude",
+        "description": "Powers ORACLE, JARVIS, and MEGAPHONE AI features",
+        "category": "AI",
+        "fields": [
+            {"key": "api_key", "label": "Anthropic API Key", "secret": True,
+             "placeholder": "sk-ant-..."},
+            {"key": "model", "label": "Default Model", "secret": False,
+             "placeholder": "claude-haiku-4-5", "optional": True,
+             "help": "e.g. claude-haiku-4-5 (cheap) or claude-sonnet-4-5 (capable)"},
+        ],
+    },
+    {
+        "type": "pagespeed",
+        "name": "Google PageSpeed",
+        "description": "Lighthouse audits run by the PIXEL agent",
+        "category": "AI",
+        "fields": [
+            {"key": "api_key", "label": "PageSpeed API Key", "secret": True,
+             "placeholder": "Google Cloud API key with PageSpeed Insights scope"},
+        ],
+    },
+    {
+        "type": "photoroom",
+        "name": "Photoroom",
+        "description": "Auto-remove backgrounds from product photos (Online Store design queue)",
+        "category": "AI",
+        "fields": [
+            {"key": "api_key", "label": "Photoroom API Key", "secret": True,
+             "placeholder": "Your Photoroom Plus API key"},
+            {"key": "provider", "label": "Active Provider", "secret": False,
+             "placeholder": "photoroom", "optional": True,
+             "help": "photoroom or rembg (self-hosted). Leave blank for auto."},
+        ],
+    },
+    # ---- Payments ----------------------------------------------------------
+    {
+        "type": "razorpay",
+        "name": "Razorpay",
+        "description": "Payment gateway for cards, UPI, and net banking",
+        "category": "Payments",
+        "fields": [
+            {"key": "key_id", "label": "Key ID", "secret": False,
+             "placeholder": "rzp_live_xxxxxxxxxxxx"},
+            {"key": "key_secret", "label": "Key Secret", "secret": True,
+             "placeholder": "Razorpay key secret"},
+            {"key": "webhook_secret", "label": "Webhook Secret", "secret": True,
+             "placeholder": "For verifying Razorpay webhook signatures",
+             "optional": True},
+        ],
+    },
+    # ---- Compliance --------------------------------------------------------
+    {
+        "type": "einvoice",
+        "name": "E-Invoice (GSP)",
+        "description": "Generate IRN for B2B invoices via a GSP (one config per GSTIN)",
+        "category": "Compliance",
+        "fields": [
+            {"key": "gstin", "label": "GSTIN", "secret": False,
+             "placeholder": "29ABCDE1234F1Z5"},
+            {"key": "gsp_url", "label": "GSP API URL", "secret": False,
+             "placeholder": "https://einvoice1.gst.gov.in"},
+            {"key": "username", "label": "GSP Username", "secret": False,
+             "placeholder": "Your GSP portal username"},
+            {"key": "password", "label": "GSP Password", "secret": True,
+             "placeholder": "Your GSP portal password"},
+        ],
+    },
+    # ---- Storage -----------------------------------------------------------
+    {
+        "type": "storage",
+        "name": "Object Storage (S3 / R2)",
+        "description": "Durable image hosting for catalog photos (S3 / Cloudflare R2 / MinIO)",
+        "category": "Storage",
+        "fields": [
+            {"key": "provider", "label": "Provider", "secret": False,
+             "placeholder": "s3",
+             "help": "s3 (also covers Cloudflare R2 and MinIO)"},
+            {"key": "bucket", "label": "Bucket Name", "secret": False,
+             "placeholder": "ims-product-images"},
+            {"key": "access_key", "label": "Access Key ID", "secret": False,
+             "placeholder": "AWS / R2 access key ID"},
+            {"key": "secret_key", "label": "Secret Access Key", "secret": True,
+             "placeholder": "AWS / R2 secret access key"},
+            {"key": "endpoint", "label": "Endpoint URL", "secret": False,
+             "placeholder": "https://<account>.r2.cloudflarestorage.com",
+             "optional": True, "help": "Leave blank for AWS S3. Required for R2/MinIO."},
+            {"key": "public_base", "label": "Public Base URL", "secret": False,
+             "placeholder": "https://cdn.bettervision.in", "optional": True},
+            {"key": "region", "label": "Region", "secret": False,
+             "placeholder": "ap-south-1", "optional": True},
+        ],
+    },
+    # ---- Ads ---------------------------------------------------------------
+    {
+        "type": "google_ads",
+        "name": "Google Ads",
+        "description": "Run and track Google Ads campaigns",
+        "category": "Ads",
+        "fields": [
+            {"key": "developer_token", "label": "Developer Token", "secret": True,
+             "placeholder": "Google Ads developer token"},
+            {"key": "client_id", "label": "OAuth Client ID", "secret": False,
+             "placeholder": "Google Cloud OAuth 2.0 client ID"},
+            {"key": "client_secret", "label": "OAuth Client Secret", "secret": True,
+             "placeholder": "Google Cloud OAuth 2.0 client secret"},
+            {"key": "refresh_token", "label": "Refresh Token", "secret": True,
+             "placeholder": "OAuth refresh token from Google"},
+            {"key": "customer_id", "label": "Customer ID", "secret": False,
+             "placeholder": "1234567890 (no dashes)"},
+        ],
+    },
+    {
+        "type": "meta_ads",
+        "name": "Meta Ads",
+        "description": "Facebook / Instagram ad campaigns",
+        "category": "Ads",
+        "fields": [
+            {"key": "access_token", "label": "Access Token", "secret": True,
+             "placeholder": "Meta system user access token"},
+            {"key": "ad_account_id", "label": "Ad Account ID", "secret": False,
+             "placeholder": "act_123456789"},
+        ],
+    },
+    {
+        "type": "meta_whatsapp",
+        "name": "Meta WhatsApp Business API",
+        "description": "Direct Meta Cloud API for WhatsApp (alternative to MSG91)",
+        "category": "Ads",
+        "fields": [
+            {"key": "phone_number_id", "label": "Phone Number ID", "secret": False,
+             "placeholder": "Meta WhatsApp phone number ID"},
+            {"key": "access_token", "label": "Access Token", "secret": True,
+             "placeholder": "Meta system user access token"},
+            {"key": "app_secret", "label": "App Secret", "secret": True,
+             "placeholder": "For verifying webhook signatures"},
+            {"key": "verify_token", "label": "Webhook Verify Token", "secret": True,
+             "placeholder": "Your chosen webhook verify token"},
+        ],
+    },
+]
 
 
 # Marketplace channels (Amazon / Flipkart). Light config scaffold so the
@@ -1262,6 +1515,28 @@ async def set_discount_rule(
 # ============================================================================
 # INTEGRATION ENDPOINTS
 # ============================================================================
+
+
+@router.get("/integrations/catalog")
+async def get_integrations_catalog(
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """Return the full integration catalog (SUPERADMIN only).
+
+    The catalog is the authoritative list of every integration type IMS
+    supports. The frontend renders it generically -- adding a new integration
+    means adding a row to `_INTEGRATION_CATALOG` in this module, not a new
+    component.
+
+    Each item contains:
+      type        -- lowercase identifier used as the Mongo doc key
+      name        -- display label
+      description -- one-line description
+      category    -- grouping label (Commerce / Messaging / AI / Payments /
+                     Compliance / Storage / Ads)
+      fields      -- list of {key, label, secret, placeholder, help?, optional?}
+    """
+    return {"catalog": _INTEGRATION_CATALOG}
 
 
 @router.get("/integrations")
