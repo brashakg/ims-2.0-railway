@@ -628,7 +628,8 @@ async def send_referral_invite(
         referral_code = existing["referral_code"]
     else:
         # Generate code from customer name
-        name_part = customer.get("name", "REF").split()[0].upper()[:6]
+        name_words = customer.get("name", "").split()
+        name_part = (name_words[0].upper()[:6] if name_words else "REF")
         referral_code = f"{name_part}{uuid.uuid4().hex[:4].upper()}"
 
         referral = {
