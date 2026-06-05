@@ -1424,10 +1424,30 @@ async def update_printer_settings(
 
 @router.get("/printers/available")
 async def list_available_printers(current_user: dict = Depends(get_current_user)):
-    """List available printers (detected on network)"""
-    # In production, this would scan for available printers
-    # For now, return empty list as no actual printer detection
-    return {"printers": []}
+    """List available printers.
+
+    OPS-14: The backend runs headless in a Railway container and has no access
+    to the LAN printer broadcast -- network printer detection must happen on
+    the client side.  The recommended path is QZ Tray (qz.io), a signed Java
+    applet that runs on the POS workstation and exposes a WebSocket API for
+    printer enumeration + raw-print / IPP. When QZ Tray is running on the POS
+    machine, the frontend calls `qz.printers.find()` directly (browser <->
+    localhost WebSocket) and does NOT need a backend endpoint.
+
+    This endpoint returns a structured explanation so the settings UI can
+    distinguish "detection not supported here" from a backend error, and surface
+    the QZ Tray install prompt to the cashier.
+    """
+    return {
+        "printers": [],
+        "detection_supported": False,
+        "detection_method": "qz_tray",
+        "message": (
+            "Printer detection runs on the POS workstation, not the server. "
+            "Install QZ Tray (qz.io) on this machine and enable it in Settings "
+            "to auto-discover network and USB printers."
+        ),
+    }
 
 
 # ============================================================================

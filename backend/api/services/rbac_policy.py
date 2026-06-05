@@ -963,6 +963,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/lens-power-combos/{combo_id}",
         "allowed": ["ADMIN", "AREA_MANAGER", "OPTOMETRIST", "STORE_MANAGER"],
     },
+    # CLI-12: ophthalmic device CSV import (autorefractor / lensmeter -> Rx).
+    # Same role gate as clinical write operations (clinical_device_import.py
+    # _DEVICE_IMPORT_ROLES). SUPERADMIN passes via require_roles always.
+    {
+        "method": "POST",
+        "path": "/api/v1/clinical/device-import",
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER", "SUPERADMIN"],
+    },
     # CLI-11: SOAP exam note endpoints.  GET is read-only -> any authenticated
     # clinical user; POST replaces the note -> same roles as test completion.
     {
@@ -1825,6 +1833,12 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/inventory/barcode/{barcode}",
+        "allowed": "AUTHENTICATED",
+    },
+    # INV-12: barcode lifecycle trace (purchase->sale->transfer->return)
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/barcode/{barcode}/trace",
         "allowed": "AUTHENTICATED",
     },
     {
@@ -4324,6 +4338,17 @@ POLICY: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/portal-tokens",
         "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    # INV-13: vendor performance scoring + purchase-history analytics
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/{vendor_id}/performance",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/{vendor_id}/purchase-history",
+        "allowed": "AUTHENTICATED",
     },
     {
         "method": "GET",
