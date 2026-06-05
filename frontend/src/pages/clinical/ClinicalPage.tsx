@@ -711,17 +711,23 @@ export function ClinicalPage() {
                   {/* Actions */}
                   <div className="flex items-center gap-2">
                     {/* Prescriptions / history — view past Rx for this customer,
-                        edit them, or add a fresh one (bugs #1-#3). */}
+                        edit them, or add a fresh one (bugs #1-#3).
+                        CLI-1 fix: guard on a real customerId — falling back to
+                        item.id (queue row id) causes a 404 on the Rx lookup. */}
                     <button
-                      onClick={() =>
+                      onClick={() => {
+                        if (!linkedCustomerId) {
+                          toast.info('No customer account linked to this queue entry. Rx history is unavailable.');
+                          return;
+                        }
                         setRxHistoryFor({
-                          customerId: linkedCustomerId || item.id,
+                          customerId: linkedCustomerId,
                           customerName: item.patientName,
-                          patientId: linkedCustomerId || item.id,
-                        })
-                      }
+                          patientId: linkedCustomerId,
+                        });
+                      }}
                       className="btn sm"
-                      title="View / edit prescriptions"
+                      title={linkedCustomerId ? 'View / edit prescriptions' : 'No customer linked'}
                     >
                       <FileText className="w-4 h-4" />
                       Rx history
@@ -802,16 +808,24 @@ export function ClinicalPage() {
                         <p className="text-gray-500">R: {formatPower(readEyePower(test, 'right', 'sphere'))} / {formatPower(readEyePower(test, 'right', 'cylinder'))}</p>
                         <p className="text-gray-500">L: {formatPower(readEyePower(test, 'left', 'sphere'))} / {formatPower(readEyePower(test, 'left', 'cylinder'))}</p>
                       </div>
+                      {/* CLI-1 fix: guard on a real customerId — test.id is the
+                          eye-test record id, not the customer id. Without a
+                          real customer id the Rx lookup returns 404. */}
                       <button
-                        onClick={() =>
+                        type="button"
+                        onClick={() => {
+                          if (!test.customerId) {
+                            toast.info('No customer account linked to this test. Rx history is unavailable.');
+                            return;
+                          }
                           setRxHistoryFor({
-                            customerId: test.customerId || test.id,
+                            customerId: test.customerId,
                             customerName: test.patientName,
-                            patientId: test.customerId || test.id,
-                          })
-                        }
+                            patientId: test.customerId,
+                          });
+                        }}
                         className="p-2 text-gray-500 hover:text-teal-600 transition-colors"
-                        title="View / edit prescriptions"
+                        title={test.customerId ? 'View / edit prescriptions' : 'No customer linked'}
                       >
                         <Eye className="w-5 h-5" />
                       </button>

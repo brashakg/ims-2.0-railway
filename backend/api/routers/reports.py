@@ -18,6 +18,7 @@ from ..dependencies import (
     get_task_repository,
     get_attendance_repository,
     get_audit_repository,
+    get_eye_test_repository,
     get_db,
     validate_store_access,
 )
@@ -735,9 +736,43 @@ async def eye_test_report(
     to_date: date = Query(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get eye test report"""
-    # Would need clinical repository - return empty for now
-    return {"data": [], "total": 0}
+    """Eye test count report (by optometrist) for a date range.
+
+    Queries the ``eye_tests`` collection via EyeTestRepository using the
+    COMPLETED status + test_date string range (same lexicographic strategy
+    as the Test-History page).  Returns each test record for the FE plus
+    an aggregation by optometrist and a grand total.
+    """
+    active_store = store_id or current_user.get("active_store_id")
+    test_repo = get_eye_test_repository()
+    if test_repo is None:
+        return {"data": [], "by_optometrist": [], "total": 0}
+
+    tests = test_repo.get_store_tests_in_range(
+        store_id=active_store,
+        from_date=from_date.isoformat(),
+        to_date=to_date.isoformat(),
+        status="COMPLETED",
+        limit=1000,
+    )
+
+    by_optometrist: dict = {}
+    for t in tests:
+        optom_id = t.get("optometrist_id") or t.get("assigned_to") or "Unknown"
+        optom_name = t.get("optometrist_name") or t.get("assigned_to_name") or optom_id
+        if optom_id not in by_optometrist:
+            by_optometrist[optom_id] = {
+                "optometrist_id": optom_id,
+                "optometrist_name": optom_name,
+                "test_count": 0,
+            }
+        by_optometrist[optom_id]["test_count"] += 1
+
+    return {
+        "data": tests,
+        "by_optometrist": list(by_optometrist.values()),
+        "total": len(tests),
+    }
 
 
 # ============================================================================
@@ -1456,52 +1491,6 @@ async def staff_ranking(
     ranked = sorted(staff_data.values(), key=lambda x: x["total_sales"], reverse=True)
 
     return {"data": ranked}
-
-
-@router.get("/clinical/eye-tests")
-async def eye_tests_report(
-    store_id: Optional[str] = Query(None),
-    from_date: date = Query(...),
-    to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
-):
-    """Eye test count report (by optometrist, by store)"""
-    active_store = store_id or current_user.get("active_store_id")
-    task_repo = get_task_repository()
-
-    if task_repo is None:
-        return {"by_optometrist": [], "by_store": [], "total": 0}
-
-    from_dt = datetime.combine(from_date, datetime.min.time())
-    to_dt = datetime.combine(to_date, datetime.max.time())
-
-    # Get all tasks/appointments (eye tests). Datetime objects, NOT
-    # .isoformat() strings -- created_at is a BSON Date so a string filter
-    # never matched and this report came back empty.
-    tasks = task_repo.find_many(
-        {
-            "store_id": active_store,
-            "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "task_type": "eye_test",
-        }
-    )
-
-    by_optometrist = {}
-    for task in tasks:
-        optom_id = task.get("assigned_to", "Unknown")
-        optom_name = task.get("assigned_to_name", optom_id)
-        if optom_id not in by_optometrist:
-            by_optometrist[optom_id] = {
-                "optometrist_id": optom_id,
-                "optometrist_name": optom_name,
-                "test_count": 0,
-            }
-        by_optometrist[optom_id]["test_count"] += 1
-
-    return {
-        "by_optometrist": list(by_optometrist.values()),
-        "total": len(tasks),
-    }
 
 
 # ============================================================================
