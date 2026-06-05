@@ -351,12 +351,12 @@ export function PrescriptionsPage() {
           {filteredPrescriptions.map(rx => (
             <div
               key={rx.id}
-              className="card hover:border-teal-200 cursor-pointer transition-all"
+              className="card hover:border-bv-red-200 cursor-pointer transition-all"
               onClick={() => setSelectedPrescription(rx)}
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-teal-100 rounded-full flex items-center justify-center">
+                  <div className="w-10 h-10 bg-bv-red-50 rounded-full flex items-center justify-center">
                     <User className="w-5 h-5 text-bv-red-600" />
                   </div>
                   <div>
@@ -400,7 +400,7 @@ export function PrescriptionsPage() {
                     e.stopPropagation();
                     setSelectedPrescription(rx);
                   }}
-                  className="text-sm text-bv-red-600 hover:text-teal-700 flex items-center gap-1"
+                  className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
                 >
                   <FileText className="w-4 h-4" />
                   View Details
