@@ -436,8 +436,8 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
     const colors = {
       Bronze: 'bg-amber-50 text-amber-700',
       Silver: 'bg-gray-100 text-slate-700',
-      Gold: 'bg-yellow-700 text-yellow-700',
-      Platinum: 'bg-blue-700 text-blue-700',
+      Gold: 'bg-yellow-50 text-yellow-700',
+      Platinum: 'bg-blue-50 text-blue-700',
     };
     return colors[tier];
   };

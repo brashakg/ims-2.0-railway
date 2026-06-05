@@ -193,13 +193,13 @@ export function StepPayment() {
           <div className="space-y-3">
             <div>
               <label className="text-xs font-medium text-gray-700">EMI Provider</label>
-              <select value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900">
+              <select aria-label="EMI Provider" value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900">
                 {emiProviders.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
             <div>
               <label className="text-xs font-medium text-gray-700">Tenure (months)</label>
-              <select value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900">
+              <select aria-label="Tenure (months)" value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900">
                 {emiTenures.map(t => <option key={t} value={t}>{t} months</option>)}
               </select>
             </div>
@@ -229,7 +229,7 @@ export function StepPayment() {
         {(store.payments || []).map((p, i) => (
           <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-600" /><span className="font-medium text-gray-900">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
-            <div className="flex items-center gap-2"><span className="font-semibold text-gray-900">{'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></div>
+            <div className="flex items-center gap-2"><span className="font-semibold text-gray-900">{'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} aria-label="Remove payment" title="Remove payment" className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></div>
           </div>
         ))}
       </div>}

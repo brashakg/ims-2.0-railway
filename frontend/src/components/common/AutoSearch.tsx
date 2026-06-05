@@ -200,7 +200,7 @@ export function AutoSearch<T>({
           className="w-full pl-10 pr-8 py-2.5 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder:text-gray-500 focus:ring-2 focus:ring-bv-red-500 focus:border-bv-red-600 transition-colors"
         />
         {query && (
-          <button onClick={handleClear} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600">
+          <button onClick={handleClear} aria-label="Clear search" title="Clear search" className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600">
             <X className="w-4 h-4" />
           </button>
         )}

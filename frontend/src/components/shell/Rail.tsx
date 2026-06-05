@@ -290,9 +290,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
     <aside
       id="rail-drawer"
       className={'rail' + (expanded ? ' expanded' : '') + (mobileOpen ? ' rail-mobile-open' : '')}
-      role={mobileOpen ? 'dialog' : undefined}
-      aria-modal={mobileOpen ? true : undefined}
-      aria-label={mobileOpen ? 'Navigation menu' : undefined}
+      {...(mobileOpen ? { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Navigation menu' } : {})}
     >
       {/* Header row — brand glyph + wordmark (expanded only) + toggle.
           Toggle moved up here so it's discoverable above the fold; the
@@ -335,7 +333,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
                 type="button"
                 className={'rail-group-title' + (isCollapsed ? ' collapsed' : '')}
                 onClick={() => toggleGroup(group.title!)}
-                aria-expanded={!isCollapsed}
+                aria-expanded={!isCollapsed ? "true" : "false"}
                 aria-controls={`rail-group-${gi}-items`}
               >
                 <span className="rail-group-title-label">{group.title}</span>

@@ -243,6 +243,8 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
             onClick={onClose}
             disabled={isSending}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            aria-label="Close modal"
+            title="Close modal"
           >
             <X className="w-5 h-5 text-gray-500" />
           </button>
@@ -318,6 +320,8 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
                   value={destinationStore}
                   onChange={(e) => setDestinationStore(e.target.value)}
                   className="input-field w-full"
+                  aria-label="Destination Store"
+                  title="Destination Store"
                 >
                   <option value="">Select destination store</option>
                   {stores.map((store) => (
@@ -459,11 +463,15 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
                                 handleQuantityChange(item.productId, parseInt(e.target.value) || 1)
                               }
                               className="input-field w-20 text-center"
+                              aria-label="Quantity"
+                              title="Quantity"
                             />
                           </div>
                           <button
                             onClick={() => handleRemoveItem(item.productId)}
                             className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            aria-label="Remove item"
+                            title="Remove item"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>

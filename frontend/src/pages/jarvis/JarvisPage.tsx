@@ -1222,7 +1222,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={a.enabled}
+                    aria-checked={a.enabled ? "true" : "false"}
                     aria-label={`${a.enabled ? 'Disable' : 'Enable'} ${a.agent_name}`}
                     onClick={() => handleToggleAgent(a.agent_id, !a.enabled)}
                     disabled={isToggling}

@@ -523,7 +523,7 @@ function RowView({
             disabled={!row.category}
             className="text-gray-400 hover:text-gray-700 disabled:opacity-30"
             aria-label={open ? 'Collapse row' : 'Expand row'}
-            aria-expanded={open}
+            aria-expanded={open ? "true" : "false"}
           >
             {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </button>

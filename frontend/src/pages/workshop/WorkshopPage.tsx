@@ -472,11 +472,11 @@ const loadJobs = async () => {
 
       {/* Error State */}
       {error && (
-        <div className="card bg-red-50 border-red-700">
-          <div className="flex items-center gap-3 text-red-200">
+        <div className="card bg-red-50 border-red-200">
+          <div className="flex items-center gap-3 text-red-700">
             <AlertTriangle className="w-5 h-5" />
             <p>{error}</p>
-            <button onClick={loadJobs} className="ml-auto text-sm underline hover:text-red-100">
+            <button onClick={loadJobs} className="ml-auto text-sm underline hover:text-red-900">
               Retry
             </button>
           </div>
@@ -640,8 +640,8 @@ const loadJobs = async () => {
                 key={job.id}
                 className={clsx(
                   'card',
-                  job.priority === 'URGENT' && 'border-red-700 bg-red-50/20',
-                  overdue && job.priority !== 'URGENT' && 'border-orange-700 bg-orange-50/20'
+                  job.priority === 'URGENT' && 'border-red-300 bg-red-50',
+                  overdue && job.priority !== 'URGENT' && 'border-orange-300 bg-orange-50'
                 )}
               >
                 <div className="flex items-start justify-between gap-4">
@@ -687,7 +687,7 @@ const loadJobs = async () => {
                     </div>
 
                     {job.notes && (
-                      <p className="mt-2 text-sm text-yellow-200 bg-yellow-50/30 px-2 py-1 rounded">
+                      <p className="mt-2 text-sm text-yellow-800 bg-yellow-50 px-2 py-1 rounded">
                         Note: {job.notes}
                       </p>
                     )}
@@ -833,9 +833,9 @@ const loadJobs = async () => {
 
                 {/* Notes */}
                 {selectedJob.notes && (
-                  <div className="bg-yellow-50/20 border border-yellow-700 rounded-lg p-3">
-                    <p className="text-sm font-medium text-yellow-700">Notes</p>
-                    <p className="text-sm text-yellow-200 mt-1">{selectedJob.notes}</p>
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-yellow-800">Notes</p>
+                    <p className="text-sm text-yellow-800 mt-1">{selectedJob.notes}</p>
                   </div>
                 )}
 
@@ -1378,7 +1378,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
   };
 
   const [vendors, setVendors] = useState<Array<{ vendor_id: string; legal_name?: string; trade_name?: string; name?: string }>>([]);
-  const [loadingVendors, setLoadingVendors] = useState(false);
+  const [loadingVendors, setLoadingVendors] = useState(true);
   const [vendorId, setVendorId] = useState(j.vendor_id || '');
   const [vendorOrderId, setVendorOrderId] = useState(j.vendor_order_id || '');
   const [trackingUrl, setTrackingUrl] = useState(j.vendor_tracking_url || '');
@@ -1400,7 +1400,6 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
   // Lazy-load the vendor directory once
   useEffect(() => {
     let cancelled = false;
-    setLoadingVendors(true);
     vendorsApi
       .getVendors({ is_active: true })
       .then((r) => {

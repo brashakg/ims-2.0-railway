@@ -448,7 +448,7 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
-      aria-pressed={active}
+      aria-pressed={active ? "true" : "false"}
       className={
         'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ' +
         (active ? activeClass : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50')

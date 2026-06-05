@@ -21,7 +21,7 @@ function ModeToggle({ mode }: { mode: Mode }) {
       <Link
         to="/catalog/add"
         role="tab"
-        aria-selected={mode === 'single'}
+        aria-selected={mode === 'single' ? "true" : "false"}
         className={clsx('qa-modeswitch-btn', mode === 'single' && 'is-active')}
       >
         Single
@@ -29,7 +29,7 @@ function ModeToggle({ mode }: { mode: Mode }) {
       <Link
         to="/catalog/add?mode=guided"
         role="tab"
-        aria-selected={mode === 'guided'}
+        aria-selected={mode === 'guided' ? "true" : "false"}
         className={clsx('qa-modeswitch-btn', mode === 'guided' && 'is-active')}
       >
         Guided
@@ -37,7 +37,7 @@ function ModeToggle({ mode }: { mode: Mode }) {
       <Link
         to="/catalog/add?mode=bulk"
         role="tab"
-        aria-selected={mode === 'bulk'}
+        aria-selected={mode === 'bulk' ? "true" : "false"}
         className={clsx('qa-modeswitch-btn', mode === 'bulk' && 'is-active')}
       >
         Bulk

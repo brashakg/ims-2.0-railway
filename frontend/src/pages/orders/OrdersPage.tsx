@@ -252,7 +252,7 @@ export function OrdersPage() {
       </div>
       ${payments ? `<div style="margin-top:15px"><strong>Payments:</strong>${payments}</div>` : ''}
       <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you for shopping with Better Vision Opticals</div>
-      <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#c5a55a;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
+      <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#b3122b;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
       </body></html>`;
 
     // Try popup first, fallback to iframe

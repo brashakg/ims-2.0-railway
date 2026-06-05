@@ -176,6 +176,8 @@ export function AdvancedSearch({
                         value={activeFilters[filter.id] || ''}
                         onChange={(e) => handleFilterChange(filter.id, e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-bv-red-500"
+                        title={filter.label}
+                        aria-label={filter.label}
                       >
                         <option value="">All {filter.label}</option>
                         {filter.options?.map((opt) => (
@@ -191,6 +193,8 @@ export function AdvancedSearch({
                         value={activeFilters[filter.id] || ''}
                         onChange={(e) => handleFilterChange(filter.id, e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-bv-red-500"
+                        title={filter.label}
+                        aria-label={filter.label}
                       />
                     )}
                     {filter.type === 'checkbox' && (

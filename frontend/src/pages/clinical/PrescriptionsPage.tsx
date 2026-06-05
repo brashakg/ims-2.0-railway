@@ -333,7 +333,7 @@ export function PrescriptionsPage() {
       {/* Prescriptions Grid */}
       {isLoading ? (
         <div className="card flex items-center justify-center py-12">
-          <Loader2 className="w-8 h-8 animate-spin text-teal-600" />
+          <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>
       ) : filteredPrescriptions.length === 0 ? (
         <div className="card text-center py-12 text-gray-500">
@@ -357,7 +357,7 @@ export function PrescriptionsPage() {
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-teal-100 rounded-full flex items-center justify-center">
-                    <User className="w-5 h-5 text-teal-600" />
+                    <User className="w-5 h-5 text-bv-red-600" />
                   </div>
                   <div>
                     <p className="font-medium text-gray-900">{rx.patientName}</p>
@@ -400,7 +400,7 @@ export function PrescriptionsPage() {
                     e.stopPropagation();
                     setSelectedPrescription(rx);
                   }}
-                  className="text-sm text-teal-600 hover:text-teal-700 flex items-center gap-1"
+                  className="text-sm text-bv-red-600 hover:text-teal-700 flex items-center gap-1"
                 >
                   <FileText className="w-4 h-4" />
                   View Details
@@ -410,7 +410,7 @@ export function PrescriptionsPage() {
                     e.stopPropagation();
                     handlePrintPrescription(rx);
                   }}
-                  className="text-sm text-gray-500 hover:text-teal-600 flex items-center gap-1"
+                  className="text-sm text-gray-500 hover:text-bv-red-600 flex items-center gap-1"
                 >
                   <Printer className="w-4 h-4" />
                   Print
@@ -420,7 +420,7 @@ export function PrescriptionsPage() {
                     e.stopPropagation();
                     handlePrintRxCard(rx);
                   }}
-                  className="text-sm text-gray-500 hover:text-teal-600 flex items-center gap-1"
+                  className="text-sm text-gray-500 hover:text-bv-red-600 flex items-center gap-1"
                 >
                   <Printer className="w-4 h-4" />
                   Print Rx (A5)

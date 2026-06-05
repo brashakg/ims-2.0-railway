@@ -174,6 +174,7 @@ export function LoyaltyRedeemControl() {
           value={pointsToRedeem}
           onChange={(e) => setPointsToRedeem(Number(e.target.value))}
           className="w-full"
+          aria-label="Points to redeem"
         />
         <div className="flex justify-between text-[11px] text-gray-400 mt-1">
           <span>{minRedeem.toLocaleString('en-IN')} min</span>

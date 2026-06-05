@@ -100,7 +100,7 @@ export function NotificationBell() {
         title="Notifications"
         aria-label="Notifications"
         aria-haspopup="dialog"
-        aria-expanded={open}
+        aria-expanded={open ? "true" : "false"}
         onClick={toggle}
         style={{ position: 'relative' }}
       >

@@ -133,19 +133,20 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
       <div className="spacer" />
 
       {multiStore && (
-        <div ref={storeRef} style={{ position: 'relative' }}>
+        <div ref={storeRef} style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
           <button
             type="button"
             className="store-pill"
+            style={{ height: 42, padding: '0 16px', borderRadius: 12 }}
             onClick={() => setStoreOpen((o) => !o)}
             aria-haspopup="listbox"
             aria-expanded={storeOpen ? "true" : "false"}
           >
-            <span className="dot" />
+            <span className="dot" style={{ width: 10, height: 10 }} />
             {/* On mobile (<sm) show just the store code to prevent wrapping;
                 on desktop show the full store name + code. */}
-            <span className="name">{activeStoreName}</span>
-            <span className="code">{user?.activeStoreId || ''}</span>
+            <span className="name" style={{ fontSize: 16 }}>{activeStoreName}</span>
+            <span className="code" style={{ fontSize: 12 }}>{user?.activeStoreId || ''}</span>
             <Icon.chevronDown width={12} height={12} />
           </button>
           {storeOpen && (
@@ -203,8 +204,6 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
           )}
         </div>
       )}
-
-      {multiStore && <div className="spacer" />}
 
       <button
         className="cmdk"

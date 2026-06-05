@@ -130,7 +130,7 @@ export function ForcePasswordChange() {
                   onClick={() => setShowCurrent(!showCurrent)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-bv-600 rounded"
                   aria-label={showCurrent ? 'Hide password' : 'Show password'}
-                  aria-pressed={showCurrent}
+                  aria-pressed={showCurrent ? "true" : "false"}
                 >
                   {showCurrent ? <EyeOff className="w-5 h-5" aria-hidden="true" /> : <Eye className="w-5 h-5" aria-hidden="true" />}
                 </button>
@@ -159,7 +159,7 @@ export function ForcePasswordChange() {
                   onClick={() => setShowNew(!showNew)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-bv-600 rounded"
                   aria-label={showNew ? 'Hide password' : 'Show password'}
-                  aria-pressed={showNew}
+                  aria-pressed={showNew ? "true" : "false"}
                 >
                   {showNew ? <EyeOff className="w-5 h-5" aria-hidden="true" /> : <Eye className="w-5 h-5" aria-hidden="true" />}
                 </button>
@@ -188,7 +188,7 @@ export function ForcePasswordChange() {
               type="submit"
               disabled={submitting}
               className="btn-primary w-full py-3 flex items-center justify-center gap-2"
-              aria-busy={submitting}
+              aria-busy={submitting ? "true" : "false"}
             >
               {submitting ? (
                 <>

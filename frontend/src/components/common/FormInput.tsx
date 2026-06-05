@@ -171,8 +171,8 @@ export function FormInput({
             className
           )}
           aria-label={label}
-          aria-required={required}
-          aria-invalid={!!displayError}
+          aria-required={required ? "true" : "false"}
+          aria-invalid={!!displayError ? "true" : "false"}
           aria-describedby={displayError ? `${inputId}-error` : hint ? `${inputId}-hint` : undefined}
           {...props}
         />
@@ -185,7 +185,7 @@ export function FormInput({
               onClick={() => setIsPasswordVisible(!isPasswordVisible)}
               className="text-gray-500 hover:text-gray-600 transition-colors"
               aria-label={isPasswordVisible ? 'Hide password' : 'Show password'}
-              aria-pressed={isPasswordVisible}
+              aria-pressed={isPasswordVisible ? "true" : "false"}
             >
               {isPasswordVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
@@ -303,8 +303,8 @@ export function FormSelect({
             className
           )}
           aria-label={label}
-          aria-required={required}
-          aria-invalid={!!error}
+          aria-required={required ? "true" : "false"}
+          aria-invalid={!!error ? "true" : "false"}
           {...props}
         >
           <option value="">Select {label?.toLowerCase()}</option>
@@ -402,8 +402,8 @@ export function FormTextarea({
           className
         )}
         aria-label={label}
-        aria-required={required}
-        aria-invalid={!!error}
+        aria-required={required ? "true" : "false"}
+        aria-invalid={!!error ? "true" : "false"}
         {...props}
       />
 
