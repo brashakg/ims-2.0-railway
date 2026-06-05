@@ -6,7 +6,7 @@ Real database queries for expense and advance management
 
 import hashlib
 import io
-from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, Header, Query, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -613,7 +613,9 @@ def _period_locked(year: int, month: int) -> bool:
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_expense(
-    expense: ExpenseCreate, current_user: dict = Depends(get_current_user)
+    expense: ExpenseCreate,
+    current_user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     """Create a new expense.
 
@@ -624,7 +626,33 @@ async def create_expense(
          settle it (or link it on this claim) before filing a new expense.
       3. Per-(role, category) spend cap: reject if today's / this month's
          running total plus this amount would exceed the configured cap.
+
+    POS-14: supports an optional ``Idempotency-Key`` header. When a non-empty
+    key is supplied and an expense with that key already exists, the EXISTING
+    expense_id is returned without duplicating the financial record. Fail-soft.
     """
+    # POS-14: idempotency guard -- look for an existing expense with this key.
+    # isinstance guard: a direct (non-HTTP) call leaves the Header(...) default
+    # object in idempotency_key, which has no .strip(); treat it as absent.
+    idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    if idem_key:
+        try:
+            expense_repo_chk = get_expense_repository()
+            if expense_repo_chk is not None:
+                existing = expense_repo_chk.find_one({"idempotency_key": idem_key})
+                if existing:
+                    return {
+                        "expense_id": existing.get("expense_id"),
+                        "status": existing.get("status"),
+                        "message": "Expense already recorded (idempotent replay)",
+                        "_idempotent_replay": True,
+                    }
+        except Exception as _exc:  # noqa: BLE001
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "[EXPENSES] idempotency lookup skipped: %s", _exc
+            )
+
     expense_repo = get_expense_repository()
     expense_id = str(uuid.uuid4())
 
@@ -684,6 +712,9 @@ async def create_expense(
                 "status": "PENDING",
                 "created_at": now,
                 "submitted_at": now,
+                # POS-14: stamp the idempotency key so a duplicate POST with the
+                # same key is caught by the guard at the top of this handler.
+                "idempotency_key": (idem_key or None),
             }
         )
         # BaseRepository.create swallows write errors and returns None. A 201

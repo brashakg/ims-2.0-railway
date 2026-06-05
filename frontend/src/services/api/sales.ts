@@ -68,8 +68,14 @@ export const orderApi = {
     return response.data;
   },
 
+  // POS-11: the backend cancel endpoint reads `reason` as a query param
+  // (reason: str = Query(..., min_length=10)), not from the request body.
+  // Sending { reason } as a JSON body was silently ignored and the endpoint
+  // failed with "field required" for the query param. Pass it correctly.
   cancelOrder: async (orderId: string, reason: string) => {
-    const response = await api.post(`/orders/${orderId}/cancel`, { reason });
+    const response = await api.post(`/orders/${orderId}/cancel`, null, {
+      params: { reason },
+    });
     return response.data;
   },
 };

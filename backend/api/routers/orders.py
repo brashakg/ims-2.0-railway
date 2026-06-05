@@ -380,7 +380,9 @@ class PaymentMethod(str, Enum):
 class OrderItemCreate(BaseModel):
     item_type: str  # FRAME, LENS, CONTACT_LENS, ACCESSORY, SERVICE
     product_id: str
-    product_name: Optional[str] = None
+    # POS-9: length cap on product_name — receipts/Tally/reports truncate or
+    # 500 on very long names; 200 chars covers the widest real product name.
+    product_name: Optional[str] = Field(None, max_length=200)
     sku: Optional[str] = None
     brand: Optional[str] = None
     subbrand: Optional[str] = None
@@ -397,10 +399,15 @@ class OrderItemCreate(BaseModel):
     # they were silently dropped before. Captured here so a 100%-line-discount
     # order can carry its own approver + reason for the required-approval gate.
     discount_approved_by: Optional[str] = None
-    discount_reason: Optional[str] = None
+    # POS-9: cap discount_reason at 200 chars (free text, shown on audit rows).
+    discount_reason: Optional[str] = Field(None, max_length=200)
     prescription_id: Optional[str] = None
     lens_options: Optional[dict] = None  # coating, tint, etc.
     lens_details: Optional[dict] = None  # type, material, coatings
+    # POS-10: per-line staff note (e.g. "wrap bifocal, tight frame").
+    # Persisted on the order item so workshop + invoice can display it.
+    # POS-9: capped at 200 chars to protect receipts/Tally from runaway text.
+    item_note: Optional[str] = Field(None, max_length=200)
     # Optional explicit serialized stock unit (when the POS knows which unit
     # is being sold, e.g. barcode-scan flow). Used by _mark_units_sold to flip
     # the unit to SOLD with the order_id so a future return can re-activate
@@ -461,7 +468,14 @@ class OrderCreate(BaseModel):
     customer_id: str
     patient_id: Optional[str] = None
     items: List[OrderItemCreate]
-    notes: Optional[str] = None
+    # POS-9: server-side cap on cart notes. 500 chars is generous for an optical
+    # note; beyond that the field can corrupt receipt/Tally line widths or store
+    # XSS/null-byte payloads. Enforced alongside the 200-char item_note cap.
+    notes: Optional[str] = Field(None, max_length=500)
+    # POS-10: order_type (sale_type from posStore: 'quick_sale' | 'full_sale')
+    # was silently dropped on create. Persist it so reports/audit can distinguish
+    # a quick-POS sale from a full workshop-linked order.
+    order_type: Optional[str] = Field(None, max_length=50)
     expected_delivery_days: int = Field(default=7, ge=1)
     # Phase 6.7 — delivery scheduling + order-level discount
     delivery_date: Optional[date] = None
@@ -471,7 +485,8 @@ class OrderCreate(BaseModel):
     )  # NORMAL | EXPRESS | URGENT
     cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     cart_discount_amount: float = Field(default=0.0, ge=0.0)
-    cart_discount_reason: Optional[str] = None
+    # POS-9: cap cart-level discount reason (same 200-char limit as item reasons).
+    cart_discount_reason: Optional[str] = Field(None, max_length=200)
     cart_discount_approved_by: Optional[str] = None
     # Incentive integration — explicit salesperson attribution (POS picker)
     # and the Visufit measurement ID for the per-staff Visufit coverage gate.
@@ -1340,6 +1355,9 @@ async def create_order(
                     "sph": getattr(item, "sph", None),
                     "cyl": getattr(item, "cyl", None),
                     "add": getattr(item, "add", None),
+                    # POS-10: per-line staff note (e.g. "tight frame — be careful
+                    # tightening screws"). Carried from posStore CartLineItem.
+                    "item_note": getattr(item, "item_note", None) or None,
                 }
             )
             subtotal += item_subtotal
@@ -1583,6 +1601,9 @@ async def create_order(
             "delivery_time_slot": order.delivery_time_slot,
             "delivery_priority": (order.delivery_priority or "NORMAL").upper(),
             "notes": order.notes,
+            # POS-10: order_type persisted so reports/audit can distinguish
+            # a quick POS sale from a full workshop-linked order.
+            "order_type": (order.order_type or None),
             "payments": [],
             "lens_reservations": lens_reservations,
             "lens_reserve_failed": bool(lens_reserve_failed),
@@ -1594,6 +1615,16 @@ async def create_order(
             # A repeat POST with the same key returns this order rather than
             # creating a duplicate (store-scoped lookup at the top of create).
             "idempotency_key": (idem_key or None),
+            # POS-12: initial status_history entry so the DRAFT create is always
+            # the first row in the timeline. Subsequent status changes append via
+            # OrderRepository.update_status -> $push {"status_history": {...}}.
+            "status_history": [
+                {
+                    "status": "DRAFT",
+                    "timestamp": datetime.now().isoformat(),
+                    "changed_by": current_user.get("user_id") or "system",
+                }
+            ],
         }
 
         try:
@@ -2218,11 +2249,41 @@ async def add_payment(
     order_id: str,
     payment: PaymentCreate,
     current_user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
-    """Add payment to order"""
+    """Add payment to order.
+
+    POS-14: supports an optional ``Idempotency-Key`` header. When a non-empty
+    key is supplied and a payment with that key already exists on this order,
+    the EXISTING payment_id is returned without recording a duplicate. This
+    makes a double-clicked "Pay" button safe. The key is stamped on the payment
+    row and looked up before any write. Fail-soft: if the lookup fails, the
+    normal (non-idempotent) path runs.
+    """
     repo = get_order_repository()
 
     if repo is not None:
+        # POS-14: idempotency guard — look for an existing payment with this key
+        # on the same order before recording another. Fail-soft.
+        # isinstance guard: a direct (non-HTTP) call leaves the Header(...) default
+        # object in idempotency_key, which has no .strip(); treat it as absent.
+        idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+        if idem_key:
+            try:
+                order_doc = repo.find_by_id(order_id)
+                if order_doc:
+                    for existing_pmt in order_doc.get("payments") or []:
+                        if existing_pmt.get("idempotency_key") == idem_key:
+                            return {
+                                "payment_id": existing_pmt.get("payment_id"),
+                                "message": "Payment recorded",
+                                "amount": existing_pmt.get("amount"),
+                                "order_status": order_doc.get("status", "DRAFT"),
+                                "payment_status": order_doc.get("payment_status", "UNPAID"),
+                                "_idempotent_replay": True,
+                            }
+            except Exception as _idem_exc:  # noqa: BLE001
+                logger.warning("[ORDERS] payment idempotency lookup skipped: %s", _idem_exc)
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -2363,6 +2424,9 @@ async def add_payment(
             "reference": payment.reference,
             "received_by": current_user.get("user_id"),
             "received_at": datetime.now().isoformat(),
+            # POS-14: persist the idempotency key on the row so a duplicate POST
+            # with the same key is caught by the guard at the top of this handler.
+            "idempotency_key": (idem_key or None),
         }
         if emi_details:
             payment_data["emi_details"] = emi_details
