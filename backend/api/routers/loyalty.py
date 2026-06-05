@@ -21,7 +21,7 @@ Side-effect on order create:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 import logging
 import uuid
 
@@ -690,6 +690,189 @@ async def expire_sweep(
         "system",
     )
     return {"expired_txns": expired_txns, "points_expired": total_points}
+
+
+# ============================================================================
+# CRM-13: LOYALTY REWARD CATALOG
+# ============================================================================
+# Staff can define redeemable "rewards" that a customer may exchange points for.
+# Each reward has a point cost, an optional cash-value equivalent, an
+# availability cap and an optional expiry date.  Redemption is always via the
+# normal loyalty-redeem path (points deducted from the account ledger);
+# the catalog is the *description* of what can be redeemed, not a separate
+# transactional ledger.
+#
+# Reward types:
+#   DISCOUNT   – a percentage or fixed-amount discount voucher
+#   FREE_ITEM  – a physical reward (free glasses-cloth, case, etc.)
+#   VOUCHER    – store credit / gift voucher
+#   EXPERIENCE – event ticket, eye-test, etc.
+# ============================================================================
+
+_REWARD_TYPES = {"DISCOUNT", "FREE_ITEM", "VOUCHER", "EXPERIENCE"}
+_REWARD_CATALOG_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+class RewardCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    type: Literal["DISCOUNT", "FREE_ITEM", "VOUCHER", "EXPERIENCE"]
+    description: Optional[str] = None
+    point_cost: int = Field(..., ge=1)
+    # Cash-equivalent value (optional — for display on the FE).
+    cash_value: Optional[float] = Field(None, ge=0)
+    # For DISCOUNT type: percentage or fixed amount.
+    discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    discount_fixed: Optional[float] = Field(None, ge=0)
+    # Cap on total redemptions (None = unlimited).
+    max_redemptions: Optional[int] = Field(None, ge=1)
+    # Availability window.
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+    active: bool = True
+    store_id: Optional[str] = None
+
+
+class RewardUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=120)
+    description: Optional[str] = None
+    point_cost: Optional[int] = Field(None, ge=1)
+    cash_value: Optional[float] = Field(None, ge=0)
+    discount_pct: Optional[float] = Field(None, ge=0, le=100)
+    discount_fixed: Optional[float] = Field(None, ge=0)
+    max_redemptions: Optional[int] = Field(None, ge=1)
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+    active: Optional[bool] = None
+    store_id: Optional[str] = None
+
+
+def _reward_db():
+    try:
+        from database.connection import get_db
+        return get_db().db
+    except Exception:
+        return None
+
+
+@router.get("/rewards")
+async def list_rewards(
+    store_id: Optional[str] = Query(None),
+    active_only: bool = Query(True),
+    limit: int = Query(100, le=500),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """List the reward catalog (visible to all authenticated staff)."""
+    db = _reward_db()
+    if db is None:
+        return {"rewards": [], "total": 0}
+    query: Dict[str, Any] = {}
+    if store_id:
+        query["store_id"] = store_id
+    if active_only:
+        query["active"] = True
+    rewards = list(db.get_collection("loyalty_rewards").find(query).sort("point_cost", 1).limit(limit))
+    for r in rewards:
+        r.pop("_id", None)
+    return {"rewards": rewards, "total": len(rewards)}
+
+
+@router.post("/rewards")
+async def create_reward(
+    req: RewardCreate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Create a new loyalty reward (ADMIN/AREA_MANAGER/STORE_MANAGER)."""
+    if not any(role in (current_user.get("roles") or []) for role in ("SUPERADMIN", *_REWARD_CATALOG_ROLES)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    db = _reward_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    reward_id = f"RWD-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    doc = {
+        "reward_id": reward_id,
+        "name": req.name,
+        "type": req.type,
+        "description": req.description,
+        "point_cost": req.point_cost,
+        "cash_value": req.cash_value,
+        "discount_pct": req.discount_pct,
+        "discount_fixed": req.discount_fixed,
+        "max_redemptions": req.max_redemptions,
+        "redemption_count": 0,
+        "valid_from": req.valid_from,
+        "valid_until": req.valid_until,
+        "active": req.active,
+        "store_id": req.store_id,
+        "created_by": current_user.get("user_id", "unknown"),
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+    }
+    db.get_collection("loyalty_rewards").insert_one(doc)
+    _audit("loyalty.reward.create", current_user, {"name": req.name, "type": req.type}, reward_id)
+    doc.pop("_id", None)
+    return {"message": "Reward created", "reward": doc}
+
+
+@router.get("/rewards/{reward_id}")
+async def get_reward(
+    reward_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Fetch a single reward from the catalog."""
+    db = _reward_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    doc = db.get_collection("loyalty_rewards").find_one({"reward_id": reward_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    doc.pop("_id", None)
+    return doc
+
+
+@router.put("/rewards/{reward_id}")
+async def update_reward(
+    reward_id: str,
+    req: RewardUpdate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Update a reward entry (ADMIN/AREA_MANAGER/STORE_MANAGER)."""
+    if not any(role in (current_user.get("roles") or []) for role in ("SUPERADMIN", *_REWARD_CATALOG_ROLES)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    db = _reward_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    doc = db.get_collection("loyalty_rewards").find_one({"reward_id": reward_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    updates = req.model_dump(exclude_unset=True, exclude_none=True)
+    if not updates:
+        doc.pop("_id", None)
+        return doc
+    updates["updated_at"] = datetime.now().isoformat()
+    db.get_collection("loyalty_rewards").update_one({"reward_id": reward_id}, {"$set": updates})
+    _audit("loyalty.reward.update", current_user, {"fields": list(updates.keys())}, reward_id)
+    fresh = db.get_collection("loyalty_rewards").find_one({"reward_id": reward_id})
+    fresh.pop("_id", None)
+    return {"message": "Reward updated", "reward": fresh}
+
+
+@router.delete("/rewards/{reward_id}")
+async def delete_reward(
+    reward_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Delete a reward from the catalog (ADMIN/SUPERADMIN only)."""
+    if not _is_admin(current_user):
+        raise HTTPException(status_code=403, detail="ADMIN or SUPERADMIN required")
+    db = _reward_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    doc = db.get_collection("loyalty_rewards").find_one({"reward_id": reward_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    db.get_collection("loyalty_rewards").delete_one({"reward_id": reward_id})
+    _audit("loyalty.reward.delete", current_user, {"name": doc.get("name")}, reward_id)
+    return {"message": "Reward deleted", "reward_id": reward_id}
 
 
 # ============================================================================
