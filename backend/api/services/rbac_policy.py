@@ -941,6 +941,18 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/tests/{test_id}/complete",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
+    # CLI-11: SOAP exam note endpoints.  GET is read-only -> any authenticated
+    # clinical user; POST replaces the note -> same roles as test completion.
+    {
+        "method": "GET",
+        "path": "/api/v1/clinical/tests/{test_id}/soap-note",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/clinical/tests/{test_id}/soap-note",
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
+    },
     # --- /api/v1/crm ---
     {"method": "GET", "path": "/api/v1/crm", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/crm/", "allowed": "PUBLIC"},
@@ -1433,6 +1445,22 @@ POLICY: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/finance/einvoice/{order_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    # FIND-5: Bank statement import + auto-reconciliation
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/bank-statement/import",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/bank-statement",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/bank-statement/{statement_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # --- /api/v1/follow-ups ---
     {"method": "POST", "path": "/api/v1/follow-ups", "allowed": "AUTHENTICATED"},
@@ -2306,6 +2334,25 @@ POLICY: List[Dict[str, object]] = [
     {"method": "POST", "path": "/api/v1/loyalty/redeem", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/loyalty/settings", "allowed": "AUTHENTICATED"},
     {"method": "PUT", "path": "/api/v1/loyalty/settings", "allowed": ["SUPERADMIN"]},
+    # CRM-13: Loyalty reward catalog. READ is open to all authenticated staff
+    # (so cashiers can describe rewards at POS); writes are gated to managers.
+    {"method": "GET", "path": "/api/v1/loyalty/rewards", "allowed": "AUTHENTICATED"},
+    {
+        "method": "POST",
+        "path": "/api/v1/loyalty/rewards",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {"method": "GET", "path": "/api/v1/loyalty/rewards/{reward_id}", "allowed": "AUTHENTICATED"},
+    {
+        "method": "PUT",
+        "path": "/api/v1/loyalty/rewards/{reward_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/loyalty/rewards/{reward_id}",
+        "allowed": ["ADMIN"],
+    },
     # --- /api/v1/marketing ---
     {
         "method": "GET",
@@ -2471,6 +2518,58 @@ POLICY: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/marketing/walkout/{customer_id}",
         "allowed": "AUTHENTICATED",
+    },
+    # CRM-8: Promo offer-template library (BOGO / COMBO / THRESHOLD).
+    # Same role gate as campaigns (ADMIN/AREA_MANAGER/STORE_MANAGER, SUPERADMIN
+    # implicit).  Store-scoped templates additionally validated inside the handler
+    # via _enforce_store_scope -> validate_store_access.
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/promo-templates",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/marketing/promo-templates",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/promo-templates/{template_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/marketing/promo-templates/{template_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/marketing/promo-templates/{template_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    # CRM-15: WhatsApp opt-in / opt-out STOP ledger.
+    # Any authenticated staff can record a consent event (staff relay verbal
+    # opt-out from customers).  The full audit ledger is ADMIN-only (compliance).
+    {
+        "method": "POST",
+        "path": "/api/v1/marketing/whatsapp-consent",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/whatsapp-consent/{customer_id}",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/whatsapp-consent-ledger",
+        "allowed": ["ADMIN"],
     },
     # CRM-16: Ad Performance dashboard (Google + Meta). Finance-sensitive:
     # restricted to ADMIN and SUPERADMIN (SUPERADMIN implicit via require_roles).
@@ -4218,6 +4317,17 @@ POLICY: List[Dict[str, object]] = [
         "method": "DELETE",
         "path": "/api/v1/vendors/{vendor_id}/sku-aliases/{alias_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    # FIN-11: TDS threshold status + quarterly 26Q/27EQ export
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/tds/threshold-status",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/tds/26q-export",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # --- /api/v1/vouchers ---
     {

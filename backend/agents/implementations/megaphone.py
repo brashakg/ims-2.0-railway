@@ -162,7 +162,16 @@ class MegaphoneAgent(JarvisAgent):
             logger.info(f"[MEGAPHONE] Queued {queued_this_run} notifications "
                         f"({len(rx_expiring)} Rx expiry, {len(birthdays)} birthday)")
 
-        # 3. Drain the queue — up to DRAIN_BATCH_SIZE PENDING messages
+        # 3. CRM-12: Dispatch SCHEDULED campaigns whose send_at is now or past.
+        #    ONE_TIME campaigns with send_at <= now are dispatched via the same
+        #    send path as the manual /campaigns/{id}/send endpoint.  This closes
+        #    the loop: a campaign marked SCHEDULED is actually sent on a tick
+        #    rather than being left waiting forever.
+        scheduled_sent = await self._dispatch_scheduled_campaigns()
+        if scheduled_sent > 0:
+            logger.info("[MEGAPHONE] Dispatched %d scheduled campaign(s)", scheduled_sent)
+
+        # 4. Drain the queue — up to DRAIN_BATCH_SIZE PENDING messages
         drain_stats = await self._drain_pending(notif_coll)
         if drain_stats["attempted"] > 0:
             logger.info(
@@ -170,6 +179,183 @@ class MegaphoneAgent(JarvisAgent):
                 f"sent={drain_stats['sent']} simulated={drain_stats['simulated']} "
                 f"failed={drain_stats['failed']} mode={dispatch_mode()}"
             )
+
+    # -------------------------------------------------------------------------
+    # CRM-12: Dispatch due SCHEDULED campaigns
+    # -------------------------------------------------------------------------
+
+    async def _dispatch_scheduled_campaigns(self) -> int:
+        """Scan the campaigns collection for ONE_TIME SCHEDULED campaigns whose
+        send_at is <= now and dispatch them via the campaign send path.
+
+        Returns the number of campaigns dispatched this tick.
+
+        Design:
+          - Only ONE_TIME campaigns are dispatched here; RECURRING/TRIGGERED
+            campaigns remain ACTIVE and are re-triggered by their own event/cron
+            logic (a future enhancement).
+          - Each campaign is dispatched ONCE by atomically setting status ->
+            ACTIVE before doing the send, so a second MEGAPHONE tick (or a
+            concurrent worker) will not double-send.
+          - The actual fan-out reuses the campaign segments + send_notification
+            path already tested by /campaigns/{id}/send — we call the service
+            helper directly, not via HTTP.
+          - Fail-soft: any exception inside one campaign's dispatch is caught and
+            logged; other campaigns still run.
+        """
+        dispatched = 0
+        coll = self.get_collection("campaigns")
+        if coll is None:
+            return 0
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Find SCHEDULED, ONE_TIME campaigns whose send_at is in the past.
+        try:
+            due = list(coll.find({
+                "status": "SCHEDULED",
+                "schedule.kind": "ONE_TIME",
+                "schedule.send_at": {"$lte": now_iso},
+            }).limit(20))  # cap per tick to avoid a burst
+        except Exception as exc:
+            logger.warning("[MEGAPHONE] scheduled-campaign scan failed: %s", exc)
+            return 0
+
+        for camp in due:
+            campaign_id = camp.get("campaign_id", "")
+            try:
+                # Atomic claim: flip SCHEDULED -> ACTIVE so only one worker sends.
+                result = coll.update_one(
+                    {"campaign_id": campaign_id, "status": "SCHEDULED"},
+                    {"$set": {"status": "ACTIVE", "updated_at": datetime.now(timezone.utc).isoformat()}},
+                )
+                if result.modified_count == 0:
+                    # Another worker already claimed this campaign.
+                    continue
+
+                await self._execute_campaign_send(camp, coll)
+                dispatched += 1
+
+            except Exception as exc:
+                logger.warning("[MEGAPHONE] Campaign %s dispatch failed: %s", campaign_id, exc)
+                # Revert to SCHEDULED so it retries on the next tick.
+                try:
+                    coll.update_one(
+                        {"campaign_id": campaign_id, "status": "ACTIVE"},
+                        {"$set": {"status": "SCHEDULED"}},
+                    )
+                except Exception:
+                    pass
+
+        return dispatched
+
+    async def _execute_campaign_send(
+        self, camp: Dict[str, Any], coll
+    ) -> None:
+        """Fan-out a single campaign to its resolved audience using the shared
+        notification_service path.  Mirrors campaigns.send_campaign but runs
+        agent-side (no HTTP, no rate-limit check -- MEGAPHONE is a trusted actor).
+        """
+        try:
+            from api.services import campaign_segments as seg
+            from api.services.notification_service import send_notification
+        except ImportError:
+            from ...api.services import campaign_segments as seg  # type: ignore[no-redef]
+            from ...api.services.notification_service import send_notification  # type: ignore[no-redef]
+
+        campaign_id = camp.get("campaign_id", "")
+        template_id = camp.get("template_id", "")
+        store_id = camp.get("store_id") or ""
+        channels = camp.get("channels") or ["WHATSAPP"]
+        primary_channel = channels[0]
+
+        # Promo quiet-hours gate: if we're in DND, defer this campaign.
+        if template_id and self._in_dnd_window():
+            logger.info(
+                "[MEGAPHONE] Campaign %s deferred (DND window)", campaign_id
+            )
+            # Revert to SCHEDULED so it fires after DND ends.
+            coll.update_one(
+                {"campaign_id": campaign_id},
+                {"$set": {"status": "SCHEDULED"}},
+            )
+            return
+
+        db = self.db
+        audience = seg.resolve_segment(
+            db,
+            camp.get("segment_key", ""),
+            store_id=store_id or None,
+            params=camp.get("segment_params") or {},
+        )
+
+        cust_coll = self.get_collection("customers")
+        sent = skipped = failed = 0
+
+        for r in audience:
+            cid = r.get("customer_id")
+            # Consent gate: respect marketing_consent == False.
+            if cid and cust_coll is not None:
+                cust = cust_coll.find_one({"customer_id": cid}) or {}
+                if cust.get("marketing_consent") is False:
+                    skipped += 1
+                    continue
+            phone = r.get("phone") or ""
+            if not phone:
+                skipped += 1
+                continue
+            try:
+                res = await send_notification(
+                    store_id=store_id,
+                    customer_id=cid or "",
+                    customer_phone=phone,
+                    customer_name=r.get("name", "Customer"),
+                    template_id=template_id,
+                    channel=primary_channel,
+                    variables={**(r.get("variables") or {}), "campaign_id": campaign_id},
+                    category="MARKETING",
+                    triggered_by="MEGAPHONE",
+                    related_entity_type="campaign",
+                    related_entity_id=campaign_id,
+                )
+                # Tag the notification row with campaign_id for analytics.
+                nid = res.get("notification_id")
+                if nid:
+                    notif_coll = self.get_collection("notification_logs")
+                    if notif_coll is not None:
+                        try:
+                            notif_coll.update_one(
+                                {"notification_id": nid},
+                                {"$set": {"campaign_id": campaign_id}},
+                            )
+                        except Exception:
+                            pass
+                sent += 1
+            except Exception as exc:
+                failed += 1
+                logger.debug("[MEGAPHONE] Campaign %s recipient failed: %s", campaign_id, exc)
+
+        # ONE_TIME -> COMPLETED after send; update counters.
+        coll.update_one(
+            {"campaign_id": campaign_id},
+            {
+                "$set": {
+                    "status": "COMPLETED",
+                    "audience_count": len(audience),
+                    "last_sent_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "$inc": {
+                    "sent_count": sent,
+                    "skipped_count": skipped,
+                    "failed_count": failed,
+                },
+            },
+        )
+        logger.info(
+            "[MEGAPHONE] Campaign %s completed: sent=%d skipped=%d failed=%d",
+            campaign_id, sent, skipped, failed,
+        )
 
     async def _scan_rx_expiring(self) -> List[Dict[str, Any]]:
         """Find prescriptions expiring in the next 7 / 30 / 90 days."""
