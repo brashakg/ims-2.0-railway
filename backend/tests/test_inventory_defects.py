@@ -101,34 +101,22 @@ class TestDiscountCategoryOnCreate:
 
         assert data["discount_category"] == "PREMIUM"
 
-    def test_lowercase_discount_category_normalised(self):
-        """Lowercase input (e.g. 'luxury') must be normalised to upper-case
-        so the cap resolver finds it."""
+    def test_discount_category_persisted_when_provided(self):
+        """INV-1/BVI-10: a provided discount_category is PERSISTED (the bug was
+        it got silently dropped on create), so the cap resolver reads the tier."""
         import sys, os
 
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
         from api.routers.products import _build_product_data
 
-        product = self._make_product(discount_category="luxury")
+        product = self._make_product(discount_category="LUXURY")
         data = _build_product_data(product, created_by="test-user")
 
         assert data["discount_category"] == "LUXURY"
 
-    def test_invalid_discount_category_coerced_to_mass(self):
-        """An unrecognised tier (typo) must be coerced to MASS so a mis-keyed
-        product never silently escapes the cap resolver."""
-        import sys, os
-
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-        from api.routers.products import _build_product_data
-
-        product = self._make_product(discount_category="BANANA")
-        data = _build_product_data(product, created_by="test-user")
-
-        assert data["discount_category"] == "MASS"
-
-    def test_none_discount_category_coerced_to_mass(self):
-        """None/missing tier coerces to MASS (backward-compat)."""
+    def test_discount_category_omitted_when_none(self):
+        """None means 'unset' -> omitted from the doc (additive); the cap
+        resolver then falls back to the product's `category`."""
         import sys, os
 
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -137,7 +125,28 @@ class TestDiscountCategoryOnCreate:
         product = self._make_product(discount_category=None)
         data = _build_product_data(product, created_by="test-user")
 
-        assert data["discount_category"] == "MASS"
+        assert "discount_category" not in data
+
+    def test_validator_uppercases_valid_and_rejects_invalid(self):
+        """The ProductCreate field validator normalises a valid tier to upper
+        case and REJECTS an unknown tier (fail loudly, never silently mis-cap)."""
+        import sys, os
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+        import pytest
+        from pydantic import ValidationError
+        from api.routers.products import ProductCreate
+
+        p = ProductCreate(
+            sku="SKU-DC-1", category="FRAME", brand="Acme", model="M1",
+            mrp=1000.0, offer_price=900.0, discount_category="luxury",
+        )
+        assert p.discount_category == "LUXURY"
+        with pytest.raises(ValidationError):
+            ProductCreate(
+                sku="SKU-DC-2", category="FRAME", brand="Acme", model="M1",
+                mrp=1000.0, offer_price=900.0, discount_category="BANANA",
+            )
 
     def test_service_tier_round_trips(self):
         """SERVICE tier (eye-test lines) must survive."""

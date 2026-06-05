@@ -41,10 +41,15 @@ def test_summary_mounts_and_returns_status(client, auth_headers):
     # Planned feature list is surfaced so the owner sees the roadmap.
     keys = {f["key"] for f in body["planned_features"]}
     assert {"collections", "mega_menu", "image_design_queue", "shopify_push"} <= keys
-    # Foundation counts present + fail-soft (ints, never missing).
-    assert set(body["counts"]) == {"catalog_variants", "products_with_ecom"}
-    assert isinstance(body["counts"]["catalog_variants"], int)
-    assert isinstance(body["counts"]["products_with_ecom"], int)
+    # Foundation counts present + fail-soft (all ints, never missing). The
+    # summary surfaces a count per PIM tier (expanded from the original two).
+    expected_count_keys = {
+        "products", "variants", "collections", "menus",
+        "images_pending_design", "customers", "orders",
+    }
+    assert expected_count_keys <= set(body["counts"])
+    for _v in body["counts"].values():
+        assert isinstance(_v, int)
 
 
 def test_summary_forbidden_for_sales_staff(client, staff_headers):

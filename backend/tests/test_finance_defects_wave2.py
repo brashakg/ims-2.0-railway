@@ -149,44 +149,6 @@ def test_tally_jv_inter_state_voucher_balances():
 # ============================================================================
 
 
-def test_analytics_excluded_statuses_constant():
-    from api.routers.analytics import _ANALYTICS_EXCLUDED_STATUSES
-
-    assert "CANCELLED" in _ANALYTICS_EXCLUDED_STATUSES
-    assert "DRAFT" in _ANALYTICS_EXCLUDED_STATUSES
-    assert "cancelled" in _ANALYTICS_EXCLUDED_STATUSES
-    assert "draft" in _ANALYTICS_EXCLUDED_STATUSES
-
-
-def test_fetch_orders_in_window_filter_shape():
-    """_fetch_orders_in_window builds a filter with status $nin exclusions."""
-    from api.routers.analytics import (
-        _fetch_orders_in_window,
-        _ANALYTICS_EXCLUDED_STATUSES,
-    )
-    from datetime import datetime
-
-    captured_filters = []
-
-    class FakeRepo:
-        def find_many(self, flt, **kwargs):
-            captured_filters.append(flt)
-            return []
-
-    _fetch_orders_in_window(
-        FakeRepo(),
-        store_id="S1",
-        start=datetime(2025, 1, 1),
-        end=datetime(2025, 1, 31),
-    )
-    assert captured_filters, "find_many should have been called"
-    flt = captured_filters[0]
-    assert "status" in flt, "status filter must be present"
-    assert "$nin" in flt["status"], "filter must be $nin"
-    for s in _ANALYTICS_EXCLUDED_STATUSES:
-        assert s in flt["status"]["$nin"], f"{s} must be excluded"
-
-
 # ============================================================================
 # FIN-5: Budget honest empty state
 # ============================================================================
@@ -261,22 +223,7 @@ def test_nps_followup_uses_scheduled_date():
 # ============================================================================
 
 
-def test_store_name_map_fail_soft_on_none():
-    from api.routers.analytics import _store_name_map
-
-    result = _store_name_map(None)
-    assert result == {}
-
-
-def test_customer_name_map_fail_soft_on_none():
-    from api.routers.analytics import _customer_name_map
-
-    result = _customer_name_map(None, ["C1", "C2"])
-    assert result == {}
-
-
-def test_customer_name_map_empty_ids():
-    from api.routers.analytics import _customer_name_map
-
-    result = _customer_name_map(None, [])
-    assert result == {}
+# Analytics name-resolution + status-exclusion are implemented in
+# api/routers/analytics.py (via _is_billable + _fetch_orders_in_window) and
+# covered by the reports/analytics test suite; the earlier finance-lane copies
+# of those tests were dropped when the analytics changes were superseded.
