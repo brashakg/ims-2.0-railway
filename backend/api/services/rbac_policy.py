@@ -941,6 +941,18 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/tests/{test_id}/complete",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
+    # CLI-11: SOAP exam note endpoints.  GET is read-only -> any authenticated
+    # clinical user; POST replaces the note -> same roles as test completion.
+    {
+        "method": "GET",
+        "path": "/api/v1/clinical/tests/{test_id}/soap-note",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/clinical/tests/{test_id}/soap-note",
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
+    },
     # --- /api/v1/crm ---
     {"method": "GET", "path": "/api/v1/crm", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/crm/", "allowed": "PUBLIC"},
