@@ -4354,6 +4354,18 @@ POLICY: List[Dict[str, object]] = [
     {"method": "POST", "path": "/api/v1/webhooks/shiprocket", "allowed": "PUBLIC"},
     {"method": "POST", "path": "/api/v1/webhooks/shopify", "allowed": "PUBLIC"},
     {"method": "POST", "path": "/api/v1/webhooks/msg91/delivery", "allowed": "PUBLIC"},
+    # CRM-14: WhatsApp inbound (Meta Business API).
+    # GET = Meta verify-token challenge (PUBLIC -- Meta hits this with no IMS auth).
+    # POST = Meta message delivery (HMAC-signed by Meta; no IMS bearer token).
+    # GET conversations = inbox view; role-checked INSIDE the handler (self_enforced).
+    {"method": "GET", "path": "/api/v1/webhooks/whatsapp", "allowed": "PUBLIC"},
+    {"method": "POST", "path": "/api/v1/webhooks/whatsapp", "allowed": "PUBLIC"},
+    {
+        "method": "GET",
+        "path": "/api/v1/webhooks/whatsapp/conversations",
+        "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER"],
+        "self_enforced": True,
+    },
     # --- /api/v1/workshop ---
     {"method": "GET", "path": "/api/v1/workshop", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/workshop/", "allowed": "PUBLIC"},

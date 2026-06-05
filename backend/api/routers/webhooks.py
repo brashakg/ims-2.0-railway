@@ -47,18 +47,47 @@ to do the actual provider-specific work.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 
 from agents import webhook_verify
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ============================================================================
+# WhatsApp inbound (Meta Business API) — CRM-14
+# GET  /webhooks/whatsapp  -> Meta verify-token challenge
+# POST /webhooks/whatsapp  -> receive inbound messages
+# GET  /webhooks/whatsapp/conversations -> inbox list (role-gated)
+#
+# Auth model:
+#   GET (challenge): PUBLIC — Meta sends a plain GET to verify the endpoint.
+#   POST: signature verified via X-Hub-Signature-256 (HMAC-SHA256 of raw body
+#         using WABA_APP_SECRET env var). If secret is unset, we ACCEPT the
+#         delivery and skip verification (fail-soft / DARK).  This lets the
+#         endpoint be registered in Meta Business Manager before creds land.
+#   GET conversations: role-gated — caller must supply a valid IMS JWT.
+#
+# Fail-soft contract (same as other vendors above):
+#   - WABA creds unset   -> 200 skipped; never 5xx to Meta's retry queue.
+#   - Bad signature      -> 401 (Meta will retry; logs let you debug).
+#   - Mongo down         -> 200, log warning (inbox is best-effort).
+#   - Intent dispatch err-> 200, log warning (reply is best-effort).
+# ============================================================================
+
+_WABA_VERIFY_TOKEN = os.getenv("WABA_VERIFY_TOKEN", "")
+_WABA_APP_SECRET = os.getenv("WABA_APP_SECRET", "")
+# Default store for inbound-triggered follow-ups when we can't resolve a store.
+_WABA_DEFAULT_STORE_ID = os.getenv("WABA_DEFAULT_STORE_ID", "HQ")
 
 
 # ============================================================================
@@ -514,6 +543,324 @@ async def receive_shiprocket(request: Request):
         verifier=webhook_verify.verify_shiprocket,
         signature_header_name="X-Shiprocket-Signature",
     )
+
+
+# ============================================================================
+# WhatsApp inbound — CRM-14
+# ============================================================================
+
+
+def _verify_waba_signature(raw_body: bytes, signature_header: str, secret: str) -> bool:
+    """
+    Meta sends X-Hub-Signature-256: sha256=<hex>.
+    We compute HMAC-SHA256 of the raw body with the app secret and compare.
+    Pure function, fail-soft -> False on any error.
+    """
+    try:
+        if not raw_body or not signature_header or not secret:
+            return False
+        expected_prefix = "sha256="
+        if not signature_header.startswith(expected_prefix):
+            return False
+        claimed_hex = signature_header[len(expected_prefix):]
+        actual = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(actual, claimed_hex.lower())
+    except Exception as e:
+        logger.debug("[WA_INBOUND] signature verify error: %s", e)
+        return False
+
+
+def _get_wa_conversations_collection():
+    """Return the whatsapp_conversations collection or None."""
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        coll = db.get_collection("whatsapp_conversations")
+        # TTL: keep conversation threads for 180 days.
+        try:
+            coll.create_index("last_message_at", expireAfterSeconds=180 * 24 * 3600)
+        except Exception:
+            pass
+        # Lookup by normalised phone.
+        try:
+            coll.create_index("phone", unique=True)
+        except Exception:
+            pass
+        return coll
+    except Exception as e:
+        logger.warning("[WA_INBOUND] whatsapp_conversations collection unavailable: %s", e)
+        return None
+
+
+def _upsert_conversation(
+    phone: str,
+    customer_id: Optional[str],
+    customer_name: Optional[str],
+    message_doc: Dict[str, Any],
+) -> None:
+    """Upsert the per-customer conversation thread in whatsapp_conversations. Fail-soft."""
+    coll = _get_wa_conversations_collection()
+    if coll is None:
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        digits = "".join(c for c in phone if c.isdigit())
+        phone_key = digits[-10:] if len(digits) >= 10 else digits
+        coll.update_one(
+            {"phone": phone_key},
+            {
+                "$set": {
+                    "phone": phone_key,
+                    "phone_e164": phone,
+                    "customer_id": customer_id,
+                    "customer_name": customer_name or "Unknown",
+                    "last_message_at": now,
+                },
+                "$push": {
+                    "messages": {
+                        "$each": [message_doc],
+                        "$slice": -200,  # keep last 200 messages per thread
+                    }
+                },
+                "$setOnInsert": {"created_at": now, "needs_human": False},
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning("[WA_INBOUND] conversation upsert failed: %s", e)
+
+
+def _extract_message_parts(body: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """
+    Parse the Meta webhook payload and return a flat list of message dicts.
+    Meta nests: body.entry[].changes[].value.messages[].
+    Returns [] when the payload has no messages (e.g. status updates).
+    """
+    messages = []
+    try:
+        for entry in body.get("entry") or []:
+            for change in entry.get("changes") or []:
+                value = change.get("value") or {}
+                for msg in value.get("messages") or []:
+                    # Resolve sender phone from contacts[] array (Meta canonical).
+                    contacts = value.get("contacts") or []
+                    sender_name = None
+                    if contacts:
+                        sender_name = (contacts[0].get("profile") or {}).get("name")
+                    text = ""
+                    button_payload = None
+                    msg_type = msg.get("type", "text")
+                    if msg_type == "text":
+                        text = (msg.get("text") or {}).get("body", "")
+                    elif msg_type == "interactive":
+                        inter = msg.get("interactive") or {}
+                        if "button_reply" in inter:
+                            button_payload = inter["button_reply"].get("id")
+                            text = inter["button_reply"].get("title", "")
+                        elif "list_reply" in inter:
+                            button_payload = inter["list_reply"].get("id")
+                            text = inter["list_reply"].get("title", "")
+                    elif msg_type == "button":
+                        # Template quick-reply button
+                        button_payload = (msg.get("button") or {}).get("payload")
+                        text = (msg.get("button") or {}).get("text", "")
+                    messages.append(
+                        {
+                            "wa_message_id": msg.get("id"),
+                            "from_phone": msg.get("from"),
+                            "sender_name": sender_name,
+                            "type": msg_type,
+                            "text": text,
+                            "button_payload": button_payload,
+                            "timestamp": msg.get("timestamp"),
+                            "received_at": datetime.now(timezone.utc).isoformat(),
+                            "direction": "inbound",
+                        }
+                    )
+    except Exception as e:
+        logger.warning("[WA_INBOUND] message extraction failed: %s", e)
+    return messages
+
+
+@router.get("/whatsapp")
+async def whatsapp_verify_challenge(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
+):
+    """
+    Meta webhook verification challenge (GET).
+    Meta sends: hub.mode=subscribe, hub.verify_token=<our token>, hub.challenge=<string>.
+    We must echo hub.challenge back as plain text.
+
+    FAIL-SOFT: if WABA_VERIFY_TOKEN is unset we echo the challenge anyway (so
+    you can register the endpoint before the env var lands).  If the token IS
+    set and it doesn't match, we return 403.
+    """
+    if hub_mode != "subscribe":
+        raise HTTPException(status_code=400, detail="invalid hub.mode")
+
+    if _WABA_VERIFY_TOKEN:
+        if hub_verify_token != _WABA_VERIFY_TOKEN:
+            logger.warning(
+                "[WA_INBOUND] verify_token mismatch; expected=%s got=%s",
+                _WABA_VERIFY_TOKEN[:4] + "...",
+                str(hub_verify_token)[:4] + "...",
+            )
+            raise HTTPException(status_code=403, detail="forbidden")
+    else:
+        logger.info(
+            "[WA_INBOUND] WABA_VERIFY_TOKEN not set -- echoing challenge without token check"
+        )
+
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(content=hub_challenge or "")
+
+
+@router.post("/whatsapp")
+async def receive_whatsapp_inbound(request: Request):
+    """
+    Meta inbound message webhook (POST).
+
+    Steps:
+      1. Read raw body.
+      2. Verify X-Hub-Signature-256 (skip if WABA_APP_SECRET unset).
+      3. Parse payload -> extract messages.
+      4. For each message: upsert conversation thread + dispatch intent.
+      5. Return 200 (never 5xx to Meta).
+    """
+    raw_body = await request.body()
+    sig = (
+        request.headers.get("X-Hub-Signature-256")
+        or request.headers.get("x-hub-signature-256")
+        or ""
+    )
+
+    if _WABA_APP_SECRET:
+        if not sig:
+            raise HTTPException(status_code=401, detail="invalid signature")
+        if not _verify_waba_signature(raw_body, sig, _WABA_APP_SECRET):
+            logger.warning("[WA_INBOUND] bad X-Hub-Signature-256")
+            raise HTTPException(status_code=401, detail="invalid signature")
+    else:
+        logger.info(
+            "[WA_INBOUND] WABA_APP_SECRET not set -- skipping signature verification"
+        )
+
+    try:
+        body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (UnicodeDecodeError, ValueError) as e:
+        logger.warning("[WA_INBOUND] body parse error: %s", e)
+        return {"status": "received", "messages_processed": 0}
+
+    messages = _extract_message_parts(body)
+    if not messages:
+        # Status update or other non-message event -- ack and exit.
+        return {"status": "received", "messages_processed": 0}
+
+    results = []
+    for msg in messages:
+        phone = msg.get("from_phone") or ""
+        text = msg.get("text") or ""
+        button_payload = msg.get("button_payload")
+
+        # Lazy import to avoid circular at module load time.
+        try:
+            from ..services.whatsapp_intents import dispatch_intent, _lookup_customer_by_phone
+
+            customer = _lookup_customer_by_phone(phone)
+            customer_id = customer.get("customer_id") if customer else None
+            customer_name = (
+                customer.get("name") or customer.get("full_name") if customer else msg.get("sender_name")
+            )
+
+            # Persist message to conversation thread.
+            _upsert_conversation(phone, customer_id, customer_name, msg)
+
+            intent_result = await dispatch_intent(
+                phone=phone,
+                text=text,
+                button_payload=button_payload,
+                store_id=_WABA_DEFAULT_STORE_ID,
+            )
+            results.append(intent_result)
+            logger.info(
+                "[WA_INBOUND] phone=...%s intent=%s reply_sent=%s",
+                phone[-4:] if len(phone) >= 4 else phone,
+                intent_result.get("intent"),
+                intent_result.get("reply_sent"),
+            )
+        except Exception as e:
+            logger.error("[WA_INBOUND] message processing error: %s", e, exc_info=True)
+            results.append({"error": str(e), "phone": phone[-4:] if len(phone) >= 4 else ""})
+
+    return {"status": "received", "messages_processed": len(messages), "results": results}
+
+
+@router.get("/whatsapp/conversations")
+async def list_whatsapp_conversations(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    needs_human: Optional[bool] = Query(None),
+):
+    """
+    WhatsApp inbox: list conversation threads (most recent first).
+    Role-gated: requires a valid IMS JWT with SUPERADMIN, ADMIN, or STORE_MANAGER.
+    Read-only v1 -- no reply composition in this endpoint.
+    """
+    # Role gate -- inline check (mirrors the pattern in other routers).
+    try:
+        from .auth import get_current_user as _get_user
+        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+        auth_header = request.headers.get("Authorization") or ""
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="not authenticated")
+        token = auth_header.split(" ", 1)[1]
+        from .auth import decode_token as _decode
+        payload = _decode(token)
+        roles = payload.get("roles") or []
+        allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+        if not any(r in allowed for r in roles):
+            raise HTTPException(status_code=403, detail="forbidden")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.debug("[WA_INBOUND] auth check failed: %s", e)
+        raise HTTPException(status_code=401, detail="not authenticated")
+
+    coll = _get_wa_conversations_collection()
+    if coll is None:
+        return {"conversations": [], "total": 0, "limit": limit, "offset": offset}
+
+    try:
+        filt: Dict[str, Any] = {}
+        if needs_human is not None:
+            filt["needs_human"] = needs_human
+
+        total = coll.count_documents(filt)
+        cursor = (
+            coll.find(filt, {"messages": {"$slice": -20}})
+            .sort("last_message_at", -1)
+            .skip(offset)
+            .limit(limit)
+        )
+        convs = []
+        for doc in cursor:
+            doc.pop("_id", None)
+            convs.append(doc)
+        return {
+            "conversations": convs,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    except Exception as e:
+        logger.error("[WA_INBOUND] conversation list failed: %s", e)
+        return {"conversations": [], "total": 0, "limit": limit, "offset": offset}
 
 
 # ============================================================================
