@@ -2472,6 +2472,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/marketing/walkout/{customer_id}",
         "allowed": "AUTHENTICATED",
     },
+    # CRM-16: Ad Performance dashboard (Google + Meta). Finance-sensitive:
+    # restricted to ADMIN and SUPERADMIN (SUPERADMIN implicit via require_roles).
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/ad-performance",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
     # --- /api/v1/notifications ---
     {"method": "GET", "path": "/api/v1/notifications", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/notifications/", "allowed": "AUTHENTICATED"},

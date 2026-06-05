@@ -4,6 +4,36 @@
 
 import api from './client';
 
+// CRM-16: Ad performance types
+export interface CampaignRowOut {
+  channel: string;
+  campaign_id: string;
+  campaign_name: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  ctr: number;
+  cpl: number;
+  roas: number;
+  currency: string;
+  status: string;
+}
+
+export interface AdPerformanceResponse {
+  rows: CampaignRowOut[];
+  total_spend: number;
+  total_impressions: number;
+  total_clicks: number;
+  total_conversions: number;
+  blended_roas: number;
+  total_cpl: number;
+  google_configured: boolean;
+  meta_configured: boolean;
+  fetched_at: string;
+  note: string;
+}
+
 export const marketingApi = {
   // Feature 1: Notifications
   sendNotification: async (data: { customer_id: string; customer_phone: string; customer_name: string; template_id: string; channel?: string; variables?: Record<string, string>; category?: string }) => {
@@ -80,6 +110,16 @@ export const marketingApi = {
   },
   getWalkoutRecoveries: async (storeId?: string) => {
     const response = await api.get('/marketing/walkout-recoveries', { params: { store_id: storeId } });
+    return response.data;
+  },
+
+  // CRM-16: Ad Performance (Google + Meta agency dashboard)
+  getAdPerformance: async (params: {
+    from: string;
+    to: string;
+    channel?: 'google' | 'meta';
+  }): Promise<AdPerformanceResponse> => {
+    const response = await api.get('/marketing/ad-performance', { params });
     return response.data;
   },
 };

@@ -104,6 +104,8 @@ const PointsHistoryPage = lazy(() => import('./pages/incentive/PointsHistoryPage
 const PayoutDashboardPage = lazy(() => import('./pages/incentive/PayoutDashboardPage').then(m => ({ default: m.PayoutDashboardPage })));
 const PayoutSnapshotsPage = lazy(() => import('./pages/incentive/PayoutSnapshotsPage').then(m => ({ default: m.PayoutSnapshotsPage })));
 const IncentiveSettingsPage = lazy(() => import('./pages/incentive/IncentiveSettingsPage').then(m => ({ default: m.IncentiveSettingsPage })));
+// CRM-16: Ad Performance (agency oversight dashboard)
+const AdPerformancePage = lazy(() => import('./pages/marketing/AdPerformancePage').then(m => ({ default: m.AdPerformancePage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -323,6 +325,19 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <WhatsAppInboxPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM-16: Ad Performance — agency oversight dashboard (Google + Meta).
+                      Finance-sensitive spend data: restricted to SUPERADMIN / ADMIN. */}
+                  <Route
+                    path="marketing/ad-performance"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN']}
+                      >
+                        <AdPerformancePage />
                       </ProtectedRoute>
                     }
                   />
