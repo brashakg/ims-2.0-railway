@@ -2002,13 +2002,16 @@ class JarvisResponseGenerator:
         period = entities.get("time_period", "today")
         revenue = data["revenue"]
 
+        # Note: this_week and last_week are not computed by _compute_overview_live
+        # (0 is the honest value when not available). Never fabricate a percentage
+        # from current-week data (SYSTEM_INTENT: no fabricated numbers).
         period_map = {
             "today": ("today", revenue["today"], revenue["yesterday"], "yesterday"),
             "yesterday": ("yesterday", revenue["yesterday"], revenue["today"], "today"),
             "this_week": (
                 "this week",
                 revenue["this_week"],
-                revenue["this_week"] * 0.9,
+                0,  # last_week not computed; 0 avoids fabricating a % change
                 "last week",
             ),
             "this_month": (
@@ -2429,29 +2432,64 @@ class Jarvis:
         return response
 
     def _format_predictions_response(self, data: Dict) -> str:
+        """Honest predictions response.
+
+        Forecasts require the ORACLE agent + sufficient history.  When the
+        honest empty envelope is provided (no fabricated numbers), tell the
+        user exactly that rather than crashing on missing keys or inventing
+        figures (SYSTEM_INTENT: fail loudly / honest empty state).
+        """
+        revenue_forecast = data.get("revenue_forecast") or []
+        demand_forecast = data.get("demand_forecast") or []
+        stockout_predictions = data.get("stockout_predictions") or []
+
+        # Legacy key names (safety net — both shapes work)
+        if not revenue_forecast:
+            sf = data.get("sales_forecast") or {}
+            nxt = sf.get("next_month")
+            if nxt:
+                revenue_forecast = [{"period": "next_month", "amount": nxt}]
+        if not demand_forecast:
+            demand_forecast = data.get("demand_predictions") or []
+        if not stockout_predictions:
+            stockout_predictions = data.get("stock_predictions") or []
+
+        if not revenue_forecast and not demand_forecast and not stockout_predictions:
+            return (
+                "**AI Predictions & Forecasts**\n\n"
+                "Forecasts require the ORACLE agent and sufficient sales history.\n"
+                "Enable ORACLE on the Jarvis page and allow it to run for at least "
+                "one cycle to generate predictions.\n\n"
+                "In the meantime, I can answer questions about current sales, "
+                "inventory, customers, staff, or recommendations."
+            )
+
         response = "**AI Predictions & Forecasts**\n\n"
-        response += f"📈 **Sales Forecast (Next Month):** {self.response_gen.format_currency(data['sales_forecast']['next_month'])}\n"
-        response += f"🎯 Confidence: {data['sales_forecast']['confidence']}%\n\n"
 
-        response += "**Key Factors:**\n"
-        for factor in data["sales_forecast"]["factors"]:
-            response += f"• {factor}\n"
+        if revenue_forecast:
+            response += "**Revenue Forecast:**\n"
+            for item in revenue_forecast[:3]:
+                period = item.get("period") or "upcoming"
+                amount = float(item.get("amount") or 0)
+                if amount:
+                    response += f"- {period}: {self.response_gen.format_currency(amount)}\n"
+            response += "\n"
 
-        response += "\n**Demand Trends:**\n"
-        for pred in data["demand_predictions"]:
-            emoji = (
-                "📈"
-                if pred["trend"] == "up"
-                else "📉" if pred["trend"] == "down" else "➡️"
-            )
-            response += (
-                f"{emoji} {pred['category']}: {pred['change']} ({pred['reason']})\n"
-            )
+        if demand_forecast:
+            response += "**Demand Trends:**\n"
+            for pred in demand_forecast[:5]:
+                trend = pred.get("trend") or "stable"
+                emoji = "up" if trend == "up" else ("down" if trend == "down" else "stable")
+                cat = pred.get("category") or pred.get("product") or "?"
+                response += f"- {cat}: {emoji}\n"
+            response += "\n"
 
-        if data.get("stock_predictions"):
-            response += "\n**⚠️ Stock Alerts:**\n"
-            for stock in data["stock_predictions"][:3]:
-                response += f"• {stock['sku']}: {stock['days_until_stockout']} days until stockout\n"
+        if stockout_predictions:
+            response += "**Stock Alerts:**\n"
+            for stock in stockout_predictions[:3]:
+                sku = stock.get("sku") or stock.get("product") or "?"
+                days = stock.get("days_until_stockout") or "soon"
+                response += f"- {sku}: stockout in {days} days\n"
 
         return response
 
