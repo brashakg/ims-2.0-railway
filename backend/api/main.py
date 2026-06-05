@@ -5,7 +5,7 @@ Main entry point for the API server
 """
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from contextlib import asynccontextmanager
 from collections import defaultdict
 import time
@@ -490,6 +490,13 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Strict-Transport-Security"] = (
         "max-age=31536000; includeSubDomains"
     )
+    # IMS is a PRIVATE internal business platform -- keep it (and the API) out of
+    # EVERY search index + AI crawler. X-Robots-Tag applies to every response
+    # here; the frontend adds robots.txt + a noindex <meta> + a Vercel header
+    # too. (Belt-and-braces with the JWT auth gate already on the data.)
+    response.headers["X-Robots-Tag"] = (
+        "noindex, nofollow, noarchive, nosnippet, noimageindex, notranslate"
+    )
     # CSP: allow self + Vercel preview domains for the frontend
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
@@ -500,6 +507,21 @@ async def add_security_headers(request: Request, call_next):
         "https://*.uniparallel.com"
     )
     return response
+
+
+_ROBOTS_TXT = (
+    "# IMS 2.0 -- private internal business platform. Do NOT index or crawl.\n"
+    "User-agent: *\n"
+    "Disallow: /\n"
+)
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt():
+    """Disallow every crawler on the API domain too. The X-Robots-Tag response
+    header is the real enforcement; this is the file crawlers check first.
+    PUBLIC by design -- it must be readable without auth."""
+    return PlainTextResponse(_ROBOTS_TXT)
 
 
 # Full CORS middleware — handles preflight + adds CORS headers to all responses.
