@@ -89,15 +89,16 @@ def validate_store_access(store_id: str, current_user: dict) -> str:
     if is_admin:
         return store_id
 
-    # Area managers can access stores in their region
-    if "AREA_MANAGER" in user_roles:
-        user_store_ids = current_user.get("store_ids", [])
-        if store_id in user_store_ids:
-            return store_id
-        raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
-
-    # Other roles: must be in their store_ids list
-    user_store_ids = current_user.get("store_ids", [])
+    # Store-level roles (incl. AREA_MANAGER) may access any store in their
+    # store_ids OR their current active store. active_store_id is set at login
+    # to one of the caller's own stores, so honouring it is correct -- it is
+    # never the cross-store IDOR this guard exists to stop. (Without this, a
+    # store-scoped token whose active store isn't duplicated into store_ids
+    # would be 403'd from its OWN store.)
+    user_store_ids = set(current_user.get("store_ids") or [])
+    active = current_user.get("active_store_id")
+    if active:
+        user_store_ids.add(active)
     if store_id not in user_store_ids:
         raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
     return store_id

@@ -247,10 +247,10 @@ class TestListFilter:
     def _seed(self):
         return _FakeRxRepo(
             [
-                {"prescription_id": "rx-spec", "customer_id": "c1", "rx_kind": "SPECTACLE"},
-                {"prescription_id": "rx-cl", "customer_id": "c1", "rx_kind": "CONTACT_LENS"},
+                {"prescription_id": "rx-spec", "customer_id": "c1", "store_id": "store-001", "rx_kind": "SPECTACLE"},
+                {"prescription_id": "rx-cl", "customer_id": "c1", "store_id": "store-001", "rx_kind": "CONTACT_LENS"},
                 # Legacy doc with no rx_kind -> must be treated as SPECTACLE.
-                {"prescription_id": "rx-legacy", "customer_id": "c1"},
+                {"prescription_id": "rx-legacy", "customer_id": "c1", "store_id": "store-001"},
             ]
         )
 
@@ -286,6 +286,7 @@ class TestPrint:
             [
                 {
                     "prescription_id": "rx-cl",
+                    "store_id": "store-001",
                     "prescription_number": "RX-260524-CL0001",
                     "rx_kind": "CONTACT_LENS",
                     "cl_brand": "Acuvue",
@@ -315,6 +316,7 @@ class TestPrint:
             [
                 {
                     "prescription_id": "rx-spec",
+                    "store_id": "store-001",
                     "prescription_number": "RX-260524-SP0001",
                     "rx_kind": "SPECTACLE",
                     "right_eye": {"sph": "-1.25", "cyl": "-0.50", "axis": 90, "pd": "32"},
@@ -339,6 +341,7 @@ class TestPrint:
             [
                 {
                     "prescription_id": "rx-legacy",
+                    "store_id": "store-001",
                     "prescription_number": "RX-OLD",
                     "right_eye": {"sph": "0"},
                     "left_eye": {},

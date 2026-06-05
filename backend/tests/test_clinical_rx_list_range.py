@@ -363,7 +363,11 @@ class TestPrescriptionList:
         assert body["total"] == 2
 
     def test_explicit_store_id_overrides_active(self, monkeypatch):
-        client = _rx_client(monkeypatch, rx_repo=_FakeRxRepo(_seed_rx()))
+        # An ADMIN is cross-store, so an explicit store_id legitimately overrides
+        # the active store. A store-scoped role can NOT read another store's Rx
+        # this way -- that cross-store IDOR (BUG-088) is covered in
+        # test_pr1_security; here we assert the admin override still works.
+        client = _rx_client(monkeypatch, rx_repo=_FakeRxRepo(_seed_rx()), roles=("ADMIN",))
         resp = client.get("/prescriptions", params={"store_id": "store-999"})
         assert resp.status_code == 200
         ids = {p["prescription_id"] for p in resp.json()["prescriptions"]}

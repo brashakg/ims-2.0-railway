@@ -62,10 +62,10 @@ def test_family_groups_by_patient_with_validity(monkeypatch):
     recent = now.isoformat()
     old = now.replace(year=now.year - 2).isoformat()
     rxs = [
-        {"prescription_id": "rx1", "customer_id": "C1", "patient_id": "p1", "test_date": recent, "validity_months": 12},
-        {"prescription_id": "rx2", "customer_id": "C1", "patient_id": "p1", "test_date": old, "validity_months": 12},
-        {"prescription_id": "rx3", "customer_id": "C1", "patient_id": "p2", "test_date": recent, "validity_months": 12},
-        {"prescription_id": "rx4", "customer_id": "C1", "patient_id": "pX", "test_date": recent, "validity_months": 12, "patient_name": "Legacy Kid"},
+        {"prescription_id": "rx1", "customer_id": "C1", "patient_id": "p1", "store_id": "S1", "test_date": recent, "validity_months": 12},
+        {"prescription_id": "rx2", "customer_id": "C1", "patient_id": "p1", "store_id": "S1", "test_date": old, "validity_months": 12},
+        {"prescription_id": "rx3", "customer_id": "C1", "patient_id": "p2", "store_id": "S1", "test_date": recent, "validity_months": 12},
+        {"prescription_id": "rx4", "customer_id": "C1", "patient_id": "pX", "store_id": "S1", "test_date": recent, "validity_months": 12, "patient_name": "Legacy Kid"},
     ]
     customer = {
         "customer_id": "C1", "name": "Head",
