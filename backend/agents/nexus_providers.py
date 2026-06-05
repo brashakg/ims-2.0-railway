@@ -80,7 +80,10 @@ def ims_shopify_writes_enabled() -> bool:
     import os
 
     return os.getenv("IMS_SHOPIFY_WRITES", "").strip().lower() in (
-        "1", "true", "on", "yes",
+        "1",
+        "true",
+        "on",
+        "yes",
     )
 
 
@@ -95,8 +98,12 @@ async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
     shop_url = cfg.get("shop_url")
     access_token = cfg.get("access_token")
     if not shop_url or not access_token:
-        return SyncResult(ok=False, provider="shopify", kind="pull",
-                          error="shop_url or access_token not configured")
+        return SyncResult(
+            ok=False,
+            provider="shopify",
+            kind="pull",
+            error="shop_url or access_token not configured",
+        )
 
     since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
     url = f"https://{shop_url}/admin/api/2024-01/orders.json"
@@ -107,11 +114,17 @@ async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
             resp = await client.get(url, params=params, headers=headers)
         if resp.status_code != 200:
-            return SyncResult(ok=False, provider="shopify", kind="pull",
-                              error=f"status {resp.status_code}: {resp.text[:200]}")
+            return SyncResult(
+                ok=False,
+                provider="shopify",
+                kind="pull",
+                error=f"status {resp.status_code}: {resp.text[:200]}",
+            )
         orders = resp.json().get("orders", [])
         return SyncResult(
-            ok=True, provider="shopify", kind="pull",
+            ok=True,
+            provider="shopify",
+            kind="pull",
             items_synced=len(orders),
             payload={"order_ids": [o.get("id") for o in orders[:10]]},  # sample
         )
@@ -126,40 +139,56 @@ async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
     by the e-commerce app (BVI). Gated on IMS_SHOPIFY_WRITES, then DISPATCH_MODE."""
     if not ims_shopify_writes_enabled():
         return SyncResult(
-            ok=True, provider="shopify", kind="push",
+            ok=True,
+            provider="shopify",
+            kind="push",
             notes="RETIRED — Shopify catalog is owned by the e-commerce app (BVI); "
-                  "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
+            "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
         )
     if not _is_destructive_allowed():
-        return SyncResult(ok=True, provider="shopify", kind="push",
-                          notes=f"SIMULATED — dispatch_mode={dispatch_mode()}")
+        return SyncResult(
+            ok=True,
+            provider="shopify",
+            kind="push",
+            notes=f"SIMULATED — dispatch_mode={dispatch_mode()}",
+        )
 
     cfg = _load_integration_config(db, "shopify")
     shop_url = cfg.get("shop_url")
     access_token = cfg.get("access_token")
     if not shop_url or not access_token:
-        return SyncResult(ok=False, provider="shopify", kind="push",
-                          error="shop_url or access_token not configured")
+        return SyncResult(
+            ok=False,
+            provider="shopify",
+            kind="push",
+            error="shop_url or access_token not configured",
+        )
 
     shopify_id = product.get("shopify_product_id")
-    path = (
-        f"products/{shopify_id}.json" if shopify_id
-        else "products.json"
-    )
+    path = f"products/{shopify_id}.json" if shopify_id else "products.json"
     method = "PUT" if shopify_id else "POST"
     url = f"https://{shop_url}/admin/api/2024-01/{path}"
-    headers = {"X-Shopify-Access-Token": access_token, "content-type": "application/json"}
+    headers = {
+        "X-Shopify-Access-Token": access_token,
+        "content-type": "application/json",
+    }
     body = {"product": product}
 
     try:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
             resp = await client.request(method, url, headers=headers, json=body)
         if resp.status_code not in (200, 201):
-            return SyncResult(ok=False, provider="shopify", kind="push",
-                              error=f"status {resp.status_code}: {resp.text[:200]}")
+            return SyncResult(
+                ok=False,
+                provider="shopify",
+                kind="push",
+                error=f"status {resp.status_code}: {resp.text[:200]}",
+            )
         returned = resp.json().get("product") or {}
         return SyncResult(
-            ok=True, provider="shopify", kind="push",
+            ok=True,
+            provider="shopify",
+            kind="push",
             items_synced=1,
             payload={"shopify_product_id": returned.get("id")},
         )
@@ -204,39 +233,60 @@ async def shopify_set_inventory_available(
     """
     if not ims_shopify_writes_enabled():
         return SyncResult(
-            ok=True, provider="shopify", kind="push",
+            ok=True,
+            provider="shopify",
+            kind="push",
             notes="RETIRED -- Shopify catalog is owned by the e-commerce app (BVI); "
-                  "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
+            "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
         )
 
     inv_gid = _as_shopify_gid(inventory_item_id, "InventoryItem")
     loc_gid = _as_shopify_gid(location_id, "Location")
     if not inv_gid or not loc_gid:
-        return SyncResult(ok=False, provider="shopify", kind="push",
-                          error="inventory_item_id or location_id missing")
+        return SyncResult(
+            ok=False,
+            provider="shopify",
+            kind="push",
+            error="inventory_item_id or location_id missing",
+        )
 
     try:
         qty = max(0, int(available))
     except (TypeError, ValueError):
-        return SyncResult(ok=False, provider="shopify", kind="push",
-                          error=f"non-integer available={available!r}")
+        return SyncResult(
+            ok=False,
+            provider="shopify",
+            kind="push",
+            error=f"non-integer available={available!r}",
+        )
 
     if not _is_destructive_allowed():
         # off/test/unknown -> log only, no live write. Identical to today's
         # default behaviour (no outbound Shopify call).
         return SyncResult(
-            ok=True, provider="shopify", kind="push", items_synced=0,
+            ok=True,
+            provider="shopify",
+            kind="push",
+            items_synced=0,
             notes=f"SIMULATED -- dispatch_mode={dispatch_mode()}; would set "
-                  f"{inv_gid} @ {loc_gid} -> available={qty}",
-            payload={"inventory_item_id": inv_gid, "location_id": loc_gid, "available": qty},
+            f"{inv_gid} @ {loc_gid} -> available={qty}",
+            payload={
+                "inventory_item_id": inv_gid,
+                "location_id": loc_gid,
+                "available": qty,
+            },
         )
 
     cfg = _load_integration_config(db, "shopify")
     shop_url = cfg.get("shop_url")
     access_token = cfg.get("access_token")
     if not shop_url or not access_token:
-        return SyncResult(ok=False, provider="shopify", kind="push",
-                          error="shop_url or access_token not configured")
+        return SyncResult(
+            ok=False,
+            provider="shopify",
+            kind="push",
+            error="shop_url or access_token not configured",
+        )
 
     # inventorySetQuantities atomically sets the on-hand/available count to an
     # absolute value. `ignoreCompareQuantity` lets us set without supplying the
@@ -264,7 +314,10 @@ async def shopify_set_inventory_available(
         }
     }
     url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-    headers = {"X-Shopify-Access-Token": access_token, "content-type": "application/json"}
+    headers = {
+        "X-Shopify-Access-Token": access_token,
+        "content-type": "application/json",
+    }
 
     try:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
@@ -272,22 +325,41 @@ async def shopify_set_inventory_available(
                 url, headers=headers, json={"query": mutation, "variables": variables}
             )
         if resp.status_code not in (200, 201):
-            return SyncResult(ok=False, provider="shopify", kind="push",
-                              error=f"status {resp.status_code}: {resp.text[:200]}")
+            return SyncResult(
+                ok=False,
+                provider="shopify",
+                kind="push",
+                error=f"status {resp.status_code}: {resp.text[:200]}",
+            )
         body = resp.json() or {}
         # GraphQL transport-200 can still carry top-level `errors` or per-field
         # userErrors -- treat both as failures so the caller can record them.
         if body.get("errors"):
-            return SyncResult(ok=False, provider="shopify", kind="push",
-                              error=f"graphql errors: {str(body['errors'])[:200]}")
-        result = ((body.get("data") or {}).get("inventorySetQuantities") or {})
+            return SyncResult(
+                ok=False,
+                provider="shopify",
+                kind="push",
+                error=f"graphql errors: {str(body['errors'])[:200]}",
+            )
+        result = (body.get("data") or {}).get("inventorySetQuantities") or {}
         user_errors = result.get("userErrors") or []
         if user_errors:
-            return SyncResult(ok=False, provider="shopify", kind="push",
-                              error=f"userErrors: {str(user_errors)[:200]}")
+            return SyncResult(
+                ok=False,
+                provider="shopify",
+                kind="push",
+                error=f"userErrors: {str(user_errors)[:200]}",
+            )
         return SyncResult(
-            ok=True, provider="shopify", kind="push", items_synced=1,
-            payload={"inventory_item_id": inv_gid, "location_id": loc_gid, "available": qty},
+            ok=True,
+            provider="shopify",
+            kind="push",
+            items_synced=1,
+            payload={
+                "inventory_item_id": inv_gid,
+                "location_id": loc_gid,
+                "available": qty,
+            },
         )
     except httpx.TimeoutException:
         return SyncResult(ok=False, provider="shopify", kind="push", error="timeout")
@@ -320,8 +392,12 @@ async def razorpay_list_payments(db, since_hours: int = 2) -> SyncResult:
     key_id = cfg.get("key_id")
     key_secret = cfg.get("key_secret")
     if not key_id or not key_secret:
-        return SyncResult(ok=False, provider="razorpay", kind="pull",
-                          error="key_id or key_secret not configured")
+        return SyncResult(
+            ok=False,
+            provider="razorpay",
+            kind="pull",
+            error="key_id or key_secret not configured",
+        )
 
     since = int((datetime.now(timezone.utc) - timedelta(hours=since_hours)).timestamp())
     url = "https://api.razorpay.com/v1/payments"
@@ -331,13 +407,22 @@ async def razorpay_list_payments(db, since_hours: int = 2) -> SyncResult:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
             resp = await client.get(url, params=params, auth=(key_id, key_secret))
         if resp.status_code != 200:
-            return SyncResult(ok=False, provider="razorpay", kind="pull",
-                              error=f"status {resp.status_code}: {resp.text[:200]}")
+            return SyncResult(
+                ok=False,
+                provider="razorpay",
+                kind="pull",
+                error=f"status {resp.status_code}: {resp.text[:200]}",
+            )
         items = resp.json().get("items", [])
         return SyncResult(
-            ok=True, provider="razorpay", kind="pull",
+            ok=True,
+            provider="razorpay",
+            kind="pull",
             items_synced=len(items),
-            payload={"total": len(items), "captured": sum(1 for i in items if i.get("status") == "captured")},
+            payload={
+                "total": len(items),
+                "captured": sum(1 for i in items if i.get("status") == "captured"),
+            },
         )
     except httpx.TimeoutException:
         return SyncResult(ok=False, provider="razorpay", kind="pull", error="timeout")
@@ -356,8 +441,12 @@ async def shiprocket_track_awb(db, awb: str) -> SyncResult:
     email = cfg.get("email")
     password = cfg.get("password")
     if not email or not password:
-        return SyncResult(ok=False, provider="shiprocket", kind="pull",
-                          error="email or password not configured")
+        return SyncResult(
+            ok=False,
+            provider="shiprocket",
+            kind="pull",
+            error="email or password not configured",
+        )
 
     # Shiprocket API requires a token via /auth/login first
     try:
@@ -367,12 +456,20 @@ async def shiprocket_track_awb(db, awb: str) -> SyncResult:
                 json={"email": email, "password": password},
             )
             if auth_resp.status_code != 200:
-                return SyncResult(ok=False, provider="shiprocket", kind="pull",
-                                  error=f"auth status {auth_resp.status_code}")
+                return SyncResult(
+                    ok=False,
+                    provider="shiprocket",
+                    kind="pull",
+                    error=f"auth status {auth_resp.status_code}",
+                )
             token = (auth_resp.json() or {}).get("token")
             if not token:
-                return SyncResult(ok=False, provider="shiprocket", kind="pull",
-                                  error="no token in auth response")
+                return SyncResult(
+                    ok=False,
+                    provider="shiprocket",
+                    kind="pull",
+                    error="no token in auth response",
+                )
 
             # Track the AWB
             track_resp = await client.get(
@@ -380,13 +477,19 @@ async def shiprocket_track_awb(db, awb: str) -> SyncResult:
                 headers={"Authorization": f"Bearer {token}"},
             )
             if track_resp.status_code != 200:
-                return SyncResult(ok=False, provider="shiprocket", kind="pull",
-                                  error=f"track status {track_resp.status_code}")
+                return SyncResult(
+                    ok=False,
+                    provider="shiprocket",
+                    kind="pull",
+                    error=f"track status {track_resp.status_code}",
+                )
             data = track_resp.json() or {}
             tracking = (data.get("tracking_data") or {}).get("shipment_track") or []
             latest_status = tracking[0].get("current_status") if tracking else None
             return SyncResult(
-                ok=True, provider="shiprocket", kind="pull",
+                ok=True,
+                provider="shiprocket",
+                kind="pull",
                 items_synced=1,
                 payload={"awb": awb, "latest_status": latest_status},
             )
@@ -438,6 +541,7 @@ def tally_build_day_voucher_xml(
         subtotal = float(o.get("subtotal", 0) or 0)
         cgst = float(o.get("cgst_amount", 0) or 0)
         sgst = float(o.get("sgst_amount", 0) or 0)
+        igst = float(o.get("igst_amount", 0) or 0)
         total = float(o.get("grand_total", 0) or 0)
 
         narration_block = (
@@ -448,6 +552,29 @@ def tally_build_day_voucher_xml(
             if store_code
             else ""
         )
+
+        # Build tax ledger entries. Inter-state sales carry igst_amount > 0 and
+        # zero cgst/sgst; intra-state the opposite. Emit the right ledger(s) so
+        # the voucher doesn't imbalance in Tally on import.
+        if igst > 0:
+            tax_entries = f"""
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>IGST Output</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>{igst:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>"""
+        else:
+            tax_entries = f"""
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>CGST Output</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>{cgst:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>SGST Output</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>{sgst:.2f}</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>"""
 
         voucher = f"""
   <VOUCHER VCHTYPE="Sales" ACTION="Create">
@@ -464,17 +591,7 @@ def tally_build_day_voucher_xml(
       <LEDGERNAME>Sales A/c</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <AMOUNT>{subtotal:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>
-    <ALLLEDGERENTRIES.LIST>
-      <LEDGERNAME>CGST Output</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <AMOUNT>{cgst:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>
-    <ALLLEDGERENTRIES.LIST>
-      <LEDGERNAME>SGST Output</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <AMOUNT>{sgst:.2f}</AMOUNT>
-    </ALLLEDGERENTRIES.LIST>
+    </ALLLEDGERENTRIES.LIST>{tax_entries}
   </VOUCHER>"""
         vouchers.append(voucher)
 
@@ -556,7 +673,9 @@ def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "ok": len(mismatches) == 0 and batch_ok,
         "mismatch_count": len(mismatches),
-        "mismatches": mismatches[:50],  # cap report size; full list still in mismatch_count
+        "mismatches": mismatches[
+            :50
+        ],  # cap report size; full list still in mismatch_count
         "batch_delta": batch_delta,
         "batch_ok": batch_ok,
         "totals": {
