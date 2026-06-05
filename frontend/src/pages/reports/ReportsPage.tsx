@@ -757,9 +757,33 @@ export function ReportsPage() {
                         <Eye className="w-4 h-4" />
                         View GSTR-1
                       </button>
-                    ) : (
+                    ) : report.id === 'stock-report' || report.id === 'stock-movement' ? (
                       <button
-                        onClick={() => toast.info(`Detailed ${report.title} view requires store data`)}
+                        onClick={() => navigate(report.id === 'stock-movement' ? '/inventory?tab=transfers' : '/inventory?tab=stock')}
+                        className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                      >
+                        <Eye className="w-4 h-4" />
+                        View
+                      </button>
+                    ) : report.id === 'customer-report' ? (
+                      <button
+                        onClick={() => navigate('/customers')}
+                        className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                      >
+                        <Eye className="w-4 h-4" />
+                        View
+                      </button>
+                    ) : (
+                      // daily-sales / monthly-sales: scroll to the trend chart
+                      // already rendered on this page in the Sales tab.
+                      <button
+                        onClick={() => {
+                          setActiveTab('sales');
+                          setTimeout(() => {
+                            const el = document.querySelector('.inv-tabs');
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          }, 50);
+                        }}
                         className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
                       >
                         <Eye className="w-4 h-4" />

@@ -1434,6 +1434,22 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/einvoice/{order_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
+    # FIND-5: Bank statement import + auto-reconciliation
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/bank-statement/import",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/bank-statement",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/bank-statement/{statement_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # --- /api/v1/follow-ups ---
     {"method": "POST", "path": "/api/v1/follow-ups", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/follow-ups/", "allowed": "AUTHENTICATED"},
@@ -4289,6 +4305,17 @@ POLICY: List[Dict[str, object]] = [
         "method": "DELETE",
         "path": "/api/v1/vendors/{vendor_id}/sku-aliases/{alias_id}",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    # FIN-11: TDS threshold status + quarterly 26Q/27EQ export
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/tds/threshold-status",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/tds/26q-export",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # --- /api/v1/vouchers ---
     {
