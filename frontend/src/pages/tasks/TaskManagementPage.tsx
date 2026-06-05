@@ -822,6 +822,7 @@ export function TaskManagementPage() {
           counts={priorityCounts}
           selected={selectedTaskV2}
           onSelect={setSelectedTaskV2}
+          onChanged={loadData}
         />
       )}
 
@@ -907,9 +908,10 @@ interface TasksV2ViewProps {
   counts: Record<PCode, number>;
   selected: Task | null;
   onSelect: (t: Task | null) => void;
+  onChanged: () => void;
 }
 
-function TasksV2View({ tasks, counts, selected, onSelect }: TasksV2ViewProps) {
+function TasksV2View({ tasks, counts, selected, onSelect, onChanged }: TasksV2ViewProps) {
   const detailOpen = !!selected;
 
   return (
@@ -1001,7 +1003,7 @@ function TasksV2View({ tasks, counts, selected, onSelect }: TasksV2ViewProps) {
       {/* Detail panel */}
       <aside className="t-detail">
         {selected ? (
-          <TaskDetailPanel task={selected} onClose={() => onSelect(null)} />
+          <TaskDetailPanel task={selected} onClose={() => onSelect(null)} onChanged={onChanged} />
         ) : (
           <div className="d-body">
             <p className="text-sm text-gray-500">
@@ -1035,8 +1037,58 @@ function isSaneDue(min: number): boolean {
   return Number.isFinite(min) && Math.abs(min) <= MAX_SANE_DUE_MIN;
 }
 
-function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
+function TaskDetailPanel({ task, onClose, onChanged }: { task: Task; onClose: () => void; onChanged: () => void }) {
   const toast = useToast();
+  const isClosed = task.status === 'COMPLETED';
+
+  const _errMsg = (e: unknown, fallback: string): string => {
+    const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+    return typeof msg === 'string' ? msg : fallback;
+  };
+
+  // Complete the task with required completion notes (backend min 3 chars).
+  const handleComplete = async () => {
+    const notes = window.prompt('Completion notes (required, min 3 characters):', '');
+    if (notes === null) return;
+    if (notes.trim().length < 3) {
+      toast.error('Completion notes must be at least 3 characters');
+      return;
+    }
+    try {
+      await tasksApi.completeTask(task.id, notes.trim());
+      toast.success('Task completed');
+      onChanged();
+      onClose();
+    } catch (e) {
+      toast.error(_errMsg(e, 'Failed to complete task'));
+    }
+  };
+
+  // Append a progress note (PATCH /tasks/{id} { notes }).
+  const handleAddNote = async () => {
+    const note = window.prompt('Add a note to this task:', '');
+    if (!note || !note.trim()) return;
+    try {
+      await tasksApi.updateTask(task.id, { notes: note.trim() });
+      toast.success('Note added');
+      onChanged();
+    } catch (e) {
+      toast.error(_errMsg(e, 'Failed to add note'));
+    }
+  };
+
+  // Move a not-yet-started task to IN_PROGRESS.
+  const handleStart = async () => {
+    try {
+      await tasksApi.updateTask(task.id, { status: 'IN_PROGRESS' });
+      toast.success('Task marked in progress');
+      onChanged();
+      onClose();
+    } catch (e) {
+      toast.error(_errMsg(e, 'Failed to update task'));
+    }
+  };
+
   // Interim reassign: prompt for the new owner's user id + an optional reason,
   // then POST through the existing tasksApi.reassignTask seam. A full owner-
   // picker modal is a follow-up; this unblocks the previously-dead button.
@@ -1081,6 +1133,21 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
           >
             <ArrowLeft className="w-3 h-3" /> Back
           </button>
+          {!isClosed && (
+            <>
+              {(task.status === 'PENDING' || task.status === 'OVERDUE') && (
+                <button type="button" className="btn sm" onClick={handleStart}>
+                  <Zap className="w-3 h-3" /> Start
+                </button>
+              )}
+              <button type="button" className="btn sm" onClick={handleAddNote}>
+                <Edit className="w-3 h-3" /> Add note
+              </button>
+              <button type="button" className="btn sm" onClick={handleComplete}>
+                <CheckSquare className="w-3 h-3" /> Complete
+              </button>
+            </>
+          )}
           <button type="button" className="btn sm" onClick={handleReassign}>
             <User className="w-3 h-3" /> Reassign
           </button>

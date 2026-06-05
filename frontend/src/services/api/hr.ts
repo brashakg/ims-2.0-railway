@@ -504,14 +504,18 @@ export const tasksApi = {
     return response.data;
   },
 
-  // Update a task
+  // Update a task (status, notes, priority, etc.).
+  // Backend route is PATCH /tasks/{id} (TaskUpdate) -- the previous PUT 405'd,
+  // which is why editing / adding notes appeared to "do nothing".
   updateTask: async (taskId: string, updates: {
     title?: string;
     description?: string;
     priority?: string;
+    status?: string;
+    notes?: string;
     due_at?: string;
   }) => {
-    const response = await api.put(`/tasks/${taskId}`, updates);
+    const response = await api.patch(`/tasks/${taskId}`, updates);
     return response.data;
   },
 
