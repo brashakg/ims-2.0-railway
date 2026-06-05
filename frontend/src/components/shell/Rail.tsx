@@ -130,6 +130,9 @@ const RAIL_GROUPS: NavGroup[] = [
       // link to uniparallel.com; the storefront admin remains reachable from a
       // button inside the module page during the strangler-fig transition.
       { id: 'online-store', label: 'Online Store', to: '/online-store', icon: 'store', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'] },
+      // CRM-16: Ad Performance (Google + Meta agency oversight). Finance-sensitive
+      // spend data -- restricted to SUPERADMIN / ADMIN only.
+      { id: 'ad-performance', label: 'Ad Performance', to: '/marketing/ad-performance', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN'] },
     ],
   },
   {
