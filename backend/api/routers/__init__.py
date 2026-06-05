@@ -24,6 +24,7 @@ from .workshop import router as workshop_router
 from .reports import router as reports_router
 from .settings import router as settings_router
 from .clinical import router as clinical_router
+from .clinical_device_import import router as clinical_device_import_router
 from .admin import router as admin_router
 from .admin_catalog import router as admin_catalog_router
 from .admin_extras import router as admin_extras_router
@@ -94,6 +95,7 @@ __all__ = [
     "reports_router",
     "settings_router",
     "clinical_router",
+    "clinical_device_import_router",
     "admin_router",
     "admin_catalog_router",
     "admin_extras_router",

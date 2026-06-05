@@ -58,6 +58,7 @@ from .routers import (
     reports_router,
     settings_router,
     clinical_router,
+    clinical_device_import_router,
     admin_router,
     admin_catalog_router,
     admin_extras_router,
@@ -919,6 +920,11 @@ app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(budgets_router, prefix="/api/v1/budgets", tags=["Budgets"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
+# CLI-12: ophthalmic device integration -- mounted under the same /clinical prefix
+# so the new /device-import endpoint lives at /api/v1/clinical/device-import.
+app.include_router(
+    clinical_device_import_router, prefix="/api/v1/clinical", tags=["Clinical"]
+)
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(
     admin_catalog_router, prefix="/api/v1/admin", tags=["Admin · Catalog"]
