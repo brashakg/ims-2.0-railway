@@ -773,6 +773,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/payroll/run', "allowed": ['ACCOUNTANT', 'ADMIN']},
     {"method": 'GET', "path": '/api/v1/payroll/run/rows', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/payroll/salary-sheet', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    {"method": 'GET', "path": '/api/v1/payroll/commission/summary', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/payroll/commission/leaderboard', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/payroll/salary/calculate', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/payroll/salary/{employee_id}', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/payroll/tally/salary-jv', "allowed": ['ACCOUNTANT', 'ADMIN']},
