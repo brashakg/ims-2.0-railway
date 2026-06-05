@@ -428,6 +428,10 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/finance/summary-month', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/finance/tally/sales-jv', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/finance/vendor-payments', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
+    # FIN-1: GST e-invoice (IRN generation). Narrower than the router-level finance
+    # gate (no AREA_MANAGER / STORE_MANAGER; matching the inline role check in
+    # the handler). DARK by default -- returns SIMULATED until owner enables.
+    {"method": 'POST', "path": '/api/v1/finance/einvoice/{order_id}', "allowed": ['ACCOUNTANT', 'ADMIN', 'SUPERADMIN']},
     # --- /api/v1/follow-ups ---
     {"method": 'POST', "path": '/api/v1/follow-ups', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/follow-ups/', "allowed": 'AUTHENTICATED'},

@@ -951,3 +951,74 @@ def now_ist_label() -> str:
     -- the label is informational; callers that need true IST should pass an
     already-localised datetime to format_datetime_ist)."""
     return format_datetime_ist(datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# GST e-invoice QR block (FIN-1) -- appended to the tax-invoice print context
+# ---------------------------------------------------------------------------
+
+
+def einvoice_qr_block(order: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the e-invoice data block for the GST tax invoice template.
+
+    When an order carries a signed QR (einvoice_signed_qr) this helper:
+      1. Attempts to render it as a base64-encoded PNG via render_signed_qr_png
+         (uses `qrcode` if installed; fail-soft to None when absent).
+      2. Returns the IRN, AckNo, AckDate, and either the rendered QR PNG as a
+         data URI or the raw signed_qr string + a TODO note for the renderer.
+
+    The print template checks `einvoice.present` before rendering the block.
+    When an order has no IRN (not yet generated or DARK) `present` is False
+    and the template omits the block entirely -- zero impact on existing invoices.
+
+    Usage (inside a tax_invoice template context builder):
+        ctx["einvoice"] = einvoice_qr_block(order_doc)
+    """
+    irn = str(order.get("irn") or order.get("einvoice_irn") or "").strip()
+    if not irn:
+        return {
+            "present": False,
+            "irn": "",
+            "ack_no": "",
+            "ack_date": "",
+            "qr_data_uri": None,
+            "signed_qr_raw": None,
+            "render_note": "",
+        }
+
+    signed_qr = str(order.get("einvoice_signed_qr") or "").strip()
+    ack_no = str(order.get("ack_no") or "").strip()
+    ack_date = str(order.get("ack_date") or "").strip()
+
+    qr_data_uri: Optional[str] = None
+    render_note = ""
+
+    if signed_qr:
+        # Lazy import: render_signed_qr_png is import-guarded inside einvoice.py
+        try:
+            from api.services.einvoice import render_signed_qr_png
+            png_bytes = render_signed_qr_png(signed_qr)
+            if png_bytes:
+                import base64
+                b64 = base64.b64encode(png_bytes).decode("ascii")
+                qr_data_uri = f"data:image/png;base64,{b64}"
+            else:
+                render_note = (
+                    "TODO: install 'qrcode' + 'Pillow' to auto-render the QR image. "
+                    "Use signed_qr_raw to generate it client-side."
+                )
+        except Exception:  # noqa: BLE001 -- never crash the invoice render
+            render_note = (
+                "TODO: install 'qrcode' + 'Pillow' to auto-render the QR image. "
+                "Use signed_qr_raw to generate it client-side."
+            )
+
+    return {
+        "present": True,
+        "irn": irn,
+        "ack_no": ack_no,
+        "ack_date": ack_date,
+        "qr_data_uri": qr_data_uri,       # base64 PNG data URI when qrcode installed
+        "signed_qr_raw": signed_qr or None,  # raw string for client-side render
+        "render_note": render_note,
+    }
