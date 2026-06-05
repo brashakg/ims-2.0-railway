@@ -158,6 +158,7 @@ class EyeTestRepository(BaseRepository):
         lens_recommendation: Optional[str] = None,
         coating_recommendation: Optional[str] = None,
         clinical_findings: Optional[Dict] = None,
+        soap_note: Optional[Dict] = None,
     ) -> bool:
         """Complete eye test with prescription data.
 
@@ -165,6 +166,11 @@ class EyeTestRepository(BaseRepository):
         history / diagnosis / ...). When absent the test stays a refraction-only
         record exactly as before; when present it's persisted alongside the
         prescription so the full optometric exam is recoverable, not dropped.
+
+        `soap_note` (CLI-11) is the optional structured SOAP exam record
+        (Subjective / Objective / Assessment / Plan + Dx codes). When absent
+        the test record is unaffected; when present it is stored under the
+        ``soap_note`` key on the test document.
         """
         update_data = {
             "status": "COMPLETED",
@@ -180,7 +186,19 @@ class EyeTestRepository(BaseRepository):
         }
         if clinical_findings:
             update_data["clinical_findings"] = clinical_findings
+        if soap_note:
+            update_data["soap_note"] = soap_note
         return self.update(test_id, update_data)
+
+    def save_soap_note(self, test_id: str, soap_note: Dict) -> bool:
+        """Persist (or replace) the SOAP exam note on an existing test document.
+
+        CLI-11: allows post-completion charting without re-opening the test
+        completion flow.  The ``soap_note`` dict replaces whatever was stored
+        previously; callers are responsible for merging if partial updates are
+        needed.  Returns True on success, False when the test was not found.
+        """
+        return self.update(test_id, {"soap_note": soap_note})
 
     def get_store_tests(
         self,

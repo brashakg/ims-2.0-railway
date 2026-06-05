@@ -1438,3 +1438,153 @@ async def get_ad_performance(
         fetched_at=result.fetched_at,
         note=result.note,
     )
+
+
+# ============================================================================
+# CRM-15: WHATSAPP OPT-IN / OPT-OUT (STOP LEDGER)
+# ============================================================================
+# TRAI/DLT and the WhatsApp Business Policy require that operators maintain a
+# per-customer consent ledger for promotional messaging and honour STOP requests
+# immediately.  This ties into the DPDP Act 2023 consent framework.
+#
+# Architecture:
+#   - `whatsapp_consent_ledger` collection: immutable audit of every consent
+#     event (OPT_IN / OPT_OUT / STOP) with the source (API / INBOUND_STOP /
+#     CUSTOMER_REQUEST) and the actor (staff id or "system").
+#   - The customers.marketing_consent field remains the single source of truth
+#     for the runtime gate (checked by every send path).  The ledger is the
+#     immutable audit trail.
+#   - A STOP event written here ALSO flips customers.marketing_consent = False
+#     atomically so the next send path check immediately respects the opt-out.
+#   - An OPT_IN event written here flips marketing_consent = True so re-consent
+#     is recorded and honoured.
+#
+# Roles: any authenticated staff can log a consent event (they relay what the
+# customer verbally told them); the ledger is ADMIN-readable for compliance.
+# ============================================================================
+
+_CONSENT_LEDGER_COLL = "whatsapp_consent_ledger"
+
+
+class ConsentEventRequest(BaseModel):
+    customer_id: str
+    event: Literal["OPT_IN", "OPT_OUT", "STOP"]
+    source: Literal["API", "INBOUND_STOP", "CUSTOMER_REQUEST", "STAFF_ENTRY"] = "STAFF_ENTRY"
+    notes: Optional[str] = None
+
+
+@router.post("/whatsapp-consent")
+async def record_whatsapp_consent(
+    req: ConsentEventRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Record a WhatsApp consent event (OPT_IN / OPT_OUT / STOP) for a customer.
+
+    Immediately updates customers.marketing_consent so every outbound send path
+    reflects the new state.  The event is also written to the immutable
+    whatsapp_consent_ledger for DPDP / TRAI audit.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Verify customer exists.
+    customer = db.get_collection("customers").find_one({"customer_id": req.customer_id})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    # Compute the new consent state from the event type.
+    new_consent = req.event == "OPT_IN"
+
+    # Atomically update customers.marketing_consent.
+    db.get_collection("customers").update_one(
+        {"customer_id": req.customer_id},
+        {
+            "$set": {
+                "marketing_consent": new_consent,
+                "marketing_consent_updated_at": datetime.now().isoformat(),
+            }
+        },
+    )
+
+    # Write an immutable ledger row.
+    ledger_id = f"CLE-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    ledger_row = {
+        "ledger_id": ledger_id,
+        "customer_id": req.customer_id,
+        "customer_name": customer.get("name", ""),
+        "customer_phone": customer.get("mobile", ""),
+        "event": req.event,
+        "source": req.source,
+        "marketing_consent_after": new_consent,
+        "notes": req.notes or "",
+        "recorded_by": current_user.get("user_id", "unknown"),
+        "recorded_at": datetime.now().isoformat(),
+    }
+    db.get_collection(_CONSENT_LEDGER_COLL).insert_one(ledger_row)
+
+    verb = "opted in to" if new_consent else "opted out of"
+    return {
+        "message": f"Customer {verb} WhatsApp marketing",
+        "ledger_id": ledger_id,
+        "customer_id": req.customer_id,
+        "marketing_consent": new_consent,
+        "event": req.event,
+    }
+
+
+@router.get("/whatsapp-consent/{customer_id}")
+async def get_whatsapp_consent_history(
+    customer_id: str,
+    limit: int = Query(50, le=200),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the full WhatsApp consent history for a customer (audit ledger)."""
+    db = _get_db()
+    if db is None:
+        return {"customer_id": customer_id, "events": [], "total": 0, "current_consent": None}
+
+    customer = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    rows = list(
+        db.get_collection(_CONSENT_LEDGER_COLL)
+        .find({"customer_id": customer_id})
+        .sort("recorded_at", -1)
+        .limit(limit)
+    )
+    for r in rows:
+        r.pop("_id", None)
+
+    return {
+        "customer_id": customer_id,
+        "current_consent": customer.get("marketing_consent"),
+        "events": rows,
+        "total": len(rows),
+    }
+
+
+@router.get("/whatsapp-consent-ledger")
+async def get_whatsapp_consent_ledger(
+    store_id: Optional[str] = Query(None),
+    event: Optional[str] = Query(None),
+    limit: int = Query(100, le=500),
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Admin view of all WhatsApp consent events (DPDP / TRAI compliance audit)."""
+    db = _get_db()
+    if db is None:
+        return {"events": [], "total": 0}
+
+    query = {}
+    if event and event.upper() in {"OPT_IN", "OPT_OUT", "STOP"}:
+        query["event"] = event.upper()
+
+    rows = list(
+        db.get_collection(_CONSENT_LEDGER_COLL)
+        .find(query)
+        .sort("recorded_at", -1)
+        .limit(limit)
+    )
+    for r in rows:
+        r.pop("_id", None)
+
+    return {"events": rows, "total": len(rows)}
