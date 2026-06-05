@@ -1777,6 +1777,12 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/inventory/barcode/{barcode}",
         "allowed": "AUTHENTICATED",
     },
+    # INV-12: barcode lifecycle trace (purchase->sale->transfer->return)
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/barcode/{barcode}/trace",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/inventory/contact-lenses",
@@ -4203,6 +4209,17 @@ POLICY: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/portal-tokens",
         "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    # INV-13: vendor performance scoring + purchase-history analytics
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/{vendor_id}/performance",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/{vendor_id}/purchase-history",
+        "allowed": "AUTHENTICATED",
     },
     {
         "method": "GET",

@@ -1038,15 +1038,46 @@ async def receive_transfer(
                 ),
             )
 
-    # Update item quantities
-    item_map = {item["id"]: item for item in transfer["items"]}
+    # INV-11: build a multi-key lookup so older transfer docs whose item `id` was
+    # never reliably set (or was stored under a different field name) can still be
+    # received.  Priority: explicit `id` > `product_id` > zero-indexed fallback.
+    # `product_id`-keyed resolution only fires when a doc has no `id` field at all
+    # (e.g. imported / back-filled docs) so it doesn't accidentally merge two
+    # legitimate lines for the same product in a multi-line transfer.
+    item_map: Dict[str, dict] = {}
+    items_without_id: List[dict] = []
+    for item in transfer.get("items", []):
+        item_id = item.get("id") or item.get("item_id") or ""
+        if item_id:
+            item_map[item_id] = item
+        else:
+            items_without_id.append(item)
+    # For items that have no id, register by product_id as a fallback key.
+    product_id_fallback: Dict[str, dict] = {}
+    for item in items_without_id:
+        pid = str(item.get("product_id") or "")
+        if pid and pid not in product_id_fallback:
+            product_id_fallback[pid] = item
+
+    def _resolve_item(transfer_item_id: str) -> Optional[dict]:
+        """Look up a transfer line by the caller's transfer_item_id.
+
+        Falls back to product_id when the id field isn't present on the line
+        (covers back-filled or pre-INV-11 docs). Returns None when no match."""
+        if transfer_item_id in item_map:
+            return item_map[transfer_item_id]
+        # Caller may be sending product_id as transfer_item_id for legacy docs.
+        if transfer_item_id in product_id_fallback:
+            return product_id_fallback[transfer_item_id]
+        return None
+
     total_expected = 0
     total_received = 0
     total_damaged = 0
 
     for received in items_received:
-        if received.transfer_item_id in item_map:
-            item = item_map[received.transfer_item_id]
+        item = _resolve_item(received.transfer_item_id)
+        if item is not None:
             item["quantity_received"] = received.quantity_received
             item["quantity_damaged"] = received.quantity_damaged
             item["damage_notes"] = received.damage_notes
