@@ -36,6 +36,7 @@ const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').t
 const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
 const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
 const FollowUpDashboard = lazy(() => import('./pages/customers/FollowUpDashboard').then(m => ({ default: m.FollowUpDashboard })))
+const WhatsAppInboxPage = lazy(() => import('./pages/customers/WhatsAppInboxPage').then(m => ({ default: m.WhatsAppInboxPage })));
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
@@ -310,6 +311,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <CampaignManager />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM-14: WhatsApp Inbox — inbound messages from Meta Business API */}
+                  <Route
+                    path="customers/whatsapp-inbox"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <WhatsAppInboxPage />
                       </ProtectedRoute>
                     }
                   />

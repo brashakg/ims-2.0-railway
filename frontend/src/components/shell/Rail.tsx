@@ -124,6 +124,8 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Growth',
     items: [
       { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      // CRM-14: WhatsApp Inbox -- inbound customer messages via Meta Business API.
+      { id: 'whatsapp-inbox', label: 'WA Inbox', to: '/customers/whatsapp-inbox', icon: 'chat', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       // In-app Online Store module (BVI merge). Replaces the old external SSO
       // link to uniparallel.com; the storefront admin remains reachable from a
       // button inside the module page during the strangler-fig transition.
