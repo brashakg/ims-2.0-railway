@@ -232,7 +232,7 @@ export function GSTInvoice({
   };
 
   const handleDownloadPDF = () => {
-    console.info('PDF download will be available with backend wkhtmltopdf integration');
+    window.print();
   };
 
   const amountWords = amountInWords(grandTotal);

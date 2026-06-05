@@ -49,7 +49,7 @@ class StoreRepository(BaseRepository):
                 {"$addToSet": {"enabled_categories": category}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def disable_category(self, store_id: str, category: str) -> bool:
@@ -59,7 +59,7 @@ class StoreRepository(BaseRepository):
                 {"$pull": {"enabled_categories": category}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def get_store_summary(self) -> Dict:
