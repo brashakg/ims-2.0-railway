@@ -44,6 +44,7 @@ const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
+const OndcSellerPage = lazy(() => import('./pages/online-store/OndcSellerPage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -378,6 +379,19 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <OnlineOrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* ONDC Seller Node (BVI-20): India open commerce network admin page.
+                      DARK by default; gated to SUPERADMIN / ADMIN. */}
+                  <Route
+                    path="online-store/ondc"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN']}
+                      >
+                        <OndcSellerPage />
                       </ProtectedRoute>
                     }
                   />
