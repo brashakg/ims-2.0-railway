@@ -2306,6 +2306,25 @@ POLICY: List[Dict[str, object]] = [
     {"method": "POST", "path": "/api/v1/loyalty/redeem", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/loyalty/settings", "allowed": "AUTHENTICATED"},
     {"method": "PUT", "path": "/api/v1/loyalty/settings", "allowed": ["SUPERADMIN"]},
+    # CRM-13: Loyalty reward catalog. READ is open to all authenticated staff
+    # (so cashiers can describe rewards at POS); writes are gated to managers.
+    {"method": "GET", "path": "/api/v1/loyalty/rewards", "allowed": "AUTHENTICATED"},
+    {
+        "method": "POST",
+        "path": "/api/v1/loyalty/rewards",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {"method": "GET", "path": "/api/v1/loyalty/rewards/{reward_id}", "allowed": "AUTHENTICATED"},
+    {
+        "method": "PUT",
+        "path": "/api/v1/loyalty/rewards/{reward_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/loyalty/rewards/{reward_id}",
+        "allowed": ["ADMIN"],
+    },
     # --- /api/v1/marketing ---
     {
         "method": "GET",
@@ -2471,6 +2490,58 @@ POLICY: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/marketing/walkout/{customer_id}",
         "allowed": "AUTHENTICATED",
+    },
+    # CRM-8: Promo offer-template library (BOGO / COMBO / THRESHOLD).
+    # Same role gate as campaigns (ADMIN/AREA_MANAGER/STORE_MANAGER, SUPERADMIN
+    # implicit).  Store-scoped templates additionally validated inside the handler
+    # via _enforce_store_scope -> validate_store_access.
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/promo-templates",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/marketing/promo-templates",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/promo-templates/{template_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/marketing/promo-templates/{template_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/marketing/promo-templates/{template_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    # CRM-15: WhatsApp opt-in / opt-out STOP ledger.
+    # Any authenticated staff can record a consent event (staff relay verbal
+    # opt-out from customers).  The full audit ledger is ADMIN-only (compliance).
+    {
+        "method": "POST",
+        "path": "/api/v1/marketing/whatsapp-consent",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/whatsapp-consent/{customer_id}",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/whatsapp-consent-ledger",
+        "allowed": ["ADMIN"],
     },
     # CRM-16: Ad Performance dashboard (Google + Meta). Finance-sensitive:
     # restricted to ADMIN and SUPERADMIN (SUPERADMIN implicit via require_roles).

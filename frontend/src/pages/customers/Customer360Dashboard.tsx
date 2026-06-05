@@ -32,6 +32,7 @@ import {
 import type { Customer } from '../../types';
 import { customerApi, orderApi, prescriptionApi } from '../../services/api';
 import { loyaltyApi } from '../../services/api/loyalty';
+import { marketingApi } from '../../services/api/marketing';
 import StoreCreditLedgerCard from '../../components/customers/StoreCreditLedgerCard';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
@@ -101,6 +102,8 @@ export function Customer360Dashboard() {
   const [stats, setStats] = useState<CustomerStats | null>(null);
   const [loyaltyData, setLoyaltyData] = useState<LoyaltyData | null>(null);
   const [activeTab, setActiveTab] = useState<Customer360Tab>('overview');
+  // CRM-9: last NPS score for this customer (from nps_responses via nps-dashboard)
+  const [lastNpsScore, setLastNpsScore] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -287,6 +290,18 @@ export function Customer360Dashboard() {
       // No interaction log API exists yet; start with empty state
       setInteractions([]);
 
+      // CRM-9: fetch the most recent NPS score for this customer (fail-soft)
+      try {
+        const npsData = await marketingApi.getNpsDashboard(customerData.store_id);
+        const responses: any[] = npsData?.responses || [];
+        const customerNps = responses.find(
+          (r: any) => r.customer_id === customerId && r.score != null
+        );
+        setLastNpsScore(customerNps?.score ?? null);
+      } catch {
+        setLastNpsScore(null);
+      }
+
       // Removed the noisy "Customer data loaded successfully" toast — it
       // fired on every Customer 360 page open and was useless feedback
       // (the data is already visible on the page). QA polish, 2026-05-27.
@@ -397,7 +412,7 @@ export function Customer360Dashboard() {
 
       {/* Tab Content */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
-        {activeTab === 'overview' && stats && <OverviewTab stats={stats} />}
+        {activeTab === 'overview' && stats && <OverviewTab stats={stats} lastNpsScore={lastNpsScore} />}
         {activeTab === 'prescriptions' && <PrescriptionsTab prescriptions={prescriptions} customerId={customerId!} customerName={customer?.name} />}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
         {activeTab === 'interactions' && <InteractionsTab interactions={interactions} />}
@@ -519,9 +534,22 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
 
 interface OverviewTabProps {
   stats: CustomerStats;
+  lastNpsScore: number | null;
 }
 
-function OverviewTab({ stats }: OverviewTabProps) {
+// CRM-9: NPS score label helpers
+function npsLabel(score: number): string {
+  if (score >= 9) return 'Promoter';
+  if (score >= 7) return 'Passive';
+  return 'Detractor';
+}
+function npsColor(score: number): string {
+  if (score >= 9) return 'text-green-600';
+  if (score >= 7) return 'text-blue-600';
+  return 'text-orange-600';
+}
+
+function OverviewTab({ stats, lastNpsScore }: OverviewTabProps) {
   return (
     <div className="grid grid-cols-2 gap-6">
       {/* Left Column */}
@@ -555,6 +583,23 @@ function OverviewTab({ stats }: OverviewTabProps) {
             {Math.floor(monthsAsSinceDate(stats.customerSinceDate) / 12)} years{' '}
             {(monthsAsSinceDate(stats.customerSinceDate) % 12)} months
           </p>
+        </div>
+
+        {/* CRM-9: NPS score (auto-triggered on delivery, shown here) */}
+        <div className="bg-gray-50 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">NPS Score</h3>
+          {lastNpsScore !== null ? (
+            <div className="flex items-baseline gap-2">
+              <span className={clsx('text-2xl font-bold', npsColor(lastNpsScore))}>
+                {lastNpsScore}/10
+              </span>
+              <span className={clsx('text-xs font-medium', npsColor(lastNpsScore))}>
+                {npsLabel(lastNpsScore)}
+              </span>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400">No survey response yet</p>
+          )}
         </div>
       </div>
     </div>

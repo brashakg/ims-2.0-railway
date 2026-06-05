@@ -2449,6 +2449,13 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
             )
 
         if repo.update_status(order_id, "DELIVERED", current_user.get("user_id")):
+            # CRM-9: Auto-trigger NPS survey on delivery (fail-soft — a survey
+            # failure must NEVER block the delivery confirmation).
+            try:
+                from ..services.nps_trigger import trigger_nps_on_delivery
+                await trigger_nps_on_delivery(order, current_user)
+            except Exception as _nps_exc:
+                logger.warning("[ORDERS] NPS auto-trigger failed (non-fatal): %s", _nps_exc)
             return {
                 "order_id": order_id,
                 "status": "DELIVERED",
