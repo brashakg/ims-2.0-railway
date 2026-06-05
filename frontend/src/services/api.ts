@@ -5,35 +5,7 @@
 // existing imports like `import { orderApi } from '../services/api'` and
 // `import api from '../services/api'` continue to work without changes.
 
-export {
-  default,
-  authApi,
-  storeApi,
-  adminStoreApi,
-  adminUserApi,
-  adminSystemApi,
-  productApi,
-  catalogApi,
-  adminProductApi,
-  adminBrandApi,
-  adminLensApi,
-  inventoryApi,
-  vendorsApi,
-  orderApi,
-  prescriptionApi,
-  workshopApi,
-  adminDiscountApi,
-  customerApi,
-  reportsApi,
-  analyticsApi,
-  hrApi,
-  tasksApi,
-  clinicalApi,
-  settingsApi,
-  adminIntegrationApi,
-  walkoutsApi,
-  incentiveApi,
-  payoutApi,
-} from './api/index';
+export * from './api/index';
+export { default } from './api/index';
 
 export type { OnlineStatus } from './api/index';
