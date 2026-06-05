@@ -16,7 +16,7 @@ from enum import Enum
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_db as _dep_get_db
+from ..dependencies import get_db as _dep_get_db, validate_store_access
 
 router = APIRouter()
 
@@ -180,6 +180,10 @@ async def list_follow_ups(
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
+    # BUG-062: reject cross-store reads -- a single-store manager must not pull
+    # another store's follow-ups by passing ?store_id=<other store>.
+    store_id = validate_store_access(store_id, current_user)
+
     collection = db.get_collection("follow_ups")
 
     # Build query filter
@@ -217,6 +221,9 @@ async def create_follow_up(
     db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
+
+    # BUG-062: a user must not create a follow-up against another store.
+    request.store_id = validate_store_access(request.store_id, current_user)
 
     # Validate that scheduled_date is not in the past.  Follow-ups scheduled
     # for yesterday would appear overdue immediately and never be worked — they
@@ -310,6 +317,9 @@ async def get_due_today(
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
+    # BUG-062: reject cross-store reads.
+    store_id = validate_store_access(store_id, current_user)
+
     collection = db.get_collection("follow_ups")
     today = date.today().isoformat()
 
@@ -340,6 +350,9 @@ async def auto_generate_follow_ups(
     db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
+
+    # BUG-062: only generate for a store the caller is allowed to act on.
+    store_id = validate_store_access(store_id, current_user)
 
     follow_ups_collection = db.get_collection("follow_ups")
     orders_collection = db.get_collection("orders")
@@ -494,6 +507,9 @@ async def get_follow_up_summary(
     db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
+
+    # BUG-062: reject cross-store reads.
+    store_id = validate_store_access(store_id, current_user)
 
     collection = db.get_collection("follow_ups")
     today = date.today().isoformat()

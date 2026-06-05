@@ -16,6 +16,8 @@ from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
     get_audit_repository,
+    can_access_store_scoped,
+    filter_docs_by_store,
 )
 
 router = APIRouter()
@@ -366,7 +368,10 @@ async def get_patient_prescriptions(
     repo = get_prescription_repository()
 
     if repo is not None:
-        prescriptions = repo.find_by_patient(patient_id)
+        # BUG-088: only return Rx for stores the caller may access (admins see all).
+        prescriptions = filter_docs_by_store(
+            repo.find_by_patient(patient_id), current_user
+        )
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
     return {"prescriptions": [], "total": 0}
@@ -380,7 +385,11 @@ async def get_latest_prescription(
     repo = get_prescription_repository()
 
     if repo is not None:
-        prescriptions = repo.find_by_patient(patient_id, limit=1)
+        # BUG-088: scope to the caller's stores, then take the latest in-scope Rx
+        # (don't trust a limit=1 fetch that could return an out-of-scope newest).
+        prescriptions = filter_docs_by_store(
+            repo.find_by_patient(patient_id), current_user
+        )
         if prescriptions:
             return {"prescription": prescriptions[0]}
         return {"prescription": None}
@@ -396,7 +405,8 @@ async def get_valid_prescriptions(
     repo = get_prescription_repository()
 
     if repo is not None:
-        prescriptions = repo.find_valid(patient_id)
+        # BUG-088: only return Rx for stores the caller may access (admins see all).
+        prescriptions = filter_docs_by_store(repo.find_valid(patient_id), current_user)
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
     return {"prescriptions": [], "total": 0}
@@ -410,7 +420,10 @@ async def get_expiring_prescriptions(
     repo = get_prescription_repository()
 
     if repo is not None:
-        prescriptions = repo.find_expiring_soon(days)
+        # BUG-088: a store-level caller only sees their own stores' expiring Rx.
+        prescriptions = filter_docs_by_store(
+            repo.find_expiring_soon(days), current_user
+        )
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
     return {"prescriptions": [], "total": 0}
@@ -476,6 +489,11 @@ async def list_prescriptions(
             prescriptions = [
                 p for p in prescriptions if (p.get("rx_kind") or "SPECTACLE") == rx_kind
             ]
+
+        # BUG-088: drop any Rx outside the caller's store scope BEFORE paginating
+        # (admins/area-managers keep their full scope). A non-admin passing
+        # ?store_id=<other store> gets an empty page rather than a cross-store leak.
+        prescriptions = filter_docs_by_store(prescriptions, current_user)
 
         # Pagination: the repo helpers (find_by_store / find_by_customer /
         # find_by_patient) don't take skip/limit, so apply the page window here
@@ -567,7 +585,9 @@ async def family_prescriptions(
         raise HTTPException(status_code=404, detail="Customer not found")
     patients = customer.get("patients", []) or []
 
-    all_rx = repo.find_by_customer(customer_id) or []
+    # BUG-088: scope the household Rx view to stores the caller may access so a
+    # single-store user can't pull another store's family clinical PII by id.
+    all_rx = filter_docs_by_store(repo.find_by_customer(customer_id) or [], current_user)
     by_patient: dict = {}
     for rx in all_rx:
         by_patient.setdefault(rx.get("patient_id"), []).append(rx)
@@ -946,6 +966,13 @@ async def get_prescription(
     if repo is not None:
         prescription = repo.find_by_id(prescription_id)
         if prescription is not None:
+            # BUG-088: a prescription is clinical PII. Only a caller scoped to the
+            # Rx's store (admins are cross-store) may read it. Return 404 -- not
+            # 403 -- so we don't even confirm the Rx exists to an out-of-scope user.
+            if not can_access_store_scoped(
+                prescription.get("store_id"), current_user
+            ):
+                raise HTTPException(status_code=404, detail="Prescription not found")
             return prescription
         raise HTTPException(status_code=404, detail="Prescription not found")
 
@@ -969,7 +996,8 @@ async def validate_prescription(
             "issues": [],
         }
     rx = repo.find_by_id(prescription_id)
-    if rx is None:
+    # BUG-088: store-scope the clinical Rx read (404 hides existence cross-store).
+    if rx is None or not can_access_store_scoped(rx.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")
 
     issues = []
@@ -1171,7 +1199,10 @@ async def print_prescription(
 
     if repo is not None:
         prescription = repo.find_by_id(prescription_id)
-        if prescription is None:
+        # BUG-088: store-scope the clinical Rx read (404 hides existence cross-store).
+        if prescription is None or not can_access_store_scoped(
+            prescription.get("store_id"), current_user
+        ):
             raise HTTPException(status_code=404, detail="Prescription not found")
 
         if (prescription.get("rx_kind") or "SPECTACLE") == "CONTACT_LENS":
@@ -1349,7 +1380,8 @@ async def get_prescription_versions(
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
     doc = repo.find_by_id(prescription_id)
-    if doc is None:
+    # BUG-088: store-scope the clinical Rx read (404 hides existence cross-store).
+    if doc is None or not can_access_store_scoped(doc.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")
     doc = backfill_versions_from_top_level(doc)
     return {
@@ -1373,6 +1405,9 @@ async def get_prescription_progression(
     repo = get_prescription_repository()
     if repo is None:
         return {"customer_id": customer_id, "deltas": []}
-    history = repo.find_many({"customer_id": customer_id}) or []
+    # BUG-088: scope the progression history to the caller's stores.
+    history = filter_docs_by_store(
+        repo.find_many({"customer_id": customer_id}) or [], current_user
+    )
     deltas = progression_diffs(history)
     return {"customer_id": customer_id, "deltas": deltas, "visits": len(history)}

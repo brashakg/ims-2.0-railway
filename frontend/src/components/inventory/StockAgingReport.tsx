@@ -20,6 +20,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
+import { exportToCSV as exportRowsToCSV } from '../../utils/exportUtils';
 
 interface AgingProduct {
   id: string;
@@ -146,48 +147,28 @@ export function StockAgingReport() {
   const exportToCSV = (data: AgingProduct[]) => {
     if (data.length === 0) return;
 
-    const headers = [
-      'SKU',
-      'Name',
-      'Brand',
-      'Category',
-      'Classification',
-      'Age Category',
-      'Days In Stock',
-      'Quantity',
-      'Value (Rs)',
-      'Sales Last 30 Days',
-      'Sales Last 90 Days',
-      'Turnover Rate (x/yr)',
-      'Last Sale Date',
-    ];
-
-    const rows = data.map(p => [
-      p.sku,
-      `"${p.name.replace(/"/g, '""')}"`,
-      `"${p.brand.replace(/"/g, '""')}"`,
-      p.category,
-      p.classification,
-      p.ageCategory,
-      p.daysInStock,
-      p.quantity,
-      p.value,
-      p.salesLast30Days,
-      p.salesLast90Days,
-      p.turnoverRate.toFixed(2),
-      p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString() : 'No sales',
-    ]);
-
-    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `stock-aging-report-${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // BUG-139: route through the shared exporter, which neutralizes formula-
+    // injection (=,+,-,@,TAB,CR) per cell and prepends the UTF-8 BOM. The old
+    // hand-rolled builder wrote p.name / p.brand with only quote-escaping, so a
+    // product named `=cmd|'/C calc'!A0` executed when opened in Excel.
+    const rows = data.map(p => ({
+      SKU: p.sku,
+      Name: p.name,
+      Brand: p.brand,
+      Category: p.category,
+      Classification: p.classification,
+      'Age Category': p.ageCategory,
+      'Days In Stock': p.daysInStock,
+      Quantity: p.quantity,
+      'Value (Rs)': p.value,
+      'Sales Last 30 Days': p.salesLast30Days,
+      'Sales Last 90 Days': p.salesLast90Days,
+      'Turnover Rate (x/yr)': p.turnoverRate.toFixed(2),
+      'Last Sale Date': p.lastSaleDate
+        ? new Date(p.lastSaleDate).toLocaleDateString()
+        : 'No sales',
+    }));
+    exportRowsToCSV(rows, 'stock-aging-report');
     toast.success(`Exported ${data.length} products to CSV`);
   };
 

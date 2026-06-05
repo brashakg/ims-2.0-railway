@@ -13,7 +13,7 @@
  * the value with a single quote forces the spreadsheet to treat it as text.
  * Reference: OWASP "CSV Injection".
  */
-function neutralizeFormula(str: string): string {
+export function neutralizeFormula(str: string): string {
   if (str.length > 0 && /^[=+\-@\t\r]/.test(str)) {
     return `'${str}`;
   }

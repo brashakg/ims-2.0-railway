@@ -168,7 +168,10 @@ async def send_notification(
 
     # Persist to MongoDB
     db = _get_db()
-    if db:
+    # NOTE: _get_db() returns a RAW pymongo Database on the happy path (Mongo up),
+    # and pymongo Database.__bool__ raises NotImplementedError -- so `if db:` would
+    # crash every outbound-comms call (BUG-032). Compare with None explicitly.
+    if db is not None:
         try:
             coll = db.get_collection("notification_logs")
             coll.insert_one(notification)

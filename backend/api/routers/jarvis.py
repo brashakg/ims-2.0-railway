@@ -2894,7 +2894,12 @@ async def subagent_analyze(
             }
 
         store_id = query.context.get("store_id") if query.context else None
-        result = await SubAgentOrchestrator.process(db, query.message, store_id)
+        # BUG-034: the subagents subscript their db arg (db["orders"], db["stock_units"]),
+        # but get_seeded_db() returns a SeededDatabaseConnection wrapper which is NOT
+        # subscriptable. Pass the underlying pymongo Database / MockDatabase (both support
+        # __getitem__) via .db so the analysis actually runs instead of silently degrading.
+        database = getattr(db, "db", None) or db
+        result = await SubAgentOrchestrator.process(database, query.message, store_id)
         return result
 
     except ImportError:

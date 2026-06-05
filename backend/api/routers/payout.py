@@ -48,6 +48,7 @@ from database.repositories.payout_snapshot_repository import (
 from database.repositories.points_log_repository import PointsLogRepository
 from api.services.points_calculator import aggregate_mtd
 from api.services.payout_calculator import assemble_payout
+from api.services.csv_safe import safe_writer, BOM
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -612,7 +613,10 @@ async def export_csv(
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
     buf = io.StringIO()
-    w = _csv.writer(buf)
+    # BUG-139: neutralize formula-injection in user-controlled cells (staff /
+    # manager names) so an exported name like `=cmd|'/C calc'!A0` can't execute
+    # when the file is opened in Excel.
+    w = safe_writer(buf)
     w.writerow(["IMS 2.0 Pune Incentive Payout"])
     w.writerow(
         [
@@ -707,7 +711,7 @@ async def export_csv(
     )
     buf.seek(0)
     return StreamingResponse(
-        iter([buf.getvalue()]),
+        iter([BOM + buf.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={snapshot_id}.csv"},
     )

@@ -20,6 +20,7 @@ from ..dependencies import (
     get_customer_repository,
     get_order_repository,
     get_prescription_repository,
+    filter_docs_by_store,
 )
 
 router = APIRouter()
@@ -413,7 +414,11 @@ async def get_customer_prescriptions(
 ):
     """Get all prescriptions for a customer with renewal status indicators"""
     try:
-        prescriptions = db.query_customer_prescriptions(customer_id)
+        # BUG-088: clinical Rx is store-scoped PII -- never return another store's
+        # prescriptions to a store-level caller (admins are cross-store).
+        prescriptions = filter_docs_by_store(
+            db.query_customer_prescriptions(customer_id), current_user
+        )
         return [_add_prescription_status(rx) for rx in prescriptions]
     except Exception as e:
         logger.error("CRM operation failed: %s", e)

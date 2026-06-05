@@ -17,6 +17,7 @@ from ..dependencies import (
     get_stock_repository,
     get_customer_repository,
     get_task_repository,
+    validate_store_access,
 )
 
 router = APIRouter(prefix="", tags=["Analytics"])
@@ -301,7 +302,13 @@ async def get_dashboard_summary(
     """
     try:
         start_date, end_date = get_date_range(period)
-        store_id = store_id or current_user.get("active_store_id") or "store-001"
+        # BUG-062: 403 on cross-store access; validate_store_access returns the
+        # caller's active store when store_id is omitted (admins/area-mgrs pass).
+        store_id = (
+            validate_store_access(store_id, current_user)
+            or current_user.get("active_store_id")
+            or "store-001"
+        )
 
         order_repo = get_order_repository()
         stock_repo = get_stock_repository()
@@ -401,7 +408,13 @@ async def get_revenue_trends(
     Returns: Time-series revenue data with YoY comparison
     """
     try:
-        store_id = store_id or current_user.get("active_store_id") or "store-001"
+        # BUG-062: 403 on cross-store access; validate_store_access returns the
+        # caller's active store when store_id is omitted (admins/area-mgrs pass).
+        store_id = (
+            validate_store_access(store_id, current_user)
+            or current_user.get("active_store_id")
+            or "store-001"
+        )
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
@@ -622,7 +635,13 @@ async def get_inventory_intelligence(
     Get inventory intelligence: low stock, dead stock, fast-moving items
     """
     try:
-        store_id = store_id or current_user.get("active_store_id") or "store-001"
+        # BUG-062: 403 on cross-store access; validate_store_access returns the
+        # caller's active store when store_id is omitted (admins/area-mgrs pass).
+        store_id = (
+            validate_store_access(store_id, current_user)
+            or current_user.get("active_store_id")
+            or "store-001"
+        )
 
         stock_repo = get_stock_repository()
         inventory = (
@@ -749,7 +768,13 @@ async def get_customer_insights(
     """
     try:
         start_date, end_date = get_date_range(period)
-        store_id = store_id or current_user.get("active_store_id") or "store-001"
+        # BUG-062: 403 on cross-store access; validate_store_access returns the
+        # caller's active store when store_id is omitted (admins/area-mgrs pass).
+        store_id = (
+            validate_store_access(store_id, current_user)
+            or current_user.get("active_store_id")
+            or "store-001"
+        )
 
         customer_repo = get_customer_repository()
         order_repo = get_order_repository()
@@ -847,7 +872,13 @@ async def get_enterprise_kpis(
     Returns: Revenue, margins, footfall, inventory, products, cash register, store comparison
     """
     try:
-        store_id = store_id or current_user.get("active_store_id") or "store-001"
+        # BUG-062: 403 on cross-store access; validate_store_access returns the
+        # caller's active store when store_id is omitted (admins/area-mgrs pass).
+        store_id = (
+            validate_store_access(store_id, current_user)
+            or current_user.get("active_store_id")
+            or "store-001"
+        )
         start_date, end_date = get_date_range(period)
 
         # Get repositories
