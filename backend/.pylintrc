@@ -1,0 +1,23 @@
+# Pylint configuration for the IMS 2.0 backend.
+#
+# The backend CI job runs the "errors only" lint:
+#   pylint api/ --disable=all --enable=E,F --extension-pkg-allow-list=pydantic \
+#          --disable=no-name-in-module,no-member
+# (.github/workflows/backend-ci.yml). Pylint auto-loads this file from the
+# backend/ working directory, so the settings below apply on top of those flags.
+#
+# ignored-modules: these are OPTIONAL third-party runtime dependencies that are
+# intentionally NOT installed in CI or the base image. They are lazy-imported
+# behind try/except so the app runs fine without them:
+#   - boto3 / botocore : S3 object storage (api/services/object_storage.py)
+#   - rembg / PIL / onnxruntime : self-host image editor (api/services/image_editor.py)
+# Without listing them here, pylint cannot import them at lint time and emits
+# E0401 (import-error), which -- under --enable=E -- fails the whole Backend CI
+# job on main and on every branch cut from it. Listing them tells pylint these
+# modules are expected to be absent, so no import-error / no-member is raised.
+
+[MAIN]
+ignored-modules=boto3,botocore,rembg,PIL,onnxruntime
+
+[TYPECHECK]
+ignored-modules=boto3,botocore,rembg,PIL,onnxruntime
