@@ -76,7 +76,9 @@ def _store():
 
 
 def _reviewer(user: dict) -> str:
-    return user.get("email") or user.get("username") or user.get("user_id") or "superadmin"
+    return (
+        user.get("email") or user.get("username") or user.get("user_id") or "superadmin"
+    )
 
 
 # ============================================================================

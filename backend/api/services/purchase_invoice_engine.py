@@ -39,6 +39,7 @@ try:
     # importable in isolation for unit tests even if the package layout shifts.
     from .org_validation import normalize_state_code as _normalize_state_code
 except Exception:  # pragma: no cover - defensive fallback
+
     def _normalize_state_code(value):
         return value
 

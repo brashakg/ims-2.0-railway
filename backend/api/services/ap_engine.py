@@ -32,7 +32,6 @@ garbage fields coerce to 0 / are skipped so a malformed row never raises.
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-
 # --- TDS sections (rate %) -------------------------------------------------
 # Common sections an optical retailer hits when paying vendors / contractors.
 # Rates are the post-Budget-2024 "normal" rates (no surcharge/cess, payee has

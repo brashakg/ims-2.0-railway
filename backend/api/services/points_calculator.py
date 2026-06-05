@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-
 # 9-category point ceilings — must match Excel exactly.
 CATEGORY_MAX = {
     "attendance": 10,

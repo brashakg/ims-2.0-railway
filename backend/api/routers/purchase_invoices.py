@@ -203,9 +203,11 @@ def _product_state_for_valuation(db, product_ids, store_id=None) -> dict:
             if pid is None:
                 continue
             state[pid] = {
-                "cost_price": p.get("cost_price")
-                if p.get("cost_price") is not None
-                else p.get("landed_cost"),
+                "cost_price": (
+                    p.get("cost_price")
+                    if p.get("cost_price") is not None
+                    else p.get("landed_cost")
+                ),
                 "on_hand_qty": 0,
             }
     except Exception:
@@ -583,7 +585,9 @@ async def list_purchase_invoices(
         rows = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
     except Exception:
         rows = []
-    rows.sort(key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True)
+    rows.sort(
+        key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
+    )
     return {"purchase_invoices": rows, "total": len(rows)}
 
 

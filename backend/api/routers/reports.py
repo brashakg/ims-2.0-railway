@@ -636,7 +636,11 @@ async def tax_code_audit(
         # it when present without excluding global rows.
         query = {
             "is_active": {"$ne": False},
-            "$or": [{"store_id": store_id}, {"store_id": {"$exists": False}}, {"store_id": None}],
+            "$or": [
+                {"store_id": store_id},
+                {"store_id": {"$exists": False}},
+                {"store_id": None},
+            ],
         }
 
     data = []
@@ -726,7 +730,6 @@ async def tax_code_audit(
             "hsn_mismatch": hsn_mismatch,
         },
     }
-
 
 
 @router.get("/clinical/eye-tests")
@@ -1006,7 +1009,9 @@ async def gst_report(
 
     for o in orders:
         taxable, tax = _order_taxable_and_tax(o)
-        customer_state = cust_state_map.get(str(o.get("customer_id", ""))) or store_state
+        customer_state = (
+            cust_state_map.get(str(o.get("customer_id", ""))) or store_state
+        )
         is_inter_state = bool(
             store_state
             and customer_state
@@ -1034,9 +1039,7 @@ async def gst_report(
                 "cgst": cgst,
                 "sgst": sgst,
                 "igst": igst,
-                "total": float(
-                    o.get("grand_total", o.get("total_amount", 0)) or 0
-                ),
+                "total": float(o.get("grand_total", o.get("total_amount", 0)) or 0),
             }
         )
 
@@ -4083,7 +4086,14 @@ async def growth_blueprint(
 # idempotent event; a second close of the same day is rejected (409), not
 # silently re-written.
 
-_DAY_END_CLOSE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT", "SALES_CASHIER", "CASHIER")
+_DAY_END_CLOSE_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "ACCOUNTANT",
+    "SALES_CASHIER",
+    "CASHIER",
+)
 
 
 class DayEndCloseBody(BaseModel):
@@ -4092,7 +4102,9 @@ class DayEndCloseBody(BaseModel):
     server-side (never trusted from the client)."""
 
     date: str = Field(..., description="Business date being closed (YYYY-MM-DD)")
-    store_id: Optional[str] = Field(None, description="Store; defaults to the user's active store")
+    store_id: Optional[str] = Field(
+        None, description="Store; defaults to the user's active store"
+    )
     closing_cash: float = Field(0.0, description="Physically counted cash in drawer")
     system_cash: float = Field(0.0, description="System-expected cash (from POS)")
     notes: Optional[str] = Field(None, max_length=2000)
@@ -4143,7 +4155,9 @@ async def create_day_end_close(
 
     sid = validate_store_access(body.store_id, current_user)
     if not sid:
-        raise HTTPException(status_code=400, detail="No store selected for day-end close")
+        raise HTTPException(
+            status_code=400, detail="No store selected for day-end close"
+        )
     db = get_db()
     if db is None or not getattr(db, "is_connected", False):
         raise HTTPException(status_code=503, detail="Database not available")
@@ -4186,7 +4200,9 @@ async def create_day_end_close(
                     "close": _day_end_doc_public(winner),
                 },
             )
-        raise HTTPException(status_code=500, detail=f"Failed to record day-end close: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to record day-end close: {e}"
+        )
 
     # Audit (fail-soft: an audit hiccup must not undo the business record).
     try:
@@ -4211,4 +4227,9 @@ async def create_day_end_close(
     except Exception:
         pass
 
-    return {"closed": True, "store_id": sid, "date": body.date, "close": _day_end_doc_public(doc)}
+    return {
+        "closed": True,
+        "store_id": sid,
+        "date": body.date,
+        "close": _day_end_doc_public(doc),
+    }

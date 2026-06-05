@@ -897,7 +897,9 @@ class PricingInput(BaseModel):
     # negative offer is `offer or mrp`-truthy so it was persisted verbatim).
     offer_price: Optional[float] = Field(default=None, gt=0)
     cost_price: Optional[float] = Field(default=None, gt=0)
-    discount_category: str = "MASS"  # MASS / PREMIUM / LUXURY / SERVICE / NON_DISCOUNTABLE
+    discount_category: str = (
+        "MASS"  # MASS / PREMIUM / LUXURY / SERVICE / NON_DISCOUNTABLE
+    )
 
     @field_validator("discount_category")
     @classmethod
@@ -1130,9 +1132,7 @@ def _next_sku_counter(prefix: str, db=None) -> int:
     return counter
 
 
-def generate_sku(
-    category: ProductCategory, attributes: Dict[str, Any], db=None
-) -> str:
+def generate_sku(category: ProductCategory, attributes: Dict[str, Any], db=None) -> str:
     """Generate a unique SKU from category + attributes.
 
     Pass `db` so the numeric counter is allocated ATOMICALLY + PERSISTENTLY
@@ -1343,9 +1343,7 @@ def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
     if mrp is not None and offer_price is not None:
         verdict = evaluate_offer_price(mrp, offer_price)
         if verdict["reason"] == "MRP_BELOW_OFFER":
-            raise HTTPException(
-                status_code=400, detail="Offer price cannot exceed MRP"
-            )
+            raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
 
     category_code = product.category.value
     if product.gst_rate is not None:

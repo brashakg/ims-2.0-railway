@@ -54,8 +54,13 @@ _DEFAULT_SAFETY_BUFFER = 0
 # or virtual lens line never triggers a pointless Shopify lookup.
 _VIRTUAL_PID_PREFIXES = ("custom-", "lens-", "lens-sug-")
 _NON_SERIALIZED_ITEM_TYPES = {
-    "SERVICE", "EYE_TEST", "EYE_EXAM", "EYE_CHECKUP",
-    "CONSULT", "CONSULTATION", "OPTOMETRY",
+    "SERVICE",
+    "EYE_TEST",
+    "EYE_EXAM",
+    "EYE_CHECKUP",
+    "CONSULT",
+    "CONSULTATION",
+    "OPTOMETRY",
 }
 
 

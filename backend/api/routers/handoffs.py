@@ -48,7 +48,6 @@ from ..services.file_store import (
     MAX_FILE_SIZE_BYTES,
 )
 
-
 router = APIRouter()
 logger = logging.getLogger(__name__)
 

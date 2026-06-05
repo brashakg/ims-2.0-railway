@@ -164,7 +164,9 @@ def _parse_dob(value: Any) -> Optional[date]:
     return None
 
 
-def _audience_row(customer: Dict[str, Any], extra_vars: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _audience_row(
+    customer: Dict[str, Any], extra_vars: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Build the minimal bulk-send recipient row from a customer doc."""
     name = customer.get("name", "") or "Customer"
     variables: Dict[str, Any] = {"name": name, "customer_name": name}
@@ -193,7 +195,10 @@ def _customers_query(store_id: Optional[str]) -> Dict[str, Any]:
 
 
 def _resolve_rx_expiry(
-    db, store_id: Optional[str], window_days: int = RX_EXPIRY_WINDOW_DAYS, now: Optional[datetime] = None
+    db,
+    store_id: Optional[str],
+    window_days: int = RX_EXPIRY_WINDOW_DAYS,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Customers with a prescription expiring within `window_days`.
 
@@ -235,7 +240,10 @@ def _resolve_rx_expiry(
 
 
 def _resolve_birthday(
-    db, store_id: Optional[str], window_days: int = BIRTHDAY_WINDOW_DAYS, now: Optional[datetime] = None
+    db,
+    store_id: Optional[str],
+    window_days: int = BIRTHDAY_WINDOW_DAYS,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Customers whose birthday (DOB month/day) lands within the next
     `window_days` days, wrapping across a year boundary."""
@@ -258,9 +266,7 @@ def _resolve_birthday(
     return rows
 
 
-def _customers_with_recent_order(
-    db, store_id: Optional[str], since: datetime
-) -> set:
+def _customers_with_recent_order(db, store_id: Optional[str], since: datetime) -> set:
     """Set of customer_ids with at least one order created at/after `since`."""
     order_coll = db.get_collection("orders")
     q: Dict[str, Any] = {}
@@ -271,7 +277,9 @@ def _customers_with_recent_order(
     # datetime $gte, so we additionally post-filter below for safety).
     recent_ids: set = set()
     try:
-        cursor = order_coll.find(q, {"customer_id": 1, "created_at": 1}).limit(_SCAN_LIMIT)
+        cursor = order_coll.find(q, {"customer_id": 1, "created_at": 1}).limit(
+            _SCAN_LIMIT
+        )
         for o in cursor:
             cid = o.get("customer_id")
             if not cid:
@@ -289,7 +297,10 @@ def _customers_with_recent_order(
 
 
 def _resolve_winback(
-    db, store_id: Optional[str], inactive_months: int = WINBACK_INACTIVE_MONTHS, now: Optional[datetime] = None
+    db,
+    store_id: Optional[str],
+    inactive_months: int = WINBACK_INACTIVE_MONTHS,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Customers with NO order in the last `inactive_months` months."""
     now = now or datetime.now()
@@ -307,7 +318,10 @@ def _resolve_winback(
 
 
 def _resolve_recent_buyers(
-    db, store_id: Optional[str], recent_days: int = RECENT_BUYER_DAYS, now: Optional[datetime] = None
+    db,
+    store_id: Optional[str],
+    recent_days: int = RECENT_BUYER_DAYS,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Customers who placed an order in the last `recent_days` days."""
     now = now or datetime.now()
@@ -359,7 +373,10 @@ _RESOLVERS = {
 
 
 def resolve_segment(
-    db, key: str, store_id: Optional[str] = None, params: Optional[Dict[str, Any]] = None
+    db,
+    key: str,
+    store_id: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Resolve a segment key to its audience (list of bulk-send recipient rows).
 
@@ -396,7 +413,10 @@ def resolve_segment(
 
 
 def count_segment(
-    db, key: str, store_id: Optional[str] = None, params: Optional[Dict[str, Any]] = None
+    db,
+    key: str,
+    store_id: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Live audience size for a segment. Fail-soft -> 0."""
     return len(resolve_segment(db, key, store_id=store_id, params=params))
@@ -416,7 +436,13 @@ def preview_segment(
     for r in audience[:sample_size]:
         phone = r.get("phone", "") or ""
         masked = ("*" * max(0, len(phone) - 4) + phone[-4:]) if phone else ""
-        sample.append({"customer_id": r.get("customer_id", ""), "name": r.get("name", ""), "phone_masked": masked})
+        sample.append(
+            {
+                "customer_id": r.get("customer_id", ""),
+                "name": r.get("name", ""),
+                "phone_masked": masked,
+            }
+        )
     meta = segment_def(key) or {}
     return {
         "key": key,

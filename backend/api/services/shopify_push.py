@@ -42,6 +42,7 @@ Shopify; tests monkeypatch it so no real Shopify call ever happens in a default
 or test code path (belt-and-suspenders on top of the gate, which already blocks
 the live branch by default).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -148,7 +149,10 @@ def _live_or_reason(db) -> Tuple[bool, Optional[str]]:
     """Decide LIVE vs SIMULATED and, when SIMULATED, WHY. The three gates are
     checked in a fixed order so the reason is deterministic + actionable."""
     if not ims_shopify_writes_enabled():
-        return False, "writes_disabled (IMS_SHOPIFY_WRITES off -- BVI is the single writer)"
+        return (
+            False,
+            "writes_disabled (IMS_SHOPIFY_WRITES off -- BVI is the single writer)",
+        )
     if dispatch_mode() != "live":
         return False, f"dispatch_mode={dispatch_mode()} (need live)"
     if not _has_shopify_creds(db):
@@ -178,9 +182,14 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         # Should never happen (gate checked creds) but guard anyway.
         raise ValueError("shopify creds missing at GraphQL call time")
     url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-    headers = {"X-Shopify-Access-Token": access_token, "content-type": "application/json"}
+    headers = {
+        "X-Shopify-Access-Token": access_token,
+        "content-type": "application/json",
+    }
     async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
-        resp = await client.post(url, headers=headers, json={"query": query, "variables": variables})
+        resp = await client.post(
+            url, headers=headers, json={"query": query, "variables": variables}
+        )
     if resp.status_code not in (200, 201):
         raise ValueError(f"status {resp.status_code}: {resp.text[:200]}")
     return resp.json() or {}
@@ -284,7 +293,9 @@ mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
 # ===========================================================================
 
 
-def build_product_input(product: Dict[str, Any], variants: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_product_input(
+    product: Dict[str, Any], variants: List[Dict[str, Any]]
+) -> Dict[str, Any]:
     """Build a Shopify ProductInput from a catalog_products doc (+ its ecom
     sub-doc) and its catalog_variants. The Shopify gid (if already mapped) is set
     so the SAME object is updated rather than duplicated."""
@@ -337,9 +348,13 @@ def _derive_options(variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     sizes = [v.get("option_size") for v in variants if v.get("option_size")]
     options: List[Dict[str, Any]] = []
     if colors:
-        options.append({"name": "Color", "values": [{"name": c} for c in _dedupe(colors)]})
+        options.append(
+            {"name": "Color", "values": [{"name": c} for c in _dedupe(colors)]}
+        )
     if sizes:
-        options.append({"name": "Size", "values": [{"name": s} for s in _dedupe(sizes)]})
+        options.append(
+            {"name": "Size", "values": [{"name": s} for s in _dedupe(sizes)]}
+        )
     return options
 
 
@@ -413,7 +428,9 @@ def _build_rule_set(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not col:
             continue
         rel = _RULE_RELATION.get(str(r.get("relation") or "EQUALS").upper(), "EQUALS")
-        out.append({"column": col, "relation": rel, "condition": str(r.get("value") or "")})
+        out.append(
+            {"column": col, "relation": rel, "condition": str(r.get("value") or "")}
+        )
     return out
 
 
@@ -446,11 +463,13 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         src = img.get("edited_url") or img.get("url")
         if not src:
             continue
-        out.append({
-            "originalSource": src,
-            "alt": img.get("alt_text") or "",
-            "mediaContentType": "IMAGE",
-        })
+        out.append(
+            {
+                "originalSource": src,
+                "alt": img.get("alt_text") or "",
+                "mediaContentType": "IMAGE",
+            }
+        )
     return out
 
 
@@ -484,22 +503,32 @@ def _writeback_product(db, product_id: str, shopify_id: str) -> None:
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
 
 
-def _writeback_simple(db, collection_name: str, id_field: str, doc_id: str,
-                      shopify_field: str, shopify_id: str) -> None:
+def _writeback_simple(
+    db,
+    collection_name: str,
+    id_field: str,
+    doc_id: str,
+    shopify_field: str,
+    shopify_id: str,
+) -> None:
     """Generic gid write-back for collection/menu docs: set the shopify id field,
     clear locally_modified, stamp last_synced_at. Fail-soft."""
     try:
         coll = db[collection_name]
         coll.update_one(
             {id_field: doc_id},
-            {"$set": {
-                shopify_field: shopify_id,
-                "locally_modified": False,
-                "last_synced_at": _now(),
-            }},
+            {
+                "$set": {
+                    shopify_field: shopify_id,
+                    "locally_modified": False,
+                    "last_synced_at": _now(),
+                }
+            },
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"[SHOPIFY_PUSH] {collection_name} write-back failed {doc_id}: {e}")
+        logger.warning(
+            f"[SHOPIFY_PUSH] {collection_name} write-back failed {doc_id}: {e}"
+        )
 
 
 # ===========================================================================
@@ -507,8 +536,9 @@ def _writeback_simple(db, collection_name: str, id_field: str, doc_id: str,
 # ===========================================================================
 
 
-async def push_product(db, product: Dict[str, Any],
-                       variants: Optional[List[Dict[str, Any]]] = None) -> PushResult:
+async def push_product(
+    db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+) -> PushResult:
     """Push a catalog product (+ its ecom sub-doc + variants) to Shopify.
 
     DARK by default -> returns a SIMULATED dry-run plan with the full ProductInput
@@ -525,8 +555,14 @@ async def push_product(db, product: Dict[str, Any],
     live, reason = _live_or_reason(db)
     if not live:
         return PushResult(
-            mode=MODE_SIMULATED, entity="product", action=action, target_id=pid,
-            ok=True, shopify_id=existing_gid, payload=payload, reason=reason,
+            mode=MODE_SIMULATED,
+            entity="product",
+            action=action,
+            target_id=pid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+            reason=reason,
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -535,17 +571,38 @@ async def push_product(db, product: Dict[str, Any],
         body = await _graphql(db, query, {"input": payload})
         err = _user_errors(body, field_name)
         if err:
-            return PushResult(mode=MODE_LIVE, entity="product", action=action,
-                              target_id=pid, ok=False, payload=payload, error=err)
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action=action,
+                target_id=pid,
+                ok=False,
+                payload=payload,
+                error=err,
+            )
         prod = ((body.get("data") or {}).get(field_name) or {}).get("product") or {}
         new_gid = prod.get("id") or existing_gid
         if new_gid and pid:
             _writeback_product(db, pid, new_gid)
-        return PushResult(mode=MODE_LIVE, entity="product", action=action,
-                          target_id=pid, ok=True, shopify_id=new_gid, payload=payload)
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="product",
+            action=action,
+            target_id=pid,
+            ok=True,
+            shopify_id=new_gid,
+            payload=payload,
+        )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
-        return PushResult(mode=MODE_LIVE, entity="product", action=action,
-                          target_id=pid, ok=False, payload=payload, error=str(e))
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="product",
+            action=action,
+            target_id=pid,
+            ok=False,
+            payload=payload,
+            error=str(e),
+        )
 
 
 async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
@@ -560,8 +617,14 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     live, reason = _live_or_reason(db)
     if not live:
         return PushResult(
-            mode=MODE_SIMULATED, entity="collection", action=action, target_id=cid,
-            ok=True, shopify_id=existing_gid, payload=payload, reason=reason,
+            mode=MODE_SIMULATED,
+            entity="collection",
+            action=action,
+            target_id=cid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+            reason=reason,
         )
 
     query = _COLLECTION_UPDATE if existing_gid else _COLLECTION_CREATE
@@ -570,18 +633,47 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
         body = await _graphql(db, query, {"input": payload})
         err = _user_errors(body, field_name)
         if err:
-            return PushResult(mode=MODE_LIVE, entity="collection", action=action,
-                              target_id=cid, ok=False, payload=payload, error=err)
-        coll_obj = ((body.get("data") or {}).get(field_name) or {}).get("collection") or {}
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="collection",
+                action=action,
+                target_id=cid,
+                ok=False,
+                payload=payload,
+                error=err,
+            )
+        coll_obj = ((body.get("data") or {}).get(field_name) or {}).get(
+            "collection"
+        ) or {}
         new_gid = coll_obj.get("id") or existing_gid
         if new_gid and cid:
-            _writeback_simple(db, "ecom_collections", "collection_id", cid,
-                              "shopify_collection_id", new_gid)
-        return PushResult(mode=MODE_LIVE, entity="collection", action=action,
-                          target_id=cid, ok=True, shopify_id=new_gid, payload=payload)
+            _writeback_simple(
+                db,
+                "ecom_collections",
+                "collection_id",
+                cid,
+                "shopify_collection_id",
+                new_gid,
+            )
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="collection",
+            action=action,
+            target_id=cid,
+            ok=True,
+            shopify_id=new_gid,
+            payload=payload,
+        )
     except Exception as e:  # noqa: BLE001
-        return PushResult(mode=MODE_LIVE, entity="collection", action=action,
-                          target_id=cid, ok=False, payload=payload, error=str(e))
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="collection",
+            action=action,
+            target_id=cid,
+            ok=False,
+            payload=payload,
+            error=str(e),
+        )
 
 
 async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
@@ -601,14 +693,24 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
     live, reason = _live_or_reason(db)
     if not live:
         return PushResult(
-            mode=MODE_SIMULATED, entity="menu", action=action, target_id=mid,
-            ok=True, shopify_id=existing_gid, payload=payload, reason=reason,
+            mode=MODE_SIMULATED,
+            entity="menu",
+            action=action,
+            target_id=mid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+            reason=reason,
         )
 
     if existing_gid:
         query, field_name = _MENU_UPDATE, "menuUpdate"
-        variables = {"id": _as_shopify_gid(existing_gid, "Menu"),
-                     "title": title, "handle": handle, "items": items}
+        variables = {
+            "id": _as_shopify_gid(existing_gid, "Menu"),
+            "title": title,
+            "handle": handle,
+            "items": items,
+        }
     else:
         query, field_name = _MENU_CREATE, "menuCreate"
         variables = {"title": title, "handle": handle, "items": items}
@@ -616,18 +718,40 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
         body = await _graphql(db, query, variables)
         err = _user_errors(body, field_name)
         if err:
-            return PushResult(mode=MODE_LIVE, entity="menu", action=action,
-                              target_id=mid, ok=False, payload=payload, error=err)
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="menu",
+                action=action,
+                target_id=mid,
+                ok=False,
+                payload=payload,
+                error=err,
+            )
         menu_obj = ((body.get("data") or {}).get(field_name) or {}).get("menu") or {}
         new_gid = menu_obj.get("id") or existing_gid
         if new_gid and mid:
-            _writeback_simple(db, "ecom_menus", "menu_id", mid,
-                              "shopify_menu_id", new_gid)
-        return PushResult(mode=MODE_LIVE, entity="menu", action=action,
-                          target_id=mid, ok=True, shopify_id=new_gid, payload=payload)
+            _writeback_simple(
+                db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid
+            )
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="menu",
+            action=action,
+            target_id=mid,
+            ok=True,
+            shopify_id=new_gid,
+            payload=payload,
+        )
     except Exception as e:  # noqa: BLE001
-        return PushResult(mode=MODE_LIVE, entity="menu", action=action,
-                          target_id=mid, ok=False, payload=payload, error=str(e))
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="menu",
+            action=action,
+            target_id=mid,
+            ok=False,
+            payload=payload,
+            error=str(e),
+        )
 
 
 async def push_image(db, image: Dict[str, Any]) -> PushResult:
@@ -644,8 +768,12 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
 
     if str(image.get("status") or "").upper() != "APPROVED":
         return PushResult(
-            mode=MODE_SIMULATED, entity="image", action="skip", target_id=iid,
-            ok=False, payload={"status": image.get("status")},
+            mode=MODE_SIMULATED,
+            entity="image",
+            action="skip",
+            target_id=iid,
+            ok=False,
+            payload={"status": image.get("status")},
             error="only APPROVED images are push-eligible",
         )
 
@@ -658,34 +786,76 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     live, reason = _live_or_reason(db)
     if not live:
         return PushResult(
-            mode=MODE_SIMULATED, entity="image", action=action, target_id=iid,
-            ok=True, shopify_id=existing_gid, payload=payload, reason=reason,
+            mode=MODE_SIMULATED,
+            entity="image",
+            action=action,
+            target_id=iid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+            reason=reason,
         )
 
     if not product_gid:
         return PushResult(
-            mode=MODE_LIVE, entity="image", action="skip", target_id=iid, ok=False,
+            mode=MODE_LIVE,
+            entity="image",
+            action="skip",
+            target_id=iid,
+            ok=False,
             payload=payload,
             error="parent product not on Shopify yet (push the product first)",
         )
     if not media:
-        return PushResult(mode=MODE_LIVE, entity="image", action="skip", target_id=iid,
-                          ok=False, payload=payload, error="no image url to push")
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="image",
+            action="skip",
+            target_id=iid,
+            ok=False,
+            payload=payload,
+            error="no image url to push",
+        )
     try:
-        body = await _graphql(db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media})
+        body = await _graphql(
+            db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
+        )
         err = _user_errors_media(body)
         if err:
-            return PushResult(mode=MODE_LIVE, entity="image", action=action,
-                              target_id=iid, ok=False, payload=payload, error=err)
-        media_nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="image",
+                action=action,
+                target_id=iid,
+                ok=False,
+                payload=payload,
+                error=err,
+            )
+        media_nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get(
+            "media"
+        ) or []
         new_gid = (media_nodes[0].get("id") if media_nodes else None) or existing_gid
         if new_gid and iid:
             _writeback_image(db, iid, new_gid)
-        return PushResult(mode=MODE_LIVE, entity="image", action=action,
-                          target_id=iid, ok=True, shopify_id=new_gid, payload=payload)
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="image",
+            action=action,
+            target_id=iid,
+            ok=True,
+            shopify_id=new_gid,
+            payload=payload,
+        )
     except Exception as e:  # noqa: BLE001
-        return PushResult(mode=MODE_LIVE, entity="image", action=action,
-                          target_id=iid, ok=False, payload=payload, error=str(e))
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="image",
+            action=action,
+            target_id=iid,
+            ok=False,
+            payload=payload,
+            error=str(e),
+        )
 
 
 def _user_errors_media(body: Dict[str, Any]) -> Optional[str]:

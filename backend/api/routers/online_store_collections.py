@@ -29,6 +29,7 @@ Routes:
 Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; the resolver
 returns an empty set rather than 500.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -53,6 +54,7 @@ _RESOLVE_MAX = 1000
 # ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/catalog.py + online_store.py)
 # ---------------------------------------------------------------------------
+
 
 def _get_db():
     """Underlying DB object (real pymongo Database or seeded MockDatabase) when
@@ -148,6 +150,7 @@ def _with_id(doc):
 # Pydantic payloads
 # ---------------------------------------------------------------------------
 
+
 class SmartRule(BaseModel):
     field: str = Field(..., description="Logical field, e.g. brand / category / tag")
     relation: str = Field("EQUALS", description="EQUALS | CONTAINS")
@@ -179,6 +182,7 @@ class CollectionCreate(BaseModel):
 
 class CollectionUpdate(BaseModel):
     """All fields optional -- only provided keys are patched."""
+
     title: Optional[str] = None
     handle: Optional[str] = None
     description: Optional[str] = None
@@ -214,12 +218,15 @@ class ReorderProducts(BaseModel):
 # Validation helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_type(collection_type: Optional[str]) -> Optional[str]:
     if collection_type is None:
         return None
     t = collection_type.strip().upper()
     if t not in ("CUSTOM", "SMART"):
-        raise HTTPException(status_code=400, detail="collection_type must be CUSTOM or SMART")
+        raise HTTPException(
+            status_code=400, detail="collection_type must be CUSTOM or SMART"
+        )
     return t
 
 
@@ -230,6 +237,7 @@ def _rules_to_dicts(rules: Optional[List[SmartRule]]) -> List[Dict]:
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
+
 
 @router.get("")
 async def list_collections(
@@ -325,7 +333,9 @@ async def update_collection(
         new_handle = new_handle.strip()
         clash = repo.get_by_handle(new_handle)
         if clash is not None and clash.get("collection_id") != collection_id:
-            raise HTTPException(status_code=409, detail=f"handle already exists: {new_handle}")
+            raise HTTPException(
+                status_code=409, detail=f"handle already exists: {new_handle}"
+            )
         data["handle"] = new_handle
 
     if not data:
@@ -353,6 +363,7 @@ async def delete_collection(
 # ---------------------------------------------------------------------------
 # Manual membership (embedded ordered SKU array)
 # ---------------------------------------------------------------------------
+
 
 @router.post("/{collection_id}/products")
 async def add_collection_product(
@@ -461,6 +472,7 @@ async def list_collection_products(
 # ---------------------------------------------------------------------------
 # SMART rule resolution
 # ---------------------------------------------------------------------------
+
 
 @router.get("/{collection_id}/resolved-products")
 async def resolved_products(

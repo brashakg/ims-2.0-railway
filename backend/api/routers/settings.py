@@ -71,7 +71,7 @@ try:
     from cryptography.fernet import Fernet as _Fernet, InvalidToken as _InvalidToken
 
     _fernet_raw_key = hashlib.sha256(_CRED_SECRET.encode()).digest()  # 32 bytes
-    _fernet_key = base64.urlsafe_b64encode(_fernet_raw_key)           # valid Fernet key
+    _fernet_key = base64.urlsafe_b64encode(_fernet_raw_key)  # valid Fernet key
     _fernet_instance: "_Fernet | None" = _Fernet(_fernet_key)
     del _fernet_raw_key, _fernet_key  # don't leave derived key material in module scope
 except Exception as _fernet_init_err:  # pragma: no cover
@@ -153,10 +153,14 @@ def _decrypt_value(ciphertext: str) -> str:
         if _fernet_instance is None:
             # cryptography not available -- return as-is; will look garbled but
             # avoids a hard crash.
-            logger.warning("[CRED] Cannot decrypt Fernet value: cryptography not available.")
+            logger.warning(
+                "[CRED] Cannot decrypt Fernet value: cryptography not available."
+            )
             return ciphertext
         try:
-            return _fernet_instance.decrypt(ciphertext[7:].encode("ascii")).decode("utf-8")
+            return _fernet_instance.decrypt(ciphertext[7:].encode("ascii")).decode(
+                "utf-8"
+            )
         except _InvalidToken:
             logger.warning("[CRED] Fernet decryption failed (bad token or wrong key).")
             return ciphertext
@@ -165,7 +169,9 @@ def _decrypt_value(ciphertext: str) -> str:
         try:
             raw = base64.b64decode(ciphertext[4:])
             key = hashlib.sha256(_CRED_SECRET.encode()).digest()
-            return bytes(b ^ key[i % len(key)] for i, b in enumerate(raw)).decode("utf-8")
+            return bytes(b ^ key[i % len(key)] for i, b in enumerate(raw)).decode(
+                "utf-8"
+            )
         except Exception:
             return ciphertext  # Corrupt -- return as-is
     return ciphertext  # Unencrypted legacy value
@@ -495,9 +501,7 @@ class PrinterSettings(BaseModel):
     @classmethod
     def _validate_label_size(cls, v: str) -> str:
         if v not in _VALID_LABEL_SIZES:
-            raise ValueError(
-                f"label_size must be one of {sorted(_VALID_LABEL_SIZES)}"
-            )
+            raise ValueError(f"label_size must be one of {sorted(_VALID_LABEL_SIZES)}")
         return v
 
 
@@ -677,7 +681,9 @@ async def update_preferences(
     actually changed anything. Fail-soft: with no DB the call still 200s with a
     '(no DB)' marker."""
     user_id = current_user.get("user_id")
-    payload = {k: v for k, v in (preferences or {}).items() if k not in ("_id", "user_id")}
+    payload = {
+        k: v for k, v in (preferences or {}).items() if k not in ("_id", "user_id")
+    }
     collection = _get_settings_collection("user_preferences")
     if collection is not None and user_id:
         to_write = dict(payload)
@@ -1667,8 +1673,18 @@ def _audit_changes(log: dict):
             return changes
     pv, nv = log.get("previous_value"), log.get("new_value")
     scalar = (str, int, float, bool, type(None))
-    if isinstance(pv, scalar) and isinstance(nv, scalar) and not (pv is None and nv is None):
-        return [{"field": log.get("entity_type") or "value", "old_value": pv, "new_value": nv}]
+    if (
+        isinstance(pv, scalar)
+        and isinstance(nv, scalar)
+        and not (pv is None and nv is None)
+    ):
+        return [
+            {
+                "field": log.get("entity_type") or "value",
+                "old_value": pv,
+                "new_value": nv,
+            }
+        ]
     return None
 
 
@@ -1776,7 +1792,9 @@ async def get_audit_logs_summary(current_user: dict = Depends(get_current_user))
         if order_repo is not None:
             start = datetime.combine(today, datetime.min.time())
             end = datetime.combine(today, datetime.max.time())
-            orders_created = order_repo.count({"created_at": {"$gte": start, "$lte": end}})
+            orders_created = order_repo.count(
+                {"created_at": {"$gte": start, "$lte": end}}
+            )
     except Exception:  # noqa: BLE001 - a summary stat must never 500 the screen
         orders_created = 0
 

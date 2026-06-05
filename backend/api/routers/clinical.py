@@ -51,7 +51,8 @@ def _audit_clinical(
                 "entity_id": entity_id,
                 "store_id": store_id or current_user.get("active_store_id"),
                 "user_id": current_user.get("user_id"),
-                "user_name": current_user.get("full_name") or current_user.get("username"),
+                "user_name": current_user.get("full_name")
+                or current_user.get("username"),
                 "timestamp": datetime.utcnow(),
                 "severity": "INFO",
                 "source": "domain",
@@ -60,6 +61,7 @@ def _audit_clinical(
         )
     except Exception:  # noqa: BLE001 - audit must never break the clinical write
         pass
+
 
 # Roles permitted to mutate the optometry queue + eye-test records. Mirrors the
 # frontend Clinical route guard. SUPERADMIN auto-passes via require_roles.
@@ -124,7 +126,9 @@ class ClinicalFindings(BaseModel):
     chief_complaint: Optional[str] = Field(None, alias="chiefComplaint")
     history: Optional[str] = None
     diagnosis: Optional[str] = None
-    colour_vision: Optional[str] = Field(None, alias="colourVision")  # e.g. "Normal", "Ishihara 14/14"
+    colour_vision: Optional[str] = Field(
+        None, alias="colourVision"
+    )  # e.g. "Normal", "Ishihara 14/14"
     cover_test: Optional[str] = Field(None, alias="coverTest")
     dominant_eye: Optional[str] = Field(None, alias="dominantEye")  # "RIGHT"/"LEFT"
     additional_notes: Optional[str] = Field(None, alias="additionalNotes")
@@ -752,10 +756,14 @@ async def complete_test(
                     # billable Rx (audit P1). A genuine plano "0" is preserved.
                     "right_eye": {
                         "sph": str(
-                            data.right_eye.get("sphere") or data.right_eye.get("sph") or ""
+                            data.right_eye.get("sphere")
+                            or data.right_eye.get("sph")
+                            or ""
                         ),
                         "cyl": str(
-                            data.right_eye.get("cylinder") or data.right_eye.get("cyl") or ""
+                            data.right_eye.get("cylinder")
+                            or data.right_eye.get("cyl")
+                            or ""
                         ),
                         "axis": data.right_eye.get("axis"),
                         "add": str(data.right_eye.get("add") or ""),
@@ -770,10 +778,14 @@ async def complete_test(
                     },
                     "left_eye": {
                         "sph": str(
-                            data.left_eye.get("sphere") or data.left_eye.get("sph") or ""
+                            data.left_eye.get("sphere")
+                            or data.left_eye.get("sph")
+                            or ""
                         ),
                         "cyl": str(
-                            data.left_eye.get("cylinder") or data.left_eye.get("cyl") or ""
+                            data.left_eye.get("cylinder")
+                            or data.left_eye.get("cyl")
+                            or ""
                         ),
                         "axis": data.left_eye.get("axis"),
                         "add": str(data.left_eye.get("add") or ""),

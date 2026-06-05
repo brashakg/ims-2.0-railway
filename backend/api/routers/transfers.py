@@ -453,8 +453,10 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
 
         # The units to re-home are exactly those SHIP marked TRANSFERRED for this
         # transfer (stable, ordered pool); never mint new ones.
-        pool = _transferred_pool(stock_repo, transfer, product_id, line.get("shipped_stock_ids"))
-        movable = pool[already:already + want]
+        pool = _transferred_pool(
+            stock_repo, transfer, product_id, line.get("shipped_stock_ids")
+        )
+        movable = pool[already : already + want]
 
         received_ids: List[str] = list(line.get("received_stock_ids", []))
         moved_here = 0
@@ -819,14 +821,15 @@ async def approve_transfer(
     )
     transfer["updated_at"] = datetime.now().isoformat()
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": new_status,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": approval.rejection_reason if not approval.approved else "Approved",
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -858,14 +861,15 @@ async def start_picking(
     transfer["picking_by"] = current_user.get("user_id")
     transfer["updated_at"] = datetime.now().isoformat()
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": TransferStatus.PICKING,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": "Picking started",
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -907,14 +911,15 @@ async def complete_picking(
     transfer["picking_completed_at"] = datetime.now().isoformat()
     transfer["updated_at"] = datetime.now().isoformat()
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": TransferStatus.PACKED,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": "Picking completed, items packed",
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -974,14 +979,15 @@ async def ship_transfer(
     # `stock_shipped` flag set inside the helper, so a re-POST won't double-move.
     transfer = _apply_ship_stock_move(transfer)
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": TransferStatus.IN_TRANSIT,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": f"Shipped via {transfer.get('courier_name', 'carrier')}",
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -1071,14 +1077,15 @@ async def receive_transfer(
     transfer["total_damaged"] = total_damaged
     transfer["updated_at"] = datetime.now().isoformat()
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": new_status,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": f"Received {total_received} items, {total_damaged} damaged",
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -1124,14 +1131,15 @@ async def complete_transfer(
     transfer["completion_notes"] = notes
     transfer["updated_at"] = datetime.now().isoformat()
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": TransferStatus.COMPLETED,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": notes or "Transfer completed",
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -1176,14 +1184,15 @@ async def cancel_transfer(
     transfer["cancellation_reason"] = reason
     transfer["updated_at"] = datetime.now().isoformat()
 
-    _append_status_history(transfer,
+    _append_status_history(
+        transfer,
         {
             "status": TransferStatus.CANCELLED,
             "timestamp": datetime.now().isoformat(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": reason,
-        }
+        },
     )
 
     _save_transfer(transfer)
@@ -1371,7 +1380,9 @@ def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
     except Exception as exc:  # noqa: BLE001 - fail-soft
         logger.warning(
             "[TRANSFER] GSTIN lookup failed entity=%s state=%s: %s",
-            entity_id, state_code, exc,
+            entity_id,
+            state_code,
+            exc,
         )
     return ""
 
@@ -1443,7 +1454,13 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         # Fall back: compute from items if total_value is zero.
         if transfer_value == 0:
             for item in transfer.get("items") or []:
-                qty = int(float(item.get("quantity_received") or item.get("quantity_requested") or 0))
+                qty = int(
+                    float(
+                        item.get("quantity_received")
+                        or item.get("quantity_requested")
+                        or 0
+                    )
+                )
                 cost = float(item.get("unit_cost") or 0)
                 transfer_value += qty * cost
         transfer_value = round(transfer_value, 2)
@@ -1573,14 +1590,15 @@ async def bulk_approve_transfers(
         transfer["approved_at"] = datetime.now().isoformat()
         transfer["updated_at"] = datetime.now().isoformat()
 
-        _append_status_history(transfer,
+        _append_status_history(
+            transfer,
             {
                 "status": TransferStatus.APPROVED,
                 "timestamp": datetime.now().isoformat(),
                 "user_id": current_user.get("user_id"),
                 "user_name": current_user.get("username"),
                 "notes": "Bulk approved",
-            }
+            },
         )
 
         _save_transfer(transfer)

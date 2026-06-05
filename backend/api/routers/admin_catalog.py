@@ -41,7 +41,6 @@ from ..services.gst_rates import (
     invalidate_cache as invalidate_gst_cache,
 )
 
-
 router = APIRouter(dependencies=[Depends(_require_admin_role)])
 
 

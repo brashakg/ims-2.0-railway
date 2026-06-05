@@ -1278,7 +1278,10 @@ class SopTemplateUpdate(BaseModel):
                 f"Invalid category '{self.category}'. "
                 f"Must be one of {sorted(VALID_SOP_CATEGORIES)}"
             )
-        if self.frequency is not None and self.frequency.upper() not in VALID_SOP_FREQUENCIES:
+        if (
+            self.frequency is not None
+            and self.frequency.upper() not in VALID_SOP_FREQUENCIES
+        ):
             raise ValueError(
                 f"Invalid frequency '{self.frequency}'. "
                 f"Must be one of {sorted(VALID_SOP_FREQUENCIES)}"

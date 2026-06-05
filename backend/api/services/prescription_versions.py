@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-
 # Allowed version slot names (must match the doc shape)
 VALID_VERSION_NAMES = ("before_testing", "after_testing", "manual", "final")
 

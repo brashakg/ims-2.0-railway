@@ -26,6 +26,7 @@ remap with no stored payload is a 404; the mapper itself never raises. AUDIT
 EVERYTHING: a remap writes a chained audit_logs row (fail-soft) so the owner has an
 immutable record of every manual re-run (SYSTEM_INTENT: Audit Everything).
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -49,6 +50,7 @@ _MAX_LIMIT = 500
 # ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_push.py)
 # ---------------------------------------------------------------------------
+
 
 def _get_db():
     """Underlying DB object (real pymongo Database or seeded MockDatabase) when
@@ -75,12 +77,19 @@ def _clean(doc: Dict[str, Any]) -> Dict[str, Any]:
 # GET / -- list online orders
 # ---------------------------------------------------------------------------
 
+
 @router.get("")
 @router.get("/")
 async def list_online_orders(
-    status: Optional[str] = Query(None, description="Filter by IMS order status (e.g. CONFIRMED, CANCELLED)"),
-    date_from: Optional[str] = Query(None, description="ISO date/datetime lower bound on created_at"),
-    date_to: Optional[str] = Query(None, description="ISO date/datetime upper bound on created_at"),
+    status: Optional[str] = Query(
+        None, description="Filter by IMS order status (e.g. CONFIRMED, CANCELLED)"
+    ),
+    date_from: Optional[str] = Query(
+        None, description="ISO date/datetime lower bound on created_at"
+    ),
+    date_to: Optional[str] = Query(
+        None, description="ISO date/datetime upper bound on created_at"
+    ),
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_roles(*_READ_ROLES)),
@@ -93,7 +102,13 @@ async def list_online_orders(
     """
     db = _get_db()
     if db is None:
-        return {"orders": [], "total": 0, "limit": limit, "offset": offset, "db_connected": False}
+        return {
+            "orders": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "db_connected": False,
+        }
 
     query: Dict[str, Any] = {"channel": "ONLINE"}
     if status:
@@ -109,17 +124,24 @@ async def list_online_orders(
     try:
         coll = db.get_collection("orders")
         if coll is None:
-            return {"orders": [], "total": 0, "limit": limit, "offset": offset, "db_connected": True}
+            return {
+                "orders": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "db_connected": True,
+            }
         total = int(coll.count_documents(query))
-        cursor = (
-            coll.find(query)
-            .sort("created_at", -1)
-            .skip(offset)
-            .limit(limit)
-        )
+        cursor = coll.find(query).sort("created_at", -1).skip(offset).limit(limit)
         orders: List[Dict[str, Any]] = [_clean(d) for d in cursor]
     except Exception:  # noqa: BLE001 - reads degrade, never 500
-        return {"orders": [], "total": 0, "limit": limit, "offset": offset, "db_connected": True}
+        return {
+            "orders": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "db_connected": True,
+        }
 
     return {
         "orders": orders,
@@ -133,6 +155,7 @@ async def list_online_orders(
 # ---------------------------------------------------------------------------
 # POST /remap/{shopify_order_id} -- re-run the mapper for one order
 # ---------------------------------------------------------------------------
+
 
 @router.post("/remap/{shopify_order_id}")
 async def remap_online_order(
@@ -149,7 +172,9 @@ async def remap_online_order(
     """
     db = _get_db()
     if db is None:
-        raise HTTPException(status_code=503, detail="Online Store orders unavailable (no DB)")
+        raise HTTPException(
+            status_code=503, detail="Online Store orders unavailable (no DB)"
+        )
 
     payload, webhook_id, topic = _load_last_shopify_payload(db, shopify_order_id)
     if payload is None:
@@ -181,9 +206,7 @@ def _load_last_shopify_payload(db, shopify_order_id: str):
         coll = db.get_collection("webhook_inbox")
         if coll is None:
             return None, None, None
-        rows = list(
-            coll.find({"vendor": "shopify"}).sort("received_at", -1).limit(200)
-        )
+        rows = list(coll.find({"vendor": "shopify"}).sort("received_at", -1).limit(200))
     except Exception:  # noqa: BLE001
         return None, None, None
 
@@ -195,15 +218,24 @@ def _load_last_shopify_payload(db, shopify_order_id: str):
         pid = str(payload.get("id") or payload.get("order_id") or "").strip()
         if pid and pid == target:
             headers = row.get("headers") or {}
-            webhook_id = headers.get("x-shopify-webhook-id") if isinstance(headers, dict) else None
-            topic = (headers.get("x-shopify-topic") if isinstance(headers, dict) else None) or "orders/create"
+            webhook_id = (
+                headers.get("x-shopify-webhook-id")
+                if isinstance(headers, dict)
+                else None
+            )
+            topic = (
+                headers.get("x-shopify-topic") if isinstance(headers, dict) else None
+            ) or "orders/create"
             return payload, webhook_id, topic
     return None, None, None
 
 
-def _write_remap_audit(shopify_order_id: str, result: Dict[str, Any], current_user: dict) -> None:
+def _write_remap_audit(
+    shopify_order_id: str, result: Dict[str, Any], current_user: dict
+) -> None:
     """Write a chained audit row for a manual remap. Fail-soft: any audit error is
-    swallowed so it can never block the remap (mirrors online_store_push._write_audit)."""
+    swallowed so it can never block the remap (mirrors online_store_push._write_audit).
+    """
     try:
         from ..dependencies import get_audit_repository
 
@@ -227,7 +259,8 @@ def _write_remap_audit(shopify_order_id: str, result: Dict[str, Any], current_us
                     "customer_id": (result or {}).get("customer_id"),
                     "store_id": (result or {}).get("store_id"),
                     "status_synced": (result or {}).get("status_synced"),
-                    "error": (result or {}).get("error") or (result or {}).get("reason"),
+                    "error": (result or {}).get("error")
+                    or (result or {}).get("reason"),
                 },
             }
         )

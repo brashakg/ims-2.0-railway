@@ -24,6 +24,7 @@ action. Pick the provider with the IMAGE_EDIT_PROVIDER env var:
 Everything is FAIL-SOFT: a missing key / missing dep / provider error never
 crashes the worker -- the caller keeps the RAW image and flags it for manual.
 """
+
 from __future__ import annotations
 
 import os
@@ -41,10 +42,10 @@ class EditSpec:
     makes the output CONSISTENT across the catalog -- one saved recipe, not
     per-image prompting). Owner signs these off; they become the template."""
 
-    background_color: str = "FFFFFF"   # solid backdrop hex (no '#')
-    output_size: str = "1000x1000"     # fixed canvas (square catalog tile)
-    padding: float = 0.1               # breathing room around the product
-    shadow_mode: str = "ai.soft"       # soft synthetic CONTACT shadow (safe)
+    background_color: str = "FFFFFF"  # solid backdrop hex (no '#')
+    output_size: str = "1000x1000"  # fixed canvas (square catalog tile)
+    padding: float = 0.1  # breathing room around the product
+    shadow_mode: str = "ai.soft"  # soft synthetic CONTACT shadow (safe)
 
     @classmethod
     def from_env(cls) -> "EditSpec":
@@ -119,7 +120,9 @@ class PhotoroomEditor:
         files = {"imageFile": ("raw.png", raw, "application/octet-stream")}
         headers = {"x-api-key": self._api_key, "Accept": "image/png, application/json"}
         async with httpx.AsyncClient(timeout=_PHOTOROOM_TIMEOUT) as client:
-            resp = await client.post(_PHOTOROOM_URL, headers=headers, data=data, files=files)
+            resp = await client.post(
+                _PHOTOROOM_URL, headers=headers, data=data, files=files
+            )
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Photoroom edit failed ({resp.status_code}): {resp.text[:300]}"

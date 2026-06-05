@@ -492,6 +492,7 @@ async def list_prescriptions(
 
 # ---- Family Rx view helpers --------------------------------------------
 
+
 def _parse_dt(value):
     """Best-effort parse of an ISO date/datetime (or passthrough) -> datetime, else None."""
     if value is None:
@@ -552,9 +553,16 @@ async def family_prescriptions(
     repo = get_prescription_repository()
     customer_repo = get_customer_repository()
     if repo is None:
-        return {"customer_id": customer_id, "members": [], "member_count": 0, "total_prescriptions": 0}
+        return {
+            "customer_id": customer_id,
+            "members": [],
+            "member_count": 0,
+            "total_prescriptions": 0,
+        }
 
-    customer = customer_repo.find_by_id(customer_id) if customer_repo is not None else None
+    customer = (
+        customer_repo.find_by_id(customer_id) if customer_repo is not None else None
+    )
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
     patients = customer.get("patients", []) or []
@@ -594,30 +602,34 @@ async def family_prescriptions(
         pid = p.get("patient_id")
         seen.add(pid)
         rows, valid_count, latest = _enrich(by_patient.get(pid, []))
-        members.append({
-            "patient_id": pid,
-            "name": p.get("name"),
-            "relation": p.get("relation"),
-            "dob": p.get("dob"),
-            "prescription_count": len(rows),
-            "valid_count": valid_count,
-            "latest": latest,
-            "prescriptions": rows,
-        })
+        members.append(
+            {
+                "patient_id": pid,
+                "name": p.get("name"),
+                "relation": p.get("relation"),
+                "dob": p.get("dob"),
+                "prescription_count": len(rows),
+                "valid_count": valid_count,
+                "latest": latest,
+                "prescriptions": rows,
+            }
+        )
     for pid, rx_list in by_patient.items():
         if pid in seen:
             continue
         rows, valid_count, latest = _enrich(rx_list)
-        members.append({
-            "patient_id": pid,
-            "name": (latest or {}).get("patient_name") or "Unlinked patient",
-            "relation": None,
-            "dob": None,
-            "prescription_count": len(rows),
-            "valid_count": valid_count,
-            "latest": latest,
-            "prescriptions": rows,
-        })
+        members.append(
+            {
+                "patient_id": pid,
+                "name": (latest or {}).get("patient_name") or "Unlinked patient",
+                "relation": None,
+                "dob": None,
+                "prescription_count": len(rows),
+                "valid_count": valid_count,
+                "latest": latest,
+                "prescriptions": rows,
+            }
+        )
 
     return {
         "customer_id": customer_id,
@@ -894,11 +906,14 @@ async def update_prescription(
     # so the edit stays internally consistent (expiry = test_date + N months).
     update_doc = dict(body)
     if rx.validity_months is not None:
-        base_dt = _parse_dt(
-            existing.get("prescription_date")
-            or existing.get("test_date")
-            or existing.get("created_at")
-        ) or datetime.now()
+        base_dt = (
+            _parse_dt(
+                existing.get("prescription_date")
+                or existing.get("test_date")
+                or existing.get("created_at")
+            )
+            or datetime.now()
+        )
         update_doc["expiry_date"] = _add_months(base_dt, rx.validity_months).isoformat()
 
     update_doc["updated_by"] = current_user.get("user_id")
@@ -983,8 +998,10 @@ async def validate_prescription(
                     issues.append(
                         f"{eye_label} AXIS {axis} must be a whole number (1-180)"
                     )
-            if add not in (None, "", 0) and float(add) != 0 and not (
-                0.75 <= float(add) <= 3.50
+            if (
+                add not in (None, "", 0)
+                and float(add) != 0
+                and not (0.75 <= float(add) <= 3.50)
             ):
                 issues.append(f"{eye_label} ADD {add} out of range (+0.75..+3.50)")
         except (ValueError, TypeError):

@@ -134,18 +134,14 @@ def _delivery_state(payload: Dict[str, Any]) -> str:
         addr = payload.get(key)
         if isinstance(addr, dict):
             cand = (
-                addr.get("province_code")
-                or addr.get("province")
-                or addr.get("state")
+                addr.get("province_code") or addr.get("province") or addr.get("state")
             )
             if cand:
                 return str(cand)
     return ""
 
 
-def _map_line_items(
-    payload: Dict[str, Any], product_repo
-) -> List[Dict[str, Any]]:
+def _map_line_items(payload: Dict[str, Any], product_repo) -> List[Dict[str, Any]]:
     """Map Shopify line_items -> IMS order item dicts with per-line HSN + GST
     rate + taxable + tax. Online prices are GST-INCLUSIVE (Shopify shows the
     all-in price the customer paid), so we extract tax from within the line
@@ -273,9 +269,7 @@ def ingest_shopify_order(
     if topic and str(topic).strip().lower() not in ("orders/create", "orders/paid"):
         return {"status": "ignored", "reason": f"topic:{topic}"}
 
-    shopify_order_id = str(
-        payload.get("id") or payload.get("order_id") or ""
-    ).strip()
+    shopify_order_id = str(payload.get("id") or payload.get("order_id") or "").strip()
     if not shopify_order_id or not (payload.get("line_items")):
         return {"status": "ignored", "reason": "no_order_id_or_line_items"}
 
@@ -379,9 +373,7 @@ def ingest_shopify_order(
     if cust:
         customer_name = (
             " ".join(
-                str(p)
-                for p in (cust.get("first_name"), cust.get("last_name"))
-                if p
+                str(p) for p in (cust.get("first_name"), cust.get("last_name")) if p
             ).strip()
             or cust.get("email")
             or ""
@@ -427,7 +419,9 @@ def ingest_shopify_order(
         "store_id": store_id,
         "customer_id": str(payload.get("customer", {}).get("id") or "") or None,
         "customer_name": customer_name,
-        "customer_phone": (cust.get("phone") if cust else "") or payload.get("phone") or "",
+        "customer_phone": (cust.get("phone") if cust else "")
+        or payload.get("phone")
+        or "",
         "items": items,
         "subtotal": subtotal,
         "tax_rate": (max((i.get("gst_rate") or 0.0) for i in items) if items else 0.0),
@@ -441,15 +435,22 @@ def ingest_shopify_order(
         "invoice_date": now.isoformat(),
         # Shopify already collected payment -> the online order is PAID on
         # ingestion (its financial_status is typically "paid").
-        "amount_paid": grand_total
-        if str(payload.get("financial_status") or "").lower() in ("paid", "partially_paid")
-        else 0.0,
-        "balance_due": 0.0
-        if str(payload.get("financial_status") or "").lower() == "paid"
-        else grand_total,
-        "payment_status": "PAID"
-        if str(payload.get("financial_status") or "").lower() == "paid"
-        else "UNPAID",
+        "amount_paid": (
+            grand_total
+            if str(payload.get("financial_status") or "").lower()
+            in ("paid", "partially_paid")
+            else 0.0
+        ),
+        "balance_due": (
+            0.0
+            if str(payload.get("financial_status") or "").lower() == "paid"
+            else grand_total
+        ),
+        "payment_status": (
+            "PAID"
+            if str(payload.get("financial_status") or "").lower() == "paid"
+            else "UNPAID"
+        ),
         "status": "CONFIRMED",
         "place_of_supply": gst_split.get("place_of_supply", buyer_state),
         "place_of_supply_assumed": gst_split.get("place_of_supply_assumed", False),
@@ -470,19 +471,23 @@ def ingest_shopify_order(
         if "duplicate key" in msg or "e11000" in msg:
             existing = None
             try:
-                existing = orders_coll.find_one(
-                    {"shopify_order_id": shopify_order_id}
-                )
+                existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
             except Exception:  # noqa: BLE001
                 existing = None
             return {
                 "status": "duplicate",
                 "order_id": (existing or {}).get("order_id", order_id),
-                "invoice_number": (existing or {}).get("invoice_number", invoice_number),
+                "invoice_number": (existing or {}).get(
+                    "invoice_number", invoice_number
+                ),
                 "shopify_order_id": shopify_order_id,
             }
         logger.error("[SHOPIFY_INGEST] order insert failed: %s", exc)
-        return {"status": "error", "error": str(exc), "shopify_order_id": shopify_order_id}
+        return {
+            "status": "error",
+            "error": str(exc),
+            "shopify_order_id": shopify_order_id,
+        }
 
     logger.info(
         "[SHOPIFY_INGEST] online order ingested shopify_id=%s ims_order=%s "

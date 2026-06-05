@@ -36,6 +36,7 @@ Routes:
 
 Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -55,14 +56,25 @@ _ECOM_ROLES = ("ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER")
 # Shopify MenuItemType enum (BVI MenuItem.itemType). Validated on add/update so a
 # typo can't store an un-pushable type.
 _ITEM_TYPES = {
-    "COLLECTION", "COLLECTIONS", "PRODUCT", "PAGE", "BLOG", "ARTICLE",
-    "FRONTPAGE", "CATALOG", "SEARCH", "HTTP", "SHOP_POLICY", "METAOBJECT",
+    "COLLECTION",
+    "COLLECTIONS",
+    "PRODUCT",
+    "PAGE",
+    "BLOG",
+    "ARTICLE",
+    "FRONTPAGE",
+    "CATALOG",
+    "SEARCH",
+    "HTTP",
+    "SHOP_POLICY",
+    "METAOBJECT",
 }
 
 
 # ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_collections.py)
 # ---------------------------------------------------------------------------
+
 
 def _get_db():
     """Underlying DB object (real pymongo Database or seeded MockDatabase) when
@@ -118,6 +130,7 @@ def _with_id(doc):
 # Pydantic payloads
 # ---------------------------------------------------------------------------
 
+
 class MenuItemIn(BaseModel):
     """A MenuItem node as supplied by the editor. `id` is server-owned (ignored
     on input); `children` lets a whole subtree be added/replaced in one call.
@@ -125,6 +138,7 @@ class MenuItemIn(BaseModel):
     Declared with a forward self-reference so `children` is the same shape
     (recursive mega-menu). model_rebuild() below resolves the reference.
     """
+
     title: str = ""
     item_type: Optional[str] = Field(None, description="Shopify MenuItemType")
     url: Optional[str] = None
@@ -153,6 +167,7 @@ class MenuCreate(BaseModel):
 class MenuUpdate(BaseModel):
     """All fields optional -- only provided keys are patched. Supplying `items`
     REPLACES the whole tree (normalized + renumbered by the repository)."""
+
     title: Optional[str] = None
     handle: Optional[str] = None
     is_default: Optional[bool] = None
@@ -164,6 +179,7 @@ class AddItem(BaseModel):
     """Add one node under `parent_id` (None = top level) at `position`
     (None = append). The node payload is `item`; its `children` (if any) are
     added with it."""
+
     item: MenuItemIn
     parent_id: Optional[str] = None
     position: Optional[int] = None
@@ -177,6 +193,7 @@ class MoveItem(BaseModel):
 class UpdateItem(BaseModel):
     """Patch a node's presentation/linkage fields in place (no re-parenting --
     use the move route for that). Only provided keys change."""
+
     title: Optional[str] = None
     item_type: Optional[str] = None
     url: Optional[str] = None
@@ -193,12 +210,14 @@ class ReorderItems(BaseModel):
     """Replace the whole items tree with `items` (the editor's drag-reorder
     result). Equivalent to PUT /{menu_id} with only `items`, exposed separately
     for a cleaner editor call."""
+
     items: List[MenuItemIn] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
+
 
 def _validate_item_type(item_type: Optional[str]) -> Optional[str]:
     """Uppercase + validate a Shopify MenuItemType, or 400. None passes through
@@ -229,6 +248,7 @@ def _item_to_dict(item: MenuItemIn) -> Dict:
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
+
 
 @router.get("")
 async def list_menus(
@@ -311,7 +331,9 @@ async def update_menu(
         new_handle = new_handle.strip()
         clash = repo.get_by_handle(new_handle)
         if clash is not None and clash.get("menu_id") != menu_id:
-            raise HTTPException(status_code=409, detail=f"handle already exists: {new_handle}")
+            raise HTTPException(
+                status_code=409, detail=f"handle already exists: {new_handle}"
+            )
         data["handle"] = new_handle
     # Whole-tree replacement (only when `items` was explicitly provided).
     if payload.items is not None:
@@ -343,6 +365,7 @@ async def delete_menu(
 # Item-tree editing (embedded recursive nodes addressed by their own id)
 # ---------------------------------------------------------------------------
 
+
 @router.post("/{menu_id}/items")
 async def add_menu_item(
     menu_id: str,
@@ -355,10 +378,14 @@ async def add_menu_item(
     if repo.get_by_id(menu_id) is None:
         raise HTTPException(status_code=404, detail="Menu not found")
     item = _item_to_dict(payload.item)
-    updated = repo.add_item(menu_id, item, parent_id=payload.parent_id, position=payload.position)
+    updated = repo.add_item(
+        menu_id, item, parent_id=payload.parent_id, position=payload.position
+    )
     if updated is None:
         # add_item returns None for an unknown parent (caller error) too.
-        raise HTTPException(status_code=400, detail="Failed to add item (unknown parent_id?)")
+        raise HTTPException(
+            status_code=400, detail="Failed to add item (unknown parent_id?)"
+        )
     return {"menu": _with_id(updated)}
 
 

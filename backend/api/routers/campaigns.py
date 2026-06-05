@@ -164,7 +164,13 @@ def _strip(doc: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
-def _audit(db, campaign_id: str, action: str, user: dict, detail: Optional[Dict[str, Any]] = None) -> None:
+def _audit(
+    db,
+    campaign_id: str,
+    action: str,
+    user: dict,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
     """Append an immutable campaign_audit row (fail-soft -- never blocks the
     action). SYSTEM_INTENT 'Audit Everything': sends + lifecycle transitions are
     recorded with who/when/what."""
@@ -249,7 +255,9 @@ def _campaign_analytics(db, campaign_id: str) -> Dict[str, Any]:
         status = (log.get("status") or "").upper()
         delivery = (log.get("delivery_status") or "").upper()
         ch = (log.get("channel") or "UNKNOWN").upper()
-        chan = by_channel.setdefault(ch, {"total": 0, "sent": 0, "delivered": 0, "failed": 0})
+        chan = by_channel.setdefault(
+            ch, {"total": 0, "sent": 0, "delivered": 0, "failed": 0}
+        )
         chan["total"] += 1
         # SIMULATED counts as "sent" for analytics (it left the campaign engine;
         # under DISPATCH_MODE!=live the provider was a dry-run, but the campaign
@@ -347,7 +355,12 @@ async def list_campaigns(
         return {
             "campaigns": [],
             "total": 0,
-            "summary": {"active": 0, "total_sent": 0, "open_rate": 0.0, "conversion": 0.0},
+            "summary": {
+                "active": 0,
+                "total_sent": 0,
+                "open_rate": 0.0,
+                "conversion": 0.0,
+            },
         }
     query: Dict[str, Any] = {}
     if store_id:
@@ -418,7 +431,13 @@ async def create_campaign(
         "updated_at": _now_iso(),
     }
     db.get_collection("campaigns").insert_one(doc)
-    _audit(db, campaign_id, "CREATE", current_user, {"name": req.name, "segment": req.segment_key})
+    _audit(
+        db,
+        campaign_id,
+        "CREATE",
+        current_user,
+        {"name": req.name, "segment": req.segment_key},
+    )
     return {"message": "Campaign created", "campaign": _strip(dict(doc))}
 
 
@@ -454,11 +473,23 @@ async def update_campaign(
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
     if doc.get("status") == "COMPLETED":
-        raise HTTPException(status_code=409, detail="A completed campaign cannot be edited; duplicate it instead")
+        raise HTTPException(
+            status_code=409,
+            detail="A completed campaign cannot be edited; duplicate it instead",
+        )
 
     updates: Dict[str, Any] = {}
     payload = req.model_dump(exclude_unset=True)
-    for field in ("name", "type", "segment_key", "channels", "template_id", "store_id", "segment_params", "description"):
+    for field in (
+        "name",
+        "type",
+        "segment_key",
+        "channels",
+        "template_id",
+        "store_id",
+        "segment_params",
+        "description",
+    ):
         if field in payload and payload[field] is not None:
             updates[field] = payload[field]
     if "schedule" in payload and payload["schedule"] is not None:
@@ -470,7 +501,9 @@ async def update_campaign(
     if not updates:
         return {"message": "No changes", "campaign": _strip(dict(doc))}
     updates["updated_at"] = _now_iso()
-    db.get_collection("campaigns").update_one({"campaign_id": campaign_id}, {"$set": updates})
+    db.get_collection("campaigns").update_one(
+        {"campaign_id": campaign_id}, {"$set": updates}
+    )
     _audit(db, campaign_id, "UPDATE", current_user, {"fields": list(updates.keys())})
     fresh = db.get_collection("campaigns").find_one({"campaign_id": campaign_id})
     return {"message": "Campaign updated", "campaign": _strip(fresh)}
@@ -487,7 +520,9 @@ async def delete_campaign(
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
     if doc.get("status") == "ACTIVE":
-        raise HTTPException(status_code=409, detail="Pause the campaign before deleting it")
+        raise HTTPException(
+            status_code=409, detail="Pause the campaign before deleting it"
+        )
     db.get_collection("campaigns").delete_one({"campaign_id": campaign_id})
     _audit(db, campaign_id, "DELETE", current_user, {"name": doc.get("name")})
     return {"message": "Campaign deleted", "campaign_id": campaign_id}
@@ -544,13 +579,20 @@ async def schedule_campaign(
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
     if doc.get("status") == "COMPLETED":
-        raise HTTPException(status_code=409, detail="A completed campaign cannot be re-scheduled; duplicate it")
+        raise HTTPException(
+            status_code=409,
+            detail="A completed campaign cannot be re-scheduled; duplicate it",
+        )
 
     sched = schedule.model_dump()
     if sched["kind"] == "ONE_TIME" and not sched.get("send_at"):
-        raise HTTPException(status_code=422, detail="ONE_TIME schedule requires send_at")
+        raise HTTPException(
+            status_code=422, detail="ONE_TIME schedule requires send_at"
+        )
     if sched["kind"] == "RECURRING" and not sched.get("frequency"):
-        raise HTTPException(status_code=422, detail="RECURRING schedule requires frequency")
+        raise HTTPException(
+            status_code=422, detail="RECURRING schedule requires frequency"
+        )
 
     db.get_collection("campaigns").update_one(
         {"campaign_id": campaign_id},
@@ -571,7 +613,9 @@ async def pause_campaign(
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
     if doc.get("status") not in ("ACTIVE", "SCHEDULED"):
-        raise HTTPException(status_code=409, detail="Only an ACTIVE or SCHEDULED campaign can be paused")
+        raise HTTPException(
+            status_code=409, detail="Only an ACTIVE or SCHEDULED campaign can be paused"
+        )
     db.get_collection("campaigns").update_one(
         {"campaign_id": campaign_id},
         {"$set": {"status": "PAUSED", "updated_at": _now_iso()}},
@@ -592,7 +636,9 @@ async def resume_campaign(
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
     if doc.get("status") != "PAUSED":
-        raise HTTPException(status_code=409, detail="Only a PAUSED campaign can be resumed")
+        raise HTTPException(
+            status_code=409, detail="Only a PAUSED campaign can be resumed"
+        )
     next_status = "SCHEDULED" if doc.get("schedule") else "ACTIVE"
     db.get_collection("campaigns").update_one(
         {"campaign_id": campaign_id},
@@ -629,7 +675,9 @@ async def send_campaign(
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
     if doc.get("status") == "PAUSED":
-        raise HTTPException(status_code=409, detail="Resume the campaign before sending")
+        raise HTTPException(
+            status_code=409, detail="Resume the campaign before sending"
+        )
 
     rate_err = _check_notification_rate(current_user.get("user_id", "unknown"))
     if rate_err:
@@ -662,12 +710,16 @@ async def send_campaign(
             cust = cust_coll.find_one({"customer_id": cid}) or {}
             if cust.get("marketing_consent") is False:
                 skipped += 1
-                results.append({"customer_id": cid, "status": "skipped", "reason": "opted_out"})
+                results.append(
+                    {"customer_id": cid, "status": "skipped", "reason": "opted_out"}
+                )
                 continue
         phone = r.get("phone") or ""
         if not phone:
             skipped += 1
-            results.append({"customer_id": cid, "status": "skipped", "reason": "no_phone"})
+            results.append(
+                {"customer_id": cid, "status": "skipped", "reason": "no_phone"}
+            )
             continue
         try:
             res = await send_notification(
@@ -696,7 +748,9 @@ async def send_campaign(
                 except Exception:  # noqa: BLE001
                     pass
             sent += 1
-            results.append({"customer_id": cid, "status": "queued", "notification_id": nid})
+            results.append(
+                {"customer_id": cid, "status": "queued", "notification_id": nid}
+            )
         except Exception as exc:  # noqa: BLE001
             failed += 1
             results.append({"customer_id": cid, "status": "failed", "error": str(exc)})
@@ -727,7 +781,13 @@ async def send_campaign(
         campaign_id,
         "SEND",
         current_user,
-        {"audience": len(audience), "queued": sent, "skipped": skipped, "failed": failed, "status": new_status},
+        {
+            "audience": len(audience),
+            "queued": sent,
+            "skipped": skipped,
+            "failed": failed,
+            "status": new_status,
+        },
     )
     msg = f"{sent}/{len(audience)} queued"
     if skipped:

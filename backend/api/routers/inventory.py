@@ -742,8 +742,12 @@ async def opening_stock_preview(
         if err:
             errors += 1
             results.append(
-                {"index": i, "status": "ERROR", "identifier": row.product_id or row.sku,
-                 "message": err}
+                {
+                    "index": i,
+                    "status": "ERROR",
+                    "identifier": row.product_id or row.sku,
+                    "message": err,
+                }
             )
             continue
         already = existing > 0
@@ -813,16 +817,25 @@ async def opening_stock_commit(
         if err:
             rows_errored += 1
             results.append(
-                {"index": i, "status": "ERROR", "identifier": row.product_id or row.sku,
-                 "message": err}
+                {
+                    "index": i,
+                    "status": "ERROR",
+                    "identifier": row.product_id or row.sku,
+                    "message": err,
+                }
             )
             continue
         if existing > 0 and payload.skip_if_existing:
             rows_skipped += 1
             results.append(
-                {"index": i, "status": "SKIPPED", "product_id": product.get("product_id"),
-                 "sku": product.get("sku"), "existing": existing,
-                 "message": f"Skipped — already has {existing} in stock."}
+                {
+                    "index": i,
+                    "status": "SKIPPED",
+                    "product_id": product.get("product_id"),
+                    "sku": product.get("sku"),
+                    "existing": existing,
+                    "message": f"Skipped — already has {existing} in stock.",
+                }
             )
             continue
 
@@ -850,9 +863,14 @@ async def opening_stock_commit(
                 created_count += 1
         units_added += created_count
         results.append(
-            {"index": i, "status": "ADDED", "product_id": pid, "sku": product.get("sku"),
-             "added": created_count,
-             "message": f"Added {created_count} unit(s)."}
+            {
+                "index": i,
+                "status": "ADDED",
+                "product_id": pid,
+                "sku": product.get("sku"),
+                "added": created_count,
+                "message": f"Added {created_count} unit(s).",
+            }
         )
 
     return {
@@ -1410,6 +1428,7 @@ async def get_stock_count(
 # re-reconciled.  Fail-soft: DB unavailable returns a 503 (not a silent 200)
 # because reconciliation is a stock-altering write, not a read.
 
+
 class ReconcileStockCountRequest(BaseModel):
     notes: Optional[str] = None
     # Per-item overrides: the reviewer can accept a different final quantity
@@ -1522,7 +1541,11 @@ async def reconcile_stock_count(
                 try:
                     candidates = list(
                         stock_coll.find(
-                            {"product_id": pid, "store_id": store_id, "status": "AVAILABLE"},
+                            {
+                                "product_id": pid,
+                                "store_id": store_id,
+                                "status": "AVAILABLE",
+                            },
                             sort=[("created_at", 1)],
                             limit=shrinkage_qty,
                         )
@@ -1591,7 +1614,9 @@ async def reconcile_stock_count(
         raise
     except Exception as e:
         logger.warning(f"reconcile_stock_count error: {e}")
-        raise HTTPException(status_code=500, detail="Internal error during reconciliation")
+        raise HTTPException(
+            status_code=500, detail="Internal error during reconciliation"
+        )
 
 
 # ============================================================================
@@ -1706,20 +1731,25 @@ async def cross_store_stock(
         return {"product_id": product_id, "stores": []}
 
     try:
-        rows = stock_repo.aggregate([
-            {
-                "$match": {
-                    "product_id": product_id,
-                    "status": "AVAILABLE",
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$store_id",
-                    "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
-                }
-            },
-        ]) or []
+        rows = (
+            stock_repo.aggregate(
+                [
+                    {
+                        "$match": {
+                            "product_id": product_id,
+                            "status": "AVAILABLE",
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$store_id",
+                            "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                        }
+                    },
+                ]
+            )
+            or []
+        )
 
         # Enrich with product name (once)
         product_name = ""
@@ -1979,7 +2009,9 @@ async def get_non_moving_stock(
                 # with 10 sold and 0 available showed current_stock=10.
                 stock_filter = {
                     "product_id": product_id,
-                    "status": {"$in": ["AVAILABLE", "RESERVED", "available", "reserved"]},
+                    "status": {
+                        "$in": ["AVAILABLE", "RESERVED", "available", "reserved"]
+                    },
                 }
                 if active_store:
                     stock_filter["store_id"] = active_store
@@ -2099,7 +2131,12 @@ async def scan_barcode_for_count(
             stock_coll.aggregate(
                 [
                     {"$match": count_match},
-                    {"$group": {"_id": None, "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                        }
+                    },
                 ]
             )
         )

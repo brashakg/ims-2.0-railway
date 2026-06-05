@@ -151,11 +151,7 @@ def _resolve_merchant_name(db, store_id: str) -> str:
         coll = db.get_collection("stores")
         doc = coll.find_one({"store_id": store_id})
         if doc:
-            return (
-                doc.get("store_name")
-                or doc.get("name")
-                or "Better Vision"
-            )
+            return doc.get("store_name") or doc.get("name") or "Better Vision"
     except Exception:  # noqa: BLE001
         pass
     return "Better Vision"
@@ -259,7 +255,10 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
     if razorpay_payment_id:
         existing_payments = order.get("payments") or []
         for p in existing_payments:
-            if isinstance(p, dict) and p.get("provider_payment_id") == razorpay_payment_id:
+            if (
+                isinstance(p, dict)
+                and p.get("provider_payment_id") == razorpay_payment_id
+            ):
                 logger.debug(
                     "[UPI_RECONCILE] payment %s already recorded for order %s",
                     razorpay_payment_id,
@@ -282,9 +281,7 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
     new_paid = round(current_paid + amount_rupees, 2)
     new_balance = round(grand_total - new_paid, 2)
     new_status = (
-        "PAID"
-        if new_balance <= 0.01
-        else ("PARTIAL" if new_paid > 0 else "UNPAID")
+        "PAID" if new_balance <= 0.01 else ("PARTIAL" if new_paid > 0 else "UNPAID")
     )
 
     try:

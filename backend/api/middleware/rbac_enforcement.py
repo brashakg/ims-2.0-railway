@@ -93,7 +93,9 @@ def _roles_from_bearer(request: Request):
     return payload.get("roles", []) or []
 
 
-def _forbidden_response(request: Request, method: str, path: str, allowed) -> JSONResponse:
+def _forbidden_response(
+    request: Request, method: str, path: str, allowed
+) -> JSONResponse:
     """Build the 403 JSONResponse, attaching CORS headers for an allowed origin
     so the browser surfaces the real status instead of masking it as a network
     error (same treatment as block_investor_writes / the HTTPException handler).

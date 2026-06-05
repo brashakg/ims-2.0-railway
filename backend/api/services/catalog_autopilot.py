@@ -1002,7 +1002,9 @@ class AIEnrichAdapter(SourceAdapter):
         )
         return system, user
 
-    def _to_candidate(self, data, brand, model, color, size) -> Optional[Dict[str, Any]]:
+    def _to_candidate(
+        self, data, brand, model, color, size
+    ) -> Optional[Dict[str, Any]]:
         if not isinstance(data, dict):
             return None
         cand = _candidate_skeleton(self.name, self.source_class)
@@ -1062,9 +1064,7 @@ class AIEnrichAdapter(SourceAdapter):
         max_tokens = int(os.getenv("AUTOPILOT_AI_MAX_TOKENS", "700"))
         # ONE Claude call. The helper already strips code fences + parses JSON
         # fail-soft (returns None on any failure), so we never see raw text.
-        data = _run_coro_sync(
-            call_claude_json(system, user, max_tokens=max_tokens)
-        )
+        data = _run_coro_sync(call_claude_json(system, user, max_tokens=max_tokens))
         if data is None:
             return []
         cand = self._to_candidate(data, brand, model, color, size)

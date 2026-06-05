@@ -94,9 +94,7 @@ def last_successful_shopify_sync_at(db) -> Optional[str]:
         return None
     try:
         rows = list(
-            coll.find(
-                {"integration": "shopify", "ok": True}, {"_id": 0, "ran_at": 1}
-            )
+            coll.find({"integration": "shopify", "ok": True}, {"_id": 0, "ran_at": 1})
             .sort("ran_at", -1)
             .limit(1)
         )
@@ -344,7 +342,10 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
         return {**_empty, "reason": f"import error: {exc}"}
 
     if not _has_shopify_creds(db):
-        return {**_empty, "reason": "shopify creds not configured -- drift check skipped"}
+        return {
+            **_empty,
+            "reason": "shopify creds not configured -- drift check skipped",
+        }
 
     # ---- Collect pushed gids from catalog_products + ecom_collections ----
     candidates: List[Dict[str, Any]] = []
@@ -353,38 +354,51 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
             for doc in (
                 _coll(db, "catalog_products")
                 .find(
-                    {"ecom.shopify_product_id": {"$exists": True,
-                                                 "$nin": [None, ""]}},
-                    {"_id": 0, "sku": 1,
-                     "ecom.shopify_product_id": 1,
-                     "ecom.last_pushed_at": 1},
+                    {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}},
+                    {
+                        "_id": 0,
+                        "sku": 1,
+                        "ecom.shopify_product_id": 1,
+                        "ecom.last_pushed_at": 1,
+                    },
                 )
                 .limit(limit)
             ):
                 ecom = doc.get("ecom") or {}
-                candidates.append({
-                    "gid": str(ecom.get("shopify_product_id") or ""),
-                    "sku": str(doc.get("sku") or ""),
-                    "last_pushed_at": ecom.get("last_pushed_at"),
-                })
+                candidates.append(
+                    {
+                        "gid": str(ecom.get("shopify_product_id") or ""),
+                        "sku": str(doc.get("sku") or ""),
+                        "last_pushed_at": ecom.get("last_pushed_at"),
+                    }
+                )
             remaining = max(0, limit - len(candidates))
             if remaining:
                 for col in (
                     _coll(db, "ecom_collections")
                     .find(
-                        {"shopify_collection_id": {"$exists": True,
-                                                   "$nin": [None, ""]}},
-                        {"_id": 0, "handle": 1,
-                         "shopify_collection_id": 1,
-                         "last_synced_at": 1},
+                        {
+                            "shopify_collection_id": {
+                                "$exists": True,
+                                "$nin": [None, ""],
+                            }
+                        },
+                        {
+                            "_id": 0,
+                            "handle": 1,
+                            "shopify_collection_id": 1,
+                            "last_synced_at": 1,
+                        },
                     )
                     .limit(remaining)
                 ):
-                    candidates.append({
-                        "gid": str(col.get("shopify_collection_id") or ""),
-                        "sku": str(col.get("handle") or ""),
-                        "last_pushed_at": col.get("last_synced_at"),
-                    })
+                    candidates.append(
+                        {
+                            "gid": str(col.get("shopify_collection_id") or ""),
+                            "sku": str(col.get("handle") or ""),
+                            "last_pushed_at": col.get("last_synced_at"),
+                        }
+                    )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[DRIFT] candidate fetch failed: %s", exc)
         return {**_empty, "reason": f"candidate fetch failed: {exc}"}
@@ -402,7 +416,7 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
         logger.warning("[DRIFT] Shopify graphql call failed: %s", exc)
         return {**_empty, "reason": f"shopify graphql error: {exc}"}
 
-    nodes = ((body.get("data") or {}).get("nodes") or [])
+    nodes = (body.get("data") or {}).get("nodes") or []
 
     drifted: List[Dict[str, Any]] = []
     no_timestamp = 0
@@ -427,23 +441,26 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
                 shopify_updated_at_str.replace("Z", "+00:00")
             )
             if isinstance(last_pushed, datetime):
-                our_dt = last_pushed.replace(tzinfo=timezone.utc) \
-                    if last_pushed.tzinfo is None else last_pushed
-            else:
-                our_dt = datetime.fromisoformat(
-                    str(last_pushed).replace("Z", "+00:00")
+                our_dt = (
+                    last_pushed.replace(tzinfo=timezone.utc)
+                    if last_pushed.tzinfo is None
+                    else last_pushed
                 )
+            else:
+                our_dt = datetime.fromisoformat(str(last_pushed).replace("Z", "+00:00"))
         except (ValueError, TypeError, AttributeError):
             no_timestamp += 1
             continue
 
         if shopify_dt > our_dt:
-            drifted.append({
-                "gid": gid,
-                "sku": cand.get("sku", ""),
-                "shopify_updated_at": shopify_updated_at_str,
-                "our_last_pushed_at": str(last_pushed),
-            })
+            drifted.append(
+                {
+                    "gid": gid,
+                    "sku": cand.get("sku", ""),
+                    "shopify_updated_at": shopify_updated_at_str,
+                    "our_last_pushed_at": str(last_pushed),
+                }
+            )
 
     return {
         "checked": True,
@@ -493,9 +510,8 @@ def _drift_sync_shim(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
 # when writes are off OR dry_run, returns the PLAN without touching Shopify.
 # Never raises.
 
-async def repush_oversell_risk(
-    db, dry_run: bool = True
-) -> Dict[str, Any]:
+
+async def repush_oversell_risk(db, dry_run: bool = True) -> Dict[str, Any]:
     """Re-push the absolute inventory quantity for every SKU that is flagged
     as oversell_risk (online qty > physical on-hand).
 
@@ -568,18 +584,19 @@ async def repush_oversell_risk(
     for p in products:
         sku = p.get("sku")
         o = online.get(sku, {})
-        items.append({
-            "sku": sku,
-            "in_store": on_hand.get(p.get("product_id"), 0),
-            "online": int(o.get("online_stock") or 0),
-            "is_online": bool(o.get("online")),
-            "product_id": p.get("product_id"),
-        })
+        items.append(
+            {
+                "sku": sku,
+                "in_store": on_hand.get(p.get("product_id"), 0),
+                "online": int(o.get("online_stock") or 0),
+                "is_online": bool(o.get("online")),
+                "product_id": p.get("product_id"),
+            }
+        )
 
     result = stock_allocation.reconcile_items(items, safety_buffer=0)
     oversell_items = [
-        i for i in result.get("items", [])
-        if i.get("status") == "OVERSELL_RISK"
+        i for i in result.get("items", []) if i.get("status") == "OVERSELL_RISK"
     ]
     base["would_repush"] = [
         {
@@ -587,8 +604,7 @@ async def repush_oversell_risk(
             "in_store": i.get("in_store", 0),
             "online": i.get("online", 0),
             "product_id": next(
-                (p.get("product_id")
-                 for p in products if p.get("sku") == i.get("sku")),
+                (p.get("product_id") for p in products if p.get("sku") == i.get("sku")),
                 None,
             ),
         }
@@ -622,26 +638,30 @@ async def repush_oversell_risk(
         in_store = int(item.get("in_store") or 0)
         inv_item_id = _inventory_item_id_for_sku(db, sku)
         if not inv_item_id:
-            repushed.append({
-                "sku": sku,
-                "result": {
-                    "ok": False,
-                    "error": "no shopify inventory_item_id found for sku",
-                },
-            })
+            repushed.append(
+                {
+                    "sku": sku,
+                    "result": {
+                        "ok": False,
+                        "error": "no shopify inventory_item_id found for sku",
+                    },
+                }
+            )
             continue
         try:
             sync_result = await shopify_set_inventory_available(
                 db, inv_item_id, location_id, in_store
             )
-            repushed.append({
-                "sku": sku,
-                "result": {
-                    "ok": sync_result.ok,
-                    "notes": sync_result.notes,
-                    "error": sync_result.error,
-                },
-            })
+            repushed.append(
+                {
+                    "sku": sku,
+                    "result": {
+                        "ok": sync_result.ok,
+                        "notes": sync_result.notes,
+                        "error": sync_result.error,
+                    },
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             repushed.append({"sku": sku, "result": {"ok": False, "error": str(exc)}})
 
@@ -653,11 +673,13 @@ def _shopify_online_location(db) -> Optional[str]:
     """Read SHOPIFY_ONLINE_LOCATION_ID from the integrations.shopify config
     doc, or fall back to the env var. Fail-soft -> None."""
     import os
+
     env_val = os.getenv("SHOPIFY_ONLINE_LOCATION_ID", "").strip()
     if env_val:
         return env_val
     try:
         from agents.nexus_providers import _load_integration_config
+
         cfg = _load_integration_config(db, "shopify") or {}
         return cfg.get("online_location_id") or None
     except Exception:  # noqa: BLE001
@@ -671,8 +693,10 @@ def _inventory_item_id_for_sku(db, sku: str) -> Optional[str]:
         return None
     try:
         doc = _coll(db, "catalog_variants").find_one(
-            {"sku": sku, "shopify_inventory_item_id": {"$exists": True,
-                                                        "$nin": [None, ""]}},
+            {
+                "sku": sku,
+                "shopify_inventory_item_id": {"$exists": True, "$nin": [None, ""]},
+            },
             {"_id": 0, "shopify_inventory_item_id": 1},
         )
         if doc:
@@ -714,19 +738,27 @@ def parity_summary(db) -> Dict[str, Any]:
     entities = {
         "catalog_products": {
             "total_filter": {},
-            "pushed_filter": {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}},
+            "pushed_filter": {
+                "ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}
+            },
         },
         "catalog_variants": {
             "total_filter": {},
-            "pushed_filter": {"shopify_variant_id": {"$exists": True, "$nin": [None, ""]}},
+            "pushed_filter": {
+                "shopify_variant_id": {"$exists": True, "$nin": [None, ""]}
+            },
         },
         "ecom_collections": {
             "total_filter": {},
-            "pushed_filter": {"shopify_collection_id": {"$exists": True, "$nin": [None, ""]}},
+            "pushed_filter": {
+                "shopify_collection_id": {"$exists": True, "$nin": [None, ""]}
+            },
         },
         "product_images": {
             "total_filter": {},
-            "pushed_filter": {"shopify_image_id": {"$exists": True, "$nin": [None, ""]}},
+            "pushed_filter": {
+                "shopify_image_id": {"$exists": True, "$nin": [None, ""]}
+            },
         },
     }
 
@@ -790,8 +822,15 @@ def uploads_image_audit(db, limit: int = 500) -> Dict[str, Any]:
         all_images = list(
             coll.find(
                 {},
-                {"_id": 0, "image_id": 1, "product_id": 1, "url": 1,
-                 "edited_url": 1, "status": 1, "sku": 1},
+                {
+                    "_id": 0,
+                    "image_id": 1,
+                    "product_id": 1,
+                    "url": 1,
+                    "edited_url": 1,
+                    "status": 1,
+                    "sku": 1,
+                },
             ).limit(limit)
         )
     except Exception as exc:  # noqa: BLE001
@@ -806,15 +845,17 @@ def uploads_image_audit(db, limit: int = 500) -> Dict[str, Any]:
         primary_local = _is_local_url(url)
         edited_local = edited_url is not None and _is_local_url(str(edited_url))
         if primary_local or edited_local:
-            local_items.append({
-                "image_id": img.get("image_id") or "",
-                "sku": img.get("sku") or img.get("product_id") or "",
-                "url": url,
-                "edited_url": edited_url,
-                "status": img.get("status") or "",
-                "primary_local": primary_local,
-                "edited_local": edited_local,
-            })
+            local_items.append(
+                {
+                    "image_id": img.get("image_id") or "",
+                    "sku": img.get("sku") or img.get("product_id") or "",
+                    "url": url,
+                    "edited_url": edited_url,
+                    "status": img.get("status") or "",
+                    "primary_local": primary_local,
+                    "edited_local": edited_local,
+                }
+            )
 
     return {
         "checked": True,

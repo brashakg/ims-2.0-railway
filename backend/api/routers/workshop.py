@@ -182,7 +182,9 @@ class LensStatusBody(BaseModel):
 class QcCheckItem(BaseModel):
     """A single structured checklist item for the QC checklist endpoint."""
 
-    key: str = Field(..., description="Checklist item key, e.g. 'power', 'fitting', 'cosmetic'")
+    key: str = Field(
+        ..., description="Checklist item key, e.g. 'power', 'fitting', 'cosmetic'"
+    )
     label: str = Field(..., description="Human-readable label")
     passed: bool = Field(..., description="True if this item passed")
     note: Optional[str] = Field(None, description="Optional note for this item")
@@ -196,9 +198,7 @@ class QcChecklistBody(BaseModel):
     is provided with a reason.
     """
 
-    checklist: List[QcCheckItem] = Field(
-        ..., description="One entry per QC check item"
-    )
+    checklist: List[QcCheckItem] = Field(..., description="One entry per QC check item")
     overall_notes: Optional[str] = Field(
         None, description="Free-text summary / rework instructions"
     )
@@ -757,7 +757,10 @@ async def update_job(
         # changed out from under QC/delivery. COMPLETED is intentionally
         # included so QC rework can't silently alter specs mid-check.
         if existing.get("status") in ["COMPLETED", "READY", "DELIVERED", "CANCELLED"]:
-            raise HTTPException(status_code=400, detail="Cannot update completed, ready, delivered, or cancelled jobs")
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot update completed, ready, delivered, or cancelled jobs",
+            )
 
         update_data = job.model_dump(exclude_unset=True)
         if "expected_date" in update_data and update_data["expected_date"]:
