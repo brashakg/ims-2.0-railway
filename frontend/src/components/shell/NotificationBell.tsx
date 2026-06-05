@@ -156,7 +156,7 @@ export function NotificationBell() {
               borderBottom: '1px solid var(--line)',
             }}
           >
-            <strong style={{ font: '600 13px var(--font-sans)', color: 'var(--ink-1)' }}>
+            <strong style={{ font: '600 13px var(--font-sans)', color: 'var(--ink)' }}>
               Notifications{unread > 0 ? ` (${unread})` : ''}
             </strong>
           </div>
@@ -198,7 +198,7 @@ export function NotificationBell() {
                         marginBottom: 2,
                       }}
                     >
-                      <span style={{ font: '600 12.5px var(--font-sans)', color: 'var(--ink-1)' }}>
+                      <span style={{ font: '600 12.5px var(--font-sans)', color: 'var(--ink)' }}>
                         {n.title}
                       </span>
                       <span style={{ color: 'var(--ink-4)', fontSize: 10.5, flexShrink: 0 }}>

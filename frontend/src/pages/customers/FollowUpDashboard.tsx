@@ -267,7 +267,7 @@ export function FollowUpDashboard() {
             className={clsx(
               'whitespace-nowrap px-4 py-2 rounded-lg font-medium transition',
               activeType === type.id
-                ? `${type.color} text-gray-900 ring-2 ring-offset-2 ring-offset-white`
+                ? `${type.color} text-white ring-2 ring-offset-2 ring-offset-white`
                 : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
             )}
           >
@@ -296,7 +296,7 @@ export function FollowUpDashboard() {
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-700">
+              <tbody className="divide-y divide-gray-100">
                 {filteredFollowUps.map((fu) => (
                   <tr key={fu.follow_up_id} className="hover:bg-gray-50 transition">
                     <td className="px-4 py-3 text-gray-900 font-medium">{fu.customer_name}</td>
