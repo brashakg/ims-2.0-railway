@@ -35,6 +35,13 @@ export interface LensFittingFormValue {
   expected_lens_receive_date: string;
   confirmed_by_sales: boolean;
   confirmed_at: string;
+  // CLI-6 — progressive lens fitting parameters.  Optional; critical for
+  // high-index / progressive / occupational lenses where mis-measurement
+  // is a leading cause of remakes.
+  segment_height: string;    // mm — distance from bottom of lens to optical centre
+  pantoscopic_tilt: string;  // degrees — frame tilt toward the face (typical 8-12)
+  vertex_distance: string;   // mm — cornea-to-back-surface distance (standard 12)
+  wrap_angle: string;        // degrees — frame face-form / wrap
 }
 
 interface LensFittingFormModalProps {
@@ -83,6 +90,11 @@ export function LensFittingFormModal({
     expected_lens_receive_date: defaultReceive(),
     confirmed_by_sales: false,
     confirmed_at: '',
+    // CLI-6 progressive fitting params
+    segment_height: '',
+    pantoscopic_tilt: '',
+    vertex_distance: '',
+    wrap_angle: '',
   });
   const [err, setErr] = useState<string | null>(null);
 
@@ -159,6 +171,16 @@ export function LensFittingFormModal({
           <LensField label="BASE CURVE" k="base_curve" placeholder="e.g. 6, 8" />
           <LensField label="COATING" k="coating" placeholder="AR / Blue-cut / Photochromic" />
           <LensField label="OTHER" k="other" placeholder="Any additional notes" />
+
+          {/* CLI-6 — Progressive fitting parameters (separator + 4 new fields) */}
+          <div className="h-px bg-gray-200 my-1" />
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Progressive / High-index Fitting
+          </p>
+          <LensField label="SEG HT" k="segment_height" placeholder="mm — e.g. 19, 22" />
+          <LensField label="PAN TILT" k="pantoscopic_tilt" placeholder="deg — e.g. 10" />
+          <LensField label="VERTEX" k="vertex_distance" placeholder="mm — e.g. 12, 13.5" />
+          <LensField label="WRAP" k="wrap_angle" placeholder="deg — face-form, e.g. 5" />
 
           <div className="h-px bg-gray-200 my-2" />
 
