@@ -147,6 +147,29 @@ def compute_cogs(orders, cost_by_product: dict, fallback_rate: float = 0.0) -> f
     return round(cogs, 2)
 
 
+def compute_cogs_with_flag(
+    orders, cost_by_product: dict, fallback_rate: float = 0.0
+) -> tuple:
+    """Like compute_cogs but also returns (cogs, estimated_lines, total_lines)
+    so callers can surface a 'COGS partially estimated' flag on the P&L when
+    the fallback was used (rather than silently showing fabricated margins).
+    Pure."""
+    cogs = 0.0
+    total_lines = 0
+    estimated_lines = 0
+    for o in orders:
+        for it in o.get("items") or []:
+            total_lines += 1
+            qty = it.get("quantity", 1) or 1
+            cost = _item_cost(it, cost_by_product)
+            if cost is not None:
+                cogs += cost * float(qty)
+            elif fallback_rate:
+                cogs += float(it.get("total", 0) or 0) * fallback_rate
+                estimated_lines += 1
+    return round(cogs, 2), estimated_lines, total_lines
+
+
 def _cost_by_product(db) -> dict:
     """product_id (and _id) -> cost_price, for COGS. Keyed both ways because
     imported orders may reference a product by its Mongo _id."""
@@ -245,9 +268,11 @@ def gst_reconciliation(
         eid = _ent(o.get("store_id"))
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = str(
-            customer_state_by_id.get(o.get("customer_id"), "") or ""
-        ).strip().lower()
+        buyer = (
+            str(customer_state_by_id.get(o.get("customer_id"), "") or "")
+            .strip()
+            .lower()
+        )
         is_inter_state = bool(seller and buyer and seller != buyer)
         bucket = acc.setdefault(eid, _blank())
         if is_inter_state:
@@ -308,9 +333,11 @@ def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dic
         tax = float(t or 0)
         total += tax
         seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = str(
-            customer_state_by_id.get(o.get("customer_id"), "") or ""
-        ).strip().lower()
+        buyer = (
+            str(customer_state_by_id.get(o.get("customer_id"), "") or "")
+            .strip()
+            .lower()
+        )
         if seller and buyer and seller != buyer:
             igst += tax
     igst = round(igst, 2)
@@ -604,12 +631,17 @@ async def get_pnl(
     total_expenses = sum(e["amount"] for e in expenses)
 
     # Real COGS from product cost_price (fallback 60% of line total if a
-    # product's cost is unknown).
+    # product's cost is unknown). Surface a flag when the fallback is used so
+    # the UI can warn the owner that some margins are estimated (SYSTEM_INTENT:
+    # never show fabricated numbers without flagging them as estimates).
     cost_map = _cost_by_product(db)
     period_orders = list(
         db.get_collection("orders").find(match, {"_id": 0, "items": 1})
     )
-    cogs = compute_cogs(period_orders, cost_map, fallback_rate=0.6)
+    cogs, cogs_est_lines, cogs_total_lines = compute_cogs_with_flag(
+        period_orders, cost_map, fallback_rate=0.6
+    )
+    cogs_is_estimated = cogs_est_lines > 0
     gross_profit = revenue - cogs
 
     # Payroll cost-to-company for the period's months.
@@ -619,6 +651,12 @@ async def get_pnl(
     return {
         "revenue": revenue,
         "cogs": round(cogs, 2),
+        # When cogs_is_estimated=True, some cost lines used a 60%-of-revenue
+        # fallback because the product cost_price is not set. Gross margin shown
+        # should be treated as approximate until all products have a cost_price.
+        "cogs_is_estimated": cogs_is_estimated,
+        "cogs_estimated_lines": cogs_est_lines,
+        "cogs_total_lines": cogs_total_lines,
         "gross_profit": round(gross_profit, 2),
         "gross_margin": round(gross_profit / revenue * 100, 1) if revenue > 0 else 0,
         "expenses": {e["_id"]: e["amount"] for e in expenses},
@@ -701,7 +739,13 @@ async def get_gst_summary(
     _sales_orders = list(
         db.get_collection("orders").find(
             sales_match,
-            {"_id": 0, "store_id": 1, "customer_id": 1, "tax_amount": 1, "tax_total": 1},
+            {
+                "_id": 0,
+                "store_id": 1,
+                "customer_id": 1,
+                "tax_amount": 1,
+                "tax_total": 1,
+            },
         )
     )
 
@@ -722,8 +766,14 @@ async def get_gst_summary(
         for _b in db.get_collection("vendor_bills").find(
             {},
             {
-                "_id": 0, "bill_date": 1, "tax_amount": 1, "gst_amount": 1,
-                "status": 1, "itc_blocked": 1, "received": 1, "itc_eligible": 1,
+                "_id": 0,
+                "bill_date": 1,
+                "tax_amount": 1,
+                "gst_amount": 1,
+                "status": 1,
+                "itc_blocked": 1,
+                "received": 1,
+                "itc_eligible": 1,
             },
         ):
             _bd = ap_engine.parse_date(_b.get("bill_date"))
@@ -1042,7 +1092,10 @@ async def get_cash_flow(
     # start.date().isoformat() (date-only) so it compares cleanly with the
     # stored date-only strings and INCLUDES 1st-of-month expenses (a datetime
     # 'YYYY-MM-01T00:00:00' boundary would sort AFTER the bare 'YYYY-MM-01').
-    exp_match = {"expense_date": {"$gte": start.date().isoformat()}, "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
+    exp_match = {
+        "expense_date": {"$gte": start.date().isoformat()},
+        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+    }
     if active_store:
         exp_match["store_id"] = active_store
     exp_out = list(
@@ -1704,18 +1757,21 @@ async def get_budget(
         {"month": m, "year": y, "mode": mode}, {"_id": 0}
     )
     if not budget:
-        # Default budget structure
+        # No budget configured for this period -- return an honest empty
+        # skeleton (budget=0 for all categories) rather than fabricated
+        # allocation numbers. The UI should prompt the user to set a budget.
         budget = {
             "month": m,
             "year": y,
             "mode": mode,
+            "no_budget_set": True,
             "categories": {
-                "rent": {"budget": 50000, "actual": 0},
-                "salaries": {"budget": 200000, "actual": 0},
-                "utilities": {"budget": 15000, "actual": 0},
-                "marketing": {"budget": 30000, "actual": 0},
-                "inventory": {"budget": 500000, "actual": 0},
-                "miscellaneous": {"budget": 20000, "actual": 0},
+                "rent": {"budget": 0, "actual": 0},
+                "salaries": {"budget": 0, "actual": 0},
+                "utilities": {"budget": 0, "actual": 0},
+                "marketing": {"budget": 0, "actual": 0},
+                "inventory": {"budget": 0, "actual": 0},
+                "miscellaneous": {"budget": 0, "actual": 0},
             },
         }
 
@@ -1890,19 +1946,27 @@ async def get_tally_sales_jv(
     _apply_created_at_range(match, from_date, to_date)
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0}))
-    # Orders persist only total tax; split intra-state CGST/SGST = tax/2 and set
-    # the taxable subtotal so each voucher balances (taxable + cgst + sgst = grand).
-    # NOTE: the shared Tally voucher builder (agents.nexus_providers) only emits
-    # CGST/SGST output ledgers -- it has no IGST ledger -- so inter-state sales
-    # cannot be represented as IGST here without imbalancing the voucher. For the
-    # single-state chains this assumption holds. Adding IGST is tracked as a
-    # follow-up against nexus_providers (a shared file outside this scope).
+    # Determine inter-state vs intra-state for each order so the Tally voucher
+    # uses the correct output ledger (IGST for inter-state, CGST+SGST for intra).
+    _store_states = _store_state_map(db)
+    _customer_states = _customer_state_map(db)
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
-        cgst, sgst = _jv_cgst_sgst_split(tax)
-        o["cgst_amount"] = cgst
-        o["sgst_amount"] = sgst
+        seller = str(_store_states.get(o.get("store_id"), "") or "").strip().lower()
+        buyer = (
+            str(_customer_states.get(o.get("customer_id"), "") or "").strip().lower()
+        )
+        is_inter_state = bool(seller and buyer and seller != buyer)
+        if is_inter_state:
+            o["igst_amount"] = round(tax, 2)
+            o["cgst_amount"] = 0.0
+            o["sgst_amount"] = 0.0
+        else:
+            cgst, sgst = _jv_cgst_sgst_split(tax)
+            o["igst_amount"] = 0.0
+            o["cgst_amount"] = cgst
+            o["sgst_amount"] = sgst
         o["subtotal"] = round(grand - tax, 2)
         o["grand_total"] = grand
 
@@ -1963,13 +2027,15 @@ async def get_pnl_by_store(
 
     cost_map = _cost_by_product(db)
     cogs_by_store: dict = {}
+    cogs_estimated_by_store: dict = {}  # store_id -> bool (any line estimated)
     for o in db.get_collection("orders").find(
         match, {"_id": 0, "store_id": 1, "items": 1}
     ):
         sid = o.get("store_id")
-        cogs_by_store[sid] = cogs_by_store.get(sid, 0) + compute_cogs(
-            [o], cost_map, fallback_rate=0.6
-        )
+        _c, _est, _tot = compute_cogs_with_flag([o], cost_map, fallback_rate=0.6)
+        cogs_by_store[sid] = cogs_by_store.get(sid, 0) + _c
+        if _est > 0:
+            cogs_estimated_by_store[sid] = True
 
     # Expenses are dated on `expense_date` (ISO 'YYYY-MM-DD' string), not
     # `date`; the old field name silently dropped every expense for any
@@ -1982,9 +2048,14 @@ async def get_pnl_by_store(
         exp_match.setdefault("expense_date", {})["$gte"] = from_date
     if to_date:
         exp_match.setdefault("expense_date", {})["$lte"] = to_date
-    exp = list(db.get_collection("expenses").aggregate(
-        [{"$match": exp_match}, {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}}]
-    ))
+    exp = list(
+        db.get_collection("expenses").aggregate(
+            [
+                {"$match": exp_match},
+                {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}},
+            ]
+        )
+    )
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
 
     pay_by_store = _payroll_by_store(db, from_date, to_date)
@@ -2004,6 +2075,9 @@ async def get_pnl_by_store(
                 "entity_id": s2e.get(sid),
                 "revenue": r,
                 "cogs": c,
+                # True when any order line used the 60%-fallback (no cost_price).
+                # Gross margin for this store should be treated as approximate.
+                "cogs_is_estimated": bool(cogs_estimated_by_store.get(sid)),
                 "expenses": e,
                 "payroll": p,
                 "net_profit": net,
