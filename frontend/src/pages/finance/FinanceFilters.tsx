@@ -63,13 +63,13 @@ export default function FinanceFilters({
             <select
               value={selectedYear}
               onChange={(e) => onYearChange(e.target.value)}
-              className="bg-slate-50 border border-slate-700 text-gray-900 rounded px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
+              className="bg-slate-50 border border-gray-200 text-gray-900 rounded px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
             >
               <option>2025-2026</option>
               <option>2024-2025</option>
               <option>2023-2024</option>
             </select>
-            <button className="flex items-center gap-2 px-4 py-2 bg-blue-50 hover:bg-blue-800 text-blue-100 rounded border border-blue-700 transition-colors font-medium text-sm">
+            <button className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded border border-blue-700 transition-colors font-medium text-sm">
               <Download className="w-4 h-4" />
               Export
             </button>
@@ -83,20 +83,20 @@ export default function FinanceFilters({
               type="date"
               value={dateFrom}
               onChange={(e) => onDateFromChange(e.target.value)}
-              className="bg-slate-50 border border-slate-700 text-gray-900 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+              className="bg-slate-50 border border-gray-200 text-gray-900 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
             />
             <input
               type="date"
               value={dateTo}
               onChange={(e) => onDateToChange(e.target.value)}
-              className="bg-slate-50 border border-slate-700 text-gray-900 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+              className="bg-slate-50 border border-gray-200 text-gray-900 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
             />
           </div>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex flex-wrap gap-2 mb-6 border-b border-slate-700">
+      <div className="flex flex-wrap gap-2 mb-6 border-b border-gray-200">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
             key={id}

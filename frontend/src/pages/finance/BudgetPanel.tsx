@@ -19,15 +19,15 @@ export default function BudgetPanel({ budgets, selectedYear }: BudgetPanelProps)
     <div className="space-y-6">
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Total Budget</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(totalAllocated)}</p>
         </div>
-        <div className="bg-white border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Total Spent</p>
           <p className="text-2xl font-bold text-blue-600 mt-1">{formatCurrency(totalSpent)}</p>
         </div>
-        <div className="bg-white border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-sm text-slate-600">Utilization</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">
             {totalAllocated > 0 ? ((totalSpent / totalAllocated) * 100).toFixed(1) : 0}%
@@ -56,7 +56,7 @@ export default function BudgetPanel({ budgets, selectedYear }: BudgetPanelProps)
               <th className="px-4 py-3">Progress</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-700">
+          <tbody className="divide-y divide-gray-100">
             {budgets.map((b) => {
               const pct = b.allocated > 0 ? (b.spent / b.allocated) * 100 : 0;
               const overBudget = b.remaining < 0;

@@ -39,10 +39,10 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
     <div className="space-y-6">
       {/* Revenue Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-gradient-to-br from-green-900 to-green-800 border border-green-700 rounded-lg p-6 text-gray-900">
+        <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-gray-900">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-green-200 text-sm font-medium">Total Revenue</p>
+              <p className="text-green-700 text-sm font-medium">Total Revenue</p>
               <p className="text-2xl font-bold mt-2">{money(revenue)}</p>
               <p className="text-xs text-green-700 mt-2">Selected period</p>
             </div>
@@ -50,10 +50,10 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-blue-900 to-blue-800 border border-blue-700 rounded-lg p-6 text-gray-900">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 text-gray-900">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-blue-200 text-sm font-medium">Gross Profit</p>
+              <p className="text-blue-700 text-sm font-medium">Gross Profit</p>
               <p className="text-2xl font-bold mt-2">{money(grossProfit)}</p>
               <p className="text-xs text-blue-700 mt-2">{grossMarginPct}</p>
             </div>
@@ -61,10 +61,10 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-purple-900 to-purple-800 border border-purple-700 rounded-lg p-6 text-gray-900">
+        <div className="bg-purple-50 border border-purple-200 rounded-lg p-6 text-gray-900">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-purple-200 text-sm font-medium">Net Profit</p>
+              <p className="text-purple-700 text-sm font-medium">Net Profit</p>
               <p className="text-2xl font-bold mt-2">{money(netProfit)}</p>
               <p className="text-xs text-purple-700 mt-2">{netMarginPct}</p>
             </div>
@@ -72,10 +72,10 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-orange-900 to-orange-800 border border-orange-700 rounded-lg p-6 text-gray-900">
+        <div className="bg-orange-50 border border-orange-200 rounded-lg p-6 text-gray-900">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-orange-200 text-sm font-medium">Operating Expense</p>
+              <p className="text-orange-700 text-sm font-medium">Operating Expense</p>
               <p className="text-2xl font-bold mt-2">{money(operatingExpenses)}</p>
               <p className="text-xs text-orange-700 mt-2">{opexPct}</p>
             </div>
@@ -86,8 +86,8 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
 
       {/* P&L Statement Detail */}
       {plStatement && (
-        <div className="bg-white border border-slate-700 rounded-lg overflow-hidden">
-          <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+          <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
             <h3 className="text-gray-900 font-semibold flex items-center gap-2">
               <FileText className="w-5 h-5 text-blue-600" />
               Profit & Loss Statement
@@ -95,41 +95,41 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           </div>
           <div className="p-6 space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <div className="bg-slate-50 p-4 rounded border border-slate-700">
+              <div className="bg-slate-50 p-4 rounded border border-gray-200">
                 <p className="text-slate-600 text-sm">Revenue</p>
                 <p className="text-gray-900 text-lg font-semibold mt-1">
                   {formatCurrency(plStatement.revenue)}
                 </p>
               </div>
-              <div className="bg-slate-50 p-4 rounded border border-slate-700">
+              <div className="bg-slate-50 p-4 rounded border border-gray-200">
                 <p className="text-slate-600 text-sm">Cost of Goods Sold</p>
                 <p className="text-red-600 text-lg font-semibold mt-1">
                   {formatCurrency(plStatement.cost_of_goods)}
                 </p>
               </div>
 
-              <div className="col-span-2 bg-gray-100 p-4 rounded border border-slate-600">
+              <div className="col-span-2 bg-gray-100 p-4 rounded border border-gray-200">
                 <p className="text-slate-700 text-sm">Gross Profit</p>
                 <p className="text-green-600 text-xl font-semibold mt-1">
                   {formatCurrency(plStatement.gross_profit)}
                 </p>
               </div>
 
-              <div className="bg-slate-50 p-4 rounded border border-slate-700">
+              <div className="bg-slate-50 p-4 rounded border border-gray-200">
                 <p className="text-slate-600 text-sm">Operating Expenses</p>
                 <p className="text-red-600 text-lg font-semibold mt-1">
                   {formatCurrency(plStatement.operating_expenses)}
                 </p>
               </div>
-              <div className="bg-slate-50 p-4 rounded border border-slate-700">
+              <div className="bg-slate-50 p-4 rounded border border-gray-200">
                 <p className="text-slate-600 text-sm">Tax Expense</p>
                 <p className="text-red-600 text-lg font-semibold mt-1">
                   {formatCurrency(plStatement.tax_expense)}
                 </p>
               </div>
 
-              <div className="col-span-2 bg-gradient-to-r from-green-900 to-green-800 p-4 rounded border border-green-700">
-                <p className="text-green-200 text-sm font-medium">Net Profit</p>
+              <div className="col-span-2 bg-green-50 p-4 rounded border border-green-200">
+                <p className="text-green-700 text-sm font-medium">Net Profit</p>
                 <p className="text-green-700 text-2xl font-bold mt-1">
                   {formatCurrency(plStatement.net_profit)}
                 </p>
@@ -143,13 +143,13 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
       )}
 
       {/* Monthly Revenue Breakdown */}
-      <div className="bg-white border border-slate-700 rounded-lg overflow-hidden">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-700">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="bg-slate-50 px-6 py-4 border-b border-gray-200">
           <h3 className="text-gray-900 font-semibold">Monthly Revenue Breakdown</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-slate-700">
-            <thead className="bg-slate-50 border-b border-slate-700">
+            <thead className="bg-slate-50 border-b border-gray-200">
               <tr>
                 <th className="px-6 py-3 text-left text-slate-600">Period</th>
                 <th className="px-6 py-3 text-right text-slate-600">Gross Sales</th>
