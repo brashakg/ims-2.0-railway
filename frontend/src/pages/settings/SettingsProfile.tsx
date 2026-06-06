@@ -200,33 +200,42 @@ export function ProfileSection() {
             <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
               <h4 className="font-medium text-gray-900 mb-3">Change Password</h4>
               <div className="space-y-3">
-                <input
-                  type="password"
-                  placeholder="Current Password"
-                  className="input-field"
-                  autoComplete="current-password"
-                  value={pwCurrent}
-                  onChange={e => setPwCurrent(e.target.value)}
-                  disabled={pwSubmitting}
-                />
-                <input
-                  type="password"
-                  placeholder="New Password (min 8 chars)"
-                  className="input-field"
-                  autoComplete="new-password"
-                  value={pwNew}
-                  onChange={e => setPwNew(e.target.value)}
-                  disabled={pwSubmitting}
-                />
-                <input
-                  type="password"
-                  placeholder="Confirm New Password"
-                  className="input-field"
-                  autoComplete="new-password"
-                  value={pwConfirm}
-                  onChange={e => setPwConfirm(e.target.value)}
-                  disabled={pwSubmitting}
-                />
+                <div>
+                  <label htmlFor="current-password" className="block text-sm font-medium text-gray-600 mb-1">Current Password</label>
+                  <input
+                    id="current-password"
+                    type="password"
+                    className="input-field"
+                    autoComplete="current-password"
+                    value={pwCurrent}
+                    onChange={e => setPwCurrent(e.target.value)}
+                    disabled={pwSubmitting}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="new-password" className="block text-sm font-medium text-gray-600 mb-1">New Password (min 8 chars)</label>
+                  <input
+                    id="new-password"
+                    type="password"
+                    className="input-field"
+                    autoComplete="new-password"
+                    value={pwNew}
+                    onChange={e => setPwNew(e.target.value)}
+                    disabled={pwSubmitting}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-600 mb-1">Confirm New Password</label>
+                  <input
+                    id="confirm-password"
+                    type="password"
+                    className="input-field"
+                    autoComplete="new-password"
+                    value={pwConfirm}
+                    onChange={e => setPwConfirm(e.target.value)}
+                    disabled={pwSubmitting}
+                  />
+                </div>
                 <button
                   className="btn-primary"
                   onClick={handleChangePassword}
