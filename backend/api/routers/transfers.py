@@ -1456,8 +1456,17 @@ def _book_mirror_purchase(transfer: Dict) -> None:
     from_entity = _store_entity(db, from_store_id)
     to_entity = _store_entity(db, to_store_id)
 
-    # Only inter-entity transfers need the mirror purchase.
-    if not from_entity or not to_entity or from_entity == to_entity:
+    # NEW-GST-TRANSFER-IGST: a stock move books a mirror purchase (and GST) when it
+    # crosses a GSTIN boundary -- that is EITHER a different legal entity OR a
+    # different STATE. A same-PAN inter-STATE transfer is a deemed supply between
+    # distinct GSTINs (Sch I) and attracts IGST. Compute states here so the gate
+    # isn't fooled by a same-entity cross-state move (previously it returned early
+    # and booked NO IGST -> GST understated).
+    from_state = _store_state_code(db, from_store_id)
+    to_state = _store_state_code(db, to_store_id)
+    if not from_entity or not to_entity:
+        return
+    if from_entity == to_entity and (from_state or "") == (to_state or ""):
         return
 
     # Idempotent: skip if we already wrote the bill for this transfer.

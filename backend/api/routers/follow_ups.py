@@ -285,8 +285,25 @@ async def complete_follow_up(
 
     collection = db.get_collection("follow_ups")
 
+    # BUG-NEW-IDOR-FOLLOWUP: Load the follow-up first to fetch its store_id,
+    # then validate that the user has access to that store before allowing the
+    # update. This prevents a cashier at store A from completing store B's
+    # follow-ups. SUPERADMIN/ADMIN can complete follow-ups across all stores
+    # (verified by can_access_store_scoped).
+    follow_up = collection.find_one({"follow_up_id": follow_up_id})
+    if not follow_up:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+
+    # Validate store access (raises 403 if user cannot access this follow-up's store).
+    from ..dependencies import can_access_store_scoped
+
+    if not can_access_store_scoped(follow_up.get("store_id"), current_user):
+        raise HTTPException(status_code=403, detail="No access to this follow-up's store")
+
+    # Update the follow-up, including store_id in the filter to prevent accidental
+    # updates due to concurrent deletes or ID collisions.
     result = collection.find_one_and_update(
-        {"follow_up_id": follow_up_id},
+        {"follow_up_id": follow_up_id, "store_id": follow_up.get("store_id")},
         {
             "$set": {
                 "status": "completed",
@@ -300,6 +317,7 @@ async def complete_follow_up(
     )
 
     if not result:
+        # This should never happen (we already fetched it), but handle gracefully.
         raise HTTPException(status_code=404, detail="Follow-up not found")
 
     return _to_response(result)

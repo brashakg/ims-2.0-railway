@@ -1,0 +1,104 @@
+import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+
+describe('vercel.json security headers', () => {
+  let vercelConfig: any;
+
+  it('loads vercel.json without errors', () => {
+    const vercelPath = path.join(__dirname, '../..', 'vercel.json');
+    expect(() => {
+      const content = fs.readFileSync(vercelPath, 'utf-8');
+      vercelConfig = JSON.parse(content);
+    }).not.toThrow();
+    expect(vercelConfig).toBeDefined();
+  });
+
+  it('defines a headers array', () => {
+    expect(Array.isArray(vercelConfig.headers)).toBe(true);
+    expect(vercelConfig.headers.length).toBeGreaterThan(0);
+  });
+
+  it('includes security headers on the root (.*) route', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    expect(rootRoute).toBeDefined();
+    expect(Array.isArray(rootRoute.headers)).toBe(true);
+    expect(rootRoute.headers.length).toBeGreaterThan(0);
+  });
+
+  it('has X-Content-Type-Options set to nosniff', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'X-Content-Type-Options');
+    expect(header).toBeDefined();
+    expect(header.value).toBe('nosniff');
+  });
+
+  it('has X-Frame-Options set to DENY', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'X-Frame-Options');
+    expect(header).toBeDefined();
+    expect(header.value).toBe('DENY');
+  });
+
+  it('has Referrer-Policy set to strict-origin-when-cross-origin', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'Referrer-Policy');
+    expect(header).toBeDefined();
+    expect(header.value).toBe('strict-origin-when-cross-origin');
+  });
+
+  it('has Strict-Transport-Security with max-age and includeSubDomains', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'Strict-Transport-Security');
+    expect(header).toBeDefined();
+    expect(header.value).toContain('max-age=31536000');
+    expect(header.value).toContain('includeSubDomains');
+  });
+
+  it('has Content-Security-Policy with frame-ancestors none', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'Content-Security-Policy');
+    expect(header).toBeDefined();
+    expect(header.value).toContain('frame-ancestors \'none\'');
+  });
+
+  it('has Content-Security-Policy with default-src self', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'Content-Security-Policy');
+    expect(header).toBeDefined();
+    expect(header.value).toContain("default-src 'self'");
+  });
+
+  it('has Content-Security-Policy with wasm-unsafe-eval for Vite runtime', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const header = rootRoute.headers.find((h: any) => h.key === 'Content-Security-Policy');
+    expect(header).toBeDefined();
+    expect(header.value).toContain("'wasm-unsafe-eval'");
+  });
+
+  it('preserves existing rewrites for SPA routing', () => {
+    expect(Array.isArray(vercelConfig.rewrites)).toBe(true);
+    const spaRewrite = vercelConfig.rewrites.find((r: any) => r.source === '/(.*)');
+    expect(spaRewrite).toBeDefined();
+    expect(spaRewrite.destination).toBe('/index.html');
+  });
+
+  it('preserves asset caching (31536000 seconds = 1 year)', () => {
+    const assetRoute = vercelConfig.headers.find((h: any) => h.source === '/assets/(.*)');
+    expect(assetRoute).toBeDefined();
+    const cacheHeader = assetRoute.headers.find((h: any) => h.key === 'Cache-Control');
+    expect(cacheHeader).toBeDefined();
+    expect(cacheHeader.value).toContain('max-age=31536000');
+    expect(cacheHeader.value).toContain('immutable');
+  });
+
+  it('preserves index.html no-cache policy', () => {
+    const htmlRoute = vercelConfig.headers.find((h: any) => h.source === '/index.html');
+    expect(htmlRoute).toBeDefined();
+    const cacheHeader = htmlRoute.headers.find((h: any) => h.key === 'Cache-Control');
+    expect(cacheHeader).toBeDefined();
+    expect(cacheHeader.value).toContain('no-cache');
+    expect(cacheHeader.value).toContain('no-store');
+    expect(cacheHeader.value).toContain('must-revalidate');
+  });
+});

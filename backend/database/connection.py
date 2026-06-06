@@ -191,8 +191,10 @@ class DatabaseConnection:
         _idx("orders", "order_id", unique=True, background=True)
         _idx("orders", "store_id", background=True)
         _idx("orders", "customer_id", background=True)
+        _idx("orders", "salesperson_id", background=True)
         _idx("orders", [("store_id", 1), ("status", 1)], background=True)
         _idx("orders", [("store_id", 1), ("created_at", -1)], background=True)
+        _idx("orders", [("salesperson_id", 1), ("created_at", -1)], background=True)
         _idx("orders", "order_number", unique=True, sparse=True, background=True)
         _idx("orders", [("store_id", 1), ("balance_due", 1)], background=True)
         # GST invoice serial (Rule 46(b)): UNIQUE backstop so a duplicate invoice
@@ -219,6 +221,7 @@ class DatabaseConnection:
         _idx("products", "product_id", unique=True, background=True)
         _idx("products", "sku", unique=True, sparse=True, background=True)
         _idx("products", "barcode", unique=True, sparse=True, background=True)
+        _idx("products", "is_active", background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
         # Prefix-search indexes for the searchable fields (brand, model, sku, variant).
         # The search() method now anchors regex patterns with ^, enabling MongoDB to

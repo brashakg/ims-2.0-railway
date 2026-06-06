@@ -60,11 +60,11 @@ TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
 
 
 class TaskCreate(BaseModel):
-    title: str = Field(..., min_length=3)
-    description: Optional[str] = None
-    category: str = Field(default="General")
+    title: str = Field(..., min_length=3, max_length=500)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    category: str = Field(default="General", max_length=100)
     priority: str = Field(default="P3")  # P0-P4
-    assigned_to: str = Field(..., min_length=1)
+    assigned_to: str = Field(..., min_length=1, max_length=255)
     # Canonical field is `due_at`; `due_date` accepted for backwards compat.
     due_date: Optional[datetime] = None
     due_at: Optional[datetime] = None
@@ -119,7 +119,7 @@ class TaskUpdate(BaseModel):
 
 
 class TaskComplete(BaseModel):
-    completion_notes: str = Field(..., min_length=3)
+    completion_notes: str = Field(..., min_length=3, max_length=2000)
 
 
 class ChecklistItemComplete(BaseModel):
@@ -1216,8 +1216,8 @@ VALID_SOP_FREQUENCIES = {"DAILY", "WEEKLY", "MONTHLY", "AD_HOC"}
 
 class SopStep(BaseModel):
     step_number: int = Field(..., ge=1)
-    instruction: str = Field(..., min_length=1)
-    warning: Optional[str] = None
+    instruction: str = Field(..., min_length=1, max_length=1000)
+    warning: Optional[str] = Field(default=None, max_length=500)
 
 
 def _validate_sop_steps(steps: Optional[List[SopStep]]) -> Optional[List[SopStep]]:
@@ -1236,8 +1236,8 @@ def _validate_sop_steps(steps: Optional[List[SopStep]]) -> Optional[List[SopStep
 
 
 class SopTemplateCreate(BaseModel):
-    title: str = Field(..., min_length=3)
-    description: Optional[str] = None
+    title: str = Field(..., min_length=3, max_length=500)
+    description: Optional[str] = Field(default=None, max_length=2000)
     category: str = "Operations"  # Operations | Finance | Sales | Clinical | Workshop
     frequency: str = "DAILY"  # DAILY | WEEKLY | MONTHLY | AD_HOC
     estimated_time: int = Field(15, ge=1, le=480)  # minutes

@@ -223,13 +223,7 @@ async def send_marketing_notification(
     if req.template_id not in _TRANSACTIONAL_TEMPLATES:
         db = _get_db()
         if db is not None:
-            cust = (
-                db.get_collection("customers").find_one(
-                    {"customer_id": req.customer_id}
-                )
-                or {}
-            )
-            if cust.get("marketing_consent") is False:
+            if is_opted_out(req.customer_id, db):
                 raise HTTPException(
                     status_code=422,
                     detail="Customer has opted out of marketing messages",
@@ -293,13 +287,11 @@ async def send_bulk_notifications(
     # None defaults to consented (matches the create-path default). Ad-hoc
     # recipients with no customer_id can't be consent-checked and are sent.
     db = _get_db()
-    cust_coll = db.get_collection("customers") if db is not None else None
     results = []
     skipped = 0
     for r in req.recipients:
-        if r.customer_id and cust_coll is not None:
-            cust = cust_coll.find_one({"customer_id": r.customer_id}) or {}
-            if cust.get("marketing_consent") is False:
+        if r.customer_id and db is not None:
+            if is_opted_out(r.customer_id, db):
                 skipped += 1
                 results.append(
                     {"phone": r.phone, "status": "skipped", "reason": "opted_out"}
@@ -490,7 +482,7 @@ async def send_rx_reminder(
     # Marketing-consent gate: PRESCRIPTION_EXPIRY is a reminder template and
     # counts as marketing under TRAI/TCCCPR (it is not a transactional event
     # like an OTP or order confirmation).  Never send to opted-out customers.
-    if customer.get("marketing_consent") is False:
+    if is_opted_out(customer_id, db):
         raise HTTPException(
             status_code=422,
             detail="Customer has opted out of marketing messages",
@@ -612,7 +604,7 @@ async def send_referral_invite(
         raise HTTPException(status_code=404, detail="Customer not found")
 
     # Marketing-consent gate: REFERRAL_INVITE is a PROMOTIONAL message.
-    if customer.get("marketing_consent") is False:
+    if is_opted_out(customer_id, db):
         raise HTTPException(
             status_code=422,
             detail="Customer has opted out of marketing messages",
@@ -1466,6 +1458,41 @@ async def get_ad_performance(
 # ============================================================================
 
 _CONSENT_LEDGER_COLL = "whatsapp_consent_ledger"
+
+
+def is_opted_out(customer_id: str, db) -> bool:
+    """Check if a customer is opted out via marketing_consent OR ledger.
+    
+    Returns True if:
+    - customers.marketing_consent is explicitly False, OR
+    - the most recent whatsapp_consent_ledger entry has event in {OPT_OUT, STOP}
+    
+    This unified check ensures all outbound paths honor all 3 opt-out signals:
+    1. The customers.marketing_consent flag (direct state)
+    2. INBOUND_STOP events in the ledger (TRAI/DPDP audit trail)
+    3. Explicit OPT_OUT events (manual withdrawal)
+    """
+    if db is None:
+        return False
+    
+    # Check the direct flag first (fast path)
+    cust = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    if cust.get("marketing_consent") is False:
+        return True
+    
+    # Check the most recent ledger entry (fail-soft: a ledger lookup error must
+    # never 500 the send path -- the marketing_consent flag above is authoritative).
+    try:
+        latest_event = db.get_collection(_CONSENT_LEDGER_COLL).find_one(
+            {"customer_id": customer_id},
+            sort=[("recorded_at", -1)]
+        )
+        if latest_event and latest_event.get("event") in {"OPT_OUT", "STOP"}:
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 class ConsentEventRequest(BaseModel):

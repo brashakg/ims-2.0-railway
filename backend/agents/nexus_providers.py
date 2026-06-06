@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 import logging
 import os
+from xml.sax.saxutils import escape
 
 import httpx
 
@@ -532,12 +533,15 @@ def tally_build_day_voucher_xml(
     store_name = str(meta.get("store_name") or "").strip()
     narration_bits = [b for b in (store_code, store_name) if b]
     narration = " · ".join(narration_bits)
+    # Escape store metadata for XML safety
+    escaped_store_code = escape(store_code) if store_code else ""
+    escaped_narration = escape(narration) if narration else ""
 
     vouchers = []
     for o in orders:
-        order_id = o.get("order_id", "")
+        order_id = escape(str(o.get("order_id", "")))
         order_date = to_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
-        party = o.get("customer_name") or "Walk-in Customer"
+        party = escape(o.get("customer_name") or "Walk-in Customer")
         subtotal = float(o.get("subtotal", 0) or 0)
         cgst = float(o.get("cgst_amount", 0) or 0)
         sgst = float(o.get("sgst_amount", 0) or 0)
@@ -545,11 +549,11 @@ def tally_build_day_voucher_xml(
         total = float(o.get("grand_total", 0) or 0)
 
         narration_block = (
-            f"\n    <NARRATION>{narration}</NARRATION>" if narration else ""
+            f"\n    <NARRATION>{escaped_narration}</NARRATION>" if escaped_narration else ""
         )
         cost_centre_block = (
-            f"\n    <COSTCENTRECATEGORY>{store_code}</COSTCENTRECATEGORY>"
-            if store_code
+            f"\n    <COSTCENTRECATEGORY>{escaped_store_code}</COSTCENTRECATEGORY>"
+            if escaped_store_code
             else ""
         )
 

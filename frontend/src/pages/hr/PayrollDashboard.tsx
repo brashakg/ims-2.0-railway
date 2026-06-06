@@ -20,6 +20,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { default as api } from '../../services/api/client';
 import clsx from 'clsx';
+import { neutralizeFormula } from '../../utils/exportUtils';
 
 // Types
 interface SalaryBreakdown {
@@ -200,11 +201,12 @@ export function PayrollDashboard() {
 
   const exportSalarySheet = () => {
     let csv = 'Name,Basic,HRA,Allowances,Gross,PF,ESI,PT,TDS,LWP,Advance,Net Pay\n';
+    const BOM = '﻿'; // UTF-8 BOM for Excel compatibility
     salarySheet.forEach((salary: any) => {
       // Flat rows from GET /payroll/salary-sheet (no nested breakdown).
-      csv += `${salary.employee_name},${salary.basic ?? 0},${salary.hra ?? 0},${salary.allowances ?? 0},${salary.gross_salary ?? 0},${salary.pf_employee ?? 0},${salary.esi ?? 0},${salary.professional_tax ?? 0},${salary.tds ?? 0},${salary.lwp_deduction ?? 0},${salary.advance_deduction ?? 0},${salary.net_pay ?? 0}\n`;
+      csv += `${neutralizeFormula(salary.employee_name)},${salary.basic ?? 0},${salary.hra ?? 0},${salary.allowances ?? 0},${salary.gross_salary ?? 0},${salary.pf_employee ?? 0},${salary.esi ?? 0},${salary.professional_tax ?? 0},${salary.tds ?? 0},${salary.lwp_deduction ?? 0},${salary.advance_deduction ?? 0},${salary.net_pay ?? 0}\n`;
     });
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob([BOM + csv], { type: 'text/csv;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

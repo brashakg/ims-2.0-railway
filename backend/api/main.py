@@ -478,7 +478,44 @@ _CORS_DEFAULT_ALLOW_HEADERS = (
 # 120 requests per minute per IP for all endpoints (generous for POS use)
 _GLOBAL_RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
 _GLOBAL_RATE_WINDOW = 60  # seconds
+# Number of trusted reverse proxies between client and this server.
+# E.g., if behind Cloudflare+nginx, set to 2.
+# Default 0 = only use request.client.host (safe, no XFF parsing).
+_TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", "0"))
 _request_log: dict = defaultdict(list)
+
+
+def _extract_client_ip(request: Request) -> str:
+    """
+    Extract the real client IP from the request, respecting trusted proxies.
+    
+    If TRUSTED_PROXY_COUNT is 0 (default), uses request.client.host only.
+    Otherwise, extracts the rightmost untrusted hop from X-Forwarded-For.
+    
+    Attack scenario: attacker sends X-Forwarded-For: attacker_ip, real_ip
+    With TRUSTED_PROXY_COUNT=0, we ignore XFF entirely and use real_ip from socket.
+    With TRUSTED_PROXY_COUNT=1 (1 trusted proxy), we take the rightmost XFF hop
+    before the trusted proxy, which is real_ip.
+    """
+    if _TRUSTED_PROXY_COUNT <= 0:
+        # No trusted proxies configured; use the socket's IP (always real).
+        return request.client.host if request.client else "unknown"
+    
+    # Parse X-Forwarded-For: extract the rightmost untrusted hop.
+    xff = request.headers.get("x-forwarded-for", "").strip()
+    if not xff:
+        return request.client.host if request.client else "unknown"
+    
+    # X-Forwarded-For: client, proxy1, proxy2, ..., proxyN
+    # If TRUSTED_PROXY_COUNT=N, the rightmost N hops are trusted proxies.
+    # We want the hop at index -(N+1) (the first untrusted hop from the right).
+    hops = [ip.strip() for ip in xff.split(",") if ip.strip()]
+    if len(hops) > _TRUSTED_PROXY_COUNT:
+        # Take the rightmost untrusted hop (at index -(TRUSTED_PROXY_COUNT+1)).
+        return hops[-(1 + _TRUSTED_PROXY_COUNT)]
+    
+    # Fallback if XFF is shorter than expected (misconfigured or spoofed).
+    return request.client.host if request.client else "unknown"
 
 
 @app.middleware("http")
@@ -494,9 +531,7 @@ async def global_rate_limiter(request: Request, call_next):
     if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("ENVIRONMENT") == "test":
         return await call_next(request)
 
-    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
-        request.client.host if request.client else "unknown"
-    )
+    client_ip = _extract_client_ip(request)
     now = time.time()
     cutoff = now - _GLOBAL_RATE_WINDOW
 

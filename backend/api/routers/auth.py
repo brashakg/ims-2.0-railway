@@ -38,6 +38,11 @@ def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> f
 # HTTPBearer with auto_error=False allows us to handle missing credentials gracefully
 security = HTTPBearer(auto_error=False)
 
+# Constant dummy bcrypt hash for timing side-channel defense
+# Used when user not found to maintain constant-time password verification
+# Prevents username enumeration via response-time analysis
+_DUMMY_BCRYPT_HASH = "$2b$12$uqhsMGHlGOXPvtqN9Bgcv.vBJ2D6x3aajGtBt/eNIC2c3Yk/pTYU6"
+
 # JWT Configuration
 # The previous fallback generated a per-process random secret if JWT_SECRET_KEY
 # was unset. With `uvicorn --workers 4` (see backend/Dockerfile) each worker
@@ -496,6 +501,9 @@ async def login(request: LoginRequest, req: Request = None):
                 pass
 
     if user is None:
+        # Always run bcrypt verify against dummy hash to prevent timing side-channel
+        # username enumeration. Unknown users will have constant-time response.
+        verify_password(request.password, _DUMMY_BCRYPT_HASH)
         _login_limiter.record(client_ip, request.username, success=False)
         _audit_auth_event(
             action="login_failure",

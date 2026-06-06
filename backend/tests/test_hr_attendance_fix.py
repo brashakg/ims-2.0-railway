@@ -40,6 +40,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import hr  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402  -- server uses IST for "today"
 
 SECRET = os.environ["JWT_SECRET_KEY"]
 
@@ -176,7 +177,7 @@ class TestNoDuplicateRows:
             "attendance_id": "att-mark",
             "employee_id": "u-test",
             "store_id": "S1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
             "check_in": None,
         }
@@ -191,9 +192,9 @@ class TestNoDuplicateRows:
     def test_mark_twice_same_day_single_row(self, monkeypatch):
         repo = _FakeAttendanceRepo([])
         c = _make_app(monkeypatch, attendance_repo=repo)
-        body = {"employee_id": "E1", "date": date.today().isoformat(), "status": "PRESENT"}
+        body = {"employee_id": "E1", "date": ist_today().isoformat(), "status": "PRESENT"}
         assert c.post("/hr/attendance/mark", headers=_headers(), json=body).status_code == 200
-        body2 = {"employee_id": "E1", "date": date.today().isoformat(), "status": "ABSENT"}
+        body2 = {"employee_id": "E1", "date": ist_today().isoformat(), "status": "ABSENT"}
         assert c.post("/hr/attendance/mark", headers=_headers(), json=body2).status_code == 200
         rows = [r for r in repo._store.values() if r["employee_id"] == "E1"]
         assert len(rows) == 1
@@ -202,7 +203,7 @@ class TestNoDuplicateRows:
     def test_legacy_datetime_date_row_matched(self, monkeypatch):
         """A legacy row whose `date` is a datetime (not an ISO string) is matched
         on the fallback path so re-mark updates it instead of duplicating."""
-        today = date.today()
+        today = ist_today()
         legacy = {
             "attendance_id": "att-legacy",
             "employee_id": "E2",
@@ -229,7 +230,7 @@ class TestNoDuplicateRows:
             "attendance_id": "att-win",
             "employee_id": "u-test",
             "store_id": "S1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
             "check_in": "2026-01-01T09:00:00",
         }
@@ -251,7 +252,7 @@ class TestAdminEdit:
             "attendance_id": "att-edit",
             "employee_id": "E9",
             "store_id": "S1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
             "check_in": (datetime.now() - timedelta(hours=8)).isoformat(),
             "check_out": None,
@@ -298,7 +299,7 @@ class TestAdminEdit:
         assert repo._store["att-edit"]["check_out"] is None
 
     def test_edit_redate_collision_409(self, monkeypatch):
-        other_day = (date.today() - timedelta(days=1)).isoformat()
+        other_day = (ist_today() - timedelta(days=1)).isoformat()
         rows = [
             self._row(),  # today
             self._row(attendance_id="att-other", date=other_day),
@@ -317,7 +318,7 @@ class TestAdminEdit:
     def test_edit_future_date_422(self, monkeypatch):
         repo = _FakeAttendanceRepo([self._row()])
         c = _make_app(monkeypatch, attendance_repo=repo, audit_repo=_FakeAuditRepo())
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        tomorrow = (ist_today() + timedelta(days=1)).isoformat()
         resp = c.put(
             "/hr/attendance/att-edit",
             headers=_headers(roles=["ADMIN"]),
@@ -385,7 +386,7 @@ class TestAdminEdit:
 
 class TestSummary:
     def _setup(self, monkeypatch):
-        month = date.today().strftime("%Y-%m")
+        month = ist_today().strftime("%Y-%m")
         d = lambda n: f"{month}-{n:02d}"  # noqa: E731
         users = [
             {"user_id": "E1", "full_name": "Alice", "store_ids": ["S1"], "is_active": True},
@@ -443,7 +444,7 @@ class TestSummary:
         monkeypatch.setattr(hr, "get_attendance_repository", lambda: None)
         monkeypatch.setattr(hr, "get_user_repository", lambda: None)
         c = TestClient(app)
-        month = date.today().strftime("%Y-%m")
+        month = ist_today().strftime("%Y-%m")
         r = c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ADMIN"]))
         assert r.status_code == 200, r.text
         assert r.json()["employees"] == []
@@ -460,7 +461,7 @@ class TestSameDayCheckout:
             "attendance_id": "att-co",
             "employee_id": "u-test",
             "store_id": "S1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
             "check_in": (datetime.now() - timedelta(hours=8)).isoformat(),
             "check_out": None,
@@ -483,7 +484,7 @@ class TestSameDayCheckout:
             "attendance_id": "att-co2",
             "employee_id": "u-test",
             "store_id": "S1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "check_in": "2026-01-01T09:00:00",
             "check_out": "2026-01-01T18:00:00",
         }

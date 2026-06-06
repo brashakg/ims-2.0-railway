@@ -5,7 +5,7 @@ Customer and patient management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 import uuid
@@ -153,7 +153,7 @@ def _annotate_customer_matches(customers: List[Dict], query: str) -> List[Dict]:
 
 
 class PatientCreate(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=120)
     mobile: Optional[str] = None
     dob: Optional[date] = None
     anniversary: Optional[date] = None
@@ -177,7 +177,7 @@ class PatientCreate(BaseModel):
 
 class CustomerCreate(BaseModel):
     customer_type: str = "B2C"  # B2C, B2B
-    name: str = Field(..., min_length=2)
+    name: str = Field(..., min_length=2, max_length=120)
     # Normalized to the canonical bare 10-digit form via the shared phone util,
     # so +91 / 0 / spaces / dashes that staff actually type are accepted and
     # stored identically to a bare number (was a raw pattern that 422'd them and
@@ -998,6 +998,7 @@ async def add_store_credit(
 
 
 class StoreCreditEntryRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     amount: float
     reason: Optional[str] = ""
     ref: Optional[str] = None  # e.g. originating return_id / order_id
