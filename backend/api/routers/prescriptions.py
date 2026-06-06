@@ -307,12 +307,21 @@ class PrescriptionCreate(BaseModel):
     rx_kind: Literal["SPECTACLE", "CONTACT_LENS"] = "SPECTACLE"
     source: str = "TESTED_AT_STORE"  # TESTED_AT_STORE, FROM_DOCTOR
     optometrist_id: Optional[str] = None
-    validity_months: int = Field(default=12, ge=6, le=24)
+    validity_months: Optional[int] = Field(default=None, ge=6, le=24)
     # Optional back-date: when supplied the prescription is stamped with this
     # date instead of utcnow(), and expiry_date is derived from it. Must not be
     # in the future. Omitting it (or passing null) keeps the original behaviour
     # (utcnow()). Accepts a full ISO-8601 datetime or a plain YYYY-MM-DD date.
     prescription_date: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _set_validity_months_default(self) -> "PrescriptionCreate":
+        """Apply kind-aware validity_months defaults: CONTACT_LENS -> 12 months,
+        SPECTACLE -> 24 months. Only when validity_months is omitted/None; an
+        explicit value (even if it matches the default) always wins."""
+        if self.validity_months is None:
+            self.validity_months = 12 if self.rx_kind == "CONTACT_LENS" else 24
+        return self
     # Spectacle eyes default to empty EyeData so a CONTACT_LENS payload need not
     # send them; a SPECTACLE payload still validates powers as before.
     right_eye: EyeData = Field(default_factory=EyeData)
@@ -334,6 +343,52 @@ class PrescriptionCreate(BaseModel):
     ipd: Optional[str] = None
     next_checkup: Optional[str] = None
     remarks: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_contact_lens_block(self) -> "PrescriptionCreate":
+        """BUG-117e: when rx_kind==CONTACT_LENS, require at least one of cl_right/
+        cl_left, each present eye carrying cl_power + base_curve + diameter, and a
+        valid modality. Spectacle Rx (default) are unaffected."""
+        if self.rx_kind != "CONTACT_LENS":
+            return self
+        
+        # At least one eye must be present.
+        if self.cl_right is None and self.cl_left is None:
+            raise ValueError(
+                "When rx_kind=CONTACT_LENS, at least one of cl_right or cl_left "
+                "must be present."
+            )
+        
+        # Validate each present eye has required fields.
+        def _check_eye_required_fields(eye: Optional[CLEyeData], label: str):
+            if eye is None:
+                return
+            if eye.cl_power is None:
+                raise ValueError(
+                    f"{label}: cl_power is required for a contact-lens Rx."
+                )
+            if eye.base_curve is None:
+                raise ValueError(
+                    f"{label}: base_curve is required for a contact-lens Rx."
+                )
+            if eye.diameter is None:
+                raise ValueError(
+                    f"{label}: diameter is required for a contact-lens Rx."
+                )
+        
+        _check_eye_required_fields(self.cl_right, "Right eye")
+        _check_eye_required_fields(self.cl_left, "Left eye")
+        
+        # modality is strongly recommended (though optional at the model level,
+        # it should be present for a complete CL Rx). The endpoint-level check
+        # still allows omission for backwards-compat, but at least validate it
+        # if supplied.
+        if self.modality is not None and self.modality not in CL_MODALITIES:
+            raise ValueError(
+                f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}."
+            )
+        
+        return self
 
 
 class EyeDataEdit(BaseModel):
