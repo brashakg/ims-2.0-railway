@@ -207,7 +207,9 @@ class TestContactLensCreate:
         bad = dict(_CL_BODY, modality="WEEKLY")
         resp = client.post("/prescriptions", json=bad)
         assert resp.status_code == 422
-        assert "modality" in resp.json()["detail"].lower()
+        # BUG-117e moved the check to a Pydantic model_validator, so `detail` is a
+        # list of error dicts (not a string); str() handles both shapes.
+        assert "modality" in str(resp.json()["detail"]).lower()
 
     def test_cl_axis_out_of_range_rejected(self, monkeypatch):
         repo = _FakeRxRepo()
@@ -384,3 +386,13 @@ class TestPureBuilders:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_cl_missing_both_eyes_rejected(monkeypatch):
+    """BUG-117e: rx_kind=CONTACT_LENS with neither cl_right nor cl_left is an
+    incomplete (un-dispensable) CL prescription -> rejected."""
+    repo = _FakeRxRepo()
+    client = _client(monkeypatch, ["OPTOMETRIST"], repo)
+    bad = {k: v for k, v in _CL_BODY.items() if k not in ("cl_right", "cl_left")}
+    resp = client.post("/prescriptions", json=bad)
+    assert resp.status_code == 422, resp.text
