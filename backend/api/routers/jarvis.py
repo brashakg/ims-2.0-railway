@@ -2247,7 +2247,7 @@ class Jarvis:
         self.analytics = JarvisAnalyticsEngine()
         self.nlp = JarvisNLP()
         self.response_gen = JarvisResponseGenerator()
-        self.conversation_history = []
+        self.user_conversation_histories: Dict[str, List[Dict]] = {}
 
     @property
     def claude_enabled(self) -> bool:
@@ -2260,10 +2260,11 @@ class Jarvis:
             return bool(ANTHROPIC_API_KEY)
 
     async def process_query_async(
-        self, query: str, context: Dict = None, model_id: str = None
+        self, query: str, context: Dict = None, model_id: str = None, user_id: str = None
     ) -> Dict:
         """Process a natural language query via the selected LLM (or the
-        deterministic template fallback)."""
+        deterministic template fallback). user_id scopes the conversation history
+        to prevent cross-user data leaks."""
         intent = self.nlp.detect_intent(query)
         entities = self.nlp.extract_entities(query)
 
@@ -2285,25 +2286,32 @@ class Jarvis:
         except Exception as e:
             logger.warning("[JARVIS] extended ctx failed (continuing with base): %s", e)
 
+        # Get or initialize user-scoped conversation history
+        if user_id is None:
+            user_id = "anonymous"
+        user_history = self.user_conversation_histories.get(user_id, [])
+
         # Try the selected LLM first (local OSS and/or Claude)
         claude_response = None
         if self.claude_enabled:
             claude_response = await ClaudeClient.call_claude(
                 message=query,
                 business_data=business_data,
-                conversation_history=self.conversation_history,
+                conversation_history=user_history,
                 model_id=model_id,
             )
 
         if claude_response:
-            # Store in conversation history
-            self.conversation_history.append({"role": "user", "content": query})
-            self.conversation_history.append(
+            # Store in user's conversation history
+            user_history.append({"role": "user", "content": query})
+            user_history.append(
                 {"role": "assistant", "content": claude_response}
             )
-            # Keep only last 20 messages
-            if len(self.conversation_history) > 20:
-                self.conversation_history = self.conversation_history[-20:]
+            # Keep only last 20 messages per user
+            if len(user_history) > 20:
+                user_history = user_history[-20:]
+            # Persist back to the per-user dictionary
+            self.user_conversation_histories[user_id] = user_history
 
             from agents import llm_provider
 
@@ -2732,7 +2740,7 @@ async def query_jarvis(
 ):
     """Send a query to JARVIS - SUPERADMIN ONLY"""
     result = await jarvis_instance.process_query_async(
-        query.message, query.context, model_id=query.model
+        query.message, query.context, model_id=query.model, user_id=current_user.get("user_id")
     )
 
     return {
