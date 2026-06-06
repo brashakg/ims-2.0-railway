@@ -4,6 +4,7 @@ import csv
 import io
 import uuid
 from datetime import datetime, timedelta
+from ..utils.ist import now_ist, now_ist_naive, ist_today, ist_day_start_utc, fy_start_year_ist
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import Response
@@ -206,7 +207,7 @@ def _months_in_range(from_date, to_date):
 
     start = _parse(from_date) if from_date else None
     end = _parse(to_date) if to_date else None
-    now = datetime.utcnow()
+    now = now_ist()
     if not start and not end:
         return [(now.year, now.month)]
     start = start or end
@@ -495,26 +496,17 @@ async def get_revenue(
             "prev_revenue": 0,
             "change_pct": None,
         }
-    now = datetime.utcnow()
+    today = ist_today()
 
     if period == "day":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = ist_day_start_utc(today)
     elif period == "week":
-        start = now - timedelta(days=now.weekday())
-        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = ist_day_start_utc(today - timedelta(days=today.weekday()))
     elif period == "month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start = ist_day_start_utc(today.replace(day=1))
     else:
-        start = now.replace(
-            month=4 if now.month >= 4 else 4,
-            day=1,
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        if now.month < 4:
-            start = start.replace(year=now.year - 1)
+        fy_year = fy_start_year_ist(now_ist())
+        start = ist_day_start_utc(today.replace(year=fy_year, month=4, day=1))
 
     # created_at is a BSON datetime -> compare against a datetime, not an ISO
     # string (a string bound never matches). Exclude DRAFT/CANCELLED so revenue
@@ -734,7 +726,7 @@ async def get_gst_summary(
             "net_gst_liability": 0,
             "gst_by_rate": {},
         }
-    now = datetime.utcnow()
+    now = now_ist()
     m = month or now.month
     y = year or now.year
 
@@ -966,7 +958,7 @@ async def get_outstanding(
     )
 
     terms_by_customer = _customer_credit_terms(db)
-    now = datetime.utcnow()
+    now = now_ist_naive()
     buckets = {"0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0, "current": 0.0}
     items = []
 
@@ -1082,8 +1074,8 @@ async def get_cash_flow(
     current_user: dict = Depends(get_current_user),
 ):
     db = _get_db()
-    now = datetime.utcnow()
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    today = ist_today()
+    start = ist_day_start_utc(today.replace(day=1))
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
@@ -1301,8 +1293,8 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
     ADMIN / ACCOUNTANT only."""
     _require_finance_admin(current_user)
     db = _get_db()
-    now = datetime.utcnow()
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    now = now_ist_naive()
+    start = ist_day_start_utc(now.replace(day=1).date())
 
     ar = _ar_aging(db, now)
 
@@ -1427,7 +1419,7 @@ async def cash_flow_forecast(
     warning. ADMIN / ACCOUNTANT only."""
     _require_finance_admin(current_user)
     db = _get_db()
-    now = datetime.utcnow()
+    now = now_ist_naive()
 
     # Inflows from AR.
     inflow_events = []
@@ -1774,7 +1766,7 @@ async def get_budget(
     current_user: dict = Depends(get_current_user),
 ):
     db = _get_db()
-    now = datetime.utcnow()
+    now = now_ist()
     m = month or now.month
     y = year or now.year
 
@@ -1872,7 +1864,7 @@ async def get_gst_reconciliation(
     """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
     You file the actual returns through Tally; this is the cross-check."""
     db = _get_db()
-    now = datetime.utcnow()
+    now = now_ist()
     m = month or now.month
     y = year or now.year
     start = datetime(y, m, 1)
@@ -2248,7 +2240,7 @@ def _cash_expenses_for_window(
     if db is None:
         return 0.0
     start_day = start_iso[:10]
-    end_day = (end_iso or _iso_now())[:10]
+    end_day = (end_iso or now_ist().isoformat())[:10]
     total = 0.0
     try:
         cursor = db.get_collection("expenses").find(
@@ -2808,7 +2800,7 @@ async def import_bank_statement(
         min_date = min(dates)
         max_date = max(dates)
     else:
-        min_date = max_date = datetime.utcnow().date().isoformat()
+        min_date = max_date = ist_today().isoformat()
 
     receipts: List[dict] = []
     payments: List[dict] = []

@@ -6,6 +6,7 @@ Order data access operations
 import logging
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, date, timedelta
+from api.utils.ist import now_ist, now_ist_naive, ist_day_start_utc
 from decimal import Decimal
 from .base_repository import BaseRepository
 
@@ -99,7 +100,7 @@ class OrderRepository(BaseRepository):
         filter = {"$or": [{"store_id": store_id}, {"storeId": store_id}]}
         
         if from_date:
-            dt = datetime.combine(from_date, datetime.min.time()).isoformat()
+            dt = ist_day_start_utc(from_date).isoformat()
             filter["$or"] = [
                 {"store_id": store_id, "created_at": {"$gte": dt}},
                 {"storeId": store_id, "createdAt": {"$gte": dt}},
@@ -118,9 +119,9 @@ class OrderRepository(BaseRepository):
         filter = {"salesperson_id": user_id}
         
         if from_date:
-            filter["created_at"] = {"$gte": datetime.combine(from_date, datetime.min.time())}
+            filter["created_at"] = {"$gte": ist_day_start_utc(from_date)}
         if to_date:
-            filter.setdefault("created_at", {})["$lte"] = datetime.combine(to_date, datetime.max.time())
+            filter.setdefault("created_at", {})["$lte"] = ist_day_start_utc(to_date + timedelta(days=1))
         
         return self.find_many(filter, sort=[("created_at", -1)])
     
@@ -153,7 +154,7 @@ class OrderRepository(BaseRepository):
         """Find overdue orders (past expected delivery)"""
         filter = {
             "status": {"$in": ["CONFIRMED", "PROCESSING", "READY"]},
-            "expected_delivery": {"$lt": datetime.now()}
+            "expected_delivery": {"$lt": now_ist_naive()}
         }
         if store_id:
             filter["store_id"] = store_id
@@ -477,7 +478,7 @@ class OrderRepository(BaseRepository):
         fallback path is only hit when the DB is unavailable, in which case
         nothing is persisted anyway.
         """
-        now = when or datetime.now()
+        now = when or now_ist()
         label = fy_label(now)
         prefix = self._resolve_invoice_prefix(store_id, store_doc)
         counters = self._counters_collection()
@@ -569,8 +570,8 @@ class OrderRepository(BaseRepository):
             {"$match": {
                 "store_id": store_id,
                 "created_at": {
-                    "$gte": datetime.combine(from_date, datetime.min.time()),
-                    "$lte": datetime.combine(to_date, datetime.max.time())
+                    "$gte": ist_day_start_utc(from_date),
+                    "$lte": ist_day_start_utc(to_date + timedelta(days=1))
                 },
                 "status": {"$nin": ["CANCELLED", "DRAFT"]}
             }},
@@ -601,8 +602,8 @@ class OrderRepository(BaseRepository):
             {"$match": {
                 "store_id": store_id,
                 "created_at": {
-                    "$gte": datetime.combine(from_date, datetime.min.time()),
-                    "$lte": datetime.combine(to_date, datetime.max.time())
+                    "$gte": ist_day_start_utc(from_date),
+                    "$lte": ist_day_start_utc(to_date + timedelta(days=1))
                 },
                 "status": {"$nin": ["CANCELLED", "DRAFT"]}
             }},
@@ -619,8 +620,8 @@ class OrderRepository(BaseRepository):
     
     def get_daily_sales(self, store_id: str, days: int = 30) -> List[Dict]:
         """Get daily sales for last N days"""
-        start_date = datetime.now() - timedelta(days=days)
-        
+        start_date = ist_day_start_utc(now_ist().date() - timedelta(days=days))
+
         pipeline = [
             {"$match": {
                 "store_id": store_id,
@@ -628,7 +629,7 @@ class OrderRepository(BaseRepository):
                 "status": {"$nin": ["CANCELLED", "DRAFT"]}
             }},
             {"$group": {
-                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at", "timezone": "+05:30"}},
                 "order_count": {"$sum": 1},
                 "total_sales": {"$sum": "$grand_total"}
             }},

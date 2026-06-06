@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
 from ..dependencies import validate_store_access
+from ..utils.ist import now_ist, ist_day_start_utc
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
     pt_for,
@@ -1908,15 +1909,18 @@ async def get_commission_leaderboard(
         return {"leaderboard": [], "period": period}
 
     try:
-        now = datetime.now()
+        now = now_ist()
+        today = now.date()
         if period == "today":
-            from_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # IST-midnight today, as the equivalent naive-UTC instant for created_at
+            from_dt = ist_day_start_utc(today)
         elif period == "week":
-            from_dt = (now - timedelta(days=now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            # IST-midnight of the Monday of this IST week
+            week_start = today - timedelta(days=now.weekday())
+            from_dt = ist_day_start_utc(week_start)
         else:  # month
-            from_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            # IST-midnight of the 1st of this IST month
+            from_dt = ist_day_start_utc(today.replace(day=1))
 
         active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
         query: dict = {
