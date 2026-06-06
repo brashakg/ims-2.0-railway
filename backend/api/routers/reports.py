@@ -2174,7 +2174,8 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     igst = 0.0
 
                 bill_number = order.get(
-                    "bill_number", order.get("order_number", "")
+                    "invoice_number",
+                    order.get("bill_number", order.get("order_number", ""))
                 ) or order.get("order_id", "")
                 created_raw = order.get("created_at", "")
                 invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
@@ -2285,6 +2286,150 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         for v in b2cs_map.values()
     ]
 
+    # CDNR (Credit/Debit Notes Register) and HSN summary
+    cdnr: list = []
+    hsn_by_rate: dict = {}
+
+    if db is not None:
+        # Process credit notes from returns/refunds in credit_note_ledger
+        try:
+            ledger_col = db.get_collection("credit_note_ledger") or db["credit_note_ledger"]
+            if ledger_col is not None:
+                # Query credit notes issued in the period
+                ledger_query = {
+                    "store_id": active_store,
+                    "type": "ISSUED",
+                    "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+                }
+                # Allow for date stored as datetime or ISO string
+                try:
+                    for entry in ledger_col.find(ledger_query):
+                        if not isinstance(entry, dict):
+                            continue
+                        # Credit notes reduce GST liability
+                        cust_id = str(entry.get("customer_id", ""))
+                        cust_info = cust_map.get(cust_id, {})
+                        cust_gstin = cust_info.get("gstin", "")
+                        cust_state = cust_info.get("state", "") or store_state
+
+                        # Derive tax from gross/net refund (net = gross - tax)
+                        gross_refund = float(entry.get("gross_refund") or 0.0)
+                        net_refund = float(entry.get("net_refund", entry.get("amount", 0)) or 0.0)
+                        cn_tax = round(gross_refund - net_refund, 2) if gross_refund > 0 else 0.0
+
+                        # Split CGST/SGST vs IGST by comparing states
+                        is_inter = bool(
+                            store_state
+                            and cust_state
+                            and store_state.strip().lower() != cust_state.strip().lower()
+                        )
+                        if is_inter:
+                            cn_igst = round(cn_tax, 2)
+                            cn_cgst = 0.0
+                            cn_sgst = 0.0
+                        else:
+                            cn_cgst = round(cn_tax / 2, 2)
+                            cn_sgst = round(cn_tax / 2, 2)
+                            cn_igst = 0.0
+
+                        # Reference to the return (e.g., RET-250415-ABC123)
+                        ref = str(entry.get("ref", entry.get("entry_id", "")) or "")
+                        cn_date = str(entry.get("created_at", ""))[:10] if entry.get("created_at") else month + "-01"
+
+                        # Assume credit notes use the same HSN/rate as the items returned
+                        cn_hsn = "9004"
+                        cn_rate = 18
+                        cn_place = cust_state or store_state or "Unknown"
+
+                        cn_entry = {
+                            "refReference": ref,
+                            "creditNoteDate": cn_date,
+                            "customerId": cust_id,
+                            "customerName": cust_info.get("name", ""),
+                            "customerGSTIN": cust_gstin,
+                            "customerState": cn_place,
+                            "placeOfSupply": cn_place,
+                            "grossValue": round(gross_refund, 2),
+                            "taxableValue": round(net_refund, 2),
+                            "cgst": cn_cgst,
+                            "sgst": cn_sgst,
+                            "igst": cn_igst,
+                            "taxValue": round(cn_tax, 2),
+                            "hsnCode": cn_hsn,
+                            "gstRate": cn_rate,
+                        }
+                        cdnr.append(cn_entry)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Build HSN summary by aggregating sales and deducting credit notes
+    for inv in b2b + b2cl:
+        if not isinstance(inv, dict):
+            continue
+        hsn = str(inv.get("hsnCode", "9004"))
+        rate = float(inv.get("gstRate", 0))
+        key = f"{hsn}|{rate}"
+        if key not in hsn_by_rate:
+            hsn_by_rate[key] = {
+                "hsnCode": hsn,
+                "gstRate": int(rate),
+                "taxableValue": 0.0,
+                "cgst": 0.0,
+                "sgst": 0.0,
+                "igst": 0.0,
+            }
+        hsn_by_rate[key]["taxableValue"] += float(inv.get("taxableValue", 0))
+        hsn_by_rate[key]["cgst"] += float(inv.get("cgst", 0))
+        hsn_by_rate[key]["sgst"] += float(inv.get("sgst", 0))
+        hsn_by_rate[key]["igst"] += float(inv.get("igst", 0))
+
+    for b2cs_row in b2cs:
+        if not isinstance(b2cs_row, dict):
+            continue
+        hsn = "9004"
+        rate = float(b2cs_row.get("gstRate", 0))
+        key = f"{hsn}|{rate}"
+        if key not in hsn_by_rate:
+            hsn_by_rate[key] = {
+                "hsnCode": hsn,
+                "gstRate": int(rate),
+                "taxableValue": 0.0,
+                "cgst": 0.0,
+                "sgst": 0.0,
+                "igst": 0.0,
+            }
+        hsn_by_rate[key]["taxableValue"] += float(b2cs_row.get("taxableValue", 0))
+        hsn_by_rate[key]["cgst"] += float(b2cs_row.get("cgst", 0))
+        hsn_by_rate[key]["sgst"] += float(b2cs_row.get("sgst", 0))
+        hsn_by_rate[key]["igst"] += float(b2cs_row.get("igst", 0))
+
+    for cn in cdnr:
+        if not isinstance(cn, dict):
+            continue
+        hsn = str(cn.get("hsnCode", "9004"))
+        rate = float(cn.get("gstRate", 0))
+        key = f"{hsn}|{rate}"
+        if key in hsn_by_rate:
+            hsn_by_rate[key]["taxableValue"] -= float(cn.get("taxableValue", 0))
+            hsn_by_rate[key]["cgst"] -= float(cn.get("cgst", 0))
+            hsn_by_rate[key]["sgst"] -= float(cn.get("sgst", 0))
+            hsn_by_rate[key]["igst"] -= float(cn.get("igst", 0))
+
+    hsn_summary = [
+        {
+            "hsnCode": v["hsnCode"],
+            "gstRate": v["gstRate"],
+            "taxableValue": round(max(0, v["taxableValue"]), 2),
+            "cgst": round(max(0, v["cgst"]), 2),
+            "sgst": round(max(0, v["sgst"]), 2),
+            "igst": round(max(0, v["igst"]), 2),
+        }
+        for v in hsn_by_rate.values()
+        if v["taxableValue"] > 0 or v["cgst"] > 0 or v["sgst"] > 0 or v["igst"] > 0
+    ]
+
     total_invoices = len(b2b) + len(b2cl) + len(b2cs_map)
     total_taxable = (
         sum(i["taxableValue"] for i in b2b)
@@ -2308,6 +2453,8 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         "b2b": b2b,
         "b2cl": b2cl,
         "b2cs": b2cs,
+        "cdnr": cdnr,
+        "hsnSummary": hsn_summary,
         "validation": {
             "ok": len(validation_issues) == 0,
             "issueCount": len(validation_issues),
