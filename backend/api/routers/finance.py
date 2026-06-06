@@ -63,6 +63,10 @@ def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
     `end` date-only bound expands to 23:59:59.999999 so the whole final day is
     inclusive. Returns None when the input is empty / unparseable (caller then
     omits that bound).
+    
+    For date-only inputs (YYYY-MM-DD), treats them as IST business days
+    (matching the other IST-swept paths in this router). Converts IST midnight
+    to the equivalent naive-UTC instant for comparison with created_at.
     """
     if s is None:
         return None
@@ -78,10 +82,17 @@ def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
             dt = dt.replace(tzinfo=None)
     except ValueError:
         try:
-            dt = datetime.fromisoformat(txt[:10])
+            # Date-only input: parse as an IST business day and convert to UTC.
+            # ist_day_start_utc gives us IST midnight as a naive-UTC instant,
+            # which is the correct >= bound for range-filtering created_at.
+            parsed_date = datetime.fromisoformat(txt[:10]).date()
+            dt = ist_day_start_utc(parsed_date)
         except ValueError:
             return None
-    # A date-only end bound covers the entire day.
+    # A date-only end bound covers the entire day in IST.
+    # ist_day_start_utc already gives IST midnight in UTC; for the end bound,
+    # add 23:59:59.999999 in IST time (which is 23:59:59.999999 in UTC, since
+    # ist_day_start_utc is already the UTC equivalent of IST midnight).
     if len(txt) <= 10 and end:
         return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     return dt
@@ -399,17 +410,23 @@ def _customer_state_map(db) -> dict:
 def pnl_by_category(orders, cost_by_product: dict) -> list:
     """Revenue + COGS per product category (item_type), from order line items.
     Pure. Prefers item.cost_at_sale snapshot; 60%-of-line COGS fallback when
-    a product's cost is unknown."""
+    a product's cost is unknown. Includes cogs_is_estimated flag per category
+    so the UI can mark estimates (SYSTEM_INTENT: never show fabricated numbers
+    without flagging them)."""
     acc: dict = {}
     for o in orders:
         for it in o.get("items") or []:
             cat = it.get("item_type") or it.get("category") or "OTHER"
             qty = it.get("quantity", 1) or 1
             rev = float(it.get("total", 0) or 0)
-            d = acc.setdefault(cat, {"revenue": 0.0, "cogs": 0.0})
+            d = acc.setdefault(cat, {"revenue": 0.0, "cogs": 0.0, "estimated_lines": 0})
             d["revenue"] += rev
             cost = _item_cost(it, cost_by_product)
-            d["cogs"] += (cost * float(qty)) if cost is not None else rev * 0.6
+            if cost is not None:
+                d["cogs"] += cost * float(qty)
+            else:
+                d["cogs"] += rev * 0.6
+                d["estimated_lines"] += 1
     rows = []
     for cat, d in acc.items():
         r, c = round(d["revenue"], 2), round(d["cogs"], 2)
@@ -420,6 +437,7 @@ def pnl_by_category(orders, cost_by_product: dict) -> list:
                 "cogs": c,
                 "gross_profit": round(r - c, 2),
                 "gross_margin": round((r - c) / r * 100, 1) if r > 0 else 0,
+                "cogs_is_estimated": d["estimated_lines"] > 0,
             }
         )
     return sorted(rows, key=lambda x: -x["revenue"])
