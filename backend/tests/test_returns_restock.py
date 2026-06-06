@@ -340,6 +340,11 @@ class _FakeOrderRepo:
         order = dict(order)
         if "items" not in order:
             order["items"] = [dict(li) for li in _DEFAULT_ORDER_ITEMS]
+        # BUG-096: a return now requires a returnable order status + a cumulative
+        # refund <= amount_paid. These restock fixtures model a real PAID,
+        # delivered sale, so default both unless an individual test overrides them.
+        order.setdefault("status", "DELIVERED")
+        order.setdefault("amount_paid", 1_000_000.0)
         self._order = order
         # Expose a bound `orders` collection so the returns atomic claim runs
         # against the SAME order doc the repo serves.

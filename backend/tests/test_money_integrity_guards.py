@@ -124,6 +124,8 @@ class _FakeOrdersColl:
 class _FakeOrderRepo:
     def __init__(self, order: Dict[str, Any]):
         self._order = copy.deepcopy(order)
+        # BUG-096: cumulative refund capped at amount_paid; model a PAID order.
+        self._order.setdefault("amount_paid", 1_000_000_000.0)
         self.collection = _FakeOrdersColl([self._order])
 
     def find_by_id(self, oid):
