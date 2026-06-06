@@ -21,6 +21,7 @@ from ..dependencies import (
     get_audit_repository,
     get_vendor_repository,
     validate_store_access,
+    can_access_store_scoped,
 )
 
 # Roles allowed to drive the lens lifecycle + ready-notify. SUPERADMIN passes
@@ -755,6 +756,11 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     if repo is not None:
         job = repo.find_by_id(job_id)
         if job is not None:
+            # NEW-IDOR-by-id: a workshop job carries customer + medical Rx data;
+            # existence-hide one whose store the caller can't access (cross-store
+            # PII leak). Admins / area-managers pass.
+            if not can_access_store_scoped(job.get("store_id"), current_user):
+                raise HTTPException(status_code=404, detail="Workshop job not found")
             return job_to_frontend(job)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
@@ -771,6 +777,9 @@ async def update_job(
     if repo is not None:
         existing = repo.find_by_id(job_id)
         if existing is None:
+            raise HTTPException(status_code=404, detail="Workshop job not found")
+        # NEW-IDOR-by-id: don't let a store-scoped caller mutate another store's job.
+        if not can_access_store_scoped(existing.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         # Bug fix: READY and QC_FAILED were missing from the immutable-status
