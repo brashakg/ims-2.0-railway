@@ -438,6 +438,30 @@ def is_period_locked(db, month, year) -> bool:
         return False
 
 
+def check_period_locked(db, posting_date) -> None:
+    """Raise HTTPException(423) if the posting_date's month/year is locked.
+    
+    Fail-soft: if db is None or period_locks lookup fails, does not raise.
+    Used by orders/returns/vendor-bills/payments to guard financial-period closure.
+    """
+    if db is None:
+        return
+    try:
+        from datetime import date
+        if isinstance(posting_date, str):
+            posting_date = date.fromisoformat(posting_date)
+        month, year = posting_date.month, posting_date.year
+        if is_period_locked(db, month, year):
+            raise HTTPException(
+                status_code=423,
+                detail=f"Accounting period {month:02d}/{year} is locked; cannot post to a closed month."
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # fail-soft: period check errors do not block posting
+
+
 def _payroll_by_store(db, from_date, to_date) -> dict:
     """store_id -> payroll cost-to-company over the months in the range."""
     out: dict = {}

@@ -1841,10 +1841,15 @@ async def create_vendor_bill(
             detail="taxable_amount + tax_amount must equal total_amount",
         )
 
+    # Accounting period lock: cannot record vendor bills into a closed month.
+    db_early = _get_db()
+    if db_early is not None:
+        from .finance import check_period_locked
+        check_period_locked(db_early, bill.bill_date)
+
     # Duplicate bill guard: the same vendor invoice number must not be recorded
     # twice for the same vendor. A double-entry would double the outstanding
     # payable and produce a duplicate payment row in the ledger.
-    db_early = _get_db()
     if db_early is not None:
         try:
             dup = db_early.get_collection("vendor_bills").find_one(
@@ -1939,6 +1944,12 @@ async def create_vendor_payment(
         tds_amount = ap_engine.compute_tds(base, tds_section)["tds_amount"]
     else:
         tds_amount = 0.0
+
+    # Accounting period lock: cannot record vendor payments into a closed month.
+    db = _get_db()
+    if db is not None:
+        from .finance import check_period_locked
+        check_period_locked(db, payment.payment_date)
 
     payment_id = str(uuid.uuid4())
     doc = {

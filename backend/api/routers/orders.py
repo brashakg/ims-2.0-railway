@@ -27,6 +27,20 @@ from ..dependencies import (
     validate_store_access,
 )
 
+
+def _get_db():
+    """Raw MongoDB handle, or None when unavailable (mock / no-DB mode)."""
+    try:
+        from ..dependencies import get_db
+
+        conn = get_db()
+        if conn is not None and getattr(conn, "is_connected", False):
+            return conn.db
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 # Discount caps (category + luxury brand) come from the canonical
 # api.services.pricing_caps -- NEVER re-implement them here. The old local
 # table under-capped PREMIUM (5% vs 20%) / MASS (10% vs 15%) / LUXURY (2% vs 5%)
@@ -1055,6 +1069,14 @@ async def create_order(
             status_code=400,
             detail=f"Cart exceeds maximum of {MAX_CART_ITEMS} items. Split into multiple orders.",
         )
+
+    # Accounting period lock: cannot create orders in a closed month.
+    db = _get_db()
+    if db is not None:
+        from .finance import check_period_locked
+        from datetime import date as _pl_date
+
+        check_period_locked(db, _pl_date.today())
 
     # Validate product_ids exist.
     #

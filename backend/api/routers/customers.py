@@ -5,7 +5,7 @@ Customer and patient management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 import uuid
@@ -998,6 +998,7 @@ async def add_store_credit(
 
 
 class StoreCreditEntryRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     amount: float
     reason: Optional[str] = ""
     ref: Optional[str] = None  # e.g. originating return_id / order_id

@@ -11,6 +11,7 @@ Pure helpers here (no DB) so the math is unit-tested; the router persists.
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -44,6 +45,11 @@ def make_entry(
     - REDEEMED: amount > 0 and <= current_balance (spends credit).
     - ADJUSTED: signed amount; cannot drive the balance negative.
     """
+    if not math.isfinite(amount):
+        raise ValueError("amount must be a finite number")
+    if not math.isfinite(current_balance):
+        raise ValueError("current_balance must be a finite number")
+
     et = (entry_type or "").upper()
     if et not in ENTRY_TYPES:
         raise ValueError(f"entry_type must be one of {sorted(ENTRY_TYPES)}")
