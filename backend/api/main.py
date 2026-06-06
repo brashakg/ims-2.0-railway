@@ -358,31 +358,49 @@ def _sanitize_cors_origin(origin: str) -> str:
     return ""
 
 
+# Vercel PREVIEW deployments for THIS project deploy under the owner's Vercel
+# team scope (...-<team-slug>.vercel.app). SEC-CORS-WILDCARD (BUG-114): the old
+# check used a SUBSTRING test (".vercel.app" in origin / ".up.railway.app" in
+# origin), so https://evil.vercel.app AND https://x.vercel.app.attacker.com were
+# BOTH trusted as credentialed cross-origins. We now anchor on the team-scope
+# suffix (end-match). Comma-separated + env-overridable for when the team slug
+# changes; the real production aliases are exact-matched via DEFAULT_CORS_ORIGINS
+# so prod never depends on this pattern.
+_VERCEL_PREVIEW_SUFFIXES = [
+    s.strip()
+    for s in os.getenv(
+        "VERCEL_PREVIEW_SUFFIX", "-avinashs-projects-b3cb6df8.vercel.app"
+    ).split(",")
+    if s.strip()
+]
+
+
 def _is_allowed_origin(origin: str) -> bool:
-    """Check if an origin is allowed based on exact match or pattern"""
+    """True if an origin may make credentialed cross-origin requests.
+
+    Exact production + localhost hosts (incl. the Railway backend) come from
+    DEFAULT_CORS_ORIGINS. Beyond those we trust ONLY the owner's own Vercel
+    preview deployments (anchored team-scope suffix -- never a bare *.vercel.app
+    substring) and true uniparallel.com subdomains. No blanket *.vercel.app /
+    *.up.railway.app -- that allowed any attacker-controlled deployment.
+    """
     if not origin:
         return False
 
-    # Check exact match first
+    # Exact match: all real prod hosts, the Railway backend, and localhost dev.
     if origin in DEFAULT_CORS_ORIGINS:
         return True
 
-    # Allow all Vercel preview deployments (*.vercel.app)
-    if origin.startswith("https://") and ".vercel.app" in origin:
-        return True
-
-    # Allow Railway preview deployments (*.up.railway.app)
-    if origin.startswith("https://") and ".up.railway.app" in origin:
-        return True
-
-    # Allow the unified uniparallel.com app + ANY subdomain (Option A):
-    # app.uniparallel.com (IMS frontend) calls api.uniparallel.com (backend),
-    # and the apex hosts the BVI admin. ".uniparallel.com" (with the leading
-    # dot) means only true subdomains match -- "eviluniparallel.com" does NOT.
-    if origin.startswith("https://") and (
-        origin == "https://uniparallel.com" or origin.endswith(".uniparallel.com")
-    ):
-        return True
+    if origin.startswith("https://"):
+        # Owner's Vercel preview deployments only -- anchored END match so an
+        # attacker's own *.vercel.app (or evil.vercel.app.attacker.com) is NOT
+        # trusted with credentials.
+        if any(origin.endswith(sfx) for sfx in _VERCEL_PREVIEW_SUFFIXES):
+            return True
+        # Unified app: uniparallel.com apex + any TRUE subdomain (leading dot),
+        # so "eviluniparallel.com" does NOT match.
+        if origin == "https://uniparallel.com" or origin.endswith(".uniparallel.com"):
+            return True
 
     return False
 
@@ -398,7 +416,10 @@ else:
     CORS_ORIGINS = DEFAULT_CORS_ORIGINS
 
 logger.info(f"CORS Origins configured: {CORS_ORIGINS}")
-logger.info("✓ All *.vercel.app and *.up.railway.app domains allowed")
+logger.info(
+    "[CORS] anchored allow-list: exact prod hosts + owner Vercel previews %s + *.uniparallel.com",
+    _VERCEL_PREVIEW_SUFFIXES,
+)
 
 # ============================================================================
 # CORS — origin-whitelisted, headers reflected from request.
