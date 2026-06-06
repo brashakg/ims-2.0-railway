@@ -459,12 +459,32 @@ def _payroll_by_store(db, from_date, to_date) -> dict:
 # === Revenue Tracking ===
 
 
+_HQ_STORE_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER"}
+
+
+def _scope_store(store_id, current_user):
+    """Resolve + authorise the store filter for a finance aggregation (BUG-062).
+
+    - explicit store_id -> validate_store_access (403 if a store-scoped role asks
+      for ANOTHER store; admins / area-managers pass through).
+    - omitted -> all stores (None) for HQ roles, but the caller's OWN active store
+      for store-scoped roles -- so a store-level role can never read an all-stores
+      or other-store financial aggregate (revenue / P&L / receivables).
+    """
+    if store_id:
+        return validate_store_access(store_id, current_user)
+    if set(current_user.get("roles") or []) & _HQ_STORE_ROLES:
+        return None
+    return current_user.get("active_store_id")
+
+
 @router.get("/revenue")
 async def get_revenue(
     period: str = Query("month", pattern="^(day|week|month|year)$"),
     store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    store_id = _scope_store(store_id, current_user)
     db = _get_db()
     if db is None:
         return {
@@ -578,6 +598,7 @@ async def get_pnl(
     to_date: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    store_id = _scope_store(store_id, current_user)
     db = _get_db()
     if db is None:
         return {
@@ -913,6 +934,7 @@ async def get_outstanding(
     over 30 days as overdue even when the customer is within their NET-60
     terms. Real overdue = days past the due_date.
     """
+    store_id = _scope_store(store_id, current_user)
     db = _get_db()
     if db is None:
         return []
