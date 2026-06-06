@@ -360,6 +360,15 @@ def _build_store_ledger(
             pipeline = [
                 {"$match": {"store_id": store_id}},
                 {
+                    "$project": {
+                        "product_id": 1,
+                        "status": 1,
+                        "quantity": 1,
+                        "barcode": 1,
+                        "location_code": 1,
+                    }
+                },
+                {
                     "$group": {
                         "_id": {
                             "product_id": "$product_id",

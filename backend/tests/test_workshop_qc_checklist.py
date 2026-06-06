@@ -69,6 +69,9 @@ def _mk_job(
         "store_id": "BV-TEST-01",
         "created_at": (now - timedelta(days=created_days_ago)).isoformat(),
         "expected_date": expected_date or (now + timedelta(days=3)).date().isoformat(),
+        # BUG-116c: model a sales-confirmed fitting so the ->IN_PROGRESS acceptance
+        # gate passes (a test exercising that gate sets this False explicitly).
+        "fitting_details": {"confirmed_by_sales": True},
     }
     if completed_today:
         doc["completed_at"] = now.isoformat()
@@ -634,3 +637,44 @@ class TestWorkshopRepositoryUpdateStatus:
         )
         assert store["j1"]["status"] == "READY"
         assert store["j1"]["qc_waived"] is True
+
+
+class TestEmptyChecklistRejected:
+    """BUG-116b: an EMPTY QC checklist must not vacuously pass (all([]) == True)."""
+
+    def test_empty_checklist_rejected_422(self, monkeypatch):
+        repo = FakeRepo([_mk_job("j1", "COMPLETED")])
+        client = _client_with(monkeypatch, ["WORKSHOP_STAFF"], repo)
+        r = client.post("/workshop/jobs/j1/qc-checklist", json={"checklist": []})
+        assert r.status_code == 422, r.text
+        assert repo._jobs["j1"]["status"] == "COMPLETED"  # never advanced
+
+    def test_nonempty_checklist_ok(self, monkeypatch):
+        repo = FakeRepo([_mk_job("j1", "COMPLETED")])
+        client = _client_with(monkeypatch, ["WORKSHOP_STAFF"], repo)
+        r = client.post("/workshop/jobs/j1/qc-checklist", json={"checklist": QC_ITEMS_ALL_PASS})
+        assert r.status_code == 200, r.text
+
+
+class TestSalesConfirmGate:
+    """BUG-116c: the workshop cannot ACCEPT a job (-> IN_PROGRESS) until sales
+    confirms the fitting details (confirmed_by_sales)."""
+
+    def _unconfirmed(self):
+        j = _mk_job("j1", "PENDING")
+        j["fitting_details"] = {"confirmed_by_sales": False}
+        return j
+
+    def test_start_blocked_without_sales_confirm(self, monkeypatch):
+        client = _client_with(monkeypatch, ["WORKSHOP_STAFF"], FakeRepo([self._unconfirmed()]))
+        assert client.post("/workshop/jobs/j1/start").status_code == 400
+
+    def test_status_patch_to_inprogress_blocked_without_confirm(self, monkeypatch):
+        client = _client_with(monkeypatch, ["WORKSHOP_STAFF"], FakeRepo([self._unconfirmed()]))
+        r = client.patch("/workshop/jobs/j1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 400, r.text
+
+    def test_start_ok_when_confirmed(self, monkeypatch):
+        # _mk_job defaults confirmed_by_sales=True
+        client = _client_with(monkeypatch, ["WORKSHOP_STAFF"], FakeRepo([_mk_job("j1", "PENDING")]))
+        assert client.post("/workshop/jobs/j1/start").status_code == 200

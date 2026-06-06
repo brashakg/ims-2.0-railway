@@ -38,6 +38,27 @@ router = APIRouter()
 
 # Entity management is highly sensitive (statutory identity of the business).
 _ENTITY_ADMIN = ("ADMIN",)  # SUPERADMIN auto-passes inside require_roles
+# SEC-ENTITIES-PII: roles allowed to SEE sensitive corporate PII (PAN / TAN /
+# bank accounts). Any other authenticated role gets the entity structure with
+# those fields projected out -- a SALES_STAFF must not read the company PAN/TAN
+# or bank account numbers. (GSTIN is printed on every invoice -> not secret ->
+# kept so invoicing/display still works for lower roles.)
+_ENTITY_PII_ROLES = ("SUPERADMIN", "ADMIN", "ACCOUNTANT")
+_ENTITY_PII_FIELDS = ("pan", "tan", "bank_accounts", "bank_account_no")
+
+
+def _can_view_entity_pii(current_user: dict) -> bool:
+    return any(r in (current_user.get("roles") or []) for r in _ENTITY_PII_ROLES)
+
+
+def _redact_entity_pii(doc: dict) -> dict:
+    """Return a copy of an entity doc with sensitive PII (PAN/TAN/bank) removed."""
+    if not isinstance(doc, dict):
+        return doc
+    out = dict(doc)
+    for f in _ENTITY_PII_FIELDS:
+        out.pop(f, None)
+    return out
 
 
 # ============================================================================
@@ -347,6 +368,8 @@ async def list_entities(
     try:
         query = {} if include_inactive else {"is_active": True}
         entities = [_clean(e) for e in db.get_collection("entities").find(query)]
+        if not _can_view_entity_pii(current_user):
+            entities = [_redact_entity_pii(e) for e in entities]
         return {"entities": entities, "total": len(entities)}
     except Exception as e:
         logger.error("list_entities failed: %s", e)
@@ -406,7 +429,10 @@ async def get_entity(entity_id: str, current_user: dict = Depends(get_current_us
         entity = db.get_collection("entities").find_one({"entity_id": entity_id})
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
-        return {"entity": _clean(entity)}
+        cleaned = _clean(entity)
+        if not _can_view_entity_pii(current_user):
+            cleaned = _redact_entity_pii(cleaned)
+        return {"entity": cleaned}
     except HTTPException:
         raise
     except Exception as e:

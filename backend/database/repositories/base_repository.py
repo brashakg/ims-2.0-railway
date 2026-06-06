@@ -309,7 +309,7 @@ class BaseRepository(ABC, Generic[T]):
         Tokenized text search across fields.
 
         A multi-word query is split on whitespace; EVERY token must match at
-        least one of `fields` (case-insensitive substring), and ALL tokens
+        least one of `fields` (case-insensitive prefix match), and ALL tokens
         must match somewhere. This is how a cashier actually types -- e.g.
         "Fastrack P357" finds a doc with brand="Fastrack" + model="P357BK1".
 
@@ -317,8 +317,9 @@ class BaseRepository(ABC, Generic[T]):
         each field individually, so a cross-field multi-word query found
         nothing (no single field contained "Fastrack P357"). Single-token
         queries are unchanged (one token, OR across fields). Tokens are
-        regex-escaped so a SKU like "P357BK1" or punctuation can't break the
-        query or be interpreted as a pattern.
+        regex-escaped and anchored with ^ so a SKU like "P357BK1" matches
+        P357BK1* but not RAY-P357BK1. Prefix matching via ^ enables the
+        database to use a compound index on (field, 1) instead of full scans.
 
         Args:
             text: Search text (one or more whitespace-separated tokens)
@@ -340,7 +341,10 @@ class BaseRepository(ABC, Generic[T]):
 
             and_clauses = []
             for tok in tokens:
-                regex = {"$regex": re.escape(tok), "$options": "i"}
+                # Anchor with ^ for prefix matching so indexes can be used.
+                # ^ prevents full scans and keeps the result semantics
+                # (e.g., searching "ray" no longer matches "spray" or "primary").
+                regex = {"$regex": "^" + re.escape(tok), "$options": "i"}
                 and_clauses.append({"$or": [{field: regex} for field in fields]})
 
             query = {"$and": and_clauses}

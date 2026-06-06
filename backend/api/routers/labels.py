@@ -48,6 +48,7 @@ from ..dependencies import (
     get_stock_repository,
     get_store_repository,
     get_audit_repository,
+    can_access_store_scoped,
 )
 
 router = APIRouter()
@@ -210,6 +211,15 @@ async def scan_advance(
 
     job = repo.find_by_id(job_id)
     if job is None:
+        return {
+            "ok": False,
+            "reason": "NOT_FOUND",
+            "message": f"No workshop job for id {job_id}.",
+        }
+
+    # NEW-IDOR-by-id: a store-scoped caller may only scan-advance a job at a store
+    # it can access -- existence-hide a cross-store job (same NOT_FOUND contract).
+    if not can_access_store_scoped(job.get("store_id"), current_user):
         return {
             "ok": False,
             "reason": "NOT_FOUND",
@@ -431,6 +441,11 @@ async def get_job_label(
 
     job = repo.find_by_id(job_id)
     if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+    # NEW-IDOR-LABEL: the label carries customer phone + medical Rx (SPH/CYL).
+    # Existence-hide a job whose store the caller cannot access (cross-store
+    # medical-PII leak). Admins / area-managers pass.
+    if not can_access_store_scoped(job.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
     # Rx summary (best-effort).

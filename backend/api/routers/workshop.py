@@ -21,6 +21,7 @@ from ..dependencies import (
     get_audit_repository,
     get_vendor_repository,
     validate_store_access,
+    can_access_store_scoped,
 )
 
 # Roles allowed to drive the lens lifecycle + ready-notify. SUPERADMIN passes
@@ -219,7 +220,7 @@ class QcChecklistBody(BaseModel):
     is provided with a reason.
     """
 
-    checklist: List[QcCheckItem] = Field(..., description="One entry per QC check item")
+    checklist: List[QcCheckItem] = Field(..., min_length=1, description="One or more QC check items (cannot be empty)")
     overall_notes: Optional[str] = Field(
         None, description="Free-text summary / rework instructions"
     )
@@ -755,6 +756,11 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     if repo is not None:
         job = repo.find_by_id(job_id)
         if job is not None:
+            # NEW-IDOR-by-id: a workshop job carries customer + medical Rx data;
+            # existence-hide one whose store the caller can't access (cross-store
+            # PII leak). Admins / area-managers pass.
+            if not can_access_store_scoped(job.get("store_id"), current_user):
+                raise HTTPException(status_code=404, detail="Workshop job not found")
             return job_to_frontend(job)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
@@ -771,6 +777,9 @@ async def update_job(
     if repo is not None:
         existing = repo.find_by_id(job_id)
         if existing is None:
+            raise HTTPException(status_code=404, detail="Workshop job not found")
+        # NEW-IDOR-by-id: don't let a store-scoped caller mutate another store's job.
+        if not can_access_store_scoped(existing.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         # Bug fix: READY and QC_FAILED were missing from the immutable-status
@@ -847,6 +856,20 @@ async def update_job_status(
                 detail=(
                     f"Cannot transition from {current_status} to {status}. "
                     f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}."
+                ),
+            )
+
+        # BUG-116c: the workshop may only ACCEPT a job (-> IN_PROGRESS) once sales
+        # has confirmed the fitting details (power + product correct). Mirror the
+        # /start gate on the generic status PATCH so it cannot be bypassed.
+        if status == "IN_PROGRESS" and not (
+            (job.get("fitting_details") or {}).get("confirmed_by_sales")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot start this job: sales must confirm the fitting details "
+                    "(confirmed_by_sales) first."
                 ),
             )
 
@@ -938,7 +961,7 @@ async def assign_job(
 
 @router.post("/jobs/{job_id}/start")
 async def start_job(job_id: str, current_user: dict = Depends(get_current_user)):
-    """Start working on a job"""
+    """Start working on a job. Requires sales confirmation (fitting_details.confirmed_by_sales=True)."""
     repo = get_workshop_repository()
 
     if repo is not None:
@@ -948,6 +971,14 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
 
         if job.get("status") != "PENDING":
             raise HTTPException(status_code=400, detail="Job must be PENDING to start")
+
+        # BUG-116c: gate job acceptance on sales confirmation
+        fitting_details = job.get("fitting_details") or {}
+        if not fitting_details.get("confirmed_by_sales"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot start job: sales must confirm fitting details (confirmed_by_sales=True) first",
+            )
 
         if repo.update_status(job_id, "IN_PROGRESS", current_user.get("user_id")):
             return {"job_id": job_id, "status": "IN_PROGRESS", "message": "Job started"}
@@ -959,7 +990,7 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
 
 @router.post("/jobs/{job_id}/complete")
 async def complete_job(job_id: str, current_user: dict = Depends(get_current_user)):
-    """Mark job as completed (pending QC)"""
+    """Mark job as completed (pending QC). Requires sales confirmation (fitting_details.confirmed_by_sales=True)."""
     repo = get_workshop_repository()
 
     if repo is not None:
@@ -970,6 +1001,14 @@ async def complete_job(job_id: str, current_user: dict = Depends(get_current_use
         if job.get("status") != "IN_PROGRESS":
             raise HTTPException(
                 status_code=400, detail="Job must be IN_PROGRESS to complete"
+            )
+
+        # BUG-116c: defensive check (should have been gated at /start, but verify here too)
+        fitting_details = job.get("fitting_details") or {}
+        if not fitting_details.get("confirmed_by_sales"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot complete job: sales must confirm fitting details (confirmed_by_sales=True) first",
             )
 
         if repo.update_status(job_id, "COMPLETED", current_user.get("user_id")):
