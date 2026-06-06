@@ -1081,15 +1081,11 @@ async def create_order(
                     detail=f"Product not found: {pid} ({item.product_name or 'unknown'})",
                 )
 
-    # Validate: offer_price cannot exceed MRP
-    for item in order.items:
-        offer_price = getattr(item, "offer_price", 0) or 0
-        mrp = getattr(item, "mrp", 0) or 0
-        if offer_price > 0 and mrp > 0 and offer_price > mrp:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp}) for {getattr(item, 'product_name', 'item')}",
-            )
+    # BUG-119/BUG-118: the real server-side price ceiling / cost floor / discount
+    # validation runs in the totals loop below (AFTER the idempotency check, using
+    # the catalog MRP/offer/cost snapshot). The OrderItemCreate model carries no
+    # mrp/offer_price field, so the old getattr(item,"mrp",0) guard here was always
+    # reading 0 and never fired -- a client could set any unit_price.
 
     if order_repo is not None and customer_repo is not None:
         # C-5 (DELTA 3): order-create idempotency. If the request carries a
@@ -1128,23 +1124,47 @@ async def create_order(
         # a product doc -> cost_at_sale stays None and the finance layer
         # falls back to 60% of line total.
         _cost_by_pid: Dict[str, float] = {}
+        # BUG-119/BUG-118: snapshot the catalog MRP + offer_price per product so
+        # the pricing loop can enforce a server-side price ceiling (unit_price may
+        # never exceed the product's real MRP, or its offer_price when HQ has
+        # already discounted it), a cost floor, and the "no further discount on an
+        # HQ-discounted (offer<MRP) item" rule. The client unit_price/discount is
+        # never trusted for these. Fail-soft: absent product -> no constraint.
+        _mrp_by_pid: Dict[str, float] = {}
+        _offer_by_pid: Dict[str, float] = {}
+
+        def _num_or_none(v):
+            try:
+                f = float(v)
+                return f
+            except (TypeError, ValueError):
+                return None
+
         try:
             if product_repo is not None:
+                _seen_pids: set = set()
                 for it in order.items:
                     pid = it.product_id or ""
-                    if not pid or pid in _cost_by_pid:
+                    if not pid or pid in _seen_pids:
                         continue
                     if pid.startswith(("custom-", "lens-", "lens-sug-")):
                         continue
+                    _seen_pids.add(pid)
                     pdoc = _resolve_product_doc(product_repo, pid)
-                    if pdoc and pdoc.get("cost_price") is not None:
-                        try:
-                            _cost_by_pid[pid] = float(pdoc["cost_price"])
-                        except (TypeError, ValueError):
-                            pass
+                    if not pdoc:
+                        continue
+                    c = _num_or_none(pdoc.get("cost_price"))
+                    if c is not None:
+                        _cost_by_pid[pid] = c
+                    m = _num_or_none(pdoc.get("mrp"))
+                    if m is not None and m > 0:
+                        _mrp_by_pid[pid] = m
+                    o = _num_or_none(pdoc.get("offer_price"))
+                    if o is not None and o > 0:
+                        _offer_by_pid[pid] = o
         except Exception:
-            # Cost snapshot is fail-soft -- never block order create.
-            _cost_by_pid = {}
+            # Pricing snapshot is fail-soft -- never block order create.
+            _cost_by_pid, _mrp_by_pid, _offer_by_pid = {}, {}, {}
 
         # Calculate totals
         items_data = []
@@ -1168,9 +1188,67 @@ async def create_order(
         for item in order.items:
             item_total = item.unit_price * item.quantity
 
-            # Enforce discount cap (admins bypass)
+            # ---- BUG-119/BUG-118: server-side price integrity (non-virtual) ----
+            # Enforce the catalog MRP/offer ceiling, a cost floor, and the
+            # "no further discount on an HQ-discounted item" rule. `_eff_disc` is
+            # the effective discount = the LARGER of the explicit discount_percent
+            # and the discount implied by unit_price vs MRP, so a low unit_price is
+            # capped exactly like an explicit discount and cannot bypass the cap.
+            _pid = item.product_id or ""
+            _eff_disc = item.discount_percent
+            if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
+                _mrp = _mrp_by_pid.get(_pid)
+                _offer = _offer_by_pid.get(_pid)
+                _cost = _cost_by_pid.get(_pid)
+                _up = item.unit_price
+                _hq_discounted = bool(_offer and _mrp and _offer < _mrp)
+                _ceiling = _offer if _hq_discounted else _mrp
+                if _ceiling and _up > _ceiling + 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"unit_price Rs{_up} exceeds the catalog "
+                            f"{'offer price' if _hq_discounted else 'MRP'} "
+                            f"Rs{_ceiling} for {item.product_name or _pid}."
+                        ),
+                    )
+                # Cost floor: never sell a PRICED line below cost. A Rs0 line is a
+                # free / 100%-discount item gated by the approval requirement (C-4),
+                # so it is exempt here.
+                if _cost and _cost > 0 and _up > 1e-6 and _up < _cost - 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"unit_price Rs{_up} is below cost Rs{_cost} for "
+                            f"{item.product_name or _pid}. Contact a manager."
+                        ),
+                    )
+                # BUG-118 (SYSTEM_INTENT s3): an HQ-discounted item (offer<MRP)
+                # sells at exactly offer_price -- no further store discount. A lower
+                # unit_price OR any explicit discount_percent is a further discount.
+                if not is_admin and _hq_discounted and (
+                    item.discount_percent > 0 or _up < _offer - 1e-6
+                ):
+                    logger.warning(
+                        "[ORDERS] BUG-118 blocked further discount on HQ-discounted %s by %s",
+                        _pid, current_user.get("user_id"),
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            f"{item.product_name or _pid} is already discounted by HQ "
+                            f"(offer Rs{_offer} < MRP Rs{_mrp}); no further store "
+                            f"discount is allowed. Contact an administrator to override."
+                        ),
+                    )
+                # Effective discount for the cap check (max of explicit + implied).
+                if _mrp and _up < _mrp - 1e-6:
+                    _implied = (_mrp - _up) / _mrp * 100.0
+                    _eff_disc = max(item.discount_percent, _implied)
+
+            # Enforce discount cap (admins bypass) -- against the EFFECTIVE discount
             effective_cap = user_discount_cap
-            if not is_admin and item.discount_percent > 0:
+            if not is_admin and _eff_disc > 0:
                 # Look up category cap for this product — read from the
                 # products collection (same fix as the existence-check
                 # above; the original code hit stock_units and always
@@ -1203,11 +1281,12 @@ async def create_order(
                 except Exception:
                     pass  # fall back to user cap only
 
-                if item.discount_percent > effective_cap:
+                if _eff_disc > effective_cap + 1e-9:
                     raise HTTPException(
                         status_code=403,
-                        detail=f"Discount {item.discount_percent}% on {item.product_name or item.product_id} "
-                        f"exceeds your limit of {effective_cap}%. Contact a manager for approval.",
+                        detail=f"Discount {round(_eff_disc, 2)}% on {item.product_name or item.product_id} "
+                        f"(explicit discount and/or unit price below MRP) exceeds your limit of "
+                        f"{effective_cap}%. Contact a manager for approval.",
                     )
 
             discount_amount = item_total * (item.discount_percent / 100)
@@ -1383,6 +1462,20 @@ async def create_order(
                 _pid = getattr(_it, "product_id", None)
                 if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
                     continue
+                # BUG-118: a cart-level discount on an HQ-discounted line is the
+                # same forbidden "further discount" (SYSTEM_INTENT s3) -- block it.
+                _m = _mrp_by_pid.get(_pid)
+                _o = _offer_by_pid.get(_pid)
+                if _o and _m and _o < _m:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            f"Cannot apply a cart discount: "
+                            f"{getattr(_it, 'product_name', None) or _pid} is already "
+                            f"HQ-discounted (offer Rs{_o} < MRP Rs{_m}). Contact an "
+                            f"administrator to override."
+                        ),
+                    )
                 try:
                     _prod = (
                         _cap_repo.find_by_id(_pid) if _cap_repo is not None else None
@@ -1859,14 +1952,9 @@ async def add_order_item(
     order_id: str, item: OrderItemCreate, current_user: dict = Depends(get_current_user)
 ):
     """Add item to order (only DRAFT orders)"""
-    # Validate: offer_price cannot exceed MRP
-    offer_price = getattr(item, "offer_price", 0) or 0
-    mrp = getattr(item, "mrp", 0) or 0
-    if offer_price > 0 and mrp > 0 and offer_price > mrp:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp})",
-        )
+    # BUG-119/BUG-118: real price-integrity validation is below (after the DRAFT
+    # check) using the catalog MRP/offer/cost -- the OrderItemCreate model carries
+    # no mrp/offer_price field, so the old getattr(item,"mrp",0) guard never fired.
 
     repo = get_order_repository()
 
@@ -1892,35 +1980,65 @@ async def add_order_item(
             r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
         )
         _cap = _role_cap
-        if not _is_admin and item.discount_percent > 0:
+        _eff_disc = item.discount_percent
+        _pid = item.product_id or ""
+        if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
             try:
                 pr = get_product_repository()
-                if (
-                    pr is not None
-                    and item.product_id
-                    and not item.product_id.startswith(
-                        ("custom-", "lens-", "lens-sug-")
-                    )
-                ):
-                    product = pr.find_by_id(item.product_id)
-                    if product:
-                        from api.services.pricing_caps import (
-                            effective_discount_cap as product_discount_cap,
-                        )
-
-                        _cap = min(
-                            _role_cap,
-                            product_discount_cap(
-                                product.get("discount_category"),
-                                product.get("brand"),
-                            ),
-                        )
+                product = pr.find_by_id(_pid) if pr is not None else None
             except Exception:
-                pass  # fall back to role cap only
-        if not _is_admin and item.discount_percent > _cap:
+                product = None
+            if product:
+                def _n(v):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+
+                _mrp = _n(product.get("mrp"))
+                _offer = _n(product.get("offer_price"))
+                _cost = _n(product.get("cost_price"))
+                _up = item.unit_price
+                _hq = bool(_offer and _mrp and _offer < _mrp)
+                _ceiling = _offer if _hq else (_mrp if (_mrp and _mrp > 0) else None)
+                if _ceiling and _up > _ceiling + 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unit_price Rs{_up} exceeds the catalog "
+                        f"{'offer price' if _hq else 'MRP'} Rs{_ceiling} "
+                        f"for {item.product_name or _pid}.",
+                    )
+                if _cost and _cost > 0 and _up > 1e-6 and _up < _cost - 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unit_price Rs{_up} is below cost Rs{_cost} for "
+                        f"{item.product_name or _pid}. Contact a manager.",
+                    )
+                if not _is_admin and _hq and (
+                    item.discount_percent > 0 or _up < _offer - 1e-6
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"{item.product_name or _pid} is already discounted by "
+                        f"HQ (offer Rs{_offer} < MRP Rs{_mrp}); no further store "
+                        f"discount is allowed. Contact an administrator to override.",
+                    )
+                if _mrp and _mrp > 0 and _up < _mrp - 1e-6:
+                    _eff_disc = max(item.discount_percent, (_mrp - _up) / _mrp * 100.0)
+                from api.services.pricing_caps import (
+                    effective_discount_cap as product_discount_cap,
+                )
+
+                _cap = min(
+                    _role_cap,
+                    product_discount_cap(
+                        product.get("discount_category"), product.get("brand")
+                    ),
+                )
+        if not _is_admin and _eff_disc > _cap + 1e-9:
             raise HTTPException(
                 status_code=403,
-                detail=f"Discount {item.discount_percent}% exceeds your limit of "
+                detail=f"Discount {round(_eff_disc, 2)}% exceeds your limit of "
                 f"{_cap}%. Contact a manager for approval.",
             )
 
