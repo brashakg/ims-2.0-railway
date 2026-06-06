@@ -1560,8 +1560,8 @@ async def get_integrations_catalog(
 
 
 @router.get("/integrations")
-async def list_integrations(current_user: dict = Depends(get_current_user)):
-    """List all integration configurations"""
+async def list_integrations(current_user: dict = Depends(require_roles("ADMIN"))):
+    """List all integration configurations (ADMIN/SUPERADMIN only)."""
     integrations = _get_integrations_from_db()
     if integrations:
         return {"integrations": integrations}
@@ -1571,9 +1571,12 @@ async def list_integrations(current_user: dict = Depends(get_current_user)):
 
 @router.get("/integrations/{integration_type}")
 async def get_integration(
-    integration_type: str, current_user: dict = Depends(get_current_user)
+    integration_type: str, current_user: dict = Depends(require_roles("ADMIN"))
 ):
     """Get one integration's configuration (sensitive fields masked).
+
+    ADMIN/SUPERADMIN only. Even masked configuration reveals provider type,
+    webhook presence, and enabled status — sensitive business data.
 
     Reads the canonical {type:<lower>} doc that the provider clients
     (nexus_providers.py, services/shiprocket.py) and the
