@@ -315,7 +315,7 @@ class EyeTestRepository(BaseRepository):
             }
         }
 
-        all_tests = self.find_many(filter_dict)
+        all_tests = self.find_many(filter_dict, limit=0)
         completed_tests = [t for t in all_tests if t.get("status") == "COMPLETED"]
 
         return {

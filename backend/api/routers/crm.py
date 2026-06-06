@@ -45,7 +45,7 @@ class _CRMDataAdapter:
 
     def query_all_customers(self):
         repo = get_customer_repository()
-        return repo.find_many({}) if repo else []
+        return repo.find_many({}, limit=0) if repo else []
 
     def query_customers_by_store(self, store_id: str):
         repo = get_customer_repository()
@@ -63,7 +63,8 @@ class _CRMDataAdapter:
                     {"primary_store_id": store_id},
                     {"store_id": store_id},
                 ]
-            }
+            },
+            limit=0,
         )
 
     def query_customer_orders(self, customer_id: str):
