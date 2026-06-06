@@ -2366,6 +2366,58 @@ async def gstr1_gstn_json(
 # ============================================================================
 
 
+def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
+    """BUG-138: ITC available for a month from recorded PURCHASE INVOICES
+    (vendor_bills cgst/sgst/igst_total), scoped to the store's entity. Returns
+    (igst, cgst, sgst). The old code summed the `grns` collection -- quantity-only
+    with NO tax fields -- so ITC was always 0 and the business over-paid GST.
+    invoice_date/bill_date are ISO-date STRINGS, matched with string month bounds.
+    Fail-soft -> (0.0, 0.0, 0.0)."""
+    if db is None:
+        return 0.0, 0.0, 0.0
+    try:
+        entity_id = None
+        try:
+            _srow = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
+            entity_id = (_srow or {}).get("entity_id")
+        except Exception:
+            entity_id = None
+        month_lo = f"{year:04d}-{mon:02d}-01"
+        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
+        vb_match: dict = {
+            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
+            "itc_eligible": {"$ne": False},
+            "$or": [
+                {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
+                {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
+            ],
+        }
+        if entity_id:
+            vb_match["recipient_entity_id"] = entity_id
+        pipeline = [
+            {"$match": vb_match},
+            {
+                "$group": {
+                    "_id": None,
+                    "igst": {"$sum": "$igst_total"},
+                    "cgst": {"$sum": "$cgst_total"},
+                    "sgst": {"$sum": "$sgst_total"},
+                }
+            },
+        ]
+        res = list(db["vendor_bills"].aggregate(pipeline))
+        if res:
+            a = res[0]
+            return (
+                float(a.get("igst", 0.0) or 0.0),
+                float(a.get("cgst", 0.0) or 0.0),
+                float(a.get("sgst", 0.0) or 0.0),
+            )
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0
+
+
 def _compute_gstr3b(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-3B report dict for a (month, store).
 
@@ -2375,7 +2427,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     `month`.
 
     Table 3.1 - Outward taxable supplies: derived from completed sales invoices.
-    Table 4   - ITC available: derived from purchase GRNs (grns collection).
+    Table 4   - ITC available: derived from recorded purchase invoices
+                (vendor_bills cgst/sgst/igst_total), scoped to the store's entity.
                 Returns zeros when no purchase data is present.
     Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
     Returns all-zero figures when no data exists for the period.
@@ -2467,35 +2520,11 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         except Exception:
             pass
 
-        try:
-            # --- ITC from purchase GRNs (goods received notes) ---
-            grns_col = db["grns"]
-            itc_pipeline = [
-                {
-                    "$match": {
-                        "store_id": active_store,
-                        "status": {"$nin": ["CANCELLED", "cancelled"]},
-                        "created_at": {"$gte": from_dt, "$lte": to_dt},
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": None,
-                        "igst": {"$sum": "$igst_amount"},
-                        "cgst": {"$sum": "$cgst_amount"},
-                        "sgst": {"$sum": "$sgst_amount"},
-                    }
-                },
-            ]
-            itc_result = list(grns_col.aggregate(itc_pipeline))
-            if itc_result:
-                itc_agg = itc_result[0]
-                itc_igst = float(itc_agg.get("igst", 0.0))
-                itc_cgst = float(itc_agg.get("cgst", 0.0))
-                itc_sgst = float(itc_agg.get("sgst", 0.0))
-        except Exception:
-            # grns collection may not exist or have no GST fields
-            pass
+        # BUG-138: ITC from recorded purchase invoices (vendor_bills), not the
+        # qty-only `grns` collection that made ITC always 0 (-> GST over-paid).
+        itc_igst, itc_cgst, itc_sgst = _itc_from_vendor_bills(
+            db, active_store, year, mon, last_day
+        )
 
     # Net cash liability = output tax - ITC (floor at 0 per component)
     cash_igst = max(0.0, out_igst - itc_igst)
