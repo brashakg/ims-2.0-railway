@@ -783,8 +783,6 @@ class MarketplaceAdapter(SourceAdapter):
         if not body:
             return {}
         try:
-            import json
-
             data = json.loads(body)
             return data if isinstance(data, dict) else {}
         except Exception:  # noqa: BLE001

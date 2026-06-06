@@ -2507,7 +2507,6 @@ async def trigger_einvoice(
     FAILED). DARK by default -- caller always gets a structured response; never
     a 500. Finance roles only: ACCOUNTANT / ADMIN / SUPERADMIN.
     """
-    from api.routers.auth import require_roles
     from api.services.einvoice import generate_irn
 
     role = str(
@@ -2662,7 +2661,7 @@ def _auto_match_statement(
     (None or the matched record) and `match_type` ("RECEIPT", "PAYMENT",
     "UNMATCHED").
     """
-    from ..services.ap_engine import _f, parse_date
+    from ..services.ap_engine import _f
 
     def _amt_close(a: float, b: float) -> bool:
         return abs(a - b) <= amount_tolerance

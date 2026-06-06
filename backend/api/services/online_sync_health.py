@@ -337,7 +337,6 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
     # ---- Gate: need creds -----------------------------------------------
     try:
         from .shopify_push import _has_shopify_creds, _graphql
-        from agents.nexus_providers import ims_shopify_writes_enabled
     except Exception as exc:  # noqa: BLE001
         return {**_empty, "reason": f"import error: {exc}"}
 
@@ -540,7 +539,6 @@ async def repush_oversell_risk(db, dry_run: bool = True) -> Dict[str, Any]:
             ims_shopify_writes_enabled,
             shopify_set_inventory_available,
         )
-        from agents.providers import dispatch_mode as _dispatch_mode
     except Exception as exc:  # noqa: BLE001
         return {**base, "skipped_reason": f"import error: {exc}"}
 

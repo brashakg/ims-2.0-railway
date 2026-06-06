@@ -149,8 +149,8 @@ def _rembg_editor() -> Optional[ImageEditor]:
         async def edit(self, raw: bytes, spec: EditSpec) -> bytes:
             import io
 
-            import rembg
-            from PIL import Image
+            import rembg  # noqa: F811
+            from PIL import Image  # noqa: F811
 
             cut = rembg.remove(raw)  # alpha-matte cutout (product pixels intact)
             fg = Image.open(io.BytesIO(cut)).convert("RGBA")

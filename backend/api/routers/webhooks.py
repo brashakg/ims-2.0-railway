@@ -53,7 +53,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Query
@@ -821,9 +821,6 @@ async def list_whatsapp_conversations(
     """
     # Role gate -- inline check (mirrors the pattern in other routers).
     try:
-        from .auth import get_current_user as _get_user
-        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
         auth_header = request.headers.get("Authorization") or ""
         if not auth_header.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="not authenticated")
