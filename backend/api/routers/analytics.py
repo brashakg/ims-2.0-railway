@@ -392,6 +392,9 @@ async def get_dashboard_summary(
             "stores_count": 1,
         }
 
+    except HTTPException:
+        # Propagate validate_store_access's 403 (cross-store) — don't mask it as 500.
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error calculating dashboard summary: {str(e)}"
@@ -510,6 +513,8 @@ async def get_revenue_trends(
             "data": timeline_data,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error fetching revenue trends: {str(e)}"
@@ -644,6 +649,8 @@ async def get_store_performance(
             },
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error fetching store performance: {str(e)}"
@@ -775,6 +782,8 @@ async def get_inventory_intelligence(
             },
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error fetching inventory intelligence: {str(e)}"
@@ -910,6 +919,8 @@ async def get_customer_insights(
             ),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error fetching customer insights: {str(e)}"

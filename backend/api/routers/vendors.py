@@ -20,6 +20,7 @@ from ..dependencies import (
     get_stock_repository,
     get_vendor_portal_token_repository,
     get_audit_repository,
+    validate_store_access,
 )
 from ..services import ap_engine
 
@@ -737,7 +738,7 @@ async def list_pos(
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if po_repo is None:
         return {"purchase_orders": [], "total": 0}
@@ -1143,7 +1144,7 @@ async def list_grns(
 ):
     """List GRNs with filters"""
     grn_repo = get_grn_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if grn_repo is None:
         return {"grns": [], "total": 0}
