@@ -1522,3 +1522,45 @@ class TestCrossStoreListIDOR:
             assert r.status_code not in (401, 403), (
                 f"Own-store request on {path} should pass, got {r.status_code}"
             )
+
+
+class TestFinanceCrossStoreIDOR:
+    """BUG-062 direct-dict tail: live QA proved a Pune store manager read Bokaro's
+    revenue / P&L (incl. COGS) / receivables (with customer PII) via the finance
+    aggregation endpoints, which trusted ?store_id directly. _scope_store now 403s
+    a store-scoped role asking for another store; admins keep cross-store/all.
+    """
+
+    _FIN_PATHS = [
+        "/api/v1/finance/revenue?store_id=BV-BOK-01",
+        "/api/v1/finance/pnl?store_id=BV-BOK-01",
+        "/api/v1/finance/outstanding?store_id=BV-BOK-01",
+    ]
+
+    def test_store_manager_denied_other_store(self, matrix_client):
+        token = _mint_token(["STORE_MANAGER"], store_id="BV-PUN-01")
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in self._FIN_PATHS:
+            r = matrix_client.get(path, headers=headers)
+            assert r.status_code == 403, (
+                f"Finance IDOR: STORE_MANAGER@BV-PUN-01 on {path} should be 403, "
+                f"got {r.status_code}: {r.text[:200]}"
+            )
+
+    def test_admin_allowed_cross_store(self, matrix_client):
+        token = _mint_token(["ADMIN"], store_id="BV-PUN-01")
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in self._FIN_PATHS:
+            r = matrix_client.get(path, headers=headers)
+            assert r.status_code not in (401, 403), (
+                f"ADMIN should be allowed cross-store on {path}, got {r.status_code}"
+            )
+
+    def test_store_manager_own_store_allowed(self, matrix_client):
+        token = _mint_token(["STORE_MANAGER"], store_id="BV-BOK-01")
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in self._FIN_PATHS:
+            r = matrix_client.get(path, headers=headers)
+            assert r.status_code not in (401, 403), (
+                f"Own-store finance request on {path} should pass, got {r.status_code}"
+            )
