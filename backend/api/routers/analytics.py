@@ -130,7 +130,7 @@ def _fetch_orders_in_window(
     except Exception:
         # Defensive: never 500 a dashboard on a query hiccup.
         try:
-            return _norm_orders(order_repo.find_many(flt))
+            return _norm_orders(order_repo.find_many(flt, limit=0))
         except Exception:
             return []
 
@@ -321,7 +321,7 @@ async def get_dashboard_summary(
 
         # Get inventory metrics
         inventory = (
-            stock_repo.find_many({"store_id": store_id})
+            stock_repo.find_many({"store_id": store_id}, limit=0)
             if stock_repo is not None
             else []
         )
@@ -349,7 +349,8 @@ async def get_dashboard_summary(
                         {"primary_store_id": store_id},
                         {"store_id": store_id},
                     ]
-                }
+                },
+                limit=0,
             )
             if customer_repo is not None
             else []
@@ -598,7 +599,7 @@ async def get_store_performance(
 
             # Inventory metrics
             inventory = (
-                stock_repo.find_many({"store_id": store_id})
+                stock_repo.find_many({"store_id": store_id}, limit=0)
                 if stock_repo is not None
                 else []
             )
@@ -668,7 +669,7 @@ async def get_inventory_intelligence(
 
         stock_repo = get_stock_repository()
         inventory = (
-            stock_repo.find_many({"store_id": store_id})
+            stock_repo.find_many({"store_id": store_id}, limit=0)
             if stock_repo is not None
             else []
         )
@@ -812,7 +813,8 @@ async def get_customer_insights(
                         {"primary_store_id": store_id},
                         {"store_id": store_id},
                     ]
-                }
+                },
+                limit=0,
             )
             if customer_repo is not None
             else []
@@ -1010,7 +1012,7 @@ async def get_enterprise_kpis(
 
         # ===== INVENTORY METRICS =====
         inventory = (
-            stock_repo.find_many({"store_id": store_id})
+            stock_repo.find_many({"store_id": store_id}, limit=0)
             if stock_repo is not None
             else []
         )

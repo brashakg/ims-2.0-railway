@@ -71,7 +71,10 @@ def _orders_in_window(
     if store_id:
         flt["store_id"] = store_id
     try:
-        return order_repo.find_many(flt) or []
+        # BUG-061: limit=0 returns ALL matching orders. The default limit=100
+        # silently truncated every aggregation that feeds off this helper
+        # (~15 sales/profit/discount/footfall reports) -> understated totals.
+        return order_repo.find_many(flt, limit=0) or []
     except Exception:
         return []
 
@@ -270,7 +273,7 @@ async def dashboard_stats(
     # Fetch customer data
     if customer_repo is not None:
         # Count customers created today
-        all_customers = customer_repo.find_many({"store_id": active_store})
+        all_customers = customer_repo.find_many({"store_id": active_store}, limit=0)
         for customer in all_customers:
             created_date = to_date_str(customer.get("created_at"))
             if created_date == today_str:
@@ -322,7 +325,7 @@ async def inventory_report(
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
-        all_stock = stock_repo.find_many({"store_id": active_store})
+        all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
         low_stock = stock_repo.find_low_stock(active_store, threshold=5)
 
         total_items = len(all_stock)
@@ -447,7 +450,8 @@ async def sales_by_salesperson(
             "store_id": active_store,
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+        },
+        limit=0,
     )
 
     # Group by salesperson
@@ -519,7 +523,7 @@ async def inventory_summary(
         }
 
     # Get all stock
-    all_stock = stock_repo.find_many({"store_id": active_store})
+    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
     low_stock = stock_repo.find_low_stock(active_store, threshold=5)
 
     total_value = sum(
@@ -551,7 +555,7 @@ async def inventory_valuation(
     if stock_repo is None:
         return {"valuation": {"by_category": [], "total": 0}}
 
-    all_stock = stock_repo.find_many({"store_id": active_store})
+    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
 
     # Group by category
     by_category = {}
@@ -811,7 +815,8 @@ async def attendance_report(
                 "$gte": start_date.isoformat()[:10],
                 "$lt": end_date.isoformat()[:10],
             },
-        }
+        },
+        limit=0,
     )
 
     return {
@@ -846,7 +851,8 @@ async def outstanding_report(
             "store_id": active_store,
             "balance_due": {"$gt": 0},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+        },
+        limit=0,
     )
 
     outstanding_data = []
@@ -1271,7 +1277,8 @@ async def profit_by_category(
             "store_id": active_store,
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+        },
+        limit=0,
     )
 
     profit_by_cat = {}
@@ -1330,7 +1337,8 @@ async def profit_by_store(
         {
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+        },
+        limit=0,
     )
 
     profit_by_st = {}
@@ -1661,7 +1669,7 @@ async def daily_stock_count(
     if stock_repo is None:
         return {"data": [], "summary": {}}
 
-    all_stock = stock_repo.find_many({"store_id": active_store})
+    all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
 
     by_category = {}
     total_items = 0
@@ -1769,7 +1777,7 @@ async def customer_acquisition(
     to_dt = datetime.combine(to_date, datetime.max.time())
 
     # Get all customers (small enough N to walk in-process)
-    all_customers = customer_repo.find_many({"store_id": active_store}) or []
+    all_customers = customer_repo.find_many({"store_id": active_store}, limit=0) or []
 
     # New customers — created_at within window. Mongo stamps `created_at`
     # as a real datetime, but legacy seeds may have it as ISO string.
@@ -1864,7 +1872,7 @@ async def brand_sellthrough(
 
     # Get current stock by brand
     if stock_repo:
-        current_stock = stock_repo.find_many({"store_id": active_store})
+        current_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
         by_brand_stock = {}
         for item in current_stock:
             brand = item.get("brand", "Unbranded")

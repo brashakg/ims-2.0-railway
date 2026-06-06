@@ -587,7 +587,7 @@ async def list_expenses(
     elif to_date:
         filter_dict["expense_date"] = {"$lte": to_date.isoformat()}
 
-    expenses = expense_repo.find_many(filter_dict)
+    expenses = expense_repo.find_many(filter_dict, limit=0)
 
     return {"expenses": expenses or [], "total": len(expenses) if expenses else 0}
 
@@ -1056,7 +1056,7 @@ async def list_to_enter(
     if store_id:
         filter_dict["store_id"] = store_id
 
-    expenses = expense_repo.find_many(filter_dict) or []
+    expenses = expense_repo.find_many(filter_dict, limit=0) or []
     return {"expenses": expenses, "total": len(expenses)}
 
 
@@ -1201,7 +1201,7 @@ async def list_advances(
     if status:
         filter_dict["status"] = status
 
-    advances = advance_repo.find_many(filter_dict)
+    advances = advance_repo.find_many(filter_dict, limit=0)
 
     return {"advances": advances or [], "total": len(advances) if advances else 0}
 
@@ -1379,13 +1379,13 @@ async def get_pending_approvals(
         filter_dict = {"status": "PENDING"}
         if active_store:
             filter_dict["store_id"] = active_store
-        pending_expenses = expense_repo.find_many(filter_dict) or []
+        pending_expenses = expense_repo.find_many(filter_dict, limit=0) or []
 
     if advance_repo is not None:
         filter_dict = {"status": "PENDING"}
         if active_store:
             filter_dict["store_id"] = active_store
-        pending_advances = advance_repo.find_many(filter_dict) or []
+        pending_advances = advance_repo.find_many(filter_dict, limit=0) or []
 
     return {
         "expenses": pending_expenses,
