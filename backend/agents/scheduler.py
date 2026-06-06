@@ -18,6 +18,7 @@ import uuid
 
 from .base import JarvisAgent
 from .config import AgentConfigManager
+from api.utils.ist import IST
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ class AgentScheduler:
 
         if APSCHEDULER_AVAILABLE:
             self._scheduler = AsyncIOScheduler(
+                timezone=IST,  # BUG-104: cron triggers (PIXEL 2 AM, EOD 10 PM, Tally 11 PM) must fire on IST wall-clock, not the UTC box clock
                 job_defaults={
                     "coalesce": True,  # If missed, run once instead of catching up
                     "max_instances": 1,  # Only one instance per agent

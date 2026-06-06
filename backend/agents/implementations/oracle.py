@@ -27,6 +27,7 @@ import statistics
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..claude_client import call_claude, call_claude_json, is_claude_available
+from api.utils.ist import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,8 @@ class OracleAgent(JarvisAgent):
         Hourly anomaly scan. EOD sweep is hour=22 (10 PM) — does the same
         plus a full demand forecast refresh (left as Phase 4).
         """
-        now = datetime.now(timezone.utc)
-        is_eod = now.hour == 22  # 10 PM hourly slot doubles as EOD
+        now = now_ist()
+        is_eod = now.hour == 22  # 10 PM IST hourly slot doubles as EOD
 
         anomalies: List[Dict[str, Any]] = []
 

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 from datetime import date, datetime
+from ..utils.ist import now_ist, ist_today, now_ist_naive
 from calendar import monthrange
 import uuid
 from .auth import get_current_user, require_roles
@@ -91,7 +92,7 @@ class LeaveCreate(BaseModel):
 
     @model_validator(mode="after")
     def dates_must_be_valid(self) -> "LeaveCreate":
-        today = date.today()
+        today = ist_today()
         if self.to_date < self.from_date:
             raise ValueError("to_date must be on or after from_date")
         # Allow leave applications for future dates (pre-booking), but not
@@ -125,7 +126,7 @@ class AttendanceMarkRequest(BaseModel):
         # which shadows the imported `date` type for static analysis (pylint
         # E0602) -- the string annotation sidesteps the collision. `date.today()`
         # below still resolves to the import at runtime.
-        if v > date.today():
+        if v > ist_today():
             raise ValueError("Attendance cannot be marked for a future date")
         return v
 
@@ -185,7 +186,7 @@ class AttendanceEditRequest(BaseModel):
     @field_validator("record_date")
     @classmethod
     def date_not_future(cls, v):
-        if v is not None and v > date.today():
+        if v is not None and v > ist_today():
             raise ValueError("Attendance date cannot be in the future")
         return v
 
@@ -261,7 +262,7 @@ def _parse_month(month: str) -> tuple:
                 return year, mon
         except (ValueError, IndexError, AttributeError):
             pass
-    today = date.today()
+    today = now_ist()
     return today.year, today.month
 
 
@@ -790,7 +791,7 @@ async def check_in(
     """
     roles = current_user.get("roles", []) or []
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-    now = datetime.now()
+    now = now_ist_naive()
 
     # --- Geo-fence enforcement (roles 4-7) ---
     coords = _store_coords(active_store)
@@ -917,7 +918,7 @@ async def check_out(
     staff-side "check out" never actually recorded. Fail-soft: with no DB / no
     row yet, returns a stub timestamp so the operator UI still works.
     """
-    now = datetime.now()
+    now = now_ist_naive()
     now_iso = now.isoformat()
     employee_id = current_user.get("user_id")
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")

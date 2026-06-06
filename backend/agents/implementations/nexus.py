@@ -30,6 +30,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
+from api.utils.ist import now_ist
 from ..nexus_providers import (
     SyncResult,
     shopify_pull_orders,
@@ -88,7 +89,7 @@ class NexusAgent(JarvisAgent):
             logger.debug("[NEXUS] No integrations enabled — tick skipped")
             return
 
-        now = datetime.now(timezone.utc)
+        now = now_ist()
         runs = []
 
         for integ_type in configured:

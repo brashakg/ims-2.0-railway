@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
+from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist
 from calendar import monthrange
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
@@ -215,8 +216,8 @@ async def dashboard_stats(
     customer_repo = get_customer_repository()
     task_repo = get_task_repository()
 
-    # Get today's date range
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Get today's date range (IST business day, not UTC box clock)
+    today = now_ist().replace(hour=0, minute=0, second=0, microsecond=0)
     today_str = today.strftime("%Y-%m-%d")
     yesterday_str = (today - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -415,7 +416,7 @@ async def daily_sales(
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
-    end_dt = datetime.now()
+    end_dt = now_ist_naive()
     start_dt = end_dt - timedelta(days=days)
     orders = _orders_in_window(
         order_repo,
@@ -857,7 +858,7 @@ async def outstanding_report(
 
     outstanding_data = []
     total = 0
-    now = datetime.now()
+    now = now_ist_naive()
     aging_buckets = {"0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0}
 
     for order in orders:
@@ -1560,7 +1561,7 @@ async def pending_workshop_jobs(
         active_store
     )  # PENDING + IN_PROGRESS, sorted by expected_date
 
-    now = datetime.now()
+    now = now_ist_naive()
     data = []
     bucket_counts = {"0-3d": 0, "3-7d": 0, "7+d": 0}
     tech_counts = {}
@@ -1922,7 +1923,7 @@ async def get_targets(
         "daily_target": 50000,
         "monthly_target": 1500000,
         "currency": "INR",
-        "period": datetime.now().strftime("%Y-%m"),
+        "period": now_ist().strftime("%Y-%m"),
         "created_at": datetime.now().isoformat(),
     }
 
@@ -2886,7 +2887,7 @@ async def footfall_audit(
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     db = get_db()
 
-    now = datetime.now()
+    now = now_ist_naive()
     start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
     for _ in range(months_back - 1):
         start = (start - timedelta(days=1)).replace(day=1)
@@ -3037,9 +3038,9 @@ async def sales_price_bands(
     """
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     order_repo = get_order_repository()
-    now = datetime.now()
+    now = now_ist_naive()
     # Start of FY (fy_count - 1) years before the current FY.
-    current_fy_start_year = now.year if now.month >= 4 else now.year - 1
+    current_fy_start_year = fy_start_year_ist()
     start_year = current_fy_start_year - (fy_count - 1)
     start = datetime(start_year, 4, 1)
     orders = (
@@ -3206,7 +3207,7 @@ async def sales_lens_deep_dive(
     order_repo = get_order_repository()
     db = get_db()
 
-    now = datetime.now()
+    now = now_ist_naive()
     start = now - timedelta(days=30 * months_back)
     orders = (
         _orders_in_window(
@@ -3351,7 +3352,7 @@ async def sales_seasonality(
     """
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     order_repo = get_order_repository()
-    now = datetime.now()
+    now = now_ist_naive()
     start = now - timedelta(days=365 * years_back)
     orders = (
         _orders_in_window(
@@ -3525,7 +3526,7 @@ async def purchase_recommendations(
             "as_of": datetime.now().isoformat(),
         }
 
-    now = datetime.now()
+    now = now_ist_naive()
     cutoff = now - timedelta(days=lookback_days)
     cover_days = lead_time_days + reorder_cycle_days + safety_buffer_days
 
@@ -3922,7 +3923,7 @@ async def growth_blueprint(
     from agents import llm_provider  # local import — agents pkg may be optional
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
-    month_key = datetime.now().strftime("%Y-%m")
+    month_key = now_ist().strftime("%Y-%m")
     cache_key = f"{active_store}::{month_key}::{model_id or 'default'}"
     db = get_db()
 
@@ -3965,7 +3966,7 @@ async def growth_blueprint(
     system = _BLUEPRINT_SYSTEM_PROMPT.replace("{sections_list}", sections_list)
     user_msg = (
         f"Store: {active_store}\n"
-        f"As-of: {datetime.now().strftime('%Y-%m-%d %H:%M IST')}\n\n"
+        f"As-of: {now_ist().strftime('%Y-%m-%d %H:%M IST')}\n\n"
         f"Produce the full 12-section Growth Blueprint grounded in the "
         f"BUSINESS DATA below."
     )
