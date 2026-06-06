@@ -2626,6 +2626,59 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
     return 0.0, 0.0, 0.0
 
 
+def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
+    """NEW-GST-RCM: inward supplies LIABLE TO REVERSE CHARGE for the month
+    (GSTR-3B Table 3.1(d)) -- vendor_bills flagged reverse_charge=True, scoped to
+    the store's entity. On these the BUYER owes the GST (paid in cash, then
+    claimed as ITC separately). Returns (igst, cgst, sgst, taxable). Mirrors
+    _itc_from_vendor_bills' entity + string-date-window match. Fail-soft -> zeros."""
+    if db is None:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        entity_id = None
+        try:
+            _srow = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
+            entity_id = (_srow or {}).get("entity_id")
+        except Exception:
+            entity_id = None
+        month_lo = f"{year:04d}-{mon:02d}-01"
+        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
+        vb_match: dict = {
+            "reverse_charge": True,
+            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
+            "$or": [
+                {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
+                {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
+            ],
+        }
+        if entity_id:
+            vb_match["recipient_entity_id"] = entity_id
+        pipeline = [
+            {"$match": vb_match},
+            {
+                "$group": {
+                    "_id": None,
+                    "igst": {"$sum": "$igst_total"},
+                    "cgst": {"$sum": "$cgst_total"},
+                    "sgst": {"$sum": "$sgst_total"},
+                    "taxable": {"$sum": "$taxable_amount"},
+                }
+            },
+        ]
+        res = list(db["vendor_bills"].aggregate(pipeline))
+        if res:
+            a = res[0]
+            return (
+                float(a.get("igst", 0.0) or 0.0),
+                float(a.get("cgst", 0.0) or 0.0),
+                float(a.get("sgst", 0.0) or 0.0),
+                float(a.get("taxable", 0.0) or 0.0),
+            )
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0, 0.0
+
+
 def _compute_gstr3b(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-3B report dict for a (month, store).
 
@@ -2661,6 +2714,12 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     itc_igst = 0.0
     itc_cgst = 0.0
     itc_sgst = 0.0
+
+    # RCM (Table 3.1(d)) accumulators -- inward supplies liable to reverse charge.
+    rcm_igst = 0.0
+    rcm_cgst = 0.0
+    rcm_sgst = 0.0
+    rcm_taxable = 0.0
 
     store_gstin = ""
     store_legal_name = ""
@@ -2734,10 +2793,17 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             db, active_store, year, mon, last_day
         )
 
-    # Net cash liability = output tax - ITC (floor at 0 per component)
-    cash_igst = max(0.0, out_igst - itc_igst)
-    cash_cgst = max(0.0, out_cgst - itc_cgst)
-    cash_sgst = max(0.0, out_sgst - itc_sgst)
+        # NEW-GST-RCM: Table 3.1(d) inward supplies liable to reverse charge.
+        rcm_igst, rcm_cgst, rcm_sgst, rcm_taxable = _rcm_from_vendor_bills(
+            db, active_store, year, mon, last_day
+        )
+
+    # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
+    # discharged in CASH (it cannot be set off against ITC), so it adds on top of
+    # the output-minus-ITC cash. When there are no RCM bills these terms are 0.
+    cash_igst = max(0.0, out_igst - itc_igst) + rcm_igst
+    cash_cgst = max(0.0, out_cgst - itc_cgst) + rcm_cgst
+    cash_sgst = max(0.0, out_sgst - itc_sgst) + rcm_sgst
 
     def _r(v: float) -> float:
         return round(v, 2)
@@ -2752,6 +2818,15 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "integratedTax": _r(out_igst),
             "centralTax": _r(out_cgst),
             "stateTax": _r(out_sgst),
+            "cess": 0.0,
+        },
+        # Table 3.1(d): inward supplies liable to reverse charge -- the buyer's
+        # own GST liability on RCM purchases (NEW-GST-RCM).
+        "inwardSuppliesReverseChargeValue": _r(rcm_taxable),
+        "inwardSuppliesReverseCharge": {
+            "integratedTax": _r(rcm_igst),
+            "centralTax": _r(rcm_cgst),
+            "stateTax": _r(rcm_sgst),
             "cess": 0.0,
         },
         "zeroRatedValue": 0.0,
