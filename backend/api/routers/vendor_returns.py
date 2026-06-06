@@ -10,7 +10,7 @@ from typing import List, Optional, Literal
 from datetime import datetime
 import uuid
 from .auth import get_current_user, require_roles
-from ..dependencies import get_db
+from ..dependencies import get_db, resolve_store_scope
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -101,6 +101,9 @@ async def list_vendor_returns(
     if db is None:
         return {"returns": [], "total": 0}
 
+    # BUG-062 tail: scope vendor returns to the caller's store reach (validate an
+    # explicit ?store_id, pin store-roles to their own, HQ roles see all).
+    store_id = resolve_store_scope(store_id, current_user)
     try:
         collection = db.get_collection("vendor_returns")
         filter_dict = {}

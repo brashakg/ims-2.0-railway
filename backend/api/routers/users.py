@@ -13,7 +13,7 @@ from datetime import datetime
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_user_repository
+from ..dependencies import get_user_repository, resolve_store_scope
 from ..services.role_caps import role_baseline_cap
 from ..services.user_roles import (
     BCRYPT_MAX_BYTES,
@@ -284,6 +284,7 @@ async def get_users_by_role(
     repo = get_user_repository()
 
     if repo is not None:
+        store_id = resolve_store_scope(store_id, current_user)
         users = repo.find_by_role(role, store_id)
         return [sanitize_user(u) for u in users]
 
@@ -300,6 +301,7 @@ async def search_users(
     repo = get_user_repository()
 
     if repo is not None:
+        store_id = resolve_store_scope(store_id, current_user)
         users = repo.search_users(q, store_id)
         return {"users": [sanitize_user(u) for u in users]}
 
@@ -314,6 +316,7 @@ async def get_user_summary(
     repo = get_user_repository()
 
     if repo is not None:
+        store_id = resolve_store_scope(store_id, current_user)
         summary = repo.get_user_summary(store_id)
         return {"summary": summary}
 
@@ -335,6 +338,7 @@ async def list_users(
 
     if repo is not None:
         filter_dict = {}
+        store_id = resolve_store_scope(store_id, current_user)
         if store_id:
             filter_dict["store_ids"] = store_id
         if role:

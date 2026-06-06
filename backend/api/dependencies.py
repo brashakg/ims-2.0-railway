@@ -139,6 +139,27 @@ def can_access_store_scoped(store_id, current_user: dict) -> bool:
     return bool(store_id) and store_id in stores
 
 
+def resolve_store_scope(store_id, current_user: dict):
+    """Authorise + resolve the store filter for a LIST/aggregation endpoint that
+    accepts an optional ?store_id (BUG-062 tail).
+
+    - explicit store_id -> validate_store_access (403 if a store-scoped role asks
+      for ANOTHER store; admins/area-managers pass per their reach).
+    - omitted -> None (all stores) for SUPERADMIN/ADMIN; the caller's OWN active
+      store for every other role (AREA_MANAGER + store-level), so a store-scoped
+      role can never read an all-stores or other-store list by omitting the param.
+
+    Callers use the returned value as the store filter: ``s = resolve_store_scope(
+    store_id, user); if s: filter["store_id"] = s`` (None => no filter => all).
+    """
+    if store_id:
+        return validate_store_access(store_id, current_user)
+    roles = set(current_user.get("roles") or [])
+    if "SUPERADMIN" in roles or "ADMIN" in roles:
+        return None
+    return current_user.get("active_store_id")
+
+
 def filter_docs_by_store(docs, current_user: dict, store_key: str = "store_id"):
     """Filter a list of store-stamped docs to those the caller may read.
 

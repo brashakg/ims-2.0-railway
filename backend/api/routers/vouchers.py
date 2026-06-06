@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 
 from .auth import get_current_user, require_roles
+from ..dependencies import resolve_store_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -465,6 +466,8 @@ async def list_vouchers(
     if coll is None:
         return {"vouchers": [], "total": 0}
 
+    # BUG-062 tail: scope vouchers to the caller's store reach.
+    store_id = resolve_store_scope(store_id, current_user)
     query: Dict[str, Any] = {}
     if store_id:
         query["store_id"] = store_id

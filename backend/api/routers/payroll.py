@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
-from ..dependencies import validate_store_access
+from ..dependencies import validate_store_access, resolve_store_scope
 from ..utils.ist import now_ist, ist_day_start_utc
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
@@ -512,6 +512,10 @@ async def list_salary_configs(
     db = _get_db()
     if not db:
         return {"configs": [], "total": 0}
+    # BUG-062 tail: salary configs carry bank/PAN/UAN PII -- a store-scoped role
+    # must not read another store's by passing ?store_id (validate), nor all
+    # stores by omitting it (pinned to own store; HQ roles still get all).
+    store_id = resolve_store_scope(store_id, current_user)
     try:
         query: dict = {}
         if entity_id:
@@ -1495,6 +1499,8 @@ async def list_payroll_rows(
     db = _get_db()
     if not db:
         return {"rows": [], "total": 0, "totals": {}}
+    # BUG-062 tail: scope the salary register to the caller's store reach.
+    store_id = resolve_store_scope(store_id, current_user)
     try:
         query: dict = {"month": month, "year": year}
         if store_id:
@@ -1618,6 +1624,8 @@ async def payroll_statutory_summary(
             "year": year,
             "count": 0,
         }
+    # BUG-062 tail: scope statutory totals to the caller's store reach.
+    store_id = resolve_store_scope(store_id, current_user)
     try:
         rows = _payroll_rows(db, month, year, store_id, entity_id)
         return {
@@ -1645,6 +1653,8 @@ async def payroll_tally_jv(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # BUG-062 tail: scope the Tally salary-JV export to the caller's store reach.
+    store_id = resolve_store_scope(store_id, current_user)
     try:
         rows = _payroll_rows(db, month, year, store_id, entity_id)
         if not rows:
@@ -1682,6 +1692,8 @@ async def payroll_pf_ecr(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # BUG-062 tail: scope the PF ECR export to the caller's store reach.
+    store_id = resolve_store_scope(store_id, current_user)
     try:
         rows = _payroll_rows(db, month, year, store_id, entity_id)
         emps = [r.get("employee_id") for r in rows]
