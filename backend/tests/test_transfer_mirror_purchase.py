@@ -406,3 +406,41 @@ def test_mirror_value_from_items():
     assert len(bills) == 1
     assert bills[0]["taxable_amount"] == 2000.0
     assert bills[0]["tax_amount"] == round(2000.0 * 0.18, 2)
+
+
+def test_mirror_writes_bill_same_entity_interstate():
+    """NEW-GST-TRANSFER-IGST: SAME entity but DIFFERENT states must book an IGST
+    mirror bill (deemed supply between distinct GSTINs of one PAN). Previously this
+    returned early (entity-only gate) and booked NO IGST -> GST understated."""
+    db, bills = _make_db(
+        stores={
+            "jh": {"store_id": "jh", "entity_id": "ent_1", "state_code": "20"},
+            "mh": {"store_id": "mh", "entity_id": "ent_1", "state_code": "27"},
+        },
+        entities={
+            "ent_1": {"entity_id": "ent_1", "gstins": [
+                {"state_code": "20", "gstin": "20AAPFU0939F1ZV"},
+                {"state_code": "27", "gstin": "27AAPFU0939F1ZX"},
+            ]},
+        },
+    )
+    transfer = {
+        "id": "trf_se_is",
+        "transfer_number": "TRF-202606-099",
+        "from_location_id": "jh",
+        "to_location_id": "mh",
+        "from_location_name": "Ranchi",
+        "to_location_name": "Pune",
+        "total_value": 10000.0,
+        "items": [],
+        "completed_at": "2026-06-05T18:00:00",
+    }
+    with patch("api.routers.transfers._get_db", return_value=db):
+        _book_mirror_purchase(transfer)
+
+    assert len(bills) == 1, "same-entity interstate transfer must book an IGST mirror bill"
+    b = bills[0]
+    assert b["interstate"] is True
+    assert b["igst_total"] == round(10000.0 * 0.18, 2)
+    assert round(b["cgst_total"] + b["sgst_total"], 2) == 0.0
+    assert b["vendor_id"] == "ent_1" and b["entity_id"] == "ent_1"
