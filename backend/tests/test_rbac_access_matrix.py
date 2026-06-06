@@ -327,12 +327,28 @@ class TestAuthenticatedEndpoints:
             )
 
     def test_prescriptions_list_all_roles(self, matrix_client):
-        """GET /prescriptions is AUTHENTICATED."""
+        """GET /prescriptions is CLINICAL-RESTRICTED (require_rx_read).
+
+        Prescriptions carry medical data + PII, so only clinical / POS-fulfilment
+        / workshop / management roles may read them; non-clinical roles (CASHIER
+        payment-only, ACCOUNTANT, CATALOG_MANAGER, INVENTORY_HQ) get 403. The
+        expectation is driven by the source-of-truth _RX_READ_ROLES allow-list so
+        the test and the gate can never drift.
+        """
+        from api.routers.prescriptions import _RX_READ_ROLES
+
         for role in ALL_ROLES:
             r = matrix_client.get("/api/v1/prescriptions", headers=ALL_ROLE_HEADERS[role])
-            assert r.status_code not in (401, 403), (
-                f"GET /prescriptions: role {role!r} got {r.status_code}"
-            )
+            if role in _RX_READ_ROLES:
+                assert r.status_code not in (401, 403), (
+                    f"GET /prescriptions: clinical role {role!r} should be allowed, "
+                    f"got {r.status_code}"
+                )
+            else:
+                assert r.status_code == 403, (
+                    f"GET /prescriptions: non-clinical role {role!r} should be 403, "
+                    f"got {r.status_code}"
+                )
 
     def test_catalog_products_get_all_roles(self, matrix_client):
         """GET /catalog/products is AUTHENTICATED (may 500 with no DB - that's allowed through)."""
