@@ -496,7 +496,7 @@ async def get_attendance(
 ):
     """Get attendance records with optional filters"""
     attendance_repo = get_attendance_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if attendance_repo is None:
         return {"records": [], "total": 0}
@@ -789,7 +789,7 @@ async def check_in(
     the operator UI works in demo mode.
     """
     roles = current_user.get("roles", []) or []
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     now = datetime.now()
 
     # --- Geo-fence enforcement (roles 4-7) ---
@@ -920,7 +920,7 @@ async def check_out(
     now = datetime.now()
     now_iso = now.isoformat()
     employee_id = current_user.get("user_id")
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     attendance_repo = get_attendance_repository()
     if attendance_repo is None or not employee_id:
         return {"message": "Check-out recorded", "checkOutTime": now_iso}
@@ -1214,7 +1214,7 @@ async def list_leaves(
 ):
     """List leave requests"""
     leave_repo = get_leave_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if leave_repo is None:
         return {"leaves": [], "total": 0}
@@ -1389,7 +1389,7 @@ async def list_payroll(
 ):
     """List payroll records for a month"""
     payroll_repo = get_payroll_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if payroll_repo is None:
         return {"payroll": [], "total": 0}
@@ -1412,7 +1412,7 @@ async def generate_payroll(
     payroll_repo = get_payroll_repository()
     user_repo = get_user_repository()
     attendance_repo = get_attendance_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if not payroll_repo or not user_repo:
         return {"message": "Payroll generation initiated", "count": 0}
@@ -1802,7 +1802,7 @@ async def list_weekoff_swaps(
     if status:
         flt["status"] = status.upper()
     if is_manager:
-        active_store = store_id or current_user.get("active_store_id")
+        active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
         if active_store and "SUPERADMIN" not in roles and "ADMIN" not in roles:
             flt["store_id"] = active_store
         elif store_id:

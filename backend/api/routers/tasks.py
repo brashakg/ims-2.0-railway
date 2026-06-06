@@ -16,6 +16,7 @@ from ..dependencies import (
     get_user_repository,
     get_db,
     get_order_repository,
+    validate_store_access,
 )
 from ..services.task_triggers import (
     create_system_task,
@@ -306,10 +307,11 @@ async def list_tasks(
         filters["assigned_to"] = assigned_to
     if task_type:
         filters["source"] = canon_source(task_type)
-    if store_id:
-        filters["store_id"] = store_id
-    else:
-        filters["store_id"] = current_user.get("active_store_id")
+    # BUG-062: authorise the requested store -- a store-scoped role passing
+    # another store's ?store_id is 403'd instead of served that store's tasks.
+    filters["store_id"] = validate_store_access(
+        store_id, current_user
+    ) or current_user.get("active_store_id")
 
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
@@ -423,7 +425,7 @@ async def get_overdue_tasks(
     if repo is None:
         return {"tasks": []}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     now = datetime.now()
     filters: dict = {
@@ -620,7 +622,7 @@ async def get_daily_checklists(
             "progress": 0,
         }
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     # Get SOP template for this checklist type
     filters = {"type": checklist_type, "store_id": active_store, "active": True}
@@ -644,7 +646,7 @@ async def complete_checklist_item(
     current_user: dict = Depends(get_current_user),
 ):
     """Mark a checklist item as done"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     return {
         "checklist_type": checklist_type,
@@ -667,7 +669,7 @@ async def auto_generate_daily_tasks(
     """Auto-generate today's daily tasks from persisted DAILY SOP templates for
     the store. Falls back to the built-in starter set when none are configured."""
     repo = get_task_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if repo is None:
         return {"generated": 0, "message": "Auto-generate failed"}
@@ -899,7 +901,7 @@ async def auto_escalate_overdue_tasks(
     if repo is None:
         return {"escalated": 0, "message": "Auto-escalation failed"}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     # Candidate set: non-terminal, not-yet-escalated tasks. The precise
     # decision (ack clock + overdue grace, per priority) is made by the pure
@@ -952,7 +954,7 @@ async def scan_payment_variance(
     if order_repo is None:
         return {"scanned": 0, "anomalies": 0, "tasks_created": 0}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     filters: dict = {"created_at": {"$gte": cutoff}}
     if active_store:
@@ -998,7 +1000,7 @@ async def list_fake_closures(
     if repo is None:
         return {"flagged": [], "count": 0}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     cutoff = datetime.now() - timedelta(days=days)
     filters: dict = {
         "status": {
@@ -1043,7 +1045,7 @@ async def list_silent_tasks(
     if repo is None:
         return {"silent": [], "count": 0}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     filters: dict = {"status": {"$in": ["OPEN", "open"]}}
     if active_store:
         filters["store_id"] = active_store
@@ -1073,7 +1075,7 @@ async def get_task_summary(
     if repo is None:
         return {"summary": {}, "overdue_count": 0, "escalated_count": 0}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     filters: dict = {}
     if active_store:
@@ -1328,7 +1330,8 @@ async def list_sop_templates(
     if category:
         filter_dict["category"] = category
     if store_id:
-        filter_dict["store_id"] = store_id
+        # BUG-062: authorise the requested store (store roles 403 cross-store).
+        filter_dict["store_id"] = validate_store_access(store_id, current_user)
     if active_only:
         filter_dict["is_active"] = {"$ne": False}
 
@@ -1546,7 +1549,7 @@ async def get_sop_checklist(
     if not tpl:
         raise HTTPException(status_code=404, detail="SOP template not found")
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     day = date or datetime.now().strftime("%Y-%m-%d")
 
     ccol = _sop_completions_collection()
@@ -1670,7 +1673,7 @@ async def seed_default_sop_templates(
     if col is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     now = datetime.now()
     created = 0
     for tdef in DEFAULT_SOP_TEMPLATES:

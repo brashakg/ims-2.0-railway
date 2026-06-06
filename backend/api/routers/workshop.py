@@ -20,6 +20,7 @@ from ..dependencies import (
     get_order_repository,
     get_audit_repository,
     get_vendor_repository,
+    validate_store_access,
 )
 
 # Roles allowed to drive the lens lifecycle + ready-notify. SUPERADMIN passes
@@ -344,7 +345,7 @@ async def get_pending_jobs(
 ):
     """Get pending workshop jobs"""
     repo = get_workshop_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if repo is not None:
         jobs = repo.find_pending(active_store)
@@ -361,7 +362,7 @@ async def get_overdue_jobs(
 ):
     """Get overdue workshop jobs"""
     repo = get_workshop_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if repo is not None:
         jobs = repo.find_overdue(active_store)
@@ -378,7 +379,7 @@ async def get_ready_jobs(
 ):
     """Get jobs ready for delivery"""
     repo = get_workshop_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if repo is not None:
         jobs = repo.find_ready(active_store)
@@ -395,7 +396,7 @@ async def get_technician_workload(
 ):
     """Get technician workload summary"""
     repo = get_workshop_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if repo and active_store:
         workload = repo.get_technician_workload(active_store)
@@ -438,7 +439,7 @@ async def get_dashboard_kpis(
     Fail-soft: repo absent → returns zeros with null turnaround, never raises.
     """
     repo = get_workshop_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     empty = {
         "pending": 0,
@@ -624,7 +625,7 @@ async def list_jobs(
 ):
     """List workshop jobs with filters"""
     repo = get_workshop_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if repo is not None:
         filter_dict = {}

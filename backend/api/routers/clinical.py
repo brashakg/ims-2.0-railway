@@ -20,6 +20,7 @@ from ..dependencies import (
     get_customer_repository,
     get_store_repository,
     get_audit_repository,
+    validate_store_access,
 )
 from ..services import clinical_abuse as _abuse
 
@@ -451,6 +452,8 @@ async def get_queue(
     current_user: dict = Depends(get_current_user),
 ):
     """Get eye test queue for a store"""
+    # BUG-062: 403 a store-scoped caller asking for another store's queue.
+    store_id = validate_store_access(store_id, current_user)
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:
@@ -611,6 +614,8 @@ async def get_queue_stats(
     current_user: dict = Depends(get_current_user),
 ):
     """Get queue statistics for today"""
+    # BUG-062: 403 a store-scoped caller asking for another store's stats.
+    store_id = validate_store_access(store_id, current_user)
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:
@@ -689,6 +694,8 @@ async def get_tests(
     button can open the A5 Rx card without a second lookup. Fail-soft: the Rx
     lookup never blocks the list.
     """
+    # BUG-062: 403 a store-scoped caller asking for another store's tests.
+    store_id = validate_store_access(store_id, current_user)
     test_repo = get_eye_test_repository()
 
     if test_repo is not None:
@@ -1653,9 +1660,11 @@ async def get_abuse_detection(
     if db is None or rx_repo is None:
         return {"alerts": [], "generated_at": generated_at}
 
-    # Default the store scope to the caller's active store when none is given.
-    if not store_id:
-        store_id = current_user.get("active_store_id")
+    # BUG-062: authorise the requested store; default to the caller's own when
+    # none is given (a store-scoped role passing another store's id is 403'd).
+    store_id = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id"
+    )
 
     cutoff = now - timedelta(days=days)
 
@@ -1747,7 +1756,7 @@ async def list_lens_power_combos(
     col = _get_lens_power_combos_col()
     if col is None:
         return {"combos": [], "total": 0}
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     flt: dict = {}
     if active_store:
         flt["store_id"] = active_store
@@ -1774,7 +1783,7 @@ async def create_lens_power_combo(
     if col is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     now_iso = datetime.utcnow().isoformat()
     combo_id = str(uuid.uuid4())
 

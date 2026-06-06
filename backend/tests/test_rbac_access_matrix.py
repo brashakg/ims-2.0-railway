@@ -1472,3 +1472,53 @@ class TestPolicyConsistencyWithLiveApp:
                     f"on {method} {path}, expected 403, got {status}. "
                     f"Body: {r.text[:200]}"
                 )
+
+
+class TestCrossStoreListIDOR:
+    """BUG-062 tail (live-QA 2026-06-06): a store-scoped role passing ANOTHER
+    store's ?store_id to a list endpoint must be 403'd, not served that store's
+    rows. Covers the routers the #519/#520 sweep did not reach: tasks, hr,
+    workshop, vendors, clinical. A Pune store manager must not read Bokaro's
+    tasks / attendance-PII / workshop queue / purchase orders / clinical queue.
+    """
+
+    # (path, query) — all GET list endpoints that resolve ?store_id.
+    _CROSS_STORE_PATHS = [
+        "/api/v1/tasks?store_id=BV-BOK-01",
+        "/api/v1/hr/attendance?store_id=BV-BOK-01",
+        "/api/v1/workshop/jobs?store_id=BV-BOK-01",
+        "/api/v1/vendors/purchase-orders?store_id=BV-BOK-01",
+        "/api/v1/clinical/queue?store_id=BV-BOK-01",
+    ]
+
+    def test_store_manager_denied_other_store(self, matrix_client):
+        # STORE_MANAGER scoped to BV-PUN-01 asking for BV-BOK-01.
+        token = _mint_token(["STORE_MANAGER"], store_id="BV-PUN-01")
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in self._CROSS_STORE_PATHS:
+            r = matrix_client.get(path, headers=headers)
+            assert r.status_code == 403, (
+                f"Cross-store IDOR: STORE_MANAGER@BV-PUN-01 on {path} "
+                f"should be 403, got {r.status_code}: {r.text[:200]}"
+            )
+
+    def test_admin_allowed_cross_store(self, matrix_client):
+        # ADMIN is cross-store: the same requests must NOT be authz-blocked
+        # (may 500 on missing mock DB — that's allowed through, proving authz).
+        token = _mint_token(["ADMIN"], store_id="BV-PUN-01")
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in self._CROSS_STORE_PATHS:
+            r = matrix_client.get(path, headers=headers)
+            assert r.status_code not in (401, 403), (
+                f"ADMIN should be allowed cross-store on {path}, got {r.status_code}"
+            )
+
+    def test_own_store_allowed(self, matrix_client):
+        # Same role asking for its OWN store must pass the gate (no over-block).
+        token = _mint_token(["STORE_MANAGER"], store_id="BV-BOK-01")
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in self._CROSS_STORE_PATHS:
+            r = matrix_client.get(path, headers=headers)
+            assert r.status_code not in (401, 403), (
+                f"Own-store request on {path} should pass, got {r.status_code}"
+            )
