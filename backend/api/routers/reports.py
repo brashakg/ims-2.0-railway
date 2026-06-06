@@ -2054,7 +2054,7 @@ def _b2cs_rate_lines(items, order_taxable, order_tax):
     """
     from api.services.gst_rates import GST_CATEGORY_TABLE, _normalize_category
 
-    lines = []
+    raw = []
     for it in (items or []):
         if not isinstance(it, dict):
             continue
@@ -2072,13 +2072,23 @@ def _b2cs_rate_lines(items, order_taxable, order_tax):
             rate = int(round(float(rate)))
         except (TypeError, ValueError):
             rate = 5
-        taxable = round(gross * 100.0 / (100.0 + rate), 2)
-        lines.append((rate, taxable, round(gross - taxable, 2)))
+        taxable = gross * 100.0 / (100.0 + rate)
+        raw.append((rate, taxable, gross - taxable))
 
-    if not lines:
+    if not raw:
         # No usable line items -> keep the order-level totals under one bucket.
         return [(5, round(order_taxable, 2), round(order_tax, 2))]
-    return lines
+
+    # Reconcile the per-line split back to the order-level taxable/tax: the split
+    # only DISTRIBUTES the invoice's taxable + tax across rate buckets by line, it
+    # must not change the SUM -- so the GSTR-1 totals (which add these buckets)
+    # still equal the booked invoice. Scale is 1.0 when the lines already
+    # reconcile (the normal case); it absorbs order-level rounding / cart discount.
+    sum_taxable = sum(t for _, t, _ in raw)
+    sum_tax = sum(x for _, _, x in raw)
+    st = (order_taxable / sum_taxable) if sum_taxable > 0 else 1.0
+    sx = (order_tax / sum_tax) if sum_tax > 0 else 1.0
+    return [(r, round(t * st, 2), round(x * sx, 2)) for r, t, x in raw]
 
 
 def _compute_gstr1(month: str, active_store: str) -> dict:
