@@ -980,6 +980,13 @@ async def create_return(
         except Exception as _exc:  # noqa: BLE001
             logger.warning("[RETURNS] idempotency lookup skipped: %s", _exc)
 
+    # Accounting period lock: cannot create returns in a closed month.
+    db = _get_db()
+    if db is not None:
+        from .finance import check_period_locked
+        from datetime import date
+        check_period_locked(db, date.today())
+
     active_lines = [it for it in body.items if it.return_qty > 0]
     if not active_lines:
         raise HTTPException(
