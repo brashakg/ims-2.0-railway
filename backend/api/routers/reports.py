@@ -2039,6 +2039,48 @@ def _order_taxable_and_tax(order: dict) -> tuple:
     return 0.0, round(total_tax, 2)
 
 
+def _b2cs_rate_lines(items, order_taxable, order_tax):
+    """NEW-GST-B2CS-HSN: split a consumer (B2CS) order's lines into
+    ``(gst_rate, taxable, tax)`` tuples, one per line, so an invoice that mixes
+    GST rates (e.g. a 5% frame + an 18% sunglass) lands in the correct per-rate
+    B2CS bucket instead of being lumped under the first line's rate.
+
+    Each line's rate is ``item.gst_rate`` when present, else the canonical
+    category rate (api.services.gst_rates). Taxable is derived GST-exclusively
+    from the line gross ``item_total`` (Indian retail prices are GST-inclusive):
+    ``taxable = item_total * 100 / (100 + rate)``. When no usable line items
+    exist, fall back to a single line carrying the order-level totals so nothing
+    is dropped.
+    """
+    from api.services.gst_rates import GST_CATEGORY_TABLE, _normalize_category
+
+    lines = []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        try:
+            gross = float(it.get("item_total") or 0) or 0.0
+        except (TypeError, ValueError):
+            gross = 0.0
+        if gross <= 0:
+            continue
+        rate = it.get("gst_rate")
+        if rate is None:
+            entry = GST_CATEGORY_TABLE.get(_normalize_category(it.get("category")))
+            rate = entry[1] if entry else 5.0
+        try:
+            rate = int(round(float(rate)))
+        except (TypeError, ValueError):
+            rate = 5
+        taxable = round(gross * 100.0 / (100.0 + rate), 2)
+        lines.append((rate, taxable, round(gross - taxable, 2)))
+
+    if not lines:
+        # No usable line items -> keep the order-level totals under one bucket.
+        return [(5, round(order_taxable, 2), round(order_tax, 2))]
+    return lines
+
+
 def _compute_gstr1(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-1 report dict for a (month, store).
 
@@ -2241,23 +2283,32 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             }
                         )
                 else:
-                    # B2CS: consolidate by (place_of_supply, gst_rate)
-                    key = f"{place_of_supply}|{gst_rate_dominant}"
-                    if key not in b2cs_map:
-                        b2cs_map[key] = {
-                            "placeOfSupply": place_of_supply,
-                            "gstRate": gst_rate_dominant,
-                            "taxableValue": 0.0,
-                            "cgst": 0.0,
-                            "sgst": 0.0,
-                            "igst": 0.0,
-                            "totalTax": 0.0,
-                        }
-                    b2cs_map[key]["taxableValue"] += taxable_value
-                    b2cs_map[key]["cgst"] += cgst
-                    b2cs_map[key]["sgst"] += sgst
-                    b2cs_map[key]["igst"] += igst
-                    b2cs_map[key]["totalTax"] += total_tax
+                    # B2CS: consolidate by (place_of_supply, gst_rate). NEW-GST-B2CS-HSN:
+                    # an invoice can mix GST rates (e.g. a 5% frame + an 18%
+                    # sunglass); split each line into the correct rate bucket
+                    # instead of lumping the whole invoice under the first line's
+                    # rate. Tax is split CGST/SGST (intra) or IGST (inter) per line.
+                    for rate, line_taxable, line_tax in _b2cs_rate_lines(
+                        items, taxable_value, total_tax
+                    ):
+                        key = f"{place_of_supply}|{rate}"
+                        if key not in b2cs_map:
+                            b2cs_map[key] = {
+                                "placeOfSupply": place_of_supply,
+                                "gstRate": rate,
+                                "taxableValue": 0.0,
+                                "cgst": 0.0,
+                                "sgst": 0.0,
+                                "igst": 0.0,
+                                "totalTax": 0.0,
+                            }
+                        b2cs_map[key]["taxableValue"] += line_taxable
+                        b2cs_map[key]["totalTax"] += line_tax
+                        if is_inter_state:
+                            b2cs_map[key]["igst"] += line_tax
+                        else:
+                            b2cs_map[key]["cgst"] += round(line_tax / 2, 2)
+                            b2cs_map[key]["sgst"] += round(line_tax / 2, 2)
 
                 # Validation: B2B without GSTIN — caught by the absence
                 # of customer_gstin above. Add an explicit warning for
