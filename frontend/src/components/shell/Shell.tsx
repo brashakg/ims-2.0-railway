@@ -49,6 +49,14 @@ export function Shell({ crumbs, actions, brand, children }: ShellProps) {
       className={'app-shell' + (railExpanded ? ' rail-expanded' : '')}
       data-brand={brand ?? 'bv'}
     >
+      {/* Skip to main content link for keyboard navigation */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:bg-bv-red-600 focus:text-white focus:px-3 focus:py-2 focus:rounded focus:text-sm focus:font-medium"
+      >
+        Skip to main content
+      </a>
+
       {/* Mobile nav backdrop — click to close, hidden on desktop */}
       {navOpen && (
         <div
@@ -67,7 +75,7 @@ export function Shell({ crumbs, actions, brand, children }: ShellProps) {
           onHamburgerClick={() => setNavOpen((o) => !o)}
           navOpen={navOpen}
         />
-        <div className="page-body">{children}</div>
+        <div id="main-content" className="page-body">{children}</div>
       </div>
     </div>
   );
