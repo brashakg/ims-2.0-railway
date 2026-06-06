@@ -401,8 +401,16 @@ async def create_customer(
         existing = repo.find_by_mobile(customer.mobile)
         if existing is not None:
             raise HTTPException(
-                status_code=400, detail="Customer with this mobile already exists"
+                status_code=409, detail="Customer with this mobile already exists"
             )
+
+        # Check if email already exists (when provided)
+        if customer.email:
+            existing_email = repo.find_by_email(customer.email)
+            if existing_email is not None:
+                raise HTTPException(
+                    status_code=409, detail="Customer with this email already exists"
+                )
 
         # Prepare customer data
         customer_data = {

@@ -220,6 +220,24 @@ class DatabaseConnection:
         _idx("products", "sku", unique=True, sparse=True, background=True)
         _idx("products", "barcode", unique=True, sparse=True, background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
+        # Prefix-search indexes for the searchable fields (brand, model, sku, variant).
+        # The search() method now anchors regex patterns with ^, enabling MongoDB to
+        # use these indexes instead of full collection scans. Compound indexes on each
+        # field + is_active for the most common filter pattern.
+        _idx("products", [("brand", 1), ("is_active", 1)], background=True)
+        _idx("products", [("model", 1), ("is_active", 1)], background=True)
+        _idx("products", [("variant", 1), ("is_active", 1)], background=True)
+
+        # Stock units: composite indexes for inventory ledger queries.
+        # (store_id, status) supports the $match stage in _build_store_ledger.
+        # (product_id, store_id, status) covers both filtering + grouping in the
+        # aggregation for per-product rolled-up stock lookups across the catalog.
+        _idx("stock_units", [("store_id", 1), ("status", 1)], background=True)
+        _idx(
+            "stock_units",
+            [("product_id", 1), ("store_id", 1), ("status", 1)],
+            background=True,
+        )
 
         # Users
         _idx("users", "user_id", unique=True, background=True)
