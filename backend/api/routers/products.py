@@ -490,7 +490,10 @@ async def list_products(
     access to."""
     from ..services.cache import cache
 
-    # Build cache key from query params
+    # Build cache key from query params. NOTE: store_id is cache-key/back-compat
+    # only -- list_products is a GLOBAL catalog lookup (POS must find any SKU at
+    # any store the user can access), so it is intentionally NOT store-scoped and
+    # must not call validate_store_access here.
     active_store = store_id or current_user.get("active_store_id", "")
     cache_key = f"products:{active_store}:{category}:{brand}:{search}:{skip}:{limit}"
     cached = cache.get(cache_key)

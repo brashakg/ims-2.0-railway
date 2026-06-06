@@ -43,6 +43,7 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
 
 
 from ..dependencies import get_db as _dep_get_db
+from ..dependencies import validate_store_access
 from ..services.notification_service import send_notification, populate_template
 
 router = APIRouter()
@@ -234,7 +235,7 @@ async def send_marketing_notification(
                     detail="Customer has opted out of marketing messages",
                 )
 
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     result = await send_notification(
         store_id=active_store,
         customer_id=req.customer_id,
@@ -285,7 +286,7 @@ async def send_bulk_notifications(
     # Promo quiet-hours window: a bulk fan-out is promotional unless it uses a
     # transactional template. Block out-of-window (9AM-9PM IST) before any send.
     _enforce_promo_window(req.template_id)
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     # Respect marketing consent (consent / DLT compliance): a customer who has
     # turned OFF "Receive marketing messages" (marketing_consent == False) must
     # not get promotional fan-outs. Only an explicit False opts out — missing /
@@ -335,7 +336,7 @@ async def get_notification_logs(
     current_user: dict = Depends(get_current_user),
 ):
     """Get notification logs with filters"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         return {"logs": [], "total": 0}
@@ -411,7 +412,7 @@ async def get_rx_expiry_alerts(
     current_user: dict = Depends(get_current_user),
 ):
     """Get prescriptions expiring in 30/60/90 days"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         return {"urgent": [], "soon": [], "upcoming": [], "total_count": 0}
@@ -682,7 +683,7 @@ async def get_referrals(
     current_user: dict = Depends(get_current_user),
 ):
     """List referrals for a store"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         return {"referrals": [], "total": 0}
@@ -978,7 +979,7 @@ async def get_nps_dashboard(
     current_user: dict = Depends(get_current_user),
 ):
     """Get NPS dashboard data"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         return {
@@ -1039,7 +1040,7 @@ async def create_walkin(
     current_user: dict = Depends(get_current_user),
 ):
     """Register a walk-in visitor"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -1100,7 +1101,7 @@ async def get_walkins(
     current_user: dict = Depends(get_current_user),
 ):
     """List walk-in registrations"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         return {"walkins": [], "total": 0}
@@ -1136,7 +1137,7 @@ async def record_walkout(
     current_user: dict = Depends(get_current_user),
 ):
     """Record a customer walkout for recovery follow-up"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -1216,7 +1217,7 @@ async def get_walkout_recoveries(
     current_user: dict = Depends(get_current_user),
 ):
     """List walkout recovery attempts"""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
         return {"walkouts": [], "total": 0, "recovered": 0, "recovery_rate": 0}
