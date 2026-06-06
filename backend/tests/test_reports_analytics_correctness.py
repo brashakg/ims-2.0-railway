@@ -30,6 +30,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 
 from api.routers import analytics as an  # noqa: E402
 from api.routers import reports as rep  # noqa: E402
+from api.utils.ist import now_ist_naive  # noqa: E402  -- dashboard buckets by IST day
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +201,7 @@ def _run_dashboard(monkeypatch, orders):
 
 
 def test_dashboard_change_is_real_today_vs_yesterday(monkeypatch):
-    today = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    today = now_ist_naive().replace(hour=10, minute=0, second=0, microsecond=0)
     yesterday = today - timedelta(days=1)
     orders = [
         {"store_id": "S1", "status": "CONFIRMED", "created_at": today, "grand_total": 1200},
@@ -213,7 +214,7 @@ def test_dashboard_change_is_real_today_vs_yesterday(monkeypatch):
 
 
 def test_dashboard_change_null_when_no_yesterday_sales(monkeypatch):
-    today = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    today = now_ist_naive().replace(hour=10, minute=0, second=0, microsecond=0)
     orders = [
         {"store_id": "S1", "status": "CONFIRMED", "created_at": today, "grand_total": 1200},
     ]

@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import hr  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402  -- server uses IST for "today"
 
 SECRET = os.environ["JWT_SECRET_KEY"]
 
@@ -175,27 +176,27 @@ def _make_app(monkeypatch, attendance_records=None, leave_records=None,
 
 class TestAttendanceMarkRequestSchema:
     def test_future_date_rejected(self):
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        tomorrow = (ist_today() + timedelta(days=1)).isoformat()
         from pydantic import ValidationError
         with pytest.raises(ValidationError, match="future"):
             hr.AttendanceMarkRequest(
                 employee_id="E1",
-                date=date.today() + timedelta(days=1),
+                date=ist_today() + timedelta(days=1),
                 status="PRESENT",
             )
 
     def test_today_accepted(self):
         req = hr.AttendanceMarkRequest(
             employee_id="E1",
-            date=date.today(),
+            date=ist_today(),
             status="PRESENT",
         )
-        assert req.date == date.today()
+        assert req.date == ist_today()
 
     def test_past_date_accepted(self):
         req = hr.AttendanceMarkRequest(
             employee_id="E1",
-            date=date.today() - timedelta(days=5),
+            date=ist_today() - timedelta(days=5),
             status="PRESENT",
         )
         assert req.status == "PRESENT"
@@ -205,7 +206,7 @@ class TestAttendanceMarkRequestSchema:
         with pytest.raises(ValidationError, match="status"):
             hr.AttendanceMarkRequest(
                 employee_id="E1",
-                date=date.today(),
+                date=ist_today(),
                 status="WORKING",  # not a valid status
             )
 
@@ -215,7 +216,7 @@ class TestAttendanceMarkRequestSchema:
         with pytest.raises(ValidationError, match="check_out"):
             hr.AttendanceMarkRequest(
                 employee_id="E1",
-                date=date.today(),
+                date=ist_today(),
                 status="PRESENT",
                 check_in=now,
                 check_out=now - timedelta(minutes=30),
@@ -227,7 +228,7 @@ class TestAttendanceMarkRequestSchema:
         with pytest.raises(ValidationError, match="check_out"):
             hr.AttendanceMarkRequest(
                 employee_id="E1",
-                date=date.today(),
+                date=ist_today(),
                 status="PRESENT",
                 check_in=now,
                 check_out=now,  # equal is also invalid
@@ -237,7 +238,7 @@ class TestAttendanceMarkRequestSchema:
         now = datetime.now()
         req = hr.AttendanceMarkRequest(
             employee_id="E1",
-            date=date.today(),
+            date=ist_today(),
             status="PRESENT",
             check_in=now - timedelta(hours=8),
             check_out=now,
@@ -247,7 +248,7 @@ class TestAttendanceMarkRequestSchema:
     def test_status_normalised_to_upper(self):
         req = hr.AttendanceMarkRequest(
             employee_id="E1",
-            date=date.today(),
+            date=ist_today(),
             status="present",
         )
         assert req.status == "PRESENT"
@@ -255,7 +256,7 @@ class TestAttendanceMarkRequestSchema:
     def test_all_valid_statuses_accepted(self):
         for status in hr._VALID_STATUSES:
             req = hr.AttendanceMarkRequest(
-                employee_id="E1", date=date.today(), status=status
+                employee_id="E1", date=ist_today(), status=status
             )
             assert req.status == status
 
@@ -266,16 +267,16 @@ class TestLeaveCreateSchema:
         with pytest.raises(ValidationError, match="to_date"):
             hr.LeaveCreate(
                 leave_type="CASUAL",
-                from_date=date.today() + timedelta(days=5),
-                to_date=date.today() + timedelta(days=2),
+                from_date=ist_today() + timedelta(days=5),
+                to_date=ist_today() + timedelta(days=2),
                 reason="Test",
             )
 
     def test_same_from_and_to_accepted(self):
         lv = hr.LeaveCreate(
             leave_type="SICK",
-            from_date=date.today(),
-            to_date=date.today(),
+            from_date=ist_today(),
+            to_date=ist_today(),
             reason="One day sick",
         )
         assert lv.from_date == lv.to_date
@@ -285,16 +286,16 @@ class TestLeaveCreateSchema:
         with pytest.raises(ValidationError, match="leave_type"):
             hr.LeaveCreate(
                 leave_type="VACATION",  # not in _VALID_LEAVE_TYPES
-                from_date=date.today(),
-                to_date=date.today(),
+                from_date=ist_today(),
+                to_date=ist_today(),
                 reason="Test",
             )
 
     def test_leave_type_normalised_to_upper(self):
         lv = hr.LeaveCreate(
             leave_type="casual",
-            from_date=date.today(),
-            to_date=date.today() + timedelta(days=2),
+            from_date=ist_today(),
+            to_date=ist_today() + timedelta(days=2),
             reason="Holiday",
         )
         assert lv.leave_type == "CASUAL"
@@ -303,15 +304,15 @@ class TestLeaveCreateSchema:
         for lt in hr._VALID_LEAVE_TYPES:
             lv = hr.LeaveCreate(
                 leave_type=lt,
-                from_date=date.today(),
-                to_date=date.today(),
+                from_date=ist_today(),
+                to_date=ist_today(),
                 reason="Test",
             )
             assert lv.leave_type == lt
 
     def test_back_dated_more_than_1_year_rejected(self):
         from pydantic import ValidationError
-        very_old = date.today() - timedelta(days=400)
+        very_old = ist_today() - timedelta(days=400)
         with pytest.raises(ValidationError, match="past"):
             hr.LeaveCreate(
                 leave_type="CASUAL",
@@ -339,7 +340,7 @@ class TestCheckInBlocking:
             "attendance_id": "att-1",
             "employee_id": "u-test",
             "store_id": "S1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "check_in": original_ci,  # already checked in
             "status": "PRESENT",
         }
@@ -375,7 +376,7 @@ class TestCheckOutBlocking:
         rec = {
             "attendance_id": "att-2",
             "employee_id": "u-test",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "check_in": "2026-01-01T09:00:00",
             "check_out": None,
         }
@@ -428,7 +429,7 @@ class TestMarkAttendanceValidation:
         return c.post("/hr/attendance/mark", headers=_auth_headers(), json=payload)
 
     def test_future_date_rejected_422(self, monkeypatch):
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        tomorrow = (ist_today() + timedelta(days=1)).isoformat()
         resp = self._mark(monkeypatch, {
             "employee_id": "E1", "date": tomorrow, "status": "PRESENT"
         })
@@ -436,7 +437,7 @@ class TestMarkAttendanceValidation:
 
     def test_invalid_status_rejected_422(self, monkeypatch):
         resp = self._mark(monkeypatch, {
-            "employee_id": "E1", "date": date.today().isoformat(), "status": "WORKING"
+            "employee_id": "E1", "date": ist_today().isoformat(), "status": "WORKING"
         })
         assert resp.status_code == 422
 
@@ -444,7 +445,7 @@ class TestMarkAttendanceValidation:
         now = datetime.now()
         resp = self._mark(monkeypatch, {
             "employee_id": "E1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
             "check_in": now.isoformat(),
             "check_out": (now - timedelta(hours=1)).isoformat(),
@@ -454,7 +455,7 @@ class TestMarkAttendanceValidation:
     def test_valid_mark_succeeds(self, monkeypatch):
         resp = self._mark(monkeypatch, {
             "employee_id": "E1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
         })
         assert resp.status_code == 200
@@ -463,7 +464,7 @@ class TestMarkAttendanceValidation:
         now = datetime.now()
         resp = self._mark(monkeypatch, {
             "employee_id": "E1",
-            "date": date.today().isoformat(),
+            "date": ist_today().isoformat(),
             "status": "PRESENT",
             "check_in": (now - timedelta(hours=9)).isoformat(),
             "check_out": now.isoformat(),
@@ -479,8 +480,8 @@ class TestMarkAttendanceValidation:
 class TestApplyLeave:
     _BASE = {
         "leave_type": "CASUAL",
-        "from_date": (date.today() + timedelta(days=2)).isoformat(),
-        "to_date": (date.today() + timedelta(days=4)).isoformat(),
+        "from_date": (ist_today() + timedelta(days=2)).isoformat(),
+        "to_date": (ist_today() + timedelta(days=4)).isoformat(),
         "reason": "Personal work",
     }
 
@@ -502,8 +503,8 @@ class TestApplyLeave:
         c = _make_app(monkeypatch)
         payload = {
             **self._BASE,
-            "from_date": (date.today() + timedelta(days=5)).isoformat(),
-            "to_date": (date.today() + timedelta(days=2)).isoformat(),
+            "from_date": (ist_today() + timedelta(days=5)).isoformat(),
+            "to_date": (ist_today() + timedelta(days=2)).isoformat(),
         }
         resp = c.post("/hr/leaves", headers=_auth_headers(), json=payload)
         assert resp.status_code == 422
@@ -514,8 +515,8 @@ class TestApplyLeave:
             "leave_id": "lv-exist",
             "employee_id": "u-test",
             "status": "APPROVED",
-            "from_date": (date.today() + timedelta(days=1)).isoformat(),
-            "to_date": (date.today() + timedelta(days=10)).isoformat(),
+            "from_date": (ist_today() + timedelta(days=1)).isoformat(),
+            "to_date": (ist_today() + timedelta(days=10)).isoformat(),
         }
         repo = _FakeLeaveRepo([existing])
         c = _make_app(monkeypatch, leave_repo=repo)
@@ -530,8 +531,8 @@ class TestApplyLeave:
             "leave_id": "lv-pend",
             "employee_id": "u-test",
             "status": "PENDING",
-            "from_date": (date.today() + timedelta(days=3)).isoformat(),
-            "to_date": (date.today() + timedelta(days=6)).isoformat(),
+            "from_date": (ist_today() + timedelta(days=3)).isoformat(),
+            "to_date": (ist_today() + timedelta(days=6)).isoformat(),
         }
         repo = _FakeLeaveRepo([existing])
         c = _make_app(monkeypatch, leave_repo=repo)
@@ -544,8 +545,8 @@ class TestApplyLeave:
             "leave_id": "lv-old",
             "employee_id": "u-test",
             "status": "APPROVED",
-            "from_date": (date.today() + timedelta(days=10)).isoformat(),
-            "to_date": (date.today() + timedelta(days=15)).isoformat(),
+            "from_date": (ist_today() + timedelta(days=10)).isoformat(),
+            "to_date": (ist_today() + timedelta(days=15)).isoformat(),
         }
         repo = _FakeLeaveRepo([existing])
         c = _make_app(monkeypatch, leave_repo=repo)
@@ -558,8 +559,8 @@ class TestApplyLeave:
             "leave_id": "lv-rej",
             "employee_id": "u-test",
             "status": "REJECTED",
-            "from_date": (date.today() + timedelta(days=2)).isoformat(),
-            "to_date": (date.today() + timedelta(days=4)).isoformat(),
+            "from_date": (ist_today() + timedelta(days=2)).isoformat(),
+            "to_date": (ist_today() + timedelta(days=4)).isoformat(),
         }
         repo = _FakeLeaveRepo([existing])
         c = _make_app(monkeypatch, leave_repo=repo)
