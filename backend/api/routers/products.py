@@ -479,7 +479,7 @@ async def list_products(
     search: Optional[str] = Query(None),
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(50, ge=1, le=500),
     current_user: dict = Depends(get_current_user),
 ):
     """List active catalog products with optional search / brand / category
