@@ -16,6 +16,7 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { reportsApi } from '../../services/api';
+import { neutralizeFormula } from '../../utils/exportUtils';
 
 interface GSTR1Invoice {
   invoiceNumber: string;
@@ -120,16 +121,17 @@ export function GSTR1Report() {
     if (!reportData) return;
 
     let csv = '';
+    const BOM = '﻿'; // UTF-8 BOM for Excel compatibility
 
     if (activeSection === 'b2b' && reportData.b2b.length > 0) {
       csv = 'Invoice Number,Date,Customer Name,GSTIN,State,Place of Supply,Invoice Value,Taxable Value,CGST,SGST,IGST,Total Tax,HSN Code,GST Rate\n';
       reportData.b2b.forEach(inv => {
-        csv += `${inv.invoiceNumber},${inv.invoiceDate},${inv.customerName},${inv.customerGSTIN},${inv.customerState},${inv.placeOfSupply},${inv.invoiceValue},${inv.taxableValue},${inv.cgst},${inv.sgst},${inv.igst},${inv.totalTax},${inv.hsnCode},${inv.gstRate}%\n`;
+        csv += `${inv.invoiceNumber},${inv.invoiceDate},${neutralizeFormula(inv.customerName)},${inv.customerGSTIN},${inv.customerState},${inv.placeOfSupply},${inv.invoiceValue},${inv.taxableValue},${inv.cgst},${inv.sgst},${inv.igst},${inv.totalTax},${inv.hsnCode},${inv.gstRate}%\n`;
       });
     } else if (activeSection === 'b2cl' && reportData.b2cl.length > 0) {
       csv = 'Invoice Number,Date,Customer Name,State,Place of Supply,Invoice Value,Taxable Value,CGST,SGST,IGST,Total Tax,HSN Code,GST Rate\n';
       reportData.b2cl.forEach(inv => {
-        csv += `${inv.invoiceNumber},${inv.invoiceDate},${inv.customerName},${inv.customerState},${inv.placeOfSupply},${inv.invoiceValue},${inv.taxableValue},${inv.cgst},${inv.sgst},${inv.igst},${inv.totalTax},${inv.hsnCode},${inv.gstRate}%\n`;
+        csv += `${inv.invoiceNumber},${inv.invoiceDate},${neutralizeFormula(inv.customerName)},${inv.customerState},${inv.placeOfSupply},${inv.invoiceValue},${inv.taxableValue},${inv.cgst},${inv.sgst},${inv.igst},${inv.totalTax},${inv.hsnCode},${inv.gstRate}%\n`;
       });
     } else if (activeSection === 'b2cs' && reportData.b2cs.length > 0) {
       csv = 'Place of Supply,GST Rate,Taxable Value,CGST,SGST,IGST,Total Tax\n';
@@ -138,7 +140,7 @@ export function GSTR1Report() {
       });
     }
 
-    const dataBlob = new Blob([csv], { type: 'text/csv' });
+    const dataBlob = new Blob([BOM + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement('a');
     link.href = url;
