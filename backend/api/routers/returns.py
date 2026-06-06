@@ -239,6 +239,67 @@ def _resolve_original_line(
     return None
 
 
+def _sum_prior_refunds(order_id: Optional[str]) -> float:
+    """Total net_refund already issued for an order across COMPLETED returns
+    (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when unavailable."""
+    if not order_id:
+        return 0.0
+    coll = _returns_coll()
+    if coll is None:
+        return 0.0
+    total = 0.0
+    try:
+        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+            if doc.get("status") != "COMPLETED":
+                continue
+            net = doc.get("net_refund")
+            if net is not None:
+                try:
+                    total += float(net)
+                except (TypeError, ValueError):
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[RETURNS] _sum_prior_refunds lookup failed: %s", exc)
+    return round(total, 2)
+
+
+def _order_billed_total(order: Optional[Dict[str, Any]]) -> float:
+    """Best-effort billed value of an order -- the refund ceiling FALLBACK for a
+    legacy order that predates amount_paid tracking (a current order always carries
+    amount_paid, set at create and incremented on payment). Prefers grand_total /
+    total, else sums the line totals (item_total, or unit_price*quantity)."""
+    if not order:
+        return 0.0
+    for k in ("grand_total", "total", "total_amount", "grandTotal"):
+        v = order.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    total = 0.0
+    for li in order.get("items") or []:
+        line = None
+        for k in ("item_total", "item_subtotal", "subtotal", "line_total"):
+            if li.get(k) is not None:
+                line = li.get(k)
+                break
+        if line is None:
+            up = li.get("unit_price")
+            qty = li.get("quantity", 1)
+            if up is not None:
+                try:
+                    line = float(up) * float(qty or 1)
+                except (TypeError, ValueError):
+                    line = None
+        if line is not None:
+            try:
+                total += float(line)
+            except (TypeError, ValueError):
+                pass
+    return round(total, 2)
+
+
 def _already_returned_qty(
     order_id: Optional[str],
     item_id: Optional[str],
@@ -950,6 +1011,21 @@ async def create_return(
             ),
         )
 
+    # BUG-096: only a completed sale is returnable. Reject a CANCELLED / DRAFT /
+    # REFUNDED / VOID order -- you cannot refund a sale that never completed or was
+    # already fully refunded. Legacy orders with no status field fall through to
+    # the cumulative monetary cap below (the amount_paid guard catches never-paid).
+    _ostatus = order.get("status") or order.get("orderStatus")
+    if _ostatus in ("CANCELLED", "DRAFT", "REFUNDED", "VOID", "VOIDED"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot create a return against an order with status "
+                f"'{_ostatus}'. Only a confirmed / processing / ready / delivered "
+                f"order is returnable."
+            ),
+        )
+
     line_idx = _order_line_index(order)
     resolved_order_id = body.order_id or order.get("order_id")
 
@@ -1012,6 +1088,31 @@ async def create_return(
         net_amount = engine.net_refund(gross_refund, restocking_fee)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+    # BUG-096 cumulative monetary cap: the total net value refunded across ALL
+    # COMPLETED returns for this order may never exceed what the customer actually
+    # paid (order.amount_paid). Closes unlimited / repeatable over-refund (and a
+    # refund on a never-paid order -> amount_paid 0 -> any refund rejected).
+    # Checked HERE in the validation phase -- BEFORE the atomic qty claim below --
+    # so a rejected over-refund never leaves a phantom reservation. 1-paisa epsilon.
+    _ap = (order or {}).get("amount_paid")
+    if _ap is None:
+        # Legacy order with no payment tracking -> cap at the order's billed value
+        # (still blocks unlimited over-refund). A CURRENT order always has
+        # amount_paid present (0 == genuinely never paid -> any refund rejected).
+        _refund_ceiling = _order_billed_total(order)
+    else:
+        _refund_ceiling = float(_ap or 0.0)
+    _prior_refunds = _sum_prior_refunds(resolved_order_id)
+    if round(_prior_refunds + net_amount, 2) > _refund_ceiling + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refund would exceed what is refundable on this order. "
+                f"Cap (amount paid / order value): Rs {_refund_ceiling:.2f}; "
+                f"already refunded: Rs {_prior_refunds:.2f}; this refund: Rs {net_amount:.2f}."
+            ),
+        )
 
     # Back the GST out of the gross for the credit note / GSTR-1 reversal. The
     # tax is INSIDE the gross (not added on top). Use the dominant rate across

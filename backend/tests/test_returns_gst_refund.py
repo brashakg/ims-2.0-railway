@@ -115,6 +115,11 @@ def test_engine_gst_breakup_backs_tax_out():
 
 class _FakeOrderRepo:
     def __init__(self, order=None):
+        if order is not None:
+            order = dict(order)
+            # BUG-096: cumulative refund is now capped at amount_paid; these
+            # fixtures model a fully PAID order, so default it high unless set.
+            order.setdefault("amount_paid", 1_000_000_000.0)
         self._order = order
 
     def find_by_id(self, oid):

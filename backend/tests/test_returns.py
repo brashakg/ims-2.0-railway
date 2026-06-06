@@ -209,6 +209,8 @@ class _FakeOrderRepo:
             order = dict(order)
             if "items" not in order:
                 order["items"] = [dict(li) for li in _DEFAULT_ORDER_ITEMS]
+            # BUG-096: cumulative refund capped at amount_paid; model a PAID order.
+            order.setdefault("amount_paid", 1_000_000_000.0)
             self.collection = _FakeOrdersColl([order])
         else:
             self.collection = _FakeOrdersColl([])
