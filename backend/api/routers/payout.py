@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from ..dependencies import (
+    can_access_store_scoped,
     get_audit_repository,
     get_db,
     get_user_repository,
@@ -555,6 +556,9 @@ async def get_snapshot(
     doc = repo.find_by_id(snapshot_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+    # NEW-IDOR-by-id: existence-hide snapshots whose store the caller can't access.
+    if not can_access_store_scoped(doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Snapshot not found")
     return _serialize(doc)
 
 
@@ -575,6 +579,9 @@ async def mark_paid(
         raise HTTPException(status_code=503, detail="Database unavailable")
     existing = repo.find_by_id(snapshot_id)
     if not existing:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    # NEW-IDOR-by-id: existence-hide snapshots whose store the caller can't access.
+    if not can_access_store_scoped(existing.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Snapshot not found")
     if existing.get("status") != "LOCKED":
         raise HTTPException(
@@ -610,6 +617,9 @@ async def export_csv(
         raise HTTPException(status_code=503, detail="Database unavailable")
     doc = repo.find_by_id(snapshot_id)
     if not doc:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    # NEW-IDOR-by-id: existence-hide snapshots whose store the caller can't access.
+    if not can_access_store_scoped(doc.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
     buf = io.StringIO()

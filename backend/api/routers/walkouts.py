@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import get_current_user
 from ..dependencies import (
+    can_access_store_scoped,
     get_audit_repository,
     get_customer_repository,
     get_db,
@@ -1838,15 +1839,21 @@ async def get_walkout(
     walkout_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """Fetch one walkout by id. Phase 1 doesn't enforce store-scoping
-    on reads (any logged-in user can fetch by id) — Phase 2 will tighten
-    this for cross-store privacy."""
+    """Fetch one walkout by id. Enforces store-scoping: a user may only
+    read a walkout if the walkout's store_id is one they have access to.
+    Admins (SUPERADMIN/ADMIN) may read any store. Store-scoped roles are
+    bounded to their own stores. Non-existent-or-inaccessible walkouts both
+    return 404 (existence-hiding)."""
     repo = _walkout_repo()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     walkout = repo.find_by_walkout_id(walkout_id)
     if not walkout:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+    # Store-scope check: the walkout carries customer PII (name + mobile).
+    # Existence-hide an inaccessible walkout (cross-store reads return 404).
+    if not can_access_store_scoped(walkout.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Walkout not found")
 
     return _serialize_walkout(walkout)
