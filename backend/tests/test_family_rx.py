@@ -107,3 +107,21 @@ def test_family_empty_when_no_rx(monkeypatch):
     assert body["total_prescriptions"] == 0
     assert body["member_count"] == 1
     assert body["members"][0]["prescription_count"] == 0
+
+
+def test_family_hides_cross_store_customer_roster(monkeypatch):
+    # BUG-062 tail: a STORE_MANAGER@S1 must NOT read an S2 customer's family
+    # roster (names/relations/DOB) by id -- existence-hide it (404).
+    cust = {"customer_id": "CX", "name": "Other Store Cust", "store_id": "S2",
+            "patients": [{"patient_id": "p9", "name": "Secret Kid", "relation": "Self"}]}
+    _seed(monkeypatch, [], {"CX": cust})
+    r = _client().get("/api/v1/prescriptions/family/CX")
+    assert r.status_code == 404, r.text
+
+
+def test_family_allows_own_store_customer(monkeypatch):
+    cust = {"customer_id": "C1", "name": "Mine", "home_store_id": "S1",
+            "patients": [{"patient_id": "p1", "name": "Self", "relation": "Self"}]}
+    _seed(monkeypatch, [], {"C1": cust})
+    r = _client().get("/api/v1/prescriptions/family/C1")
+    assert r.status_code == 200, r.text

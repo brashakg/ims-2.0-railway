@@ -493,7 +493,7 @@ async def list_prescriptions(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(50, ge=1, le=500),
     current_user: dict = Depends(require_rx_read),
 ):
     """List prescriptions with filters -- the real Rx library across dates.
@@ -618,6 +618,20 @@ async def family_prescriptions(
         customer_repo.find_by_id(customer_id) if customer_repo is not None else None
     )
     if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    # BUG-062 tail: the Rx below are store-filtered, but the customer ROSTER
+    # (names / relations / DOB) was returned unscoped -- a store-scoped caller
+    # could read another store's family PII by id. Existence-hide a cross-store
+    # customer (404). Admins/area-managers pass; null-store legacy docs are left
+    # readable to avoid over-blocking unattributed accounts.
+    _cust_stores = [
+        customer.get(k)
+        for k in ("preferred_store_id", "home_store_id", "primary_store_id", "store_id")
+        if customer.get(k)
+    ]
+    if _cust_stores and not any(
+        can_access_store_scoped(s, current_user) for s in _cust_stores
+    ):
         raise HTTPException(status_code=404, detail="Customer not found")
     patients = customer.get("patients", []) or []
 
