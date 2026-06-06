@@ -2191,6 +2191,19 @@ def _iso_now() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _to_dt(s):
+    """Parse an ISO date/datetime string to a datetime (None on failure)."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s)[:19])
+    except (ValueError, TypeError):
+        try:
+            return datetime.fromisoformat(str(s)[:10])
+        except (ValueError, TypeError):
+            return None
+
+
 def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
     """Net POS CASH collected for a store between start and end (ISO strings).
 
@@ -2200,11 +2213,22 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     Returns (cash_sales, cash_refunds) as positive magnitudes."""
     if db is None:
         return 0.0, 0.0
-    match: Dict = {"store_id": store_id}
-    created = {"$gte": start_iso}
+    # BUG-031: orders.created_at is a BSON Date, so an ISO-STRING $gte/$lte never
+    # matches it (Mongo type-bracketing) -> cash_sales always 0 -> false drawer
+    # variance. Match BOTH a datetime window (current Date-typed docs) AND a
+    # string window (any legacy ISO-string created_at) via $or.
+    start_dt = _to_dt(start_iso)
+    date_win: Dict = {"$gte": start_dt} if start_dt else {}
+    str_win: Dict = {"$gte": start_iso}
     if end_iso:
-        created["$lte"] = end_iso
-    match["created_at"] = created
+        str_win["$lte"] = end_iso
+        end_dt = _to_dt(end_iso)
+        if end_dt:
+            date_win["$lte"] = end_dt
+    or_clauses = [{"created_at": str_win}]
+    if date_win:
+        or_clauses.insert(0, {"created_at": date_win})
+    match: Dict = {"store_id": store_id, "$or": or_clauses}
 
     cash_sales = 0.0
     cash_refunds = 0.0
