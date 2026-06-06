@@ -1803,7 +1803,7 @@ async def transfer_recommendations(
     from ..services.inventory_intel import recommend_transfers
 
     stock_repo = get_stock_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     if stock_repo is None or not active_store:
         return {"recommendations": [], "store_id": active_store}
 
@@ -1978,7 +1978,7 @@ async def list_accountability(
     db = _get_db()
     if db is None:
         return {"custodians": []}
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     q = {"store_id": active_store} if active_store else {}
     try:
         items = list(db.get_collection("stock_accountability").find(q, {"_id": 0}))
@@ -2000,7 +2000,7 @@ async def accountability_shrinkage(
     db = _get_db()
     if db is None:
         return {"rows": []}
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     q: dict = {"status": "completed", "completed_at": {"$gte": cutoff}}
     if active_store:
@@ -2130,7 +2130,7 @@ async def get_non_moving_stock(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     try:
         products_coll = db.get_collection("products")
@@ -2490,7 +2490,7 @@ async def list_contact_lens_inventory(
     GET /inventory/contact-lenses?brand=Acuvue&modality=DAILY&near_expiry_days=90
     Store-scoped. Fail-soft: returns an empty list when DB is unavailable.
     """
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     db = _get_db()
     rows = _load_cl_stock_rows(db, active_store)
 
@@ -2538,7 +2538,7 @@ async def get_contact_lens_expiry_status(
     GET /inventory/contact-lenses/expiry-status?expiring_within_days=90
     Store-scoped. Fail-soft: returns empty buckets when DB is unavailable.
     """
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     db = _get_db()
     rows = _load_cl_stock_rows(db, active_store)
 

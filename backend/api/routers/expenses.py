@@ -14,6 +14,7 @@ from datetime import date, datetime
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_expense_repository, get_advance_repository, get_db
+from ..dependencies import validate_store_access
 from ..services.file_store import (
     get_file_store,
     ALLOWED_MIME_TYPES,
@@ -1188,7 +1189,7 @@ async def list_advances(
 ):
     """List advances with optional filters"""
     advance_repo = get_advance_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if advance_repo is None:
         return {"advances": [], "total": 0}
@@ -1370,7 +1371,7 @@ async def get_pending_approvals(
     """Get all pending expenses and advances for approval (approvers only)"""
     expense_repo = get_expense_repository()
     advance_repo = get_advance_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     pending_expenses = []
     pending_advances = []

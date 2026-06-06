@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
+from ..dependencies import validate_store_access
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
     pt_for,
@@ -675,7 +676,7 @@ async def get_salary_sheet(
     if not db:
         return {"salaries": [], "total": 0, "store_id": store_id}
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     try:
         query: dict = {"month": month, "year": year}
@@ -1800,7 +1801,7 @@ async def get_commission_summary(
             "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
             "created_at": {"$gte": from_dt, "$lte": to_dt},
         }
-        active_store = store_id or current_user.get("active_store_id")
+        active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
         if active_store:
             order_query["store_id"] = active_store
         if employee_id:
@@ -1917,7 +1918,7 @@ async def get_commission_leaderboard(
         else:  # month
             from_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        active_store = store_id or current_user.get("active_store_id")
+        active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
         query: dict = {
             "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
             "created_at": {"$gte": from_dt},

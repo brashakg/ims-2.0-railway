@@ -1063,7 +1063,7 @@ async def get_cash_flow(
     now = datetime.utcnow()
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     # Inflows (from orders) -- scoped to the active store. created_at is a BSON
     # datetime; an .isoformat() string bound never matched, so inflow always

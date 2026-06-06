@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field, field_validator
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
+from ..dependencies import validate_store_access
 from .marketing import (
     VALID_CHANNELS,
     _enforce_promo_window,
@@ -308,7 +309,7 @@ async def list_segments(
     current_user: dict = Depends(require_roles(*_CAMPAIGN_ROLES)),
 ):
     """Predefined segments, each with a LIVE audience count computed now."""
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _marketing_get_db()
     segments = seg.list_segments(db, store_id=active_store or None)
     return {"segments": segments, "total": len(segments)}
@@ -326,7 +327,7 @@ async def preview_segment(
     ('Estimated audience: N')."""
     if key not in seg.SEGMENT_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown segment '{key}'")
-    active_store = store_id or current_user.get("active_store_id", "")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     params: Dict[str, Any] = {}
     if customer_type:
         params["customer_type"] = customer_type
