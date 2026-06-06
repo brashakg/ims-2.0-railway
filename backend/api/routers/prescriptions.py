@@ -5,7 +5,7 @@ Prescription management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 from typing_extensions import Literal
 from datetime import date, datetime, timedelta
@@ -244,6 +244,44 @@ class EyeData(BaseModel):
     @classmethod
     def validate_pd(cls, v: Optional[str]) -> Optional[str]:
         return _validate_rx_value(v, "pd")
+
+    @field_validator("prism")
+    @classmethod
+    def validate_prism(cls, v: Optional[str]) -> Optional[str]:
+        # BUG-117c: prism is a magnitude in prism dioptres (0-10). Blank/None ok.
+        if v is None or str(v).strip() == "":
+            return v
+        try:
+            mag = float(str(v).strip())
+        except (ValueError, TypeError):
+            raise ValueError("prism must be a number in prism dioptres (0-10)")
+        if not (0.0 <= mag <= 10.0):
+            raise ValueError("prism must be between 0 and 10 prism dioptres")
+        return v
+
+    @field_validator("base")
+    @classmethod
+    def validate_base(cls, v: Optional[str]) -> Optional[str]:
+        # BUG-117c: prism base direction must be one of UP / DOWN / IN / OUT.
+        if v is None or str(v).strip() == "":
+            return v
+        if str(v).strip().upper() not in ("UP", "DOWN", "IN", "OUT"):
+            raise ValueError("base must be one of UP, DOWN, IN, OUT")
+        return v
+
+    @model_validator(mode="after")
+    def _cyl_requires_axis(self) -> "EyeData":
+        # BUG-117d: a non-zero cylinder is clinically un-grindable without an axis.
+        # When cyl is present and not plano (0), axis (1-180) is mandatory.
+        cyl = self.cyl
+        if cyl is not None and str(cyl).strip() != "":
+            try:
+                cyl_num = float(str(cyl).strip())
+            except (ValueError, TypeError):
+                cyl_num = None
+            if cyl_num is not None and abs(cyl_num) > 1e-9 and self.axis is None:
+                raise ValueError("axis (1-180) is required when cylinder is non-zero")
+        return self
 
 
 class CLEyeData(BaseModel):
