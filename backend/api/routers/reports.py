@@ -205,7 +205,7 @@ async def dashboard_stats(
     current_user: dict = Depends(get_current_user),
 ):
     """Get dashboard statistics for a store - fetched from database"""
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
 
     order_repo = get_order_repository()
     stock_repo = get_stock_repository()
@@ -318,7 +318,7 @@ async def inventory_report(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory report for a store - fetched from database"""
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
@@ -370,7 +370,7 @@ async def sales_summary(
     """Sales summary + daily trend + category breakdown for the
     requested window. Single endpoint that the frontend Reports page
     reads off the same response."""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
     empty = {
         "summary": {
@@ -408,7 +408,7 @@ async def daily_sales(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily sales for the last N days (chart data)."""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
@@ -478,7 +478,7 @@ async def sales_by_category(
     current_user: dict = Depends(get_current_user),
 ):
     """Sales grouped by product category for the requested window."""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
@@ -504,7 +504,7 @@ async def inventory_summary(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory summary"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -746,7 +746,7 @@ async def eye_test_report(
     as the Test-History page).  Returns each test record for the FE plus
     an aggregation by optometrist and a grand total.
     """
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     test_repo = get_eye_test_repository()
     if test_repo is None:
         return {"data": [], "by_optometrist": [], "total": 0}
@@ -791,7 +791,7 @@ async def attendance_report(
     current_user: dict = Depends(get_current_user),
 ):
     """Get attendance report for month"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     attendance_repo = get_attendance_repository()
 
     if attendance_repo is None:
@@ -834,7 +834,7 @@ async def outstanding_report(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get outstanding payments report"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -951,7 +951,7 @@ async def gst_report(
     `created_at` as a BSON datetime, so the previous `.isoformat()` STRING
     filter never matched a single order.
     """
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1066,7 +1066,7 @@ async def task_summary(
     current_user: dict = Depends(get_current_user),
 ):
     """Get task summary"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     task_repo = get_task_repository()
 
     if task_repo is None:
@@ -1106,7 +1106,7 @@ async def sales_comparison(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily/Monthly/Yearly sales comparison (current vs previous period)"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1172,7 +1172,7 @@ async def sales_growth(
     current_user: dict = Depends(get_current_user),
 ):
     """MoM (Month-over-Month) and YoY (Year-over-Year) growth percentages"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1255,7 +1255,7 @@ async def profit_by_category(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Profit by product category"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1373,7 +1373,7 @@ async def discount_analysis(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Discount average by category and store"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1534,7 +1534,7 @@ async def pending_workshop_jobs(
     from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
     from ..dependencies import get_db as _get_db
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     db = _get_db()
     if db is None or not getattr(db, "is_connected", True):
         return {
@@ -1655,7 +1655,7 @@ async def daily_stock_count(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily stock count report"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -1707,7 +1707,7 @@ async def expense_vs_revenue(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Expense vs revenue comparison"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1753,7 +1753,7 @@ async def customer_acquisition(
     current_user: dict = Depends(get_current_user),
 ):
     """Customer acquisition/retention report"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     customer_repo = get_customer_repository()
     order_repo = get_order_repository()
 
@@ -1824,7 +1824,7 @@ async def brand_sellthrough(
     current_user: dict = Depends(get_current_user),
 ):
     """Brand-wise sell-through report"""
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
     stock_repo = get_stock_repository()
 
@@ -1906,7 +1906,7 @@ async def get_targets(
     Get sales targets for a store (daily and monthly).
     Returns configurable defaults or targets from database.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
 
     # Default targets
     targets = {
@@ -2314,7 +2314,7 @@ async def gstr1_report(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     return _compute_gstr1(month, active_store)
 
 
@@ -2342,7 +2342,7 @@ async def gstr1_gstn_json(
     """
     from ..services.gstn_export import to_gstr1_json
 
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr1(period, active_store)
     try:
@@ -2577,7 +2577,7 @@ async def gstr3b_report(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b."""
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     return _compute_gstr3b(month, active_store)
 
 
@@ -2600,7 +2600,7 @@ async def gstr3b_gstn_json(
     """
     from ..services.gstn_export import to_gstr3b_json
 
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr3b(period, active_store)
     try:
@@ -2656,7 +2656,7 @@ async def non_moving_stock(
     """
     from datetime import timezone  # local import, keeps module-top imports minimal
 
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     db = get_db()
 
     if db is None or not getattr(db, "is_connected", True):
@@ -2875,7 +2875,7 @@ async def footfall_audit(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.1.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     db = get_db()
 
     now = datetime.now()
@@ -3027,7 +3027,7 @@ async def sales_price_bands(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.2.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     order_repo = get_order_repository()
     now = datetime.now()
     # Start of FY (fy_count - 1) years before the current FY.
@@ -3194,7 +3194,7 @@ async def sales_lens_deep_dive(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.3.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     order_repo = get_order_repository()
     db = get_db()
 
@@ -3341,7 +3341,7 @@ async def sales_seasonality(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.4.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     order_repo = get_order_repository()
     now = datetime.now()
     start = now - timedelta(days=365 * years_back)
@@ -3492,7 +3492,7 @@ async def purchase_recommendations(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §6.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     db = get_db()
     if db is None:
         return {
@@ -3913,7 +3913,7 @@ async def growth_blueprint(
     import json as _json
     from agents import llm_provider  # local import — agents pkg may be optional
 
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     month_key = datetime.now().strftime("%Y-%m")
     cache_key = f"{active_store}::{month_key}::{model_id or 'default'}"
     db = get_db()
