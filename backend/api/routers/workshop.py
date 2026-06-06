@@ -850,12 +850,24 @@ async def update_job_status(
                 ),
             )
 
-        # Block READY -> DELIVERED without QC gate unless QC was explicitly
-        # waived (qc_waived=True on the job doc). This enforces the rule:
-        # a job must not reach READY for pickup unless QC passed or was waived.
-        if status == "DELIVERED" and current_status == "READY":
-            # DELIVERED from READY is always fine — job passed QC to get to READY.
-            pass
+        # BUG-116a (patient-safety): a lens job must NOT reach READY-for-pickup
+        # without a QC record. The dedicated QC endpoints (/jobs/{id}/qc) set
+        # qc_passed before flipping the job to READY; this GENERIC transition
+        # previously bypassed that (the gate here was a no-op `pass`), so a job
+        # could be PATCHed COMPLETED -> READY with zero QC and reach the patient.
+        # Require an explicit QC pass or waiver on ANY -> READY transition.
+        if status == "READY" and not (
+            job.get("qc_passed") is True or job.get("qc_waived") is True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot mark this job READY: lens QC must pass (record it via "
+                    "the QC endpoint) or be explicitly waived (qc_waived) first."
+                ),
+            )
+        # DELIVERED from READY is always fine -- the job passed/waived QC to reach
+        # READY (enforced above), so no further gate is needed here.
 
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
             return {
