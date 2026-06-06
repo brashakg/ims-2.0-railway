@@ -29,25 +29,23 @@ FIVE_PCT = {
 
 
 def main():
-    uri = (
-        os.environ.get("MONGODB_URI")
-        or os.environ.get("MONGODB_URL")
-        or os.environ.get("MONGO_URL")
-        or os.environ.get("DATABASE_URL")
-        or ""
-    )
-    if not uri:
-        print("No MONGODB_URI set — aborting (run via `railway run`).")
-        return
-    from pymongo import MongoClient
+    # Connect via the app's own DB layer so this works with EITHER a full URL
+    # (MONGODB_URL / MONGO_URL) OR Railway's component vars (MONGO_HOST/PORT/USER/
+    # PASSWORD) -- the URL-only lookup failed on prod, which uses component vars.
+    from database.connection import init_db, get_db, DatabaseConfig
 
-    client = MongoClient(uri)
-    try:
-        db = client.get_default_database()
-        if db is None:
-            raise ValueError("no default db in URI")
-    except Exception:
-        db = client["ims_2_0"]
+    mongo_url = os.environ.get("MONGODB_URL") or os.environ.get("MONGO_URL")
+    if mongo_url:
+        config = DatabaseConfig.from_uri(mongo_url, database="ims_2_0")
+    else:
+        config = DatabaseConfig.from_env()
+    if not init_db(config):
+        print(
+            "Could not connect to MongoDB (set MONGODB_URL / MONGO_URL or the "
+            "MONGO_HOST/PORT/USER/PASSWORD component vars). Aborting."
+        )
+        return
+    db = get_db().db
     coll = db.get_collection("products")
 
     scanned = fixed = 0
@@ -60,20 +58,28 @@ def main():
         scanned += 1
         cur_rate = p.get("gst_rate")
         cur_hsn = str(p.get("hsn_code") or "")
-        needs = (cur_rate != 5.0) or (cur_hsn and cur_hsn[:4] != want_hsn[:4])
-        if not needs:
+        # RATE-ONLY policy (owner decision): always correct gst_rate to 5%, but
+        # PRESERVE an HSN that is already a valid 5%-category code (9001 lenses/
+        # contacts, 9003 frames) -- only write the canonical HSN when the current
+        # one is missing or not a 9001/9003 code. Avoids reclassifying e.g. a
+        # contact lens (900130) onto the spectacle-lens canonical (900150).
+        hsn_ok = bool(cur_hsn) and cur_hsn[:4] in ("9001", "9003")
+        needs_rate = cur_rate != 5.0
+        needs_hsn = not hsn_ok
+        if not (needs_rate or needs_hsn):
             continue
         fixed += 1
+        new_hsn = cur_hsn if hsn_ok else want_hsn
         if len(examples) < 12:
             examples.append(
                 f"  {p.get('product_id')} [{p.get('category')}] {p.get('name','')[:30]} "
-                f": gst {cur_rate}->5.0  hsn {cur_hsn or '-'}->{want_hsn}"
+                f": gst {cur_rate}->5.0  hsn {cur_hsn or '-'}->{new_hsn}"
             )
         if APPLY:
-            coll.update_one(
-                {"_id": p["_id"]},
-                {"$set": {"gst_rate": 5.0, "hsn_code": want_hsn}},
-            )
+            set_fields = {"gst_rate": 5.0}
+            if needs_hsn:
+                set_fields["hsn_code"] = want_hsn
+            coll.update_one({"_id": p["_id"]}, {"$set": set_fields})
 
     print(f"5%-category products scanned: {scanned}")
     print(f"{'FIXED' if APPLY else 'WOULD FIX (dry-run)'}: {fixed}")

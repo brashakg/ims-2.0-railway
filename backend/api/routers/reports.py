@@ -2039,6 +2039,58 @@ def _order_taxable_and_tax(order: dict) -> tuple:
     return 0.0, round(total_tax, 2)
 
 
+def _b2cs_rate_lines(items, order_taxable, order_tax):
+    """NEW-GST-B2CS-HSN: split a consumer (B2CS) order's lines into
+    ``(gst_rate, taxable, tax)`` tuples, one per line, so an invoice that mixes
+    GST rates (e.g. a 5% frame + an 18% sunglass) lands in the correct per-rate
+    B2CS bucket instead of being lumped under the first line's rate.
+
+    Each line's rate is ``item.gst_rate`` when present, else the canonical
+    category rate (api.services.gst_rates). Taxable is derived GST-exclusively
+    from the line gross ``item_total`` (Indian retail prices are GST-inclusive):
+    ``taxable = item_total * 100 / (100 + rate)``. When no usable line items
+    exist, fall back to a single line carrying the order-level totals so nothing
+    is dropped.
+    """
+    from api.services.gst_rates import GST_CATEGORY_TABLE, _normalize_category
+
+    raw = []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        try:
+            gross = float(it.get("item_total") or 0) or 0.0
+        except (TypeError, ValueError):
+            gross = 0.0
+        if gross <= 0:
+            continue
+        rate = it.get("gst_rate")
+        if rate is None:
+            entry = GST_CATEGORY_TABLE.get(_normalize_category(it.get("category")))
+            rate = entry[1] if entry else 5.0
+        try:
+            rate = int(round(float(rate)))
+        except (TypeError, ValueError):
+            rate = 5
+        taxable = gross * 100.0 / (100.0 + rate)
+        raw.append((rate, taxable, gross - taxable))
+
+    if not raw:
+        # No usable line items -> keep the order-level totals under one bucket.
+        return [(5, round(order_taxable, 2), round(order_tax, 2))]
+
+    # Reconcile the per-line split back to the order-level taxable/tax: the split
+    # only DISTRIBUTES the invoice's taxable + tax across rate buckets by line, it
+    # must not change the SUM -- so the GSTR-1 totals (which add these buckets)
+    # still equal the booked invoice. Scale is 1.0 when the lines already
+    # reconcile (the normal case); it absorbs order-level rounding / cart discount.
+    sum_taxable = sum(t for _, t, _ in raw)
+    sum_tax = sum(x for _, _, x in raw)
+    st = (order_taxable / sum_taxable) if sum_taxable > 0 else 1.0
+    sx = (order_tax / sum_tax) if sum_tax > 0 else 1.0
+    return [(r, round(t * st, 2), round(x * sx, 2)) for r, t, x in raw]
+
+
 def _compute_gstr1(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-1 report dict for a (month, store).
 
@@ -2241,23 +2293,32 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             }
                         )
                 else:
-                    # B2CS: consolidate by (place_of_supply, gst_rate)
-                    key = f"{place_of_supply}|{gst_rate_dominant}"
-                    if key not in b2cs_map:
-                        b2cs_map[key] = {
-                            "placeOfSupply": place_of_supply,
-                            "gstRate": gst_rate_dominant,
-                            "taxableValue": 0.0,
-                            "cgst": 0.0,
-                            "sgst": 0.0,
-                            "igst": 0.0,
-                            "totalTax": 0.0,
-                        }
-                    b2cs_map[key]["taxableValue"] += taxable_value
-                    b2cs_map[key]["cgst"] += cgst
-                    b2cs_map[key]["sgst"] += sgst
-                    b2cs_map[key]["igst"] += igst
-                    b2cs_map[key]["totalTax"] += total_tax
+                    # B2CS: consolidate by (place_of_supply, gst_rate). NEW-GST-B2CS-HSN:
+                    # an invoice can mix GST rates (e.g. a 5% frame + an 18%
+                    # sunglass); split each line into the correct rate bucket
+                    # instead of lumping the whole invoice under the first line's
+                    # rate. Tax is split CGST/SGST (intra) or IGST (inter) per line.
+                    for rate, line_taxable, line_tax in _b2cs_rate_lines(
+                        items, taxable_value, total_tax
+                    ):
+                        key = f"{place_of_supply}|{rate}"
+                        if key not in b2cs_map:
+                            b2cs_map[key] = {
+                                "placeOfSupply": place_of_supply,
+                                "gstRate": rate,
+                                "taxableValue": 0.0,
+                                "cgst": 0.0,
+                                "sgst": 0.0,
+                                "igst": 0.0,
+                                "totalTax": 0.0,
+                            }
+                        b2cs_map[key]["taxableValue"] += line_taxable
+                        b2cs_map[key]["totalTax"] += line_tax
+                        if is_inter_state:
+                            b2cs_map[key]["igst"] += line_tax
+                        else:
+                            b2cs_map[key]["cgst"] += round(line_tax / 2, 2)
+                            b2cs_map[key]["sgst"] += round(line_tax / 2, 2)
 
                 # Validation: B2B without GSTIN — caught by the absence
                 # of customer_gstin above. Add an explicit warning for
@@ -2565,6 +2626,59 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
     return 0.0, 0.0, 0.0
 
 
+def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
+    """NEW-GST-RCM: inward supplies LIABLE TO REVERSE CHARGE for the month
+    (GSTR-3B Table 3.1(d)) -- vendor_bills flagged reverse_charge=True, scoped to
+    the store's entity. On these the BUYER owes the GST (paid in cash, then
+    claimed as ITC separately). Returns (igst, cgst, sgst, taxable). Mirrors
+    _itc_from_vendor_bills' entity + string-date-window match. Fail-soft -> zeros."""
+    if db is None:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        entity_id = None
+        try:
+            _srow = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
+            entity_id = (_srow or {}).get("entity_id")
+        except Exception:
+            entity_id = None
+        month_lo = f"{year:04d}-{mon:02d}-01"
+        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
+        vb_match: dict = {
+            "reverse_charge": True,
+            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
+            "$or": [
+                {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
+                {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
+            ],
+        }
+        if entity_id:
+            vb_match["recipient_entity_id"] = entity_id
+        pipeline = [
+            {"$match": vb_match},
+            {
+                "$group": {
+                    "_id": None,
+                    "igst": {"$sum": "$igst_total"},
+                    "cgst": {"$sum": "$cgst_total"},
+                    "sgst": {"$sum": "$sgst_total"},
+                    "taxable": {"$sum": "$taxable_amount"},
+                }
+            },
+        ]
+        res = list(db["vendor_bills"].aggregate(pipeline))
+        if res:
+            a = res[0]
+            return (
+                float(a.get("igst", 0.0) or 0.0),
+                float(a.get("cgst", 0.0) or 0.0),
+                float(a.get("sgst", 0.0) or 0.0),
+                float(a.get("taxable", 0.0) or 0.0),
+            )
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0, 0.0
+
+
 def _compute_gstr3b(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-3B report dict for a (month, store).
 
@@ -2600,6 +2714,12 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     itc_igst = 0.0
     itc_cgst = 0.0
     itc_sgst = 0.0
+
+    # RCM (Table 3.1(d)) accumulators -- inward supplies liable to reverse charge.
+    rcm_igst = 0.0
+    rcm_cgst = 0.0
+    rcm_sgst = 0.0
+    rcm_taxable = 0.0
 
     store_gstin = ""
     store_legal_name = ""
@@ -2673,10 +2793,17 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             db, active_store, year, mon, last_day
         )
 
-    # Net cash liability = output tax - ITC (floor at 0 per component)
-    cash_igst = max(0.0, out_igst - itc_igst)
-    cash_cgst = max(0.0, out_cgst - itc_cgst)
-    cash_sgst = max(0.0, out_sgst - itc_sgst)
+        # NEW-GST-RCM: Table 3.1(d) inward supplies liable to reverse charge.
+        rcm_igst, rcm_cgst, rcm_sgst, rcm_taxable = _rcm_from_vendor_bills(
+            db, active_store, year, mon, last_day
+        )
+
+    # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
+    # discharged in CASH (it cannot be set off against ITC), so it adds on top of
+    # the output-minus-ITC cash. When there are no RCM bills these terms are 0.
+    cash_igst = max(0.0, out_igst - itc_igst) + rcm_igst
+    cash_cgst = max(0.0, out_cgst - itc_cgst) + rcm_cgst
+    cash_sgst = max(0.0, out_sgst - itc_sgst) + rcm_sgst
 
     def _r(v: float) -> float:
         return round(v, 2)
@@ -2691,6 +2818,15 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "integratedTax": _r(out_igst),
             "centralTax": _r(out_cgst),
             "stateTax": _r(out_sgst),
+            "cess": 0.0,
+        },
+        # Table 3.1(d): inward supplies liable to reverse charge -- the buyer's
+        # own GST liability on RCM purchases (NEW-GST-RCM).
+        "inwardSuppliesReverseChargeValue": _r(rcm_taxable),
+        "inwardSuppliesReverseCharge": {
+            "integratedTax": _r(rcm_igst),
+            "centralTax": _r(rcm_cgst),
+            "stateTax": _r(rcm_sgst),
             "cess": 0.0,
         },
         "zeroRatedValue": 0.0,

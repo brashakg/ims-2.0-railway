@@ -678,3 +678,34 @@ class TestSalesConfirmGate:
         # _mk_job defaults confirmed_by_sales=True
         client = _client_with(monkeypatch, ["WORKSHOP_STAFF"], FakeRepo([_mk_job("j1", "PENDING")]))
         assert client.post("/workshop/jobs/j1/start").status_code == 200
+
+
+class TestReworkCap:
+    """BUG-116d: QC_FAILED -> IN_PROGRESS reworks capped at MAX_REWORK (2);
+    beyond that only a manager may override."""
+
+    def _qc_failed(self, rework_count):
+        j = _mk_job("j1", "QC_FAILED")
+        j["rework_count"] = rework_count
+        return j
+
+    def test_rework_under_cap_ok_and_increments(self, monkeypatch):
+        repo = FakeRepo([self._qc_failed(1)])
+        c = _client_with(monkeypatch, ["WORKSHOP_STAFF"], repo)
+        r = c.patch("/workshop/jobs/j1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 200, r.text
+        assert repo._jobs["j1"]["rework_count"] == 2
+
+    def test_rework_blocked_at_cap_for_non_manager(self, monkeypatch):
+        repo = FakeRepo([self._qc_failed(2)])
+        c = _client_with(monkeypatch, ["WORKSHOP_STAFF"], repo)
+        r = c.patch("/workshop/jobs/j1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 400, r.text
+        assert repo._jobs["j1"]["status"] == "QC_FAILED"  # not advanced
+
+    def test_rework_manager_override_at_cap(self, monkeypatch):
+        repo = FakeRepo([self._qc_failed(2)])
+        c = _client_with(monkeypatch, ["STORE_MANAGER"], repo)
+        r = c.patch("/workshop/jobs/j1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 200, r.text
+        assert repo._jobs["j1"]["rework_count"] == 3

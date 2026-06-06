@@ -811,30 +811,51 @@ def _resolve_product_doc(product_repo, pid: str):
     """
     if not pid:
         return None
-    product = product_repo.find_by_id(pid)
-    if product is not None:
-        return product
-    try:
-        coll = product_repo.collection
-        product = coll.find_one(
-            {"$or": [{"product_id": pid}, {"sku": pid}, {"_id": pid}]}
-        )
-        if product is None and len(pid) == 24:
-            from bson import ObjectId
-
-            try:
-                product = coll.find_one({"_id": ObjectId(pid)})
-            except Exception:
-                product = None
+    # None-safe: the live seeded-catalog path calls this with product_repo=None
+    # (products live in catalog_products, resolved below). Only touch the products
+    # repo when it is actually present.
+    if product_repo is not None:
+        product = product_repo.find_by_id(pid)
         if product is not None:
             return product
-    except Exception:
-        product = None
+        try:
+            coll = product_repo.collection
+            product = coll.find_one(
+                {"$or": [{"product_id": pid}, {"sku": pid}, {"_id": pid}]}
+            )
+            if product is None and len(pid) == 24:
+                from bson import ObjectId
+
+                try:
+                    product = coll.find_one({"_id": ObjectId(pid)})
+                except Exception:
+                    product = None
+            if product is not None:
+                return product
+        except Exception:
+            product = None
     # C-1: seeded catalog products live in the `catalog_products` collection
     # (served by GET /catalog/products), NOT in `products`. When the lookup
     # above misses, fall back to catalog_products by the same id so a
     # catalog-only product can still be ordered. Fail-soft: any error -> None.
     return _resolve_catalog_product_doc(pid)
+
+
+def _canonical_pid(product_repo, pid: str) -> str:
+    """NEW-ORDER-PRODUCTID-STAMP: resolve a client-supplied product reference
+    (which may be a SKU or a Mongo _id, e.g. for imported/catalog products) to
+    the catalog's CANONICAL product_id, so persisted order lines reconcile
+    against the catalog instead of storing a raw SKU. Virtual skus
+    (custom-/lens-/lens-sug-) and unresolvable ids are returned unchanged."""
+    if not pid or pid.startswith(("custom-", "lens-", "lens-sug-")):
+        return pid
+    try:
+        doc = _resolve_product_doc(product_repo, pid)
+    except Exception:  # noqa: BLE001 -- resolution is best-effort
+        doc = None
+    if not doc:
+        return pid
+    return str(doc.get("id") or doc.get("product_id") or pid)
 
 
 def _get_catalog_collection():
@@ -1259,6 +1280,16 @@ async def create_order(
         items_data = []
         subtotal = 0.0
 
+        # NEW-ORDER-PRODUCTID-STAMP: resolve each client-supplied product ref
+        # (which may be a SKU or _id) to the catalog's canonical product_id ONCE,
+        # so the persisted order lines reconcile against the catalog instead of
+        # storing a raw SKU. Virtual + unresolvable ids map to themselves.
+        _canon_by_pid: Dict[str, str] = {}
+        for _it in order.items:
+            _ip = _it.product_id or ""
+            if _ip and _ip not in _canon_by_pid:
+                _canon_by_pid[_ip] = _canonical_pid(product_repo, _ip)
+
         # Retrieve user discount cap for enforcement.
         # Use the role-aware effective cap helper rather than the raw user
         # document field — that one defaults to 10% even for SUPERADMIN,
@@ -1488,7 +1519,7 @@ async def create_order(
                 {
                     "item_id": str(uuid.uuid4()),
                     "item_type": item.item_type,
-                    "product_id": item.product_id,
+                    "product_id": _canon_by_pid.get(item.product_id or "") or item.product_id,
                     "product_name": item.product_name,
                     "sku": item.sku,
                     "brand": item.brand,

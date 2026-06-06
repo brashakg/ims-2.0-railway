@@ -110,6 +110,10 @@ class PurchaseInvoiceCreate(BaseModel):
     place_of_supply: Optional[str] = None
     tds: float = Field(0, ge=0)
     itc_eligible: bool = True
+    # GST reverse charge (RCM): when True this is an inward supply on which the
+    # BUYER is liable to pay GST (GSTR-3B Table 3.1(d)) -- e.g. unregistered-
+    # supplier purchases, GTA freight, legal/advocate services.
+    reverse_charge: bool = False
     notes: Optional[str] = None
     # Client-computed grand total, if provided, is reconciled against the
     # server-computed taxable+tax (Rs 1 slack) -- a tamper / drift guard.
@@ -495,6 +499,7 @@ async def create_purchase_invoice(
         "total": total,
         "tds": round(body.tds, 2),
         "itc_eligible": bool(body.itc_eligible),
+        "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
         "status": "OUTSTANDING",
         "notes": body.notes,
