@@ -950,3 +950,109 @@ def earn_for_order_internal(
     except Exception as exc:
         logger.warning("earn_for_order_internal failed: %s", exc)
         return {"awarded": 0, "skipped_reason": "error", "error": str(exc)}
+
+
+def reverse_for_return(
+    return_id: str, order_id: str, customer_id: str
+) -> Dict[str, Any]:
+    """Reverse loyalty when goods are returned (BUG-099): claw back the points
+    EARNED on the original order and restore the points REDEEMED on it.
+
+    Called by returns.create_return after the atomic qty claim. Idempotent on
+    return_id (an ADJUST ledger row tagged with the return_id is the guard, so a
+    retried / duplicate return never double-reverses). The balance + both lifetime
+    counters move in a SINGLE atomic adjust_balance ($inc). Never raises -- always
+    returns a dict; the caller decides how to surface a failure.
+
+    buy -> earn 100 / redeem 50, then return:
+      net balance delta = redeemed(50) - earned(100) = -50 (claw 50 net),
+      lifetime_earned -= 100, lifetime_redeemed -= 50.
+    """
+    if not customer_id or not order_id or not return_id:
+        return {"ok": False, "reason": "missing_ids"}
+    accounts = get_loyalty_account_repository()
+    txns = get_loyalty_transaction_repository()
+    if accounts is None or txns is None:
+        return {"ok": False, "reason": "loyalty_db_unavailable"}
+    try:
+        ledger = txns.find_for_customer(customer_id, limit=1000)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reverse_for_return ledger read failed: %s", exc)
+        return {"ok": False, "reason": "ledger_read_failed"}
+
+    # Idempotency: an ADJUST row already tagged with THIS return_id == done.
+    for row in ledger:
+        if row.get("type") == "ADJUST" and row.get("return_id") == return_id:
+            return {"ok": True, "already_reversed": True}
+
+    earned = sum(
+        int(t.get("points") or 0)
+        for t in ledger
+        if t.get("order_id") == order_id and t.get("type") == "EARN"
+    )
+    redeemed = sum(
+        int(t.get("points") or 0)
+        for t in ledger
+        if t.get("order_id") == order_id and t.get("type") == "REDEEM"
+    )
+    if earned <= 0 and redeemed <= 0:
+        return {"ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0}
+
+    account = accounts.find_or_create(customer_id)
+    balance_before = int(account.get("balance_points", 0))
+    net_delta = redeemed - earned  # claw earned, restore redeemed
+    if balance_before + net_delta < 0:
+        # The clawback would drive the balance negative (the earned points were
+        # already spent on a LATER order). Do NOT silently clamp -- escalate so a
+        # human reconciles; the caller flags the return for retry.
+        logger.error(
+            "reverse_for_return BALANCE UNDERFLOW cust=%s order=%s return=%s "
+            "balance=%s net_delta=%s",
+            customer_id, order_id, return_id, balance_before, net_delta,
+        )
+        return {"ok": False, "reason": "balance_underflow",
+                "balance": balance_before, "net_delta": net_delta}
+
+    # Marker FIRST (the idempotency claim), then the atomic balance update. If the
+    # balance update fails after the marker, a retry is a safe no-op (marker found)
+    # and the caller flags loyalty_reversal_failed for reconciliation -- we fail
+    # toward NOT-clawing (customer keeps points) rather than double-clawing.
+    txn_id = str(uuid.uuid4())
+    try:
+        txns.create({
+            "txn_id": txn_id,
+            "customer_id": customer_id,
+            "type": "ADJUST",
+            "points": net_delta,
+            "order_id": order_id,
+            "return_id": return_id,
+            "reason": (
+                f"Return {return_id}: claw {earned} earned + restore {redeemed} "
+                f"redeemed on order {order_id}"
+            ),
+            "created_at": datetime.now(),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("reverse_for_return marker write failed: %s", exc)
+        return {"ok": False, "reason": "marker_write_failed", "error": str(exc)}
+    try:
+        accounts.adjust_balance(
+            customer_id,
+            delta_points=net_delta,
+            delta_lifetime_earned=-earned,
+            delta_lifetime_redeemed=-redeemed,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "reverse_for_return balance update FAILED (marker %s written) cust=%s: %s",
+            txn_id, customer_id, exc,
+        )
+        return {"ok": False, "reason": "balance_update_failed", "error": str(exc)}
+
+    return {
+        "ok": True,
+        "earned_clawed": earned,
+        "redeemed_restored": redeemed,
+        "net_delta": net_delta,
+        "txn_id": txn_id,
+    }
