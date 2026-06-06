@@ -14,11 +14,12 @@ guarding against.
 
 import pytest
 
-# Vercel prod + any *.vercel.app preview should pass; random origin should fail.
+# Exact prod hosts + the owner's TEAM-SCOPED Vercel previews pass; a bare
+# *.vercel.app or any random origin must fail (SEC-CORS-WILDCARD).
 ALLOWED_ORIGINS = [
     "https://ims-2-0-railway.vercel.app",
     "https://ims-20-railway.vercel.app",
-    "https://some-preview-abc123.vercel.app",  # matches *.vercel.app rule
+    "https://some-preview-abc123-avinashs-projects-b3cb6df8.vercel.app",  # owner preview (team-scope suffix)
     "http://localhost:3000",
     "http://localhost:5173",
     # Unified custom-domain plan (Option A — subdomains under uniparallel.com).
@@ -34,6 +35,12 @@ FORBIDDEN_ORIGINS = [
     # Look-alike: ends with "uniparallel.com" but NOT ".uniparallel.com", so the
     # subdomain rule must reject it. Guards against a too-loose substring match.
     "https://eviluniparallel.com",
+    # SEC-CORS-WILDCARD: a bare *.vercel.app (an attacker's own deploy), the old
+    # substring bypass, and the dropped blanket *.up.railway.app must ALL fail.
+    "https://some-preview-abc123.vercel.app",
+    "https://evil.vercel.app",
+    "https://ims-2-0-railway.vercel.app.attacker.com",
+    "https://evil.up.railway.app",
 ]
 
 
