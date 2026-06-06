@@ -88,6 +88,14 @@ VALID_JOB_TRANSITIONS = {
     "CANCELLED": set(),
 }
 
+# BUG-116d: cap QC_FAILED -> IN_PROGRESS reworks. A QC-failed lens job sent back
+# for rework could otherwise churn the QC-fail -> rework loop forever. Owner
+# decision: allow 2 reworks; beyond that only a manager may override and send it
+# back again. MAX_REWORK is the number of reworks ALREADY done at which a fresh
+# rework is blocked for non-managers.
+MAX_REWORK = 2
+_REWORK_OVERRIDE_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
+
 router = APIRouter()
 
 
@@ -892,7 +900,29 @@ async def update_job_status(
         # DELIVERED from READY is always fine -- the job passed/waived QC to reach
         # READY (enforced above), so no further gate is needed here.
 
+        # BUG-116d: a QC_FAILED -> IN_PROGRESS move is a rework. Cap it: once the
+        # job has already been reworked MAX_REWORK times, only a manager may send
+        # it back again (override), otherwise the rework loop is blocked.
+        is_rework = current_status == "QC_FAILED" and status == "IN_PROGRESS"
+        rework_count = int(job.get("rework_count") or 0)
+        if is_rework and rework_count >= MAX_REWORK:
+            roles = set(current_user.get("roles") or [])
+            if not (roles & _REWORK_OVERRIDE_ROLES):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"This job has already been reworked {rework_count} time(s) "
+                        f"(max {MAX_REWORK}). A Store Manager must override to rework it again."
+                    ),
+                )
+
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
+            if is_rework:
+                # Count this rework so the cap is enforced on the next attempt.
+                try:
+                    repo.update(job_id, {"rework_count": rework_count + 1})
+                except Exception:  # noqa: BLE001 -- counting is best-effort
+                    pass
             return {
                 "job_id": job_id,
                 "status": status,
