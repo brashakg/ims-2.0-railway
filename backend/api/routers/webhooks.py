@@ -753,9 +753,22 @@ async def receive_whatsapp_inbound(request: Request):
             logger.warning("[WA_INBOUND] bad X-Hub-Signature-256")
             raise HTTPException(status_code=401, detail="invalid signature")
     else:
-        logger.info(
-            "[WA_INBOUND] WABA_APP_SECRET not set -- skipping signature verification"
+        # SEC-WEBHOOK-WHATSAPP-FAILOPEN: with no app secret configured we CANNOT
+        # authenticate the sender, so an attacker could POST forged inbound
+        # messages and trigger outbound dispatch_intent replies. Fail CLOSED --
+        # ack 200 (so Meta doesn't retry-storm) but DO NOT process the payload or
+        # dispatch anything. Matches this module's documented contract
+        # (processed=false, skipped_reason=secret_not_configured).
+        logger.warning(
+            "[WA_INBOUND] WABA app_secret not configured -- skipping inbound "
+            "processing (fail-closed; no signature to verify a forged sender)."
         )
+        return {
+            "status": "received",
+            "messages_processed": 0,
+            "skipped": True,
+            "skipped_reason": "secret_not_configured",
+        }
 
     try:
         body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
