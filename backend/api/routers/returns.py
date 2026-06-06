@@ -1181,6 +1181,37 @@ async def create_return(
             )
         claimed.append(rl)
 
+    # BUG-099: reverse loyalty for this return -- claw back points earned on the
+    # original order + restore points redeemed on it. Fail-soft (never blocks the
+    # return); a genuine failure flags the return doc for reconciliation. Walk-in /
+    # no customer -> skip (walk-ins never earn loyalty).
+    loyalty_reversal_failed = False
+    _cust = customer_id
+    if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
+        try:
+            from .loyalty import reverse_for_return as _reverse_loyalty
+
+            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust)
+            if _lr.get("ok"):
+                logger.info(
+                    "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
+                    return_id,
+                    _lr.get("earned_clawed", 0),
+                    _lr.get("redeemed_restored", 0),
+                )
+            elif _lr.get("reason") not in ("missing_ids", "loyalty_db_unavailable"):
+                loyalty_reversal_failed = True
+                logger.error(
+                    "[RETURNS] loyalty reversal FAILED for %s: %s",
+                    return_id,
+                    _lr.get("reason"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            loyalty_reversal_failed = True
+            logger.error(
+                "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
+            )
+
     if body.return_type == "RETURN":
         # Net of any restocking fee = the cash actually given back.
         refund_amount = net_amount
@@ -1285,6 +1316,9 @@ async def create_return(
         "restock_stock_ids": restock_stock_ids,
         "credit_entry": credit_entry,
         "status": "COMPLETED",
+        # BUG-099: True when the loyalty reversal could not be applied (a real
+        # failure, not a walk-in / no-loyalty no-op) -> reconciliation should retry.
+        "loyalty_reversal_failed": loyalty_reversal_failed,
         "reason_summary": _reason_summary(active_lines),
         "approval_note": body.approval_note or "",
         "created_by": current_user.get("user_id"),
