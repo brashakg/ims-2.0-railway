@@ -308,12 +308,31 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI application
+# SEC-OPENAPI-PUBLIC: the OpenAPI schema + Swagger (/docs) + ReDoc (/redoc) are a
+# full UNAUTHENTICATED API-recon surface. Disable them in production (Railway, or
+# ENVIRONMENT=production) unless EXPOSE_API_DOCS is explicitly set; keep them ON in
+# local dev + tests so developers still get the interactive docs.
+def _should_disable_docs() -> bool:
+    """True when the public API docs/schema must be OFF (production), unless
+    EXPOSE_API_DOCS explicitly re-enables them. A function so it is unit-testable
+    with a patched environment."""
+    if os.getenv("EXPOSE_API_DOCS", "").lower() in ("1", "true", "yes"):
+        return False
+    return (
+        os.getenv("ENVIRONMENT", "").lower() in ("production", "prod")
+        or bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_DEPLOYMENT_ID"))
+    )
+
+
+_docs_off = _should_disable_docs()
+
 app = FastAPI(
     title="IMS 2.0 - Retail Operating System",
     description="Complete Optical & Lifestyle Retail Operating System API",
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None if _docs_off else "/docs",
+    redoc_url=None if _docs_off else "/redoc",
+    openapi_url=None if _docs_off else "/openapi.json",
     lifespan=lifespan,
     redirect_slashes=False,  # Prevent 307 redirects that break CORS
 )
