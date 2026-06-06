@@ -23,6 +23,42 @@ from ..dependencies import (
 router = APIRouter()
 
 
+# Roles permitted to READ clinical prescriptions. Rx carry medical data
+# (SPH/CYL/AXIS, IPD, lens Rx) + patient PII, so the read surface is limited to
+# clinical, POS-fulfilment, workshop, and management roles. This is ADDITIVE
+# defense on top of the per-object store-scope guard (BUG-088): it blocks
+# CASHIER (payment-only), ACCOUNTANT, CATALOG_MANAGER and INVENTORY_HQ -- roles
+# with no clinical need -- from reading any prescription, even in their own
+# store. SUPERADMIN/ADMIN pass via membership. POS order-building runs as
+# SALES_STAFF/SALES_CASHIER (both allowed); workshop lens-grinding as
+# WORKSHOP_STAFF; Rx capture as OPTOMETRIST.
+_RX_READ_ROLES = {
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "OPTOMETRIST",
+    "SALES_CASHIER",
+    "SALES_STAFF",
+    "WORKSHOP_STAFF",
+}
+
+
+def require_rx_read(current_user: dict = Depends(get_current_user)) -> dict:
+    """Gate clinical-Rx READS to roles with a clinical/fulfilment need.
+
+    Returns the caller (so it is a drop-in replacement for the get_current_user
+    dependency on read endpoints). Store-scope is still enforced separately.
+    """
+    roles = set(current_user.get("roles") or [])
+    if roles & _RX_READ_ROLES:
+        return current_user
+    raise HTTPException(
+        status_code=403,
+        detail="This role is not permitted to read clinical prescriptions",
+    )
+
+
 def _audit_rx(
     action: str,
     prescription_id: Optional[str],
@@ -362,7 +398,7 @@ def _validate_cl_eye(eye_label: str, eye: Optional[CLEyeData]):
 # NOTE: Specific routes MUST come before /{prescription_id}
 @router.get("/patient/{patient_id}")
 async def get_patient_prescriptions(
-    patient_id: str, current_user: dict = Depends(get_current_user)
+    patient_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Get all prescriptions for a patient"""
     repo = get_prescription_repository()
@@ -379,7 +415,7 @@ async def get_patient_prescriptions(
 
 @router.get("/patient/{patient_id}/latest")
 async def get_latest_prescription(
-    patient_id: str, current_user: dict = Depends(get_current_user)
+    patient_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Get latest prescription for a patient"""
     repo = get_prescription_repository()
@@ -399,7 +435,7 @@ async def get_latest_prescription(
 
 @router.get("/patient/{patient_id}/valid")
 async def get_valid_prescriptions(
-    patient_id: str, current_user: dict = Depends(get_current_user)
+    patient_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Get valid (non-expired) prescriptions for a patient"""
     repo = get_prescription_repository()
@@ -414,7 +450,7 @@ async def get_valid_prescriptions(
 
 @router.get("/expiring")
 async def get_expiring_prescriptions(
-    days: int = Query(30, ge=7, le=90), current_user: dict = Depends(get_current_user)
+    days: int = Query(30, ge=7, le=90), current_user: dict = Depends(require_rx_read)
 ):
     """Get prescriptions expiring within specified days"""
     repo = get_prescription_repository()
@@ -458,7 +494,7 @@ async def list_prescriptions(
     to_date: Optional[date] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
     """List prescriptions with filters -- the real Rx library across dates.
 
@@ -561,7 +597,7 @@ def _rx_validity(rx: dict):
 
 @router.get("/family/{customer_id}")
 async def family_prescriptions(
-    customer_id: str, current_user: dict = Depends(get_current_user)
+    customer_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Family Rx view: a customer account's prescriptions grouped by family
     member (patient), each annotated with expiry + validity. Lets POS / clinical
@@ -958,7 +994,7 @@ async def update_prescription(
 
 @router.get("/{prescription_id}")
 async def get_prescription(
-    prescription_id: str, current_user: dict = Depends(get_current_user)
+    prescription_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Get prescription by ID"""
     repo = get_prescription_repository()
@@ -981,7 +1017,7 @@ async def get_prescription(
 
 @router.get("/{prescription_id}/validate")
 async def validate_prescription(
-    prescription_id: str, current_user: dict = Depends(get_current_user)
+    prescription_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Validate a prescription's Rx values against the clinical ranges
     (SPH -20..+20, CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50) and report
@@ -1191,7 +1227,7 @@ def _build_cl_print_html(prescription: dict) -> str:
 
 @router.get("/{prescription_id}/print")
 async def print_prescription(
-    prescription_id: str, current_user: dict = Depends(get_current_user)
+    prescription_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Generate printable prescription HTML. Renders a contact-lens card when
     the Rx is rx_kind=CONTACT_LENS, else the existing spectacle card."""
@@ -1370,7 +1406,7 @@ async def finalize_prescription(
 @router.get("/{prescription_id}/versions")
 async def get_prescription_versions(
     prescription_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
     """Return all 4 versions for a prescription. Auto-backfills for
     legacy single-Rx docs."""
@@ -1395,7 +1431,7 @@ async def get_prescription_versions(
 @router.get("/customer/{customer_id}/progression")
 async def get_prescription_progression(
     customer_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
     """Adjacent-visit deltas for a customer's FINAL Rx history. Useful
     for the clinical dashboard's progression chart ('is this myopia
