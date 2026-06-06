@@ -29,25 +29,23 @@ FIVE_PCT = {
 
 
 def main():
-    uri = (
-        os.environ.get("MONGODB_URI")
-        or os.environ.get("MONGODB_URL")
-        or os.environ.get("MONGO_URL")
-        or os.environ.get("DATABASE_URL")
-        or ""
-    )
-    if not uri:
-        print("No MONGODB_URI set — aborting (run via `railway run`).")
-        return
-    from pymongo import MongoClient
+    # Connect via the app's own DB layer so this works with EITHER a full URL
+    # (MONGODB_URL / MONGO_URL) OR Railway's component vars (MONGO_HOST/PORT/USER/
+    # PASSWORD) -- the URL-only lookup failed on prod, which uses component vars.
+    from database.connection import init_db, get_db, DatabaseConfig
 
-    client = MongoClient(uri)
-    try:
-        db = client.get_default_database()
-        if db is None:
-            raise ValueError("no default db in URI")
-    except Exception:
-        db = client["ims_2_0"]
+    mongo_url = os.environ.get("MONGODB_URL") or os.environ.get("MONGO_URL")
+    if mongo_url:
+        config = DatabaseConfig.from_uri(mongo_url, database="ims_2_0")
+    else:
+        config = DatabaseConfig.from_env()
+    if not init_db(config):
+        print(
+            "Could not connect to MongoDB (set MONGODB_URL / MONGO_URL or the "
+            "MONGO_HOST/PORT/USER/PASSWORD component vars). Aborting."
+        )
+        return
+    db = get_db().db
     coll = db.get_collection("products")
 
     scanned = fixed = 0
