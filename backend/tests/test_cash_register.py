@@ -187,14 +187,25 @@ class _FakeCollection:
 
     # --- query surface for orders / expenses (find with sort/limit chain) ---
     def find(self, flt, projection=None):
-        def _match(d):
-            for k, v in flt.items():
+        def _match(d, f):
+            for k, v in f.items():
+                if k == "$or":
+                    # $or: the doc matches if ANY sub-clause matches.
+                    if not any(_match(d, sub) for sub in v):
+                        return False
+                    continue
                 dv = d.get(k)
                 if isinstance(v, dict):
                     for op, ov in v.items():
-                        if op == "$gte" and not (dv is not None and dv >= ov):
-                            return False
-                        if op == "$lte" and not (dv is not None and dv <= ov):
+                        try:
+                            if op == "$gte" and not (dv is not None and dv >= ov):
+                                return False
+                            if op == "$lte" and not (dv is not None and dv <= ov):
+                                return False
+                        except TypeError:
+                            # Mongo type-bracketing: a value of a different BSON
+                            # type than the bound never matches that bound (so the
+                            # $or's other-typed clause is what matches it).
                             return False
                         if op == "$in" and dv not in ov:
                             return False
@@ -202,7 +213,7 @@ class _FakeCollection:
                     return False
             return True
 
-        return _Cursor([dict(d) for d in self.docs if _match(d)])
+        return _Cursor([dict(d) for d in self.docs if _match(d, flt)])
 
 
 class _Cursor:
