@@ -133,23 +133,22 @@ class CustomerRepository(BaseRepository):
         if amt <= 0:
             return None
 
-        updater = getattr(self.collection, "update_one", None)
-        if not callable(updater):
+        # E1: funnel the guarded debit through the money-guard engine. STORE_CREDIT
+        # uses the conditional update_one + re-read mechanism (NOT find_one_and_update)
+        # so the guard works on any collection that honours a filtered update; the
+        # money-guard's "no_atomic" reason maps back to the DEBIT_NO_ATOMIC sentinel
+        # so a minimal/mock collection still falls back to the legacy snapshot path.
+        from api.services import money_guard
+
+        res = money_guard.debit(
+            self.collection, "STORE_CREDIT", customer_id, amt,
+            reason="redeem", record_ledger=False,
+        )
+        if res.ok:
+            return self.find_by_id(customer_id)
+        if res.reason == "no_atomic":
             return self.DEBIT_NO_ATOMIC
-        try:
-            res = updater(
-                {"customer_id": customer_id, "store_credit": {"$gte": amt}},
-                {"$inc": {"store_credit": -amt}},
-            )
-        except Exception:
-            # Driver/mock can't evaluate the conditional -> let caller fall back.
-            return self.DEBIT_NO_ATOMIC
-        matched = getattr(res, "matched_count", None)
-        if matched is None:
-            matched = getattr(res, "modified_count", 0)
-        if not matched:
-            return None
-        return self.find_by_id(customer_id)
+        return None
 
     def update_total_purchases(self, customer_id: str, amount: float) -> bool:
         try:
