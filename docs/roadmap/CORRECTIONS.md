@@ -64,3 +64,19 @@
 - `ENGINES.md` — E3-shim contract appended; phase↔wave note. ✅ applied
 - `PROTOCOL.md` — precedence + CORRECTIONS-binding + packet-before-TODO gate. ✅ applied
 - `engines/*` + `_analysis/features/F30,F31` — superseded clauses overridden HERE (precedence); fold when each item's packet is written.
+
+
+---
+
+## R1 (resolution) -- money_guard = per-type single-doc collections (closes P0-1 / E1 T13)
+
+Orchestrator call 2026-06-07 after E1 (PR #563): the unified `money_accounts` SoR is **CANCELLED**,
+not deferred. `money_guard` operates per account-type on that type's own collection via single-document
+`find_one_and_update` (no transactions, no replica set, ever). New balance types are added by their
+owning feature as a dedicated single-doc collection and registered in `money_guard` ACCOUNT_TYPES:
+- **#17 petty cash** -> `petty_cash_floats` (one doc per store).
+- **#49 family wallet** -> `family_wallets` (one doc per household; pool redeem still OTP-gated to the primary member).
+- **#3 consignment** -> `consignment_accounts` (one doc per vendor/agreement).
+When you build #17 / #49 / #3: add the collection + register the type in money_guard; do NOT build a
+unified SoR or any cross-collection write. This supersedes P0-1's "Phase B/C DO-NOT-BUILD until replica
+set" -- there is no Phase B/C to build.
