@@ -9,6 +9,28 @@ fixes are applied (`CORRECTIONS.md` + folded into the Phase-0 packets). The boar
 **Read order every loop:** this file → `PROTOCOL.md` → `DECISIONS.md` → `CORRECTIONS.md`
 → the item's packet in `features/`. **Precedence: DECISIONS > CORRECTIONS > ENGINES/packets.**
 
+## [!] COMMS CHANNEL DIRECTIVE (2026-06-07) -- WhatsApp BLOCKED
+
+Meta disabled the WhatsApp Business account (healthcare/commerce policy). Owner is appealing
+to recover it; do NOT block the program on it. SMS (DLT) still works as a fallback but is on
+hold pending the appeal outcome.
+
+**Rule for build + test sessions:** any feature whose value is *sending an outbound customer
+message* is **DEFERRED** until a live channel returns. Build everything else. If a deferred
+feature is otherwise ready, you MAY build it DARK (channel code behind `DISPATCH_MODE=off`,
+no live send, send-path covered by tests) but do NOT prioritize it over non-messaging work.
+
+- **DEFERRED (message-send dependent):** #46 reminders(send), #41 reactivation(send),
+  #47 CL-reorder(send), #51 use-it-or-lose-it(send), #52 WhatsApp-invoice, #42 lookbook(send),
+  #43 VIP-trigger customer-message, #45 walkout *follow-up message* (walkout LOGGING is NOT
+  deferred), E6 *live send* (the rail/config/cap may still be built dark).
+- **NOT affected (build normally):** all engines (E2/E3/E4/PM/SC), #35, #40, #34, #24, #50
+  (in-app bell), #39 (in-app call list), #8, #2, #9, #17, #25, #26, #15, #1, #20, #14, #13,
+  #18, #19, #44, #33, #16, #23, #27, #6, Base-Bank, etc. In-app / push / on-screen features
+  are fully unaffected.
+
+Family-wallet (#49) OTP: when it lands, route OTP via SMS (works today), not WhatsApp.
+
 ### Build session
 - Take the **top claimable** item in `EXECUTION_BOARD.md` → TODO (Phase 0: **E1, E2, #35, #40, #34, #21, E6**).
 - **Read the item's `CORRECTIONS.md` entry + its packet banner BEFORE coding.** Several clauses are DO-NOT-BUILD (esp. E1 = Phase-A facade only; NO `money_accounts` SoR / dual-write — standalone Mongo has no transactions).

@@ -23,7 +23,7 @@
 
 | # | Decision | Locked answer |
 |---|---|---|
-| 1 | MSG91 DLT / comms go-live | **Start now, utility templates first** (ORDER_READY, RX_EXPIRY); marketing later. Build comms behind flag; `DISPATCH_MODE=live` flips on after DLT approval. |
+| 1 | MSG91 / comms go-live | **UPDATE 2026-06-07: WhatsApp Business DISABLED by Meta** (healthcare/commerce policy) -- owner appealing. **SMS (DLT) is the fallback channel and works.** Build comms behind flag; message-SEND features are DEFERRED (see STATUS.md COMMS CHANNEL DIRECTIVE); `DISPATCH_MODE=live` only after WhatsApp restored OR SMS templates approved. |
 | 2 | Settings hierarchy (E2) | **global → entity → store** override order. |
 | 3 | Tally ledger names (E5) | **Use IMS defaults now**; accountant remaps in Tally. (Owner may supply real chart-of-accounts later to upgrade.) |
 | 4 | Approval/PIN model (E4) | **Per-approver PIN** (real audit trail), **60-minute** request validity. |
