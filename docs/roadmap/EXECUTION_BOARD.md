@@ -28,13 +28,13 @@ _Build order is dependency-aware: E1/E2/#35/#40 have no deps (parallelizable on 
 _empty_
 
 ## 🧪 IN TEST
-
-| # | Name | Branch | PR | Notes for test session |
-|---|---|---|---|---|
-| E1 | Money-guard service | `feat/E1-money-guard` | [#563](https://github.com/brashakg/ims-2.0-railway/pull/563) | Phase-A facade per CORRECTIONS P0-1. Validate **T1-T13** in `backend/tests/test_money_guard_e1.py` + that `test_money_integrity_guards.py` passes unchanged (T6). **T13 DEVIATION (orchestrator):** the packet's T13 (greenfield `money_accounts` WRITE) is intentionally NOT built (P0-1 outranks the packet; no Phase-0 consumer of the 3 new types) — replaced by a deferral-contract test asserting new types return `reason="unavailable"`. Do not bounce E1 for the un-built `money_accounts`; orchestrator to reconcile packet T13/item6/DoD5. Adversarial pass already caught+fixed a P0 (collection discriminator) — see PR body. Not POS-gated (shim over existing routes, identical external behavior). |
+_empty_
 
 ## ✅ DONE
-_empty_
+
+| # | Name | PR | Merged | Test-session verdict |
+|---|---|---|---|---|
+| E1 | Money-guard service | [#563](https://github.com/brashakg/ims-2.0-railway/pull/563) | `a8c6945` | **PASS — 2026-06-07.** Acceptance T1-T13 PASS (15/15 in `test_money_guard_e1.py`) + `test_money_integrity_guards.py` 25/25 unchanged (T6). Required CI green (`test 3.10/3.11`, `test-and-build`, `security`); `e2e` = known cold-preview flake, non-required per PROTOCOL §3. **P0-1 honored:** facade only — NO `money_accounts` SoR / index / migration; the 3 new types return `reason="unavailable"` (T13 deferral correct; orchestrator to reconcile packet T13 / item-6 / DoD-5 wording). Single-doc atomic balance guard (floor/status/expiry in the filter; loser matches nothing; `_classify_debit_failure` read-only), shims behavior-preserving (T10/T11/T12), audit via `AuditRepository.create`, fail-soft `unavailable`/fail-closed `no_atomic`, 0 emoji introduced (flagged em-dashes pre-existing), non-POS (no flag). **HARDENING FOLLOW-UP (orchestrator — fix BEFORE any idempotent direct caller, e.g. E5 returns/refund, wires onto E1):** the idempotency marker is pushed by `_append_ledger` in a SEPARATE `update_one` AFTER the balance `find_one_and_update`, so the `money_ledger.idempotency_key != key` filter is NOT truly atomic — two concurrent same-key calls can both pass the filter and double-apply. Sequential retries (T4/T4b) are safe and no Phase-A caller passes `idempotency_key`, so it is unreachable today. Fix: `$push money_ledger` the marker INSIDE the balance `find_one_and_update` (same atomic write) and correct the over-claiming "race-safe" comment at `money_guard.py:303-304`. |
 
 ## ⛔ BLOCKED
 _empty_
