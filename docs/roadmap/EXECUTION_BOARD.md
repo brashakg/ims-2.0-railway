@@ -25,13 +25,13 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 _Build order is dependency-aware: E1/E2/#35/#40 have no deps (parallelizable on separate branches); #34/E6 after E2; #21 after its E3-shim._
 
 ## 🔨 IN BUILD
-
-| # | Name | Branch | Started (UTC) | Notes |
-|---|---|---|---|---|
-| E1 | Money-guard service | `feat/E1-money-guard` | 2026-06-07T05:37Z | Phase-A facade ONLY per CORRECTIONS P0-1. Building facade + 3 behavior-preserving shims (vouchers/loyalty/store-credit) + credit/debit/get_balance/idempotency/audit for the 3 EXISTING types. `money_accounts` SoR + new index = NOT built (P0-1 precedence over packet Delta#3/item6/DoD#5/T13); new types (PETTY_CASH/FAMILY_WALLET/CONSIGNMENT) return `reason="unavailable"`. See PR for the T13 deviation note flagged to orchestrator. |
+_empty_
 
 ## 🧪 IN TEST
-_empty_
+
+| # | Name | Branch | PR | Notes for test session |
+|---|---|---|---|---|
+| E1 | Money-guard service | `feat/E1-money-guard` | [#563](https://github.com/brashakg/ims-2.0-railway/pull/563) | Phase-A facade per CORRECTIONS P0-1. Validate **T1-T13** in `backend/tests/test_money_guard_e1.py` + that `test_money_integrity_guards.py` passes unchanged (T6). **T13 DEVIATION (orchestrator):** the packet's T13 (greenfield `money_accounts` WRITE) is intentionally NOT built (P0-1 outranks the packet; no Phase-0 consumer of the 3 new types) — replaced by a deferral-contract test asserting new types return `reason="unavailable"`. Do not bounce E1 for the un-built `money_accounts`; orchestrator to reconcile packet T13/item6/DoD5. Adversarial pass already caught+fixed a P0 (collection discriminator) — see PR body. Not POS-gated (shim over existing routes, identical external behavior). |
 
 ## ✅ DONE
 _empty_
