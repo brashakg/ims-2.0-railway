@@ -202,7 +202,6 @@ def redeem_voucher_atomic(
 
     code_u = (code or "").strip().upper()
     amount = float(amount)
-    today_iso = _today_iso()
     now = datetime.now().isoformat()
 
     redemption = {
@@ -212,27 +211,23 @@ def redeem_voucher_atomic(
         "redeemed_by": redeemed_by,
     }
 
-    # The guard lives entirely in the filter. If any condition fails, the
-    # update matches zero docs and returns None — no balance is touched.
-    updated = coll.find_one_and_update(
-        {
-            "code": code_u,
-            "status": "ACTIVE",
-            "balance": {"$gte": amount},
-            "$or": [
-                {"expiry_date": None},
-                {"expiry_date": {"$gte": today_iso}},
-            ],
-        },
-        {
-            "$inc": {"balance": -amount},
-            "$push": {"redemptions": redemption},
-            "$set": {"updated_at": now},
-        },
-        return_document=ReturnDocument.AFTER,
+    # E1: the guarded mutation is funnelled through the money-guard engine -- a
+    # single atomic find_one_and_update + an append-only audit row. The engine owns
+    # the voucher spend semantics (status ACTIVE + not-expired, same date basis);
+    # the shim passes only the redemptions push + updated_at so the on-disk filter/
+    # update are identical to the historical path. record_ledger=False keeps the
+    # voucher document shape unchanged (Phase A).
+    from api.services import money_guard
+
+    res = money_guard.debit(
+        coll, "GIFT_VOUCHER", code_u, amount,
+        reason="redeem", actor=redeemed_by, ref=order_id,
+        set_extra={"updated_at": now},
+        push_extra={"redemptions": redemption},
+        record_ledger=False,
     )
 
-    if updated is None:
+    if not res.ok:
         # Disambiguate the failure with a follow-up read so the caller can
         # show a precise message. This read is purely for messaging — the
         # atomic guard above already prevented any spend.
@@ -243,8 +238,8 @@ def redeem_voucher_atomic(
             "reason": _redeem_failure_reason(coll, code_u, amount),
         }
 
-    new_balance = float(updated.get("balance") or 0.0)
-    status = updated.get("status")
+    new_balance = res.balance
+    status = res.status
 
     # If fully drained, flip to REDEEMED. Re-guard on balance<=0 and the
     # current status so a concurrent partial redeem can't be clobbered.

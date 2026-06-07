@@ -15,7 +15,6 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 
 | # | Name | Dep | Packet | MUST-READ correction |
 |---|---|---|---|---|
-| E1 | Money-guard service | — | features/E1.md | **P0-1: PHASE-A FACADE ONLY** over existing vouchers/loyalty/store-credit. NO `money_accounts` SoR, NO migration, NO dual-write. |
 | E2 | Settings-matrix engine | — | features/E2.md | P1: secret per-key encrypt (`_encrypt_value`); invalidate via explicit `cache.delete`; **luxury caps LOWER-only, never E2 keys**; entity-missing → global. |
 | #35 | Cost & margin masking | — | features/F35.md | Drop the false `_build_store_ledger` margin claim; per-call-site check. Test: SALES_CASHIER sees `cost_*`=null; ACCOUNTANT real. |
 | #40 | VIP churn prediction (read-only) | — | features/F40.md | Clean (not a quick-win, ~M). SUPERADMIN/ADMIN only. |
@@ -29,7 +28,10 @@ _Build order is dependency-aware: E1/E2/#35/#40 have no deps (parallelizable on 
 _empty_
 
 ## 🧪 IN TEST
-_empty_
+
+| # | Name | Branch | PR | Notes for test session |
+|---|---|---|---|---|
+| E1 | Money-guard service | `feat/E1-money-guard` | [#563](https://github.com/brashakg/ims-2.0-railway/pull/563) | Phase-A facade per CORRECTIONS P0-1. Validate **T1-T13** in `backend/tests/test_money_guard_e1.py` + that `test_money_integrity_guards.py` passes unchanged (T6). **T13 DEVIATION (orchestrator):** the packet's T13 (greenfield `money_accounts` WRITE) is intentionally NOT built (P0-1 outranks the packet; no Phase-0 consumer of the 3 new types) — replaced by a deferral-contract test asserting new types return `reason="unavailable"`. Do not bounce E1 for the un-built `money_accounts`; orchestrator to reconcile packet T13/item6/DoD5. Adversarial pass already caught+fixed a P0 (collection discriminator) — see PR body. Not POS-gated (shim over existing routes, identical external behavior). |
 
 ## ✅ DONE
 _empty_

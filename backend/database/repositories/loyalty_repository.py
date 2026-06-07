@@ -126,41 +126,36 @@ class LoyaltyAccountRepository(BaseRepository):
             # on a zero debit. (redeem already rejects points <= 0 upstream.)
             return self.find_by_id(customer_id)
 
-        foau = getattr(self.collection, "find_one_and_update", None)
-        if not callable(foau):
-            # Minimal/mock collection without atomic ops -> signal no-atomic so
-            # the caller can fail closed rather than silently double-spend.
-            return None
+        # E1: funnel the guarded debit through the money-guard engine. The lifetime
+        # counters + tier bump are applied in the SAME atomic find_one_and_update
+        # via the inc/set passthrough, so the debit and its bookkeeping stay
+        # indivisible (no double-spend window). A collection without atomic ops
+        # yields reason="no_atomic" -> None, so the caller fails closed.
+        from api.services import money_guard
 
-        inc: Dict[str, int] = {"balance_points": -points}
+        inc_extra: Dict[str, int] = {}
         if delta_lifetime_redeemed:
-            inc["lifetime_redeemed"] = int(delta_lifetime_redeemed)
+            inc_extra["lifetime_redeemed"] = int(delta_lifetime_redeemed)
         if delta_lifetime_earned:
-            inc["lifetime_earned"] = int(delta_lifetime_earned)
+            inc_extra["lifetime_earned"] = int(delta_lifetime_earned)
 
-        set_block: Dict[str, Any] = {
+        set_extra: Dict[str, Any] = {
             "last_activity_at": datetime.now(),
             "updated_at": datetime.now(),
         }
         if new_tier:
-            set_block["tier"] = new_tier
+            set_extra["tier"] = new_tier
 
-        try:
-            try:
-                from pymongo import ReturnDocument
-
-                after = ReturnDocument.AFTER
-            except Exception:  # noqa: BLE001
-                after = True
-            return foau(
-                {"customer_id": customer_id, "balance_points": {"$gte": points}},
-                {"$inc": inc, "$set": set_block},
-                return_document=after,
-            )
-        except Exception:
-            # An unexpected driver error must NOT silently fall through to an
-            # unconditional debit. Fail closed -> None (caller rejects).
-            return None
+        res = money_guard.debit(
+            self.collection, "LOYALTY", customer_id, points,
+            reason="redeem", inc_extra=inc_extra, set_extra=set_extra,
+            record_ledger=False,
+        )
+        if res.ok:
+            return (res.detail or {}).get("post_doc")
+        # insufficient OR no_atomic both map to None (existing contract: the
+        # caller surfaces a 400/409 or fails closed).
+        return None
 
 
 # ============================================================================
