@@ -49,11 +49,10 @@ export default defineConfig({
     },
     rollupOptions: {
       output: {
-        manualChunks: {
-          // Split vendor libraries into separate chunks
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-ui': ['lucide-react', 'clsx'],
-          'vendor-utils': ['date-fns', 'axios', 'zustand'],
+        manualChunks(id) {
+          if (id.includes('react-router') || id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) return 'vendor-react';
+          if (id.includes('lucide-react') || id.includes('node_modules/clsx/')) return 'vendor-ui';
+          if (id.includes('node_modules/date-fns/') || id.includes('node_modules/axios/') || id.includes('node_modules/zustand/')) return 'vendor-utils';
         },
       },
     },

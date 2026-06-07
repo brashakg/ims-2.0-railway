@@ -11,7 +11,7 @@ pydantic-settings==2.14.1
 
 # Authentication & Security
 pyjwt==2.13.0
-bcrypt==4.2.0
+bcrypt==5.0.0
 python-multipart==0.0.30
 # RSA-SHA256 signing for QZ Tray silent label printing (labels.py). The
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
@@ -42,4 +42,4 @@ email-validator==2.3.0
 python-dateutil==2.9.0.post0
 
 # Production Server (optional, uvicorn is primary)
-gunicorn==23.0.0
+gunicorn==26.0.0

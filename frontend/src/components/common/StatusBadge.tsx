@@ -251,9 +251,9 @@ export function StatusBadge({
         className
       )}
       onClick={onClick}
-      role={interactive ? "button" : undefined}
+      role={interactive ? "button" : "status"}
       aria-label={ariaLabel || `Status: ${status}`}
-      tabIndex={interactive ? 0 : -1}
+      tabIndex={interactive ? 0 : undefined}
     >
       {Icon && <Icon className="w-3.5 h-3.5 flex-shrink-0" />}
       <span className="truncate">{displayText}</span>

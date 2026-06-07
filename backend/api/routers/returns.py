@@ -314,6 +314,8 @@ def _already_returned_qty(
     is the human-facing cumulative cap (clear 400) and also works when the DB
     has no atomic find_one_and_update. Fail-soft -> 0.0 when the returns
     collection is unavailable (the atomic order-line claim is the second guard).
+    Only COMPLETED returns count — CANCELLED returns were reversed so those
+    units remain returnable.
     """
     if not order_id:
         return 0.0
@@ -322,7 +324,7 @@ def _already_returned_qty(
         return 0.0
     total = 0.0
     try:
-        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+        for doc in coll.find({"order_id": order_id, "status": "COMPLETED"}, {"_id": 0}):
             for prior in doc.get("items") or []:
                 if not isinstance(prior, dict):
                     continue

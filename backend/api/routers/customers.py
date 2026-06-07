@@ -647,6 +647,9 @@ async def get_customer(
     if repo is not None:
         customer = repo.find_by_id(customer_id)
         if customer:
+            store_id = customer.get("preferred_store_id") or customer.get("home_store_id")
+            if store_id:
+                validate_store_access(store_id, current_user)
             return customer
 
     raise HTTPException(status_code=404, detail="Customer not found")

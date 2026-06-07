@@ -451,7 +451,8 @@ async def create_salary_config(
 
 @router.get("/config/{employee_id}")
 async def get_salary_config(
-    employee_id: str, current_user: dict = Depends(get_current_user)
+    employee_id: str,
+    current_user: dict = Depends(require_roles("ADMIN", "STORE_MANAGER", "ACCOUNTANT")),
 ):
     """Get salary configuration for an employee"""
     db = _get_db()
@@ -716,7 +717,7 @@ async def get_employee_salary(
     employee_id: str,
     month: Optional[int] = Query(None, ge=1, le=12),
     year: Optional[int] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "STORE_MANAGER", "ACCOUNTANT")),
 ):
     """Get individual employee salary breakdown for a specific month or latest"""
     db = _get_db()
@@ -755,7 +756,8 @@ async def get_employee_salary(
 
 @router.post("/salary/calculate", status_code=201)
 async def calculate_salary(
-    calc_request: MonthSalaryCalculation, current_user: dict = Depends(get_current_user)
+    calc_request: MonthSalaryCalculation,
+    current_user: dict = Depends(require_roles("ADMIN", "STORE_MANAGER")),
 ):
     """Calculate salary for a month with all deductions"""
     db = _get_db()
@@ -842,7 +844,8 @@ async def calculate_salary(
 
 @router.post("/advances", status_code=201)
 async def record_salary_advance(
-    advance: SalaryAdvance, current_user: dict = Depends(get_current_user)
+    advance: SalaryAdvance,
+    current_user: dict = Depends(require_roles("ADMIN", "STORE_MANAGER")),
 ):
     """Record a salary advance"""
     db = _get_db()
@@ -888,7 +891,7 @@ async def record_salary_advance(
 async def get_salary_advances(
     employee_id: str,
     status: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "STORE_MANAGER", "ACCOUNTANT")),
 ):
     """Get salary advance history for an employee"""
     db = _get_db()
