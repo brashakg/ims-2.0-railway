@@ -136,6 +136,15 @@ class _NoAtomicColl:
         return None
 
 
+class _PymongoLikeColl(_FakeColl):
+    """Emulates a real pymongo Collection: __getattr__ synthesizes a sub-collection
+    for ANY missing attribute name (so instance hasattr(coll, 'get_collection') is
+    deceptively True). This is the exact trap that broke _resolve_collection."""
+
+    def __getattr__(self, name):
+        return _PymongoLikeColl([], key_field=self.key_field)
+
+
 class _FakeAuditRepo:
     def __init__(self):
         self.rows = []
@@ -171,8 +180,21 @@ def test_t1_no_double_spend_under_race(audit):
     loser = r1 if not r1.ok else r2
     assert loser.reason == "insufficient"
     assert coll.find_one({"customer_id": "C"})["balance_points"] == 0
-    # Exactly one audit row -- the winner only; the loser writes nothing.
-    assert len([x for x in audit.rows if x["entity_id"] == "C"]) == 1
+    # Exactly one money.debit audit row -- the winner only; the loser writes nothing
+    # (filter on action too, so a stray failure-audit under another reason is caught).
+    debit_rows = [x for x in audit.rows if x["entity_id"] == "C" and x["action"] == "money.debit"]
+    assert len(debit_rows) == 1
+
+
+def test_t1b_resolves_real_collection_not_subcollection(audit):
+    """Regression: a real pymongo Collection's __getattr__ makes instance
+    hasattr(coll,'get_collection') True. The engine must still target the ORIGINAL
+    collection (class-level discriminator), not an empty synthesized sub-collection,
+    else every live voucher/loyalty/store-credit spend fails-closed in prod."""
+    coll = _PymongoLikeColl([{"customer_id": "C", "balance_points": 500}], key_field="customer_id")
+    r = mg.debit(coll, "LOYALTY", "C", 200, reason="redeem")
+    assert r.ok is True and r.balance == 300
+    assert coll.find_one({"customer_id": "C"})["balance_points"] == 300  # ORIGINAL coll mutated
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +241,23 @@ def test_t4_idempotency_dedup(audit):
     doc = coll.find_one({"customer_id": "C"})
     keyed = [e for e in doc.get("money_ledger", []) if e.get("idempotency_key") == "ret-123"]
     assert len(keyed) == 1
+
+
+def test_t4b_idempotency_holds_even_when_ledger_suppressed(audit):
+    """Footgun guard: an idempotency_key must dedup EVEN when record_ledger=False
+    (the dedup marker must be written whenever a key is supplied, independent of
+    record_ledger), so a future caller cannot silently double-apply."""
+    cc = _FakeColl([{"customer_id": "C", "store_credit": 0.0}])
+    a = mg.credit(cc, "STORE_CREDIT", "C", 100, reason="ret", idempotency_key="K", record_ledger=False)
+    b = mg.credit(cc, "STORE_CREDIT", "C", 100, reason="ret", idempotency_key="K", record_ledger=False)
+    assert a.ok and b.ok and b.reason == "duplicate"
+    assert mg.get_balance(cc, "STORE_CREDIT", "C")["balance"] == 100.0  # applied once
+
+    lc = _FakeColl([{"customer_id": "C", "balance_points": 500}])
+    d1 = mg.debit(lc, "LOYALTY", "C", 100, reason="x", idempotency_key="D", record_ledger=False)
+    d2 = mg.debit(lc, "LOYALTY", "C", 100, reason="x", idempotency_key="D", record_ledger=False)
+    assert d1.ok and d2.ok and d2.reason == "duplicate"
+    assert lc.find_one({"customer_id": "C"})["balance_points"] == 400  # debited once, not twice
 
 
 # ---------------------------------------------------------------------------

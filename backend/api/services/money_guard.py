@@ -26,7 +26,9 @@ Contract:
     and emits one append-only audit row via AuditRepository.create (NEVER
     append_audit_entry directly). Audit is fail-soft and never blocks the money move.
   * Idempotency: a credit/debit carrying an idempotency_key is de-duplicated via a
-    money_ledger entry on the same document, so a retried call does not double-apply.
+    money_ledger marker on the same document, so a retried call does not double-apply.
+    The marker is written whenever an idempotency_key is supplied -- independent of
+    record_ledger -- so the dedup guarantee can never silently no-op.
 
 This module has NO FastAPI router and makes NO engine calls in Phase A (it is
 tier-agnostic -- the caller enforces refund/discount tiers from E2). E6 OTP verbs
@@ -44,6 +46,11 @@ try:  # pymongo is present in prod; tests use fakes that honour return_document
     _AFTER = ReturnDocument.AFTER
 except Exception:  # noqa: BLE001
     _AFTER = True
+
+try:  # money/audit records are stamped India-time (IST), per project rule
+    from api.utils.ist import now_ist_naive as _ist_now
+except Exception:  # noqa: BLE001
+    _ist_now = None
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +127,13 @@ ACCOUNT_TYPES: Dict[str, AccountSpec] = {
 
 
 def _now_iso() -> str:
+    """IST timestamp for money_ledger / new-verb records (forensic trail is India-
+    time). Falls back to naive local only if the IST helper is unavailable."""
+    if _ist_now is not None:
+        try:
+            return _ist_now().isoformat()
+        except Exception:  # noqa: BLE001
+            pass
     return datetime.now().isoformat()
 
 
@@ -166,11 +180,17 @@ def _norm_amount(spec: AccountSpec, amount: Any):
 
 def _resolve_collection(db_or_coll: Any, spec: AccountSpec):
     """Accept EITHER a bound collection (repo shims pass self.collection / _coll(db))
-    OR a db handle (new callers pass the DatabaseConnection.db). A db handle exposes
-    get_collection; a collection does not -- that is the discriminator."""
+    OR a db handle (new callers pass the DatabaseConnection.db).
+
+    Discriminate on the CLASS, NEVER the instance: a pymongo Collection defines
+    __getattr__ that synthesizes a sub-collection for ANY name, so instance
+    `hasattr(coll, "get_collection")` is deceptively True on a real Collection and
+    would silently retarget every write to an empty sub-collection. get_collection
+    is a real method on Database (class-level) and absent on Collection, so a
+    class-level lookup is immune to __getattr__."""
     if db_or_coll is None:
         return None
-    if hasattr(db_or_coll, "get_collection"):
+    if getattr(type(db_or_coll), "get_collection", None) is not None:
         try:
             c = db_or_coll.get_collection(spec.coll)
             if c is not None:
@@ -280,6 +300,10 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
             {spec.expiry_field: None},
             {spec.expiry_field: {"$gte": _today_date_iso()}},
         ]
+    # Race-safe idempotency: a concurrent retry carrying the same key cannot match
+    # (the marker is already present), so it cannot double-debit.
+    if idempotency_key:
+        filt["money_ledger.idempotency_key"] = {"$ne": idempotency_key}
     if guard_extra:
         filt.update(guard_extra)
 
@@ -297,6 +321,10 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         if matched is None:
             matched = getattr(res, "modified_count", 0)
         if not matched:
+            if idempotency_key:
+                prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
+                if prior is not None:
+                    return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
             return GuardResult(ok=False, reason="insufficient")
         post = None
         try:
@@ -304,7 +332,7 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         except Exception:  # noqa: BLE001
             post = None
         bal = float((post or {}).get(spec.balance_field) or 0.0)
-        if record_ledger:
+        if record_ledger or idempotency_key:
             _append_ledger(coll, spec, account_key, txn_id, "DEBIT", -amt, bal,
                            reason, ref, actor, store_id, idempotency_key)
         _audit("money.debit", account_type, account_key, delta=-amt, balance_after=bal,
@@ -334,9 +362,13 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         # debit -- fail closed (mirrors loyalty try_debit).
         return GuardResult(ok=False, reason="no_atomic")
     if post is None:
+        if idempotency_key:
+            prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
+            if prior is not None:
+                return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
         return GuardResult(ok=False, reason=_classify_debit_failure(coll, spec, account_key, amt))
     bal = float(post.get(spec.balance_field) or 0.0)
-    if record_ledger:
+    if record_ledger or idempotency_key:
         _append_ledger(coll, spec, account_key, txn_id, "DEBIT", -amt, bal,
                        reason, ref, actor, store_id, idempotency_key)
     _audit("money.debit", account_type, account_key, delta=-amt, balance_after=bal,
@@ -399,7 +431,7 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
                     return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
             return GuardResult(ok=False, reason="not_found")
         bal = float(post.get(spec.balance_field) or 0.0)
-        if record_ledger:
+        if record_ledger or idempotency_key:
             _append_ledger(coll, spec, account_key, txn_id, "CREDIT", amt, bal,
                            reason, ref, actor, store_id, idempotency_key)
         _audit("money.credit", account_type, account_key, delta=amt, balance_after=bal,
@@ -429,7 +461,7 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     except Exception:  # noqa: BLE001
         post = None
     bal = float((post or {}).get(spec.balance_field) or 0.0)
-    if record_ledger:
+    if record_ledger or idempotency_key:
         _append_ledger(coll, spec, account_key, txn_id, "CREDIT", amt, bal,
                        reason, ref, actor, store_id, idempotency_key)
     _audit("money.credit", account_type, account_key, delta=amt, balance_after=bal,
