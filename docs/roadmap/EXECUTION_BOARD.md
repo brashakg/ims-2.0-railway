@@ -15,7 +15,6 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 
 | # | Name | Dep | Packet | MUST-READ correction |
 |---|---|---|---|---|
-| E1 | Money-guard service | — | features/E1.md | **P0-1: PHASE-A FACADE ONLY** over existing vouchers/loyalty/store-credit. NO `money_accounts` SoR, NO migration, NO dual-write. |
 | E2 | Settings-matrix engine | — | features/E2.md | P1: secret per-key encrypt (`_encrypt_value`); invalidate via explicit `cache.delete`; **luxury caps LOWER-only, never E2 keys**; entity-missing → global. |
 | #35 | Cost & margin masking | — | features/F35.md | Drop the false `_build_store_ledger` margin claim; per-call-site check. Test: SALES_CASHIER sees `cost_*`=null; ACCOUNTANT real. |
 | #40 | VIP churn prediction (read-only) | — | features/F40.md | Clean (not a quick-win, ~M). SUPERADMIN/ADMIN only. |
@@ -26,7 +25,10 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 _Build order is dependency-aware: E1/E2/#35/#40 have no deps (parallelizable on separate branches); #34/E6 after E2; #21 after its E3-shim._
 
 ## 🔨 IN BUILD
-_empty_
+
+| # | Name | Branch | Started (UTC) | Notes |
+|---|---|---|---|---|
+| E1 | Money-guard service | `feat/E1-money-guard` | 2026-06-07T05:37Z | Phase-A facade ONLY per CORRECTIONS P0-1. Building facade + 3 behavior-preserving shims (vouchers/loyalty/store-credit) + credit/debit/get_balance/idempotency/audit for the 3 EXISTING types. `money_accounts` SoR + new index = NOT built (P0-1 precedence over packet Delta#3/item6/DoD#5/T13); new types (PETTY_CASH/FAMILY_WALLET/CONSIGNMENT) return `reason="unavailable"`. See PR for the T13 deviation note flagged to orchestrator. |
 
 ## 🧪 IN TEST
 _empty_
