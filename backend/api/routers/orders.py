@@ -935,6 +935,73 @@ _NON_SERIALIZED_ITEM_TYPES = {
     "OPTOMETRY",
 }
 
+# Item types whose stock is reserved by the LENS hook (reserve_for_order_item),
+# NOT by the serialized stock_units availability gate below.
+_LENS_RESERVED_ITEM_TYPES = {"LENS"}
+
+
+def _assert_serialized_stock_available(
+    items_data: List[dict], store_id: Optional[str]
+) -> None:
+    """BUG-097: reject order creation (409) when a SERIALIZED non-lens line does
+    not have enough AVAILABLE units in stock_units -- closes the non-lens oversell
+    where _mark_units_sold silently continued on 0 available.
+
+    Only enforced for a product that IS serialized-tracked at this store
+    (count(any status) > 0); a product with no stock_units row (a service, a
+    virtual item, or simply not unit-tracked) is left UNAFFECTED so a legit sale is
+    never false-blocked. Lens lines are gated by the lens reserve; a line carrying
+    an explicit stock_id flows through the mark_sold path.
+
+    NOTE: this is a pre-persist availability ASSERT -- a strict improvement over
+    the silent oversell, but check-then-act, so two highly-concurrent orders for
+    the last unit can still both pass. A fully-atomic reserve (find_one_and_update
+    with a status=AVAILABLE filter, mirroring the lens hook) is the follow-up.
+    """
+    if not store_id or not items_data:
+        return
+    try:
+        stock_repo = get_stock_repository()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK] availability assert: repo unavailable: %s", exc)
+        stock_repo = None
+    if stock_repo is None:
+        return  # no stock backend -> fail-soft (pre-existing behaviour)
+
+    need: Dict[str, int] = {}
+    for line in items_data:
+        if not isinstance(line, dict):
+            continue
+        it = (line.get("item_type") or "").upper()
+        if it in _NON_SERIALIZED_ITEM_TYPES or it in _LENS_RESERVED_ITEM_TYPES:
+            continue
+        pid = line.get("product_id") or ""
+        if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
+            continue
+        if line.get("stock_id"):
+            continue  # explicit unit -> handled by mark_sold
+        need[pid] = need.get(pid, 0) + int(line.get("quantity") or 1)
+
+    for pid, qty in need.items():
+        try:
+            tracked = stock_repo.count({"product_id": pid, "store_id": store_id})
+        except Exception:  # noqa: BLE001
+            tracked = 0
+        if not tracked:
+            continue  # not serialized-tracked here -> never false-block a sale
+        try:
+            avail = stock_repo.find_available(pid, store_id)
+        except Exception:  # noqa: BLE001
+            continue  # availability lookup failed -> fail-soft
+        if avail < qty:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Insufficient stock for '{pid}': {avail} available at this "
+                    f"store, {qty} requested. Cannot oversell."
+                ),
+            )
+
 
 def _mark_units_sold(
     order_id: str,
@@ -1579,6 +1646,10 @@ async def create_order(
         # value the workshop commit + order cancel paths will use to
         # find/idempotency-check the reservation later.
         precomputed_order_id = str(uuid.uuid4())
+
+        # BUG-097: block serialized non-lens oversell BEFORE reserving any lens
+        # cells, so a 409 here leaks no reservation.
+        _assert_serialized_stock_available(items_data, store_id)
 
         lens_reserve_failed = False
         lens_reservations: List[Dict[str, Any]] = []
