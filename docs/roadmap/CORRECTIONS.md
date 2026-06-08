@@ -80,3 +80,20 @@ owning feature as a dedicated single-doc collection and registered in `money_gua
 When you build #17 / #49 / #3: add the collection + register the type in money_guard; do NOT build a
 unified SoR or any cross-collection write. This supersedes P0-1's "Phase B/C DO-NOT-BUILD until replica
 set" -- there is no Phase B/C to build.
+
+## R2 (2026-06-08) -- Engine packets ship BACKEND-FIRST; FE + existing-path wiring are split follow-ups
+
+The shared-engine packets (E3, E4, E5, E6) bundle the backend engine + FE surfaces + (E3) migration of
+the existing state-change paths onto the new ledger. **An engine PR delivers the backend engine + its
+own new routes + backend acceptance tests + rbac coverage; the FE surfaces and the existing-path wiring
+are SPLIT to named follow-up items wired by the consuming features.** An engine's DoD = its backend
+acceptance + rbac-coverage-lock; the test session must NOT bounce an engine for a deferred FE/wiring that
+has a tracked follow-up here. Deferred to follow-ups (added to the Phase-1 BACKLOG):
+- **E4-FE** -- approval inbox / PIN-approve modal / Settings "set approval PIN" section. Wired by #25 / #26 / #27.
+- **E3-wiring** -- route the existing F21 quarantine, transfers ship/receive, GRN mint, labels scan-advance,
+  lens reserve/commit, and POS sell through `item_events.record_event` + a backfill. The E3 packet itself
+  stages this behind a dual-write window (medium-high regression risk); consumers #2 / #9 drive it.
+- **E3-return-serial-block** -- acceptance #8's return-side `SERIAL_MISMATCH` 409 hard-block in `returns.py`
+  (the serial-BIND half ships in E3; the return-COMPARE half is the follow-up).
+The E4/E3 engine cores themselves are adversarially verified (E4: atomic single-use approve + bcrypt/throttled
+PIN + E2 tiers, 2 P1s fixed; E3: CAS recorder + monotonic event_seq + serial-reconciled, no correctness P1).
