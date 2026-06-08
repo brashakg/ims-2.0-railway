@@ -162,6 +162,70 @@ def _ensure_code_index(coll) -> None:
         logger.debug("voucher code index create skipped", exc_info=True)
 
 
+def mint_voucher(
+    coll,
+    *,
+    vtype: str,
+    amount: float,
+    store_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    issued_by: Optional[str] = None,
+    expiry_date_iso: Optional[str] = None,
+    code: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Canonical voucher mint -- the SINGLE place a voucher document is created.
+
+    Both the issue_voucher route and reminder_rail call this, so every voucher
+    has the identical ACTIVE shape (voucher_id / initial_amount / balance /
+    currency / status / redemptions / ...) that ``redeem_voucher_atomic`` and the
+    E1 money-guard read at redemption. NO parallel mint path / divergent format.
+
+    ``extra`` merges feature-specific fields (e.g. ``reminder_dedupe``). A
+    caller-supplied ``code`` does a single insert (a duplicate-key raises to the
+    caller, which translates it to a 409); a generated code retries on collision
+    and returns None if retries are exhausted. ``vtype`` must be GIFT_CARD or
+    DISCOUNT (ValueError otherwise). Returns the inserted document.
+    """
+    vtype = (vtype or "GIFT_CARD").upper()
+    if vtype not in ("GIFT_CARD", "DISCOUNT"):
+        raise ValueError("type must be GIFT_CARD or DISCOUNT")
+    now = datetime.now().isoformat()
+    amount = float(amount)
+    base = {
+        "type": vtype,
+        "initial_amount": amount,
+        "balance": amount,
+        "currency": "INR",
+        "status": "ACTIVE",
+        "store_id": store_id,
+        "issued_to_customer_id": customer_id,
+        "issued_by": issued_by,
+        "expiry_date": expiry_date_iso,
+        "redemptions": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    if extra:
+        base.update(extra)
+    if code:
+        doc = dict(base, voucher_id=str(uuid.uuid4()), code=code.strip().upper())
+        coll.insert_one(doc)
+        return doc
+    # Generated code: a fresh voucher_id + code each try so a partial-unique
+    # setup can't loop on the same id.
+    for _ in range(_MAX_CODE_RETRIES):
+        doc = dict(base, voucher_id=str(uuid.uuid4()), code=_generate_code())
+        try:
+            coll.insert_one(doc)
+            return doc
+        except Exception as exc:  # pylint: disable=broad-except
+            if _is_dup_key(exc):
+                continue
+            raise
+    return None
+
+
 # ============================================================================
 # Core redeem engine (reusable — POS payment path calls this too)
 # ============================================================================
@@ -313,30 +377,19 @@ async def issue_voucher(
             status_code=400, detail="type must be GIFT_CARD or DISCOUNT"
         )
 
-    now = datetime.now().isoformat()
-    amount = float(body.amount)
-    base_doc = {
-        "voucher_id": str(uuid.uuid4()),
-        "type": vtype,
-        "initial_amount": amount,
-        "balance": amount,
-        "currency": "INR",
-        "status": "ACTIVE",
-        "store_id": body.store_id or current_user.get("active_store_id"),
-        "issued_to_customer_id": body.customer_id,
-        "issued_by": current_user.get("user_id"),
-        "expiry_date": body.expiry_date.isoformat() if body.expiry_date else None,
-        "redemptions": [],
-        "created_at": now,
-        "updated_at": now,
-    }
+    store_id = body.store_id or current_user.get("active_store_id")
+    expiry_iso = body.expiry_date.isoformat() if body.expiry_date else None
+    kw = dict(
+        vtype=vtype, amount=body.amount, store_id=store_id,
+        customer_id=body.customer_id, issued_by=current_user.get("user_id"),
+        expiry_date_iso=expiry_iso,
+    )
 
-    # Caller-supplied code: uppercase, single insert, surface a clean 409
-    # on collision rather than a raw Mongo error.
+    # Caller-supplied code: single insert via the canonical mint, surface a
+    # clean 409 on collision rather than a raw Mongo error.
     if body.code:
-        doc = dict(base_doc, code=body.code.strip().upper())
         try:
-            coll.insert_one(doc)
+            doc = mint_voucher(coll, code=body.code, **kw)
         except Exception as exc:
             if _is_dup_key(exc):
                 raise HTTPException(
@@ -345,24 +398,14 @@ async def issue_voucher(
             raise
         return _public_view(doc)
 
-    # Generated code: retry on duplicate-key until we land a free one.
-    last_exc: Optional[Exception] = None
-    for _ in range(_MAX_CODE_RETRIES):
-        doc = dict(base_doc, code=_generate_code())
-        try:
-            coll.insert_one(doc)
-            return _public_view(doc)
-        except Exception as exc:  # pylint: disable=broad-except
-            if _is_dup_key(exc):
-                last_exc = exc
-                # New voucher_id too, so a partial-unique setup can't loop.
-                base_doc["voucher_id"] = str(uuid.uuid4())
-                continue
-            raise
-    raise HTTPException(
-        status_code=500,
-        detail="Could not generate a unique voucher code; please retry",
-    ) from last_exc
+    # Generated code: the canonical mint retries on collision (None when exhausted).
+    doc = mint_voucher(coll, **kw)
+    if doc is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate a unique voucher code; please retry",
+        )
+    return _public_view(doc)
 
 
 @router.get("/{code}")

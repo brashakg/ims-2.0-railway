@@ -4968,6 +4968,65 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
         "store_scoped": True,
     },
+    # ------------------------------------------------------------------
+    # E6 reminder rail (routers/reminders.py): ADMIN/AREA_MANAGER/STORE_MANAGER
+    # (SUPERADMIN implicit). STORE-scope rules are additionally locked to that
+    # store via _enforce_store_scope; GLOBAL/ENTITY mutations require ADMIN+.
+    # ------------------------------------------------------------------
+    {
+        "method": "GET",
+        "path": "/api/v1/reminders/rules",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/reminders/rules",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/reminders/rules/{rule_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/reminders/rules/{rule_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/reminders/rules/{rule_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/reminders/rules/{rule_id}/toggle",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/reminders/rules/{rule_id}/preview",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/reminders/rules/{rule_id}/run-now",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/reminders/rules/{rule_id}/history",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
 ]
 
 

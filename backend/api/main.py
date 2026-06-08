@@ -75,6 +75,7 @@ from .routers import (
     payroll_router,
     marketing_router,
     campaigns_router,
+    reminders_router,
     analytics_v2_router,
     agents_router,
     proposals_router,
@@ -182,6 +183,22 @@ async def lifespan(app: FastAPI):
                 ApprovalEngine(db=get_db().db).ensure_indexes()
             except Exception as e:
                 logger.warning(f"[WARN] Approval index creation skipped: {e}")
+            # E6 reminder rail: indexes + 6 GLOBAL inactive seed rules (idempotent,
+            # non-destructive). active=False -> ZERO automated sends on deploy; the
+            # owner opts each rule on later (comms channel currently build-dark).
+            try:
+                from .services.reminder_rail import (
+                    ensure_reminder_indexes,
+                    seed_reminder_rules,
+                )
+
+                _rdb = get_db().db
+                ensure_reminder_indexes(_rdb)
+                _rn = seed_reminder_rules(_rdb)
+                if _rn:
+                    logger.info(f"[OK] Seeded {_rn} GLOBAL inactive reminder rule(s)")
+            except Exception as e:
+                logger.warning(f"[WARN] Reminder-rule seed skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:
@@ -1098,6 +1115,10 @@ app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketin
 # the /api/v1/marketing prefix. Reuses marketing.py's send/consent/quiet-hours
 # infra; does NOT re-implement the sender. See routers/campaigns.py.
 app.include_router(campaigns_router, prefix="/api/v1/marketing", tags=["Marketing"])
+# E6 reminder rail (rules CRUD + toggle + preview/dry-run + run-now + history).
+# Config/eligibility layer ONLY; reuses send_notification + consent + quiet-hours.
+# Nothing here flips DISPATCH_MODE; seeded rules are inactive. See routers/reminders.py.
+app.include_router(reminders_router, prefix="/api/v1/reminders", tags=["Reminders"])
 app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )

@@ -49,6 +49,14 @@ RX_VALIDITY_DAYS = 730  # 2-year prescription validity, matches marketing.py
 BIRTHDAY_WINDOW_DAYS = 7
 WINBACK_INACTIVE_MONTHS = 6
 RECENT_BUYER_DAYS = 30
+# E6: contact-lens reorder cadence (days since last CL purchase). Disposables
+# typically need replacement every ~30 days; configurable per-call/per-rule.
+CL_REORDER_CADENCE_DAYS = 30
+# E6: churn-risk lapse window -- bought before but silent this long. Distinct
+# from win-back (6 months); this is the earlier lapse signal.
+CHURN_RISK_DAYS = 90
+# Item-type tokens that count as a contact-lens line on an order.
+_CL_ITEM_TYPES = {"CONTACT_LENS", "CONTACT_LENSES", "CL", "CONTACTLENS"}
 PREVIEW_SAMPLE_SIZE = 5
 # Hard ceiling on rows scanned so a segment preview/resolve can never run away
 # on a large customers/prescriptions collection.
@@ -111,6 +119,38 @@ SEGMENT_DEFS: List[Dict[str, Any]] = [
         "description": "Customers who placed an order in the last 30 days.",
         "default_channel": "WHATSAPP",
         "default_template_id": "GOOGLE_REVIEW_REQUEST",
+        "campaign_type": "custom",
+        "store_scoped": True,
+    },
+    # --- E6 reminder-rail segments (additive) ---------------------------------
+    {
+        "key": "cl_reorder",
+        "label": "Contact-lens reorder due",
+        "description": "Customers with a contact-lens order whose last CL purchase "
+        "is older than the reorder cadence (default 30 days).",
+        "default_channel": "WHATSAPP",
+        "default_template_id": "ANNUAL_CHECKUP_REMINDER",
+        "campaign_type": "custom",
+        "store_scoped": True,
+    },
+    {
+        "key": "churn_risk",
+        "label": "Churn risk (lapse)",
+        "description": "Customers who bought before but have no order in the last "
+        "90 days (earlier lapse signal than the 6-month win-back).",
+        "default_channel": "WHATSAPP",
+        "default_template_id": "WALKOUT_RECOVERY",
+        "campaign_type": "winback",
+        "store_scoped": True,
+    },
+    {
+        "key": "fu_due_today",
+        "label": "Follow-ups due today",
+        "description": "Customers with a pending follow-up scheduled for today or "
+        "earlier. CALL / IN-PERSON modes route to a staff task; WHATSAPP / SMS "
+        "modes route to an outbound message.",
+        "default_channel": "WHATSAPP",
+        "default_template_id": "ANNUAL_CHECKUP_REMINDER",
         "campaign_type": "custom",
         "store_scoped": True,
     },
@@ -356,6 +396,180 @@ def _resolve_by_customer_type(
     return [_audience_row(c) for c in customers]
 
 
+def _is_cl_order(order: Dict[str, Any]) -> bool:
+    """True if an order contains at least one contact-lens line. Reads
+    items[].item_type / category (item_type is authoritative at POS)."""
+    for it in order.get("items", []) or []:
+        token = str(it.get("item_type") or it.get("category") or "").strip().upper()
+        if token in _CL_ITEM_TYPES:
+            return True
+    return False
+
+
+def _resolve_cl_reorder(
+    db,
+    store_id: Optional[str],
+    cadence_days: int = CL_REORDER_CADENCE_DAYS,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Customers who bought contact lenses and whose MOST-RECENT CL order is
+    older than `cadence_days` -- i.e. they are due to reorder. One row per
+    customer carrying the days-since-last-CL as a template var.
+    """
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=cadence_days)
+    order_coll = db.get_collection("orders")
+    cust_coll = db.get_collection("customers")
+    q: Dict[str, Any] = {}
+    if store_id:
+        q["store_id"] = store_id
+    # customer_id -> latest CL order datetime
+    latest_cl: Dict[str, datetime] = {}
+    try:
+        for o in order_coll.find(q).limit(_SCAN_LIMIT):
+            if not _is_cl_order(o):
+                continue
+            cid = o.get("customer_id")
+            if not cid:
+                continue
+            created = _coerce_dt(o.get("created_at"))
+            if created is None:
+                continue
+            if cid not in latest_cl or created > latest_cl[cid]:
+                latest_cl[cid] = created
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cl_reorder scan failed: %s", exc)
+        return []
+    rows: List[Dict[str, Any]] = []
+    for cid, last_dt in latest_cl.items():
+        if last_dt > cutoff:
+            continue  # bought CL recently -> not due yet
+        cust = cust_coll.find_one({"customer_id": cid}) or {}
+        if not cust:
+            continue
+        days_since = (now - last_dt).days
+        rows.append(_audience_row(cust, {"days_since_cl": days_since}))
+    return rows
+
+
+def _resolve_churn_risk(
+    db,
+    store_id: Optional[str],
+    inactive_days: int = CHURN_RISK_DAYS,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Customers who HAVE ordered before but have NO order in the last
+    `inactive_days` (default 90). Distinct from `winback` (6 months) -- this is
+    the earlier lapse signal. A customer with zero orders ever is NOT churn risk
+    (they were never engaged); they belong to other acquisition segments.
+    """
+    now = now or datetime.now()
+    since = now - timedelta(days=inactive_days)
+    order_coll = db.get_collection("orders")
+    cust_coll = db.get_collection("customers")
+    q: Dict[str, Any] = {}
+    if store_id:
+        q["store_id"] = store_id
+    # customer_id -> (ever_ordered, ordered_recently)
+    ever: set = set()
+    recent: set = set()
+    try:
+        for o in order_coll.find(
+            q, {"customer_id": 1, "created_at": 1}
+        ).limit(_SCAN_LIMIT):
+            cid = o.get("customer_id")
+            if not cid:
+                continue
+            ever.add(cid)
+            created = _coerce_dt(o.get("created_at"))
+            if created is None or created >= since:
+                # Unknown timestamp -> conservatively treat as recent (do NOT
+                # mis-flag an active customer as churning).
+                recent.add(cid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("churn_risk scan failed: %s", exc)
+        return []
+    lapsed = ever - recent
+    rows: List[Dict[str, Any]] = []
+    for cid in lapsed:
+        cust = cust_coll.find_one({"customer_id": cid}) or {}
+        if not cust:
+            continue
+        rows.append(_audience_row(cust))
+    return rows
+
+
+# Map a follow_ups.type (a PURPOSE enum, NOT a channel -- CORRECTIONS P1) to a
+# delivery mode. The pre-existing follow_ups collection has no `mode` field; we
+# honour an explicit `mode`/`channel` when present, else map the purpose to a
+# sensible default. order_delivery is a service ping (WHATSAPP); the rest default
+# to a CALL the staff make (safe: a task, never an un-consented auto-message).
+_FU_TYPE_TO_MODE = {
+    "order_delivery": "WHATSAPP",
+    "prescription_expiry": "WHATSAPP",
+    "eye_test_reminder": "CALL",
+    "frame_replacement": "CALL",
+    "general": "CALL",
+}
+
+
+def _resolve_fu_due_today(
+    db,
+    store_id: Optional[str],
+    now: Optional[datetime] = None,
+    **_kw,
+) -> List[Dict[str, Any]]:
+    """Customers with a PENDING follow_ups doc scheduled for today or earlier.
+
+    Reconciles with the real follow-ups source (follow_ups.py GET /due-today):
+    same collection, same `status=pending` + `scheduled_date <= today` filter.
+    Adds a `mode` to the audience row's variables so the rule evaluator routes
+    CALL / IN-PERSON to a staff task and WHATSAPP / SMS to send_notification.
+    `mode` is read from an explicit `mode`/`channel` field when present, else
+    derived from the follow-up `type` (a purpose enum, not a channel).
+    """
+    now = now or datetime.now()
+    today = now.date().isoformat()
+    fu_coll = db.get_collection("follow_ups")
+    cust_coll = db.get_collection("customers")
+    q: Dict[str, Any] = {"status": "pending", "scheduled_date": {"$lte": today}}
+    if store_id:
+        q["store_id"] = store_id
+    rows: List[Dict[str, Any]] = []
+    try:
+        follow_ups = list(fu_coll.find(q).limit(_SCAN_LIMIT))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fu_due_today scan failed: %s", exc)
+        return []
+    for fu in follow_ups:
+        cid = fu.get("customer_id", "")
+        # Explicit mode/channel wins; else map the purpose enum to a mode.
+        mode = (fu.get("mode") or fu.get("channel") or "").strip().upper()
+        if not mode:
+            mode = _FU_TYPE_TO_MODE.get(fu.get("type", "general"), "CALL")
+        # Prefer the follow-up's own contact fields; fall back to the customer.
+        name = fu.get("customer_name") or ""
+        phone = fu.get("customer_phone") or ""
+        if (not name or not phone) and cid:
+            cust = cust_coll.find_one({"customer_id": cid}) or {}
+            name = name or cust.get("name", "Customer")
+            phone = phone or cust.get("mobile", "") or cust.get("phone", "")
+        row = {
+            "customer_id": cid,
+            "phone": phone,
+            "name": name or "Customer",
+            "variables": {
+                "name": name or "Customer",
+                "customer_name": name or "Customer",
+                "mode": mode,
+                "follow_up_id": fu.get("follow_up_id", ""),
+                "follow_up_type": fu.get("type", ""),
+            },
+        }
+        rows.append(row)
+    return rows
+
+
 # Dispatch table: key -> resolver. Each resolver(db, store_id, **params).
 _RESOLVERS = {
     "rx_expiry": _resolve_rx_expiry,
@@ -364,6 +578,9 @@ _RESOLVERS = {
     "by_store": _resolve_by_store,
     "by_customer_type": _resolve_by_customer_type,
     "recent_buyers": _resolve_recent_buyers,
+    "cl_reorder": _resolve_cl_reorder,
+    "churn_risk": _resolve_churn_risk,
+    "fu_due_today": _resolve_fu_due_today,
 }
 
 

@@ -117,50 +117,15 @@ class MegaphoneAgent(JarvisAgent):
             logger.info("[MEGAPHONE] notification_logs unavailable — skipping")
             return
 
-        queued_this_run = 0
-
-        # 1. Rx expiry reminders (90 / 30 / 7 day windows)
-        rx_expiring = await self._scan_rx_expiring()
-        for rx in rx_expiring:
-            try:
-                notif_coll.insert_one({
-                    "agent_id": self.agent_id,
-                    "kind": "rx_expiry_reminder",
-                    "customer_id": rx.get("customer_id"),
-                    "patient_name": rx.get("patient_name"),
-                    "channel": "whatsapp",
-                    "status": "PENDING",
-                    "queued_at": datetime.now(timezone.utc).isoformat(),
-                    "dnd_window": self._in_dnd_window(),
-                    # If queued during DND, hold until the next 09:00 IST
-                    # (stored as UTC so the drain query compares correctly).
-                    "scheduled_for": None if not self._in_dnd_window()
-                                     else self._next_dnd_end_utc_iso(),
-                })
-                queued_this_run += 1
-            except Exception as e:
-                logger.warning(f"[MEGAPHONE] Failed to queue Rx expiry: {e}")
-
-        # 2. Birthday greetings (today's birthdays)
-        birthdays = await self._scan_birthdays_today()
-        for cust in birthdays:
-            try:
-                notif_coll.insert_one({
-                    "agent_id": self.agent_id,
-                    "kind": "birthday_greeting",
-                    "customer_id": cust.get("customer_id"),
-                    "channel": "whatsapp",
-                    "status": "PENDING",
-                    "queued_at": datetime.now(timezone.utc).isoformat(),
-                })
-                queued_this_run += 1
-            except Exception as e:
-                logger.warning(f"[MEGAPHONE] Failed to queue birthday: {e}")
-
-        self._queued_count += queued_this_run
-        if queued_this_run > 0:
-            logger.info(f"[MEGAPHONE] Queued {queued_this_run} notifications "
-                        f"({len(rx_expiring)} Rx expiry, {len(birthdays)} birthday)")
+        # 1+2. Rx-expiry + birthday reminders are NO LONGER hard-coded scans here.
+        #      E6 (the reminder rail) is now the SINGLE config-driven path for every
+        #      recurring reminder type. The legacy _scan_rx_expiring/_scan_birthdays_today
+        #      call sites are intentionally removed; equivalent reminder_rules are
+        #      SEEDED active=False (see reminder_rail seed), so the owner opts each one
+        #      on explicitly. This is the safe default: ZERO automated sends on deploy
+        #      (and the comms channel is currently disabled -- build-dark directive).
+        #      The rules are evaluated below by _run_reminder_rules through the full
+        #      consent / quiet-hours / frequency-cap gate stack (not a raw insert).
 
         # 3. CRM-12: Dispatch SCHEDULED campaigns whose send_at is now or past.
         #    ONE_TIME campaigns with send_at <= now are dispatched via the same
@@ -171,6 +136,19 @@ class MegaphoneAgent(JarvisAgent):
         if scheduled_sent > 0:
             logger.info("[MEGAPHONE] Dispatched %d scheduled campaign(s)", scheduled_sent)
 
+        # 3b. E6 reminder rail: evaluate every ACTIVE CRON-trigger reminder rule
+        #     through the gate stack (consent + quiet-hours + 30-day cap). With no
+        #     active rules (the deploy default), this is a no-op.
+        rule_stats = await self._run_reminder_rules(datetime.now(timezone.utc))
+        if rule_stats.get("rules_run", 0) > 0:
+            logger.info(
+                "[MEGAPHONE] Reminder rules: ran=%d queued=%d tasks=%d skipped=%d",
+                rule_stats["rules_run"],
+                rule_stats["queued"],
+                rule_stats["tasks"],
+                rule_stats["skipped"],
+            )
+
         # 4. Drain the queue — up to DRAIN_BATCH_SIZE PENDING messages
         drain_stats = await self._drain_pending(notif_coll)
         if drain_stats["attempted"] > 0:
@@ -179,6 +157,129 @@ class MegaphoneAgent(JarvisAgent):
                 f"sent={drain_stats['sent']} simulated={drain_stats['simulated']} "
                 f"failed={drain_stats['failed']} mode={dispatch_mode()}"
             )
+
+    # -------------------------------------------------------------------------
+    # E6: reminder rail tick + event handler
+    # -------------------------------------------------------------------------
+
+    async def _run_reminder_rules(self, now) -> Dict[str, int]:
+        """Evaluate every ACTIVE, CRON-trigger reminder_rules row through the
+        E6 gate stack (reminder_rail.evaluate_rule). Each rule resolves its
+        segment, runs consent + quiet-hours + 30-day-cap gates, and queues
+        PENDING messages via the SAME send_notification path (DISPATCH_MODE
+        gated -- nothing goes live with the default off).
+
+        With no active rules (the deploy default), this is a no-op. EVENT-trigger
+        rules are NOT run here -- they fire from on_event when their event lands.
+        Fail-soft: one rule's failure never stops the others.
+        """
+        stats = {"rules_run": 0, "queued": 0, "tasks": 0, "skipped": 0}
+        coll = self.get_collection("reminder_rules")
+        if coll is None:
+            return stats
+        try:
+            from api.services import reminder_rail
+        except Exception as exc:  # noqa: BLE001 - import guard, fail-soft
+            logger.warning("[MEGAPHONE] reminder_rail import failed: %s", exc)
+            return stats
+        try:
+            rules = list(
+                coll.find(
+                    {
+                        "active": True,
+                        "trigger.kind": "CRON",
+                        "$or": [
+                            {"deleted_at": None},
+                            {"deleted_at": {"$exists": False}},
+                        ],
+                    }
+                ).limit(100)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MEGAPHONE] reminder_rules scan failed: %s", exc)
+            return stats
+
+        for rule in rules:
+            try:
+                res = await reminder_rail.evaluate_rule(self.db, rule, now=now)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[MEGAPHONE] reminder rule %s failed: %s",
+                    rule.get("rule_id"), exc,
+                )
+                continue
+            stats["rules_run"] += 1
+            stats["queued"] += res.get("queued", 0)
+            stats["tasks"] += res.get("tasks_created", 0)
+            stats["skipped"] += (
+                res.get("skipped_consent", 0)
+                + res.get("skipped_freqcap", 0)
+                + res.get("skipped_no_phone", 0)
+            )
+            # Persist per-rule counters (single-document update).
+            try:
+                coll.update_one(
+                    {"rule_id": rule.get("rule_id")},
+                    {
+                        "$set": {
+                            "last_run_at": datetime.now(timezone.utc).isoformat(),
+                            "last_resolved": res.get("resolved", 0),
+                        },
+                        "$inc": {
+                            "sent_count": res.get("queued", 0),
+                            "skipped_count": (
+                                res.get("skipped_consent", 0)
+                                + res.get("skipped_freqcap", 0)
+                                + res.get("skipped_no_phone", 0)
+                            ),
+                            "failed_count": res.get("errors", 0),
+                        },
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return stats
+
+    async def on_event(self, event: str, payload: Dict[str, Any]):
+        """EVENT-trigger reminder rules. When ORACLE emits churn.detected,
+        evaluate every ACTIVE EVENT-trigger churn_risk rule through the gate
+        stack. Fail-soft -- never raises into the bus."""
+        if event != "churn.detected":
+            return
+        coll = self.get_collection("reminder_rules")
+        if coll is None:
+            return
+        try:
+            from api.services import reminder_rail
+        except Exception as exc:  # noqa: BLE001 - import guard, fail-soft
+            logger.warning("[MEGAPHONE] reminder_rail import failed: %s", exc)
+            return
+        try:
+            rules = list(
+                coll.find(
+                    {
+                        "active": True,
+                        "rule_type": "churn_risk",
+                        "trigger.kind": "EVENT",
+                        "$or": [
+                            {"deleted_at": None},
+                            {"deleted_at": {"$exists": False}},
+                        ],
+                    }
+                ).limit(50)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MEGAPHONE] churn rule scan failed: %s", exc)
+            return
+        for rule in rules:
+            try:
+                await reminder_rail.evaluate_rule(
+                    self.db, rule, now=datetime.now(timezone.utc)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[MEGAPHONE] churn rule %s failed: %s", rule.get("rule_id"), exc
+                )
 
     # -------------------------------------------------------------------------
     # CRM-12: Dispatch due SCHEDULED campaigns
