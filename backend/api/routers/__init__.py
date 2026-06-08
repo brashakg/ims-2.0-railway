@@ -31,6 +31,7 @@ from .admin_catalog import router as admin_catalog_router
 from .admin_extras import router as admin_extras_router
 from .handoffs import router as handoffs_router
 from .transfers import router as transfers_router
+from .item_events import router as item_events_router
 from .catalog import router as catalog_router
 from .catalog_autopilot import router as catalog_autopilot_router
 from .jarvis import router as jarvis_router
@@ -103,6 +104,7 @@ __all__ = [
     "admin_extras_router",
     "handoffs_router",
     "transfers_router",
+    "item_events_router",
     "catalog_router",
     "catalog_autopilot_router",
     "jarvis_router",

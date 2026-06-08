@@ -84,7 +84,21 @@ class StockRepository(BaseRepository):
             "status": "AVAILABLE"
         })
     
+    # E3 item-event ledger: statuses that are explicitly NOT sellable on-hand
+    # (mirrors api.services.item_events.EXCLUDED_STATUSES). A unit in any of
+    # these states can never be counted as sellable POS stock.
+    EXCLUDED_STATUSES = [
+        "QUARANTINED", "UNDER_AUDIT", "BLIND_COUNT", "TRANSFERRED",
+        "SOLD", "VOID", "DAMAGED", "RTV",
+    ]
+
     def find_available(self, product_id: str, store_id: str) -> int:
+        # The sellable-stock count for the POS path. The positive AVAILABLE match
+        # already excludes every E3 non-sellable status (QUARANTINED /
+        # UNDER_AUDIT / BLIND_COUNT / TRANSFERRED / SOLD / VOID / DAMAGED / RTV),
+        # since none of those equals "AVAILABLE" -- this is the E3 rollup-
+        # exclusion guarantee (intent #4 / #12). A quarantined or under-audit
+        # unit therefore drops out of POS sellable on-hand immediately.
         return self.count({
             "product_id": product_id,
             "store_id": store_id,

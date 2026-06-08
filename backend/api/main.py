@@ -65,6 +65,7 @@ from .routers import (
     admin_extras_router,
     handoffs_router,
     transfers_router,
+    item_events_router,
     catalog_router,
     catalog_autopilot_router,
     jarvis_router,
@@ -1054,6 +1055,10 @@ app.include_router(
 )
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
+)
+# E3 item-event ledger (append-only stock-state spine + Base-Bank replenishment).
+app.include_router(
+    item_events_router, prefix="/api/v1/items", tags=["Item-event Ledger"]
 )
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
 app.include_router(

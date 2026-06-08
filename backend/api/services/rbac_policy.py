@@ -1922,6 +1922,80 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/inventory/sell-through-analysis",
         "allowed": "AUTHENTICATED",
     },
+    # ------------------------------------------------------------------
+    # E3 item-event ledger (/api/v1/items). Reads are store-scoped to any
+    # authenticated role; quarantine + serial-bind + sell are inventory/
+    # manager-ladder writes; Base-Bank target writes are the store-manager
+    # ladder. The SELL event is additionally feature-flagged OFF (FF_E3_POS_SELL).
+    # ------------------------------------------------------------------
+    {
+        "method": "GET",
+        "path": "/api/v1/items/{stock_id}/events",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/items/events",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/items/{stock_id}/quarantine",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/items/{stock_id}/quarantine/release",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/items/{stock_id}/serial-bind",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/items/{stock_id}/sell",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+            "WORKSHOP_STAFF",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/items/base-bank",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/items/base-bank",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/items/replenishment",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/inventory/serials",
