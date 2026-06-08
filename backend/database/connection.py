@@ -213,6 +213,11 @@ class DatabaseConnection:
             name="uniq_invoice_number",
             background=True,
         )
+        # F24 conversion dashboard: the optometrist->retail join pulls a
+        # customer's orders by {customer_id, created_at}. The existing
+        # customer_id single-field index doesn't cover the created_at window
+        # bound; this compound serves the $in(customer_ids)+date-range lookup.
+        _idx("orders", [("customer_id", 1), ("created_at", -1)], background=True)
 
         # Customers
         _idx("customers", "customer_id", unique=True, background=True)
@@ -286,6 +291,16 @@ class DatabaseConnection:
         _idx("prescriptions", "prescription_id", unique=True, background=True)
         _idx("prescriptions", "customer_id", background=True)
         _idx("prescriptions", [("store_id", 1), ("created_at", -1)], background=True)
+
+        # Eye tests (F24 conversion dashboard). The per-optometrist scorecard
+        # filters {optometrist_id, test_date}; the store-scope conversion join
+        # filters {store_id, test_date, status:COMPLETED}.
+        _idx("eye_tests", [("optometrist_id", 1), ("test_date", 1)], background=True)
+        _idx(
+            "eye_tests",
+            [("store_id", 1), ("test_date", 1), ("status", 1)],
+            background=True,
+        )
 
         # Stores
         _idx("stores", "store_id", unique=True, background=True)

@@ -894,11 +894,30 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/abuse-detection",
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    {
+        "method": "GET",
+        "path": "/api/v1/clinical/conversion-dashboard",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
+    },
     {"method": "GET", "path": "/api/v1/clinical/eye-tests", "allowed": "AUTHENTICATED"},
     {
         "method": "GET",
         "path": "/api/v1/clinical/optometrist/{optometrist_id}/stats",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
     },
     {
         "method": "GET",
