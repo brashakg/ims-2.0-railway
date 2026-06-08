@@ -15,6 +15,7 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 
 | # | Name | Dep | Packet | MUST-READ correction |
 |---|---|---|---|---|
+| E2 | Settings-matrix engine | — | features/E2.md | P1: secret per-key encrypt (`_encrypt_value`); invalidate via explicit `cache.delete`; **luxury caps LOWER-only, never E2 keys**; entity-missing → global. |
 | #35 | Cost & margin masking | — | features/F35.md | Drop the false `_build_store_ledger` margin claim; per-call-site check. Test: SALES_CASHIER sees `cost_*`=null; ACCOUNTANT real. |
 | #40 | VIP churn prediction (read-only) | — | features/F40.md | Clean (not a quick-win, ~M). SUPERADMIN/ADMIN only. |
 | #34 | Global target ticker | E2 | features/F34.md | Add `{created_at,status,store_id}` orders index (net-new) + cache. SALES sees % only. |
@@ -24,10 +25,7 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 _Build order is dependency-aware: E1/E2/#35/#40 have no deps (parallelizable on separate branches); #34/E6 after E2; #21 after its E3-shim._
 
 ## 🔨 IN BUILD
-
-| # | Name | Branch | Started (UTC) | Notes |
-|---|---|---|---|---|
-| E2 | Settings-matrix engine | `feat/E2-settings-matrix` | 2026-06-07T09:24Z | policy_registry + policy_engine (global->entity->store resolve), 5 endpoints on settings.py, RBAC rows. BINDING (CORRECTIONS P1): secret values via `_encrypt_value`/`_decrypt_value` (NOT `_encrypt_config`); explicit `cache.delete(key)` per (key,scope_id) (delete_pattern is a no-op without Redis); luxury caps LOWER-only + NOT E2 keys; store missing entity_id -> global, never raise. Cost-floor + refund-tier consumers wired. |
+_empty_
 
 ## 🧪 IN TEST
 _empty_
