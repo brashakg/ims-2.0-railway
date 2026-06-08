@@ -1,3 +1,9 @@
+> # [SUPERSEDED -- DO NOT BUILD FROM THIS FILE]
+> Build from **`features/SC.md`** + **`CORRECTIONS.md` P0-4/P0-5** instead. IGNORE the dead text below: the seeded multiplier is **1.1 @ 14%** (NOT 1.4 @ 14% -- the table floor-walks ascending: 0.11->1.4 ... 0.14->1.1); settings reads use **`get_policy`** (E2), never `resolve_settings`; SC's `get_incentive_for_payroll` (locked snapshot) REPLACES `_fetch_incentive` -- never sum both (no double-count).
+> _(PROTOCOL §11 fold-gate.)_
+
+---
+
 I have full grounding. The payroll engine accepts an `incentive` float kwarg (line 223). Now I'll write the architecture contract.
 
 # Engine SC: Staff Scorecard + Slab-Incentive engine (foundation)
