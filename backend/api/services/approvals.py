@@ -321,7 +321,14 @@ class ApprovalEngine:
             coll.create_index(
                 "dedupe_key",
                 unique=True,
-                partialFilterExpression={"status": ApprovalStatus.REQUESTED.value},
+                # MUST guard on $exists: a partial index does NOT skip docs missing the
+                # field -- it indexes them as null, so two dedupe-less REQUESTED requests
+                # (the normal case -- approvals sit pending up to 60 min) would collide
+                # E11000. sparse cannot be combined with partialFilterExpression.
+                partialFilterExpression={
+                    "status": ApprovalStatus.REQUESTED.value,
+                    "dedupe_key": {"$exists": True},
+                },
             )
         except Exception:  # noqa: BLE001
             logger.debug("[APPROVALS] ensure_indexes skipped", exc_info=True)
@@ -340,12 +347,11 @@ class ApprovalEngine:
         refund.tier.* thresholds (paisa-integers). E4 owns NO threshold
         constant -- E2's registry default is the fallback.
 
-        ``required_tier`` (explicit) wins -- e.g. a serial-mismatch refund pins
-        the tier to "admin" regardless of amount (DECISIONS sec 7).
+        ``required_tier`` (explicit) may only RAISE the tier (e.g. a serial-mismatch
+        refund pins to "admin" even for a small amount, DECISIONS sec 7). It can NEVER
+        lower it: a maker must not be able to route a high-value request to a low-tier
+        approver by passing required_tier="auto" (tier-escalation bypass).
         """
-        if required_tier in _TIER_ROLES:
-            return required_tier  # type: ignore[return-value]
-
         # E2 thresholds are paisa; the request amount is rupees. Convert E2 ->
         # rupees so the comparison is in one unit. Fail-soft to the locked
         # DECISIONS sec 6 defaults if E2 is unavailable.
@@ -368,14 +374,19 @@ class ApprovalEngine:
 
         amt = float(amount or 0.0)
         if amt >= super_above_rs:
-            return "super"
-        if amt >= admin_above_rs:
-            return "admin"
-        if amt < auto_below_rs:
-            return "auto"
-        # Between auto_below and admin_above -> still the auto tier (managers can
-        # approve), matching the packet: only >2000 escalates to admin.
-        return "auto"
+            amount_tier = "super"
+        elif amt >= admin_above_rs:
+            amount_tier = "admin"
+        else:
+            # < auto_below or between auto_below and admin_above -> auto tier
+            # (managers can approve); only >= admin_above escalates.
+            amount_tier = "auto"
+
+        # required_tier may only RAISE the tier (max by severity), never lower it.
+        _severity = {"auto": 0, "admin": 1, "super": 2}
+        if required_tier in _TIER_ROLES and _severity.get(required_tier, 0) > _severity.get(amount_tier, 0):
+            return required_tier  # type: ignore[return-value]
+        return amount_tier
 
     @staticmethod
     def _tier_to_roles(tier: str) -> List[str]:

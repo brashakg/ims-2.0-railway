@@ -295,6 +295,21 @@ def test_t1_tier_routing(engine, db):
     assert res["error"] == "insufficient_tier"
 
 
+def test_t1_required_tier_can_raise_but_never_lower(engine, db):
+    # Adversarial regression: a maker-supplied required_tier must NOT be able to
+    # route a high-value request to a low-tier approver (escalation bypass).
+    # A high amount + required_tier="auto" must STAY at the amount-derived tier.
+    r = engine.request(action_type="refund", requested_by="u1", amount=12000, required_tier="auto")
+    assert r["required_tier"] == "super"          # clamp: cannot lower super -> auto
+    assert r["required_roles"] == ["SUPERADMIN"]
+    # required_tier may still RAISE (serial-mismatch pins a small refund to admin).
+    r2 = engine.request(action_type="refund", requested_by="u1", amount=100, required_tier="admin")
+    assert r2["required_tier"] == "admin"          # raise honoured
+    # And it can raise to super on a tiny amount.
+    r3 = engine.request(action_type="refund", requested_by="u1", amount=100, required_tier="super")
+    assert r3["required_tier"] == "super"
+
+
 # ============================================================================
 # T2 - PIN lifecycle + brute-force throttle
 # ============================================================================
