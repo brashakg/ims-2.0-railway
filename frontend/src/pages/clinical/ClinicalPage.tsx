@@ -17,6 +17,7 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
+  TrendingUp,
 } from 'lucide-react';
 import { clinicalApi, customerApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -28,6 +29,7 @@ import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import { AbuseDetection } from '../../components/clinical/AbuseDetection';
 import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
 import { ClinicPrescriptionHistory } from '../../components/clinical/ClinicPrescriptionHistory';
+import { ConversionTab } from './ConversionTab';
 import clsx from 'clsx';
 import { readEyePower } from '../../utils/rxEye';
 
@@ -79,7 +81,7 @@ export function ClinicalPage() {
   const [completedTests, setCompletedTests] = useState<CompletedTest[]>([]);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<'queue' | 'completed' | 'abuse-alerts'>('queue');
+  const [activeTab, setActiveTab] = useState<'queue' | 'completed' | 'abuse-alerts' | 'conversion'>('queue');
   const [showEyeTestForm, setShowEyeTestForm] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState<{
     id: string;
@@ -120,6 +122,11 @@ export function ClinicalPage() {
   const canStartTest = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']);
   const canAddPatient = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']);
   const canViewAbuseAlerts = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
+  // F24 conversion tab: clinical-management + optometrists (server role-strips
+  // revenue for optometrists and limits them to their own row).
+  const canViewConversion = hasRole([
+    'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST',
+  ]);
 
   // Load data on mount
   useEffect(() => {
@@ -649,6 +656,15 @@ export function ClinicalPage() {
             Abuse alerts
           </button>
         )}
+        {canViewConversion && (
+          <button
+            onClick={() => setActiveTab('conversion')}
+            className={activeTab === 'conversion' ? 'on' : ''}
+          >
+            <TrendingUp className="w-4 h-4" />
+            Conversion
+          </button>
+        )}
       </div>
 
       {/* Queue Tab — token-first intake (.q-item layout per design) */}
@@ -914,6 +930,9 @@ export function ClinicalPage() {
       {activeTab === 'abuse-alerts' && canViewAbuseAlerts && (
         <AbuseDetection storeId={user?.activeStoreId} />
       )}
+
+      {/* F24 Conversion Tab — optometrist -> retail conversion (read-only). */}
+      {activeTab === 'conversion' && canViewConversion && <ConversionTab />}
 
       {/* Prescription Card Print Modal */}
       {printRxCard && (

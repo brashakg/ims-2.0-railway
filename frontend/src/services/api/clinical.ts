@@ -85,6 +85,42 @@ export interface AbuseAlert {
   redoRate?: number;
 }
 
+// F24 - one converted order in an optometrist's conversion detail row. `amount`
+// is null when the caller (OPTOMETRIST) is not permitted to see revenue.
+export interface ConversionOrder {
+  order_number: string | null;
+  amount: number | null;
+  days_after_test: number;
+}
+
+// F24 - one optometrist's conversion row. Revenue fields are null (present-but-
+// null) for OPTOMETRIST callers; the FE conditionally renders the columns.
+export interface ConversionRow {
+  optometrist_id: string;
+  optometrist_name: string;
+  tests_completed: number;
+  converted_count: number;
+  conversion_rate_pct: number;
+  avg_days_to_order: number | null;
+  unattributed_tests: number;
+  revenue_attributed: number | null;
+  avg_order_value: number | null;
+  orders: ConversionOrder[];
+}
+
+export interface ConversionSummary {
+  tests_completed: number;
+  converted: number;
+  conversion_rate_pct: number;
+  unattributed_tests: number;
+  revenue_attributed: number | null;
+}
+
+export interface ConversionDashboard {
+  store_summary: ConversionSummary;
+  rows: ConversionRow[];
+}
+
 export const clinicalApi = {
   // Queue management
   getQueue: async (storeId: string) => {
@@ -227,5 +263,24 @@ export const clinicalApi = {
     if (storeId) params.store_id = storeId;
     const response = await api.get('/clinical/abuse-detection', { params });
     return response.data as { alerts: AbuseAlert[]; generated_at: string };
+  },
+
+  // F24 - optometrist -> retail conversion dashboard. Server role-strips the
+  // revenue figures for OPTOMETRIST callers (returned as null) and limits an
+  // optometrist to their own row. `storeId` is honoured only for managers.
+  getConversionDashboard: async (params: {
+    fromDate: string;   // YYYY-MM-DD
+    toDate: string;
+    storeId?: string;
+    conversionWindowDays?: number;
+  }) => {
+    const q: Record<string, string | number> = {
+      from_date: params.fromDate,
+      to_date: params.toDate,
+    };
+    if (params.storeId) q.store_id = params.storeId;
+    if (params.conversionWindowDays) q.conversion_window_days = params.conversionWindowDays;
+    const response = await api.get('/clinical/conversion-dashboard', { params: q });
+    return response.data as ConversionDashboard;
   },
 };
