@@ -26,6 +26,8 @@ _empty_
 
 | # | Name | PR | Branch | Notes |
 |---|---|---|---|---|
+| E3 | Item-event ledger (spine) | [#580](https://github.com/brashakg/ims-2.0-railway/pull/580) | `feat/E3-item-event` | Append-only `item_events` spine: `record_event` = single-doc CAS on `stock_units` + monotonic `event_seq` (existing `allocate_sequence`) + ONE `AuditRepository.create` row (NO unit hash-chain, P0-2). Reconciled with existing `serial_numbers` (serial-bind, dup 409). `/api/v1/items` 9 routes (rbac-catalogued). On-hand rollups gain `EXCLUDED_STATUSES`. **Adversarial: no correctness P0/P1** (CAS + event_seq race-safe). 18 tests + rbac 29; smoke 1010; E/F clean. **Per CORRECTIONS R2: existing-path wiring + return-`SERIAL_MISMATCH`-409 + FE are split follow-ups** (validate the spine, not the deferred wiring). |
+| E4 | Approval/PIN + maker-checker | [#579](https://github.com/brashakg/ims-2.0-railway/pull/579) | `feat/E4-approval-pin` | `ApprovalEngine`: atomic single-use `approve()`/`consume` (vouchers-style guarded `find_one_and_update`, two-concurrent→one token); bcrypt PIN + 5/15min throttle; tiers via E2 `get_policy` (no `_DEFAULT_TIERS`); hash-chained audit. 7 `/approvals/*` + 3 PIN routes (rbac-catalogued); TASKMASTER `expire_stale`. **Adversarial: 2 P1s FIXED** — dedupe-index null-collision (`$exists` guard) + maker tier-escalation (required_tier may only RAISE). 20 tests + rbac 29; smoke 1009; E/F clean. **Per CORRECTIONS R2: approval FE is a split follow-up** (wired by #25/#26/#27). |
 
 ## ✅ DONE
 
@@ -55,10 +57,12 @@ _empty_
 ### Phase 1 — comms tier + item-event/approval engines + foundations
 | ID | Name | Dep | Note |
 |---|---|---|---|
-| E3 | Item-event ledger | — | CORRECTIONS: drop unit hash-chain; reconcile existing `serial_numbers`; quarantine/blind-count NET-NEW. |
-| E4 | Approval/PIN + maker-checker | E1 | CORRECTIONS: atomic `approve()`; PIN brute-force throttle + test. |
-| PM | Unified product master (N5) | — | CORRECTIONS: SKU = rewrite (format-permissive legacy); add `HEARING_AID` enum first; triple-write spine-first + compensation. |
-| SC | Scorecard + slab-incentive (N2) | E2 | CORRECTIONS: replaces `_fetch_incentive` (no double-count); fix multiplier example 1.1@14%. |
+| E3 | Item-event ledger | — | **IN TEST (#580).** Spine shipped; see CORRECTIONS R2 for split follow-ups. |
+| E4 | Approval/PIN + maker-checker | E1 | **IN TEST (#579).** Engine shipped (2 adversarial P1s fixed); FE split per CORRECTIONS R2. |
+| E3w | E3 existing-path wiring + return-SERIAL_MISMATCH-409 | E3 | **NEW (CORRECTIONS R2 follow-up):** route F21-quarantine/transfers/GRN/labels/lens/POS-sell through `record_event` + backfill (dual-write window); add the return-side serial-block 409 in `returns.py` (acceptance #8 second half). |
+| E4fe | Approval inbox + PIN-modal FE | E4 | **NEW (CORRECTIONS R2 follow-up):** approval-inbox / my-requests / PIN-approve-modal / Settings PIN section — wired by #25/#26/#27. |
+| SC | Scorecard + slab-incentive (N2) | E2 | **BUILT (`feat/SC-scorecard`)** — adversarial-verify pending before PR. |
+| PM | Unified product master (N5) | — | CORRECTIONS: SKU = rewrite (format-permissive legacy); add `HEARING_AID` enum first; triple-write spine-first + compensation. **HELD until E3 merges (shares product_repository/products spine).** |
 | #46 | Configurable reminders | E6-full | Moved from Phase 0 — needs the E6 rule engine, not the OTP slice. |
 | N1/#45 | Walkout / lost-sale CRM (30-field + 2-stage FU + FU-Due-Today) | E6 | grounds #45 |
 | N3 | Footfall + conversion % (manual) | SC | |
