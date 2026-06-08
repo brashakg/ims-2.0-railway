@@ -32,7 +32,10 @@ no live send, send-path covered by tests) but do NOT prioritize it over non-mess
 Family-wallet (#49) OTP: when it lands, route OTP via SMS (works today), not WhatsApp.
 
 ### Build session
-- Take the **top claimable** item in `EXECUTION_BOARD.md` → TODO (Phase 0: **E1, E2, #35, #40, #34, #21, E6**).
+- Take the **top claimable** item in `EXECUTION_BOARD.md` → TODO. Current Phase-0 reality (2026-06-08):
+  - **In flight:** E1 = **DONE** (PR #563, on `main`). E2 = **IN BUILD** (`feat/E2-settings-matrix`).
+  - **Claimable now** (no deps, on `main`): **#35, #40, #21** (#21 builds its E3-shim; read `features/F21.md` — quarantine status is a **free string** `QUARANTINED`, no enum).
+  - **Blocked on E2 merge to `main`:** **#34, E6** — they call `get_policy`, which only exists on the E2 branch. Do not claim until E2 lands on `main`.
 - **Read the item's `CORRECTIONS.md` entry + its packet banner BEFORE coding.** Several clauses are DO-NOT-BUILD (esp. E1 = Phase-A facade only; NO `money_accounts` SoR / dual-write — standalone Mongo has no transactions).
 - One branch per item (`feat/<id>-<slug>`), build to the packet's **Intended behavior**, verify (PROTOCOL §8), open a PR, move the item to `IN TEST`.
 - Any balance change = single-document `find_one_and_update` only. Call the engines; never reimplement (PROTOCOL §6).
