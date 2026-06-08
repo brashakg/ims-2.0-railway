@@ -14,6 +14,7 @@ import {
   Clock,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
@@ -83,6 +84,11 @@ export function VendorReturns() {
   const toast = useToast();
   const { user } = useAuth();
   const activeStoreId = user?.activeStoreId || '';
+  // F21: the Quarantine Queue "Create RTV" CTA deep-links here with ?stock_id=...
+  // so the new return physically links that quarantined unit (backend backfills
+  // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
+  const [searchParams] = useSearchParams();
+  const linkedStockId = searchParams.get('stock_id');
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -161,6 +167,7 @@ export function VendorReturns() {
         })),
         return_type: returnType,
         notes,
+        ...(linkedStockId ? { stock_ids: [linkedStockId] } : {}),
       });
 
       toast.success('Vendor return created successfully');

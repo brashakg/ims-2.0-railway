@@ -7,7 +7,7 @@ Stock management, stock count/audit, aging analysis, barcode operations
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import uuid
 import logging
 
@@ -3819,11 +3819,24 @@ async def list_quarantined_stock(
         else:
             match["quarantine_label_printed"] = {"$ne": True}
     if date_from or date_to:
+        # quarantine_at is a tz-aware IST datetime; a raw STRING bound never matches
+        # the BSON Date (type bracket) -> the filter was a silent no-op returning [].
+        # Coerce to IST-aware datetimes; a date-only date_to covers the whole IST day.
+        _IST = timezone(timedelta(hours=5, minutes=30))
         rng: Dict = {}
-        if date_from:
-            rng["$gte"] = date_from
-        if date_to:
-            rng["$lte"] = date_to
+        try:
+            if date_from:
+                _f = datetime.fromisoformat(date_from)
+                rng["$gte"] = _f.replace(tzinfo=_IST) if _f.tzinfo is None else _f
+            if date_to:
+                _t = datetime.fromisoformat(date_to)
+                if _t.tzinfo is None:
+                    if (_t.hour, _t.minute, _t.second) == (0, 0, 0):
+                        _t = _t + timedelta(days=1) - timedelta(microseconds=1)
+                    _t = _t.replace(tzinfo=_IST)
+                rng["$lte"] = _t
+        except ValueError:
+            raise HTTPException(status_code=422, detail="date_from / date_to must be ISO format (YYYY-MM-DD)")
         match["quarantine_at"] = rng
 
     items: List[Dict] = []

@@ -10,7 +10,7 @@ from typing import List, Optional, Literal
 from datetime import datetime
 import uuid
 from .auth import get_current_user, require_roles
-from ..dependencies import get_db, resolve_store_scope
+from ..dependencies import get_db, resolve_store_scope, validate_store_access
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -103,7 +103,7 @@ def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> No
     for sid in stock_ids:
         try:
             result = stock_coll.update_one(
-                {"stock_id": sid, "status": "QUARANTINED"},
+                {"stock_id": sid, "status": "QUARANTINED", "store_id": store_id},
                 {"$set": {"rtv_vendor_id": return_id}},
             )
             if getattr(result, "modified_count", 0) and audit is not None:
@@ -190,6 +190,11 @@ async def create_vendor_return(
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
+
+    # F21 IDOR fix: the caller must own the return's store (store-roles are pinned
+    # to their own store; HQ roles pass). Without this a STORE_MANAGER could forge
+    # store_id + RTV-link another store's QUARANTINED units (cross-store write).
+    validate_store_access(return_data.store_id, current_user)
 
     try:
         collection = db.get_collection("vendor_returns")
