@@ -15,12 +15,11 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 
 | # | Name | Dep | Packet | MUST-READ correction |
 |---|---|---|---|---|
-| #40 | VIP churn prediction (read-only) | — | features/F40.md | Clean (not a quick-win, ~M). SUPERADMIN/ADMIN only. |
 | #34 | Global target ticker | E2 | features/F34.md | Add `{created_at,status,store_id}` orders index (net-new) + cache. SALES sees % only. |
 | #21 | Defective quarantine barcoding | E3-shim (ENGINES.md) | features/F21.md | Status = free string (no enum); exclude QUARANTINED from ALL on-hand rollups; intent test: sell quarantined unit → 409. |
 | E6 | Reminder/segment rail (OTP+cap slice) | E2 | features/E6.md | `fu_due_today` needs channel/`/due-today` reconcile; freq-cap = **soft-ceiling**; OTP path short-circuits consent/quiet-hours first. |
 
-_Build order is dependency-aware: #35/#40 have no deps (parallelizable on separate branches); #34/E6 after E2 merges to main; #21 after its E3-shim. (E1 DONE, E2 IN TEST.)_
+_Build order is dependency-aware: #34/E6 after E2 merges to main; #21 after its E3-shim. (E1 DONE; E2/#35/#40 IN TEST; #21 in build.)_
 
 ## 🔨 IN BUILD
 _empty_
@@ -31,6 +30,7 @@ _empty_
 |---|---|---|---|---|
 | E2 | Settings-matrix engine | [#566](https://github.com/brashakg/ims-2.0-railway/pull/566) | `feat/E2-settings-matrix` | Engine (`policy_registry`+`policy_engine`, store>entity>global>env>default) + 5 `/settings/policies/*` endpoints + RBAC + schema-driven **Policy Matrix** tab. **9/9** intent tests (T1-3,6-8,10,11); 583 settings/rbac/policy regression pass; `tsc -b`/`vite build` clean; **E/F pylint clean**. Adversarial pass (3 skeptics): no prod-killer, RBAC SAFE; fixed DB-outage cache-poisoning, atomic audit pre-image, secret decrypt→default, GET-read tightening, malformed-scope 422. **Cross-phase packet tests T4 (cost-floor) / T5 (refund-tier) DEFERRED per PROTOCOL §11 — they gate their consumer, NOT E2.** Tracked-not-fixed (app-wide, flag to orchestrator): entity-scope writes have no entity-ownership check (JWT carries no entity binding; ADMIN/ACCOUNTANT cross-entity by design, cf. `finance.py`). |
 | #35 | Cost & margin masking | [#569](https://github.com/brashakg/ims-2.0-railway/pull/569) | `feat/F35-cost-mask` | `cost_mask.py` (pure) strips cost/margin server-side: catalog list/get/create/update, analytics non-moving, **finance /pnl (G1 fix — endpoint had NO role gate)**. COST_VISIBLE = SUPERADMIN/ADMIN/ACCOUNTANT; CATALOG_MANAGER only on edit form; AREA_MANAGER+ below never (DECISIONS §9). FE CostCell/MarginCell + AddProduct guard + MultiStore/Reorder cells. 7 intent tests (incl AREA_MANAGER excluded, nested pricing, P&L strip-set); tsc/vite clean; E/F pylint clean. Tracked cosmetic follow-up: ReportsPage/InventoryValuation/FinanceDashboard cell-wraps (backend already strips the data they read). |
+| #40 | VIP churn prediction (read-only) | [#571](https://github.com/brashakg/ims-2.0-railway/pull/571) | `feat/F40-vip-churn` | Pure `vip_churn.py` (median-interval model; HIGH = >90d overdue OR >50% of interval; VIP = LTV>=1L AND >=3 orders). ORACLE EOD `_scan_vip_churn` (22:00 is_eod): per-VIP `vip_churn_risk` subdoc + one per-store daily `vip_churn_snapshots` + top-10 Claude (capped, fail-soft) + HIGH anomalies emitted. `GET /crm/vip-churn` (watchlist+trend; ADMIN store-scoped; fail-soft) + `POST /crm/vip-churn/{id}/intervene` (P1 task deduped 30d; audit; WINBACK→PENDING notification row, never sync-send). FE watchlist + Customer360 card + shared modal + nav (SUPERADMIN/ADMIN). 9 tests (T1-5/11/12); tsc/vite clean; E/F pylint clean. No POS/money/flag. |
 
 ## ✅ DONE
 
