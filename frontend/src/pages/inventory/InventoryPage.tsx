@@ -61,6 +61,7 @@ import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverv
 import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
 import { ContactLensInventoryWidget, ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget, TransferRecommendationsWidget } from '../../components/inventory/AdvancedInventoryFeatures';
+import { QuarantineQueue } from '../../components/inventory/QuarantineQueue';
 import { DisplayLayoutPanel } from '../../components/inventory/DisplayLayoutPanel';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
@@ -115,7 +116,7 @@ interface StockMovement {
   createdBy: string;
 }
 
-type ViewTab = 'alerts' | 'catalog' | 'display-layout' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock' | 'rebalance';
+type ViewTab = 'alerts' | 'catalog' | 'display-layout' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock' | 'rebalance' | 'quarantine';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -162,7 +163,7 @@ export function InventoryPage() {
     const tabParam = searchParams.get('tab');
     const fixtureParam = searchParams.get('fixture');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: ViewTab[] = ['alerts', 'catalog', 'display-layout', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock', 'rebalance'];
+      const validTabs: ViewTab[] = ['alerts', 'catalog', 'display-layout', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock', 'rebalance', 'quarantine'];
       if (validTabs.includes(tabParam as ViewTab)) {
         setActiveTab(tabParam as ViewTab);
       }
@@ -195,9 +196,14 @@ export function InventoryPage() {
   const [csvPreview, setCsvPreview] = useState<Array<Record<string, string>>>([]);
   const [isImporting, setIsImporting] = useState(false);
 
+  // F21: count of QUARANTINED units still lacking a printed red label -- drives
+  // the Quarantine tab's badge. Loaded fail-soft for the manager ladder only.
+  const [quarantineUnlabeled, setQuarantineUnlabeled] = useState(0);
+
 
   // Role-based permissions
   const canTransfer = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
+  const canQuarantine = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
   const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
@@ -206,6 +212,25 @@ export function InventoryPage() {
   useEffect(() => {
     loadInventory();
   }, [storeFilter]);
+
+  // F21: refresh the quarantine unlabeled-count badge whenever the store changes
+  // or the Quarantine tab is opened. Fail-soft: a non-manager / no-data response
+  // just leaves the badge at 0.
+  useEffect(() => {
+    if (!canQuarantine) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const sid = storeFilter || user?.activeStoreId;
+        const res = await inventoryApi.getQuarantinedStock(sid ? { store_id: sid } : undefined);
+        if (!cancelled) setQuarantineUnlabeled(res.unlabeled_count || 0);
+      } catch {
+        if (!cancelled) setQuarantineUnlabeled(0);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeFilter, activeTab, canQuarantine]);
 
   // v2-2b: load fixtures + placements for the Zone column. Two batched list
   // calls per store -- never per-row. Fail-soft: a missing backend just
@@ -588,6 +613,7 @@ export function InventoryPage() {
     { id: 'sell-through',   label: 'Sell-through',    icon: TrendingDown },
     { id: 'overstock',      label: 'Overstock',       icon: Boxes },
     { id: 'rebalance',      label: 'Rebalance',       icon: ArrowRightLeft },
+    { id: 'quarantine',     label: 'Quarantine',      icon: AlertTriangle, count: quarantineUnlabeled || undefined },
   ];
 
   /**
@@ -610,7 +636,7 @@ export function InventoryPage() {
   }> = [
     { id: 'catalog',  label: 'Catalog',     icon: Package,         members: ['catalog', 'display-layout'] },
     { id: 'health',   label: 'Stock health',icon: AlertTriangle,   members: ['low-stock', 'non-moving', 'aging', 'alerts'] },
-    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'stock-count'] },
+    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'stock-count', 'quarantine'] },
     { id: 'optical',  label: 'Optical',     icon: Eye,             members: ['serial-numbers', 'contact-lens', 'power-grid'] },
     { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock'] },
   ];
@@ -1289,6 +1315,11 @@ export function InventoryPage() {
       {/* Rebalance: inter-store transfer suggestions + stock accountability */}
       {activeTab === 'rebalance' && (
         <TransferRecommendationsWidget />
+      )}
+
+      {/* F21: defective quarantine queue */}
+      {activeTab === 'quarantine' && (
+        <QuarantineQueue />
       )}
 
       {/* Barcode Management Modal */}
