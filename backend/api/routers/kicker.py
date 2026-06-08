@@ -135,7 +135,10 @@ class ProductSaleKicker(BaseModel):
     order_id: Optional[str] = None
     product_id: Optional[str] = None
     incentive_amount: float = Field(
-        ..., description="Rupees. Negative = clawback (DECISIONS.md s4)."
+        ..., ge=-100000, le=100000,
+        description="Rupees. Negative = clawback (DECISIONS.md s4). Server-bounded "
+                    "+/-1L so a self-loggable kicker can't mint an unbounded "
+                    "payroll-feeding amount (money-integrity: never trust a client amount).",
     )
 
 

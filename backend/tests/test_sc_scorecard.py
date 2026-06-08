@@ -775,3 +775,23 @@ def test_engine_reuses_calculators_not_forks():
     assert eng.assemble_payout is pc.assemble_payout
     assert eng.compute_eligibility is ptc.compute_eligibility
     assert eng.aggregate_mtd is ptc.aggregate_mtd
+
+
+def test_sc_t7b_kicker_amount_is_server_bounded(client, patched):
+    """Adversarial P2: a SALES_STAFF can self-log a kicker that feeds payroll, so
+    the amount MUST have a server ceiling (money-integrity: never trust a client
+    amount). An absurd self-logged amount is rejected 422, not paid out."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token({
+        "user_id": "S9", "username": "s9", "roles": ["SALES_STAFF"],
+        "store_ids": [STORE], "active_store_id": STORE,
+    })
+    hdr = {"Authorization": f"Bearer {token}"}
+    body = {
+        "staff_id": "S9", "date": "2026-06-10", "sku": "ABUSE-1",
+        "brand": "X", "category": "FR", "order_id": "OABUSE",
+        "incentive_amount": 1_000_000_000,  # 100 crore -> must be rejected
+    }
+    r = client.post("/api/v1/incentive/kicker/product-sale", json=body, headers=hdr)
+    assert r.status_code == 422, r.text  # pydantic le=100000 ceiling
