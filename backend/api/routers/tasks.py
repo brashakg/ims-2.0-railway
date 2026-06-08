@@ -408,7 +408,7 @@ async def get_my_tasks(
 
     tasks = [
         _canon_task_out(t)
-        for t in repo.find_many(filters, sort=[("priority", 1), ("due_at", 1)])
+        for t in repo.find_many(filters, sort=[("priority", 1), ("due_at", 1)], limit=0)
     ]
 
     return {"tasks": tasks, "total": len(tasks)}
@@ -436,7 +436,7 @@ async def get_overdue_tasks(
     if active_store:
         filters["store_id"] = active_store
 
-    tasks = [_canon_task_out(t) for t in repo.find_many(filters, sort=[("due_at", 1)])]
+    tasks = [_canon_task_out(t) for t in repo.find_many(filters, sort=[("due_at", 1)], limit=0)]
 
     return {"tasks": tasks, "total": len(tasks)}
 

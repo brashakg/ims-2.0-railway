@@ -1272,8 +1272,10 @@ async def create_order(
                     o = _num_or_none(pdoc.get("offer_price"))
                     if o is not None and o > 0:
                         _offer_by_pid[pid] = o
-        except Exception:
-            # Pricing snapshot is fail-soft -- never block order create.
+        except (AttributeError, TypeError, KeyError) as _snap_exc:
+            # Narrow catch: only structural errors from the snapshot build.
+            # Unexpected exceptions (DB down, etc.) propagate so ops see them.
+            logger.warning("[ORDERS] pricing snapshot partial failure: %s", _snap_exc)
             _cost_by_pid, _mrp_by_pid, _offer_by_pid = {}, {}, {}
 
         # Calculate totals
@@ -2032,6 +2034,7 @@ async def update_order(
         existing = repo.find_by_id(order_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(existing.get("store_id"), current_user)
 
         if existing.get("status") != "DRAFT":
             raise HTTPException(
@@ -2086,6 +2089,7 @@ async def add_order_item(
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") != "DRAFT":
             raise HTTPException(
@@ -2222,6 +2226,7 @@ async def remove_order_item(
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") != "DRAFT":
             raise HTTPException(
@@ -2453,6 +2458,7 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
 
         if not validate_status_transition(order.get("status", ""), "CONFIRMED"):
             raise HTTPException(
@@ -2709,6 +2715,7 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
 
         if not validate_status_transition(order.get("status", ""), "READY"):
             raise HTTPException(
@@ -2737,6 +2744,7 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
 
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(
@@ -2784,6 +2792,7 @@ async def cancel_order(
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") == "DELIVERED":
             raise HTTPException(

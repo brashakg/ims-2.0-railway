@@ -49,6 +49,7 @@ from ..dependencies import (
     get_order_repository,
     get_product_repository,
     get_stock_repository,
+    validate_store_access,
 )
 from ..services import restock_engine
 from ..services import returns_engine as engine
@@ -993,7 +994,9 @@ async def create_return(
             status_code=400, detail="Select at least one item to return"
         )
 
-    store_id = body.store_id or current_user.get("active_store_id")
+    store_id = validate_store_access(
+        body.store_id or current_user.get("active_store_id"), current_user
+    ) or current_user.get("active_store_id")
 
     order = _resolve_order(body)
 

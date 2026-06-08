@@ -411,8 +411,9 @@ export function POSLayout() {
               }
             }
             await orderApi.addPayment(result.order_id, body as any);
-          } catch {
-            // Don't block order — payment can be recorded later
+          } catch (payErr) {
+            const msg = payErr instanceof Error ? payErr.message : 'Payment not recorded';
+            toast.error(`Payment (${p.method}) failed — ${msg}. Record manually in order detail.`);
           }
         }
         store.setOrderResult(result.order_id, result.order_number);

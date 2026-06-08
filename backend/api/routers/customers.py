@@ -647,6 +647,10 @@ async def get_customer(
     if repo is not None:
         customer = repo.find_by_id(customer_id)
         if customer:
+            validate_store_access(
+                customer.get("home_store_id") or customer.get("preferred_store_id"),
+                current_user,
+            )
             return customer
 
     raise HTTPException(status_code=404, detail="Customer not found")
@@ -671,6 +675,10 @@ async def update_customer(
         existing = repo.find_by_id(customer_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Customer not found")
+        validate_store_access(
+            existing.get("home_store_id") or existing.get("preferred_store_id"),
+            current_user,
+        )
 
         update_data = customer.model_dump(exclude_unset=True)
 
