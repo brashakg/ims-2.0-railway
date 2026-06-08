@@ -34,7 +34,9 @@ import { customerApi, orderApi, prescriptionApi } from '../../services/api';
 import { loyaltyApi } from '../../services/api/loyalty';
 import { marketingApi } from '../../services/api/marketing';
 import StoreCreditLedgerCard from '../../components/customers/StoreCreditLedgerCard';
+import { VipInterveneModal } from '../../components/customers/VipInterveneModal';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
 import { PrescriptionHistoryModal } from '../../components/clinical/PrescriptionHistoryModal';
 import clsx from 'clsx';
@@ -94,6 +96,10 @@ export function Customer360Dashboard() {
   const { customerId } = useParams<{ customerId: string }>();
   const navigate = useNavigate();
   const toast = useToast();
+  const { hasRole } = useAuth();
+  // F40: only SUPERADMIN/ADMIN can launch a VIP intervention.
+  const canIntervene = hasRole(['SUPERADMIN', 'ADMIN']);
+  const [vipInterveneOpen, setVipInterveneOpen] = useState(false);
 
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [prescriptions, setPrescriptions] = useState<PrescriptionData[]>([]);
@@ -412,7 +418,15 @@ export function Customer360Dashboard() {
 
       {/* Tab Content */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
-        {activeTab === 'overview' && stats && <OverviewTab stats={stats} lastNpsScore={lastNpsScore} />}
+        {activeTab === 'overview' && stats && (
+          <OverviewTab
+            stats={stats}
+            lastNpsScore={lastNpsScore}
+            vipChurnRisk={customer?.vip_churn_risk}
+            canIntervene={canIntervene}
+            onIntervene={() => setVipInterveneOpen(true)}
+          />
+        )}
         {activeTab === 'prescriptions' && <PrescriptionsTab prescriptions={prescriptions} customerId={customerId!} customerName={customer?.name} />}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
         {activeTab === 'interactions' && <InteractionsTab interactions={interactions} />}
@@ -432,6 +446,17 @@ export function Customer360Dashboard() {
         )}
         {activeTab === 'preferences' && <PreferencesTab customer={customer} />}
       </div>
+
+      {/* F40: VIP intervention dialog — only mounted/usable for SUPERADMIN/ADMIN. */}
+      {canIntervene && customerId && (
+        <VipInterveneModal
+          customerId={customerId}
+          customerName={customer?.name}
+          isOpen={vipInterveneOpen}
+          onClose={() => setVipInterveneOpen(false)}
+          onSuccess={loadCustomerData}
+        />
+      )}
     </div>
   );
 }
@@ -535,6 +560,10 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
 interface OverviewTabProps {
   stats: CustomerStats;
   lastNpsScore: number | null;
+  // F40: personalised VIP churn-risk subdoc (present only for qualifying VIPs).
+  vipChurnRisk?: Customer['vip_churn_risk'];
+  canIntervene: boolean;
+  onIntervene: () => void;
 }
 
 // CRM-9: NPS score label helpers
@@ -549,7 +578,7 @@ function npsColor(score: number): string {
   return 'text-orange-600';
 }
 
-function OverviewTab({ stats, lastNpsScore }: OverviewTabProps) {
+function OverviewTab({ stats, lastNpsScore, vipChurnRisk, canIntervene, onIntervene }: OverviewTabProps) {
   return (
     <div className="grid grid-cols-2 gap-6">
       {/* Left Column */}
@@ -565,6 +594,41 @@ function OverviewTab({ stats, lastNpsScore }: OverviewTabProps) {
 
       {/* Right Column */}
       <div className="space-y-4">
+        {/* F40: VIP churn-risk card — personalised buying rhythm, shown only for
+            qualifying VIPs (subdoc present). Replaces the flat recency note for
+            this customer. Risk shown as coloured text only, no background fill. */}
+        {vipChurnRisk && (
+          <div className="bg-white border border-gray-200 rounded-lg p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-gray-700">VIP churn risk</h3>
+              {vipChurnRisk.risk_label === 'HIGH' ? (
+                <span className="text-sm font-medium text-red-600">HIGH</span>
+              ) : vipChurnRisk.risk_label === 'WATCH' ? (
+                <span className="text-sm font-medium text-amber-600">WATCH</span>
+              ) : (
+                <span className="text-sm text-gray-500">{vipChurnRisk.risk_label}</span>
+              )}
+            </div>
+            <div className="text-sm text-gray-600 space-y-0.5">
+              <p>Usual visit: every {vipChurnRisk.usual_interval_days} days</p>
+              <p>Last visit: {vipChurnRisk.last_purchase_days_ago} days ago</p>
+              <p>Overdue by: {vipChurnRisk.overdue_by_days} days</p>
+            </div>
+            {vipChurnRisk.narrative && (
+              <p className="text-xs text-gray-500 italic mt-1">{vipChurnRisk.narrative}</p>
+            )}
+            {canIntervene && (
+              <button
+                type="button"
+                onClick={onIntervene}
+                className="mt-2 text-sm text-blue-600 underline hover:text-blue-800"
+              >
+                Intervene
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Last Order */}
         <div className="bg-gray-50 rounded-lg p-4">
           <h3 className="text-lg font-semibold text-gray-900 mb-3">Recent Activity</h3>

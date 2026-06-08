@@ -15,13 +15,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_customer_repository,
     get_order_repository,
     get_prescription_repository,
     filter_docs_by_store,
+    get_task_repository,
+    get_audit_repository,
 )
+from ..services.task_triggers import create_system_task
 
 router = APIRouter()
 
@@ -464,6 +467,186 @@ async def get_churn_risk_customers(
         raise HTTPException(
             status_code=500, detail="Failed to retrieve churn risk data"
         )
+
+
+# ============================================================================
+# F40 - VIP churn watchlist (#40)
+# Personalised-interval VIP churn (vip_churn_risk subdoc written nightly by
+# ORACLE's EOD scan). Read-only watchlist + an admin "Intervene" action that
+# creates a P1 task (deduped per 30-day window). SUPERADMIN/ADMIN only;
+# ADMIN is store-scoped. Never touches orders / prices / balances.
+# ============================================================================
+
+_VIP_INTERVENTIONS = ("PERSONAL_CALL", "EXCLUSIVE_OFFER", "LOYALTY_BONUS", "WINBACK_WHATSAPP")
+
+
+class VipInterveneBody(BaseModel):
+    intervention_type: Literal["PERSONAL_CALL", "EXCLUSIVE_OFFER", "LOYALTY_BONUS", "WINBACK_WHATSAPP"]
+    notes: str = Field(default="", max_length=500)
+
+
+def _vip_store_guard(current_user: dict, store_id: Optional[str]) -> Optional[str]:
+    """SUPERADMIN sees any/all stores; ADMIN must operate within an owned store.
+    Returns the effective store_id (may be None for SUPERADMIN all-stores)."""
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" in roles:
+        return store_id
+    owned = list(current_user.get("store_ids", []) or [])
+    active = current_user.get("active_store_id")
+    if active and active not in owned:
+        owned.append(active)
+    if store_id is None:
+        store_id = active or (owned[0] if owned else None)
+    if store_id not in owned:
+        raise HTTPException(status_code=403, detail="Not permitted for this store")
+    return store_id
+
+
+@router.get("/vip-churn")
+async def get_vip_churn_watchlist(
+    store_id: Optional[str] = Query(None),
+    risk_label: Optional[Literal["WATCH", "HIGH"]] = Query(None),
+    sort_by: Literal["overdue_by_days", "ltv", "last_purchase_days_ago"] = Query("overdue_by_days"),
+    limit: int = Query(50, ge=1, le=500),
+    current_user: dict = Depends(require_roles("SUPERADMIN", "ADMIN")),
+):
+    """Ranked VIP-churn watchlist (WATCH/HIGH) + the latest daily snapshot trend.
+    Fail-soft: no DB -> empty envelope (200, never 500)."""
+    store_id = _vip_store_guard(current_user, store_id)
+    db = _crm_get_db()
+    if db is None:
+        return {"customers": [], "trend": None, "total": 0}
+    labels = [risk_label] if risk_label else ["WATCH", "HIGH"]
+    query: dict = {"vip_churn_risk.risk_label": {"$in": labels}}
+    if store_id:
+        query["$or"] = [{"store_ids": store_id}, {"primary_store_id": store_id}, {"store_id": store_id}]
+    try:
+        rows = list(db.get_collection("customers").find(query, {"_id": 0}))
+    except Exception:  # noqa: BLE001
+        rows = []
+
+    def _ltv(c: dict) -> float:
+        return float(c.get("total_lifetime_value", c.get("ltv", 0)) or 0)
+
+    def _sort_key(c: dict):
+        if sort_by == "ltv":
+            return -_ltv(c)
+        return -float((c.get("vip_churn_risk") or {}).get(sort_by, 0) or 0)
+
+    rows.sort(key=_sort_key)
+    customers = []
+    for c in rows[:limit]:
+        vr = c.get("vip_churn_risk") or {}
+        customers.append({
+            "customer_id": c.get("customer_id"),
+            "name": c.get("name") or c.get("full_name") or "",
+            "store_id": c.get("primary_store_id") or (c.get("store_ids") or [None])[0],
+            "ltv": round(_ltv(c), 2),
+            "vip_churn_risk": {k: vr.get(k) for k in (
+                "usual_interval_days", "last_purchase_days_ago", "overdue_by_days",
+                "risk_score", "risk_label", "narrative")},
+        })
+    trend = None
+    try:
+        snap_q = {"store_id": store_id} if store_id else {}
+        snap = list(db.get_collection("vip_churn_snapshots").find(snap_q, {"_id": 0})
+                    .sort("scanned_at", -1).limit(1))
+        if snap:
+            s = snap[0]
+            trend = {"scanned_at": s.get("scanned_at"), "vip_count": s.get("vip_count"),
+                     "watch_count": s.get("watch_count"), "high_risk_count": s.get("high_risk_count")}
+    except Exception:  # noqa: BLE001
+        trend = None
+    return {"customers": customers, "trend": trend, "total": len(customers)}
+
+
+@router.post("/vip-churn/{customer_id}/intervene")
+async def intervene_vip_churn(
+    customer_id: str,
+    body: VipInterveneBody,
+    current_user: dict = Depends(require_roles("SUPERADMIN", "ADMIN")),
+):
+    """Create a P1 CRM task for a VIP-churn intervention (deduped per 30-day window
+    via the tasks engine). Audited. WINBACK_WHATSAPP additionally queues a PENDING
+    notification row that MEGAPHONE drains (honouring DISPATCH_MODE) -- it does NOT
+    send synchronously. No order/price/balance is touched."""
+    cust = None
+    try:
+        repo = get_customer_repository()
+        cust = repo.find_by_id(customer_id) if repo else None
+    except Exception:  # noqa: BLE001
+        cust = None
+    if not cust:
+        raise HTTPException(status_code=404, detail="customer not found")
+    # The intervene target store is the CUSTOMER's own, resolved across EVERY
+    # canonical store field (TechCherry=preferred_store_id, native=home_store_id,
+    # legacy=primary_store_id/store_ids/store_id). Do NOT backfill to the caller's
+    # store -- a non-SUPERADMIN who doesn't own the customer's store is DENIED
+    # (was a cross-store write IDOR: P1-grade task/audit/notification on any store).
+    store_id = (cust.get("preferred_store_id") or cust.get("home_store_id")
+                or cust.get("primary_store_id") or (cust.get("store_ids") or [None])[0]
+                or cust.get("store_id"))
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" not in roles:
+        owned = list(current_user.get("store_ids", []) or [])
+        active = current_user.get("active_store_id")
+        if active and active not in owned:
+            owned.append(active)
+        if not store_id or store_id not in owned:
+            raise HTTPException(status_code=403, detail="Not permitted to intervene for this customer's store")
+
+    # 30-day rolling window so a fresh window allows a new task; same window dedupes.
+    window = (datetime.now() - datetime(2020, 1, 1)).days // 30
+    dedupe_ref = f"vip_intervene:{customer_id}:{window}"
+    task = create_system_task(
+        repo=get_task_repository(),
+        title=f"VIP win-back ({body.intervention_type})",
+        description=(body.notes or "")[:500] or f"VIP churn intervention for {customer_id}",
+        priority="P1",
+        category="CRM",
+        store_id=store_id,
+        dedupe_ref=dedupe_ref,
+    )
+    already_intervened = task is None
+
+    try:
+        arepo = get_audit_repository()
+        if arepo is not None:
+            arepo.create({
+                "action": "VIP_CHURN_INTERVENTION",
+                "entity_type": "customer",
+                "entity_id": customer_id,
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("full_name") or current_user.get("username"),
+                "store_id": store_id,
+                "severity": "INFO",
+                "source": "crm",
+                "before_state": {},
+                "after_state": {"intervention_type": body.intervention_type,
+                                "notes": body.notes, "deduped": already_intervened},
+            })
+    except Exception:  # noqa: BLE001
+        pass
+
+    if body.intervention_type == "WINBACK_WHATSAPP" and not already_intervened:
+        db = _crm_get_db()
+        if db is not None:
+            try:
+                phone = (cust or {}).get("mobile") or (cust or {}).get("phone")
+                db.get_collection("notification_logs").insert_one({
+                    "notification_id": f"NTF-VIP-{uuid.uuid4().hex[:10]}",
+                    "kind": "vip_winback",
+                    "channel": "whatsapp",
+                    "customer_id": customer_id,
+                    "customer_phone": phone,
+                    "status": "PENDING",
+                    "created_at": datetime.now(),
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {"ok": True, "task_id": (task or {}).get("task_id"),
+            "intervention_type": body.intervention_type, "already_intervened": already_intervened}
 
 
 @router.get("/customers/{customer_id}/cl-refill-status")

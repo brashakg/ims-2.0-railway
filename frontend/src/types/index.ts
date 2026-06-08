@@ -196,6 +196,19 @@ export interface Customer {
   marketing_consent?: boolean;
   // POS-4: per-customer credit limit (khata). 0 = unlimited.
   credit_limit?: number;
+  // F40: personalised VIP churn-risk subdoc, written nightly by ORACLE for
+  // VIP customers (LTV >= 1,00,000 AND >= 3 completed orders). Present only on
+  // qualifying customers; surfaced by the Customer 360 VIP card. Shape mirrors
+  // VipChurnRisk in services/api/crm.ts (kept inline to keep this module free
+  // of service-layer imports).
+  vip_churn_risk?: {
+    usual_interval_days: number;
+    last_purchase_days_ago: number;
+    overdue_by_days: number;
+    risk_score: number;
+    risk_label: 'NONE' | 'WATCH' | 'HIGH';
+    narrative: string | null;
+  };
 }
 
 export interface Patient {

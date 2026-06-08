@@ -30,6 +30,7 @@ const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m
 const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
 const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
 const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
+const VipChurnWatchlistPage = lazy(() => import('./pages/customers/VipChurnWatchlistPage').then(m => ({ default: m.VipChurnWatchlistPage })));
 const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
 const LoyaltyLedger = lazy(() => import('./pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
@@ -278,6 +279,17 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <CustomerSegmentation />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* F40: VIP Churn Watchlist — overdue high-LTV customers.
+                      Read-only retention oversight: SUPERADMIN / ADMIN only. */}
+                  <Route
+                    path="customers/vip-churn-watchlist"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <VipChurnWatchlistPage />
                       </ProtectedRoute>
                     }
                   />
