@@ -161,9 +161,17 @@ def _on_hand_by_product(
     """
     if db is None or not product_ids:
         return {}
-    avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
+    # E3: reuse the canonical on-hand allowlist + the explicit non-sellable
+    # exclusion list (QUARANTINED / UNDER_AUDIT / BLIND_COUNT / TRANSFERRED /
+    # SOLD / VOID / DAMAGED / RTV) from the item-event ledger service so every
+    # rollup shares one definition. The $nin makes the exclusion intent-explicit
+    # even for a unit whose status was set outside the allowlist.
+    from ..services.item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
+
+    avail = list(ON_HAND_STATUSES)
     match: dict = {
         "product_id": {"$in": list(product_ids)},
+        "status": {"$nin": list(EXCLUDED_STATUSES)},
         "$or": [
             {"status": {"$in": avail}},
             {"status": {"$exists": False}},
