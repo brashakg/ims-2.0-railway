@@ -74,6 +74,11 @@ class PayoutSnapshotRepository(BaseRepository):
             "locked_by": data.get("locked_by") if status == "LOCKED" else None,
             "paid_at": None,
             "paid_by": None,
+            # SC payroll-feed guard (P0-4): stamped the first time a payroll
+            # run consumes this snapshot; a re-run sees it set and won't
+            # double-count.
+            "payroll_fed_at": None,
+            "payroll_run_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -118,6 +123,37 @@ class PayoutSnapshotRepository(BaseRepository):
     # ------------------------------------------------------------------
     # State transitions
     # ------------------------------------------------------------------
+    def stamp_payroll_fed(
+        self, snapshot_id: str, payroll_run_id: str
+    ) -> bool:
+        """Atomically stamp payroll_fed_at + payroll_run_id on a snapshot the
+        FIRST time a payroll-run consumes it.
+
+        Single-document `find_one_and_update` guarded on `payroll_fed_at: null`
+        (P0-1 / P0-4): exactly one run can claim the feed. Returns True only if
+        THIS call did the stamping (i.e. the run is the first consumer); False
+        if it was already fed (a re-run must NOT re-add the incentive).
+        """
+        now = datetime.now()
+        try:
+            from pymongo import ReturnDocument
+
+            updated = self.collection.find_one_and_update(
+                {"snapshot_id": snapshot_id, "payroll_fed_at": None},
+                {
+                    "$set": {
+                        "payroll_fed_at": now,
+                        "payroll_run_id": payroll_run_id,
+                        "updated_at": now,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            return updated is not None
+        except Exception as e:  # noqa: BLE001
+            print(f"[PAYOUT] stamp_payroll_fed failed: {e}")
+            return False
+
     def mark_paid(self, snapshot_id: str, paid_by: str) -> Optional[Dict]:
         existing = self.find_by_id(snapshot_id)
         if not existing:

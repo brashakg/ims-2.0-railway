@@ -47,8 +47,11 @@ from database.repositories.payout_snapshot_repository import (
     PayoutSnapshotRepository,
 )
 from database.repositories.points_log_repository import PointsLogRepository
+from database.repositories.product_incentive_log_repository import (
+    ProductIncentiveLogRepository,
+)
 from api.services.points_calculator import aggregate_mtd
-from api.services.payout_calculator import assemble_payout
+from api.services import scorecard_engine
 from api.services.csv_safe import safe_writer, BOM
 
 logger = logging.getLogger(__name__)
@@ -362,6 +365,18 @@ class MarkPaidRequest(BaseModel):
 # ============================================================================
 
 
+def _kicker_repo() -> Optional[ProductIncentiveLogRepository]:
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return ProductIncentiveLogRepository(
+            db.get_collection("product_incentive_log")
+        )
+    except Exception:
+        return None
+
+
 def _compute_payout(
     *,
     store_id: str,
@@ -370,13 +385,15 @@ def _compute_payout(
     overrides: PreviewOverrides,
 ) -> Dict[str, Any]:
     settings_repo = _settings_repo()
-    settings = (
-        settings_repo.get_for_store(store_id)
-        if settings_repo
-        else IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(
-            store_id
+    if settings_repo is not None:
+        # E2 hierarchy (global -> entity -> store) via the shared resolver.
+        settings = scorecard_engine.resolve_settings(
+            store_id, settings_repo=settings_repo
         )
-    )  # type: ignore
+    else:
+        settings = IncentiveSettingsRepository.__new__(
+            IncentiveSettingsRepository
+        )._defaults(store_id)  # type: ignore
 
     # Inputs
     if overrides.this_year_sale is not None:
@@ -413,15 +430,17 @@ def _compute_payout(
     mtd_data = _build_mtd_data(store_id, year, month)
     name_lookup = _name_lookup_for(store_id, mtd_data)
 
-    envelope = assemble_payout(
-        inputs=inputs,
+    # Engine folds the Product-Incentive Kicker rupees into each staff line.
+    envelope = scorecard_engine.compute_payout(
+        store_id=store_id,
+        year=year,
+        month=month,
         settings=settings,
+        inputs=inputs,
         mtd_data=mtd_data,
         name_lookup=name_lookup,
+        kicker_repo=_kicker_repo(),
     )
-    envelope["store_id"] = store_id
-    envelope["year"] = year
-    envelope["month"] = month
     return envelope
 
 
@@ -604,6 +623,48 @@ async def mark_paid(
     return _serialize(updated)
 
 
+@router.get("/payroll-feed")
+async def payroll_feed(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    year: int = Query(..., ge=2024, le=2100),
+    month: int = Query(..., ge=1, le=12),
+):
+    """The SINGLE incentive source for payroll (P0-4). Returns
+    {staff_id: total_incentive_rupees} from the LOCKED/PAID snapshot --
+    slab payout + manager bonus + product incentive per staff. 404 when no
+    locked snapshot exists (payroll then uses 0; never estimates).
+
+    ACCOUNTANT / SUPERADMIN / ADMIN only."""
+    roles = _user_role_set(current_user)
+    if not (roles & {"ACCOUNTANT", "SUPERADMIN", "ADMIN"}):
+        raise HTTPException(
+            status_code=403,
+            detail="Only accountant / admin / superadmin can read the payroll feed",
+        )
+    store = _resolve_store(current_user, store_id)
+    repo = _snapshot_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    snap = repo.find_locked(store, year, month)
+    if not snap:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No locked payout snapshot for {year}-{month:02d}",
+        )
+    feed = scorecard_engine.incentive_map_from_snapshot(snap)
+    return {
+        "store_id": store,
+        "year": year,
+        "month": month,
+        "snapshot_id": snap.get("snapshot_id"),
+        "status": snap.get("status"),
+        "feed": feed,
+        "payroll_fed_at": _serialize(snap.get("payroll_fed_at")),
+        "payroll_run_id": snap.get("payroll_run_id"),
+    }
+
+
 @router.get("/export/{snapshot_id}.csv")
 async def export_csv(
     snapshot_id: str,
@@ -661,6 +722,7 @@ async def export_csv(
             "L2",
             "L3",
             "Total payout",
+            "Product incentive",
         ]
     )
     for s in doc.get("staff_payouts") or []:
@@ -676,6 +738,7 @@ async def export_csv(
                 plv.get("L2"),
                 plv.get("L3"),
                 s.get("total_payout"),
+                s.get("product_incentive", 0.0),
             ]
         )
     w.writerow([])

@@ -80,6 +80,7 @@ from .routers import (
     walkouts_router,
     points_router,
     payout_router,
+    kicker_router,
     webhooks_router,
     loyalty_router,
     vendor_portal_router,
@@ -1102,6 +1103,9 @@ app.include_router(
     points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"]
 )
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
+app.include_router(
+    kicker_router, prefix="/api/v1/incentive/kicker", tags=["Product Incentive"]
+)
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
 app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"])

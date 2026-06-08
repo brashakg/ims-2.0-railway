@@ -14,6 +14,8 @@ import type {
   LeaderboardResponse,
   IncentiveSettings,
   EligibilityBand,
+  KickerEntry,
+  KickerRollupResponse,
 } from '../../types';
 
 export const incentiveApi = {
@@ -168,6 +170,72 @@ export const incentiveApi = {
       payload,
       { params: storeId ? { store_id: storeId } : undefined },
     );
+    return r.data;
+  },
+
+  /** SC E2 — resolved settings (global -> entity -> store) with per-key source. */
+  getEffectiveSettings: async (
+    storeId?: string, entityId?: string,
+  ): Promise<IncentiveSettings & { _resolution_sources?: Record<string, string> }> => {
+    const r = await api.get('/incentive/points/settings/effective', {
+      params: {
+        ...(storeId ? { store_id: storeId } : {}),
+        ...(entityId ? { entity_id: entityId } : {}),
+      },
+    });
+    return r.data;
+  },
+
+  /** SC E2 — set chain-wide calculator defaults at entity/global scope. */
+  updateScopeSettings: async (
+    payload: {
+      scope: 'global' | 'entity';
+      entity_id?: string;
+      eligibility_bands?: EligibilityBand[];
+      growth_targets?: Record<string, number>;
+      base_rates?: Record<string, number>;
+      discount_kill_threshold?: number;
+      discount_multipliers?: Array<{ max_pct: number; multiplier: number }>;
+      staff_weightages?: Record<string, number>;
+      visufit_gate_threshold?: number;
+      visufit_gate_enabled?: boolean;
+    },
+  ): Promise<Record<string, unknown>> => {
+    const r = await api.patch('/incentive/points/settings/scope', payload);
+    return r.data;
+  },
+
+  /** SC Kicker — log a product-incentive sale (manual). 409 on dup order+sku. */
+  logProductSale: async (
+    payload: {
+      staff_id: string;
+      date: string;
+      sku: string;
+      brand: string;
+      category: string;
+      description?: string;
+      order_id?: string;
+      product_id?: string;
+      incentive_amount: number;
+    },
+    storeId?: string,
+  ): Promise<KickerEntry> => {
+    const r = await api.post('/incentive/kicker/product-sale', payload, {
+      params: storeId ? { store_id: storeId } : undefined,
+    });
+    return r.data;
+  },
+
+  /** SC Kicker — monthly product-incentive rollup per staff for 'YYYY-MM'. */
+  getKickerRollup: async (
+    ym: string, storeId?: string, staffId?: string,
+  ): Promise<KickerRollupResponse> => {
+    const r = await api.get(`/incentive/kicker/${ym}`, {
+      params: {
+        ...(storeId ? { store_id: storeId } : {}),
+        ...(staffId ? { staff_id: staffId } : {}),
+      },
+    });
     return r.data;
   },
 };

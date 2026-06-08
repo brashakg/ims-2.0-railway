@@ -1329,22 +1329,72 @@ class PayrollBatchAction(BaseModel):
     entity_id: Optional[str] = None
 
 
-def _fetch_incentive(db, employee_id: str, month: int, year: int) -> float:
-    """Best-effort monthly incentive from the incentives collection."""
-    if db is None:
-        return 0.0
+def _incentive_feed_for_store(db, store_id: Optional[str], month: int, year: int) -> dict:
+    """{staff_id: rupees} from the LOCKED/PAID payout snapshot for a store-month.
+
+    P0-4: the SC locked snapshot is the ONLY incentive source for payroll. The
+    old `incentives`-collection read path is RETIRED -- payroll never sums two
+    sources. No locked snapshot -> {} -> every staff gets 0 (never an estimate).
+    """
+    if db is None or not store_id:
+        return {}
     try:
-        doc = db.get_collection("incentives").find_one(
-            {"staff_id": employee_id, "month": month, "year": year}
+        from database.repositories.payout_snapshot_repository import (
+            PayoutSnapshotRepository,
         )
-        if not doc:
-            return 0.0
-        for key in ("incentive_amount", "amount", "total", "payout", "net_incentive"):
-            v = doc.get(key)
-            if isinstance(v, (int, float)):
-                return float(v)
-        return 0.0
+        from api.services import scorecard_engine
+
+        repo = PayoutSnapshotRepository(db.get_collection("payout_snapshots"))
+        return scorecard_engine.get_incentive_for_payroll(
+            store_id, year, month, snapshot_repo=repo
+        )
     except Exception:  # pragma: no cover - defensive
+        return {}
+
+
+def _stamp_consumed_snapshots(db, feed_cache: dict, month: int, year: int,
+                              run_by: Optional[str]) -> None:
+    """Stamp payroll_fed_at on each snapshot whose feed this run consumed.
+
+    Idempotent across re-runs: the repo guard (find_one_and_update on
+    payroll_fed_at:null) means only the FIRST run stamps. A later run still
+    reads the SAME snapshot total (no double-count), it just doesn't re-stamp.
+    Fail-soft -- a stamp failure never aborts the payroll run.
+    """
+    if db is None:
+        return
+    try:
+        from database.repositories.payout_snapshot_repository import (
+            PayoutSnapshotRepository,
+        )
+
+        repo = PayoutSnapshotRepository(db.get_collection("payout_snapshots"))
+    except Exception:  # pragma: no cover - defensive
+        return
+    run_id = run_by or "payroll-run"
+    for store_id, feed in (feed_cache or {}).items():
+        if not feed:
+            continue
+        try:
+            snap = repo.find_locked(store_id, year, month)
+            if snap and snap.get("snapshot_id") and snap.get("payroll_fed_at") is None:
+                repo.stamp_payroll_fed(
+                    snap["snapshot_id"], f"{run_id}:{year}-{month:02d}"
+                )
+        except Exception:  # pragma: no cover - defensive
+            continue
+
+
+def _fetch_incentive(db, employee_id: str, month: int, year: int,
+                     store_id: Optional[str] = None) -> float:
+    """Monthly incentive for one employee from the LOCKED payout snapshot.
+
+    P0-4: reads exactly ONE source (the SC snapshot feed). Returns 0.0 when
+    the employee has no locked-snapshot incentive for the month."""
+    feed = _incentive_feed_for_store(db, store_id, month, year)
+    try:
+        return round(float(feed.get(employee_id, 0.0)), 2)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
         return 0.0
 
 
@@ -1399,12 +1449,30 @@ async def run_payroll(
         payroll_coll = db.get_collection("payroll")
         rows = []
         totals = {"gross": 0.0, "deductions": 0.0, "net": 0.0, "employer_cost": 0.0}
+        # P0-4: incentive feed comes from the LOCKED payout snapshot ONLY, one
+        # store-scoped fetch per store (cached across configs in the loop).
+        _feed_cache: Dict[str, dict] = {}
+
+        def _store_feed(store_id: Optional[str]) -> dict:
+            if not store_id:
+                return {}
+            if store_id not in _feed_cache:
+                _feed_cache[store_id] = _incentive_feed_for_store(
+                    db, store_id, req.month, req.year
+                )
+            return _feed_cache[store_id]
+
         for cfg in configs:
             emp = cfg.get("employee_id")
+            cfg_store = cfg.get("store_id")
             lwp = float(req.lwp_days.get(emp, 0) or 0)
             incentive = (req.incentives or {}).get(emp)
             if incentive is None:
-                incentive = _fetch_incentive(db, emp, req.month, req.year)
+                feed = _store_feed(cfg_store)
+                try:
+                    incentive = round(float(feed.get(emp, 0.0)), 2)
+                except (TypeError, ValueError):
+                    incentive = 0.0
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
             breakdown = compute_payroll(
@@ -1468,6 +1536,14 @@ async def run_payroll(
             totals["deductions"] += breakdown["deductions"]["total_deductions"]
             totals["net"] += breakdown["net_pay"]
             totals["employer_cost"] += breakdown["ctc_cost"]
+        # P0-4 double-feed guard: stamp payroll_fed_at on each consumed
+        # snapshot. The repo's find_one_and_update is guarded on
+        # payroll_fed_at:null so a SECOND run for the same month sees it
+        # already stamped and the (re-read) feed is NOT added twice -- the
+        # rows above already reflect the same single snapshot total.
+        if not req.dry_run:
+            _stamp_consumed_snapshots(db, _feed_cache, req.month, req.year,
+                                      current_user.get("user_id"))
         totals = {k: round(v, 2) for k, v in totals.items()}
         return {
             "status": "success",

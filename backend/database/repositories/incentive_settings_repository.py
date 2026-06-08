@@ -105,6 +105,62 @@ class IncentiveSettingsRepository(BaseRepository):
             self.collection.insert_one(doc)
         return self.get_for_store(store_id)
 
+    # ------------------------------------------------------------------
+    # E2 scope resolution (global -> entity -> store)
+    # ------------------------------------------------------------------
+    # Non-store scopes are keyed by a sentinel store_id so the EXISTING
+    # unique `store_id` index stays satisfied (one global doc, one per
+    # entity, one per store). scorecard_engine owns the scope-key shapes
+    # (GLOBAL_SCOPE_ID == "__global__", entity == "__entity__:<id>").
+
+    def get_raw(self, scope_key: str) -> Optional[Dict]:
+        """Return the RAW settings doc for a scope key (store_id /
+        sentinel), WITHOUT defaults backfill, or None. Used by the E2
+        resolver so it can tell "key present in this scope" from "absent"."""
+        try:
+            return self.collection.find_one({"store_id": scope_key})
+        except Exception:
+            return None
+
+    def upsert_scope(
+        self,
+        scope_key: str,
+        patch: Dict,
+        *,
+        scope: str,
+        entity_id: Optional[str],
+        updated_by: str,
+    ) -> Dict:
+        """Upsert calculator-input keys at a given scope (global / entity /
+        store). `scope_key` is the store_id (store scope) or the sentinel
+        for global / entity. Stamps `scope` + `entity_id` provenance."""
+        now = datetime.now()
+        set_doc = {
+            **patch,
+            "scope": scope,
+            "entity_id": entity_id,
+            "updated_at": now,
+            "updated_by": updated_by,
+        }
+        existing = self.collection.find_one({"store_id": scope_key})
+        if existing:
+            self.collection.update_one(
+                {"store_id": scope_key}, {"$set": set_doc}
+            )
+        else:
+            doc = {
+                "store_id": scope_key,
+                "_id": scope_key,
+                "scope": scope,
+                "entity_id": entity_id,
+                **patch,
+                "created_at": now,
+                "updated_at": now,
+                "updated_by": updated_by,
+            }
+            self.collection.insert_one(doc)
+        return self.get_raw(scope_key) or {}
+
     def update_visufit_gate(
         self,
         store_id: str,
