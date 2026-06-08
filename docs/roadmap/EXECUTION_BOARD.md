@@ -26,7 +26,7 @@ _empty_
 
 | # | Name | PR | Branch | Notes |
 |---|---|---|---|---|
-| F24 | Optometrist→retail conversion | _building_ | `feat/F24-conversion-dashboard` | **IN BUILD.** Read-only conversion dashboard (eye_tests $lookup orders, 7-day window, role-gated revenue per DECISIONS §3 — OPTOMETRIST sees no revenue), + fixes a latent RBAC gap on the existing optometrist-stats endpoint. No order/POS mutation. Adversarial-verify before PR. |
+| F24 | Optometrist→retail conversion | [#589](https://github.com/brashakg/ims-2.0-railway/pull/589) | `feat/F24-conversion-dashboard` | Read-only conversion dashboard (COMPLETED eye_tests × customer orders, 7-day window, most-recent-test attribution; role-gated revenue per DECISIONS §3 — OPTOMETRIST sees no rupees). Fixes a latent RBAC gap (stats route was AUTHENTICATED-open). **Adversarial: 1 P1 FIXED** — cross-store money IDOR on the stats route (now `validate_store_access`, mirrors the dashboard; 403 regression added); revenue role-strip confirmed clean (server-side, None-not-0); conversion math sound. No order/POS mutation. 19 tests + rbac 29; smoke 1031; E/F + tsc/vite clean. Follow-ups: admin-empty-store_ids → all-stores, null test_id credit-drop, prescriptions-twin gap, days-floor. |
 
 ## ✅ DONE
 
