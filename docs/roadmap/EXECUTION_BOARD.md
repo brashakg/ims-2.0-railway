@@ -26,6 +26,7 @@ _empty_
 
 | # | Name | PR | Branch | Notes |
 |---|---|---|---|---|
+| PM | Unified product master (N5) | [#585](https://github.com/brashakg/ims-2.0-railway/pull/585) | `feat/PM-product-master` | Spine-first Mongo product master + SKU service (legacy-permissive) + `HEARING_AID` + flag-gated compensation mirror. **Adversarial: 0 P0/P1 — no live Shopify/PG write possible on a fresh deploy** (double-gated: `pm.mirror_enabled` default False AND `DISPATCH_MODE=live`; even both-on makes no external call — NEXUS reconciles from the spine); spine single-doc, uncorrupted by mirror failure; legacy SKUs + legacy `POST /products` untouched. **4 P2s FIXED:** dead `/categories` route remounted under `/master/` (+TestClient regression), 3 uncreated indexes added to `ensure_indexes`, false-OK mirror → SKIPPED, enum over-claim corrected. 29 tests + rbac 29; smoke 1030; E/F clean. Follow-ups (R2): `AddProductPage` repoint, backfill, IST timestamps. |
 
 ## ✅ DONE
 
