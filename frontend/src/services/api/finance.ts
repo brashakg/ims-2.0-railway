@@ -82,4 +82,42 @@ export const financeApi = {
     const response = await api.get('/finance/tally/sales-jv', { params, responseType: 'blob' });
     return response.data as Blob;
   },
+
+  // --- F34 Global target ticker ---
+  // Privacy-stratified server-side: management roles get rupee + pace fields;
+  // floor roles get pct_complete only (money keys absent from the payload).
+  getTargetTicker: async (storeId?: string) => {
+    const response = await api.get('/finance/target-ticker', {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as TickerResponse;
+  },
+
+  updateTickerSettings: async (payload: { milestone_pcts: number[]; refresh_seconds: number }) => {
+    const response = await api.post('/finance/target-ticker/settings', payload);
+    return response.data as { milestone_pcts: number[]; refresh_seconds: number; saved: boolean };
+  },
 };
+
+// Per-store ticker entry. Money keys are OPTIONAL because they are ABSENT (not
+// null) for floor roles -- the server never sends them, so the client can never
+// reveal a rupee figure by flipping a flag.
+export interface TickerStore {
+  store_id: string;
+  store_name?: string;
+  monthly_target?: number | null;
+  mtd_revenue?: number;
+  pct_complete: number;
+  days_elapsed: number;
+  days_in_month: number;
+  pace_revenue?: number;
+  pace_delta?: number;
+  milestones_fired: number[];
+  no_target: boolean;
+}
+
+export interface TickerResponse {
+  raw_visible: boolean;
+  stores: TickerStore[];
+  ticker_refresh_seconds: number;
+}
