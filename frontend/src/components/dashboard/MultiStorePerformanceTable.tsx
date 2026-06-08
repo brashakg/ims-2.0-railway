@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { ChevronDown, ChevronUp, TrendingUp, TrendingDown } from 'lucide-react';
 import clsx from 'clsx';
+import { MarginCell } from '../common/CostCell';
 
 export interface StoreMetrics {
   storeId: string;
@@ -245,7 +246,7 @@ export function MultiStorePerformanceTable({ stores, onStoreClick, loading }: Mu
                     {/* Margin % */}
                     <td className="px-4 py-3 text-right">
                       <span className={clsx('px-3 py-1 rounded-lg font-semibold text-sm', marginColor)}>
-                        {store.marginPercent.toFixed(1)}%
+                        <MarginCell value={store.marginPercent} />
                       </span>
                     </td>
 

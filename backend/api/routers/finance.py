@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
+from ..services.cost_mask import can_see_cost
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
@@ -704,7 +705,7 @@ async def get_pnl(
     payroll_cost = _payroll_cost(db, store_id, from_date, to_date)
     net_profit = gross_profit - total_expenses - payroll_cost
 
-    return {
+    pnl = {
         "revenue": revenue,
         "cogs": round(cogs, 2),
         # When cogs_is_estimated=True, some cost lines used a 60%-of-revenue
@@ -722,6 +723,15 @@ async def get_pnl(
         "net_margin": round(net_profit / revenue * 100, 1) if revenue > 0 else 0,
         "tax_collected": tax,
     }
+    # F35 / GAP_ANALYSIS G1: /pnl is store-scoped only (NO role gate), so the cost,
+    # profit and margin economics must be stripped for any role not in
+    # COST_VISIBLE_ROLES (excludes AREA_MANAGER per DECISIONS sec 9). Revenue + tax
+    # (top line) stay visible. Without this, gross_margin/cogs reach every role.
+    if not can_see_cost(current_user):
+        for _f in ("cogs", "cogs_is_estimated", "cogs_estimated_lines", "cogs_total_lines",
+                   "gross_profit", "gross_margin", "net_profit", "net_margin", "payroll_cost"):
+            pnl.pop(_f, None)
+    return pnl
 
 
 # === GST Management ===

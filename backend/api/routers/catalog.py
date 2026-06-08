@@ -13,6 +13,7 @@ from enum import Enum
 import uuid
 
 from .auth import get_current_user, require_roles
+from api.services.cost_mask import mask_cost, mask_cost_list
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
@@ -1300,8 +1301,11 @@ async def list_catalog_products(
     start = (page - 1) * limit
     end = start + limit
 
+    # F35: strip cost/margin for roles that may not see it (CATALOG_MANAGER sees
+    # cost only on the edit form, not this operational list -> default context).
+    page_products = mask_cost_list(products[start:end], current_user)
     return {
-        "products": products[start:end],
+        "products": page_products,
         "total": total,
         "page": page,
         "total_pages": (total + limit - 1) // limit,
@@ -1317,6 +1321,8 @@ async def get_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # F35: product create/edit form -> CATALOG_MANAGER keeps cost (catalog_edit context).
+    product = mask_cost(product, current_user, context="catalog_edit")
     return {"product": product}
 
 
@@ -1456,7 +1462,7 @@ async def create_catalog_product(
         product_data["shopify"] = shopify_result
 
     return {
-        "product": product_data,
+        "product": mask_cost(product_data, current_user, context="catalog_edit"),
         "message": "Product created successfully",
         "shopify_sync": shopify_result,
     }
@@ -1526,7 +1532,7 @@ async def update_catalog_product(
     existing["updated_at"] = datetime.now().isoformat()
 
     _save_catalog_product(existing)
-    return {"product": existing, "message": "Product updated successfully"}
+    return {"product": mask_cost(existing, current_user, context="catalog_edit"), "message": "Product updated successfully"}
 
 
 @router.delete("/products/{product_id}")
