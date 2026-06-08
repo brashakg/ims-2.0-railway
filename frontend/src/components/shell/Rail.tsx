@@ -99,6 +99,9 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Operations',
     items: [
       { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // E4: PIN-gated approval inbox. requireRoles mirrors the /approvals
+      // ProtectedRoute gate (the approver set; ACCOUNTANT is inbox read-only).
+      { id: 'approvals', label: 'Approvals', to: '/approvals', icon: 'shield', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'expenses', label: 'Expenses', to: '/finance/expenses', icon: 'banknote' },
       // Attendance is its OWN top-level item (was buried in HR tabs). Managers
       // see the full monthly grid + admin edit; staff (roles 5-7) get their
