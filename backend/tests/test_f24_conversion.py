@@ -367,6 +367,19 @@ def test_http_stats_403_when_optometrist_reads_another_id(client):
     assert resp.status_code == 403
 
 
+def test_http_stats_403_store_manager_foreign_store(client):
+    # P1 regression (adversarial): a STORE_MANAGER of BV-1 must NOT read BV-2's
+    # conversion + revenue_attributed via a forged ?store_id (was a cross-store
+    # money IDOR -- the route trusted the param with no validate_store_access).
+    headers = {"Authorization": f"Bearer {_token(['STORE_MANAGER'], user_id='M1', store='BV-1')}"}
+    resp = client.get(
+        "/api/v1/clinical/optometrist/O1/stats",
+        params={"from_date": "2026-06-01", "to_date": "2026-06-30", "store_id": "BV-2"},
+        headers=headers,
+    )
+    assert resp.status_code == 403
+
+
 def test_http_conversion_dashboard_403_for_non_clinical_role(client):
     headers = {"Authorization": f"Bearer {_token(['SALES_CASHIER'])}"}
     resp = client.get(

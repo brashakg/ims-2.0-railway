@@ -1069,15 +1069,23 @@ async def get_optometrist_stats(
         except Exception:  # noqa: BLE001 - read path never 500s on a stats hiccup
             base = {"total_tests": 0, "completed_tests": 0, "completion_rate": 0}
 
-    # Resolve the store scope for the conversion join.
+    # Resolve the store scope for the conversion join. Mirror the sibling
+    # /conversion-dashboard: a non-HQ revenue role (STORE_MANAGER) is validated
+    # against the requested store -- WITHOUT this a STORE_MANAGER could pass a
+    # foreign ?store_id and read another store's conversion + revenue (P1
+    # cross-store money IDOR). HQ roles pass any store / their whole reach.
     if is_revenue_role:
-        scope = (
-            [store_id]
-            if store_id
-            else (current_user.get("store_ids") or
-                  ([current_user.get("active_store_id")]
-                   if current_user.get("active_store_id") else []))
-        )
+        if roles & _HQ_ROLES:
+            if store_id:
+                scope = [validate_store_access(store_id, current_user)]
+            else:
+                scope = list(current_user.get("store_ids") or [])
+                active = current_user.get("active_store_id")
+                if active and active not in scope:
+                    scope.append(active)
+        else:
+            resolved = validate_store_access(store_id, current_user)
+            scope = [resolved] if resolved else []
     else:
         # Optometrist is bounded to their active store.
         active = current_user.get("active_store_id")
