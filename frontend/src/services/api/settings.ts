@@ -594,3 +594,52 @@ export const adminIntegrationApi = {
     return response.data;
   },
 };
+
+// ============================================================================
+// E2 - Policy Matrix API (/settings/policies/*)
+// Schema-driven: the registry IS the form definition. Resolution store>entity>
+// global>env>default; secrets masked in GET; per-key write-roles enforced server-side.
+// ============================================================================
+
+export interface PolicySpecPublic {
+  key: string;
+  type: string;            // bool|int|float|percent|money_paisa|string|json|enum|csv_int
+  default: any;
+  scopes: string[];        // subset of global|entity|store
+  write_roles: string[];
+  group: string;
+  label: string;
+  help?: string | null;
+  secret?: boolean;
+  minimum?: number | null;
+  maximum?: number | null;
+  enum?: string[] | null;
+}
+
+export interface PolicyEffective {
+  key: string;
+  value: any;              // masked ("****") when secret
+  source: string;          // store|entity|global|env|default
+  scope: string;           // resolved scope address
+  type: string;
+  secret?: boolean;
+}
+
+export const policiesApi = {
+  getRegistry: async (): Promise<{ policies: PolicySpecPublic[]; groups: Record<string, PolicySpecPublic[]> }> => {
+    const r = await api.get('/settings/policies/registry');
+    return r.data;
+  },
+  getAll: async (scope?: string): Promise<{ scope: string; policies: Record<string, PolicyEffective> }> => {
+    const r = await api.get('/settings/policies', { params: scope ? { scope } : {} });
+    return r.data;
+  },
+  set: async (key: string, value: any, scope?: Record<string, string> | null): Promise<PolicyEffective> => {
+    const r = await api.put(`/settings/policies/${encodeURIComponent(key)}`, { value, scope: scope || null });
+    return r.data;
+  },
+  clear: async (key: string, scope?: string): Promise<PolicyEffective> => {
+    const r = await api.delete(`/settings/policies/${encodeURIComponent(key)}`, { params: scope ? { scope } : {} });
+    return r.data;
+  },
+};
