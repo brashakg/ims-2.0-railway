@@ -17,11 +17,43 @@ from ..services import barcode as barcode_svc
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
+    get_audit_repository,
     validate_store_access,
+    can_access_store_scoped,
+    resolve_store_scope,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Stock-manager roles permitted to drive the defective-unit quarantine lifecycle
+# (mark / lift / print label). SUPERADMIN auto-passes via require_roles. This is
+# DELIBERATELY narrower than _INVENTORY_ROLES -- a quarantine is a physical
+# control decision (pull a defective unit off the sellable floor), reserved for
+# the manager ladder, not catalog/workshop staff.
+_STOCK_MANAGER_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+)
+
+# The free-string status value a quarantined unit carries. NOT an enum / schema
+# change (CORRECTIONS P0-6): stock_units.status is a free string, and every
+# on-hand / sellable rollup uses an explicit AVAILABLE/RESERVED allowlist, so a
+# QUARANTINED unit is excluded from POS, transfers and blind-count simply by not
+# being in any allowlist.
+STOCK_STATUS_QUARANTINED = "QUARANTINED"
+
+# Allowed quarantine reasons (free-text fallback OTHER + notes). Kept here so the
+# endpoint validates the dropdown the frontend shows.
+_QUARANTINE_REASONS = {
+    "DEFECTIVE",
+    "SCRATCHED",
+    "CUSTOMER_RETURN_DAMAGED",
+    "QC_FAILED_WORKSHOP",
+    "RECEIVED_DAMAGED",
+    "OTHER",
+}
 
 # Roles permitted to mutate stock (add / count / scan / transfer / serials).
 # Mirrors the inventory page route guard — the broadest role set any inventory
@@ -78,6 +110,22 @@ class StartStockCountRequest(BaseModel):
 
 class CompleteStockCountRequest(BaseModel):
     notes: Optional[str] = None
+
+
+class QuarantineRequest(BaseModel):
+    """Body for PATCH /stock/{stock_id}/quarantine."""
+
+    reason: str = Field(..., min_length=1)
+    notes: Optional[str] = Field(default=None, max_length=200)
+    rtv_vendor_id: Optional[str] = None
+
+
+class LiftQuarantineRequest(BaseModel):
+    """Body for PATCH /stock/{stock_id}/lift-quarantine. lift_reason is
+    MANDATORY (>=5 chars) so a mis-quarantine correction is always justified in
+    the immutable audit trail."""
+
+    lift_reason: str = Field(..., min_length=5)
 
 
 # ============================================================================
@@ -3512,3 +3560,298 @@ async def update_serial(
     except Exception as e:
         logger.error(f"update_serial error: {e}")
         raise HTTPException(status_code=500, detail="Error updating serial")
+
+
+# ============================================================================
+# DEFECTIVE QUARANTINE  (F21 -- the E3-shim)
+# ============================================================================
+# A store manager pulls a physically defective / damaged unit off the sellable
+# floor by flipping its free-string status to QUARANTINED. Because every on-hand
+# / sellable rollup in this module (and product_repository.find_available, and
+# transfers' ship-move) uses an explicit AVAILABLE/RESERVED allowlist, a
+# QUARANTINED unit is excluded from POS sale, transfers and blind-count purely
+# by not being in any allowlist -- no rollup edit is needed. Each status
+# transition writes ONE hash-chained audit row via AuditRepository.create (never
+# append_audit_entry directly) and dispatches a fail-soft stock.quarantined
+# event. Standalone Mongo: every write is a single-document op (no transactions).
+
+
+def _now_ist():
+    """IST-stamped datetime for quarantine records (India-time forensic trail).
+    Falls back to naive local only if the IST helper is unavailable."""
+    try:
+        from api.utils.ist import now_ist
+
+        return now_ist()
+    except Exception:  # noqa: BLE001
+        return datetime.now()
+
+
+def _quarantine_audit(action: str, stock_id: str, store_id, user_id,
+                      before_state: Dict, after_state: Dict, detail: Dict) -> None:
+    """Write one hash-chained STOCK_UNIT audit row. Fail-soft: an audit hiccup
+    never undoes the business write that triggered it."""
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": action,
+                    "entity_type": "STOCK_UNIT",
+                    "entity_id": stock_id,
+                    "store_id": store_id,
+                    "user_id": user_id,
+                    "before_state": before_state,
+                    "after_state": after_state,
+                    "detail": detail,
+                }
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] quarantine audit failed: %s", e)
+
+
+@router.patch("/stock/{stock_id}/quarantine")
+async def quarantine_stock_unit(
+    stock_id: str,
+    req: QuarantineRequest,
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """Mark a physical stock unit QUARANTINED (defective -- pull off the floor).
+
+    Guards: the unit must exist, be store-accessible to the caller, and be in an
+    eligible status (AVAILABLE or DAMAGED -- NOT SOLD/TRANSFERRED/QUARANTINED).
+    Writes the free-string QUARANTINED status + quarantine metadata, audits the
+    transition, and dispatches a fail-soft stock.quarantined event so TASKMASTER
+    can chase an RTV later. No accounting entry (per F21 owner decision).
+    """
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        raise HTTPException(status_code=503, detail="Stock repository unavailable")
+
+    unit = stock_repo.find_by_id(stock_id)
+    if unit is None:
+        raise HTTPException(status_code=404, detail="Stock unit not found")
+
+    store_id = unit.get("store_id")
+    # Existence-hide a cross-store unit (same 404 contract as other IDOR guards).
+    if not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(status_code=404, detail="Stock unit not found")
+
+    reason = (req.reason or "").strip().upper()
+    if reason not in _QUARANTINE_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reason must be one of {sorted(_QUARANTINE_REASONS)}",
+        )
+
+    current_status = (unit.get("status") or "AVAILABLE").strip().upper()
+    if current_status == STOCK_STATUS_QUARANTINED:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "already_quarantined", "message": "Unit is already quarantined."},
+        )
+    if current_status not in ("AVAILABLE", "DAMAGED"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "not_eligible",
+                "message": f"A unit in status {current_status} cannot be quarantined.",
+            },
+        )
+
+    # Period-lock check (audit completeness; fail-soft -- only raises 423 for an
+    # explicitly locked accounting month). Quarantine is a physical control, not
+    # a financial write, so current-period operations are never gated.
+    try:
+        db = _get_db()
+        if db is not None:
+            from .finance import check_period_locked
+            from datetime import date as _pl_date
+
+            check_period_locked(db, _pl_date.today())
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] quarantine period-lock check skipped: %s", e)
+
+    now = _now_ist()
+    actor = current_user.get("user_id")
+    actor_name = current_user.get("name") or current_user.get("username") or ""
+
+    update = {
+        "status": STOCK_STATUS_QUARANTINED,
+        "quarantine_reason": reason,
+        "quarantine_at": now,
+        "quarantine_by": actor,
+        "quarantine_by_name": actor_name,
+        "quarantine_notes": (req.notes or "")[:200],
+        "quarantine_label_printed": False,
+    }
+    if req.rtv_vendor_id:
+        update["rtv_vendor_id"] = req.rtv_vendor_id
+
+    if not stock_repo.update(stock_id, update):
+        raise HTTPException(status_code=500, detail="Failed to quarantine stock unit")
+
+    _quarantine_audit(
+        "STOCK_QUARANTINED",
+        stock_id,
+        store_id,
+        actor,
+        {"status": current_status},
+        {"status": STOCK_STATUS_QUARANTINED, "quarantine_reason": reason},
+        {"notes": update["quarantine_notes"], "rtv_vendor_id": req.rtv_vendor_id},
+    )
+
+    # Event bus (fail-soft): lets TASKMASTER raise an RTV follow-up after 7 days.
+    try:
+        from agents.registry import dispatch_event
+
+        await dispatch_event(
+            "stock.quarantined",
+            {
+                "stock_id": stock_id,
+                "store_id": store_id,
+                "reason": reason,
+                "actor_id": actor,
+            },
+            source="inventory_router",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] stock.quarantined dispatch failed: %s", e)
+
+    updated = stock_repo.find_by_id(stock_id) or {**unit, **update}
+    return {"stock_unit": updated, "message": "Stock unit quarantined"}
+
+
+@router.patch("/stock/{stock_id}/lift-quarantine")
+async def lift_quarantine_stock_unit(
+    stock_id: str,
+    req: LiftQuarantineRequest,
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """Lift a quarantine (mis-quarantine correction) -- restore to AVAILABLE.
+
+    A mandatory lift_reason (>=5 chars) is recorded in the audit trail. The unit
+    must currently be QUARANTINED (409 not_quarantined otherwise). No approval /
+    PIN gate -- store-manager self-approval is sufficient (F21 owner decision).
+    """
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        raise HTTPException(status_code=503, detail="Stock repository unavailable")
+
+    unit = stock_repo.find_by_id(stock_id)
+    if unit is None:
+        raise HTTPException(status_code=404, detail="Stock unit not found")
+
+    store_id = unit.get("store_id")
+    if not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(status_code=404, detail="Stock unit not found")
+
+    current_status = (unit.get("status") or "").strip().upper()
+    if current_status != STOCK_STATUS_QUARANTINED:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "not_quarantined", "message": "Unit is not quarantined."},
+        )
+
+    now = _now_ist()
+    actor = current_user.get("user_id")
+
+    update = {
+        "status": "AVAILABLE",
+        "quarantine_lifted_at": now,
+        "quarantine_lifted_by": actor,
+        "quarantine_lift_reason": req.lift_reason,
+        "quarantine_label_printed": False,
+    }
+    if not stock_repo.update(stock_id, update):
+        raise HTTPException(status_code=500, detail="Failed to lift quarantine")
+
+    _quarantine_audit(
+        "QUARANTINE_LIFTED",
+        stock_id,
+        store_id,
+        actor,
+        {"status": STOCK_STATUS_QUARANTINED},
+        {"status": "AVAILABLE"},
+        {"lift_reason": req.lift_reason},
+    )
+
+    updated = stock_repo.find_by_id(stock_id) or {**unit, **update}
+    return {"stock_unit": updated, "message": "Quarantine lifted"}
+
+
+@router.get("/stock/quarantined")
+async def list_quarantined_stock(
+    store_id: Optional[str] = Query(None),
+    rtv_vendor_id: Optional[str] = Query(None),
+    label_printed: Optional[bool] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: dict = Depends(
+        require_roles(*_STOCK_MANAGER_ROLES, "ACCOUNTANT")
+    ),
+):
+    """The Quarantine Queue: all QUARANTINED units for the caller's store(s).
+
+    Store-scoped: a store-level role only ever sees its OWN store (an explicit
+    cross-store ?store_id is 403'd by resolve_store_scope); HQ roles may pass any
+    store_id or see all. Each row carries product name/brand/category and the
+    quarantine metadata; the summary reports the count of UNLABELED units (the
+    ones that still need a red sticker before they can be cleared).
+    """
+    db = _get_db()
+    if db is None:
+        return {"items": [], "total": 0, "unlabeled_count": 0}
+
+    # Authorise + resolve the store filter (store-roles pinned to their own).
+    scoped_store = resolve_store_scope(store_id, current_user)
+
+    match: Dict = {"status": STOCK_STATUS_QUARANTINED}
+    if scoped_store:
+        match["store_id"] = scoped_store
+    if rtv_vendor_id:
+        match["rtv_vendor_id"] = rtv_vendor_id
+    if label_printed is not None:
+        if label_printed:
+            match["quarantine_label_printed"] = True
+        else:
+            match["quarantine_label_printed"] = {"$ne": True}
+    if date_from or date_to:
+        rng: Dict = {}
+        if date_from:
+            rng["$gte"] = date_from
+        if date_to:
+            rng["$lte"] = date_to
+        match["quarantine_at"] = rng
+
+    items: List[Dict] = []
+    unlabeled = 0
+    try:
+        stock_coll = db.get_collection("stock_units")
+        products_coll = db.get_collection("products")
+        prod_cache: Dict[str, Dict] = {}
+        for row in stock_coll.find(match):
+            row.pop("_id", None)
+            pid = row.get("product_id")
+            prod = prod_cache.get(pid)
+            if prod is None and pid:
+                prod = products_coll.find_one({"product_id": pid}) or {}
+                prod_cache[pid] = prod
+            prod = prod or {}
+            if not row.get("quarantine_label_printed"):
+                unlabeled += 1
+            items.append(
+                {
+                    **row,
+                    "product_name": prod.get("name") or prod.get("product_name") or "",
+                    "brand": prod.get("brand") or "",
+                    "category": prod.get("category") or "",
+                }
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] quarantine queue read failed: %s", e)
+        return {"items": [], "total": 0, "unlabeled_count": 0}
+
+    return {"items": items, "total": len(items), "unlabeled_count": unlabeled}

@@ -53,6 +53,29 @@ from ..dependencies import (
 
 router = APIRouter()
 
+# Roles permitted to print a quarantine (DO-NOT-SHELVE) label. Mirrors
+# inventory._STOCK_MANAGER_ROLES (the manager ladder that owns the quarantine
+# lifecycle). SUPERADMIN auto-passes via require_roles.
+_QUARANTINE_LABEL_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+)
+
+# Luxury brands carrying an extra "BRAND AUTHORIZATION REQUIRED" line on the
+# quarantine label (F21 owner decision option b -- the more rigorous choice for
+# luxury optical). Same brand set as pricing_caps.LUXURY_BRAND_CAPS; matched on
+# the upper-cased, stripped brand name.
+_LUXURY_BRANDS = {
+    "CARTIER",
+    "CHOPARD",
+    "BVLGARI",
+    "GUCCI",
+    "PRADA",
+    "VERSACE",
+    "BURBERRY",
+}
+
 
 # ============================================================================
 # STAGE PIPELINE  (pure, unit-tested -- no DB access)
@@ -583,6 +606,117 @@ async def get_product_label(
             logger.warning("[LABELS] product lookup failed: %s", e)
 
     return out
+
+
+@router.post("/labels/quarantine/{stock_id}")
+async def get_quarantine_label(
+    stock_id: str,
+    current_user: dict = Depends(require_roles(*_QUARANTINE_LABEL_ROLES)),
+):
+    """Build the bright-red "QUARANTINED -- DO NOT SHELVE" label for a defective
+    unit, flip quarantine_label_printed=true, and write an audit row.
+
+    Guards: the unit must exist, be QUARANTINED (400 not_quarantined otherwise),
+    and be store-accessible to the caller. The payload carries the unit's
+    existing barcode, the quarantine reason/date, the store name, and -- for the
+    named luxury brands -- a "BRAND AUTHORIZATION REQUIRED" line. ASCII only
+    (Windows cp1252): the header uses a double-dash, never a unicode em-dash.
+    """
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        raise HTTPException(status_code=503, detail="Stock repository unavailable")
+
+    stock_doc = stock_repo.find_by_id(stock_id)
+    if stock_doc is None:
+        raise HTTPException(status_code=404, detail="Stock unit not found")
+
+    store_id = stock_doc.get("store_id")
+    if not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(status_code=404, detail="Stock unit not found")
+
+    status = (stock_doc.get("status") or "").strip().upper()
+    if status != "QUARANTINED":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "not_quarantined", "message": "Unit is not quarantined."},
+        )
+
+    # Product master (name / brand / category) -- best-effort.
+    product = {}
+    pid = stock_doc.get("product_id")
+    if pid:
+        try:
+            prod_repo = get_product_repository()
+            if prod_repo is not None:
+                product = prod_repo.find_by_id(pid) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LABELS] quarantine product lookup failed: %s", e)
+
+    # Store name -- best-effort.
+    store_name = ""
+    try:
+        store_repo = get_store_repository()
+        if store_repo is not None and store_id:
+            store = store_repo.find_by_id(store_id)
+            if store:
+                store_name = store.get("name") or store.get("store_name") or ""
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LABELS] quarantine store lookup failed: %s", e)
+
+    rtv_vendor_id = stock_doc.get("rtv_vendor_id")
+    q_at = stock_doc.get("quarantine_at")
+    payload = {
+        "ok": True,
+        "label_type": "QUARANTINED",
+        "header": "QUARANTINED -- DO NOT SHELVE",
+        "sub_header": "RTV Pending" if rtv_vendor_id else "No RTV linked",
+        "background_color": "#DC2626",
+        "stock_id": stock_id,
+        "barcode_value": stock_doc.get("barcode") or stock_id,
+        "product_id": pid,
+        "name": product.get("name") or product.get("product_name") or "",
+        "brand": product.get("brand") or "",
+        "category": product.get("category") or "",
+        "quarantine_reason": stock_doc.get("quarantine_reason") or "",
+        "quarantine_at": q_at.isoformat() if hasattr(q_at, "isoformat") else q_at,
+        "quarantine_by_name": stock_doc.get("quarantine_by_name") or "",
+        "store_id": store_id,
+        "store_name": store_name,
+        "rtv_vendor_id": rtv_vendor_id,
+        "generated_at": datetime.now().isoformat(),
+    }
+
+    brand = (product.get("brand") or "").strip().upper()
+    if brand in _LUXURY_BRANDS:
+        payload["luxury_brand_line"] = "BRAND AUTHORIZATION REQUIRED"
+
+    # Flip the printed flag (single-document write) BEFORE returning so the
+    # queue's unlabeled count drops the moment the label is produced.
+    try:
+        stock_repo.update(stock_id, {"quarantine_label_printed": True})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LABELS] quarantine label flag write failed: %s", e)
+
+    # Audit (fail-soft) -- one STOCK_UNIT row per label print.
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "QUARANTINE_LABEL_PRINTED",
+                    "entity_type": "STOCK_UNIT",
+                    "entity_id": stock_id,
+                    "store_id": store_id,
+                    "user_id": current_user.get("user_id"),
+                    "before_state": {"quarantine_label_printed": False},
+                    "after_state": {"quarantine_label_printed": True},
+                    "detail": {"reason": payload["quarantine_reason"]},
+                }
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LABELS] quarantine label audit failed: %s", e)
+
+    return payload
 
 
 # ============================================================================

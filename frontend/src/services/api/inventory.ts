@@ -221,7 +221,82 @@ export const inventoryApi = {
     });
     return response.data as OpeningStockResponse;
   },
+
+  // ----- F21: defective quarantine lifecycle -------------------------------
+  // Mark a physical unit QUARANTINED (pull it off the sellable floor).
+  quarantineStock: async (
+    stockId: string,
+    body: { reason: string; notes?: string; rtv_vendor_id?: string },
+  ) => {
+    const response = await api.patch(`/inventory/stock/${stockId}/quarantine`, body);
+    return response.data;
+  },
+
+  // Lift a quarantine (mis-quarantine correction) -- mandatory reason.
+  liftQuarantine: async (stockId: string, liftReason: string) => {
+    const response = await api.patch(`/inventory/stock/${stockId}/lift-quarantine`, {
+      lift_reason: liftReason,
+    });
+    return response.data;
+  },
+
+  // The Quarantine Queue: all QUARANTINED units for the store + unlabeled count.
+  getQuarantinedStock: async (params?: {
+    store_id?: string;
+    rtv_vendor_id?: string;
+    label_printed?: boolean;
+  }): Promise<QuarantineQueueResponse> => {
+    const response = await api.get('/inventory/stock/quarantined', { params });
+    return response.data as QuarantineQueueResponse;
+  },
+
+  // Build + register the red "DO NOT SHELVE" label and flip the printed flag.
+  printQuarantineLabel: async (stockId: string): Promise<QuarantineLabel> => {
+    const response = await api.post(`/labels/quarantine/${stockId}`);
+    return response.data as QuarantineLabel;
+  },
 };
+
+export interface QuarantineUnit {
+  stock_id: string;
+  product_id?: string;
+  product_name?: string;
+  brand?: string;
+  category?: string;
+  barcode?: string;
+  status?: string;
+  quarantine_reason?: string;
+  quarantine_at?: string;
+  quarantine_by_name?: string;
+  quarantine_notes?: string;
+  quarantine_label_printed?: boolean;
+  rtv_vendor_id?: string;
+}
+
+export interface QuarantineQueueResponse {
+  items: QuarantineUnit[];
+  total: number;
+  unlabeled_count: number;
+}
+
+export interface QuarantineLabel {
+  ok: boolean;
+  label_type: string;
+  header: string;
+  sub_header?: string;
+  background_color?: string;
+  stock_id: string;
+  barcode_value: string;
+  name?: string;
+  brand?: string;
+  category?: string;
+  quarantine_reason?: string;
+  quarantine_at?: string;
+  quarantine_by_name?: string;
+  store_name?: string;
+  rtv_vendor_id?: string;
+  luxury_brand_line?: string;
+}
 
 // One opening-stock import row (product identified by product_id OR sku).
 export interface OpeningStockInputRow {

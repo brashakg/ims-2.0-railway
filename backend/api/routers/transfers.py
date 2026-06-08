@@ -27,6 +27,12 @@ router = APIRouter()
 # returns.py (a transferred unit must never be resurrected by a return).
 STOCK_STATUS_TRANSFERRED = "TRANSFERRED"
 STOCK_STATUS_AVAILABLE = "AVAILABLE"
+# A defective unit pulled off the floor (F21). It is never AVAILABLE, so the
+# ship-move's AVAILABLE allowlist already excludes it -- but if a caller pins an
+# explicit stock_id on a transfer line, we reject it LOUDLY (400) rather than
+# silently shipping a quarantined unit. A quarantined unit must never move
+# between stores.
+STOCK_STATUS_QUARANTINED = "QUARANTINED"
 
 
 # ============================================================================
@@ -326,7 +332,31 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
             line.setdefault("shipped_stock_ids", [])
             continue
 
+        # F21: if the caller pins explicit stock_ids on this line, reject LOUDLY
+        # (400) any that are QUARANTINED -- a defective unit must never move
+        # between stores. (When no explicit ids are given, the AVAILABLE
+        # allowlist below already excludes quarantined units from being claimed.)
+        explicit_ids = line.get("stock_ids") or []
+        if explicit_ids:
+            for sid in explicit_ids:
+                try:
+                    pinned = stock_repo.find_by_id(sid)
+                except Exception:  # noqa: BLE001
+                    pinned = None
+                if pinned and (pinned.get("status") or "").strip().upper() == STOCK_STATUS_QUARANTINED:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "quarantined_unit",
+                            "message": (
+                                f"Stock unit {sid} is QUARANTINED and cannot be transferred."
+                            ),
+                        },
+                    )
+
         # Claim AVAILABLE source units for this product (one row per unit).
+        # status=AVAILABLE is an explicit allowlist, so a QUARANTINED unit is
+        # never a candidate here -- F21 safety is structural, not incidental.
         try:
             candidates = stock_repo.find_many(
                 {

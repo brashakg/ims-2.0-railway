@@ -43,6 +43,10 @@ class VendorReturnCreate(BaseModel):
     items: List[ReturnItemCreate]
     return_type: Literal["credit_note", "replacement"]
     notes: Optional[str] = None
+    # F21: optional physical-unit linkage. When supplied, the matched QUARANTINED
+    # stock_units are backfilled with rtv_vendor_id = this return's id, tying the
+    # defective units physically shipped back to the RTV record.
+    stock_ids: Optional[List[str]] = None
 
 
 class VendorReturnStatusUpdate(BaseModel):
@@ -79,6 +83,45 @@ def generate_credit_note_number() -> str:
     """Generate unique credit note number"""
     timestamp = datetime.now().strftime("%y%m%d%H%M")
     return f"CN-{timestamp}-{str(uuid.uuid4())[:6].upper()}"
+
+
+def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> None:
+    """F21: backfill rtv_vendor_id on QUARANTINED stock_units + audit each link.
+
+    Only units currently in QUARANTINED status are matched/updated (the status
+    filter silently skips anything else). Each match is a single-document update
+    (standalone Mongo -- no transactions). One QUARANTINE_LINKED_RTV audit row is
+    written per linked unit via the hash-chained AuditRepository.create facade.
+    Fail-soft: a backfill error never undoes the vendor-return write."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+    except Exception:  # noqa: BLE001
+        audit = None
+    stock_coll = db.get_collection("stock_units")
+    for sid in stock_ids:
+        try:
+            result = stock_coll.update_one(
+                {"stock_id": sid, "status": "QUARANTINED"},
+                {"$set": {"rtv_vendor_id": return_id}},
+            )
+            if getattr(result, "modified_count", 0) and audit is not None:
+                audit.create(
+                    {
+                        "action": "QUARANTINE_LINKED_RTV",
+                        "entity_type": "STOCK_UNIT",
+                        "entity_id": sid,
+                        "store_id": store_id,
+                        "user_id": actor_id,
+                        "before_state": {"rtv_vendor_id": None},
+                        "after_state": {"rtv_vendor_id": return_id},
+                        "detail": {"return_id": return_id},
+                    }
+                )
+        except Exception:  # noqa: BLE001
+            # One bad id never blocks the rest / the return itself.
+            continue
 
 
 # ============================================================================
@@ -190,6 +233,17 @@ async def create_vendor_return(
         }
 
         collection.insert_one(return_doc)
+
+        # F21: backfill the physical-unit linkage. For each supplied stock_id
+        # that is currently QUARANTINED, set rtv_vendor_id = this return's id and
+        # write a STOCK_UNIT audit row. A unit NOT in QUARANTINED status is
+        # silently skipped (the {status: QUARANTINED} filter simply matches
+        # nothing). Standalone Mongo: each update is a single-document op.
+        if return_data.stock_ids:
+            _link_stock_units_to_rtv(
+                db, return_data.stock_ids, return_id,
+                return_data.store_id, current_user.get("user_id"),
+            )
 
         return {
             "return_id": return_id,
