@@ -68,6 +68,8 @@ const OrganizationPage = lazy(() => import('./pages/settings/OrganizationPage'))
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const GrowthBlueprintPage = lazy(() => import('./pages/reports/GrowthBlueprintPage').then(m => ({ default: m.GrowthBlueprintPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
+const ApprovalInboxPage = lazy(() => import('./pages/approvals/ApprovalInboxPage').then(m => ({ default: m.ApprovalInboxPage })));
+const MyRequestsPage = lazy(() => import('./pages/approvals/MyRequestsPage').then(m => ({ default: m.MyRequestsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
 const OutstandingPaymentsReport = lazy(() => import('./pages/reports/OutstandingPaymentsReport'));
 const PrintPage = lazy(() => import('./pages/print/PrintPage'));
@@ -195,6 +197,22 @@ function App() {
 
                   {/* Notifications (any authenticated user) */}
                   <Route path="notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
+
+                  {/* E4 Approvals — inbox (approvers) + my requests (any maker).
+                      Route gates mirror the backend rbac_policy: inbox/approve
+                      is the approver set; my-requests is any authenticated user. */}
+                  <Route
+                    path="approvals"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <ApprovalInboxPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="approvals/mine"
+                    element={<ProtectedRoute><MyRequestsPage /></ProtectedRoute>}
+                  />
                   <Route
                     path="dashboard/executive"
                     element={

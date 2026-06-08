@@ -32,6 +32,13 @@ import {
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api/settings';
+import { useAuth } from '../../context/AuthContext';
+import { ApprovalPinSection } from './ApprovalPinSection';
+
+// Roles that may configure approval workflow rules. Approvers below ADMIN can
+// still set their own PIN (the section below the rules), but the rule-config UI
+// stays HQ-only.
+const WORKFLOW_CONFIG_ROLES = ['SUPERADMIN', 'ADMIN'];
 
 // ============================================================================
 // Types
@@ -541,12 +548,23 @@ function WorkflowCard({
 
 export function ApprovalWorkflows() {
   const toast = useToast();
+  const { user } = useAuth();
   const [workflows, setWorkflows] = useState<ApprovalWorkflow[]>([]);
   const [loadingWorkflows, setLoadingWorkflows] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
 
-  // Load workflows from backend on mount
+  // The workflow-config UI (thresholds, approver roles) is HQ-only; the PIN
+  // section below is available to every approver who reaches this tab.
+  const canConfigureWorkflows = (user?.roles || []).some((r) =>
+    WORKFLOW_CONFIG_ROLES.includes(r),
+  );
+
+  // Load workflows from backend on mount (only when the user can see them).
   useEffect(() => {
+    if (!canConfigureWorkflows) {
+      setLoadingWorkflows(false);
+      return;
+    }
     let cancelled = false;
     setLoadingWorkflows(true);
     settingsApi
@@ -565,7 +583,7 @@ export function ApprovalWorkflows() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [canConfigureWorkflows]);
 
   const activeCount = workflows.filter((w) => w.isEnabled).length;
   const pendingCount = pendingApprovals.length;
@@ -619,6 +637,11 @@ export function ApprovalWorkflows() {
 
   return (
     <div className="space-y-6">
+      {/* Your approval PIN — available to every approver who reaches this tab. */}
+      <ApprovalPinSection />
+
+      {!canConfigureWorkflows ? null : (
+      <>
       {/* Summary Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="flex items-center gap-3 p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
@@ -697,6 +720,8 @@ export function ApprovalWorkflows() {
           </div>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

@@ -111,7 +111,7 @@ const SETTINGS_SECTIONS = [
   { id: 'notifications' as SettingsTab, label: 'Notifications', icon: Bell, description: 'SMS, WhatsApp templates', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, Tally, Shopify', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'printers' as SettingsTab, label: 'Printers', icon: Printer, description: 'Receipt and label printers', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-  { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules and thresholds', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules; set your approval PIN', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
   { id: 'agents' as SettingsTab, label: 'AI Agents', icon: Bot, description: 'JARVIS agent control panel', role: ['SUPERADMIN'] },
   { id: 'feature-toggles' as SettingsTab, label: 'Feature Toggles', icon: ToggleLeft, description: 'Enable/disable system features per store', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },

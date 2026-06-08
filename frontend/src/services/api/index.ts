@@ -133,6 +133,21 @@ export type { Entity, GstinEntry, PtRegistration } from './entities';
 export { payrollApi, grossOf } from './payroll';
 export type { SalaryConfig, PtSlab, OtherAllowance } from './payroll';
 
+// E4 Approvals (PIN-gated maker-checker inbox + per-user PIN management)
+export { approvalsApi } from './approvals';
+export type {
+  ApprovalActionType,
+  ApprovalStatus,
+  ApprovalTier,
+  ApprovalRequest,
+  ApprovalListResponse,
+  CreateRequestPayload,
+  CreateRequestResponse,
+  ApproveResult,
+  ConsumeResult,
+  PinStatus,
+} from './approvals';
+
 // Jarvis AI change-proposals (SUPERADMIN only — SYSTEM_INTENT section 8)
 export { proposalsApi } from './proposals';
 export type {
