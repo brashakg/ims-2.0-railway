@@ -77,7 +77,9 @@ export function PayoutSnapshotsPage() {
               <th className="px-3 py-2 text-center">Status</th>
               <th className="px-3 py-2 text-center">Best level</th>
               <th className="px-3 py-2 text-right">Pool</th>
+              <th className="px-3 py-2 text-right">Product incentive</th>
               <th className="px-3 py-2 text-right">Grand total</th>
+              <th className="px-3 py-2 text-center">Payroll fed</th>
               <th className="px-3 py-2 text-right">Locked / Paid</th>
               <th className="px-3 py-2"></th>
             </tr>
@@ -85,7 +87,7 @@ export function PayoutSnapshotsPage() {
           <tbody className="divide-y divide-gray-100">
             {items.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-3 py-12 text-center text-gray-500">
+                <td colSpan={10} className="px-3 py-12 text-center text-gray-500">
                   {loading ? <Loader2 className="w-5 h-5 animate-spin inline-block mr-2" /> : null}
                   {loading ? 'Loading…' : 'No snapshots locked for this year yet.'}
                 </td>
@@ -106,7 +108,26 @@ export function PayoutSnapshotsPage() {
                 </td>
                 <td className="px-3 py-2 text-center text-gray-700">{s.best_level_achieved || '—'}</td>
                 <td className="px-3 py-2 text-right text-gray-700">{inr(s.total_team_pool)}</td>
-                <td className="px-3 py-2 text-right font-semibold">{inr(s.grand_total?.all)}</td>
+                <td className="px-3 py-2 text-right text-gray-700">
+                  {inr(s.grand_total?.product_incentive ?? s.product_incentive_total ?? 0)}
+                </td>
+                <td className="px-3 py-2 text-right font-semibold">
+                  {inr(s.grand_total?.all_with_kicker ?? s.grand_total?.all)}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {s.payroll_fed_at ? (
+                    <span
+                      className="text-xs px-2 py-0.5 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-200"
+                      title={`Fed ${new Date(s.payroll_fed_at).toLocaleString()}`}
+                    >
+                      <Check className="w-3 h-3 inline mr-0.5" /> Fed
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-500 border-gray-200">
+                      Not yet
+                    </span>
+                  )}
+                </td>
                 <td className="px-3 py-2 text-right text-xs text-gray-500">
                   {s.locked_at ? new Date(s.locked_at).toLocaleDateString() : '—'}
                   {s.paid_at && <div>Paid {new Date(s.paid_at).toLocaleDateString()}</div>}

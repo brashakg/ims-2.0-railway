@@ -789,6 +789,10 @@ export interface StaffPayout {
   eligibility: number;
   payout_by_level: Record<PayoutLevel, number>;
   total_payout: number;
+  /** SC: Product-Incentive Kicker rupees folded in for the month. */
+  product_incentive?: number;
+  /** SC: total_payout + manager bonus (if any) + product_incentive. */
+  total_with_kicker?: number;
 }
 
 export interface ManagerBonus {
@@ -820,7 +824,15 @@ export interface PayoutEnvelope {
   total_team_pool: number;
   staff_payouts: StaffPayout[];
   manager_bonuses: ManagerBonus[];
-  grand_total: { staff: number; manager: number; all: number };
+  grand_total: {
+    staff: number;
+    manager: number;
+    all: number;
+    product_incentive?: number;
+    all_with_kicker?: number;
+  };
+  /** SC: total Product-Incentive Kicker rupees for the store-month. */
+  product_incentive_total?: number;
 }
 
 export interface PayoutSnapshot extends PayoutEnvelope {
@@ -832,6 +844,49 @@ export interface PayoutSnapshot extends PayoutEnvelope {
   paid_by: string | null;
   created_at: string;
   updated_at: string;
+  /** SC: stamped the first time a payroll-run consumes this snapshot (P0-4). */
+  payroll_fed_at?: string | null;
+  payroll_run_id?: string | null;
+}
+
+export interface PayrollFeedResponse {
+  store_id: string;
+  year: number;
+  month: number;
+  snapshot_id: string;
+  status: PayoutStatus;
+  /** { staff_id: total_incentive_rupees } -- the single payroll incentive source. */
+  feed: Record<string, number>;
+  payroll_fed_at: string | null;
+  payroll_run_id: string | null;
+}
+
+export interface KickerEntry {
+  entry_id: string;
+  store_id: string;
+  date_str: string;
+  ym: string;
+  staff_id: string;
+  staff_name?: string | null;
+  sku: string;
+  brand: string;
+  category: string;
+  description?: string | null;
+  order_id?: string | null;
+  incentive_amount: number;
+}
+
+export interface KickerRollupResponse {
+  store_id: string;
+  ym: string;
+  total: number;
+  items: Array<{
+    staff_id: string;
+    staff_name?: string | null;
+    total_rupees: number;
+    sale_count: number;
+    entries: KickerEntry[];
+  }>;
 }
 
 export interface PreviewParams {

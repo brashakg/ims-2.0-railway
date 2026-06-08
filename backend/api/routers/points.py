@@ -52,6 +52,7 @@ from api.services.points_calculator import (
     compute_total,
     leaderboard_sort_key,
 )
+from api.services import scorecard_engine
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -120,6 +121,22 @@ class CreateDailyPointsRequest(BaseModel):
         "the gate is not applied (fail-soft) until the clinical "
         "endpoint lands.",
     )
+    visufit_source: Optional[str] = Field(
+        None,
+        description="Provenance of the visufit usage input: 'clinical' "
+        "(auto from the Visufit clinical feed) or 'manual' (operator "
+        "override). Stamped on the row for transparency.",
+    )
+
+    @field_validator("visufit_source")
+    @classmethod
+    def _visufit_source_enum(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip().lower()
+        if v not in ("clinical", "manual"):
+            raise ValueError("visufit_source must be 'clinical' or 'manual'")
+        return v
 
 
 class BulkDailyPointsRequest(BaseModel):
@@ -192,66 +209,17 @@ def _resolve_staff_name(staff_id: str) -> Optional[str]:
 
 
 def _conversion_score_for(store_id: str, date_str: str, staff_id: str) -> Optional[int]:
-    """Pull conversion_score from Module (i)'s feed math, in-process
-    (no HTTP self-call). Returns None on any failure — caller should
-    treat that as "no auto-fill"."""
-    repo = get_walkout_repository()
-    walkin_repo = get_walkin_counter_repository()
-    if repo is None:
-        return None
-    try:
-        walkouts_today = repo.list_walkouts(
-            store_id=store_id,
-            date_from=date_str,
-            date_to=date_str,
-            limit=5000,
-        )
-    except Exception:
-        walkouts_today = []
-    walkouts_count = sum(
-        1 for w in walkouts_today if w.get("sales_person_id") == staff_id
+    """Thin HTTP-layer shim: resolve the walkout/walkin repos and hand the
+    Module (i) conversion math to scorecard_engine (the importable, tested
+    surface). Returns None when the walkout repo is unavailable -- caller
+    treats that as "no auto-fill"."""
+    return scorecard_engine.conversion_score(
+        store_id,
+        date_str,
+        staff_id,
+        walkout_repo=get_walkout_repository(),
+        walkin_repo=get_walkin_counter_repository(),
     )
-
-    # Retro: prior 90 days where result_set_at falls on date_str
-    try:
-        target_d = date_type.fromisoformat(date_str)
-        window_from = (target_d - timedelta(days=90)).isoformat()
-        window_to = (target_d - timedelta(days=1)).isoformat()
-        prior = repo.list_walkouts(
-            store_id=store_id,
-            date_from=window_from,
-            date_to=window_to,
-            limit=5000,
-        )
-    except Exception:
-        prior = []
-    retro = 0
-    for w in prior:
-        if w.get("result") != "CONVERTED":
-            continue
-        if w.get("sales_person_id") != staff_id:
-            continue
-        rsa = w.get("result_set_at")
-        rsa_str = (
-            rsa[:10]
-            if isinstance(rsa, str)
-            else (rsa.date().isoformat() if isinstance(rsa, datetime) else "")
-        )
-        if rsa_str != date_str:
-            continue
-        retro += 1
-
-    walk_ins = 0
-    if walkin_repo is not None:
-        try:
-            today_doc = walkin_repo.get_today(store_id, date_str=date_str)
-            walk_ins = int((today_doc.get("per_staff") or {}).get(staff_id, 0))
-        except Exception:
-            pass
-    if walk_ins <= 0:
-        return 0
-    raw = (walk_ins - walkouts_count + retro) / walk_ins * 20.0
-    return int(round(max(0.0, min(20.0, raw))))
 
 
 def _audit(
@@ -322,55 +290,29 @@ def _build_row(
     settings: Dict,
     user_id: Optional[str],
 ) -> Dict:
-    """Pure helper — compose the points_log document from payload +
-    settings (auto-fill conversion if needed, apply visufit gate, total,
-    eligibility snapshot)."""
+    """HTTP-layer shim: delegate the score composition (conversion auto-fill,
+    visufit gate, total, eligibility snapshot, visufit_source) to
+    scorecard_engine.score_daily, then stamp the persistence fields
+    (`date` datetime, staff_name, created_by) the engine deliberately leaves
+    to the router."""
     date_str = payload.date.isoformat()
-    today = datetime.now().date().isoformat()
 
-    # Convert payload scores → mutable dict
-    raw_scores = payload.scores.model_dump()
-
-    # Auto-fill conversion if null AND target date is today.
-    if raw_scores.get("conversion") is None:
-        if date_str == today:
-            raw_scores["conversion"] = (
-                _conversion_score_for(store_id, date_str, payload.staff_id) or 0
-            )
-        else:
-            # Past date with explicit None — accept as 0 (operator
-            # signaled "no conversion measurement"); the build plan
-            # allows manual override but doesn't require non-null.
-            raw_scores["conversion"] = 0
-
-    # Apply Visufit gate
-    threshold = float(settings.get("visufit_gate_threshold") or 0.9)
-    enabled = bool(settings.get("visufit_gate_enabled", True))
-    scored, gate_applied = apply_visufit_gate(
-        raw_scores,
+    row = scorecard_engine.score_daily(
+        raw_scores=payload.scores.model_dump(),
+        date_str=date_str,
+        staff_id=payload.staff_id,
+        store_id=store_id,
+        settings=settings,
         visufit_usage_pct_mtd=payload.visufit_usage_pct_mtd,
-        threshold=threshold,
-        enabled=enabled,
+        visufit_source=payload.visufit_source,
+        conversion_provider=lambda: _conversion_score_for(
+            store_id, date_str, payload.staff_id
+        ),
     )
-
-    total = compute_total(scored)
-    bands = settings.get("eligibility_bands") or []
-    eligibility = compute_eligibility(total, bands)
-
-    return {
-        "store_id": store_id,
-        "date": datetime.combine(payload.date, datetime.min.time()),
-        "date_str": date_str,
-        "staff_id": payload.staff_id,
-        "staff_name": _resolve_staff_name(payload.staff_id),
-        **scored,
-        "total": total,
-        "eligibility": eligibility,
-        "eligibility_thresholds_used": {"bands": list(bands)},
-        "visufit_gate_applied": gate_applied,
-        "visufit_usage_pct_mtd": payload.visufit_usage_pct_mtd,
-        "created_by": user_id,
-    }
+    row["date"] = datetime.combine(payload.date, datetime.min.time())
+    row["staff_name"] = _resolve_staff_name(payload.staff_id)
+    row["created_by"] = user_id
+    return row
 
 
 def _save_row(
@@ -688,6 +630,114 @@ async def get_settings(
     if settings_repo is None:
         return IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store)  # type: ignore
     return _serialize(settings_repo.get_for_store(store))
+
+
+@router.get("/settings/effective")
+async def get_effective_settings(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(None),
+):
+    """E2-resolved settings for a store: global -> entity -> store merged.
+
+    Reports which scope each calculator-input key resolved from
+    (`_resolution_sources`) so the UI can show "inherited from entity" vs
+    "store override". VIEW_ROLES only."""
+    if not (_user_role_set(current_user) & _LOG_ANY_STAFF_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only managers / admin / accountant can view effective settings",
+        )
+    store = _resolve_store(current_user, store_id)
+    settings_repo = _settings_repo()
+    if settings_repo is None:
+        return scorecard_engine.resolve_settings(
+            store, entity_id, settings_repo=None
+        )
+    resolved = scorecard_engine.resolve_settings(
+        store, entity_id, settings_repo=settings_repo
+    )
+    return _serialize(resolved)
+
+
+class UpdateScopeSettingsRequest(BaseModel):
+    """SUPERADMIN-only -- set calculator-input defaults at entity / global
+    scope (E2 hierarchy). At least one field must be supplied."""
+
+    scope: str = Field(..., description="'global' or 'entity'")
+    entity_id: Optional[str] = None
+    eligibility_bands: Optional[List[EligibilityBand]] = None
+    growth_targets: Optional[Dict[str, float]] = None
+    base_rates: Optional[Dict[str, float]] = None
+    discount_kill_threshold: Optional[float] = Field(None, ge=0, le=1)
+    discount_multipliers: Optional[List[Dict[str, float]]] = None
+    staff_weightages: Optional[Dict[str, float]] = None
+    supervisor_bonuses: Optional[List[Dict]] = None
+    visufit_gate_threshold: Optional[float] = Field(None, ge=0, le=1)
+    visufit_gate_enabled: Optional[bool] = None
+
+    @field_validator("scope")
+    @classmethod
+    def _scope_enum(cls, v):
+        v = str(v).strip().lower()
+        if v not in ("global", "entity"):
+            raise ValueError("scope must be 'global' or 'entity'")
+        return v
+
+
+@router.patch("/settings/scope")
+async def update_scope_settings(
+    payload: UpdateScopeSettingsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only. Set chain-wide calculator defaults at entity or
+    global scope (E2 hierarchy) without per-store duplication. Store rows
+    still override via PATCH /settings/payout."""
+    if "SUPERADMIN" not in _user_role_set(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN can set entity/global settings",
+        )
+    settings_repo = _settings_repo()
+    if settings_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if payload.scope == "entity" and not payload.entity_id:
+        raise HTTPException(
+            status_code=400, detail="entity_id required for entity scope"
+        )
+
+    patch = payload.model_dump(
+        exclude_unset=True, exclude={"scope", "entity_id"}
+    )
+    if payload.eligibility_bands is not None:
+        patch["eligibility_bands"] = [b.model_dump() for b in payload.eligibility_bands]
+    if not patch:
+        raise HTTPException(
+            status_code=400, detail="At least one settings field must be provided"
+        )
+
+    if payload.scope == "global":
+        scope_key = scorecard_engine.GLOBAL_SCOPE_ID
+        entity_id = None
+    else:
+        scope_key = scorecard_engine._entity_scope_id(payload.entity_id)
+        entity_id = payload.entity_id
+
+    updated = settings_repo.upsert_scope(
+        scope_key,
+        patch,
+        scope=payload.scope,
+        entity_id=entity_id,
+        updated_by=current_user.get("user_id") or "",
+    )
+    _audit(
+        action="incentive.settings.update",
+        log_id=f"settings:{scope_key}",
+        store_id=scope_key,
+        current_user=current_user,
+        detail={"scope": payload.scope, "entity_id": entity_id, "keys": list(patch.keys())},
+    )
+    return _serialize(updated)
 
 
 @router.patch("/settings/eligibility")

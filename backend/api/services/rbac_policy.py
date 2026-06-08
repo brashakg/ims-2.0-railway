@@ -1736,6 +1736,16 @@ POLICY: List[Dict[str, object]] = [
     },
     # --- /api/v1/incentive ---
     {
+        "method": "POST",
+        "path": "/api/v1/incentive/kicker/product-sale",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/incentive/kicker/{ym}",
+        "allowed": "AUTHENTICATED",
+    },
+    {
         "method": "GET",
         "path": "/api/v1/incentive/points/daily",
         "allowed": "AUTHENTICATED",
@@ -1797,8 +1807,18 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["SUPERADMIN"],
     },
     {
+        "method": "GET",
+        "path": "/api/v1/incentive/points/settings/effective",
+        "allowed": "AUTHENTICATED",
+    },
+    {
         "method": "PATCH",
         "path": "/api/v1/incentive/points/settings/payout",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
+        "method": "PATCH",
+        "path": "/api/v1/incentive/points/settings/scope",
         "allowed": ["SUPERADMIN"],
     },
     {
@@ -3044,6 +3064,11 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {"method": "POST", "path": "/api/v1/payout/lock", "allowed": ["SUPERADMIN"]},
+    {
+        "method": "GET",
+        "path": "/api/v1/payout/payroll-feed",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
     {"method": "GET", "path": "/api/v1/payout/preview", "allowed": "AUTHENTICATED"},
     {
         "method": "GET",

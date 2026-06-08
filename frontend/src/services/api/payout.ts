@@ -10,6 +10,7 @@ import type {
   PreviewParams,
   LockSnapshotRequest,
   SnapshotsListResponse,
+  PayrollFeedResponse,
 } from '../../types';
 
 export const payoutApi = {
@@ -44,6 +45,17 @@ export const payoutApi = {
 
   get: async (snapshotId: string): Promise<PayoutSnapshot> => {
     const r = await api.get(`/payout/snapshot/${snapshotId}`);
+    return r.data;
+  },
+
+  /** SC — the single payroll incentive source (locked-snapshot feed, P0-4).
+   *  404 when no snapshot is locked for the month (payroll then uses 0). */
+  payrollFeed: async (
+    year: number, month: number, storeId?: string,
+  ): Promise<PayrollFeedResponse> => {
+    const r = await api.get('/payout/payroll-feed', {
+      params: { year, month, ...(storeId ? { store_id: storeId } : {}) },
+    });
     return r.data;
   },
 

@@ -330,6 +330,35 @@ class DatabaseConnection:
             background=True,
         )
 
+        # Product-Incentive (Kicker) log (SC). Monthly rollup + idempotency.
+        _idx(
+            "product_incentive_log",
+            [("store_id", 1), ("date_str", -1), ("staff_id", 1)],
+            background=True,
+        )
+        _idx(
+            "product_incentive_log",
+            [("store_id", 1), ("ym", 1), ("staff_id", 1)],
+            background=True,
+        )
+        # Idempotency: one kicker per (order_id, sku). PARTIAL on a string
+        # order_id so manual entries (order_id null) aren't constrained and a
+        # manager can log multiple manual kickers.
+        _idx(
+            "product_incentive_log",
+            [("order_id", 1), ("sku", 1)],
+            unique=True,
+            partialFilterExpression={"order_id": {"$type": "string"}},
+            name="uniq_kicker_order_sku",
+            background=True,
+        )
+        # incentive_settings E2 scope lookup (global / entity / store rows).
+        _idx(
+            "incentive_settings",
+            [("scope", 1), ("entity_id", 1)],
+            background=True,
+        )
+
         # Audit logs (SYSTEM_INTENT 10 -- immutable, hash-chained trail). UNIQUE
         # sparse `seq` is the belt-and-braces against a forked tamper-evident
         # chain; sparse excludes the fail-soft UNCHAINED (seq-less) rows.
