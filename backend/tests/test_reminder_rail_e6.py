@@ -544,6 +544,44 @@ def test_voucher_minted_once_per_customer_rule_day(monkeypatch):
     assert any("voucher_code" in (c.get("variables") or {}) for c in rec.calls)
 
 
+def test_voucher_minted_via_canonical_path_not_parallel(monkeypatch):
+    """T5 / PROTOCOL S6 regression: the reminder voucher MUST be minted through
+    the canonical vouchers.mint_voucher (single source of truth + the exact
+    ACTIVE doc shape that redeem_voucher_atomic + the E1 money-guard read at
+    redemption), NOT a parallel insert. Spy proves the engine was the mint path."""
+    import api.routers.vouchers as vmod
+
+    calls = []
+    real_mint = vmod.mint_voucher
+
+    def _spy(coll, **kw):
+        calls.append(kw)
+        return real_mint(coll, **kw)
+
+    monkeypatch.setattr(vmod, "mint_voucher", _spy)
+
+    db = _FakeDB(
+        {
+            "customers": _FakeColl([_cust("C1")]),
+            "comms_ledger": _FakeColl(),
+            "notification_logs": _FakeColl(),
+            "vouchers": _FakeColl(),
+        }
+    )
+    _patch_send(monkeypatch, db)
+    rule = _rule(voucher_template={"type": "DISCOUNT", "amount": 200, "validity_days": 30})
+    _run(rail.evaluate_rule(db, rule, dry_run=False))
+
+    assert len(calls) == 1  # the canonical engine was called exactly once
+    assert calls[0]["vtype"] == "DISCOUNT" and calls[0]["amount"] == 200
+    v = db.get_collection("vouchers").docs[0]
+    # Canonical ACTIVE shape -- the fields redeem/E1 depend on:
+    assert v["status"] == "ACTIVE" and v["balance"] == 200 and v["currency"] == "INR"
+    assert v["redemptions"] == [] and v["voucher_id"]
+    assert v["code"].startswith("GC-")  # canonical _generate_code, not a forked RMD-
+    assert v["reminder_dedupe"].startswith("C1:RMD-TEST-1:")  # feature field rode `extra`
+
+
 # ===========================================================================
 # (f) seeded rules are active=False (no auto-send on deploy)
 # ===========================================================================

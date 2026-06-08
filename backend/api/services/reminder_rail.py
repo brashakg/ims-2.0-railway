@@ -316,32 +316,29 @@ def _mint_voucher_for_rule(
         vtype = "DISCOUNT"
     amount = float(tmpl.get("amount") or 0)
     validity_days = int(tmpl.get("validity_days") or 30)
-    iso = _now_iso(now)
     expiry = (_now_utc(now) + timedelta(days=validity_days)).date().isoformat()
-    code = f"RMD{secrets.token_hex(4).upper()}"
-    doc = {
-        "voucher_id": str(uuid.uuid4()),
-        "code": code,
-        "type": vtype,
-        "initial_amount": amount,
-        "balance": amount,
-        "currency": "INR",
-        "status": "ACTIVE",
-        "store_id": rule.get("store_id"),
-        "issued_to_customer_id": customer_id,
-        "issued_by": f"reminder:{rule_id}",
-        "expiry_date": expiry,
-        "redemptions": [],
-        "reminder_dedupe": dedupe,
-        "created_at": iso,
-        "updated_at": iso,
-    }
+
+    # Mint via the CANONICAL path (vouchers.mint_voucher) -- NOT a parallel insert.
+    # This guarantees the same ACTIVE doc shape (voucher_id/initial_amount/balance/
+    # currency/status/redemptions/...) that redeem_voucher_atomic + the E1
+    # money-guard read at redemption; reminder_dedupe + source ride `extra`.
+    from api.routers.vouchers import mint_voucher
+
     try:
-        coll.insert_one(doc)
+        doc = mint_voucher(
+            coll,
+            vtype=vtype,
+            amount=amount,
+            store_id=rule.get("store_id"),
+            customer_id=customer_id,
+            issued_by=f"reminder:{rule_id}",
+            expiry_date_iso=expiry,
+            extra={"reminder_dedupe": dedupe, "source": "reminder"},
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("voucher mint failed for %s: %s", customer_id, exc)
         return None
-    return code
+    return doc.get("code") if doc else None
 
 
 # ---------------------------------------------------------------------------
