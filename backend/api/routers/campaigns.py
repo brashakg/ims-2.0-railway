@@ -700,21 +700,33 @@ async def send_campaign(
         params=doc.get("segment_params") or {},
     )
 
-    cust_coll = db.get_collection("customers")
+    # E6: the full 3-signal consent check (flag + STOP ledger) supersedes the
+    # inline marketing_consent==False test, and the shared 30-day frequency cap
+    # (comms_ledger) is applied here so MANUAL campaigns share the SAME cap as the
+    # automated reminder rail. Reuse the engines -- never reimplement.
+    from .marketing import is_opted_out as _is_opted_out
+    from ..services import reminder_rail as _rail
+
     results: List[Dict[str, Any]] = []
     sent = skipped = failed = 0
     for r in audience:
         cid = r.get("customer_id")
-        # Consent gate (mirrors send-bulk): an explicit False opts out;
-        # missing/None defaults to consented. Ad-hoc rows w/o customer_id send.
-        if cid:
-            cust = cust_coll.find_one({"customer_id": cid}) or {}
-            if cust.get("marketing_consent") is False:
-                skipped += 1
-                results.append(
-                    {"customer_id": cid, "status": "skipped", "reason": "opted_out"}
-                )
-                continue
+        # Consent gate (full is_opted_out): flag OR a STOP/OPT_OUT ledger entry.
+        # Ad-hoc rows w/o customer_id send (no consent record to check).
+        if cid and _is_opted_out(cid, db):
+            skipped += 1
+            results.append(
+                {"customer_id": cid, "status": "skipped", "reason": "opted_out"}
+            )
+            continue
+        # Shared 30-day frequency cap (soft ceiling). A campaign whose template is
+        # transactional rides category check inside check_frequency_cap (exempt).
+        if cid and not _rail.check_frequency_cap(db, cid, category="MARKETING"):
+            skipped += 1
+            results.append(
+                {"customer_id": cid, "status": "skipped", "reason": "freqcap"}
+            )
+            continue
         phone = r.get("phone") or ""
         if not phone:
             skipped += 1
@@ -748,6 +760,16 @@ async def send_campaign(
                     )
                 except Exception:  # noqa: BLE001
                     pass
+            # Record the cap ledger row so this manual send counts against the
+            # shared 30-day cap (transactional categories are skipped inside).
+            if cid:
+                _rail.record_outbound(
+                    db,
+                    cid,
+                    channel=primary_channel,
+                    category="MARKETING",
+                    campaign_id=campaign_id,
+                )
             sent += 1
             results.append(
                 {"customer_id": cid, "status": "queued", "notification_id": nid}

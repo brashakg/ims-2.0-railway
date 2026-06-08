@@ -183,6 +183,22 @@ async def lifespan(app: FastAPI):
                 ApprovalEngine(db=get_db().db).ensure_indexes()
             except Exception as e:
                 logger.warning(f"[WARN] Approval index creation skipped: {e}")
+            # E6 reminder rail: indexes + 6 GLOBAL inactive seed rules (idempotent,
+            # non-destructive). active=False -> ZERO automated sends on deploy; the
+            # owner opts each rule on later (comms channel currently build-dark).
+            try:
+                from .services.reminder_rail import (
+                    ensure_reminder_indexes,
+                    seed_reminder_rules,
+                )
+
+                _rdb = get_db().db
+                ensure_reminder_indexes(_rdb)
+                _rn = seed_reminder_rules(_rdb)
+                if _rn:
+                    logger.info(f"[OK] Seeded {_rn} GLOBAL inactive reminder rule(s)")
+            except Exception as e:
+                logger.warning(f"[WARN] Reminder-rule seed skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:

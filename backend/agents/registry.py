@@ -221,6 +221,11 @@ def initialize_registry(db=None):
     # NEXUS handles inbound webhooks
     subscribe_event("webhook.received",  "nexus")
 
+    # MEGAPHONE (E6 reminder rail) acts on churn signals: an ACTIVE EVENT-trigger
+    # churn_risk reminder rule is evaluated through the consent/quiet-hours/cap
+    # gate stack. No active rules on deploy -> a no-op.
+    subscribe_event("churn.detected",    "megaphone")
+
     # Final roster log — Phase 6.5. If anything dropped out, this line
     # makes it obvious in Railway logs without needing a separate diag
     # endpoint round-trip. Looks for the canonical 8 by id and prints the

@@ -567,6 +567,133 @@ async def evaluate_rule(
 
 
 # ---------------------------------------------------------------------------
+# Seed + indexes (idempotent; run once on deploy)
+# ---------------------------------------------------------------------------
+
+# 6 GLOBAL inactive rules. active=False is the safety flag: nothing auto-sends
+# on deploy (and the comms channel is currently disabled -- build-dark). The
+# owner toggles each one on when a channel returns. Upsert on rule_id makes the
+# seed idempotent and NON-destructive (never overwrites owner edits to a rule).
+_SEED_RULES: List[Dict[str, Any]] = [
+    {
+        "rule_id": "RMD-SEED-RX-EXPIRY",
+        "name": "Prescription expiry reminder",
+        "rule_type": "rx_expiry",
+        "segment_key": "rx_expiry",
+        "channel": "WHATSAPP",
+        "template_id": "PRESCRIPTION_EXPIRY",
+        "trigger": {"kind": "CRON", "cron": "DAILY 09:00", "event_key": None},
+    },
+    {
+        "rule_id": "RMD-SEED-BIRTHDAY",
+        "name": "Birthday greeting",
+        "rule_type": "birthday",
+        "segment_key": "birthday",
+        "channel": "WHATSAPP",
+        "template_id": "BIRTHDAY_WISH",
+        "trigger": {"kind": "CRON", "cron": "DAILY 09:00", "event_key": None},
+    },
+    {
+        "rule_id": "RMD-SEED-WINBACK",
+        "name": "Win-back (lapsed customers)",
+        "rule_type": "winback",
+        "segment_key": "winback",
+        "channel": "WHATSAPP",
+        "template_id": "WALKOUT_RECOVERY",
+        "trigger": {"kind": "CRON", "cron": "WEEKLY 10:00", "event_key": None},
+    },
+    {
+        "rule_id": "RMD-SEED-CL-REORDER",
+        "name": "Contact-lens reorder reminder",
+        "rule_type": "cl_reorder",
+        "segment_key": "cl_reorder",
+        "channel": "WHATSAPP",
+        "template_id": "ANNUAL_CHECKUP_REMINDER",
+        "trigger": {"kind": "CRON", "cron": "DAILY 10:00", "event_key": None},
+    },
+    {
+        "rule_id": "RMD-SEED-CHURN-RISK",
+        "name": "Churn-risk alert",
+        "rule_type": "churn_risk",
+        "segment_key": "churn_risk",
+        "channel": "WHATSAPP",
+        "template_id": "WALKOUT_RECOVERY",
+        "trigger": {"kind": "EVENT", "cron": None, "event_key": "churn.detected"},
+    },
+    {
+        "rule_id": "RMD-SEED-FEEDBACK",
+        "name": "Post-delivery feedback / NPS",
+        "rule_type": "feedback",
+        "segment_key": "recent_buyers",
+        "channel": "WHATSAPP",
+        "template_id": "NPS_SURVEY",
+        "trigger": {"kind": "CRON", "cron": "DAILY 11:00", "event_key": None},
+    },
+]
+
+
+def ensure_reminder_indexes(db) -> None:
+    """Create the reminder-rail indexes (idempotent). Fail-soft."""
+    if db is None:
+        return
+    try:
+        db.get_collection("reminder_rules").create_index("rule_id", unique=True)
+        db.get_collection("reminder_rules").create_index([("active", 1), ("rule_type", 1)])
+        db.get_collection("comms_ledger").create_index([("customer_id", 1), ("sent_at", 1)])
+        db.get_collection("pool_otp").create_index("otp_id", unique=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reminder index creation skipped: %s", exc)
+
+
+def seed_reminder_rules(db) -> int:
+    """Upsert the 6 GLOBAL inactive seed rules. Idempotent + non-destructive:
+    only inserts a rule that does not already exist (by rule_id) so an owner who
+    later edits/activates a seeded rule is never reset. Returns the number of
+    rules newly inserted. active=False on every seed -- no auto-send on deploy.
+    """
+    if db is None:
+        return 0
+    coll = db.get_collection("reminder_rules")
+    now = _now_iso()
+    inserted = 0
+    for spec in _SEED_RULES:
+        try:
+            if coll.find_one({"rule_id": spec["rule_id"]}):
+                continue
+            doc = {
+                "rule_id": spec["rule_id"],
+                "scope": "GLOBAL",
+                "entity_id": None,
+                "store_id": None,
+                "name": spec["name"],
+                "rule_type": spec["rule_type"],
+                "segment_key": spec["segment_key"],
+                "segment_params": {},
+                "channel": spec["channel"],
+                "template_id": spec["template_id"],
+                "trigger": spec["trigger"],
+                "is_transactional": False,
+                "freq_cap_exempt": False,
+                "voucher_template": None,
+                "active": False,  # SAFE DEFAULT -- inert until owner toggles on.
+                "last_run_at": None,
+                "last_resolved": None,
+                "sent_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "deleted_at": None,
+                "created_by": "system:seed",
+                "created_at": now,
+                "updated_at": now,
+            }
+            coll.insert_one(doc)
+            inserted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reminder seed %s skipped: %s", spec.get("rule_id"), exc)
+    return inserted
+
+
+# ---------------------------------------------------------------------------
 # Family-wallet pool OTP (Wave 0b transactional slice; LOCKED design)
 # ---------------------------------------------------------------------------
 
