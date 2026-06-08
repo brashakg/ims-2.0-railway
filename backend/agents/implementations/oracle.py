@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import logging
 import statistics
+import uuid
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..claude_client import call_claude, call_claude_json, is_claude_available
@@ -118,6 +119,13 @@ class OracleAgent(JarvisAgent):
                 a.setdefault("recommended_action", None)
                 a.setdefault("ai_powered", False)
 
+        # 3b. EOD ONLY (#40): VIP-churn scan. It writes each VIP's vip_churn_risk
+        #     subdoc + the daily per-store snapshot and self-enriches its own
+        #     top-10 narratives; it returns the HIGH-label anomalies (already
+        #     carrying the narrative keys) so they persist + emit like the rest.
+        if is_eod:
+            anomalies.extend(await self._scan_vip_churn(now))
+
         # Persist + emit
         if anomalies:
             await self._record_anomalies(anomalies, eod=is_eod)
@@ -135,6 +143,122 @@ class OracleAgent(JarvisAgent):
                     f"({'EOD' if is_eod else 'hourly'} scan); "
                     f"{sum(1 for a in anomalies if a.get('ai_powered'))} ai-enriched; "
                     f"{proposals} reorder proposal(s) enqueued")
+
+    async def _scan_vip_churn(self, now) -> List[Dict[str, Any]]:
+        """#40 EOD VIP-churn scan. Aggregates each customer's booked orders ->
+        LTV + completed-purchase dates + count; for VIPs (LTV >= 1,00,000 AND
+        >= 3 orders) computes the personalised-interval churn subdoc and writes
+        it back; enriches the top-10 by risk_score with a Claude one-liner;
+        upserts ONE per-store daily snapshot; returns HIGH-label anomalies for
+        emit. Fail-soft: returns [] if the DB/collections are unavailable."""
+        from api.services.vip_churn import (
+            compute_vip_churn, VIP_LTV_THRESHOLD, VIP_MIN_ORDERS,
+        )
+
+        customers = self.get_collection("customers")
+        orders = self.get_collection("orders")
+        if customers is None or orders is None:
+            return []
+        try:
+            pipeline = [
+                {"$match": {"status": {"$nin": ["DRAFT", "CANCELLED", "draft", "cancelled"]},
+                            "customer_id": {"$nin": [None, ""]}}},
+                {"$group": {"_id": "$customer_id",
+                            "ltv": {"$sum": {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}},
+                            "dates": {"$push": "$created_at"},
+                            "count": {"$sum": 1}}},
+                {"$match": {"ltv": {"$gte": VIP_LTV_THRESHOLD}, "count": {"$gte": VIP_MIN_ORDERS}}},
+            ]
+            agg = list(orders.aggregate(pipeline))
+        except Exception:  # noqa: BLE001
+            return []
+
+        scored = []          # (risk_score, cid, name, store, sub, ltv) for WATCH/HIGH
+        by_store: Dict[str, Dict[str, Any]] = {}
+        for row in agg:
+            cid = row.get("_id")
+            dates = [d for d in (row.get("dates") or []) if isinstance(d, datetime)]
+            sub = compute_vip_churn(dates, row.get("ltv", 0), row.get("count", 0), now)
+            if sub is None:
+                continue
+            try:
+                customers.update_one({"customer_id": cid}, {"$set": {"vip_churn_risk": sub}})
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                cdoc = customers.find_one(
+                    {"customer_id": cid},
+                    {"_id": 0, "name": 1, "full_name": 1, "primary_store_id": 1, "store_ids": 1},
+                ) or {}
+            except Exception:  # noqa: BLE001
+                cdoc = {}
+            store = cdoc.get("primary_store_id") or (cdoc.get("store_ids") or ["UNKNOWN"])[0] or "UNKNOWN"
+            name = cdoc.get("name") or cdoc.get("full_name") or cid
+            label = sub["risk_label"]
+            st = by_store.setdefault(store, {"vip": 0, "watch": 0, "high": 0, "top": []})
+            st["vip"] += 1
+            if label == "WATCH":
+                st["watch"] += 1
+            elif label == "HIGH":
+                st["high"] += 1
+            if label in ("WATCH", "HIGH"):
+                scored.append((sub["risk_score"], cid, name, store, sub, float(row.get("ltv", 0) or 0)))
+                st["top"].append({"customer_id": cid, "name": name,
+                                  "ltv": round(float(row.get("ltv", 0) or 0), 2),
+                                  "overdue_by_days": sub["overdue_by_days"], "risk_label": label})
+
+        # Top-10 by risk_score get a Claude narrative (hard cap; fail-soft).
+        scored.sort(key=lambda x: -x[0])
+        if is_claude_available():
+            for _score, cid, name, _store, sub, _ltv in scored[:10]:
+                try:
+                    narrative, _rec = await self._enrich_with_claude({
+                        "kind": "vip_churn",
+                        "severity": "HIGH" if sub["risk_label"] == "HIGH" else "MEDIUM",
+                        "summary": (f"VIP '{name}' overdue by {sub['overdue_by_days']}d "
+                                    f"(usual interval {sub['usual_interval_days']}d)"),
+                    })
+                    if narrative:
+                        customers.update_one({"customer_id": cid},
+                                             {"$set": {"vip_churn_risk.narrative": narrative}})
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # One snapshot per store per day (upsert keyed on store + scan_date).
+        snaps = self.get_collection("vip_churn_snapshots")
+        if snaps is not None:
+            scan_date = now.strftime("%Y-%m-%d")
+            for store, st in by_store.items():
+                try:
+                    snaps.update_one(
+                        {"store_id": store, "scan_date": scan_date},
+                        {"$set": {"snapshot_id": f"VCS-{uuid.uuid4().hex[:10]}", "store_id": store,
+                                  "scanned_at": now, "scan_date": scan_date,
+                                  "vip_count": st["vip"], "watch_count": st["watch"],
+                                  "high_risk_count": st["high"],
+                                  "top_10": sorted(st["top"], key=lambda x: -x["overdue_by_days"])[:10]}},
+                        upsert=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # HIGH-label anomalies for _emit_for_severe (carry the narrative keys so
+        # _record_anomalies / downstream consumers don't trip on missing fields).
+        high_anomalies: List[Dict[str, Any]] = []
+        for _score, cid, name, store, sub, _ltv in scored:
+            if sub["risk_label"] == "HIGH":
+                high_anomalies.append({
+                    "kind": "vip_churn", "severity": "HIGH",
+                    "summary": (f"VIP '{name}' overdue by {sub['overdue_by_days']} days "
+                                f"(usual interval {sub['usual_interval_days']}d)"),
+                    "customer_id": cid, "store_id": store,
+                    "overdue_by_days": sub["overdue_by_days"],
+                    "narrative": sub.get("narrative"), "recommended_action": None,
+                    "ai_powered": sub.get("narrative") is not None,
+                })
+        logger.info(f"[ORACLE] VIP-churn EOD scan: {len(scored)} at-risk VIPs "
+                    f"across {len(by_store)} store(s); {len(high_anomalies)} HIGH")
+        return high_anomalies
 
     async def _propose_reorders(self) -> int:
         """
