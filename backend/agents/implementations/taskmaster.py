@@ -76,6 +76,18 @@ class TaskmasterAgent(JarvisAgent):
         # 2. Auto-reorder: stock items below reorder_point → draft PO
         actions.extend(await self._draft_reorders())
 
+        # 3. E4: expire stale approval requests past their 60-min TTL. This is a
+        # status flip (REQUESTED -> EXPIRED), not a delete -- rows stay
+        # auditable. Fail-soft: a missing DB / engine error never breaks the tick.
+        try:
+            from api.services.approvals import ApprovalEngine
+
+            expired = ApprovalEngine(db=self.db).expire_stale()
+            if expired:
+                logger.info("[TASKMASTER] expired %d stale approval request(s)", expired)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] approval expire_stale skipped: %s", e)
+
         if actions:
             logger.info(f"[TASKMASTER] tick complete — {len(actions)} action(s) executed")
         self._actions_taken += len(actions)
