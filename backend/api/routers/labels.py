@@ -356,6 +356,12 @@ async def scan_advance(
     except Exception as e:  # noqa: BLE001
         logger.warning("[LABELS] scan-advance audit failed: %s", e)
 
+    # E3w-NOT-WIRED: scan-advance moves a WORKSHOP JOB through its stage spine
+    # (workshop_jobs.status) -- it does NOT change a stock_units state and there
+    # is no matching ItemEventType in the merged item_events enum (no
+    # SCAN_ADVANCE). Wiring it would require a parallel path, so it is left
+    # unwired per the E3w contract and reported back to the orchestrator.
+
     return {
         "ok": True,
         "job_id": job_id,

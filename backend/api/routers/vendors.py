@@ -1452,6 +1452,35 @@ async def accept_grn(
                             store_id,
                             user_id,
                         )
+                        # E3w: ledger the GRN mint (None -> AVAILABLE) into
+                        # item_events. Additive + fail-soft: this runs AFTER the
+                        # unit is already in stock_units, performs no CAS / no
+                        # projection, and any error is logged + swallowed so it
+                        # can never lose the received stock.
+                        try:
+                            from ..services import item_events as ie
+
+                            _le_db = _get_db()
+                            if _le_db is not None:
+                                ie.record_post_write_event(
+                                    _le_db,
+                                    event_type=ie.ItemEventType.MINT,
+                                    actor_id=user_id or "",
+                                    stock_id=str(stock_id),
+                                    from_state=None,
+                                    to_state=ie.StockState.AVAILABLE,
+                                    store_id=store_id,
+                                    product_id=product_id,
+                                    source_type="GRN",
+                                    source_id=grn_id,
+                                    payload={"grn_number": grn_number,
+                                             "po_id": po_id},
+                                )
+                        except Exception as _le_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[VENDOR] GRN mint ledger emit skipped: %s",
+                                _le_exc,
+                            )
 
     # Mark the GRN accepted.
     grn_repo.update(
