@@ -1458,6 +1458,20 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/summary-month",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # F34 target ticker. The GET is mounted on a SEPARATE router WITHOUT the
+    # finance role gate so EVERY authenticated role can reach it (the response is
+    # privacy-stratified server-side -- floor roles get pct only, no rupees). The
+    # settings POST is SUPERADMIN/ADMIN only.
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/target-ticker",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/target-ticker/settings",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/tally/sales-jv",

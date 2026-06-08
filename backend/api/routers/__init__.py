@@ -19,6 +19,7 @@ from .returns import router as returns_router
 from .tasks import router as tasks_router
 from .expenses import router as expenses_router
 from .finance import router as finance_router
+from .finance import ticker_router as finance_ticker_router
 from .hr import router as hr_router
 from .workshop import router as workshop_router
 from .reports import router as reports_router
@@ -90,6 +91,7 @@ __all__ = [
     "tasks_router",
     "expenses_router",
     "finance_router",
+    "finance_ticker_router",
     "hr_router",
     "workshop_router",
     "reports_router",
