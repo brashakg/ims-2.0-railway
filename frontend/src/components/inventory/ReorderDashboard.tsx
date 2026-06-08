@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { CostCell } from '../common/CostCell';
 import {
   TrendingDown,
   AlertTriangle,
@@ -489,7 +490,8 @@ export function ReorderDashboard() {
                         <span className="font-medium text-purple-600">{product.reorderQuantity}</span>
                         {product.unitCost && (
                           <p className="text-xs text-gray-500">
-                            &#8377;{(product.unitCost * product.reorderQuantity).toLocaleString('en-IN')}
+                            {/* F35: cost masked to "-" for non-cost-visible roles */}
+                            <CostCell value={product.unitCost * product.reorderQuantity} />
                           </p>
                         )}
                       </td>

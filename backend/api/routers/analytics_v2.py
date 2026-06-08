@@ -23,6 +23,7 @@ import uuid
 
 from .auth import get_current_user
 from ..dependencies import get_db as _dep_get_db, validate_store_access
+from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
 
 router = APIRouter()
@@ -488,9 +489,12 @@ async def dead_stock(
 
     dead_items.sort(key=lambda x: x["cost_value"], reverse=True)
 
+    # F35: strip per-item cost_value + the aggregate total inventory cost for roles
+    # that may not see cost (SALES/STORE_MANAGER/AREA_MANAGER); total_skus stays.
+    _cost_ok = can_see_cost(current_user)
     return {
-        "dead_stock": dead_items[:100],
-        "total_value": round(total_value, 2),
+        "dead_stock": mask_cost_list(dead_items[:100], current_user),
+        "total_value": round(total_value, 2) if _cost_ok else None,
         "total_skus": len(dead_items),
     }
 

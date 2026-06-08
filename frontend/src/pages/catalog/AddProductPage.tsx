@@ -434,26 +434,30 @@ export function GuidedAddProduct() {
           )}
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Cost Price
-          </label>
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
-            <input
-              type="number"
-              value={costPrice}
-              onChange={(e) => setCostPrice(e.target.value)}
-              className="input-field w-full pl-8"
-              placeholder="Your purchase cost"
-            />
+        {/* F35: cost + margin hint are visible only to cost-authorised roles
+            (CATALOG_MANAGER may set cost on this product form). */}
+        {hasRole(['SUPERADMIN', 'ADMIN', 'ACCOUNTANT', 'CATALOG_MANAGER']) && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Cost Price
+            </label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
+              <input
+                type="number"
+                value={costPrice}
+                onChange={(e) => setCostPrice(e.target.value)}
+                className="input-field w-full pl-8"
+                placeholder="Your purchase cost"
+              />
+            </div>
+            {costPrice && mrp && (
+              <p className="text-blue-600 text-xs mt-1">
+                Margin: {Math.round(((parseFloat(mrp) - parseFloat(costPrice)) / parseFloat(mrp)) * 100)}%
+              </p>
+            )}
           </div>
-          {costPrice && mrp && (
-            <p className="text-blue-600 text-xs mt-1">
-              Margin: {Math.round(((parseFloat(mrp) - parseFloat(costPrice)) / parseFloat(mrp)) * 100)}%
-            </p>
-          )}
-        </div>
+        )}
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
