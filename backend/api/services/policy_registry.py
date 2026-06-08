@@ -195,6 +195,20 @@ _REGISTRY_LIST: List[PolicySpec] = [
           scopes=("global", "entity"), write_roles=("SUPERADMIN",),
           group="Own-use Allowances", label="Own-use allowance - admin", minimum=0),
 
+    # --- Product Master (PM / N5) ---
+    # OFF by default: gates the catalog/external (Postgres/BVI/Shopify) mirror of
+    # the product-master triple-write. The Mongo `products` spine is ALWAYS
+    # written (single-doc, atomic, source of truth) regardless of this flag; only
+    # the secondary best-effort mirror is gated. A live EXTERNAL write additionally
+    # requires NEXUS DISPATCH_MODE=live, so a fresh deploy NEVER mirrors externally.
+    _spec(key="pm.mirror_enabled", type="bool", default=False,
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Product Master", label="Product-master mirror enabled",
+          help="Mirror new/updated products to the PIM catalog (and, when DISPATCH_MODE=live, "
+               "the external Postgres/Shopify catalog). Off by default; the Mongo spine is "
+               "always written regardless.",
+          env="PM_MIRROR_ENABLED"),
+
     # --- NBA (next best action) ---
     _spec(key="nba.cards_per_day", type="int", default=15,
           scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),

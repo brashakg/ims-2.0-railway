@@ -8,6 +8,7 @@ from .dashboard_widgets import router as dashboard_widgets_router
 from .users import router as users_router
 from .stores import router as stores_router
 from .products import router as products_router
+from .product_master import router as product_master_router
 from .inventory import router as inventory_router
 from .customers import router as customers_router
 from .orders import router as orders_router
@@ -82,6 +83,7 @@ __all__ = [
     "users_router",
     "stores_router",
     "products_router",
+    "product_master_router",
     "inventory_router",
     "customers_router",
     "crm_router",
