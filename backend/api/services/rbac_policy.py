@@ -3567,13 +3567,15 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/settings ---
     {"method": "GET", "path": "/api/v1/settings", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/settings/", "allowed": "PUBLIC"},
-    # E2 policy matrix: GET reads are AUTHENTICATED; PUT/DELETE = union of write
-    # roles (the fine-grained per-key write_roles gate is enforced in set_policy).
-    {"method": "GET", "path": "/api/v1/settings/policies/registry", "allowed": "AUTHENTICATED"},
-    {"method": "GET", "path": "/api/v1/settings/policies", "allowed": "AUTHENTICATED"},
-    {"method": "GET", "path": "/api/v1/settings/policies/{key}", "allowed": "AUTHENTICATED"},
+    # E2 policy matrix: GET reads are restricted to settings-viewing roles (a cashier
+    # should not enumerate another store's discount caps / refund thresholds);
+    # PUT/DELETE = union of write roles (the fine-grained per-key write_roles gate is
+    # enforced in set_policy/clear_override -- the table row is defense-in-depth).
+    {"method": "GET", "path": "/api/v1/settings/policies/registry", "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER"]},
+    {"method": "GET", "path": "/api/v1/settings/policies", "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER"]},
+    {"method": "GET", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER"]},
     {"method": "PUT", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"]},
-    {"method": "DELETE", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]},
+    {"method": "DELETE", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"]},
     {
         "method": "GET",
         "path": "/api/v1/settings/admin-controls",

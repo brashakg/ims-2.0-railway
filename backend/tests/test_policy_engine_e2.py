@@ -56,6 +56,14 @@ class _PolicyColl:
             self._dunset(d, k)
         return _R(1)
 
+    def find_one_and_update(self, filt, update, upsert=False, return_document=None):
+        # ReturnDocument.BEFORE is falsy, AFTER is truthy -- set_policy passes BEFORE.
+        pre = copy.deepcopy(self.docs.get(filt.get("_id")))
+        self.update_one(filt, update, upsert=upsert)
+        if return_document:
+            return copy.deepcopy(self.docs.get(filt.get("_id")))
+        return pre
+
     @staticmethod
     def _dset(d, key, val):
         cur = d
@@ -244,6 +252,20 @@ def test_t8_audit_on_write(eng):
 
 
 # --------------------------------------------------------------------------- T10
+
+
+def test_t11_db_outage_does_not_poison_cache(eng, monkeypatch):
+    # Adversarial regression: a transient DB outage must NOT cache an empty {} that
+    # would silently drop all overrides for the cache TTL.
+    pe.set_policy("promo.ceiling_pct", 22.0, {}, actor=ADMIN)
+    assert pe.get_policy("promo.ceiling_pct") == 22.0
+    # Outage: fresh cache (drop the warm entry) + _coll returns None.
+    monkeypatch.setattr(pe, "cache", _FakeCache())
+    monkeypatch.setattr(pe, "_coll", lambda name="policy_settings": None)
+    assert pe.get_policy("promo.ceiling_pct") == 30.0  # degrades to default during the outage
+    # Recovery: the override is visible immediately because the outage was never cached.
+    monkeypatch.setattr(pe, "_coll", lambda name="policy_settings": eng["policy"])
+    assert pe.get_policy("promo.ceiling_pct") == 22.0
 
 
 def test_t10_luxury_cap_lower_only(eng):

@@ -10,10 +10,14 @@ BINDING CORRECTIONS (CORRECTIONS.md P1 -- outrank the E2 packet):
   * Secret values are encrypted PER VALUE via settings._encrypt_value (NOT
     _encrypt_config, which only matches leaf names in _SENSITIVE_FIELDS and would
     leave dotted policy keys in PLAINTEXT).
-  * Cache invalidation is an explicit cache.delete(exact_key) for each written
-    (scope) -- delete_pattern / invalidate_store are NO-OPS in the in-memory
-    fallback. We cache the per-SCOPE document (not the resolved value), so a write
-    to one scope invalidates exactly one key and resolutions re-read the fresh doc.
+  * Cache invalidation is an explicit cache.delete(exact_key) for the written scope
+    (delete_pattern / invalidate_store are NO-OPS in the in-memory fallback). We cache
+    the per-SCOPE document (not the resolved value). With Redis the delete clears the
+    SHARED key -> every worker re-reads fresh. WITHOUT Redis the delete clears only the
+    writing worker's in-process store, so sibling workers may serve the prior value
+    until the (short) TTL expires -- eventually consistent, bounded by _TTL. A
+    DB-unavailable read is NEVER cached (caching an empty {} would poison the scope,
+    silently dropping all overrides for the TTL).
   * pricing.category_caps.* overrides may only LOWER the pricing_caps code constant,
     never raise it (luxury brand caps are NOT E2 keys at all).
   * A store with a MISSING entity_id (dirty prod data / unassigned) resolves to
@@ -32,7 +36,11 @@ from api.services.cache import cache
 from api.services import policy_registry as reg
 
 _UNSET = object()
-_TTL = getattr(cache, "TTL_LONG", 900)
+# Short TTL on purpose: with Redis absent (the fail-soft per-worker in-memory path),
+# cache.delete on a write only clears the writing worker, so a short TTL bounds the
+# cross-worker staleness window. With Redis present the shared-key delete is already
+# coherent and the TTL only caps a transient-miss reread.
+_TTL = getattr(cache, "TTL_SHORT", 60)
 _DOC_CACHE_PREFIX = "policy_doc:"        # per-scope override doc
 _SE_CACHE_PREFIX = "policy_se:"          # store_id -> entity_id memo
 
@@ -128,14 +136,14 @@ def _scope_doc_values(addr: str) -> Dict[str, Any]:
     cached = cache.get(ck)
     if cached is not None:
         return cached
-    values: Dict[str, Any] = {}
     coll = _coll()
-    if coll is not None:
-        try:
-            doc = coll.find_one({"_id": addr}) or {}
-            values = doc.get("values") or {}
-        except Exception:  # noqa: BLE001
-            values = {}
+    if coll is None:
+        return {}  # DB unavailable -- do NOT cache (an empty {} would poison the scope for _TTL)
+    try:
+        doc = coll.find_one({"_id": addr}) or {}
+    except Exception:  # noqa: BLE001
+        return {}  # transient read failure -- do NOT cache the empty result; retry next request
+    values = doc.get("values") or {}
     cache.set(ck, values, ttl=_TTL)
     return values
 
@@ -161,8 +169,6 @@ def _coerce(spec: reg.PolicySpec, raw: Any) -> Any:
         if t == "json":
             if isinstance(raw, (list, dict)):
                 return raw
-            import json
-
             return json.loads(raw)
     except Exception:  # noqa: BLE001
         return raw
@@ -201,6 +207,8 @@ def get_policy(key: str, scope: Optional[dict] = None, *, default: Any = _UNSET)
         if v is not _MISSING:
             if spec.secret and isinstance(v, str):
                 v = decrypt(v)
+                if isinstance(v, str) and v.startswith(("fernet:", "enc:")):
+                    return spec.default  # decrypt failed (e.g. key rotation) -> safe code default
             return _coerce(spec, v)
 
     # env fallback beats the registry code default (ops override); DB beats env.
@@ -369,26 +377,25 @@ def set_policy(key: str, value: Any, scope: dict, *, actor: Optional[dict] = Non
     if coll is None:
         raise PolicyError("settings store unavailable", status=503)
 
-    before = None
-    try:
-        existing = coll.find_one({"_id": addr}) or {}
-        _b = _nested_get(existing.get("values") or {}, key)
-        before = None if _b is _MISSING else _b
-    except Exception:  # noqa: BLE001
-        before = None
-
+    # Atomic write + pre-image fetch in ONE op (mirrors vouchers.redeem_voucher_atomic):
+    # avoids a read-then-write race that would record a misleading audit before-state.
     now = datetime.utcnow()
     try:
-        coll.update_one(
+        from pymongo import ReturnDocument
+
+        pre = coll.find_one_and_update(
             {"_id": addr},
             {"$set": {f"values.{key}": stored, "level": level,
                       "scope_id": scope.get("store_id") or scope.get("entity_id"),
                       "updated_at": now, "updated_by": (actor or {}).get("user_id")},
              "$setOnInsert": {"created_at": now}},
             upsert=True,
+            return_document=ReturnDocument.BEFORE,
         )
     except Exception as exc:  # noqa: BLE001
         raise PolicyError(f"failed to write policy: {exc}", status=500)
+    _b = _nested_get((pre or {}).get("values") or {}, key)
+    before = None if _b is _MISSING else _b
 
     _audit_policy(key, addr, before, (stored if spec.secret else clean), actor, spec.secret)
     cache.delete(f"{_DOC_CACHE_PREFIX}{addr}")
@@ -419,17 +426,22 @@ def clear_override(key: str, scope: dict, *, actor: Optional[dict] = None) -> di
     if coll is None:
         raise PolicyError("settings store unavailable", status=503)
     before = None
+    was_present = False
     try:
         existing = coll.find_one({"_id": addr}) or {}
         _b = _nested_get(existing.get("values") or {}, key)
-        before = None if _b is _MISSING else _b
-        coll.update_one({"_id": addr}, {"$unset": {f"values.{key}": ""},
-                                        "$set": {"updated_at": datetime.utcnow(),
-                                                 "updated_by": (actor or {}).get("user_id")}})
+        was_present = _b is not _MISSING
+        before = _b if was_present else None
+        if was_present:
+            coll.update_one({"_id": addr}, {"$unset": {f"values.{key}": ""},
+                                            "$set": {"updated_at": datetime.utcnow(),
+                                                     "updated_by": (actor or {}).get("user_id")}})
     except Exception as exc:  # noqa: BLE001
         raise PolicyError(f"failed to clear policy: {exc}", status=500)
-    _audit_policy(key, addr, before, None, actor, spec.secret, action="policy_clear")
-    cache.delete(f"{_DOC_CACHE_PREFIX}{addr}")
+    # No phantom audit / cache churn when there was nothing to clear.
+    if was_present:
+        _audit_policy(key, addr, before, None, actor, spec.secret, action="policy_clear")
+        cache.delete(f"{_DOC_CACHE_PREFIX}{addr}")
     return get_effective(key, scope)
 
 

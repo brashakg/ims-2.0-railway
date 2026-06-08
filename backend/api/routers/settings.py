@@ -2545,14 +2545,17 @@ class PolicyWriteBody(BaseModel):
 
 
 def _parse_policy_scope(scope: Optional[str]) -> Dict[str, str]:
-    """Parse ?scope=global | entity:<id> | store:<id> into a scope dict."""
+    """Parse ?scope=global | entity:<id> | store:<id> into a scope dict. A malformed
+    scope is rejected (422) rather than silently resolving to global -- a typo'd
+    ?scope=store:X must not quietly return GLOBAL values to a caller who believes
+    they queried a store."""
     if not scope or scope == "global":
         return {}
-    if scope.startswith("store:"):
+    if scope.startswith("store:") and len(scope) > len("store:"):
         return {"store_id": scope.split(":", 1)[1]}
-    if scope.startswith("entity:"):
+    if scope.startswith("entity:") and len(scope) > len("entity:"):
         return {"entity_id": scope.split(":", 1)[1]}
-    return {}
+    raise HTTPException(status_code=422, detail="scope must be 'global', 'store:<id>', or 'entity:<id>'")
 
 
 # NOTE: /policies/registry MUST be declared BEFORE /policies/{key} so the literal
