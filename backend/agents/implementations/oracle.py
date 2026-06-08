@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import logging
 import statistics
+import uuid
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..claude_client import call_claude, call_claude_json, is_claude_available
@@ -130,11 +131,141 @@ class OracleAgent(JarvisAgent):
         #    the (reversible) DRAFT PO is created. Fail-soft.
         proposals = await self._propose_reorders()
 
+        # 5. F34 target-ticker milestones: a one-time celebratory bell to
+        #    store-floor staff when a store's MTD revenue crosses a configured
+        #    threshold of its monthly REVENUE budget. Fully fail-soft.
+        milestones = await self._check_milestones()
+
         self._anomalies_found += len(anomalies)
         logger.info(f"[ORACLE] tick complete - {len(anomalies)} anomalies "
                     f"({'EOD' if is_eod else 'hourly'} scan); "
                     f"{sum(1 for a in anomalies if a.get('ai_powered'))} ai-enriched; "
-                    f"{proposals} reorder proposal(s) enqueued")
+                    f"{proposals} reorder proposal(s) enqueued; "
+                    f"{milestones} target milestone(s) fired")
+
+    async def _check_milestones(self) -> int:
+        """
+        F34: for each store with a current-month REVENUE budget, compute MTD
+        revenue and fire a one-time bell to that store's floor staff
+        (SALES_CASHIER/SALES_STAFF/CASHIER ONLY -- management gets none) for any
+        milestone threshold crossed and not already in ``milestones_fired``.
+
+        Atomic, single-document writes only: ``$addToSet milestones_fired`` on the
+        budget doc guards against a same-month re-fire even across workers. A
+        budget doc from a PREVIOUS month whose ``milestones_fired`` is dirty is
+        reset to [] (month rollover). Returns the count of milestone crossings
+        notified. Wrapped end-to-end in try/except -- never crashes the tick.
+        """
+        try:
+            from api.services import ticker_service, policy_engine
+
+            budgets_coll = self.get_collection("budgets")
+            orders_coll = self.get_collection("orders")
+            if budgets_coll is None:
+                return 0
+
+            period = ticker_service.current_period()
+            milestone_pcts = policy_engine.get_policy(
+                "ticker.milestone_pcts", scope={},
+                default=ticker_service.DEFAULT_MILESTONE_PCTS,
+            )
+            if not isinstance(milestone_pcts, list):
+                milestone_pcts = ticker_service.DEFAULT_MILESTONE_PCTS
+
+            # Month rollover: any REVENUE budget for a PRIOR period with a
+            # non-empty milestones_fired gets reset so next month starts clean.
+            try:
+                for stale in budgets_coll.find({
+                    "head": "REVENUE",
+                    "period": {"$ne": period},
+                    "milestones_fired": {"$nin": [None, []]},
+                }):
+                    budgets_coll.update_one(
+                        {"store_id": stale.get("store_id"),
+                         "period": stale.get("period"), "head": "REVENUE"},
+                        {"$set": {"milestones_fired": []}},
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[ORACLE] milestone rollover reset skipped: {e}")
+
+            fired = 0
+            for bdoc in budgets_coll.find({"period": period, "head": "REVENUE"}):
+                store_id = bdoc.get("store_id")
+                target = bdoc.get("planned_amount")
+                if not store_id or not target or float(target) <= 0:
+                    continue
+                already = bdoc.get("milestones_fired") or []
+                mtd = ticker_service.mtd_revenue(orders_coll, store_id)
+                pct = mtd / float(target) * 100 if float(target) > 0 else 0
+                crossings = ticker_service.crossed_milestones(pct, milestone_pcts, already)
+                for m in crossings:
+                    # Single-doc atomic guard: only adds if not present (prevents
+                    # a same-month re-fire). We notify ONLY when this op actually
+                    # added the threshold (no double-bell on a concurrent tick).
+                    res = budgets_coll.update_one(
+                        {"store_id": store_id, "period": period, "head": "REVENUE",
+                         "milestones_fired": {"$ne": m}},
+                        {"$addToSet": {"milestones_fired": m}},
+                    )
+                    if getattr(res, "modified_count", 0) < 1:
+                        continue
+                    self._notify_floor_staff(store_id, m)
+                    try:
+                        await self.emit_event("target.milestone_reached", {
+                            "store_id": store_id, "pct": m,
+                            "mtd_revenue": round(float(mtd), 2),
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"[ORACLE] milestone event emit failed: {e}")
+                    fired += 1
+            return fired
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ORACLE] _check_milestones failed (fail-soft): {e}")
+            return 0
+
+    def _notify_floor_staff(self, store_id: str, pct: int) -> None:
+        """Insert one TARGET_MILESTONE bell notification per store-floor user
+        (SALES_CASHIER/SALES_STAFF/CASHIER) at ``store_id``. Management tiers get
+        NONE. Fail-soft: a notification failure never propagates."""
+        try:
+            from api.services import ticker_service
+
+            users_coll = self.get_collection("users")
+            notif_coll = self.get_collection("notifications")
+            if users_coll is None or notif_coll is None:
+                return
+            staff = list(users_coll.find({
+                "store_ids": store_id,
+                "roles": {"$in": list(ticker_service.FLOOR_NOTIFY_ROLES)},
+                "is_active": True,
+            }))
+            if not staff:
+                return
+            now = now_ist().replace(tzinfo=None)
+            day = now.strftime("%Y%m%d")
+            docs = []
+            for u in staff:
+                uid = u.get("user_id") or str(u.get("_id"))
+                if not uid:
+                    continue
+                docs.append({
+                    "notification_id": f"NTF-{day}-{uuid.uuid4().hex[:8].upper()}",
+                    "user_id": uid,
+                    "store_id": store_id,
+                    "type": "TARGET_MILESTONE",
+                    "notification_type": "target_milestone",
+                    "title": "Monthly target milestone",
+                    "message": f"Your store reached {pct}% of the monthly target.",
+                    "channels": ["IN_APP"],
+                    "status": "PENDING",
+                    "created_at": now,
+                    "read_at": None,
+                    "source": "oracle_agent",
+                })
+            if docs:
+                notif_coll.insert_many(docs, ordered=False)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ORACLE] milestone notification insert failed: {e}")
 
     async def _propose_reorders(self) -> int:
         """
