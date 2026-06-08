@@ -15,20 +15,22 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 
 | # | Name | Dep | Packet | MUST-READ correction |
 |---|---|---|---|---|
-| E2 | Settings-matrix engine | — | features/E2.md | P1: secret per-key encrypt (`_encrypt_value`); invalidate via explicit `cache.delete`; **luxury caps LOWER-only, never E2 keys**; entity-missing → global. |
-| #35 | Cost & margin masking | — | features/F35.md | Drop the false `_build_store_ledger` margin claim; per-call-site check. Test: SALES_CASHIER sees `cost_*`=null; ACCOUNTANT real. |
+| #35 | Cost & margin masking | — | features/F35.md | Drop the false `_build_store_ledger` margin claim; per-call-site check. Test: SALES_CASHIER sees `cost_*`=null; ACCOUNTANT real. (GAP_ANALYSIS G1: the `_FINANCE_ROLES` gate does NOT exist; `/pnl` reaches ALL roles today — packet MUST add the gate.) |
 | #40 | VIP churn prediction (read-only) | — | features/F40.md | Clean (not a quick-win, ~M). SUPERADMIN/ADMIN only. |
 | #34 | Global target ticker | E2 | features/F34.md | Add `{created_at,status,store_id}` orders index (net-new) + cache. SALES sees % only. |
 | #21 | Defective quarantine barcoding | E3-shim (ENGINES.md) | features/F21.md | Status = free string (no enum); exclude QUARANTINED from ALL on-hand rollups; intent test: sell quarantined unit → 409. |
 | E6 | Reminder/segment rail (OTP+cap slice) | E2 | features/E6.md | `fu_due_today` needs channel/`/due-today` reconcile; freq-cap = **soft-ceiling**; OTP path short-circuits consent/quiet-hours first. |
 
-_Build order is dependency-aware: E1/E2/#35/#40 have no deps (parallelizable on separate branches); #34/E6 after E2; #21 after its E3-shim._
+_Build order is dependency-aware: #35/#40 have no deps (parallelizable on separate branches); #34/E6 after E2 merges to main; #21 after its E3-shim. (E1 DONE, E2 IN TEST.)_
 
 ## 🔨 IN BUILD
 _empty_
 
 ## 🧪 IN TEST
-_empty_
+
+| # | Name | PR | Branch | Notes |
+|---|---|---|---|---|
+| E2 | Settings-matrix engine | [#566](https://github.com/brashakg/ims-2.0-railway/pull/566) | `feat/E2-settings-matrix` | Engine (`policy_registry`+`policy_engine`, store>entity>global>env>default) + 5 `/settings/policies/*` endpoints + RBAC + schema-driven **Policy Matrix** tab. **9/9** intent tests (T1-3,6-8,10,11); 583 settings/rbac/policy regression pass; `tsc -b`/`vite build` clean; **E/F pylint clean**. Adversarial pass (3 skeptics): no prod-killer, RBAC SAFE; fixed DB-outage cache-poisoning, atomic audit pre-image, secret decrypt→default, GET-read tightening, malformed-scope 422. **Cross-phase packet tests T4 (cost-floor) / T5 (refund-tier) DEFERRED per PROTOCOL §11 — they gate their consumer, NOT E2.** Tracked-not-fixed (app-wide, flag to orchestrator): entity-scope writes have no entity-ownership check (JWT carries no entity binding; ADMIN/ACCOUNTANT cross-entity by design, cf. `finance.py`). |
 
 ## ✅ DONE
 
