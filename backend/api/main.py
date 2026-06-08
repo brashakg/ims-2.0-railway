@@ -106,6 +106,7 @@ from .routers import (
     online_store_push_router,
     online_store_orders_router,
     ondc_router,
+    approvals_router,
 )
 from .routers.auth import require_roles
 
@@ -171,6 +172,14 @@ async def lifespan(app: FastAPI):
                     logger.info(f"[OK] Seeded {_n} HSN->GST master rows")
             except Exception as e:
                 logger.warning(f"[WARN] HSN->GST seed skipped: {e}")
+            # E4: approval_requests indexes (idempotent; no TTL-delete index --
+            # expired approval rows must stay auditable).
+            try:
+                from .services.approvals import ApprovalEngine
+
+                ApprovalEngine(db=get_db().db).ensure_indexes()
+            except Exception as e:
+                logger.warning(f"[WARN] Approval index creation skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:
@@ -1096,6 +1105,8 @@ app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
 app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"])
+# E4 - PIN-gated maker-checker approval engine.
+app.include_router(approvals_router, prefix="/api/v1/approvals", tags=["Approvals"])
 # Vendor portal — PUBLIC, token-auth via path param. Mounted OUTSIDE the
 # JWT-protected family of routers because external lens labs hit this
 # without an IMS user account.

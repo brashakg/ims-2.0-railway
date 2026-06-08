@@ -116,6 +116,37 @@ Allowed = Union[List[str], str]
 # Generated from api.main.app.routes; see module docstring for methodology.
 # ---------------------------------------------------------------------------
 POLICY: List[Dict[str, object]] = [
+    # --- /api/v1/approvals (E4 PIN-gated maker-checker) ---
+    # Any authenticated maker can open a request, view their own, or consume an
+    # approval they hold; approve/reject is gated to business approvers (the PIN
+    # is the second factor inside the handler). Inbox adds ACCOUNTANT (read-only).
+    {"method": "POST", "path": "/api/v1/approvals/requests", "allowed": AUTHENTICATED},
+    {
+        "method": "GET",
+        "path": "/api/v1/approvals/requests/inbox",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"],
+    },
+    {"method": "GET", "path": "/api/v1/approvals/requests/mine", "allowed": AUTHENTICATED},
+    {
+        "method": "GET",
+        "path": "/api/v1/approvals/requests/{request_id}",
+        "allowed": AUTHENTICATED,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/approvals/requests/{request_id}/approve",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/approvals/requests/{request_id}/reject",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/approvals/requests/{request_id}/consume",
+        "allowed": AUTHENTICATED,
+    },
     # --- /api/v1/admin ---
     {"method": "GET", "path": "/api/v1/admin", "allowed": ["ADMIN", "SUPERADMIN"]},
     {"method": "GET", "path": "/api/v1/admin/", "allowed": ["ADMIN", "SUPERADMIN"]},
@@ -4244,6 +4275,24 @@ POLICY: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/users/{user_id}/stores/{store_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    # E4 approval-PIN management. PUT + GET-status are self-OR-admin (the handler
+    # enforces self/admin inline), so AUTHENTICATED; DELETE (force-clear) is
+    # ADMIN/SUPERADMIN only.
+    {
+        "method": "PUT",
+        "path": "/api/v1/users/{user_id}/approval-pin",
+        "allowed": AUTHENTICATED,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/users/{user_id}/approval-pin",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/users/{user_id}/approval-pin/status",
+        "allowed": AUTHENTICATED,
     },
     # --- /api/v1/vendor-portal ---
     {

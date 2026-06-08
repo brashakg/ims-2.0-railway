@@ -751,3 +751,101 @@ async def remove_store_access(
         raise HTTPException(status_code=500, detail="Failed to remove store access")
 
     return {"message": f"Store {store_id} access revoked"}
+
+
+# ============================================================================
+# E4 - Approval PIN management (set / clear / status)
+# ============================================================================
+# A per-approver PIN authorizes maker-checker approvals (E4). A PIN is a short
+# password: it is hashed/verified with bcrypt and is NEVER returned by any
+# endpoint. Self-service rotation requires the current PIN; an ADMIN can force-
+# set/clear without it. The engine (api/services/approvals.py) owns hashing, the
+# brute-force throttle, and the audit row.
+
+
+class ApprovalPinSet(BaseModel):
+    pin: str = Field(..., min_length=4, max_length=6)
+    # Required for SELF-rotation when a PIN already exists; ignored when an ADMIN
+    # force-sets another user's PIN.
+    current_pin: Optional[str] = None
+
+
+def _is_self_or_admin(user_id: str, current_user: dict) -> bool:
+    if current_user.get("user_id") == user_id:
+        return True
+    return any(r in _ADMIN_ROLES for r in (current_user.get("roles") or []))
+
+
+@router.put("/{user_id}/approval-pin")
+async def set_approval_pin(
+    user_id: str,
+    body: ApprovalPinSet,
+    current_user: dict = Depends(get_current_user),
+):
+    """Set / rotate an approval PIN. Self OR ADMIN/SUPERADMIN. A non-admin self-
+    rotation must supply the current PIN when one is already set."""
+    if not _is_self_or_admin(user_id, current_user):
+        raise HTTPException(status_code=403, detail="Cannot set another user's PIN")
+
+    from ..services import approvals as _appr
+    from database.connection import get_db
+
+    db = get_db().db
+    if db is None:
+        raise HTTPException(status_code=503, detail="User store unavailable")
+
+    is_admin = any(r in _ADMIN_ROLES for r in (current_user.get("roles") or []))
+    is_self = current_user.get("user_id") == user_id
+
+    # Self-rotation must verify the current PIN if one exists (admins bypass).
+    if is_self and not is_admin:
+        status = _appr.has_approver_pin(db, user_id)
+        if status.get("has_pin"):
+            if not body.current_pin:
+                raise HTTPException(status_code=400, detail="current_pin required to rotate")
+            check = _appr.verify_approver_pin(db, user_id, body.current_pin)
+            if not check:
+                raise HTTPException(status_code=403, detail="Current PIN is incorrect")
+
+    res = _appr.set_approver_pin(db, user_id, body.pin, set_by=current_user.get("user_id"))
+    if not res.get("ok"):
+        err = res.get("error")
+        if err == "invalid_pin_format":
+            raise HTTPException(status_code=400, detail="PIN must be 4-6 digits")
+        if err == "user_not_found":
+            raise HTTPException(status_code=404, detail="User not found")
+        if err == "no_db":
+            raise HTTPException(status_code=503, detail="User store unavailable")
+        raise HTTPException(status_code=500, detail="Failed to set PIN")
+    return res
+
+
+@router.delete("/{user_id}/approval-pin")
+async def delete_approval_pin(
+    user_id: str, current_user: dict = Depends(require_admin)
+):
+    """Clear a user's approval PIN (ADMIN/SUPERADMIN only)."""
+    from ..services import approvals as _appr
+    from database.connection import get_db
+
+    db = get_db().db
+    if db is None:
+        raise HTTPException(status_code=503, detail="User store unavailable")
+    res = _appr.clear_approver_pin(db, user_id, cleared_by=current_user.get("user_id"))
+    if not res.get("ok") and res.get("error") == "user_not_found":
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"ok": True}
+
+
+@router.get("/{user_id}/approval-pin/status")
+async def get_approval_pin_status(
+    user_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Whether the user has an approval PIN set (never the hash). Self OR ADMIN."""
+    if not _is_self_or_admin(user_id, current_user):
+        raise HTTPException(status_code=403, detail="Cannot view another user's PIN status")
+    from ..services import approvals as _appr
+    from database.connection import get_db
+
+    db = get_db().db
+    return _appr.has_approver_pin(db, user_id)
