@@ -27,9 +27,21 @@ export type { FamilyRxResponse, FamilyRxMember, FamilyRxPrescription } from './s
 // Customers
 export { customerApi, customersApi } from './customers';
 
-// CRM analytics (RFM segments, churn-risk, lifecycle)
+// CRM analytics (RFM segments, churn-risk, lifecycle, VIP churn prediction)
 export { crmApi } from './crm';
-export type { ChurnRiskCustomer, ChurnRiskLevel } from './crm';
+export type {
+  ChurnRiskCustomer,
+  ChurnRiskLevel,
+  VipRiskLabel,
+  VipChurnRisk,
+  VipChurnRiskCustomer,
+  VipChurnTrend,
+  VipChurnResponse,
+  VipInterventionType,
+  VipInterveneRequest,
+  VipInterveneResponse,
+  VipChurnSortBy,
+} from './crm';
 
 // Customer Returns / Exchanges / Credit Notes
 export { returnsApi } from './returns';

@@ -124,6 +124,9 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Growth',
     items: [
       { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      // F40: VIP churn watchlist -- overdue high-LTV customers (personalised
+      // buying rhythm). Read-only retention oversight; SUPERADMIN / ADMIN only.
+      { id: 'vip-churn-watchlist', label: 'VIP Watch List', to: '/customers/vip-churn-watchlist', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN'] },
       // CRM-14: WhatsApp Inbox -- inbound customer messages via Meta Business API.
       { id: 'whatsapp-inbox', label: 'WA Inbox', to: '/customers/whatsapp-inbox', icon: 'chat', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       // In-app Online Store module (BVI merge). Replaces the old external SSO
