@@ -65,7 +65,8 @@ export { clinicalApi } from './clinical';
 export { expensesApi } from './expenses';
 
 // Settings & Integrations
-export { settingsApi, adminIntegrationApi } from './settings';
+export { settingsApi, adminIntegrationApi, policiesApi } from './settings';
+export type { PolicySpecPublic, PolicyEffective } from './settings';
 
 // Marketing Automation
 export { marketingApi } from './marketing';

@@ -17,7 +17,7 @@ import {
   RefreshCw, ToggleLeft, ToggleRight,
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer, Save,
-  Search, Calendar, Filter, X, Shield, LogOut, Bot, Award,
+  Search, Calendar, Filter, X, Shield, LogOut, Bot, Award, Sliders,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -39,6 +39,7 @@ import { LoyaltySettingsSection } from '../../components/settings/LoyaltySetting
 import { LensRangePricingSection } from '../../components/settings/LensRangePricing';
 import { HsnRatesSection } from '../../components/settings/HsnRatesSection';
 import { TdsRatesSection } from '../../components/settings/TdsRatesSection';
+import { PolicySchemaForm } from '../../components/settings/PolicySchemaForm';
 
 // Sub-components
 import { ProfileSection, BusinessSection } from './SettingsProfile';
@@ -104,6 +105,7 @@ const SETTINGS_SECTIONS = [
   { id: 'tax-invoice' as SettingsTab, label: 'Tax & Invoice', icon: Receipt, description: 'GST, invoice numbering', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
   { id: 'hsn-rates' as SettingsTab, label: 'HSN & GST Rates', icon: Percent, description: 'Edit GST rate per HSN code (govt revisions)', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'tds-rates' as SettingsTab, label: 'TDS Rates', icon: Percent, description: 'TDS rates on vendor / rent / contractor payments', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+  { id: 'policies' as SettingsTab, label: 'Policy Matrix', icon: Sliders, description: 'Scoped operational policies — discount caps, cash variance, refund tiers, promo, reminders (global → entity → store)', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT', 'STORE_MANAGER'] },
   { id: 'notifications' as SettingsTab, label: 'Notifications', icon: Bell, description: 'SMS, WhatsApp templates', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, Tally, Shopify', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'printers' as SettingsTab, label: 'Printers', icon: Printer, description: 'Receipt and label printers', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
@@ -128,7 +130,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -208,7 +210,7 @@ export function SettingsPage() {
     { id: 'account', label: 'Account',      members: ['profile'] },
     { id: 'org',     label: 'Organisation', members: ['business', 'stores', 'users'] },
     { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts'] },
-    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'tds-rates', 'printers', 'notifications', 'integrations', 'loyalty'] },
+    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'printers', 'notifications', 'integrations', 'loyalty'] },
     { id: 'system',  label: 'System',       members: ['approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'] },
   ];
 
@@ -423,6 +425,7 @@ export function SettingsPage() {
           {activeTab === 'lens-pricing' && <div><LensRangePricingSection /></div>}
           {activeTab === 'hsn-rates' && <div><HsnRatesSection /></div>}
           {activeTab === 'tds-rates' && <div><TdsRatesSection /></div>}
+          {activeTab === 'policies' && <div><PolicySchemaForm storeId={user?.activeStoreId || ''} /></div>}
           {activeTab === 'feature-toggles' && <div><FeatureToggles storeId={user?.activeStoreId || ''} /></div>}
 
           {/* ---- Inline tabs ---- */}

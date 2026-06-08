@@ -24,6 +24,7 @@ export type SettingsTab =
   | 'agents'
   | 'loyalty'
   | 'lens-pricing'
+  | 'policies'
   | 'system';
 
 export interface StoreData {

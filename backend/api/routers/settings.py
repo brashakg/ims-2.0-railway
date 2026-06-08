@@ -2528,3 +2528,106 @@ async def update_tds_rates(
         upsert=True,
     )
     return {"message": "TDS rates updated", "rates": body.rates}
+
+
+# ============================================================================
+# E2 -- Policy settings matrix  (/api/v1/settings/policies/*)
+# Engine: api/services/policy_engine. Scoped resolution global -> entity -> store;
+# secret values encrypted per-VALUE; explicit cache.delete; luxury caps LOWER-only;
+# store missing entity_id resolves to global. The per-key write-role gate lives in
+# set_policy (raises PolicyError status=403); the RBAC table row is defense-in-depth.
+# ============================================================================
+
+
+class PolicyWriteBody(BaseModel):
+    value: Any
+    scope: Optional[Dict[str, str]] = None  # {"store_id":..} | {"entity_id":..} | None=global
+
+
+def _parse_policy_scope(scope: Optional[str]) -> Dict[str, str]:
+    """Parse ?scope=global | entity:<id> | store:<id> into a scope dict. A malformed
+    scope is rejected (422) rather than silently resolving to global -- a typo'd
+    ?scope=store:X must not quietly return GLOBAL values to a caller who believes
+    they queried a store."""
+    if not scope or scope == "global":
+        return {}
+    if scope.startswith("store:") and len(scope) > len("store:"):
+        return {"store_id": scope.split(":", 1)[1]}
+    if scope.startswith("entity:") and len(scope) > len("entity:"):
+        return {"entity_id": scope.split(":", 1)[1]}
+    raise HTTPException(status_code=422, detail="scope must be 'global', 'store:<id>', or 'entity:<id>'")
+
+
+# NOTE: /policies/registry MUST be declared BEFORE /policies/{key} so the literal
+# "registry" is not captured as a policy key (FastAPI matches in declaration order).
+@router.get("/policies/registry")
+async def get_policy_registry(current_user: dict = Depends(get_current_user)):
+    """The typed policy catalog the FE renders. Secret keys carry no value here."""
+    from api.services import policy_engine
+
+    rows = policy_engine.registry()
+    groups: Dict[str, list] = {}
+    for r in rows:
+        groups.setdefault(r["group"], []).append(r)
+    return {"policies": rows, "groups": groups}
+
+
+@router.get("/policies")
+async def get_policies_batch(
+    scope: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Effective value of every key at the requested scope (secrets masked)."""
+    from api.services import policy_engine
+
+    return {
+        "scope": scope or "global",
+        "policies": policy_engine.get_policies(None, _parse_policy_scope(scope)),
+    }
+
+
+@router.get("/policies/{key}")
+async def get_policy_one(
+    key: str,
+    scope: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Fully-resolved effective value + source level for one key (secret masked)."""
+    from api.services import policy_engine
+
+    try:
+        return policy_engine.get_effective(key, _parse_policy_scope(scope))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown policy key: {key}")
+
+
+@router.put("/policies/{key}")
+async def put_policy(
+    key: str,
+    body: PolicyWriteBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Set a scoped override. Per-key write-role + store-ownership + type/luxury
+    validation are enforced inside set_policy (raises PolicyError)."""
+    from api.services import policy_engine
+
+    try:
+        return policy_engine.set_policy(key, body.value, body.scope or {}, actor=current_user)
+    except policy_engine.PolicyError as exc:
+        raise HTTPException(status_code=getattr(exc, "status", 400), detail=str(exc))
+
+
+@router.delete("/policies/{key}")
+async def delete_policy_override(
+    key: str,
+    scope: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Clear a store/entity override so the key falls back to its parent scope.
+    Global cannot be cleared (use PUT)."""
+    from api.services import policy_engine
+
+    try:
+        return policy_engine.clear_override(key, _parse_policy_scope(scope), actor=current_user)
+    except policy_engine.PolicyError as exc:
+        raise HTTPException(status_code=getattr(exc, "status", 400), detail=str(exc))
