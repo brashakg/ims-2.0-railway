@@ -141,6 +141,21 @@ _REGISTRY_LIST: List[PolicySpec] = [
           group="Reminders", label="Rx expiry reminder lead (days)",
           help="Days before Rx expiry to remind the customer.", minimum=1, maximum=365),
 
+    # --- Operations (#34 global target ticker) ---
+    # Stored as scopes=("global",) so a future store-scope override can be added
+    # without a code change. milestone_pcts is the list of MTD-vs-target
+    # thresholds (%) ORACLE fires a one-time floor-staff bell at; refresh_seconds
+    # is the Hub ticker card poll interval.
+    _spec(key="ticker.milestone_pcts", type="json", default=[25, 50, 75, 100],
+          scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Operations", label="Target ticker milestone thresholds (%)",
+          help="MTD-vs-monthly-target percentages that fire a one-time floor-staff bell."),
+    _spec(key="ticker.refresh_seconds", type="int", default=60,
+          scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Operations", label="Target ticker refresh interval (seconds)",
+          help="How often the Hub target-ticker card re-polls the server.",
+          minimum=30, maximum=300),
+
     # --- Communications (DECISIONS sec 10) ---
     _spec(key="comms.cap_per_customer_30d", type="int", default=3,
           scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
