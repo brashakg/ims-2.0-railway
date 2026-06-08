@@ -3502,6 +3502,32 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/categories/list",
         "allowed": "AUTHENTICATED",
     },
+    # --- PM (N5) unified product-master sub-paths (router product_master.py) ---
+    {
+        "method": "GET",
+        "path": "/api/v1/products/master/categories",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/products/master/categories/{category}/fields",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/products/sku-preview",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/products/master",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/products/master/{product_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
     {"method": "GET", "path": "/api/v1/products/gst-rates", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/products/sku/{sku}", "allowed": "AUTHENTICATED"},
     {

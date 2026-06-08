@@ -96,9 +96,16 @@ PRODUCT_SCHEMA = {
         "product_id": {"bsonType": "string"},
         "sku": {"bsonType": "string"},
         "category": {
+            # PM (N5): HEARING_AID added for parity with gst_rates.py + the
+            # AddProductPage UI + the PM category registry. NOTE: this $jsonSchema is
+            # documentation/parity only -- startup uses ensure_indexes(), NOT
+            # collMod/run_migrations, so no validator is enforced at runtime (HA was
+            # never actually code-121 rejected). The PM engine's own category
+            # registry is what gates writes; this keeps the schema doc in sync.
             "enum": ["FRAME", "SUNGLASS", "READING_GLASSES", "OPTICAL_LENS",
                     "CONTACT_LENS", "COLORED_CONTACT_LENS", "WATCH", "SMARTWATCH",
-                    "SMARTGLASSES", "WALL_CLOCK", "ACCESSORIES", "SERVICES"]
+                    "SMARTGLASSES", "WALL_CLOCK", "ACCESSORIES", "SERVICES",
+                    "HEARING_AID"]
         },
         "brand": {"bsonType": "string"},
         "model": {"bsonType": "string"},
@@ -131,7 +138,22 @@ PRODUCT_SCHEMA = {
         "pack_size": {"bsonType": "int", "minimum": 1},  # lenses per box
         "is_active": {"bsonType": "bool"},
         "is_discountable": {"bsonType": "bool"},
-        "discount_category": {"enum": ["MASS", "PREMIUM", "LUXURY", "NON_DISCOUNTABLE"]},
+        # PM (N5): SERVICE added to match pricing_caps.CATEGORY_DISCOUNT_CAPS (10%
+        # cap tier) -- SERVICE was a valid cap at POS/pricing but rejected by this
+        # validator, so a product carrying discount_category="SERVICE" 121'd on save.
+        "discount_category": {"enum": ["MASS", "PREMIUM", "LUXURY", "SERVICE", "NON_DISCOUNTABLE"]},
+        # ------------------------------------------------------------------
+        # PM (N5) unified product master: link to the PIM superset doc and the
+        # short SKU-prefix code. Both OPTIONAL + additive so existing (legacy)
+        # product rows -- which carry neither -- continue to validate unchanged.
+        "pim_product_id": {"bsonType": "string"},  # FK -> catalog_products.id
+        "sku_prefix": {"bsonType": "string"},       # short code (FR/SG/CL/...) for grid grouping
+        "country_of_origin": {"bsonType": "string"},
+        "warranty_months": {"bsonType": "int", "minimum": 0},
+        "weight_grams": {"bsonType": "double"},
+        # Mirror-sync compensation log (PM triple-write): per-target best-effort
+        # status recorded back on the Mongo spine. Never blocks the spine write.
+        "sync_status": {"bsonType": "object"},
         "created_at": {"bsonType": "date"},
         "created_by": {"bsonType": "string"}
     }
@@ -653,7 +675,12 @@ INDEXES = {
         {"keys": [("category", 1)]},
         {"keys": [("brand", 1)]},
         {"keys": [("is_active", 1)]},
-        {"keys": [("brand", 1), ("category", 1)]}
+        {"keys": [("brand", 1), ("category", 1)]},
+        # PM (N5) unified product master. All additive + sparse/optional so they
+        # never reject or re-index legacy rows that lack the field.
+        {"keys": [("pim_product_id", 1)], "sparse": True},  # FK lookup to catalog_products
+        {"keys": [("sku_prefix", 1)]},                        # category-grid grouping
+        {"keys": [("category", 1), ("brand", 1), ("model", 1), ("color", 1), ("size", 1)]}
     ],
     "stock_units": [
         {"keys": [("barcode", 1)], "unique": True, "sparse": True},

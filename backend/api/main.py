@@ -41,6 +41,7 @@ from .routers import (
     users_router,
     stores_router,
     products_router,
+    product_master_router,
     inventory_router,
     customers_router,
     crm_router,
@@ -954,6 +955,13 @@ app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
 app.include_router(stores_router, prefix="/api/v1/stores", tags=["Stores"])
 app.include_router(products_router, prefix="/api/v1/products", tags=["Products"])
+# PM (N5) unified product master -- engine-backed sub-paths under /products
+# (/categories, /sku-preview, /master). Mounted AFTER products_router; the
+# new sub-paths do not collide with the legacy products routes (FastAPI uses
+# first-registered-wins on a path collision).
+app.include_router(
+    product_master_router, prefix="/api/v1/products", tags=["Product Master"]
+)
 app.include_router(
     product_templates_router,
     prefix="/api/v1/product-templates",

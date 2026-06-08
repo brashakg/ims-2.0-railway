@@ -235,6 +235,17 @@ class DatabaseConnection:
         _idx("products", [("brand", 1), ("is_active", 1)], background=True)
         _idx("products", [("model", 1), ("is_active", 1)], background=True)
         _idx("products", [("variant", 1), ("is_active", 1)], background=True)
+        # PM (N5) product-master: pim_product_id back-link (sparse FK lookup),
+        # sku_prefix, and the 5-field dedupe grid. Declared in schemas.py but only
+        # created here (ensure_indexes is the live path; collMod/run_migrations isn't
+        # wired), so without these the PM FK lookups + dedupe collection-scan.
+        _idx("products", [("pim_product_id", 1)], sparse=True, background=True)
+        _idx("products", [("sku_prefix", 1)], background=True)
+        _idx(
+            "products",
+            [("category", 1), ("brand", 1), ("model", 1), ("color", 1), ("size", 1)],
+            background=True,
+        )
 
         # Stock units: composite indexes for inventory ledger queries.
         # (store_id, status) supports the $match stage in _build_store_ledger.
