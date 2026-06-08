@@ -75,6 +75,7 @@ from .routers import (
     payroll_router,
     marketing_router,
     campaigns_router,
+    reminders_router,
     analytics_v2_router,
     agents_router,
     proposals_router,
@@ -1098,6 +1099,10 @@ app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketin
 # the /api/v1/marketing prefix. Reuses marketing.py's send/consent/quiet-hours
 # infra; does NOT re-implement the sender. See routers/campaigns.py.
 app.include_router(campaigns_router, prefix="/api/v1/marketing", tags=["Marketing"])
+# E6 reminder rail (rules CRUD + toggle + preview/dry-run + run-now + history).
+# Config/eligibility layer ONLY; reuses send_notification + consent + quiet-hours.
+# Nothing here flips DISPATCH_MODE; seeded rules are inactive. See routers/reminders.py.
+app.include_router(reminders_router, prefix="/api/v1/reminders", tags=["Reminders"])
 app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )
