@@ -576,10 +576,24 @@ async def intervene_vip_churn(
         cust = repo.find_by_id(customer_id) if repo else None
     except Exception:  # noqa: BLE001
         cust = None
-    store_id = None
-    if cust:
-        store_id = cust.get("primary_store_id") or (cust.get("store_ids") or [None])[0]
-    _vip_store_guard(current_user, store_id)
+    if not cust:
+        raise HTTPException(status_code=404, detail="customer not found")
+    # The intervene target store is the CUSTOMER's own, resolved across EVERY
+    # canonical store field (TechCherry=preferred_store_id, native=home_store_id,
+    # legacy=primary_store_id/store_ids/store_id). Do NOT backfill to the caller's
+    # store -- a non-SUPERADMIN who doesn't own the customer's store is DENIED
+    # (was a cross-store write IDOR: P1-grade task/audit/notification on any store).
+    store_id = (cust.get("preferred_store_id") or cust.get("home_store_id")
+                or cust.get("primary_store_id") or (cust.get("store_ids") or [None])[0]
+                or cust.get("store_id"))
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" not in roles:
+        owned = list(current_user.get("store_ids", []) or [])
+        active = current_user.get("active_store_id")
+        if active and active not in owned:
+            owned.append(active)
+        if not store_id or store_id not in owned:
+            raise HTTPException(status_code=403, detail="Not permitted to intervene for this customer's store")
 
     # 30-day rolling window so a fresh window allows a new task; same window dedupes.
     window = (datetime.now() - datetime(2020, 1, 1)).days // 30

@@ -28,7 +28,7 @@ import uuid
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..claude_client import call_claude, call_claude_json, is_claude_available
-from api.utils.ist import now_ist
+from api.utils.ist import now_ist, now_ist_naive
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,9 @@ class OracleAgent(JarvisAgent):
         #     top-10 narratives; it returns the HIGH-label anomalies (already
         #     carrying the narrative keys) so they persist + emit like the rest.
         if is_eod:
-            anomalies.extend(await self._scan_vip_churn(now))
+            # IST-NAIVE clock: orders' created_at is naive (datetime.now); subtracting
+            # an aware now_ist() would TypeError and abort the whole EOD sweep.
+            anomalies.extend(await self._scan_vip_churn(now_ist_naive()))
 
         # Persist + emit
         if anomalies:

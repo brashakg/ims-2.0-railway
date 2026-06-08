@@ -90,3 +90,14 @@ def test_risk_label_unit():
 def test_median_gap_needs_three_orders():
     assert median_gap_days([NOW, NOW - timedelta(days=30)]) is None   # 2 orders -> no baseline
     assert median_gap_days(_dates_from_gaps(10, [30, 40])) == 35      # gaps [30,40] -> median 35
+
+
+def test_tz_aware_now_does_not_raise():
+    # P0 regression (adversarial pass): prod passes now_ist() (tz-AWARE) but Mongo
+    # created_at is NAIVE -> (aware - naive) raised TypeError and aborted the whole
+    # EOD anomaly sweep. compute_vip_churn must normalize and never raise.
+    from datetime import timezone
+    aware_now = NOW.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))  # IST-aware
+    sub = compute_vip_churn(_dates_from_gaps(125, [30, 28, 32]), ltv=200000, order_count=4, now=aware_now)
+    assert sub is not None
+    assert sub["risk_label"] == "HIGH" and sub["overdue_by_days"] == 95  # == naive result

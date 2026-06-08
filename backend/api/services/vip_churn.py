@@ -21,6 +21,15 @@ HIGH_OVERDUE_DAYS = 90         # absolute HIGH trigger
 HIGH_INTERVAL_FRACTION = 0.5   # OR overdue > 50% of the usual interval
 
 
+def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """Strip tzinfo so an aware clock (now_ist()) and naive Mongo `created_at`
+    (datetime.now()) can be subtracted without a TypeError. Mongo stores naive IST,
+    so dropping the tz on an aware value keeps the same wall-clock instant."""
+    if dt is not None and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
 def is_vip(ltv: float, order_count: int) -> bool:
     return float(ltv or 0) >= VIP_LTV_THRESHOLD and int(order_count or 0) >= VIP_MIN_ORDERS
 
@@ -28,7 +37,7 @@ def is_vip(ltv: float, order_count: int) -> bool:
 def median_gap_days(order_dates: List[datetime]) -> Optional[int]:
     """Median gap (days) between consecutive completed orders. None when there are
     fewer than 2 positive gaps (i.e. < 3 orders), so no interval baseline exists."""
-    dates = sorted(d for d in (order_dates or []) if d is not None)
+    dates = sorted(_to_naive(d) for d in (order_dates or []) if d is not None)
     if len(dates) < VIP_MIN_ORDERS:
         return None
     gaps = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
@@ -57,7 +66,8 @@ def compute_vip_churn(
     interval = median_gap_days(order_dates)
     if not interval or interval <= 0:
         return None
-    last = max(d for d in order_dates if d is not None)
+    now = _to_naive(now)
+    last = max(_to_naive(d) for d in order_dates if d is not None)
     last_ago = (now - last).days
     overdue = last_ago - interval
     score = max(0.0, min(1.0, overdue / interval)) if interval else 0.0

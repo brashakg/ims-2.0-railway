@@ -986,6 +986,9 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/crm ---
     {"method": "GET", "path": "/api/v1/crm", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/crm/", "allowed": "PUBLIC"},
+    # F40 VIP-churn watchlist (#40): SUPERADMIN/ADMIN; ADMIN store-scoped server-side.
+    {"method": "GET", "path": "/api/v1/crm/vip-churn", "allowed": ["SUPERADMIN", "ADMIN"]},
+    {"method": "POST", "path": "/api/v1/crm/vip-churn/{customer_id}/intervene", "allowed": ["SUPERADMIN", "ADMIN"]},
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/360/{customer_id}",
