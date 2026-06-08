@@ -1940,6 +1940,26 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
         "store_scoped": True,
     },
+    # F21 -- defective quarantine lifecycle (manager-ladder only; queue read also
+    # for ACCOUNTANT). store_scoped: a store role only sees / acts on its store.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/stock/quarantined",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"],
+        "store_scoped": True,
+    },
+    {
+        "method": "PATCH",
+        "path": "/api/v1/inventory/stock/{stock_id}/quarantine",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "PATCH",
+        "path": "/api/v1/inventory/stock/{stock_id}/lift-quarantine",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/inventory/stock-count",
@@ -3244,6 +3264,13 @@ POLICY: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/prescriptions/{prescription_id}/versions",
         "allowed": "AUTHENTICATED",
+    },
+    # --- /api/v1/labels (F21 quarantine sticker) ---
+    {
+        "method": "POST",
+        "path": "/api/v1/labels/quarantine/{stock_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     # --- /api/v1/print ---
     {"method": "GET", "path": "/api/v1/print/qz/cert", "allowed": "AUTHENTICATED"},
