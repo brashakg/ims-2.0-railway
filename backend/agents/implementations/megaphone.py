@@ -179,12 +179,9 @@ class MegaphoneAgent(JarvisAgent):
             return stats
         try:
             from api.services import reminder_rail
-        except Exception:  # pragma: no cover - import guard
-            try:
-                from ...api.services import reminder_rail  # type: ignore[no-redef]
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[MEGAPHONE] reminder_rail import failed: %s", exc)
-                return stats
+        except Exception as exc:  # noqa: BLE001 - import guard, fail-soft
+            logger.warning("[MEGAPHONE] reminder_rail import failed: %s", exc)
+            return stats
         try:
             rules = list(
                 coll.find(
@@ -254,12 +251,9 @@ class MegaphoneAgent(JarvisAgent):
             return
         try:
             from api.services import reminder_rail
-        except Exception:
-            try:
-                from ...api.services import reminder_rail  # type: ignore[no-redef]
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[MEGAPHONE] reminder_rail import failed: %s", exc)
-                return
+        except Exception as exc:  # noqa: BLE001 - import guard, fail-soft
+            logger.warning("[MEGAPHONE] reminder_rail import failed: %s", exc)
+            return
         try:
             rules = list(
                 coll.find(
