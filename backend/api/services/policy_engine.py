@@ -23,6 +23,7 @@ Standalone Mongo: set_policy writes ONE policy_settings document + ONE audit row
 (two sequential single-document writes; no cross-collection transaction needed).
 No emoji (Windows cp1252).
 """
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -168,6 +169,21 @@ def _coerce(spec: reg.PolicySpec, raw: Any) -> Any:
     return raw
 
 
+_MISSING = object()
+
+
+def _nested_get(values: Dict[str, Any], key: str) -> Any:
+    """Read a dotted policy key from the `values` subdoc. A `$set` of
+    `values.<dotted.key>` makes Mongo NEST (values -> dotted -> key), so the key is
+    NOT a flat field -- we must walk the path. Returns _MISSING when absent."""
+    cur: Any = values
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
+    return cur
+
+
 def get_policy(key: str, scope: Optional[dict] = None, *, default: Any = _UNSET) -> Any:
     """Resolve `key` to its effective value: store > entity > global > env > registry
     default > `default` arg. Raises KeyError for an unknown key only when no default
@@ -181,8 +197,8 @@ def get_policy(key: str, scope: Optional[dict] = None, *, default: Any = _UNSET)
     _, decrypt = _enc()
     for addr in _chain(scope):
         values = _scope_doc_values(addr)
-        if key in values:
-            v = values[key]
+        v = _nested_get(values, key)
+        if v is not _MISSING:
             if spec.secret and isinstance(v, str):
                 v = decrypt(v)
             return _coerce(spec, v)
@@ -209,8 +225,8 @@ def get_effective(key: str, scope: Optional[dict] = None) -> dict:
     found = False
     for addr in _chain(scope):
         values = _scope_doc_values(addr)
-        if key in values:
-            v = values[key]
+        v = _nested_get(values, key)
+        if v is not _MISSING:
             if spec.secret and isinstance(v, str):
                 v = decrypt(v)
             value = _coerce(spec, v)
@@ -324,22 +340,30 @@ def set_policy(key: str, value: Any, scope: dict, *, actor: Optional[dict] = Non
     if not is_super and not (roles & set(spec.write_roles)):
         raise PolicyError(f"role not permitted to write {key}", status=403)
 
-    # 3. store-scope ownership (STORE_MANAGER may only write their own store)
+    # 3. scope-role: a store-only role (STORE_MANAGER) may write ONLY at store scope
+    # for its own store. Global/entity overrides require a higher write role.
+    if level in ("global", "entity"):
+        if not is_super and not (roles & (set(spec.write_roles) - {"STORE_MANAGER"})):
+            raise PolicyError(f"a store-scoped role cannot write {key} at {level} scope", status=403)
+
+    # 4. store-scope ownership (STORE_MANAGER may only write their own store)
     if level == "store":
         sid = scope.get("store_id")
         hq = roles & {"SUPERADMIN", "ADMIN", "AREA_MANAGER"}
         if not hq and sid not in (actor or {}).get("store_ids", []):
             raise PolicyError("not permitted to write policy for this store", status=403)
 
-    # 4. type + bounds + 5. luxury LOWER-only guard
+    # 5. type + bounds + 6. luxury LOWER-only guard
     clean = _validate_value(spec, value)
     _luxury_guard(spec, clean)
 
-    # 6. encrypt secret values PER VALUE (never _encrypt_config)
+    # 6. encrypt secret values PER VALUE (never _encrypt_config). Non-string secrets
+    #    (e.g. a json map) are JSON-serialized before encryption; get_policy decrypts
+    #    then _coerce re-parses. So a `secret` value is NEVER stored in plaintext.
     stored = clean
-    if spec.secret and isinstance(clean, str):
+    if spec.secret:
         enc, _ = _enc()
-        stored = enc(clean)
+        stored = enc(clean if isinstance(clean, str) else json.dumps(clean))
 
     coll = _coll()
     if coll is None:
@@ -348,7 +372,8 @@ def set_policy(key: str, value: Any, scope: dict, *, actor: Optional[dict] = Non
     before = None
     try:
         existing = coll.find_one({"_id": addr}) or {}
-        before = (existing.get("values") or {}).get(key)
+        _b = _nested_get(existing.get("values") or {}, key)
+        before = None if _b is _MISSING else _b
     except Exception:  # noqa: BLE001
         before = None
 
@@ -382,6 +407,8 @@ def clear_override(key: str, scope: dict, *, actor: Optional[dict] = None) -> di
     is_super = "SUPERADMIN" in roles
     if not is_super and not (roles & set(spec.write_roles)):
         raise PolicyError(f"role not permitted to write {key}", status=403)
+    if level == "entity" and not is_super and not (roles & (set(spec.write_roles) - {"STORE_MANAGER"})):
+        raise PolicyError(f"a store-scoped role cannot clear {key} at entity scope", status=403)
     if level == "store":
         sid = scope.get("store_id")
         hq = roles & {"SUPERADMIN", "ADMIN", "AREA_MANAGER"}
@@ -394,7 +421,8 @@ def clear_override(key: str, scope: dict, *, actor: Optional[dict] = None) -> di
     before = None
     try:
         existing = coll.find_one({"_id": addr}) or {}
-        before = (existing.get("values") or {}).get(key)
+        _b = _nested_get(existing.get("values") or {}, key)
+        before = None if _b is _MISSING else _b
         coll.update_one({"_id": addr}, {"$unset": {f"values.{key}": ""},
                                         "$set": {"updated_at": datetime.utcnow(),
                                                  "updated_by": (actor or {}).get("user_id")}})

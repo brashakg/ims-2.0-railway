@@ -3567,6 +3567,13 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/settings ---
     {"method": "GET", "path": "/api/v1/settings", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/settings/", "allowed": "PUBLIC"},
+    # E2 policy matrix: GET reads are AUTHENTICATED; PUT/DELETE = union of write
+    # roles (the fine-grained per-key write_roles gate is enforced in set_policy).
+    {"method": "GET", "path": "/api/v1/settings/policies/registry", "allowed": "AUTHENTICATED"},
+    {"method": "GET", "path": "/api/v1/settings/policies", "allowed": "AUTHENTICATED"},
+    {"method": "GET", "path": "/api/v1/settings/policies/{key}", "allowed": "AUTHENTICATED"},
+    {"method": "PUT", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"]},
+    {"method": "DELETE", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]},
     {
         "method": "GET",
         "path": "/api/v1/settings/admin-controls",
