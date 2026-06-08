@@ -3505,12 +3505,12 @@ POLICY: List[Dict[str, object]] = [
     # --- PM (N5) unified product-master sub-paths (router product_master.py) ---
     {
         "method": "GET",
-        "path": "/api/v1/products/categories",
+        "path": "/api/v1/products/master/categories",
         "allowed": "AUTHENTICATED",
     },
     {
         "method": "GET",
-        "path": "/api/v1/products/categories/{category}/fields",
+        "path": "/api/v1/products/master/categories/{category}/fields",
         "allowed": "AUTHENTICATED",
     },
     {

@@ -104,14 +104,15 @@ def _raise(err: "pm.ProductMasterError"):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/categories")
+@router.get("/master/categories")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """All canonical product-master category specs (long-form value + SKU prefix
-    + required/optional fields)."""
+    + required/optional fields). Mounted under /master/ -- a bare /products/categories
+    is shadowed by the legacy GET /products/{product_id} (first-registered-wins)."""
     return {"categories": pm.all_category_specs()}
 
 
-@router.get("/categories/{category}/fields")
+@router.get("/master/categories/{category}/fields")
 async def category_fields(
     category: str, current_user: dict = Depends(get_current_user)
 ):

@@ -433,9 +433,32 @@ def test_new_routes_role_gated_in_policy():
     ):
         allowed = by_key[(method, path)]
         assert allowed == ["ADMIN", "CATALOG_MANAGER"], (method, path, allowed)
-    # Reads -> any authenticated user.
+    # Reads -> any authenticated user. (Mounted under /master/ to escape the legacy
+    # GET /products/{product_id} shadow.)
     for method, path in (
-        ("GET", "/api/v1/products/categories"),
-        ("GET", "/api/v1/products/categories/{category}/fields"),
+        ("GET", "/api/v1/products/master/categories"),
+        ("GET", "/api/v1/products/master/categories/{category}/fields"),
     ):
         assert by_key[(method, path)] == "AUTHENTICATED", (method, path)
+
+
+def test_categories_route_not_shadowed_over_http():
+    """Adversarial P2 regression: a bare GET /products/categories was a dead 404
+    (shadowed by legacy GET /products/{product_id}). The list route is now under
+    /master/ -- assert it actually resolves to the category list over HTTP, not a
+    404 'Product not found'."""
+    import sys
+    sys.path.insert(0, "backend")
+    from fastapi.testclient import TestClient
+    from api.routers.auth import create_access_token
+    from api.main import app
+
+    client = TestClient(app)
+    token = create_access_token({"user_id": "u1", "username": "u1", "roles": ["ADMIN"]})
+    r = client.get(
+        "/api/v1/products/master/categories",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "categories" in body and isinstance(body["categories"], list) and body["categories"]

@@ -605,11 +605,15 @@ def _write_mirror(
     try:
         if catalog_repo is not None:
             catalog_repo.upsert(pim_doc)
+            targets.append(_SyncTarget("catalog_products", "OK"))
         elif db is not None:
             db.get_collection("catalog_products").update_one(
                 {"id": pim_doc["id"]}, {"$set": pim_doc}
             )
-        targets.append(_SyncTarget("catalog_products", "OK"))
+            targets.append(_SyncTarget("catalog_products", "OK"))
+        else:
+            # No catalog target wired -> record SKIPPED, never a false OK.
+            targets.append(_SyncTarget("catalog_products", "SKIPPED", "no catalog target"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PM] catalog_products mirror failed for %s: %s", spine.get("sku"), exc)
         targets.append(_SyncTarget("catalog_products", "FAILED", str(exc)[:200]))

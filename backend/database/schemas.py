@@ -96,10 +96,12 @@ PRODUCT_SCHEMA = {
         "product_id": {"bsonType": "string"},
         "sku": {"bsonType": "string"},
         "category": {
-            # PM (N5): HEARING_AID added so the unified product master can persist
-            # hearing aids (HSN 9021 NIL/exempt, gst_rate 0.0) -- it was already in
-            # gst_rates.py + the AddProductPage UI but absent here, so a HA product
-            # was rejected by this $jsonSchema validator (Mongo code 121).
+            # PM (N5): HEARING_AID added for parity with gst_rates.py + the
+            # AddProductPage UI + the PM category registry. NOTE: this $jsonSchema is
+            # documentation/parity only -- startup uses ensure_indexes(), NOT
+            # collMod/run_migrations, so no validator is enforced at runtime (HA was
+            # never actually code-121 rejected). The PM engine's own category
+            # registry is what gates writes; this keeps the schema doc in sync.
             "enum": ["FRAME", "SUNGLASS", "READING_GLASSES", "OPTICAL_LENS",
                     "CONTACT_LENS", "COLORED_CONTACT_LENS", "WATCH", "SMARTWATCH",
                     "SMARTGLASSES", "WALL_CLOCK", "ACCESSORIES", "SERVICES",
