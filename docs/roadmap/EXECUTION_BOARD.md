@@ -15,11 +15,8 @@ Legend: **BACKLOG** (not ready) · **TODO** (packet ready + corrections folded, 
 
 | # | Name | Dep | Packet | MUST-READ correction |
 |---|---|---|---|---|
-| #34 | Global target ticker | E2 | features/F34.md | Add `{created_at,status,store_id}` orders index (net-new) + cache. SALES sees % only. |
-| E6 | Reminder/segment rail (OTP+cap slice) | E2 | features/E6.md | `fu_due_today` needs channel/`/due-today` reconcile; freq-cap = **soft-ceiling**; OTP path short-circuits consent/quiet-hours first. |
-| #40 | VIP churn prediction (read-only) | E2 | features/F40.md | **BOUNCED 2026-06-08 (test session) -- CI red.** Logic is sound (9/9 model tests pass; median-interval intent correct: VIP=LTV>=1L AND >=3 orders, HIGH=>90d OR >50%% interval, EOD-only scan). **Findings 2026-06-08:** `tests/test_rbac_policy.py::test_no_uncatalogued_routes` FAILS in CI test(3.10/3.11) -- "2 /api/v1 route(s) missing from rbac_policy.POLICY". F40 added 2 new routes (`GET /crm/vip-churn`, `POST /crm/vip-churn/{id}/intervene` in crm.py ~L435+) but the PR never touches rbac_policy.py, so they are uncatalogued (every route must be registered -- #369 RBAC access-matrix). **FIX:** add both vip-churn routes to backend/api/services/rbac_policy.py POLICY with packet roles (SUPERADMIN/ADMIN). **ALSO REBASE:** branch is 6 commits stale (base b16901a, pre-E2/#35); the mypy "585 errors in 96 files" job failure is codebase-wide/pre-existing and should clear on up-to-date main. repro: gh run view 27133610200. |
 
-_Build order is dependency-aware: #34/E6 after E2 merges to main. (E1 DONE; E2/#35/#40/#21 IN TEST.)_
+_All 8 Phase-0 items are built. DONE (merged): E1, E2, #35, #21. IN TEST: #34, E6, #40. Phase 1 (E3, E4, PM, SC, #46, N1/#45, ...) is the next promotion wave — fold each packet's CORRECTIONS per the PROTOCOL §11 gate before promoting to TODO._
 
 ## 🔨 IN BUILD
 _empty_
@@ -28,6 +25,9 @@ _empty_
 
 | # | Name | PR | Branch | Notes |
 |---|---|---|---|---|
+| #34 | Global target ticker | [#576](https://github.com/brashakg/ims-2.0-railway/pull/576) | `feat/F34-target-ticker` | Stratified `GET /finance/target-ticker` (floor=pct only; money keys deleted) + `POST .../settings` (E2 `ticker.*`) + ORACLE `_check_milestones` (atomic `$ne`+`$addToSet` re-fire guard, floor-bell only, month-rollover reset) + `{created_at,status,store_id}` index + FE TickerCard. Adversarial pass CLEAN (no P0/P1). 12 tests + rbac-coverage 29; smoke 999; E/F clean; tsc clean; rebased. P3 follow-ups: bell tz sort-skew, dead AbortController, no-op cache. **Merge note:** shares one `oracle._do_background_work` line with #40 — second merger keeps both calls. |
+| E6 | Reminder/segment rail (DARK) | [#577](https://github.com/brashakg/ims-2.0-railway/pull/577) | `feat/E6-reminder-rail` | `reminder_rail.py` (rule eval, soft-ceiling cap, atomic OTP consume) + 9 `/reminders/*` endpoints (all rbac-catalogued) + 3 segment resolvers + megaphone tick + manual-campaign cap hookup. **Built DARK per comms directive: NO live-send path, all 6 seed rules `active=False`, DISPATCH_MODE-gated.** Adversarial pass CLEAN (no P0/P1; dark-compliance verified). 19 tests + rbac-coverage; smoke 1006; api/ E/F clean; rebased. P2 follow-ups (fix before activating at volume): churn-event re-blasts cohort, unsorted 5000-row scans, non-atomic scheduled_for stamp. |
+| #40 | VIP churn prediction (read-only) | [#571](https://github.com/brashakg/ims-2.0-railway/pull/571) | `feat/F40-vip-churn` | **RE-SUBMITTED after the 2026-06-08 bounce.** Bounce cause fixed: rebased onto current main (no longer 6-stale) + the 2 `/crm/vip-churn` rbac_policy rows added (coverage-lock green). Adversarial pass also fixed a **P0** (EOD-scan tz crash: now_ist aware vs naive created_at — `_to_naive` + `now_ist_naive()`) + a cross-store intervene **IDOR** (resolve customer store across all canonical fields; 403 non-owners). 10 tests (incl tz-aware regression) + rbac-coverage 29; smoke 999; E/F clean. ORACLE EOD VIP-churn scan + watchlist + intervene + FE. |
 
 ## ✅ DONE
 
