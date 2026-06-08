@@ -106,6 +106,10 @@
   --color-wz:            #0e8c8c;
   --color-wz-50:         #e6f4f4;
 
+  /* Single semantic accent -- tracks the active brand colour (BV red / WZ teal).
+     Used by the F34 target-ticker progress fill (one accent, no multi-colour). */
+  --color-accent:        var(--color-bv);
+
   --color-ok:            #0d7b4c;
   --color-ok-50:         #e5f3ed;
   --color-warn:          #b46a00;

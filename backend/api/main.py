@@ -53,6 +53,7 @@ from .routers import (
     tasks_router,
     expenses_router,
     finance_router,
+    finance_ticker_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -983,6 +984,14 @@ app.include_router(
     prefix="/api/v1/finance",
     tags=["Finance"],
     dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
+)
+# F34 target-ticker GET: mounted at the SAME /api/v1/finance prefix but WITHOUT
+# the _FINANCE_ROLES gate, so every authenticated role (incl. store-floor staff)
+# can reach it. The response is privacy-stratified server-side in the handler.
+app.include_router(
+    finance_ticker_router,
+    prefix="/api/v1/finance",
+    tags=["Finance"],
 )
 app.include_router(
     hr_router,

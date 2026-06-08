@@ -14,6 +14,7 @@ import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
+import TickerCard from '../../components/hub/TickerCard';
 import './HubPage.css';
 
 interface HeroMeta {
@@ -354,6 +355,12 @@ export default function HubPage() {
             <div className="sm">Clinical</div>
           </div>
         </div>
+      </section>
+
+      {/* F34 monthly-target ticker — shown to EVERY role; the view is
+          privacy-stratified server-side (floor staff see % only, no rupees). */}
+      <section style={{ marginBottom: 18 }}>
+        <TickerCard />
       </section>
 
       {/* Owner digest — day-close snapshot, SUPERADMIN / ADMIN only. */}

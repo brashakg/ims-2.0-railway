@@ -17,7 +17,7 @@ import {
   RefreshCw, ToggleLeft, ToggleRight,
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer, Save,
-  Search, Calendar, Filter, X, Shield, LogOut, Bot, Award, Sliders,
+  Search, Calendar, Filter, X, Shield, LogOut, Bot, Award, Sliders, Target,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -26,7 +26,9 @@ import type { UserRole } from '../../types';
 import {
   adminSystemApi,
   settingsApi,
+  policiesApi,
 } from '../../services/api';
+import { financeApi } from '../../services/api/finance';
 
 import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
 import { FeatureToggles } from '../../components/settings/FeatureToggles';
@@ -1156,6 +1158,112 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Admin Controls -- Store & Role Configuration</h2>
         <AdminControlPanel />
       </div>
+
+      {/* F34 target-ticker config (SUPERADMIN/ADMIN; the System tab is already
+          role-gated to them). Persisted to the two E2 policy keys. */}
+      <TargetTickerSettings />
+    </div>
+  );
+}
+
+// ============================================================================
+// Target Ticker Settings (F34) -- milestone thresholds + refresh interval
+// ============================================================================
+
+function TargetTickerSettings() {
+  const toast = useToast();
+  const [milestonesCsv, setMilestonesCsv] = useState('25,50,75,100');
+  const [refreshSeconds, setRefreshSeconds] = useState(60);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    policiesApi
+      .getAll('global')
+      .then((res) => {
+        if (!alive) return;
+        const pol = res?.policies || {};
+        const pcts = pol['ticker.milestone_pcts']?.value;
+        const refresh = pol['ticker.refresh_seconds']?.value;
+        if (Array.isArray(pcts) && pcts.length > 0) setMilestonesCsv(pcts.join(','));
+        if (typeof refresh === 'number' && refresh > 0) setRefreshSeconds(refresh);
+      })
+      .catch(() => {
+        /* fall back to defaults */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const save = async () => {
+    // Parse + validate the comma-separated thresholds (1..100 integers).
+    const pcts = milestonesCsv
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n));
+    if (pcts.length === 0 || pcts.some((n) => n < 1 || n > 100)) {
+      toast.error('Milestone thresholds must be integers between 1 and 100');
+      return;
+    }
+    if (refreshSeconds < 30 || refreshSeconds > 300) {
+      toast.error('Refresh interval must be between 30 and 300 seconds');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await financeApi.updateTickerSettings({ milestone_pcts: pcts, refresh_seconds: refreshSeconds });
+      setMilestonesCsv((res.milestone_pcts || pcts).join(','));
+      setRefreshSeconds(res.refresh_seconds || refreshSeconds);
+      toast.success('Target ticker settings saved');
+    } catch {
+      toast.error('Failed to save target ticker settings');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card mt-6">
+      <div className="flex items-center gap-2 mb-1">
+        <Target className="w-5 h-5 text-gray-500" />
+        <h2 className="text-lg font-semibold text-gray-900">Target Ticker</h2>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        The monthly-target progress card on the Hub. Milestone crossings push a one-time celebratory
+        bell to store-floor staff.
+      </p>
+      <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-600 mb-1">Milestone thresholds (%)</label>
+          <input
+            type="text"
+            value={milestonesCsv}
+            onChange={(e) => setMilestonesCsv(e.target.value)}
+            placeholder="25,50,75,100"
+            className="input-field"
+          />
+          <p className="text-xs text-gray-400 mt-1">Comma-separated integers, each 1-100.</p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-600 mb-1">Refresh every (seconds)</label>
+          <input
+            type="number"
+            min={30}
+            max={300}
+            value={refreshSeconds}
+            placeholder="60"
+            title="Refresh interval in seconds"
+            onChange={(e) => setRefreshSeconds(parseInt(e.target.value, 10) || 0)}
+            className="input-field"
+          />
+          <p className="text-xs text-gray-400 mt-1">How often the Hub card re-polls (30-300).</p>
+        </div>
+      </div>
+      <button type="button" onClick={save} disabled={saving} className="btn-primary mt-4">
+        <Save className="w-4 h-4 mr-2" />
+        {saving ? 'Saving…' : 'Save Target Ticker Settings'}
+      </button>
     </div>
   );
 }

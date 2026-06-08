@@ -194,6 +194,11 @@ class DatabaseConnection:
         _idx("orders", "salesperson_id", background=True)
         _idx("orders", [("store_id", 1), ("status", 1)], background=True)
         _idx("orders", [("store_id", 1), ("created_at", -1)], background=True)
+        # F34 target ticker: the MTD-range scan filters {created_at: {$gte:
+        # month_start}, status: {$nin:[...]}, store_id}. The existing
+        # {store_id, created_at:-1} is DESC and store-first; this ASC
+        # created_at-leading compound serves the open-ended >= month bound.
+        _idx("orders", [("created_at", 1), ("status", 1), ("store_id", 1)], background=True)
         _idx("orders", [("salesperson_id", 1), ("created_at", -1)], background=True)
         _idx("orders", "order_number", unique=True, sparse=True, background=True)
         _idx("orders", [("store_id", 1), ("balance_due", 1)], background=True)
