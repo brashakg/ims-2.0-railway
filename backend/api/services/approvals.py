@@ -80,6 +80,12 @@ ACTION_TYPES: frozenset = frozenset({
     # the "auto" tier (STORE_MANAGER+); single-use + store-bound at approve-time, so
     # a manager of store A cannot approve an override consumed against store B.
     "RETURN_SERIAL_OVERRIDE",
+    # F26: a remote PIN-gated leave approval. amount=None -> resolves to the "auto"
+    # tier (STORE_MANAGER+), single-use + store-bound at approve-time so a manager
+    # of store A cannot approve a leave filed against store B. Self-approval (the
+    # applicant approving their own leave) is blocked at the leave-router layer,
+    # which knows the leave doc's employee_id (the engine does not).
+    "leave_approval",
 })
 
 # Actions that REQUIRE separation of duties (approver != maker).

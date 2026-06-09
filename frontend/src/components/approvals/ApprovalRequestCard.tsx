@@ -22,6 +22,8 @@ const ACTION_LABELS: Record<string, string> = {
   petty_cash: 'Petty Cash',
   endless_aisle: 'Endless Aisle',
   rtv: 'Return to Vendor',
+  RETURN_SERIAL_OVERRIDE: 'Return Serial Override',
+  leave_approval: 'Leave Approval',
 };
 
 export function actionLabel(actionType: string): string {

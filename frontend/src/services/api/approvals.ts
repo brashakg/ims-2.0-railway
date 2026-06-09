@@ -28,7 +28,10 @@ export type ApprovalActionType =
   | 'profile_merge'
   | 'petty_cash'
   | 'endless_aisle'
-  | 'rtv';
+  | 'rtv'
+  | 'RETURN_SERIAL_OVERRIDE'
+  // F26: a remote PIN-gated leave approval routed through the same engine.
+  | 'leave_approval';
 
 export type ApprovalStatus =
   | 'REQUESTED'
