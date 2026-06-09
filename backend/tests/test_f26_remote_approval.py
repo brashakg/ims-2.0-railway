@@ -450,6 +450,36 @@ def test_remote_approve_without_valid_token_fails(wired):
     assert leave["status"] == "PENDING"
 
 
+def test_remote_approve_no_request_leave_does_not_burn_foreign_token(wired):
+    """P3 regression (adversarial): a leave with NO approval_request_id (filed
+    fail-soft when E4 was down) must REFUSE remote-approve with 409
+    no_approval_request, and must NOT atomically BURN a token minted for a
+    DIFFERENT leave (a griefing token-burn)."""
+    db = wired
+    _seed_user(db, "mgr1", roles=["STORE_MANAGER"], store_ids=["S1"], pin="1234")
+    staff = _user("staff1", ["SALES_STAFF"], store_id="S1")
+    # Leave A (SICK) opens a real E4 request; the manager approves -> token A.
+    a = _run(hr_router.apply_leave(_Leave("SICK", from_days_ahead=0), staff))
+    engine = ApprovalEngine(db=db)
+    appr = engine.approve(a["approval_request_id"], approver_user_id="mgr1",
+                          approver_roles=["STORE_MANAGER"], pin="1234",
+                          approver_store_ids=["S1"])
+    token_a = appr["approval_token"]
+    # Leave B (EARNED) opens NO E4 request -> approval_request_id is None.
+    b = _run(hr_router.apply_leave(_Leave("EARNED", from_days_ahead=1), staff))
+    assert b["approval_request_id"] is None
+
+    mgr = _user("mgr1", ["STORE_MANAGER"], store_id="S1")
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(hr_router.approve_leave_remote(b["leaveId"], _Req(token_a), mgr))
+    assert ei.value.status_code == 409
+    assert ei.value.detail == "no_approval_request"
+    # Token A is NOT burned -- still APPROVED + spendable for its own leave.
+    assert engine.get(a["approval_request_id"])["status"] == "APPROVED"
+    assert db.get_collection("leaves").find_one({"leave_id": b["leaveId"]})["status"] == "PENDING"
+
+
 # ============================================================================
 # 3. Self-approval is blocked on every path
 # ============================================================================

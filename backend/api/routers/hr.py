@@ -1590,12 +1590,20 @@ async def approve_leave_remote(
     # by token via the engine's get-on-request_id path is not available, so we
     # look it up through the request_id recorded on the leave when it was opened.
     req_id = leave.get("approval_request_id")
-    if req_id:
-        req = engine.get(req_id)
-        if not req or req.get("approval_token") != body.approval_token:
-            raise HTTPException(status_code=400, detail="token_mismatch")
-        if (req.get("context") or {}).get("leave_id") != leave_id:
-            raise HTTPException(status_code=400, detail="token_mismatch")
+    # A leave with NO recorded approval request was never sent for approval (e.g.
+    # E4 was unavailable at apply time, fail-soft -> approval_request_id=None).
+    # REFUSE remote-approve outright -- do NOT fall through to a token-only consume,
+    # which would atomically BURN a token minted for a DIFFERENT leave (a griefing
+    # token-burn). Such a leave must be re-filed / standard-approved instead.
+    if not req_id:
+        raise HTTPException(status_code=409, detail="no_approval_request")
+    # Bind the token to THIS leave's request BEFORE consuming, so a token minted
+    # for another leave can never reach (and burn) the single-use consume.
+    req = engine.get(req_id)
+    if not req or req.get("approval_token") != body.approval_token:
+        raise HTTPException(status_code=400, detail="token_mismatch")
+    if (req.get("context") or {}).get("leave_id") != leave_id:
+        raise HTTPException(status_code=400, detail="token_mismatch")
 
     # Atomic single-use spend. The engine flips APPROVED -> CONSUMED in one op;
     # a replay returns already_consumed; an expired/rejected token is refused.
