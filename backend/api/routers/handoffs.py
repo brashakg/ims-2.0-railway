@@ -40,8 +40,13 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
-from .auth import get_current_user
-from ..dependencies import get_handoff_repository, get_user_repository
+from .auth import get_current_user, require_roles
+from ..dependencies import (
+    get_handoff_repository,
+    get_user_repository,
+    get_prescription_repository,
+    get_audit_repository,
+)
 from ..services.file_store import (
     get_file_store,
     ALLOWED_MIME_TYPES,
@@ -80,6 +85,35 @@ VALID_RESPONSES = frozenset(
 
 MIN_VALIDITY_DAYS = 3
 MAX_VALIDITY_DAYS = 30
+
+# F50 -- clinical->retail handover. The CLINICAL_RX handoff is minted by the
+# clinical router's send-to-floor endpoint; these constants gate who may VIEW /
+# ACKNOWLEDGE / MARK-SERVED it from the sales floor. Deliberately distinct from
+# ELIGIBLE_RECIPIENT_ROLES (the general file-handoff recipient set) so the
+# existing file-handoff flow is untouched -- SALES_STAFF / SALES_CASHIER can
+# receive a CLINICAL_RX but NOT a general file handoff.
+HANDOFF_TYPE_CLINICAL = "CLINICAL_RX"
+_CLINICAL_INBOX_ROLES = frozenset(
+    {
+        "SALES_STAFF",
+        "SALES_CASHIER",
+        "STORE_MANAGER",
+        "AREA_MANAGER",
+        "ADMIN",
+        "SUPERADMIN",
+    }
+)
+# Acknowledge / mark-served are floor actions: the associate who is actually
+# closing the sale. AREA_MANAGER / ADMIN see the inbox (oversight) but the
+# act-on roles are the floor + their direct manager.
+_CLINICAL_ACTION_ROLES = frozenset(
+    {
+        "SALES_STAFF",
+        "SALES_CASHIER",
+        "STORE_MANAGER",
+        "SUPERADMIN",
+    }
+)
 
 
 # ============================================================================
@@ -381,6 +415,44 @@ async def list_sent(current_user: dict = Depends(get_current_user)):
     return {"handoffs": [_scrub(r) for r in rows], "total": len(rows)}
 
 
+@router.get("/clinical-inbox")
+async def list_clinical_inbox(
+    current_user: dict = Depends(require_roles(*sorted(_CLINICAL_INBOX_ROLES))),
+):
+    """Store-scoped CLINICAL_RX inbox for the sales floor (F50).
+
+    Returns only CLINICAL_RX handoffs where the caller is a recipient, that have
+    not expired (the send endpoint sets expires_at = now + 8h; the TTL index
+    eventually deletes them, this filter hides them immediately on expiry), and
+    that the caller has not dismissed / snoozed. Each card carries a live Rx
+    summary. NO file, NO outbound message -- the bell is the only channel.
+
+    MUST be registered before GET /{handoff_id} so the literal path wins over the
+    {handoff_id} param (FastAPI matches in registration order)."""
+    repo = get_handoff_repository()
+    if repo is None:
+        return {"handoffs": [], "total": 0}
+    uid = current_user.get("user_id")
+    rows = repo.find_inbox_for_user(uid, handoff_type=HANDOFF_TYPE_CLINICAL)
+    now = _now()
+    visible: List[Dict] = []
+    for h in rows:
+        # Expiry guard (immediate hide; TTL index does the eventual delete).
+        exp = h.get("expires_at")
+        if isinstance(exp, datetime) and exp <= now:
+            continue
+        my_r = next(
+            (r for r in h.get("recipients", []) if r.get("user_id") == uid),
+            None,
+        )
+        if my_r is None:
+            continue
+        if not _is_visible_on_hub(my_r, now):
+            continue
+        visible.append(_clinical_view(h, uid))
+    return {"handoffs": visible, "total": len(visible)}
+
+
 @router.get("/{handoff_id}")
 async def get_handoff(
     handoff_id: str,
@@ -649,6 +721,225 @@ async def revoke_handoff(
             except Exception:
                 pass
     return {"deleted": True, "handoff_id": handoff_id}
+
+
+# ============================================================================
+# F50 — Clinical->retail handover (CLINICAL_RX)
+# ============================================================================
+# The CLINICAL_RX handoff doc is MINTED by the clinical router
+# (POST /clinical/tests/{id}/send-to-floor). These endpoints are the sales-floor
+# side: read the inbox, acknowledge (first-seen), and mark-served (logs the 50/50
+# conversion credit per DECISIONS sec 3). NO outbound message is sent anywhere --
+# the only delivery channel is the in-app bell (notifications collection) written
+# by the send endpoint. The comms channel is dark (WhatsApp disabled by Meta).
+
+
+def _audit_handover(action: str, handoff: Dict, current_user: dict, detail: Dict) -> None:
+    """Best-effort domain audit for a CLINICAL_RX action. FAIL-SOFT: any audit
+    failure is swallowed so it can never undo / 500 the handover action. Uses the
+    AuditRepository.create facade (never append_audit_entry)."""
+    try:
+        repo = get_audit_repository()
+        if repo is None:
+            return
+        repo.create(
+            {
+                "action": action,
+                "entity_type": "handoff",
+                "entity_id": handoff.get("handoff_id"),
+                "store_id": handoff.get("store_id"),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("full_name")
+                or current_user.get("username"),
+                "timestamp": datetime.utcnow(),
+                "severity": "INFO",
+                "source": "domain",
+                "detail": detail or {},
+            }
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the action
+        pass
+
+
+def _rx_summary(prescription_id: Optional[str]) -> Optional[Dict]:
+    """Live-read the linked prescription and return a small Rx summary for the
+    inbox card. The handover stores only the prescription_id (never a copy), so
+    the card always reflects the current Rx. Fail-soft: a missing Rx / DB down
+    returns None and the card simply omits the summary."""
+    if not prescription_id:
+        return None
+    try:
+        rx_repo = get_prescription_repository()
+        if rx_repo is None:
+            return None
+        rx = rx_repo.find_by_id(prescription_id)
+        if not rx:
+            return None
+        return {
+            "right_eye": rx.get("right_eye"),
+            "left_eye": rx.get("left_eye"),
+            "expiry_date": rx.get("expiry_date"),
+            "lens_recommendation": rx.get("lens_recommendation"),
+            "prescription_number": rx.get("prescription_number"),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _clinical_view(handoff: Dict, user_id: str) -> Dict:
+    """Per-recipient inbox view of a CLINICAL_RX handoff. Enriched with the live
+    Rx summary; recipient-private file/blob fields are absent (CLINICAL_RX has
+    no file)."""
+    base = _scrub(handoff) or {}
+    my_recipient = next(
+        (r for r in base.get("recipients", []) if r.get("user_id") == user_id),
+        None,
+    )
+    return {
+        "handoff_id": base.get("handoff_id"),
+        "handoff_type": base.get("handoff_type"),
+        "title": base.get("title"),
+        "clinical_summary": base.get("clinical_summary"),
+        "description": base.get("description"),
+        "optometrist_id": base.get("optometrist_id"),
+        "optometrist_name": base.get("optometrist_name"),
+        "patient_name": base.get("patient_name"),
+        "customer_id": base.get("customer_id"),
+        "patient_id": base.get("patient_id"),
+        "prescription_id": base.get("prescription_id"),
+        "eye_test_id": base.get("eye_test_id"),
+        "store_id": base.get("store_id"),
+        "product_recommendations": base.get("product_recommendations") or [],
+        "created_at": base.get("created_at"),
+        "expires_at": base.get("expires_at"),
+        "acknowledged_by": base.get("acknowledged_by"),
+        "acknowledged_at": base.get("acknowledged_at"),
+        "mark_served": bool(base.get("mark_served")),
+        "served_by": base.get("served_by"),
+        "served_at": base.get("served_at"),
+        "rx_summary": _rx_summary(base.get("prescription_id")),
+        "my_status": (my_recipient or {}).get("status", "pending"),
+        "my_dismissed": (my_recipient or {}).get("dismissed", False),
+        "my_kept": (my_recipient or {}).get("kept", False),
+        "my_snooze_until": (my_recipient or {}).get("snooze_until"),
+    }
+
+
+def _is_recipient(handoff: Dict, user_id: str) -> bool:
+    return any(
+        r.get("user_id") == user_id for r in (handoff.get("recipients") or [])
+    )
+
+
+@router.patch("/{handoff_id}/acknowledge")
+async def acknowledge_clinical_handover(
+    handoff_id: str,
+    current_user: dict = Depends(require_roles(*sorted(_CLINICAL_ACTION_ROLES))),
+):
+    """Sales associate acknowledges a CLINICAL_RX handover (first-seen).
+
+    Idempotent: the first caller to acknowledge stamps acknowledged_by/at
+    (guarded atomic find_one_and_update); a second acknowledge returns 200
+    without overwriting the original. NO send -- in-app only."""
+    repo = get_handoff_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    handoff = repo.find_by_id(handoff_id)
+    if handoff is None:
+        raise HTTPException(status_code=404, detail="Handoff not found")
+    if handoff.get("handoff_type") != HANDOFF_TYPE_CLINICAL:
+        raise HTTPException(status_code=404, detail="Not a clinical handover")
+
+    uid = current_user.get("user_id")
+    if not _is_recipient(handoff, uid):
+        raise HTTPException(
+            status_code=403, detail="You are not a recipient of this handover"
+        )
+
+    already = handoff.get("acknowledged_by")
+    if not already:
+        claimed = repo.acknowledge_clinical(handoff_id, uid)
+        if claimed:
+            # Also reflect on the caller's recipient sub-doc + audit.
+            repo.update_recipient(
+                handoff_id,
+                uid,
+                {"status": "responded", "response": "accepted", "responded_at": _now()},
+            )
+            _audit_handover(
+                "CLINICAL_HANDOVER_ACKNOWLEDGED",
+                handoff,
+                current_user,
+                {"acknowledged_by": uid, "eye_test_id": handoff.get("eye_test_id")},
+            )
+
+    fresh = repo.find_by_id(handoff_id) or handoff
+    return {
+        "ok": True,
+        "handoff_id": handoff_id,
+        "acknowledged_by": fresh.get("acknowledged_by"),
+        "acknowledged_at": fresh.get("acknowledged_at"),
+    }
+
+
+@router.patch("/{handoff_id}/mark-served")
+async def mark_served_clinical_handover(
+    handoff_id: str,
+    current_user: dict = Depends(require_roles(*sorted(_CLINICAL_ACTION_ROLES))),
+):
+    """Sales associate marks a CLINICAL_RX handover Served (manual, post-sale).
+
+    Records the conversion-credit split 50/50 between the sending optometrist
+    and the serving associate (DECISIONS sec 3) into the audit detail -- the SC
+    incentive engine consumes it later, so no credit is lost. A second
+    mark-served returns 409 (the guarded atomic write only flips it once, so the
+    credit can never be double-counted). NO send."""
+    repo = get_handoff_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    handoff = repo.find_by_id(handoff_id)
+    if handoff is None:
+        raise HTTPException(status_code=404, detail="Handoff not found")
+    if handoff.get("handoff_type") != HANDOFF_TYPE_CLINICAL:
+        raise HTTPException(status_code=404, detail="Not a clinical handover")
+
+    uid = current_user.get("user_id")
+    if not _is_recipient(handoff, uid):
+        raise HTTPException(
+            status_code=403, detail="You are not a recipient of this handover"
+        )
+
+    if handoff.get("mark_served"):
+        raise HTTPException(status_code=409, detail="Already marked served")
+
+    flipped = repo.mark_served_clinical(handoff_id, uid)
+    if not flipped:
+        # Lost the race to a concurrent mark-served — treat as already-served.
+        raise HTTPException(status_code=409, detail="Already marked served")
+
+    now = _now()
+    optometrist_id = handoff.get("optometrist_id")
+    _audit_handover(
+        "CLINICAL_HANDOVER_SERVED",
+        handoff,
+        current_user,
+        {
+            "optometrist_id": optometrist_id,
+            "served_by": uid,
+            "eye_test_id": handoff.get("eye_test_id"),
+            "prescription_id": handoff.get("prescription_id"),
+            # DECISIONS sec 3: handover conversion credit split 50/50 between the
+            # sending (logging) associate/optometrist and the closing associate.
+            "conversion_credit": "50_50_split",
+            "credit_split": {
+                "optometrist_id": optometrist_id,
+                "optometrist_share": 0.5,
+                "served_by": uid,
+                "served_by_share": 0.5,
+            },
+        },
+    )
+    return {"ok": True, "handoff_id": handoff_id, "served_by": uid, "served_at": now}
 
 
 @router.get("/eligible-recipients/list")

@@ -101,6 +101,59 @@ export interface EligibleRecipient {
 export type DismissAction = 'dismiss' | 'keep' | 'snooze';
 
 // ============================================================================
+// F50 — Clinical -> retail handover (CLINICAL_RX)
+// ============================================================================
+
+/** One free-text product recommendation row on a clinical handover (advisory,
+ *  no catalog validation). */
+export interface ProductRecommendation {
+  category?: string | null;
+  brand_preference?: string | null;
+  notes?: string | null;
+}
+
+/** Small Rx summary attached to a clinical-inbox card (live-read from the
+ *  prescription, never copied). */
+export interface ClinicalRxSummary {
+  right_eye?: Record<string, unknown> | null;
+  left_eye?: Record<string, unknown> | null;
+  expiry_date?: string | null;
+  lens_recommendation?: string | null;
+  prescription_number?: string | null;
+}
+
+/** Per-recipient view of a CLINICAL_RX handover (what GET /clinical-inbox
+ *  returns). NO file — the only channel is the in-app bell. */
+export interface ClinicalHandover {
+  handoff_id: string;
+  handoff_type: 'CLINICAL_RX';
+  title: string;
+  clinical_summary: string | null;
+  description: string | null;
+  optometrist_id: string | null;
+  optometrist_name: string | null;
+  patient_name: string | null;
+  customer_id: string | null;
+  patient_id: string | null;
+  prescription_id: string | null;
+  eye_test_id: string | null;
+  store_id: string | null;
+  product_recommendations: ProductRecommendation[];
+  created_at: string;
+  expires_at: string;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  mark_served: boolean;
+  served_by: string | null;
+  served_at: string | null;
+  rx_summary: ClinicalRxSummary | null;
+  my_status: HandoffRecipientStatus;
+  my_dismissed: boolean;
+  my_kept: boolean;
+  my_snooze_until: string | null;
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -240,6 +293,33 @@ export const handoffsApi = {
       '/handoffs/eligible-recipients/list',
       { params: q && q.trim() ? { q: q.trim() } : undefined },
     );
+    return r.data;
+  },
+
+  // --- F50: clinical -> retail handover ---
+
+  /** Sales floor's CLINICAL_RX inbox (store-scoped server-side; only the
+   *  caller's non-expired, non-dismissed handovers). */
+  listClinicalInbox: async (): Promise<{ handoffs: ClinicalHandover[]; total: number }> => {
+    const r = await api.get<{ handoffs: ClinicalHandover[]; total: number }>(
+      '/handoffs/clinical-inbox',
+    );
+    return r.data;
+  },
+
+  /** Acknowledge a clinical handover (first-seen). Idempotent. */
+  acknowledgeClinical: async (
+    id: string,
+  ): Promise<{ ok: boolean; handoff_id: string; acknowledged_by: string | null; acknowledged_at: string | null }> => {
+    const r = await api.patch(`/handoffs/${id}/acknowledge`);
+    return r.data;
+  },
+
+  /** Mark a clinical handover Served (manual, post-sale). 409 if already served. */
+  markServedClinical: async (
+    id: string,
+  ): Promise<{ ok: boolean; handoff_id: string; served_by: string; served_at: string }> => {
+    const r = await api.patch(`/handoffs/${id}/mark-served`);
     return r.data;
   },
 };

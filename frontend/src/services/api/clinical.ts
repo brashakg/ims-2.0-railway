@@ -218,6 +218,28 @@ export const clinicalApi = {
     return response.data;
   },
 
+  // F50: send a COMPLETED test's Rx to the sales floor as an in-app handover.
+  // Mints a CLINICAL_RX handoff (8h TTL) + an in-app bell per recipient. NO
+  // outbound message. Recommendations are free-text (max 5 rows). Behind a
+  // per-store feature flag (403 when off; 422 if the test is not COMPLETED).
+  sendToFloor: async (
+    testId: string,
+    body: {
+      productRecommendations?: {
+        category?: string;
+        brandPreference?: string;
+        notes?: string;
+      }[];
+      clinicalSummary?: string;
+    },
+  ): Promise<{ handoff_id: string; recipient_count: number; already_sent: boolean }> => {
+    const response = await api.post(`/clinical/tests/${testId}/send-to-floor`, {
+      productRecommendations: body.productRecommendations ?? [],
+      clinicalSummary: body.clinicalSummary ?? null,
+    });
+    return response.data;
+  },
+
   // CLI-11: retrieve the structured SOAP exam note for a completed test.
   // Returns { soapNote: {...} } or { soapNote: null } for refraction-only tests.
   getSoapNote: async (testId: string) => {

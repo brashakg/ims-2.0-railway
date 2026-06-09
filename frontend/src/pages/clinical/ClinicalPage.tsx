@@ -23,6 +23,7 @@ import { clinicalApi, customerApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
+import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
@@ -112,6 +113,12 @@ export function ClinicalPage() {
   const [printToken, setPrintToken] = useState<any>(null);
   const [storeInfo, setStoreInfo] = useState<any>(null);
   const [printRxCard, setPrintRxCard] = useState<any>(null);
+
+  // F50: clinical -> retail handover. `sendToFloorFor` opens the drawer for a
+  // completed test; `sentTestIds` tracks which rows have already been sent so
+  // the button flips to "Sent" (idempotency UX).
+  const [sendToFloorFor, setSendToFloorFor] = useState<{ testId: string; patientName: string } | null>(null);
+  const [sentTestIds, setSentTestIds] = useState<Set<string>>(new Set());
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -917,6 +924,19 @@ export function ClinicalPage() {
                       >
                         <FileText className="w-5 h-5" />
                       </button>
+                      {/* F50: send this completed Rx to the sales floor. Secondary
+                          (neutral) action — not the red CTA. Flips to "Sent" after
+                          a successful send. The backend gates on the per-store
+                          feature flag (403 -> toast). */}
+                      <button
+                        type="button"
+                        onClick={() => setSendToFloorFor({ testId: test.id, patientName: test.patientName })}
+                        disabled={sentTestIds.has(test.id)}
+                        className="text-xs border border-gray-300 text-gray-700 px-2.5 py-1 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        title="Send Rx to the sales floor"
+                      >
+                        {sentTestIds.has(test.id) ? 'Sent' : 'Send to Floor'}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -933,6 +953,22 @@ export function ClinicalPage() {
 
       {/* F24 Conversion Tab — optometrist -> retail conversion (read-only). */}
       {activeTab === 'conversion' && canViewConversion && <ConversionTab />}
+
+      {/* F50: Send-to-Floor drawer */}
+      {sendToFloorFor && (
+        <SendToFloorDrawer
+          testId={sendToFloorFor.testId}
+          patientName={sendToFloorFor.patientName}
+          onClose={() => setSendToFloorFor(null)}
+          onSent={() => {
+            setSentTestIds((prev) => {
+              const next = new Set(prev);
+              next.add(sendToFloorFor.testId);
+              return next;
+            });
+          }}
+        />
+      )}
 
       {/* Prescription Card Print Modal */}
       {printRxCard && (

@@ -33,23 +33,133 @@ class HandoffRepository(BaseRepository):
     # Inbox / outbox queries
     # ------------------------------------------------------------------
 
-    def find_inbox_for_user(self, user_id: str) -> List[Dict]:
+    def find_inbox_for_user(
+        self, user_id: str, handoff_type: Optional[str] = None
+    ) -> List[Dict]:
         """Return non-expired handoffs where the user is one of the
         recipients AND has not yet responded / dismissed (visibility
-        rules applied at the router layer)."""
+        rules applied at the router layer).
+
+        When ``handoff_type`` is supplied the query is narrowed to that
+        discriminator (F50: CLINICAL_RX). When omitted the legacy
+        file-handoff behaviour is preserved exactly -- the general inbox
+        sees CLINICAL_RX docs too only if no filter is passed, but the
+        router for the general inbox does not pass one; the dedicated
+        clinical inbox always does."""
         if not user_id:
             return []
         # Mongo's `$elemMatch` on the recipients array — match any
         # recipient sub-doc with this user_id. Result still contains
         # all recipient sub-docs; the router filters per-user view.
         try:
+            query: Dict = {"recipients.user_id": user_id}
+            if handoff_type is not None:
+                query["handoff_type"] = handoff_type
             return self.find_many(
-                {"recipients.user_id": user_id},
+                query,
                 sort=[("created_at", -1)],
                 limit=200,
             )
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # F50 — clinical->retail handover (CLINICAL_RX discriminator)
+    # ------------------------------------------------------------------
+
+    def find_active_clinical_for_test(
+        self, eye_test_id: str, now: Optional[datetime] = None
+    ) -> Optional[Dict]:
+        """Return a NON-EXPIRED CLINICAL_RX handoff already minted for this
+        eye_test_id, if any. Powers the send-to-floor idempotency guard so a
+        retried / double-clicked send returns the existing handoff instead of
+        firing a second batch of notifications."""
+        if not eye_test_id:
+            return None
+        if now is None:
+            now = datetime.now(timezone.utc)
+        try:
+            return self.find_one(
+                {
+                    "handoff_type": "CLINICAL_RX",
+                    "eye_test_id": eye_test_id,
+                    "expires_at": {"$gt": now},
+                }
+            )
+        except Exception:
+            return None
+
+    def acknowledge_clinical(
+        self, handoff_id: str, user_id: str, now: Optional[datetime] = None
+    ) -> bool:
+        """Atomically claim the FIRST acknowledgement of a CLINICAL_RX handoff.
+
+        Guarded single-document ``find_one_and_update`` (mirrors
+        ``payout_snapshot.stamp_payroll_fed`` / ``vouchers.redeem_voucher_atomic``):
+        the filter requires ``acknowledged_by`` to be unset/null, so under
+        concurrency exactly one caller wins and stamps. Returns True only when
+        THIS call did the stamping; False if it was already acknowledged (the
+        router then returns 200 idempotently without overwriting the original
+        ``acknowledged_at``)."""
+        if not handoff_id or not user_id:
+            return False
+        if now is None:
+            now = datetime.now(timezone.utc)
+        try:
+            from pymongo import ReturnDocument
+
+            updated = self.collection.find_one_and_update(
+                {
+                    "handoff_id": handoff_id,
+                    "handoff_type": "CLINICAL_RX",
+                    "$or": [
+                        {"acknowledged_by": {"$exists": False}},
+                        {"acknowledged_by": None},
+                    ],
+                },
+                {"$set": {"acknowledged_by": user_id, "acknowledged_at": now}},
+                return_document=ReturnDocument.AFTER,
+            )
+            return updated is not None
+        except Exception as e:  # noqa: BLE001
+            print(f"[HANDOFF] acknowledge_clinical failed: {e}")
+            return False
+
+    def mark_served_clinical(
+        self, handoff_id: str, user_id: str, now: Optional[datetime] = None
+    ) -> bool:
+        """Atomically mark a CLINICAL_RX handoff Served the FIRST time only.
+
+        Guarded ``find_one_and_update`` on ``mark_served != True`` so a double
+        mark-served can never double-count the conversion credit. Returns True
+        only when THIS call flipped it; False if it was already served (router
+        returns 409)."""
+        if not handoff_id or not user_id:
+            return False
+        if now is None:
+            now = datetime.now(timezone.utc)
+        try:
+            from pymongo import ReturnDocument
+
+            updated = self.collection.find_one_and_update(
+                {
+                    "handoff_id": handoff_id,
+                    "handoff_type": "CLINICAL_RX",
+                    "mark_served": {"$ne": True},
+                },
+                {
+                    "$set": {
+                        "mark_served": True,
+                        "served_by": user_id,
+                        "served_at": now,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            return updated is not None
+        except Exception as e:  # noqa: BLE001
+            print(f"[HANDOFF] mark_served_clinical failed: {e}")
+            return False
 
     def find_sent_by_user(self, user_id: str) -> List[Dict]:
         if not user_id:

@@ -991,6 +991,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/tests/{test_id}/complete",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
+    # F50 -- send a completed Rx to the sales floor (in-app handover). Same gate
+    # as test completion (require_roles(*_CLINICAL_ROLES); SUPERADMIN implicit).
+    # Per-store feature flag + store IDOR guard enforced in the handler.
+    {
+        "method": "POST",
+        "path": "/api/v1/clinical/tests/{test_id}/send-to-floor",
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     # CLI-7 — frame+lens+Rx manufacturability pre-check
     {
         "method": "POST",
@@ -1582,6 +1591,34 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/handoffs ---
     {"method": "POST", "path": "/api/v1/handoffs", "allowed": "AUTHENTICATED"},
     {"method": "POST", "path": "/api/v1/handoffs/", "allowed": "AUTHENTICATED"},
+    # F50 -- clinical->retail handover (CLINICAL_RX). The inbox is gated to the
+    # sales floor + their managers (require_roles(*_CLINICAL_INBOX_ROLES)); the
+    # acknowledge / mark-served actions to the floor + store manager
+    # (require_roles(*_CLINICAL_ACTION_ROLES)). SUPERADMIN implicit. Recipient
+    # ownership + store scope enforced in the handler.
+    {
+        "method": "GET",
+        "path": "/api/v1/handoffs/clinical-inbox",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "PATCH",
+        "path": "/api/v1/handoffs/{handoff_id}/acknowledge",
+        "allowed": ["SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "PATCH",
+        "path": "/api/v1/handoffs/{handoff_id}/mark-served",
+        "allowed": ["SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/handoffs/eligible-recipients/list",
