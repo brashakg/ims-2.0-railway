@@ -1,19 +1,21 @@
 """
 IMS 2.0 - AI Change-Proposal API
 ==================================
-SUPERADMIN-EXCLUSIVE endpoints for the AI change-proposal review loop
-(SYSTEM_INTENT.md section 8).
+Endpoints for the AI change-proposal review loop (SYSTEM_INTENT.md section 8).
 
     AI enqueues a suggestion (PENDING)
-      -> Superadmin lists + reviews
+      -> SUPERADMIN / ADMIN list + review
       -> approve  -> auto-executes IF reversible (Tier-1 whitelist),
                      otherwise ADVISORY (approval recorded, human acts)
       -> reject   -> REJECTED with reason
       -> every transition writes an immutable before/after audit_logs row.
 
-*** STRICTLY SUPERADMIN ONLY - NO EXCEPTIONS ***
-Like the agents router, non-superadmin callers get 404 (deliberate: the
-endpoint's existence is not leaked).
+*** SUPERADMIN + ADMIN ONLY ***
+The review queue is the entry point for #7 predictive-purchasing reorder
+suggestions, which DECISIONS scopes to SUPERADMIN + ADMIN. All other roles get
+404 (deliberate: the endpoint's existence is not leaked - the 404-hiding
+discipline is preserved for Store Manager and below). The legacy
+``require_superadmin`` guard is kept for any strictly-CEO route.
 
 Mounted at /api/v1/jarvis/proposals (see main.py). The route paths here are
 relative to that prefix, e.g. GET /api/v1/jarvis/proposals.
@@ -32,13 +34,23 @@ router = APIRouter()
 
 
 # ============================================================================
-# SUPERADMIN GUARD
+# ACCESS GUARDS
 # ============================================================================
 
 
 def require_superadmin(current_user: dict = Depends(get_current_user)):
     """Strict SUPERADMIN-only access guard (mirrors agents.py)."""
     if "SUPERADMIN" not in current_user.get("roles", []):
+        raise HTTPException(status_code=404, detail="Not found")
+    return current_user
+
+
+def require_superadmin_or_admin(current_user: dict = Depends(get_current_user)):
+    """SUPERADMIN or ADMIN may review proposals (#7 DECISIONS). Everyone else
+    gets the same 404 existence-hiding response as the SUPERADMIN-only guard, so
+    no information about the endpoint leaks to lower roles."""
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" not in roles and "ADMIN" not in roles:
         raise HTTPException(status_code=404, detail="Not found")
     return current_user
 
@@ -101,7 +113,8 @@ class RejectRequest(BaseModel):
     description=(
         "Returns the AI change-proposal queue newest-first, optionally "
         "filtered by status (PENDING / APPROVED / REJECTED / EXECUTED / "
-        "FAILED). SUPERADMIN-only - non-superadmin callers get 404."
+        "FAILED) and by type (e.g. draft_po for #7 reorder suggestions). "
+        "SUPERADMIN + ADMIN only - all other roles get 404."
     ),
 )
 async def list_proposals(
@@ -110,16 +123,23 @@ async def list_proposals(
         description="Filter by lifecycle status",
         pattern="^(PENDING|APPROVED|REJECTED|EXECUTED|FAILED)$",
     ),
+    type: Optional[str] = Query(
+        None,
+        alias="type",
+        description="Filter by proposal type (e.g. draft_po, rx_reminder, mark_task)",
+        max_length=64,
+    ),
     limit: int = Query(50, ge=1, le=200),
-    user: dict = Depends(require_superadmin),
+    user: dict = Depends(require_superadmin_or_admin),
 ):
     from agents.proposals import REVERSIBLE_TYPES
 
-    proposals = _store().list(status=status, limit=limit)
+    proposals = _store().list(status=status, limit=limit, proposal_type=type)
     return {
         "proposals": proposals,
         "total": len(proposals),
         "filter_status": status,
+        "filter_type": type,
         # Surface the whitelist so the UI can label types without hardcoding.
         "reversible_types": sorted(REVERSIBLE_TYPES),
     }
@@ -129,7 +149,7 @@ async def list_proposals(
     "/proposals/{proposal_id}",
     summary="Get a single AI change-proposal",
 )
-async def get_proposal(proposal_id: str, user: dict = Depends(require_superadmin)):
+async def get_proposal(proposal_id: str, user: dict = Depends(require_superadmin_or_admin)):
     proposal = _store().get(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
@@ -148,10 +168,10 @@ async def get_proposal(proposal_id: str, user: dict = Depends(require_superadmin
         "existing domain services and a before/after audit row is written "
         "(status -> EXECUTED, or FAILED if execution errors). Otherwise the "
         "approval is recorded as ADVISORY (status -> APPROVED) and a human "
-        "performs the change. SUPERADMIN-only."
+        "performs the change. SUPERADMIN + ADMIN only."
     ),
 )
-async def approve_proposal(proposal_id: str, user: dict = Depends(require_superadmin)):
+async def approve_proposal(proposal_id: str, user: dict = Depends(require_superadmin_or_admin)):
     result = _store().approve(proposal_id, reviewed_by=_reviewer(user))
     if not result.get("ok"):
         err = result.get("error")
@@ -172,13 +192,13 @@ async def approve_proposal(proposal_id: str, user: dict = Depends(require_supera
     description=(
         "Decline a PENDING proposal with an optional reason. Records the "
         "decision in an immutable audit row and sets status -> REJECTED. "
-        "SUPERADMIN-only."
+        "SUPERADMIN + ADMIN only."
     ),
 )
 async def reject_proposal(
     proposal_id: str,
     body: RejectRequest = RejectRequest(),
-    user: dict = Depends(require_superadmin),
+    user: dict = Depends(require_superadmin_or_admin),
 ):
     result = _store().reject(
         proposal_id, reviewed_by=_reviewer(user), reason=body.reason

@@ -37,6 +37,7 @@ export interface ProposalListResponse {
   proposals: AIProposal[];
   total: number;
   filter_status: string | null;
+  filter_type?: string | null;
   reversible_types: string[];
 }
 
@@ -55,7 +56,9 @@ export interface RejectResponse {
 }
 
 export const proposalsApi = {
-  list: async (params?: { status?: ProposalStatus; limit?: number }) => {
+  // `type` filters to one proposal kind (e.g. 'draft_po' for #7 reorder
+  // suggestions). Server-side filter; omitted -> all types (unchanged).
+  list: async (params?: { status?: ProposalStatus; type?: string; limit?: number }) => {
     const { data } = await api.get<ProposalListResponse>('/jarvis/proposals', {
       params,
     });

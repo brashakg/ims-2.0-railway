@@ -156,6 +156,17 @@ _REGISTRY_LIST: List[PolicySpec] = [
           help="How often the Hub target-ticker card re-polls the server.",
           minimum=30, maximum=300),
 
+    # --- Predictive purchasing (#7) ---
+    # ORACLE enqueues a reorder draft-PO PROPOSAL (human-approved, never an
+    # auto-sent PO) when a SKU's projected days-of-stock-remaining falls below
+    # this horizon. Lowering it makes ORACLE wait until stock is closer to
+    # running out; raising it surfaces reorders earlier. Store/entity override.
+    _spec(key="predictive_purchasing.horizon_days", type="days", default=14,
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Operations", label="Predictive reorder horizon (days)",
+          help="Surface a reorder suggestion when projected days-of-stock falls below this.",
+          minimum=1, maximum=180),
+
     # --- Communications (DECISIONS sec 10) ---
     _spec(key="comms.cap_per_customer_30d", type="int", default=3,
           scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),

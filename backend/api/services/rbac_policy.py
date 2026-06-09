@@ -2554,21 +2554,27 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["SUPERADMIN"],
     },
     {"method": "GET", "path": "/api/v1/jarvis/models", "allowed": ["SUPERADMIN"]},
-    {"method": "GET", "path": "/api/v1/jarvis/proposals", "allowed": ["SUPERADMIN"]},
+    # #7 predictive purchasing: the proposal review queue is SUPERADMIN + ADMIN
+    # (DECISIONS). self_enforced is still auto-applied by the /jarvis/ prefix
+    # below, so a DENIED role (AREA_MANAGER and down) keeps the route's 404
+    # existence-hiding response - the middleware defers, the route's
+    # require_superadmin_or_admin guard returns 404.
+    {"method": "GET", "path": "/api/v1/jarvis/proposals",
+     "allowed": ["SUPERADMIN", "ADMIN"]},
     {
         "method": "GET",
         "path": "/api/v1/jarvis/proposals/{proposal_id}",
-        "allowed": ["SUPERADMIN"],
+        "allowed": ["SUPERADMIN", "ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/jarvis/proposals/{proposal_id}/approve",
-        "allowed": ["SUPERADMIN"],
+        "allowed": ["SUPERADMIN", "ADMIN"],
     },
     {
         "method": "POST",
         "path": "/api/v1/jarvis/proposals/{proposal_id}/reject",
-        "allowed": ["SUPERADMIN"],
+        "allowed": ["SUPERADMIN", "ADMIN"],
     },
     {"method": "POST", "path": "/api/v1/jarvis/query", "allowed": ["SUPERADMIN"]},
     {
