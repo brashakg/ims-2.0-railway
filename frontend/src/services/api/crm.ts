@@ -125,6 +125,54 @@ export interface NbaListResponse {
 
 export type NbaDismissReason = 'not_interested' | 'already_called' | 'no_answer' | 'wrong_number';
 
+// ---------------------------------------------------------------------------
+// F41 Lapsed-patient reactivation. An in-app, per-store work-list of clinically
+// lapsed patients (no confirmed order AND no Rx exam in the lapse window). It is
+// NOT a message channel and mints NO voucher: logging an outcome records an
+// in-app reactivation_call follow_up, never a provider send (WhatsApp ban; dark).
+// ---------------------------------------------------------------------------
+
+export interface ReactivationEntry {
+  rank: number;
+  customer_id: string;
+  customer_name: string;
+  customer_mobile: string;
+  months_lapsed: number | null; // null = no visit on record (infinitely lapsed)
+  last_touch_date: string | null;
+  lifetime_value: number; // paisa
+  is_vip: boolean;
+  headline: string;
+  tags: string[];
+  follow_up_id: string | null;
+}
+
+export interface ReactivationListResponse {
+  store_id: string;
+  date: string;
+  generated_at: string | null;
+  lapse_months?: number;
+  entries: ReactivationEntry[];
+}
+
+export type ReactivationOutcome =
+  | 'reached'
+  | 'no_answer'
+  | 'not_interested'
+  | 'wrong_number'
+  | 'scheduled_visit';
+
+export interface ReactivationAnalytics {
+  store_id: string;
+  window_days: number;
+  logged: number;
+  reached: number;
+  no_answer: number;
+  not_interested: number;
+  scheduled_visit: number;
+  wrong_number: number;
+  currently_lapsed: number;
+}
+
 export const crmApi = {
   // At-risk customers by engagement band. Read-only.
   getChurnRiskCustomers: async (params?: { risk_level?: ChurnRiskLevel; limit?: number }) => {
@@ -186,5 +234,40 @@ export const crmApi = {
       follow_up_scheduled_date: followUpScheduledDate || undefined,
     });
     return response.data as { ok: boolean; next_follow_up_id?: string | null };
+  },
+
+  // F41: today's reactivation work-list for a store (lapsed patients, VIP-first).
+  // Read-only. preview=true never persists a cohort doc.
+  getReactivationWorklist: async (storeId: string, opts?: { date?: string; preview?: boolean }) => {
+    const response = await api.get(`/crm/reactivation/${storeId}`, {
+      params: { date: opts?.date || undefined, preview: opts?.preview || undefined },
+    });
+    return response.data as ReactivationListResponse;
+  },
+
+  // F41: log a reactivation outcome after the staff member calls / visits the
+  // lapsed patient. Records an in-app reactivation_call follow_up; optionally
+  // schedules a next touch. No message is sent and no voucher is minted.
+  logReactivationOutcome: async (
+    storeId: string,
+    customerId: string,
+    outcome: ReactivationOutcome,
+    opts?: { notes?: string; followUpScheduledDate?: string },
+  ) => {
+    const response = await api.post(`/crm/reactivation/${storeId}/log`, {
+      customer_id: customerId,
+      outcome,
+      notes: opts?.notes || '',
+      follow_up_scheduled_date: opts?.followUpScheduledDate || undefined,
+    });
+    return response.data as { ok: boolean; follow_up_id?: string | null; next_follow_up_id?: string | null };
+  },
+
+  // F41: reactivation outcomes for a store over the look-back window. Read-only.
+  getReactivationAnalytics: async (storeId: string, days?: number) => {
+    const response = await api.get(`/crm/reactivation/${storeId}/analytics`, {
+      params: days ? { days } : undefined,
+    });
+    return response.data as ReactivationAnalytics;
   },
 };

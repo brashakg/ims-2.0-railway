@@ -33,6 +33,7 @@ const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Das
 const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
 const VipChurnWatchlistPage = lazy(() => import('./pages/customers/VipChurnWatchlistPage').then(m => ({ default: m.VipChurnWatchlistPage })));
 const NBADashboardPage = lazy(() => import('./pages/customers/NBADashboardPage').then(m => ({ default: m.NBADashboardPage })));
+const LapsedReactivationPage = lazy(() => import('./pages/customers/LapsedReactivationPage').then(m => ({ default: m.LapsedReactivationPage })));
 const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
 const LoyaltyLedger = lazy(() => import('./pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
@@ -324,6 +325,20 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER']}
                       >
                         <NBADashboardPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* F41: Lapsed-patient reactivation — in-app work-list of
+                      clinically lapsed patients to bring back. Store-facing;
+                      in-app only (no message send, no voucher mint). */}
+                  <Route
+                    path="customers/reactivation"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER']}
+                      >
+                        <LapsedReactivationPage />
                       </ProtectedRoute>
                     }
                   />
