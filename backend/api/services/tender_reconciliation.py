@@ -383,6 +383,18 @@ def build_reconciliation_snapshot(
     return doc
 
 
+def get_snapshot(db, snapshot_id: str) -> Optional[Dict[str, Any]]:
+    """Load a reconciliation snapshot by id (or None). Used by the lock route to
+    store-scope the actor BEFORE the irreversible lock (cross-store IDOR guard)."""
+    coll = _snapshot_coll(db)
+    if coll is None:
+        return None
+    try:
+        return coll.find_one({"_id": snapshot_id})
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def lock_reconciliation(db, snapshot_id: str, actor: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Lock a snapshot ATOMICALLY: a single guarded ``find_one_and_update`` on
     ``status:OPEN`` flips it to ``LOCKED`` in the same op. Two concurrent locks

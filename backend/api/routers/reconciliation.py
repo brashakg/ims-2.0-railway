@@ -192,6 +192,14 @@ async def lock_reconciliation_snapshot(
     roles = _roles(current_user)
     if not (roles & {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}):
         raise HTTPException(status_code=403, detail="not permitted to lock reconciliation")
+    # Store-scope BEFORE the irreversible lock: load the snapshot + validate the
+    # actor owns its store (mirrors the sibling by-mode/snapshot-create routes).
+    # Without this an accountant scoped to store A could permanently LOCK store B's
+    # daily cash-variance record by id (cross-store IDOR on an irreversible freeze).
+    snap = tr.get_snapshot(_get_db(), snapshot_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail="reconciliation snapshot not found")
+    validate_store_access(snap.get("store_id"), current_user)
     res = tr.lock_reconciliation(_get_db(), snapshot_id, actor=current_user)
     if not res.get("ok"):
         raise HTTPException(status_code=int(res.get("http", 400)), detail=res.get("error", "lock_failed"))

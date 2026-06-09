@@ -520,6 +520,33 @@ def test_lock_missing_snapshot_is_404(db):
     assert res["http"] == 404
 
 
+def test_lock_route_403_for_cross_store_actor(db, monkeypatch):
+    """P1 regression (adversarial): the lock ROUTE must store-scope the actor
+    BEFORE the irreversible lock. A BV-1 ACCOUNTANT must NOT lock a BV-2 snapshot
+    (cross-store IDOR permanently freezing another store's cash-variance SoR).
+    validate_store_access store-scopes ACCOUNTANT (only SUPERADMIN/ADMIN bypass)."""
+    import asyncio
+    from fastapi import HTTPException
+    from api.routers import reconciliation as recmod
+
+    db.get_collection("orders").insert_one(
+        {"order_id": "OX", "store_id": "BV-2", "created_at": "2026-06-09T10:00:00",
+         "payments": [_pay("CASH", 100.0)]}
+    )
+    snap = trec.build_reconciliation_snapshot(db, "BV-2", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+    sid = snap["snapshot_id"]
+    monkeypatch.setattr(recmod, "_get_db", lambda: db)
+    bv1_accountant = {"user_id": "A1", "roles": ["ACCOUNTANT"],
+                      "store_ids": ["BV-1"], "active_store_id": "BV-1"}
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            recmod.lock_reconciliation_snapshot(sid, current_user=bv1_accountant)
+        )
+    assert exc.value.status_code == 403
+    # The foreign snapshot stays OPEN -- the IDOR lock was blocked.
+    assert trec.get_snapshot(db, sid)["status"] == "OPEN"
+
+
 def test_locked_snapshot_is_immutable_on_rebuild(db):
     db.get_collection("orders").insert_one(
         {"order_id": "O3", "store_id": "BV-1", "created_at": "2026-06-09T10:00:00",
