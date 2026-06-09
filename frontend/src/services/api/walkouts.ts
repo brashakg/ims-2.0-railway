@@ -17,6 +17,9 @@ import type {
   SetWalkoutResultRequest,
   FollowUpsDueResponse,
   WalkinTodayResponse,
+  WalkinStatusResponse,
+  PerStaffWalkinRequest,
+  ConversionFeedRow,
   ManualTopupRequest,
   PerStaffResponse,
   TopReasonsResponse,
@@ -161,6 +164,45 @@ export const walkoutsApi = {
   ): Promise<WalkinTodayResponse> => {
     const r = await api.post('/walkouts/walkins/manual-topup', payload, {
       params: storeId ? { store_id: storeId } : undefined,
+    });
+    return r.data;
+  },
+
+  /** N3 — footfall capture status (PENDING / PARTIAL / COMPLETE) for a
+   *  (store, date). Defaults to today (IST) server-side. */
+  walkinsStatus: async (
+    storeId?: string, date?: string,
+  ): Promise<WalkinStatusResponse> => {
+    const r = await api.get('/walkouts/walkins/status', {
+      params: {
+        ...(storeId ? { store_id: storeId } : {}),
+        ...(date ? { date } : {}),
+      },
+    });
+    return r.data;
+  },
+
+  /** N3 — manager sets/updates ONE staff member's walk-in count for a day.
+   *  Managers + admin only (server-gated). walk_ins=0 is valid. */
+  walkinsPerStaffUpdate: async (
+    payload: PerStaffWalkinRequest, storeId?: string,
+  ): Promise<WalkinTodayResponse> => {
+    const r = await api.patch('/walkouts/walkins/per-staff', payload, {
+      params: storeId ? { store_id: storeId } : undefined,
+    });
+    return r.data;
+  },
+
+  /** N3 — per-staff conversion feed for a (store, date). conversion_score is
+   *  null + footfall_missing=true for staff with no walk-in entry. */
+  conversionFeed: async (
+    storeId?: string, date?: string,
+  ): Promise<ConversionFeedRow[]> => {
+    const r = await api.get('/walkouts/conversion-feed', {
+      params: {
+        ...(storeId ? { store_id: storeId } : {}),
+        ...(date ? { date } : {}),
+      },
     });
     return r.data;
   },

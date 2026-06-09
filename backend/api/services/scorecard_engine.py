@@ -60,6 +60,25 @@ from api.services.payout_calculator import (  # noqa: F401  (re-exported surface
 # ===========================================================================
 
 
+class FootfallMissingError(Exception):
+    """Raised by score_daily when the conversion component must be auto-filled
+    (caller supplied no explicit value) BUT no walk-in footfall exists for the
+    staff/day -- so the auto-fill is undefined (None, not 0).
+
+    N3 / CORRECTIONS.md HARDENING line 92 (binding): a missing footfall must
+    NOT silently score 0 (it corrupts payout rupees -- 'Fail Loudly'). The HTTP
+    layer catches this and returns 422 with a footfall-explaining message; a
+    manager can override by POSTing an explicit numeric conversion value.
+    """
+
+    def __init__(self, date_str: str):
+        self.date_str = date_str
+        super().__init__(
+            f"Footfall missing for {date_str}. Enter the walk-in count or "
+            f"supply an explicit conversion score."
+        )
+
+
 def conversion_score(
     store_id: str,
     date_str: str,
@@ -71,12 +90,13 @@ def conversion_score(
     """Module (i) conversion math, in-process (no HTTP self-call).
 
     conversion = round((walk_ins - walkouts + 90-day retro) / walk_ins * 20)
-    clamped to [0, 20]. Returns 0 when there is no walk-in footfall (no
-    division). Returns None only when the walkout repo is unavailable so the
-    caller can treat that as "no auto-fill".
+    clamped to [0, 20].
 
-    Extracted verbatim from the old points.py::_conversion_score_for so the
-    behaviour (and its tests) are preserved.
+    N3 / CORRECTIONS.md HARDENING line 92 (binding): returns None -- NOT 0 --
+    when there is no walk-in footfall (walk_ins <= 0). A silent 0 here corrupts
+    payout rupees; the caller must treat None as "unscored / blocked" rather
+    than zero. Also returns None when the walkout repo is unavailable so the
+    caller can likewise treat that as "no auto-fill".
     """
     if walkout_repo is None:
         return None
@@ -130,7 +150,8 @@ def conversion_score(
         except Exception:  # noqa: BLE001
             pass
     if walk_ins <= 0:
-        return 0
+        # N3: missing footfall -> unscored (None), never a silent 0.
+        return None
     raw = (walk_ins - walkouts_count + retro) / walk_ins * 20.0
     return int(round(max(0.0, min(20.0, raw))))
 
@@ -146,6 +167,7 @@ def score_daily(
     visufit_source: Optional[str] = None,
     conversion_provider: Optional[Callable[[], Optional[int]]] = None,
     today_str: Optional[str] = None,
+    block_on_missing_footfall: bool = False,
 ) -> Dict[str, Any]:
     """Compose the scored row body (no DB, no audit, no log_id).
 
@@ -158,15 +180,36 @@ def score_daily(
 
     Additions (SC delta):
       - tracks `visufit_source` provenance on the row
+
+    N3 footfall correction (CORRECTIONS.md HARDENING line 92, binding):
+      - when ``block_on_missing_footfall`` is True and the auto-fill is needed
+        (caller supplied no explicit conversion, date is today) but the
+        provider returns None (no walk-in footfall), raise FootfallMissingError
+        instead of silently scoring 0. The HTTP layer turns that into a 422.
+      - an explicit numeric ``conversion`` value bypasses the block entirely
+        (manager override) and stamps ``conversion_missing_footfall=False``.
+      - rows that DID auto-fill from real footfall carry
+        ``conversion_missing_footfall=False``; the flag is only ever True on a
+        legacy/lenient (non-blocking) path where a 0 was substituted for a
+        missing footfall.
     """
     today = today_str or datetime.now().date().isoformat()
     scores = dict(raw_scores)
 
-    if scores.get("conversion") is None:
+    conversion_missing_footfall = False
+    explicit_conversion = scores.get("conversion") is not None
+    if not explicit_conversion:
+        auto = None
         if date_str == today and conversion_provider is not None:
-            scores["conversion"] = conversion_provider() or 0
-        else:
+            auto = conversion_provider()
+        if auto is None:
+            # No footfall (or unavailable repo / past date with no value).
+            if block_on_missing_footfall and date_str == today:
+                raise FootfallMissingError(date_str)
+            conversion_missing_footfall = True
             scores["conversion"] = 0
+        else:
+            scores["conversion"] = auto
 
     threshold = float(settings.get("visufit_gate_threshold") or 0.9)
     enabled = bool(settings.get("visufit_gate_enabled", True))
@@ -192,6 +235,7 @@ def score_daily(
         "visufit_gate_applied": gate_applied,
         "visufit_usage_pct_mtd": visufit_usage_pct_mtd,
         "visufit_source": visufit_source,
+        "conversion_missing_footfall": conversion_missing_footfall,
     }
 
 

@@ -1400,10 +1400,13 @@ def test_conversion_feed_score_capped_at_20(
     assert akshay["conversion_score"] == 20.0
 
 
-def test_conversion_feed_zero_walkins_yields_zero_score(
+def test_conversion_feed_zero_walkins_yields_null_score(
     client, auth_headers, patched_walkouts
 ):
-    """No walk-ins → score 0 (no denominator)."""
+    """No walk-ins -> conversion is UNSCORED (null + footfall_missing), NOT a
+    silent 0. N3 / CORRECTIONS.md HARDENING line 92 (binding): a missing
+    footfall must fail loudly, not score 0 (which corrupts payout rupees).
+    Updated from the prior `== 0.0` expectation when the correction landed."""
     _create_walkout(client, auth_headers, mobile="9300100001", sales_person_id="user-rupesh")
     resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
     assert resp.status_code == 200
@@ -1411,7 +1414,8 @@ def test_conversion_feed_zero_walkins_yields_zero_score(
     rupesh = next(r for r in items if r["sales_person_id"] == "user-rupesh")
     assert rupesh["walk_ins_today"] == 0
     assert rupesh["walkouts_today"] == 1
-    assert rupesh["conversion_score"] == 0.0
+    assert rupesh["conversion_score"] is None
+    assert rupesh["footfall_missing"] is True
 
 
 def test_backfill_idempotent_on_mobile_date(tmp_path):

@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Save, Loader2, RefreshCw, AlertCircle, Trash2, BarChart3, History, ChevronRight, Calculator } from 'lucide-react';
-import { incentiveApi } from '../../services/api';
+import { incentiveApi, walkoutsApi } from '../../services/api';
 import { adminUserApi } from '../../services/api/stores';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -22,6 +22,7 @@ import type {
   PointsLog,
   IncentiveSettings,
   EligibilityBand,
+  WalkinStatusResponse,
 } from '../../types';
 
 const CATEGORIES: Array<{ key: keyof DailyScores; label: string; max: number; auto?: boolean }> = [
@@ -87,6 +88,10 @@ export function DailyScorecardPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // N3 — footfall capture status for the selected day. Drives a warning banner
+  // when today's footfall is incomplete (conversion auto-fill would otherwise
+  // be blocked at save time).
+  const [footfallStatus, setFootfallStatus] = useState<WalkinStatusResponse | null>(null);
 
   const isToday = useMemo(
     () => date === new Date().toISOString().slice(0, 10),
@@ -128,13 +133,21 @@ export function DailyScorecardPage() {
       const map: Record<string, PointsLog> = {};
       for (const row of dayList.items) map[row.staff_id] = row;
       setSavedByStaff(map);
+      // N3 — footfall capture status (best-effort; never blocks the page).
+      try {
+        setFootfallStatus(
+          await walkoutsApi.walkinsStatus((user as any)?.activeStoreId, date),
+        );
+      } catch {
+        setFootfallStatus(null);
+      }
     } catch (e: any) {
       const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
       setError(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);
     }
-  }, [date]);
+  }, [date, user]);
 
   useEffect(() => { loadStaff(); }, [loadStaff]);
   useEffect(() => { loadDay(); }, [loadDay]);
@@ -271,6 +284,28 @@ export function DailyScorecardPage() {
       {error && (
         <div className="card p-3 bg-amber-50 border border-amber-200 text-sm text-amber-800 inline-flex items-center gap-2">
           <AlertCircle className="w-4 h-4" /> {error}
+        </div>
+      )}
+
+      {/* N3 — footfall-incomplete warning. Only for TODAY (past dates fall back
+          to a 0 conversion server-side; today's missing footfall BLOCKS the
+          auto-fill save with a 422). Info-level (neutral), not a hard error. */}
+      {isToday && footfallStatus && footfallStatus.status !== 'COMPLETE' && (
+        <div className="card p-3 border border-gray-200 bg-gray-50 text-sm text-gray-700 flex items-center gap-3">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            Walk-in count {footfallStatus.status === 'PENDING' ? 'not entered' : 'incomplete'} for today
+            {footfallStatus.staff_missing.length > 0
+              ? ` (${footfallStatus.staff_missing.length} staff missing)`
+              : ''}.
+            {' '}Conversion scores will be blocked until entered.
+          </span>
+          <Link
+            to="/pos/footfall"
+            className="ml-auto inline-flex items-center gap-1 text-bv-red-600 hover:text-bv-red-700 font-medium whitespace-nowrap"
+          >
+            Go to Footfall <ChevronRight className="w-4 h-4" />
+          </Link>
         </div>
       )}
 

@@ -309,10 +309,13 @@ def test_sc_t2_conversion_auto_calc():
         def get_today(self, store_id, date_str):
             return {"per_staff": {}}
 
+    # N3 / CORRECTIONS.md HARDENING line 92: missing footfall -> None (unscored),
+    # NOT a silent 0 (which corrupts payout rupees -- 'Fail Loudly'). Updated from
+    # the prior `== 0` expectation when the footfall-block correction landed.
     assert eng.conversion_score(
         STORE, "2026-06-08", "S1",
         walkout_repo=_WalkoutRepo(), walkin_repo=_ZeroWalkin(),
-    ) == 0
+    ) is None
     # repo unavailable -> None (no auto-fill)
     assert eng.conversion_score(
         STORE, "2026-06-08", "S1", walkout_repo=None, walkin_repo=None

@@ -297,18 +297,25 @@ def _build_row(
     to the router."""
     date_str = payload.date.isoformat()
 
-    row = scorecard_engine.score_daily(
-        raw_scores=payload.scores.model_dump(),
-        date_str=date_str,
-        staff_id=payload.staff_id,
-        store_id=store_id,
-        settings=settings,
-        visufit_usage_pct_mtd=payload.visufit_usage_pct_mtd,
-        visufit_source=payload.visufit_source,
-        conversion_provider=lambda: _conversion_score_for(
-            store_id, date_str, payload.staff_id
-        ),
-    )
+    try:
+        row = scorecard_engine.score_daily(
+            raw_scores=payload.scores.model_dump(),
+            date_str=date_str,
+            staff_id=payload.staff_id,
+            store_id=store_id,
+            settings=settings,
+            visufit_usage_pct_mtd=payload.visufit_usage_pct_mtd,
+            visufit_source=payload.visufit_source,
+            conversion_provider=lambda: _conversion_score_for(
+                store_id, date_str, payload.staff_id
+            ),
+            # N3 / CORRECTIONS.md HARDENING line 92 (binding): block a silent-0
+            # conversion auto-fill when today's footfall is missing. The manager
+            # can still save by supplying an explicit numeric conversion value.
+            block_on_missing_footfall=True,
+        )
+    except scorecard_engine.FootfallMissingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     row["date"] = datetime.combine(payload.date, datetime.min.time())
     row["staff_name"] = _resolve_staff_name(payload.staff_id)
     row["created_by"] = user_id

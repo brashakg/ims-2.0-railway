@@ -188,6 +188,101 @@ class WalkInCounterRepository(BaseRepository):
         }
 
     # ------------------------------------------------------------------
+    # Per-staff manual entry (N3 footfall)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def compute_entry_status(per_staff: Dict, expected_staff: List[str]) -> str:
+        """Derive the day's footfall capture status.
+
+        N3 explicit status enum (replaces the implicit 'integer 0 = nothing
+        logged' colour-as-meaning from Excel):
+          PENDING  -- no staff has a walk-in entry yet
+          PARTIAL  -- some expected staff have entries, at least one is missing
+          COMPLETE -- every expected staff has an entry (or there are no
+                      expected staff but at least one entry exists)
+        """
+        per_staff = per_staff or {}
+        entered = {sp for sp in per_staff.keys() if sp}
+        if not entered:
+            return "PENDING"
+        expected = {s for s in (expected_staff or []) if s}
+        if not expected:
+            # No roster to compare against; any entry means the store engaged.
+            return "COMPLETE"
+        missing = expected - entered
+        return "COMPLETE" if not missing else "PARTIAL"
+
+    def set_per_staff(
+        self,
+        *,
+        store_id: str,
+        staff_id: str,
+        walk_ins: int,
+        updated_by: str,
+        date_str: Optional[str] = None,
+        reason: Optional[str] = None,
+        expected_staff: Optional[List[str]] = None,
+    ) -> Dict:
+        """Set (not increment) the day's walk-in count for ONE staff member.
+
+        This is the N3 manager attribution layer. It overwrites
+        ``per_staff[staff_id]`` to ``walk_ins`` (0 is a valid value -- a staff
+        with no customers today is real data, not missing data), appends an
+        append-only ``per_staff_log`` audit entry, recomputes ``entry_status``,
+        and leaves ``pos_auto_count`` / ``manual_topup`` / ``total`` untouched
+        (the POS auto-floor and the per-staff attribution are independent).
+
+        Single-document write (standalone Mongo -- no transactions). Reads then
+        writes the one doc via ``find_one_and_update`` so the recomputed
+        per_staff / log / status land atomically on that one document.
+        """
+        date_str = date_str or self._today_str()
+        doc = self._get_or_init(store_id, date_str)
+
+        per_staff = dict(doc.get("per_staff") or {})
+        old_val = int(per_staff.get(staff_id, 0)) if staff_id in per_staff else None
+        new_val = max(0, int(walk_ins))
+        per_staff[staff_id] = new_val
+
+        log = list(doc.get("per_staff_log") or [])
+        log.append(
+            {
+                "staff_id": staff_id,
+                "old_val": old_val,
+                "new_val": new_val,
+                "updated_by": updated_by,
+                "updated_at": datetime.now(),
+                "reason": reason,
+            }
+        )
+        status = self.compute_entry_status(per_staff, expected_staff or [])
+
+        updated = None
+        try:
+            updated = self.collection.find_one_and_update(
+                {"_id": doc["_id"]},
+                {
+                    "$set": {
+                        "per_staff": per_staff,
+                        "per_staff_log": log,
+                        "entry_status": status,
+                        "updated_at": datetime.now(),
+                    }
+                },
+                return_document=True,
+            )
+        except Exception as e:
+            print(f"[WALKIN] set_per_staff update failed: {e}")
+        if not updated:
+            # Fall back to the in-memory shape so the caller still gets the
+            # committed values (the $set above is what we wrote).
+            updated = dict(doc)
+            updated["per_staff"] = per_staff
+            updated["per_staff_log"] = log
+            updated["entry_status"] = status
+        return {k: v for k, v in updated.items() if k not in ("_id", "mobiles_seen")}
+
+    # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
     def get_today(self, store_id: str, date_str: Optional[str] = None) -> Dict:
