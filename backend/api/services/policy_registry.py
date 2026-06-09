@@ -216,6 +216,17 @@ _REGISTRY_LIST: List[PolicySpec] = [
     _spec(key="nba.vip_reserved_slots", type="int", default=2,
           scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),
           group="NBA", label="NBA VIP reserved slots", minimum=0, maximum=50),
+
+    # --- Clinical -> Retail Handover (F50 / #50) ---
+    # Off by default. The orchestrator flips this ON per-store for the 1-2 pilot
+    # stores (DECISIONS: "pilot 1-2 stores"); a fresh DB keeps the feature dark
+    # everywhere. When False, POST /clinical/tests/{id}/send-to-floor is 403'd.
+    _spec(key="clinical.handover_enabled", type="bool", default=False,
+          scopes=("global", "entity", "store"),
+          write_roles=("SUPERADMIN", "ADMIN", "STORE_MANAGER"),
+          group="Clinical", label="Clinical->retail handover enabled",
+          help="Let optometrists send a completed Rx to the sales floor "
+               "(in-app bell). Enable per store for the pilot."),
 ]
 
 REGISTRY = {s.key: s for s in _REGISTRY_LIST}

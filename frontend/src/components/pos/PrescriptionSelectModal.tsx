@@ -10,10 +10,11 @@
 // list is still shown so the operator confirms which prescription to attach.
 
 import { useState, useEffect } from 'react';
-import { X, Eye, AlertTriangle, Check, Calendar, User, Users, Clock, FileText, Plus, ChevronLeft } from 'lucide-react';
+import { X, Eye, AlertTriangle, Check, Calendar, User, Users, Clock, FileText, Plus, ChevronLeft, Stethoscope } from 'lucide-react';
 import type { Prescription, Patient } from '../../types';
 import { prescriptionApi } from '../../services/api';
 import { mapRx } from '../../services/api/sales';
+import { handoffsApi, type ClinicalHandover } from '../../services/api/handoffs';
 
 interface FamilyMember {
   patient_id: string | null;
@@ -45,13 +46,29 @@ export function PrescriptionSelectModal({
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // F50: active clinical->retail handovers for this customer. Read-only advisory
+  // surface ("From doctor today") — does NOT change selection / order / payment.
+  const [handovers, setHandovers] = useState<ClinicalHandover[]>([]);
 
   useEffect(() => {
     if (customerId) {
       loadFamily();
+      loadHandovers();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerId]);
+
+  const loadHandovers = async () => {
+    if (!customerId) return;
+    try {
+      const res = await handoffsApi.listClinicalInbox();
+      // Scope to THIS customer client-side (the endpoint is already store + recipient scoped).
+      setHandovers((res.handoffs || []).filter((h) => h.customer_id === customerId && !h.mark_served));
+    } catch {
+      // Fail-soft: a missing handover surface must never break the POS Rx picker.
+      setHandovers([]);
+    }
+  };
 
   const loadFamily = async () => {
     if (!customerId) return;
@@ -128,6 +145,12 @@ export function PrescriptionSelectModal({
   };
 
   const selectedMember = members.find((m) => m.patient_id === selectedPatientId) || null;
+
+  // F50: the active handover for the patient currently in view (if any). Matches
+  // on patient_id; falls back to a customer-level match for unlinked patients.
+  const activeHandover =
+    handovers.find((h) => selectedPatientId && h.patient_id === selectedPatientId) ||
+    (selectedPatientId ? null : handovers[0] || null);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -223,6 +246,22 @@ export function PrescriptionSelectModal({
             )
           ) : /* ---------- STEP 2: PRESCRIPTION PICKER ---------- */ (
             <div className="space-y-3">
+              {/* F50: "From doctor today" advisory. Read-only marker that an
+                  optometrist sent this patient's Rx to the floor; it does NOT
+                  alter selection / order / payment (POS-safe). */}
+              {activeHandover && (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-gray-50 border-l-2 border-bv-red-500">
+                  <Stethoscope className="w-4 h-4 text-bv-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-xs text-gray-700">
+                    <span className="font-medium text-gray-900">From Dr. {activeHandover.optometrist_name || 'Optometry'}</span>
+                    {activeHandover.clinical_summary && (
+                      <span className="text-gray-500"> · {activeHandover.clinical_summary}</span>
+                    )}
+                    <p className="text-gray-500">Rx sent to the floor today — confirm the prescription below.</p>
+                  </div>
+                </div>
+              )}
+
               {/* Create New Option */}
               <button
                 onClick={onCreateNew}

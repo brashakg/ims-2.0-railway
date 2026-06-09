@@ -11,6 +11,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
+import ClinicalHandoverCard from '../../components/handoffs/ClinicalHandoverCard';
 import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
@@ -449,6 +450,10 @@ export default function HubPage() {
 
       {/* Handoff inbox — only renders when the user has at least one card. */}
       <HandoffInboxCard refreshKey={inboxRefreshKey} />
+
+      {/* F50: clinical -> retail handovers — only renders when the sales floor
+          has at least one active CLINICAL_RX from optometry. */}
+      <ClinicalHandoverCard refreshKey={inboxRefreshKey} />
 
       <section className="modules">
         <div className="section-head">
