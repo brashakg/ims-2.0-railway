@@ -299,6 +299,11 @@ class CustomerUpdate(BaseModel):
     # POS-4: per-customer credit limit (khata). 0 = no limit (unlimited).
     # B2B accounts typically carry a non-zero limit; B2C defaults to 0.
     credit_limit: Optional[float] = Field(default=None, ge=0)
+    # F39 note: `tags` are deliberately NOT a field here. The generic
+    # PUT /{customer_id} is only AUTHENTICATED -- exposing tags on this model
+    # would let any role set them, bypassing the STORE_MANAGER+ gate, the
+    # _clean_tag PII strip, and the suggest->approve workflow. Tags are written
+    # ONLY via the governed PATCH /{customer_id}/tags endpoint.
 
     @field_validator("name", mode="before")
     @classmethod
@@ -673,6 +678,10 @@ async def update_customer(
             raise HTTPException(status_code=404, detail="Customer not found")
 
         update_data = customer.model_dump(exclude_unset=True)
+        # Defense-in-depth: `tags` are governed by PATCH /{id}/tags (STORE_MANAGER+
+        # + PII strip + suggest->approve). Never let them be written through this
+        # AUTHENTICATED generic update, even if a client smuggles the field in.
+        update_data.pop("tags", None)
 
         # Serialize date fields to ISO strings — Mongo + downstream JSON
         # consumers prefer strings over datetime objects on this doc.
@@ -1523,3 +1532,245 @@ async def withdraw_consent(
             "Review data-retention obligations before erasing records."
         )
     return response
+
+
+# ============================================================================
+# F39 - Customer tags (manager-approved; feed the NBA daily call list)
+# Staff SUGGEST tags; STORE_MANAGER+ APPROVES (DECISIONS s3). Approved tags land
+# on customers.tags[] and feed next-day NBA scoring (VIP slot + sub-headlines).
+# Tags must not carry PII (phone / email / GSTIN) -- stripped on write.
+# ============================================================================
+
+_TAG_MANAGER_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
+_TAG_SUGGEST_ROLES = (
+    "SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN",
+)
+_MAX_TAGS = 10
+_MAX_TAG_LEN = 50
+_MAX_SUGGESTIONS_PER_DAY = 5
+
+# PII patterns a tag may NOT contain. A tag that matches ANY is rejected.
+_PHONE_IN_TEXT_RE = re.compile(r"\d{10}")
+_EMAIL_IN_TEXT_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_GSTIN_IN_TEXT_RE = re.compile(r"[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]", re.IGNORECASE)
+
+
+def _clean_tag(tag: str) -> Optional[str]:
+    """Return a sanitised tag, or None if it is empty or carries PII. The whole
+    tag is rejected (not partially masked) so PII never lands on the record."""
+    if not isinstance(tag, str):
+        return None
+    t = _sanitize_text(tag)[: _MAX_TAG_LEN].strip()
+    if not t:
+        return None
+    if _PHONE_IN_TEXT_RE.search(t) or _EMAIL_IN_TEXT_RE.search(t) or _GSTIN_IN_TEXT_RE.search(t):
+        return None
+    return t
+
+
+def _tag_suggestions_coll():
+    """tag_suggestions collection via the seeded DB wrapper (robust under tests +
+    CI -- the same accessor the credit-note ledger uses). None when DB absent."""
+    from ..dependencies import get_db
+
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("tag_suggestions")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class TagsUpdate(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+
+
+class TagSuggestBody(BaseModel):
+    tag: str = Field(..., min_length=1, max_length=_MAX_TAG_LEN)
+
+
+@router.patch("/{customer_id}/tags")
+async def set_customer_tags(
+    customer_id: str = Path(..., description="Customer ID"),
+    body: TagsUpdate = Body(...),
+    current_user: dict = Depends(require_roles(*_TAG_MANAGER_ROLES)),
+):
+    """Replace a customer's tags (STORE_MANAGER+). PII-bearing tags (phone /
+    email / GSTIN) are stripped; max 10 tags, each max 50 chars. Single-doc
+    update + audit."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    customer = repo.find_by_id(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    cleaned: List[str] = []
+    for raw in (body.tags or []):
+        c = _clean_tag(raw)
+        if c and c not in cleaned:
+            cleaned.append(c)
+        if len(cleaned) >= _MAX_TAGS:
+            break
+
+    before = list(customer.get("tags") or [])
+    try:
+        repo.update(customer_id, {"tags": cleaned})
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Failed to persist tags")
+
+    _audit_customer(
+        "CUSTOMER_TAGS_SET",
+        customer_id,
+        current_user,
+        before_state={"tags": before},
+        after_state={"tags": cleaned},
+    )
+    return {"customer_id": customer_id, "tags": cleaned}
+
+
+@router.post("/{customer_id}/tags/suggest")
+async def suggest_customer_tag(
+    customer_id: str = Path(..., description="Customer ID"),
+    body: TagSuggestBody = Body(...),
+    current_user: dict = Depends(require_roles(*_TAG_SUGGEST_ROLES)),
+):
+    """Staff suggest a tag; it is written PENDING and is invisible to NBA until a
+    manager approves it. Rate-limited to 5 suggestions per user per day. PII tags
+    are rejected (422)."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if not repo.find_by_id(customer_id):
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    cleaned = _clean_tag(body.tag)
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="Tag is empty or contains personal data (phone/email/GSTIN)")
+
+    user_id = current_user.get("user_id") or current_user.get("id")
+    sug_coll = _tag_suggestions_coll()
+    if sug_coll is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Rate-limit: max 5 PENDING-or-not suggestions by this user since today's start.
+    today_start = datetime.utcnow().date().isoformat()
+    try:
+        recent = sug_coll.count_documents(
+            {"suggested_by": user_id, "suggested_at": {"$gte": today_start}}
+        )
+    except Exception:  # noqa: BLE001
+        recent = 0
+    if recent >= _MAX_SUGGESTIONS_PER_DAY:
+        raise HTTPException(status_code=429, detail="Daily tag-suggestion limit reached")
+
+    suggestion_id = f"TAGSUG-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
+    sug = {
+        "suggestion_id": suggestion_id,
+        "customer_id": customer_id,
+        "tag": cleaned,
+        "status": "pending",
+        "suggested_by": user_id,
+        "suggested_at": datetime.utcnow().isoformat(),
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "store_id": current_user.get("active_store_id"),
+    }
+    try:
+        sug_coll.insert_one(sug)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Failed to persist suggestion")
+
+    return {"suggestion_id": suggestion_id, "tag": cleaned, "status": "pending"}
+
+
+@router.get("/{customer_id}/tags/suggestions")
+async def list_tag_suggestions(
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(require_roles(*_TAG_MANAGER_ROLES)),
+):
+    """List PENDING tag suggestions for a customer (STORE_MANAGER+)."""
+    sug_coll = _tag_suggestions_coll()
+    if sug_coll is None:
+        return {"customer_id": customer_id, "suggestions": []}
+    try:
+        rows = list(sug_coll.find(
+            {"customer_id": customer_id, "status": "pending"}, {"_id": 0}
+        ))
+    except Exception:  # noqa: BLE001
+        rows = []
+    return {"customer_id": customer_id, "suggestions": rows}
+
+
+@router.post("/{customer_id}/tags/suggestions/{suggestion_id}/approve")
+async def approve_tag_suggestion(
+    customer_id: str = Path(..., description="Customer ID"),
+    suggestion_id: str = Path(..., description="Suggestion ID"),
+    current_user: dict = Depends(require_roles(*_TAG_MANAGER_ROLES)),
+):
+    """Approve a pending suggestion: mark it approved (single-doc update) then
+    add the tag to customers.tags via $addToSet (idempotent single-doc update).
+    Two sequential single-document writes -- no cross-collection transaction."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    sug_coll = _tag_suggestions_coll()
+    if sug_coll is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    sug = sug_coll.find_one_and_update(
+        {"suggestion_id": suggestion_id, "customer_id": customer_id, "status": "pending"},
+        {"$set": {
+            "status": "approved",
+            "reviewed_by": current_user.get("user_id") or current_user.get("id"),
+            "reviewed_at": datetime.utcnow().isoformat(),
+        }},
+    )
+    if not sug:
+        raise HTTPException(status_code=404, detail="Pending suggestion not found")
+
+    tag = _clean_tag(sug.get("tag", ""))
+    if tag:
+        try:
+            repo.collection.update_one(
+                {"customer_id": customer_id}, {"$addToSet": {"tags": tag}}
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    _audit_customer(
+        "CUSTOMER_TAG_APPROVED", customer_id, current_user,
+        after_state={"tag": tag, "suggestion_id": suggestion_id},
+    )
+    return {"ok": True, "tag": tag}
+
+
+@router.post("/{customer_id}/tags/suggestions/{suggestion_id}/reject")
+async def reject_tag_suggestion(
+    customer_id: str = Path(..., description="Customer ID"),
+    suggestion_id: str = Path(..., description="Suggestion ID"),
+    current_user: dict = Depends(require_roles(*_TAG_MANAGER_ROLES)),
+):
+    """Reject a pending suggestion (single-doc update). The tag never lands on
+    the customer record."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    sug_coll = _tag_suggestions_coll()
+    if sug_coll is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    sug = sug_coll.find_one_and_update(
+        {"suggestion_id": suggestion_id, "customer_id": customer_id, "status": "pending"},
+        {"$set": {
+            "status": "rejected",
+            "reviewed_by": current_user.get("user_id") or current_user.get("id"),
+            "reviewed_at": datetime.utcnow().isoformat(),
+        }},
+    )
+    if not sug:
+        raise HTTPException(status_code=404, detail="Pending suggestion not found")
+    _audit_customer(
+        "CUSTOMER_TAG_REJECTED", customer_id, current_user,
+        after_state={"suggestion_id": suggestion_id},
+    )
+    return {"ok": True}

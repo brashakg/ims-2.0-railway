@@ -117,6 +117,21 @@ class MegaphoneAgent(JarvisAgent):
             logger.info("[MEGAPHONE] notification_logs unavailable — skipping")
             return
 
+        # 0. F39: NBA daily call list. Score each active store's customers into a
+        #    ranked 15-card list (2 reserved VIP slots) and pre-create the call
+        #    follow_up docs. This is a CALL LIST -- it queues NO messages; the
+        #    follow_up docs are the staff's work-list, completed manually in-app.
+        #    Idempotent + per-store fail-soft.
+        try:
+            nba_stats = self._score_nba_daily()
+            if nba_stats.get("stores_scored", 0) > 0:
+                logger.info(
+                    "[MEGAPHONE] NBA: stores_scored=%d cards=%d follow_ups=%d",
+                    nba_stats["stores_scored"], nba_stats["cards"], nba_stats["follow_ups"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MEGAPHONE] NBA daily scoring failed: %s", exc)
+
         # 1+2. Rx-expiry + birthday reminders are NO LONGER hard-coded scans here.
         #      E6 (the reminder rail) is now the SINGLE config-driven path for every
         #      recurring reminder type. The legacy _scan_rx_expiring/_scan_birthdays_today
@@ -157,6 +172,112 @@ class MegaphoneAgent(JarvisAgent):
                 f"sent={drain_stats['sent']} simulated={drain_stats['simulated']} "
                 f"failed={drain_stats['failed']} mode={dispatch_mode()}"
             )
+
+    # -------------------------------------------------------------------------
+    # F39: NBA (next-best-action) daily call list
+    # -------------------------------------------------------------------------
+
+    def _active_store_ids(self) -> List[str]:
+        """Distinct active store IDs. Reads the `stores` collection; fail-soft
+        to []. An inactive/closed store is skipped (status != ACTIVE only when
+        the field exists -- legacy docs with no status are treated as active)."""
+        coll = self.get_collection("stores")
+        if coll is None:
+            return []
+        ids: List[str] = []
+        try:
+            for s in coll.find({}, {"_id": 0, "store_id": 1, "status": 1, "is_active": 1}):
+                sid = s.get("store_id")
+                if not sid:
+                    continue
+                status = str(s.get("status") or "").upper()
+                if status and status not in ("ACTIVE", "OPEN", "LIVE"):
+                    continue
+                if s.get("is_active") is False:
+                    continue
+                ids.append(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MEGAPHONE] store scan failed: %s", exc)
+        return ids
+
+    def _score_nba_daily(self) -> Dict[str, int]:
+        """Score each active store's NBA call list for today (IST) and persist it.
+
+        For every store:
+          * If today's nba_scores doc already exists, SKIP (idempotent re-run).
+          * Else score via nba_call_list.score_nba (which REUSES the merged
+            campaign_segments resolvers + the persisted vip_churn_risk subdoc --
+            no recompute/fork), upsert the nba_scores doc (one document, one
+            collection -- P0-1 compliant), and pre-create a `nba_call` follow_up
+            per card (idempotent via a find_one pre-check).
+        Per-store fail-soft: one store's error never stops the others. NO message
+        is queued -- this only builds the staff call work-list."""
+        import uuid as _uuid
+
+        from api.services import nba_call_list as nba
+
+        db = self.db
+        if db is None:
+            return {"stores_scored": 0, "cards": 0, "follow_ups": 0}
+        nba_coll = self.get_collection("nba_scores")
+        fu_coll = self.get_collection("follow_ups")
+        if nba_coll is None:
+            return {"stores_scored": 0, "cards": 0, "follow_ups": 0}
+
+        today = nba._today_ist()
+        stores_scored = 0
+        total_cards = 0
+        total_fu = 0
+        for store_id in self._active_store_ids():
+            try:
+                # Idempotency: a doc for (store, today) means we already scored.
+                if nba_coll.find_one({"store_id": store_id, "date": today}):
+                    continue
+                cards = nba.score_nba(db, store_id, max_customers=500)
+                # Pre-create one nba_call follow_up per card (idempotent), then
+                # stamp its id back onto the card before persisting the doc.
+                if fu_coll is not None:
+                    for card in cards:
+                        cid = card.get("customer_id")
+                        if not cid:
+                            continue
+                        existing = fu_coll.find_one({
+                            "customer_id": cid, "store_id": store_id,
+                            "type": "nba_call", "scheduled_date": today,
+                        })
+                        if existing:
+                            card["follow_up_id"] = existing.get("follow_up_id")
+                            continue
+                        fu_id = f"FU-{today.replace('-', '')}-{_uuid.uuid4().hex[:8].upper()}"
+                        fu_coll.insert_one({
+                            "follow_up_id": fu_id,
+                            "customer_id": cid,
+                            "customer_name": card.get("customer_name", ""),
+                            "customer_phone": card.get("customer_mobile", ""),
+                            "store_id": store_id,
+                            "type": "nba_call",
+                            "scheduled_date": today,
+                            "status": "pending",
+                            "outcome": None,
+                            "notes": card.get("headline", ""),
+                            "created_at": datetime.now().isoformat(),
+                            "completed_at": None,
+                            "completed_by": None,
+                        })
+                        card["follow_up_id"] = fu_id
+                        total_fu += 1
+                doc = nba.build_nba_doc(store_id, cards, date_str=today)
+                nba_coll.find_one_and_update(
+                    {"store_id": store_id, "date": today},
+                    {"$set": doc},
+                    upsert=True,
+                )
+                stores_scored += 1
+                total_cards += len(cards)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[MEGAPHONE] NBA score failed store %s: %s", store_id, exc)
+                continue
+        return {"stores_scored": stores_scored, "cards": total_cards, "follow_ups": total_fu}
 
     # -------------------------------------------------------------------------
     # E6: reminder rail tick + event handler

@@ -19,7 +19,7 @@ interface FollowUp {
   customer_name: string;
   customer_phone: string;
   store_id: string;
-  type: 'eye_test_reminder' | 'frame_replacement' | 'order_delivery' | 'prescription_expiry' | 'general';
+  type: 'eye_test_reminder' | 'frame_replacement' | 'order_delivery' | 'prescription_expiry' | 'general' | 'nba_call';
   scheduled_date: string;
   status: 'pending' | 'completed' | 'skipped';
   outcome?: string | null;
@@ -49,6 +49,8 @@ const FOLLOW_UP_TYPES = [
   { id: 'frame_replacement', label: 'Frame Replacement', color: 'bg-blue-700', icon: '👓' },
   { id: 'order_delivery', label: 'Order Delivery', color: 'bg-green-700', icon: '📦' },
   { id: 'prescription_expiry', label: 'Prescription', color: 'bg-red-700', icon: '📄' },
+  // F39: NBA-generated call tasks from the daily call list.
+  { id: 'nba_call', label: 'NBA Call', color: 'bg-gray-700', icon: '📞' },
 ];
 
 const OUTCOMES: Outcome[] = [

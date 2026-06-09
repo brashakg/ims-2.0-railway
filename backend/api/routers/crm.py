@@ -649,6 +649,231 @@ async def intervene_vip_churn(
             "intervention_type": body.intervention_type, "already_intervened": already_intervened}
 
 
+# ============================================================================
+# F39 - NBA (next-best-action) daily call list (#39)
+# A ranked daily list of customers a STORE associate should MANUALLY PHONE
+# today. This is a CALL LIST, not a message channel: nothing here sends
+# WhatsApp/SMS. Marking a card done/skipped records an in-app follow_up doc
+# (the durable audit), never a provider send.
+#
+# Reuses the merged campaign_segments resolvers + the persisted vip_churn_risk
+# subdoc (READ, never recomputed). 15 cards/day with 2 reserved VIP slots, both
+# caps from E2 policy. Single-doc writes only (standalone Mongo, no transactions).
+# ============================================================================
+
+
+class NbaDismissBody(BaseModel):
+    customer_id: str = Field(..., description="Customer whose card is being skipped")
+    reason: Literal["not_interested", "already_called", "no_answer", "wrong_number"]
+
+
+class NbaCompleteBody(BaseModel):
+    customer_id: str = Field(..., description="Customer whose card is being completed")
+    outcome_notes: str = Field(..., min_length=10, max_length=2000)
+    follow_up_scheduled_date: Optional[str] = Field(
+        default=None, description="Optional YYYY-MM-DD to schedule a next follow-up"
+    )
+
+
+def _nba_card_for(doc: dict, customer_id: str) -> Optional[dict]:
+    for card in (doc or {}).get("cards", []):
+        if card.get("customer_id") == customer_id:
+            return card
+    return None
+
+
+def _nba_audit(action: str, customer_id: str, store_id: str, current_user: dict, detail: dict) -> None:
+    """Best-effort audit row. Fail-soft -- never undoes the NBA write."""
+    try:
+        arepo = get_audit_repository()
+        if arepo is None:
+            return
+        arepo.create({
+            "action": action,
+            "entity_type": "customer",
+            "entity_id": customer_id,
+            "user_id": current_user.get("user_id") or current_user.get("id"),
+            "user_name": current_user.get("full_name") or current_user.get("username"),
+            "store_id": store_id,
+            "severity": "INFO",
+            "source": "crm.nba",
+            "before_state": {},
+            "after_state": detail,
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.get("/nba/{store_id}")
+async def get_nba_call_list(
+    store_id: str = Path(..., description="Store ID"),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today (IST)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Today's ranked NBA call list for a store (max cards/day, 2 reserved VIP
+    slots). Reads the MEGAPHONE-written nba_scores doc; if absent (the agent has
+    not run yet), scores synchronously as a fallback. The internal `score` is
+    NEVER in the response -- associates see `rank`. Dismissed cards are excluded.
+
+    Store-scoped (validate_store_access): a store-scoped role gets 403 for another
+    store. Fail-soft: no DB -> empty list."""
+    from fastapi import HTTPException as _HX
+
+    from ..dependencies import validate_store_access
+    from ..services import nba_call_list as nba
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    target_date = date or nba._today_ist()
+    if db is None:
+        return {"store_id": store_id, "date": target_date, "generated_at": None, "cards": []}
+
+    doc = None
+    try:
+        doc = db.get_collection("nba_scores").find_one(
+            {"store_id": store_id, "date": target_date}
+        )
+    except Exception:  # noqa: BLE001
+        doc = None
+
+    if doc:
+        return {
+            "store_id": store_id,
+            "date": target_date,
+            "generated_at": doc.get("generated_at"),
+            "cards": nba.public_cards(doc.get("cards", [])),
+        }
+
+    # Fallback: score synchronously (capped) so the page is never empty just
+    # because the agent has not ticked yet.
+    cards = nba.score_nba(db, store_id, max_customers=200)
+    return {
+        "store_id": store_id,
+        "date": target_date,
+        "generated_at": datetime.utcnow().isoformat(),
+        "cards": nba.public_cards(cards),
+    }
+
+
+@router.post("/nba/{store_id}/dismiss")
+async def dismiss_nba_card(
+    store_id: str = Path(..., description="Store ID"),
+    body: NbaDismissBody = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Skip a card: mark it dismissed in today's nba_scores doc (single-doc
+    update) and resolve its pre-created follow_up to status=skipped with the
+    reason. Writes an audit row. A dismissed customer does not reappear today."""
+    from ..dependencies import validate_store_access
+    from ..services import nba_call_list as nba
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    target_date = nba._today_ist()
+    # Single-document update on nba_scores: flip the matching card's dismissed flag.
+    updated = db.get_collection("nba_scores").find_one_and_update(
+        {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id},
+        {"$set": {"cards.$.dismissed": True}},
+        return_document=True,
+    )
+    card = _nba_card_for(updated, body.customer_id) if updated else None
+    follow_up_id = (card or {}).get("follow_up_id")
+
+    # Resolve the linked follow_up (single-document update on follow_ups).
+    if follow_up_id:
+        try:
+            db.get_collection("follow_ups").find_one_and_update(
+                {"follow_up_id": follow_up_id, "store_id": store_id},
+                {"$set": {
+                    "status": "skipped",
+                    "outcome": body.reason,
+                    "completed_at": datetime.now().isoformat(),
+                    "completed_by": current_user.get("user_id") or current_user.get("id"),
+                }},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    _nba_audit("nba.dismissed", body.customer_id, store_id, current_user,
+               {"reason": body.reason, "follow_up_id": follow_up_id})
+    return {"ok": True}
+
+
+@router.post("/nba/{store_id}/complete")
+async def complete_nba_card(
+    store_id: str = Path(..., description="Store ID"),
+    body: NbaCompleteBody = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Complete a card after the staff member calls the customer: mark it
+    dismissed in today's nba_scores doc, resolve the pre-created follow_up to
+    status=completed with the outcome notes, and optionally insert a NEW follow_up
+    for a scheduled next touch. Writes an audit row. NO message is sent -- this is
+    a pure in-app record of a manual call (WhatsApp ban; F39 is dark)."""
+    from ..dependencies import validate_store_access
+    from ..services import nba_call_list as nba
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    target_date = nba._today_ist()
+    updated = db.get_collection("nba_scores").find_one_and_update(
+        {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id},
+        {"$set": {"cards.$.dismissed": True}},
+        return_document=True,
+    )
+    card = _nba_card_for(updated, body.customer_id) if updated else None
+    follow_up_id = (card or {}).get("follow_up_id")
+
+    now_iso = datetime.now().isoformat()
+    user_id = current_user.get("user_id") or current_user.get("id")
+    if follow_up_id:
+        try:
+            db.get_collection("follow_ups").find_one_and_update(
+                {"follow_up_id": follow_up_id, "store_id": store_id},
+                {"$set": {
+                    "status": "completed",
+                    "outcome": "completed",
+                    "notes": body.outcome_notes,
+                    "completed_at": now_iso,
+                    "completed_by": user_id,
+                }},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    next_follow_up_id = None
+    if body.follow_up_scheduled_date:
+        next_follow_up_id = f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            db.get_collection("follow_ups").insert_one({
+                "follow_up_id": next_follow_up_id,
+                "customer_id": body.customer_id,
+                "customer_name": (card or {}).get("customer_name", ""),
+                "customer_phone": (card or {}).get("customer_mobile", ""),
+                "store_id": store_id,
+                "type": "general",
+                "scheduled_date": body.follow_up_scheduled_date,
+                "status": "pending",
+                "outcome": None,
+                "notes": "Scheduled from NBA call list",
+                "created_at": now_iso,
+                "completed_at": None,
+                "completed_by": None,
+            })
+        except Exception:  # noqa: BLE001
+            next_follow_up_id = None
+
+    _nba_audit("nba.completed", body.customer_id, store_id, current_user,
+               {"follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id})
+    return {"ok": True, "next_follow_up_id": next_follow_up_id}
+
+
 @router.get("/customers/{customer_id}/cl-refill-status")
 async def get_cl_refill_status(
     customer_id: str = Path(..., description="Customer ID"),

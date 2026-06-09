@@ -70,6 +70,8 @@ const RAIL_GROUPS: NavGroup[] = [
     items: [
       { id: 'pos', label: 'POS', to: '/pos', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
       { id: 'customers', label: 'Customers', to: '/customers', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      // F39: NBA daily call list — ranked customers to phone today (in-app only).
+      { id: 'daily-calls', label: 'Daily Calls', to: '/customers/nba', icon: 'phone', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER'] },
       { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
       { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
       { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },

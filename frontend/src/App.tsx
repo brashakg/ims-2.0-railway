@@ -32,6 +32,7 @@ const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(
 const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
 const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
 const VipChurnWatchlistPage = lazy(() => import('./pages/customers/VipChurnWatchlistPage').then(m => ({ default: m.VipChurnWatchlistPage })));
+const NBADashboardPage = lazy(() => import('./pages/customers/NBADashboardPage').then(m => ({ default: m.NBADashboardPage })));
 const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
 const LoyaltyLedger = lazy(() => import('./pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
@@ -310,6 +311,19 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <VipChurnWatchlistPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* F39: NBA daily call list — ranked customers to phone today.
+                      Store-facing call work-list; in-app only (no message send). */}
+                  <Route
+                    path="customers/nba"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER']}
+                      >
+                        <NBADashboardPage />
                       </ProtectedRoute>
                     }
                   />

@@ -35,6 +35,7 @@ import { loyaltyApi } from '../../services/api/loyalty';
 import { marketingApi } from '../../services/api/marketing';
 import StoreCreditLedgerCard from '../../components/customers/StoreCreditLedgerCard';
 import { VipInterveneModal } from '../../components/customers/VipInterveneModal';
+import { CustomerTagsPanel } from '../../components/customers/CustomerTagsPanel';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
@@ -397,6 +398,11 @@ export function Customer360Dashboard() {
 
       {/* Customer Header Card */}
       <CustomerHeaderCard customer={customer} stats={stats} loyaltyData={loyaltyData} />
+
+      {/* F39: manager-approved tags (feed the NBA daily call list) */}
+      {customerId && (
+        <CustomerTagsPanel customerId={customerId} tags={(customer as any)?.tags || []} />
+      )}
 
       {/* Tab Navigation */}
       <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
