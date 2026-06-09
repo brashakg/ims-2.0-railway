@@ -68,6 +68,17 @@ _VALID_LEAVE_TYPES = frozenset(
     }
 )
 
+# F26 remote-approval: leave types that are eligible for the short-notice
+# PIN-gated remote fast-path. Short-notice CASUAL / SICK leave is the case a
+# manager must be able to action from another store / their phone; planned
+# leave (EARNED/PRIVILEGE/MATERNITY etc.) rides the standard HR-page flow.
+_FAST_PATH_LEAVE_TYPES = frozenset({"CASUAL", "SICK"})
+
+# Fallback notice threshold (calendar days) below which a CASUAL/SICK leave is
+# flagged fast_path. The live value is read from the E2 policy key
+# "approval.leave_fastpath_days"; this is the no-E2 code default (packet sec 7).
+_FAST_PATH_DAYS_DEFAULT = 2
+
 
 # ============================================================================
 # SCHEMAS
@@ -1202,6 +1213,106 @@ async def edit_attendance(
 
 
 # ============================================================================
+# LEAVE remote-approval helpers (F26)
+# ============================================================================
+#
+# F26 wires leave applications through the merged E4 ApprovalEngine so a manager
+# can action a pending leave from a different store / device with their PIN. The
+# E4 engine owns the PIN gate, the atomic single-use token, the store-binding at
+# approve-time, and the audit chain -- this router only opens the request on
+# apply, blocks self-approval, and stamps the leave on consume. No fork of E4.
+
+
+def _fast_path_days_threshold(store_id: Optional[str], entity_id: Optional[str] = None) -> int:
+    """Short-notice threshold (calendar days) from E2 policy with a code fallback.
+    Never raises -- a missing key / no-DB returns the locked default of 2."""
+    scope: dict = {}
+    if store_id:
+        scope["store_id"] = store_id
+    if entity_id:
+        scope["entity_id"] = entity_id
+    try:
+        from ..services.policy_engine import get_policy
+
+        return int(get_policy("approval.leave_fastpath_days", scope or None,
+                              default=_FAST_PATH_DAYS_DEFAULT))
+    except Exception:  # noqa: BLE001 - fail-soft to the locked default
+        return _FAST_PATH_DAYS_DEFAULT
+
+
+def _is_fast_path_leave(leave_type: str, from_date: date, store_id: Optional[str]) -> bool:
+    """A leave is fast-path when BOTH hold: the type is short-notice-eligible
+    (CASUAL / SICK) AND the days-until-start is strictly below the threshold.
+    Planned types or sufficient notice -> standard flow (False)."""
+    if (leave_type or "").strip().upper() not in _FAST_PATH_LEAVE_TYPES:
+        return False
+    threshold = _fast_path_days_threshold(store_id)
+    days_until = (from_date - ist_today()).days
+    return days_until < threshold
+
+
+def _notify_store_managers(store_id: Optional[str], leave_doc: dict, *, fast_path: bool) -> int:
+    """Best-effort in-app bell to every active manager of the leave's store, so a
+    manager who is not currently on the HR page (different store / their phone)
+    still sees a pending leave. Fail-soft: a missing DB / collection is a silent
+    no-op; never blocks the leave application. Returns the count written.
+
+    Outbound WhatsApp is MEGAPHONE's job (DISPATCH_MODE-gated) and is intentionally
+    not done synchronously here; the in-app bell has no external dependency, so a
+    manager can always poll the approvals inbox even if MSG91 is down."""
+    db = _get_db()
+    if db is None:
+        return 0
+    # Managers of this store + HQ approvers. find_by_role is_active-filtered.
+    user_repo = get_user_repository()
+    recipients: List[str] = []
+    if user_repo is not None and store_id:
+        try:
+            for role in ("STORE_MANAGER", "AREA_MANAGER", "ADMIN"):
+                for u in (user_repo.find_by_role(role, store_id) or []):
+                    uid = u.get("user_id")
+                    if uid and uid not in recipients:
+                        recipients.append(uid)
+        except Exception:  # noqa: BLE001
+            recipients = []
+    try:
+        ncoll = db.get_collection("notifications")
+    except Exception:  # noqa: BLE001
+        return 0
+    if ncoll is None:
+        return 0
+    now = now_ist().isoformat()
+    written = 0
+    base = {
+        "kind": "leave_request",
+        "title": "Leave approval required" if fast_path else "Leave request filed",
+        "message": (
+            f"{leave_doc.get('leave_type')} leave "
+            f"{leave_doc.get('from_date')} to {leave_doc.get('to_date')}"
+        ),
+        "for_roles": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN"],
+        "store_id": store_id,
+        "leave_id": leave_doc.get("leave_id"),
+        "approval_request_id": leave_doc.get("approval_request_id"),
+        "urgent": bool(fast_path),
+        "status": "PENDING",
+        "source": "HR_LEAVE",
+        "created_at": now,
+    }
+    targets = recipients or [None]  # store-less fallback: one role-addressed bell
+    for uid in targets:
+        try:
+            row = dict(base)
+            row["notification_id"] = f"NTF-LV-{uuid.uuid4().hex[:10]}"
+            row["for_user"] = uid
+            ncoll.insert_one(row)
+            written += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return written
+
+
+# ============================================================================
 # LEAVE ENDPOINTS
 # ============================================================================
 
@@ -1281,6 +1392,8 @@ async def apply_leave(
                     ),
                 )
 
+    fast_path = _is_fast_path_leave(leave.leave_type, leave.from_date, store_id)
+
     doc = {
         "leave_id": str(uuid.uuid4()),
         "employee_id": employee_id,
@@ -1292,15 +1405,56 @@ async def apply_leave(
         "status": "PENDING",
         "applied_by": employee_id,
         "applied_at": datetime.now().isoformat(),
+        # F26 remote-approval fields (additive; absence on legacy rows = standard).
+        "fast_path": fast_path,
+        "approval_request_id": None,
+        "approved_via": None,
     }
+
+    # F26: a short-notice CASUAL/SICK leave opens an E4 leave_approval request so it
+    # surfaces in the manager's approvals inbox and can be actioned remotely with a
+    # PIN. amount=None -> the E4 "auto" tier (STORE_MANAGER+). Fail-soft: if no DB /
+    # the engine can't record it, the leave is still filed and the standard HR-page
+    # approve path remains. dedupe_key keeps a re-submit from spawning a duplicate.
+    if fast_path:
+        try:
+            from ..services.approvals import request_approval
+
+            ar = request_approval(
+                _get_db(),
+                action_type="leave_approval",
+                requested_by=employee_id,
+                requested_by_roles=list(current_user.get("roles", []) or []),
+                store_id=store_id,
+                amount=None,
+                context={
+                    "leave_id": doc["leave_id"],
+                    "employee_id": employee_id,
+                    "leave_type": leave.leave_type,
+                    "from_date": doc["from_date"],
+                    "to_date": doc["to_date"],
+                    "fast_path": True,
+                },
+                reason=(leave.reason or "").strip(),
+                dedupe_key=f"leave:{doc['leave_id']}",
+            )
+            if ar and ar.get("request_id"):
+                doc["approval_request_id"] = ar["request_id"]
+        except Exception:  # noqa: BLE001 - approval is best-effort; leave still files
+            pass
 
     if leave_repo is not None:
         leave_repo.create(doc)
+
+    # In-app bell to store managers on every submission (fail-soft).
+    _notify_store_managers(store_id, doc, fast_path=fast_path)
 
     return {
         "leaveId": doc["leave_id"],
         "message": "Leave application submitted",
         "status": "PENDING",
+        "fast_path": fast_path,
+        "approval_request_id": doc["approval_request_id"],
     }
 
 
@@ -1323,6 +1477,12 @@ async def approve_leave(
         if not leave:
             raise HTTPException(status_code=404, detail="Leave request not found")
 
+        # F26: self-approval is blocked. A manager applying for their own leave
+        # cannot approve it -- a different eligible manager must. SUPERADMIN is no
+        # exception: separation of duties holds for every actor.
+        if leave.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(status_code=403, detail="cannot_approve_own")
+
         if leave.get("status") != "PENDING":
             raise HTTPException(status_code=400, detail="Leave is not pending")
 
@@ -1332,6 +1492,7 @@ async def approve_leave(
                 "status": "APPROVED",
                 "approved_by": current_user.get("user_id"),
                 "approved_at": datetime.now().isoformat(),
+                "approved_via": "standard",
             },
         )
 
@@ -1356,6 +1517,11 @@ async def reject_leave(
         if not leave:
             raise HTTPException(status_code=404, detail="Leave request not found")
 
+        # F26: a manager cannot reject their own leave either -- same separation
+        # of duties as approve. (Cancelling one's own leave is a different flow.)
+        if leave.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(status_code=403, detail="cannot_approve_own")
+
         if leave.get("status") != "PENDING":
             raise HTTPException(status_code=400, detail="Leave is not pending")
 
@@ -1370,6 +1536,106 @@ async def reject_leave(
         )
 
     return {"message": "Leave rejected", "leave_id": leave_id}
+
+
+class LeaveRemoteApprove(BaseModel):
+    """Body for the remote fast-path leave approval. The approver has already
+    approved the E4 leave_approval request from their approvals inbox (PIN-gated,
+    store-bound, atomic) and holds the one-time approval_token it minted."""
+
+    approval_token: str = Field(..., min_length=8)
+
+
+@router.post("/leaves/{leave_id}/approve-remote")
+async def approve_leave_remote(
+    leave_id: str,
+    body: LeaveRemoteApprove,
+    current_user: dict = Depends(require_roles(*_SWAP_APPROVER_ROLES)),
+):
+    """Remote fast-path leave approval (F26).
+
+    An eligible manager -- possibly at a different store, on their phone -- has
+    approved the E4 ``leave_approval`` request in their approvals inbox with their
+    PIN and received a single-use ``approval_token``. This endpoint spends that
+    token EXACTLY ONCE via the merged ApprovalEngine (the atomic single-use guard,
+    PIN gate, and store-binding all live there -- no fork) and, only on a clean
+    consume, stamps the leave APPROVED with ``approved_via='fast_path'``.
+
+    Self-approval is blocked: a manager cannot fast-path their own leave. The
+    token's E4 context must reference THIS leave, so a token minted for one leave
+    cannot be replayed against another.
+    """
+    leave_repo = get_leave_repository()
+    if leave_repo is None:
+        raise HTTPException(status_code=503, detail="Leave store unavailable")
+
+    leave = leave_repo.find_by_id(leave_id)
+    if not leave:
+        raise HTTPException(status_code=404, detail="Leave request not found")
+
+    # Self-approval block (defense-in-depth; the engine does not know employee_id).
+    if leave.get("employee_id") == current_user.get("user_id"):
+        raise HTTPException(status_code=403, detail="cannot_approve_own")
+
+    if leave.get("status") != "PENDING":
+        raise HTTPException(status_code=400, detail="Leave is not pending")
+
+    from ..services.approvals import ApprovalEngine
+
+    engine = ApprovalEngine(db=_get_db())
+
+    # Bind the token to THIS leave BEFORE consuming so a token minted for a
+    # different leave can never be spent here (the consume is single-use; we must
+    # not burn it on the wrong leave). The request the token belongs to is fetched
+    # by token via the engine's get-on-request_id path is not available, so we
+    # look it up through the request_id recorded on the leave when it was opened.
+    req_id = leave.get("approval_request_id")
+    if req_id:
+        req = engine.get(req_id)
+        if not req or req.get("approval_token") != body.approval_token:
+            raise HTTPException(status_code=400, detail="token_mismatch")
+        if (req.get("context") or {}).get("leave_id") != leave_id:
+            raise HTTPException(status_code=400, detail="token_mismatch")
+
+    # Atomic single-use spend. The engine flips APPROVED -> CONSUMED in one op;
+    # a replay returns already_consumed; an expired/rejected token is refused.
+    res = engine.consume_approval(
+        consumed_by=current_user.get("user_id"),
+        action_type="leave_approval",
+        approval_token=body.approval_token,
+    )
+    if not res.get("ok"):
+        err = res.get("error")
+        code_map = {
+            "already_consumed": 409,
+            "expired": 410,
+            "action_mismatch": 400,
+            "not_approved": 409,
+            "not_found": 404,
+            "no_db": 503,
+        }
+        raise HTTPException(status_code=code_map.get(err, 400), detail=err or "consume_failed")
+
+    consumed_req = res.get("request") or {}
+    # The consumed request must reference this leave (guards a token whose leave
+    # link was not recorded on the leave doc, e.g. legacy / repaired rows).
+    if (consumed_req.get("context") or {}).get("leave_id") not in (None, leave_id):
+        raise HTTPException(status_code=400, detail="token_mismatch")
+
+    leave_repo.update(
+        leave_id,
+        {
+            "status": "APPROVED",
+            "approved_by": current_user.get("user_id"),
+            "approved_at": datetime.now().isoformat(),
+            "approved_via": "fast_path",
+        },
+    )
+    return {
+        "message": "Leave approved",
+        "leave_id": leave_id,
+        "approved_via": "fast_path",
+    }
 
 
 @router.get("/leaves/balance/{employee_id}")

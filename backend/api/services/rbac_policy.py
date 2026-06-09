@@ -1756,6 +1756,15 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
+        # F26 remote fast-path leave approval (consumes an E4 approval token).
+        # Reachable via the hr router's finance-role gate; the per-route gate
+        # (_SWAP_APPROVER_ROLES) further 403s ACCOUNTANT, mirroring the sibling
+        # /approve + /reject rows.
+        "method": "POST",
+        "path": "/api/v1/hr/leaves/{leave_id}/approve-remote",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/hr/payroll",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],

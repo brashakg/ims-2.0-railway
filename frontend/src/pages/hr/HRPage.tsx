@@ -61,6 +61,9 @@ interface LeaveRequest {
   status: LeaveStatus;
   appliedAt: string;
   approvedBy?: string;
+  // F26 remote-approval passthrough (raw snake_case from the leave doc).
+  fast_path?: boolean;
+  approved_via?: string | null;
 }
 
 const ATTENDANCE_STATUS_CONFIG: Record<AttendanceStatus, { label: string; class: string }> = {
@@ -533,6 +536,14 @@ export function HRPage() {
                         <div className="flex items-center gap-2 mb-1">
                           <span className="font-medium text-gray-900">{leave.userName}</span>
                           <span className={statusConfig.class}>{statusConfig.label}</span>
+                          {leave.status === 'PENDING' && leave.fast_path && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
+                              title="Short-notice leave — eligible for remote PIN approval from your approvals inbox"
+                            >
+                              Urgent · short notice
+                            </span>
+                          )}
                         </div>
                         <p className="text-sm text-gray-500">{leave.role}</p>
                         <div className="mt-2 text-sm">
@@ -568,6 +579,9 @@ export function HRPage() {
                     {leave.status === 'APPROVED' && leave.approvedBy && (
                       <p className="text-xs text-gray-500">
                         Approved by {leave.approvedBy}
+                        {leave.approved_via === 'fast_path' && (
+                          <span className="ml-1 text-amber-700">(remote)</span>
+                        )}
                       </p>
                     )}
                   </div>

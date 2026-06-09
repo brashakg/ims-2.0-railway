@@ -100,6 +100,22 @@ export const hrApi = {
     return response.data;
   },
 
+  // F26 remote fast-path approval. The manager has already approved the E4
+  // leave_approval request in their approvals inbox (PIN-gated) and holds the
+  // one-time approval_token it minted; this spends it and stamps the leave
+  // approved_via='fast_path'. Used for short-notice CASUAL/SICK leave actioned
+  // from another store / device.
+  approveLeaveRemote: async (leaveId: string, approvalToken: string) => {
+    const response = await api.post(`/hr/leaves/${leaveId}/approve-remote`, {
+      approval_token: approvalToken,
+    });
+    return response.data as {
+      message: string;
+      leave_id: string;
+      approved_via: string;
+    };
+  },
+
   getLatestPayslip: async (employeeId: string) => {
     const response = await api.get(`/payroll/payslip/${employeeId}`);
     return response.data;
