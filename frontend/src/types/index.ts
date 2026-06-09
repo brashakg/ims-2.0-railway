@@ -196,6 +196,9 @@ export interface Customer {
   marketing_consent?: boolean;
   // POS-4: per-customer credit limit (khata). 0 = unlimited.
   credit_limit?: number;
+  // F39: manager-approved free-form tags (e.g. "VIP", "Zeiss fan"). Feed the
+  // NBA daily call list. Staff suggest; STORE_MANAGER+ approves.
+  tags?: string[];
   // F40: personalised VIP churn-risk subdoc, written nightly by ORACLE for
   // VIP customers (LTV >= 1,00,000 AND >= 3 completed orders). Present only on
   // qualifying customers; surfaced by the Customer 360 VIP card. Shape mirrors

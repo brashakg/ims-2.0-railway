@@ -74,6 +74,13 @@ class DatabaseMigration:
         results.append(result)
         print(f"  {result}")
 
+        # 2c. F39 NBA call-list indexes: unique {store_id, date} (idempotent
+        # upsert target) + a TTL on ttl_expires_at (the day's list drops at the
+        # IST midnight stamped on each doc).
+        for result in self._create_nba_scores_indexes():
+            results.append(result)
+            print(f"  {result}")
+
         # 3. Create default data
         print("\n📝 Creating Default Data...")
         result = self._create_default_data()
@@ -181,6 +188,42 @@ class DatabaseMigration:
             )
         except Exception as e:
             return MigrationResult(False, f"TTL index on sso_jti failed: {e}")
+
+    def _create_nba_scores_indexes(self) -> List[MigrationResult]:
+        """F39 NBA daily call list (#39) indexes on nba_scores.
+
+        - unique {store_id, date}: one list per store per IST day; the upsert
+          target for an idempotent MEGAPHONE re-run.
+        - TTL on ttl_expires_at (expireAfterSeconds=0): Mongo drops the doc when
+          the IST-midnight stamp passes, so yesterday's list is auto-purged.
+        Idempotent: create_index is a no-op when an identical named index exists.
+        """
+        out: List[MigrationResult] = []
+        try:
+            coll = self.db["nba_scores"]
+            name1 = coll.create_index(
+                [("store_id", 1), ("date", 1)],
+                unique=True,
+                name="nba_scores_store_date_uq",
+                background=True,
+            )
+            out.append(MigrationResult(True, "Unique index on nba_scores.store_id+date",
+                                       {"index_name": name1}))
+        except Exception as e:
+            out.append(MigrationResult(False, f"nba_scores unique index failed: {e}"))
+        try:
+            coll = self.db["nba_scores"]
+            name2 = coll.create_index(
+                "ttl_expires_at",
+                expireAfterSeconds=0,
+                name="nba_scores_ttl",
+                background=True,
+            )
+            out.append(MigrationResult(True, "TTL index on nba_scores.ttl_expires_at",
+                                       {"index_name": name2}))
+        except Exception as e:
+            out.append(MigrationResult(False, f"nba_scores TTL index failed: {e}"))
+        return out
 
     def _seed_lens_enum_config(self) -> MigrationResult:
         """Seed lens_enum_config defaults (Branch B' sub-PR 1, Q6).

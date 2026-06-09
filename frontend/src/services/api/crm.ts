@@ -91,6 +91,40 @@ export interface VipInterveneResponse {
 
 export type VipChurnSortBy = 'overdue_by_days' | 'ltv' | 'last_purchase_days_ago';
 
+// ---------------------------------------------------------------------------
+// F39 NBA (next-best-action) daily call list. A ranked daily list of customers
+// a store associate should MANUALLY PHONE today. It is NOT a message channel:
+// marking a card done/skipped records an in-app follow_up, never a send.
+// ---------------------------------------------------------------------------
+
+export interface NbaCard {
+  rank: number;
+  is_vip_slot: boolean;
+  customer_id: string;
+  customer_name: string;
+  customer_mobile: string;
+  signals: string[];
+  headline: string;
+  sub_headlines: string[];
+  suggested_action: string;
+  loyalty_tier: string | null;
+  lifetime_value: number; // paisa
+  last_purchase_date: string | null;
+  tags: string[];
+  follow_up_id: string | null;
+  // NOTE: there is deliberately NO `score` field -- the numeric score is
+  // internal-only and stripped server-side (gaming-prevention).
+}
+
+export interface NbaListResponse {
+  store_id: string;
+  date: string;
+  generated_at: string | null;
+  cards: NbaCard[];
+}
+
+export type NbaDismissReason = 'not_interested' | 'already_called' | 'no_answer' | 'wrong_number';
+
 export const crmApi = {
   // At-risk customers by engagement band. Read-only.
   getChurnRiskCustomers: async (params?: { risk_level?: ChurnRiskLevel; limit?: number }) => {
@@ -122,5 +156,35 @@ export const crmApi = {
   interveneVipChurn: async (customerId: string, body: VipInterveneRequest) => {
     const response = await api.post(`/crm/vip-churn/${customerId}/intervene`, body);
     return response.data as VipInterveneResponse;
+  },
+
+  // F39: today's ranked NBA call list for a store. Read-only.
+  getNbaCallList: async (storeId: string, date?: string) => {
+    const response = await api.get(`/crm/nba/${storeId}`, { params: date ? { date } : undefined });
+    return response.data as NbaListResponse;
+  },
+
+  // F39: skip a card. Records the reason on the linked follow_up (status=skipped)
+  // + an audit row. No message is sent.
+  dismissNbaCard: async (storeId: string, customerId: string, reason: NbaDismissReason) => {
+    const response = await api.post(`/crm/nba/${storeId}/dismiss`, { customer_id: customerId, reason });
+    return response.data as { ok: boolean };
+  },
+
+  // F39: complete a card after the staff member phones the customer. Records the
+  // outcome notes on the follow_up (status=completed) + optionally schedules a
+  // next follow-up. outcome_notes must be >= 10 chars. No message is sent.
+  completeNbaCard: async (
+    storeId: string,
+    customerId: string,
+    outcomeNotes: string,
+    followUpScheduledDate?: string,
+  ) => {
+    const response = await api.post(`/crm/nba/${storeId}/complete`, {
+      customer_id: customerId,
+      outcome_notes: outcomeNotes,
+      follow_up_scheduled_date: followUpScheduledDate || undefined,
+    });
+    return response.data as { ok: boolean; next_follow_up_id?: string | null };
   },
 };

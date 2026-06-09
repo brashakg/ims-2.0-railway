@@ -1048,6 +1048,26 @@ POLICY: List[Dict[str, object]] = [
     # F40 VIP-churn watchlist (#40): SUPERADMIN/ADMIN; ADMIN store-scoped server-side.
     {"method": "GET", "path": "/api/v1/crm/vip-churn", "allowed": ["SUPERADMIN", "ADMIN"]},
     {"method": "POST", "path": "/api/v1/crm/vip-churn/{customer_id}/intervene", "allowed": ["SUPERADMIN", "ADMIN"]},
+    # F39 NBA daily call list (#39): store-facing call work-list (store-scoped via
+    # validate_store_access). NOT ACCOUNTANT/OPTOMETRIST/CATALOG/WORKSHOP/CASHIER.
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/nba/{store_id}",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/nba/{store_id}/dismiss",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/nba/{store_id}/complete",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/360/{customer_id}",
@@ -1121,6 +1141,32 @@ POLICY: List[Dict[str, object]] = [
         "method": "PUT",
         "path": "/api/v1/customers/{customer_id}",
         "allowed": "AUTHENTICATED",
+    },
+    # F39 customer tags: staff SUGGEST, STORE_MANAGER+ approves (DECISIONS s3).
+    {
+        "method": "PATCH",
+        "path": "/api/v1/customers/{customer_id}/tags",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/customers/{customer_id}/tags/suggest",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/customers/{customer_id}/tags/suggestions",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/customers/{customer_id}/tags/suggestions/{suggestion_id}/approve",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/customers/{customer_id}/tags/suggestions/{suggestion_id}/reject",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "POST",

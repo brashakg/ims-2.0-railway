@@ -51,6 +51,10 @@ class FollowUpType(str, Enum):
     order_delivery = "order_delivery"
     prescription_expiry = "prescription_expiry"
     general = "general"
+    # F39: an NBA-generated call task. PURPOSE, not a channel (CORRECTIONS P1) --
+    # it marks a staff phone call queued by the daily next-best-action list. NBA
+    # never sends a message; this type identifies the call's origin.
+    nba_call = "nba_call"
 
 
 class FollowUpStatus(str, Enum):
