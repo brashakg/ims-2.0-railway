@@ -71,11 +71,13 @@ class PurchaseOrderRepository(BaseRepository):
             filter["status"] = status
         return self.find_many(filter, sort=[("created_at", -1)])
     
-    def find_pending(self, vendor_id: str = None) -> List[Dict]:
+    def find_pending(self, vendor_id: str = None, limit: int = 100) -> List[Dict]:
+        # limit=0 -> all pending POs (the variance report passes 0 so a chain with
+        # >100 open POs isn't silently truncated; default 100 preserves callers).
         filter = {"status": {"$in": ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"]}}
         if vendor_id:
             filter["vendor_id"] = vendor_id
-        return self.find_many(filter, sort=[("expected_date", 1)])
+        return self.find_many(filter, sort=[("expected_date", 1)], limit=limit)
     
     def find_overdue(self) -> List[Dict]:
         return self.find_many({

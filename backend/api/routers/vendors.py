@@ -2590,7 +2590,9 @@ async def po_grn_variance_report(
     active_store = validate_store_access(store_id, current_user)
 
     try:
-        pos = po_repo.find_pending() or []
+        # limit=0 -> ALL open POs; the variance total + backorders must not be
+        # silently capped at the default 100 (a chain can have >100 open POs).
+        pos = po_repo.find_pending(limit=0) or []
     except Exception:  # noqa: BLE001
         pos = []
 

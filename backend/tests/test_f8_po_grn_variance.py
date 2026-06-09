@@ -384,11 +384,15 @@ class _FakePoRepo:
     def find_by_id(self, po_id):
         return self._pos.get(po_id)
 
-    def find_pending(self):
-        return [
+    def find_pending(self, vendor_id=None, limit=100):
+        # Mirror the real signature: the variance report passes limit=0 (all) so a
+        # >100-PO chain isn't silently capped. The fake returns all matching here.
+        rows = [
             p for p in self._pos.values()
             if p.get("status") in ("SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED")
+            and (vendor_id is None or p.get("vendor_id") == vendor_id)
         ]
+        return rows if not limit else rows[:limit]
 
 
 class _FakeGrnRepo:
