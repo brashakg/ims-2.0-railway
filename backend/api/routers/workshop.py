@@ -103,8 +103,13 @@ def _resolve_dc_workshop_settings(db) -> dict:
     return {"require_dc_for_workshop": require, "dc_hardlock_from_date": cutover}
 
 
-def _check_dc_hardlock(db, lens_details, store_id, created_at, current_user, override_reason):
+def _check_dc_hardlock(db, lens_status, lens_product_id, store_id, created_at, current_user, override_reason):
     """F9 DC HARDLOCK guard. Returns dict(override_applied: bool, reason: str|None).
+
+    `lens_status` is the TOP-LEVEL job field ("NOT_ORDERED"/"ORDERED"/"RECEIVED"/
+    "MOUNTED"), passed explicitly by the caller -- it is NOT a key inside the
+    lens_details Rx spec (reading it from there was a no-op: every job sailed
+    through). `lens_product_id` is the lens SKU to match a DC against.
 
     Hard-blocks (raises 422 with code DC_HARDLOCK) when:
       * the lens is external-lab (lens_status == ORDERED), AND
@@ -116,8 +121,6 @@ def _check_dc_hardlock(db, lens_details, store_id, created_at, current_user, ove
     An ADMIN+ may bypass with override_reason (audited by the caller). In-house
     lenses (lens_status != ORDERED) are exempt and pass straight through.
     """
-    lens = lens_details if isinstance(lens_details, dict) else {}
-    lens_status = lens.get("lens_status")
     # Only external-lab (ORDERED) lenses are gated; in-house stock is exempt.
     if lens_status != "ORDERED":
         return {"override_applied": False, "reason": None}
@@ -136,7 +139,7 @@ def _check_dc_hardlock(db, lens_details, store_id, created_at, current_user, ove
         except Exception:
             pass
 
-    product_id = lens.get("product_id")
+    product_id = lens_product_id
     has_dc = False
     if db is not None and product_id:
         try:
@@ -382,6 +385,9 @@ class StatusBody(BaseModel):
 
     status: str
     notes: Optional[str] = None
+    # F9 DC HARDLOCK override (ADMIN+ + reason) when advancing an external-lab
+    # (lens_status=ORDERED) job to IN_PROGRESS with no logged Delivery Challan.
+    override_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -864,9 +870,14 @@ async def create_job(
         # exists at this store. Raises 422 (code DC_HARDLOCK) when blocked; an
         # ADMIN+ can bypass with override_reason (audited below). In-house lenses
         # and a disabled flag pass straight through.
+        # At create the job's lens_status is usually unset (the lens is ORDERED
+        # later via the lens lifecycle) -> exempt here; the REAL gate is the
+        # -> IN_PROGRESS transition below. We still pass any lens_status carried on
+        # the create payload so an already-ORDERED create is gated too.
         hardlock = _check_dc_hardlock(
             get_db(),
-            job.lens_details,
+            (job.lens_details or {}).get("lens_status"),
+            (job.lens_details or {}).get("product_id"),
             store_id,
             created_at,
             current_user,
@@ -1112,6 +1123,42 @@ async def update_job_status(
                     "(confirmed_by_sales) first."
                 ),
             )
+
+        # F9 DC HARDLOCK: an external-lab lens (top-level lens_status=ORDERED) may
+        # not ADVANCE TO IN_PROGRESS until an accepted Delivery Challan covering its
+        # SKU exists at this store -- this is the REAL gate (create-time lens_status
+        # is unset). Raises 422 (DC_HARDLOCK) when blocked; an ADMIN+ override_reason
+        # bypasses (audited). In-house lenses + a disabled flag pass through.
+        if status == "IN_PROGRESS":
+            dc_lock = _check_dc_hardlock(
+                get_db(),
+                job.get("lens_status"),
+                (job.get("lens_details") or {}).get("product_id"),
+                job.get("store_id"),
+                job.get("created_at"),
+                current_user,
+                (body.override_reason if body else None),
+            )
+            if dc_lock.get("override_applied"):
+                try:
+                    audit = get_audit_repository()
+                    if audit is not None:
+                        audit.create(
+                            {
+                                "action": "dc_hardlock_override",
+                                "entity_type": "workshop_job",
+                                "entity_id": job_id,
+                                "user_id": current_user.get("user_id"),
+                                "detail": {
+                                    "transition": "IN_PROGRESS",
+                                    "store_id": job.get("store_id"),
+                                    "product_id": (job.get("lens_details") or {}).get("product_id"),
+                                    "reason": dc_lock.get("reason"),
+                                },
+                            }
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
 
         # BUG-116a (patient-safety): a lens job must NOT reach READY-for-pickup
         # without a QC record. The dedicated QC endpoints (/jobs/{id}/qc) set

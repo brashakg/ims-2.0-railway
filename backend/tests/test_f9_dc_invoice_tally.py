@@ -228,6 +228,20 @@ class _WorkshopRepo:
                 return dict(j)
         return None
 
+    def update_status(self, job_id, status, by_user=None, notes=None):
+        for j in self._jobs:
+            if j.get("job_id") == job_id:
+                j["status"] = status
+                return True
+        return False
+
+    def update(self, job_id, data):
+        for j in self._jobs:
+            if j.get("job_id") == job_id:
+                j.update(data or {})
+                return True
+        return False
+
 
 class _AuditRepo:
     def __init__(self):
@@ -633,6 +647,58 @@ class TestWorkshopHardlock:
         db.collections["purchase_settings"][0]["require_dc_for_workshop"] = True
         r2 = c.post("/api/v1/workshop/jobs", json=_job_body("ORDERED"))
         assert r2.status_code == 422
+
+    # --- P1 regression: the REAL gate fires when an external-lab lens job advances
+    #     to IN_PROGRESS, reading the TOP-LEVEL lens_status (the production lifecycle
+    #     field set via update_lens_status) -- NOT lens_details. The old build only
+    #     checked lens_details.lens_status, so every real ORDERED job sailed through.
+    def _seed_ordered_job(self, wrepo, lens_status="ORDERED", product_id="L1", store_id="S1"):
+        wrepo._jobs.append({
+            "job_id": "JOB-1", "job_number": "WS-1", "status": "PENDING",
+            "store_id": store_id, "lens_status": lens_status,          # TOP-LEVEL
+            "lens_details": {"product_id": product_id},                # spec; no lens_status
+            "fitting_details": {"confirmed_by_sales": True},           # passes the sales gate
+        })
+
+    def test_inprogress_ordered_no_dc_blocked(self):
+        db = _FakeDB(); wrepo = _WorkshopRepo()
+        c = _workshop_client(db, wrepo)
+        self._seed_ordered_job(wrepo)
+        r = c.patch("/api/v1/workshop/jobs/JOB-1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 422
+        assert r.json()["detail"]["code"] == "DC_HARDLOCK"
+        # Status must NOT have advanced.
+        assert wrepo.find_by_id("JOB-1")["status"] == "PENDING"
+
+    def test_inprogress_ordered_with_dc_allowed(self):
+        db = _FakeDB()
+        db.collections["grns"].append({
+            "grn_id": "DC1", "grn_subtype": "DELIVERY_CHALLAN", "status": "ACCEPTED",
+            "store_id": "S1", "items": [_grn_item("L1", 3)],
+        })
+        wrepo = _WorkshopRepo(); c = _workshop_client(db, wrepo)
+        self._seed_ordered_job(wrepo)
+        r = c.patch("/api/v1/workshop/jobs/JOB-1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 200, r.text
+        assert wrepo.find_by_id("JOB-1")["status"] == "IN_PROGRESS"
+
+    def test_inprogress_inhouse_lens_exempt(self):
+        db = _FakeDB(); wrepo = _WorkshopRepo(); c = _workshop_client(db, wrepo)
+        self._seed_ordered_job(wrepo, lens_status="RECEIVED")  # not ORDERED -> exempt
+        r = c.patch("/api/v1/workshop/jobs/JOB-1/status", json={"status": "IN_PROGRESS"})
+        assert r.status_code == 200, r.text
+
+    def test_inprogress_ordered_admin_override_audited(self):
+        db = _FakeDB(); audit = _AuditRepo()
+        wrepo = _WorkshopRepo()
+        c = _workshop_client(db, wrepo, audit=audit, roles=("ADMIN",))
+        self._seed_ordered_job(wrepo)
+        r = c.patch(
+            "/api/v1/workshop/jobs/JOB-1/status",
+            json={"status": "IN_PROGRESS", "override_reason": "DC in transit"},
+        )
+        assert r.status_code == 200, r.text
+        assert any(row["action"] == "dc_hardlock_override" for row in audit.rows)
 
 
 # ===========================================================================
