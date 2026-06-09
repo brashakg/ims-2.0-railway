@@ -22,6 +22,7 @@ import type {
   TopReasonsResponse,
   ResultBreakdownResponse,
   FUStatusResponse,
+  WalkoutPosComplianceCheck,
 } from '../../types';
 
 export const walkoutsApi = {
@@ -203,6 +204,17 @@ export const walkoutsApi = {
   ): Promise<FUStatusResponse> => {
     const r = await api.get('/walkouts/dashboard/fu-status', {
       params: { days, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
+  },
+
+  /** F45 D5 -- POS soft-block compliance counter for a (store, salesperson).
+   *  Read-only; drives a dismissable POS banner. NEVER blocks a sale. */
+  posComplianceCheck: async (
+    storeId: string, salesPersonId: string,
+  ): Promise<WalkoutPosComplianceCheck> => {
+    const r = await api.get('/walkouts/pos-compliance-check', {
+      params: { store_id: storeId, sales_person_id: salesPersonId },
     });
     return r.data;
   },

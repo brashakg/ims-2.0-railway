@@ -1117,119 +1117,54 @@ async def get_walkins(
 
 
 # ============================================================================
-# FEATURE 7: WALKOUT RECOVERY
+# FEATURE 7: WALKOUT RECOVERY -- RETIRED (F45 D1)
 # ============================================================================
+# These two endpoints were a zombie duplicate of the canonical walkouts module
+# (backend/api/routers/walkouts.py, mounted at /api/v1/walkouts). They wrote to
+# the SAME `walkouts` collection with a mismatched 5-field schema (no 30-field
+# capture, no 2/3-round follow-up, no result pipeline) AND fired a WALKOUT_RECOVERY
+# WhatsApp immediately -- which is now forbidden (COMMS CHANNEL DIRECTIVE
+# 2026-06-07: WhatsApp ban; walkout follow-up messages are deferred / dark only).
+#
+# They are RETIRED to HTTP 410 Gone: the routes remain registered (so the RBAC
+# coverage-lock + no-stale-entry tests stay green) but they no longer write any
+# document or fire any send. Callers must use POST/GET /api/v1/walkouts instead.
 
 
-@router.post("/walkout/{customer_id}")
+@router.post("/walkout/{customer_id}", deprecated=True)
 async def record_walkout(
     customer_id: str,
-    req: WalkoutRequest,
-    store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Record a customer walkout for recovery follow-up"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
-    db = _get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+    """RETIRED (F45 D1). Use POST /api/v1/walkouts (canonical 30-field capture).
 
-    customer = (
-        db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    Returns 410 Gone -- this stub no longer writes a partial-schema walkout doc
+    nor fires a WALKOUT_RECOVERY message (WhatsApp is banned; sends are dark).
+    """
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "This endpoint is retired. Use POST /api/v1/walkouts for the full "
+            "30-field walkout / lost-sale capture."
+        ),
     )
 
-    # Walkout recording itself is always allowed, but the WALKOUT_RECOVERY
-    # WhatsApp message is a PROMOTIONAL message and must not be sent to
-    # customers who have opted out of marketing.  Record the walkout regardless;
-    # only skip the outbound notification.
-    send_recovery_msg = customer.get("marketing_consent") is not False
 
-    walkout_id = (
-        f"WKO-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-    )
-    store = db.get_collection("stores").find_one({"store_id": active_store}) or {}
-
-    walkout = {
-        "walkout_id": walkout_id,
-        "store_id": active_store,
-        "customer_id": customer_id,
-        "customer_name": customer.get("name", ""),
-        "customer_phone": customer.get("mobile", ""),
-        "frames_tried": req.frames_tried,
-        "reason": req.reason,
-        "notes": req.notes,
-        "recovery_message_sent": False,
-        "recovered": False,
-        "created_at": datetime.now().isoformat(),
-        "created_by": current_user.get("user_id", "unknown"),
-    }
-
-    db.get_collection("walkouts").insert_one(walkout)
-
-    recovery_status = "skipped (opted out)"
-    if send_recovery_msg:
-        # Schedule recovery message (log as SCHEDULED for now)
-        frame_names = (
-            ", ".join(req.frames_tried[:3]) if req.frames_tried else "some frames"
-        )
-        validity = (datetime.now() + timedelta(days=7)).strftime("%d %b %Y")
-
-        await send_notification(
-            store_id=active_store,
-            customer_id=customer_id,
-            customer_phone=customer.get("mobile", ""),
-            customer_name=customer.get("name", "Customer"),
-            template_id="WALKOUT_RECOVERY",
-            channel="WHATSAPP",
-            variables={
-                "store_name": store.get("name", "Better Vision"),
-                "frame_names": frame_names,
-                "discount_percent": "10",
-                "validity_date": validity,
-            },
-            category="PROMOTIONAL",
-            triggered_by=current_user.get("user_id", "unknown"),
-            related_entity_type="walkout",
-            related_entity_id=walkout_id,
-        )
-        recovery_status = "scheduled"
-
-    walkout.pop("_id", None)
-    return {
-        "message": f"Walkout recorded, recovery message {recovery_status}",
-        "walkout": walkout,
-        "recovery_message": recovery_status,
-    }
-
-
-@router.get("/walkout-recoveries")
+@router.get("/walkout-recoveries", deprecated=True)
 async def get_walkout_recoveries(
-    store_id: Optional[str] = Query(None),
-    limit: int = Query(50, le=200),
     current_user: dict = Depends(get_current_user),
 ):
-    """List walkout recovery attempts"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
-    db = _get_db()
-    if db is None:
-        return {"walkouts": [], "total": 0, "recovered": 0, "recovery_rate": 0}
+    """RETIRED (F45 D1). Use GET /api/v1/walkouts (canonical list + dashboards).
 
-    coll = db.get_collection("walkouts")
-    walkouts = list(
-        coll.find({"store_id": active_store}).sort("created_at", -1).limit(limit)
+    Returns 410 Gone.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "This endpoint is retired. Use GET /api/v1/walkouts and the "
+            "/api/v1/walkouts/dashboard/* endpoints."
+        ),
     )
-    for w in walkouts:
-        w.pop("_id", None)
-
-    recovered = len([w for w in walkouts if w.get("recovered")])
-    rate = round(recovered / len(walkouts) * 100, 1) if walkouts else 0
-
-    return {
-        "walkouts": walkouts,
-        "total": len(walkouts),
-        "recovered": recovered,
-        "recovery_rate": rate,
-    }
 
 
 # ============================================================================

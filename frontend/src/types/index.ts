@@ -512,12 +512,46 @@ export type PurchasePlan =
   | 'AFTER A MONTH' | 'UNDECIDED';
 
 export type FollowUpMode = 'CALL' | 'WHATSAPP' | 'SMS' | 'EMAIL' | 'IN-PERSON';
+// F45 D6 -- RESCHEDULED + NOT INTERESTED are additive (existing values kept).
 export type FollowUpStatus =
-  | 'PENDING' | 'DONE' | 'NOT REACHABLE' | 'NOT REQUIRED' | 'ESCALATED';
+  | 'PENDING' | 'DONE' | 'NOT REACHABLE' | 'NOT REQUIRED' | 'ESCALATED'
+  | 'RESCHEDULED' | 'NOT INTERESTED';
 export type FollowUpApprovalStatus =
   | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
 export type FollowUpApprovalDecision = 'APPROVED' | 'REJECTED';
-export type WalkoutResultValue = 'DUE' | 'NEGATIVE' | 'CONVERTED';
+// F45 D6 -- WON / LOST are additive Excel-alignment outcomes.
+export type WalkoutResultValue = 'DUE' | 'NEGATIVE' | 'CONVERTED' | 'WON' | 'LOST';
+
+// F45 D3 -- reason-driven follow-up policy computed on create.
+export type WalkoutPolicyAction =
+  | 'PROMO_VOUCHER' | 'RESTOCK_WATCH' | 'MANAGER_ESCALATE' | 'STANDARD_FU' | null;
+
+export interface WalkoutPolicySuggestion {
+  action: WalkoutPolicyAction;
+  voucher_eligible: boolean;
+  restock_watch: boolean;
+  escalate_immediate: boolean;
+  suggested_fu_channel: 'CALL' | 'WHATSAPP' | 'SMS';
+  escalation_task_id?: string;
+}
+
+// F45 D2 -- 50/50 sale-credit split written on CONVERTED.
+export interface WalkoutSaleCredit {
+  credit_type: 'LOGGING' | 'CLOSING';
+  user_id: string;
+  user_name?: string | null;
+  pct: number;
+  order_id: string;
+  credited_at?: string;
+  month_key?: string;
+}
+
+// F45 D5 -- POS soft-block compliance counter (read-only).
+export interface WalkoutPosComplianceCheck {
+  open_count: number;
+  overdue_count: number;
+  oldest_open_date: string | null;
+}
 
 export interface WalkoutFollowUp {
   round: number;
@@ -587,6 +621,7 @@ export const FOLLOWUP_MODES: FollowUpMode[] = [
 ];
 export const FOLLOWUP_STATUSES: FollowUpStatus[] = [
   'PENDING', 'DONE', 'NOT REACHABLE', 'NOT REQUIRED', 'ESCALATED',
+  'RESCHEDULED', 'NOT INTERESTED',
 ];
 
 // Phase 4 — walk-in counter + dashboard types
@@ -936,10 +971,14 @@ export interface Walkout {
   sales_person_id: string;
   sales_person_name?: string;
   followups: WalkoutFollowUp[];
-  result: 'DUE' | 'NEGATIVE' | 'CONVERTED' | null;
+  result: WalkoutResultValue | null;
   result_set_at: string | null;
   converted_order_id: string | null;
   action_remarks: string;
+  // F45 -- reason-driven policy (D3) + 50/50 sale-credit split (D2). Both are
+  // additive: absent on legacy docs, populated on create / CONVERTED.
+  policy_suggestion?: WalkoutPolicySuggestion;
+  sale_credits?: WalkoutSaleCredit[];
   created_at: string;
   created_by: string;
   updated_at: string;

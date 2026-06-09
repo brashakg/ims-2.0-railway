@@ -15,6 +15,7 @@ import {
   type ListWalkoutsParams,
   type Walkout,
   type WalkoutReason,
+  type WalkoutPolicyAction,
 } from '../../types';
 import { WalkoutIntakeModal } from './WalkoutIntakeModal';
 import { WalkoutResultBadge } from './ResultPanel';
@@ -254,7 +255,10 @@ export function WalkoutsPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-700">{w.sales_person_name || w.sales_person_id}</td>
                     <td className="px-4 py-3">
-                      <WalkoutResultBadge value={w.result} />
+                      <div className="flex flex-col items-start gap-1">
+                        <WalkoutResultBadge value={w.result} />
+                        <WalkoutPolicyChip action={w.policy_suggestion?.action} />
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -321,6 +325,24 @@ function FilterField({ label, children }: { label: string; children: React.React
       <span className="text-xs text-gray-500 mb-1 block">{label}</span>
       {children}
     </label>
+  );
+}
+
+// F45 D3 -- reason-driven follow-up policy chip. Neutral palette + single
+// semantic accent per action. Renders nothing for STANDARD_FU / null.
+function WalkoutPolicyChip({ action }: { action?: WalkoutPolicyAction }) {
+  if (!action || action === 'STANDARD_FU') return null;
+  const map: Record<string, { label: string; cls: string }> = {
+    PROMO_VOUCHER: { label: 'Promo eligible', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+    RESTOCK_WATCH: { label: 'Restock watch', cls: 'bg-slate-50 text-slate-700 border-slate-200' },
+    MANAGER_ESCALATE: { label: 'Escalated', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  };
+  const m = map[action];
+  if (!m) return null;
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${m.cls}`}>
+      {m.label}
+    </span>
   );
 }
 

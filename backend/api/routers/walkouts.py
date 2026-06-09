@@ -25,7 +25,7 @@ Side effects on POST:
 
 from datetime import datetime, date as date_type
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
 import re
 import uuid
@@ -135,6 +135,9 @@ class FollowUpStatus(str, Enum):
     NOT_REACHABLE = "NOT REACHABLE"
     NOT_REQUIRED = "NOT REQUIRED"
     ESCALATED = "ESCALATED"
+    # F45 D6 -- additive Excel-alignment statuses (existing values unchanged).
+    RESCHEDULED = "RESCHEDULED"
+    NOT_INTERESTED = "NOT INTERESTED"
 
 
 class ApprovalStatus(str, Enum):
@@ -157,6 +160,11 @@ class WalkoutResult(str, Enum):
     DUE = "DUE"
     NEGATIVE = "NEGATIVE"
     CONVERTED = "CONVERTED"
+    # F45 D6 -- additive Excel-alignment outcomes (existing values unchanged).
+    # WON mirrors CONVERTED semantics for legacy-sheet imports; LOST mirrors
+    # NEGATIVE. The pipeline treats CONVERTED as the canonical "credit" state.
+    WON = "WON"
+    LOST = "LOST"
 
 
 # ============================================================================
@@ -606,6 +614,317 @@ def _audit_walkout_action(
 
 
 # ============================================================================
+# F45 — reason-driven policy + 50/50 sale-credit + manager escalation
+# ============================================================================
+# Reasons that map to a promo-voucher follow-up suggestion (price objection).
+_VOUCHER_REASONS = {"BUDGET/PRICE"}
+# Reasons that map to a "notify on restock" watch (availability objection).
+_RESTOCK_REASONS = {"BRAND", "COLOR", "NOT AVAILABLE"}
+# Reason that fires an immediate manager escalation (service complaint).
+_ESCALATE_REASONS = {"STAFF BEHAVIOUR"}
+
+
+def _compute_policy_suggestion(
+    primary_reason: str, secondary_reason: Optional[str]
+) -> Dict[str, Any]:
+    """Pure function (no DB). Map the walkout reason to a follow-up policy.
+
+    Excel I.7 intent:
+      BUDGET/PRICE          -> offer a promo voucher (action PROMO_VOUCHER)
+      BRAND/COLOR/NOT AVAIL -> notify on restock   (action RESTOCK_WATCH)
+      STAFF BEHAVIOUR       -> escalate to manager  (action MANAGER_ESCALATE)
+      everything else       -> standard FU          (action STANDARD_FU)
+
+    The primary reason wins; the secondary reason only promotes a restock
+    watch when the primary did not already produce a stronger action.
+    """
+    primary = (primary_reason or "").strip().upper()
+    secondary = (secondary_reason or "").strip().upper()
+
+    escalate = primary in _ESCALATE_REASONS
+    voucher = primary in _VOUCHER_REASONS
+    restock = (primary in _RESTOCK_REASONS) or (
+        secondary in _RESTOCK_REASONS and not (escalate or voucher)
+    )
+
+    if escalate:
+        action = "MANAGER_ESCALATE"
+        channel = "CALL"
+    elif voucher:
+        action = "PROMO_VOUCHER"
+        channel = "WHATSAPP"
+    elif restock:
+        action = "RESTOCK_WATCH"
+        channel = "WHATSAPP"
+    else:
+        action = "STANDARD_FU"
+        channel = "CALL"
+
+    return {
+        "action": action,
+        "voucher_eligible": bool(voucher),
+        "restock_watch": bool(restock),
+        "escalate_immediate": bool(escalate),
+        "suggested_fu_channel": channel,
+    }
+
+
+def _store_manager_user_id(store_id: str) -> Optional[str]:
+    """Best-effort: find a STORE_MANAGER for the given store to assign the
+    escalation task to. Returns None if none found / repo unavailable."""
+    try:
+        user_repo = get_user_repository()
+        if user_repo is None:
+            return None
+        candidates = user_repo.find_many(
+            {"roles": "STORE_MANAGER", "store_ids": store_id}
+        )
+        if candidates:
+            u = candidates[0]
+            return u.get("user_id") or u.get("id")
+    except Exception:
+        pass
+    return None
+
+
+def _create_manager_escalation_task(
+    walkout_id: str,
+    store_id: str,
+    sales_person_id: str,
+    walkout_doc: Dict,
+    current_user: dict,
+) -> Optional[str]:
+    """Fire a P1 staff Task to the store's STORE_MANAGER when a walkout is
+    logged with reason STAFF BEHAVIOUR (Excel I.7). Best-effort -- logs a
+    warning on failure and never raises. Returns the task_id or None.
+
+    This is an in-app TASK, NOT an outbound customer message: it never rides
+    a comms channel, so it is unaffected by the WhatsApp ban (build-dark).
+    """
+    try:
+        task_repo = get_task_repository()
+    except Exception:
+        task_repo = None
+    if task_repo is None:
+        return None
+    assignee = _store_manager_user_id(store_id) or sales_person_id
+    task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
+    task_doc = {
+        "task_id": task_id,
+        "title": (
+            f"Staff-behaviour walkout -- {walkout_doc.get('customer_name')} "
+            f"({walkout_doc.get('mobile') or 'no mobile'})"
+        ),
+        "description": (
+            f"A customer walked out citing STAFF BEHAVIOUR (walkout "
+            f"{walkout_id}). Review with the sales associate and follow up "
+            f"with the customer. Notes: "
+            f"{walkout_doc.get('action_remarks') or '--'}"
+        ),
+        "priority": "P1",
+        "status": "open",
+        "assigned_to": assignee,
+        "assigned_by": current_user.get("user_id"),
+        "store_id": store_id,
+        "type": "system",
+        "due_date": datetime.now(),
+        "created_at": datetime.now(),
+        "escalation_level": 0,
+        "source": {
+            "type": "walkout_staff_behaviour",
+            "walkout_id": walkout_id,
+            "sales_person_id": sales_person_id,
+        },
+    }
+    try:
+        task_repo.create(task_doc)
+    except Exception as e:
+        logger.warning(f"[WALKOUT] manager escalation task create failed: {e}")
+        return None
+    _audit_walkout_action(
+        action="walkout.escalate.staff_behaviour",
+        walkout_id=walkout_id,
+        store_id=store_id,
+        current_user=current_user,
+        detail={"task_id": task_id, "assignee": assignee, "priority": "P1"},
+    )
+    return task_id
+
+
+def _resolve_closing_user(db, converted_order_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the closing associate (who actually sold the order) from the
+    orders collection. Returns (user_id, user_name). Fail-soft -> (None, None).
+    """
+    if db is None or not converted_order_id:
+        return None, None
+    try:
+        orders_coll = db.get_collection("orders")
+        order = orders_coll.find_one(
+            {"order_id": converted_order_id}
+        ) or orders_coll.find_one({"order_number": converted_order_id})
+    except Exception:
+        return None, None
+    if not order:
+        return None, None
+    uid = (
+        order.get("sales_person_id")
+        or order.get("salesperson_id")
+        or order.get("created_by")
+    )
+    if not uid:
+        return None, None
+    return uid, (_resolve_sales_person_name(uid) or uid)
+
+
+def _write_sale_credits(
+    db,
+    *,
+    walkout_id: str,
+    store_id: str,
+    order_id: str,
+    logging_user_id: str,
+    logging_user_name: Optional[str],
+    closing_user_id: str,
+    closing_user_name: Optional[str],
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Write the 50/50 sale-credit split (DECISIONS sec 3).
+
+    P0-1 COMPLIANT: standalone Mongo has NO multi-doc transactions. We write
+    each credit type to its OWN single document in `walkout_sale_credits` via
+    a guarded find_one_and_update upsert (deterministic _id makes it
+    idempotent on retry), then mirror the two dicts onto the walkout doc's
+    embedded `sale_credits` array in a separate single-doc update. No
+    cross-collection atomic write is attempted.
+
+    When the logging associate IS the closing associate, both 50% rows point
+    at the same user (SC rollup sums them to 100% of that conversion).
+
+    Returns the list of credit dicts written (for the response / embed).
+    """
+    now = now or datetime.now()
+    month_key = now.strftime("%Y-%m")
+    plan = [
+        ("LOGGING", logging_user_id, logging_user_name),
+        ("CLOSING", closing_user_id, closing_user_name),
+    ]
+    credits: List[Dict[str, Any]] = []
+    coll = None
+    if db is not None:
+        try:
+            coll = db.get_collection("walkout_sale_credits")
+        except Exception:
+            coll = None
+    for credit_type, uid, uname in plan:
+        credit = {
+            "_id": f"WC-{walkout_id}-{credit_type}",
+            "walkout_id": walkout_id,
+            "order_id": order_id,
+            "store_id": store_id,
+            "credit_type": credit_type,
+            "user_id": uid,
+            "user_name": uname,
+            "pct": 50,
+            "credited_at": now,
+            "month_key": month_key,
+        }
+        if coll is not None:
+            try:
+                # Single-document upsert -- idempotent on retry via _id +
+                # $setOnInsert. One op per credit type; never cross-collection.
+                coll.find_one_and_update(
+                    {"_id": credit["_id"]},
+                    {"$setOnInsert": credit},
+                    upsert=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[WALKOUT] sale-credit upsert failed ({credit_type}): {e}"
+                )
+        # Embedded mirror omits the Mongo _id.
+        credits.append({k: v for k, v in credit.items() if k != "_id"})
+    return credits
+
+
+# Follow-up modes that route to an outbound message (vs a staff task only).
+_MESSAGE_FU_MODES = {"WHATSAPP", "SMS", "EMAIL"}
+
+
+async def _maybe_queue_followup_outbound(
+    db,
+    *,
+    walkout_row: Dict,
+    round_num: int,
+    mode: str,
+    current_user: dict,
+) -> str:
+    """F45 D4 -- DARK outbound for a WHATSAPP/SMS/EMAIL overdue FU.
+
+    BUILD-DARK CONTRACT (COMMS CHANNEL DIRECTIVE 2026-06-07): this NEVER calls
+    a provider directly. It rides the EXISTING E6 gate + send_notification
+    path, which writes a PENDING row and only dispatches under
+    DISPATCH_MODE=live (Railway default off). The 30-day/3-message cap
+    (reminder_rail.check_frequency_cap, a SOFT ceiling) is checked first; a
+    capped customer is suppressed (no notification, no ledger row). On a queue,
+    a comms_ledger row is recorded so the cap stays accurate.
+
+    Returns one of: 'no_customer', 'capped', 'queued', 'unavailable', 'error'.
+    A staff Task is ALWAYS created by the caller regardless of this outcome.
+    """
+    customer_id = walkout_row.get("customer_id")
+    phone = walkout_row.get("mobile") or ""
+    if not customer_id or not phone:
+        return "no_customer"
+    if db is None:
+        return "unavailable"
+    try:
+        from api.services import reminder_rail
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[WALKOUT] reminder_rail unavailable: {e}")
+        return "unavailable"
+
+    # E6 SOFT-ceiling cap: a customer at 3/30 is suppressed.
+    try:
+        if not reminder_rail.check_frequency_cap(db, customer_id):
+            return "capped"
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[WALKOUT] freq-cap check failed (fail-open): {e}")
+
+    channel = "SMS" if mode == "SMS" else ("EMAIL" if mode == "EMAIL" else "WHATSAPP")
+    try:
+        from api.services.notification_service import send_notification
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[WALKOUT] send_notification unavailable: {e}")
+        return "unavailable"
+
+    try:
+        await send_notification(
+            store_id=walkout_row.get("store_id") or "",
+            customer_id=customer_id,
+            customer_phone=phone,
+            customer_name=walkout_row.get("customer_name", "Customer"),
+            template_id="WALKOUT_RECOVERY",
+            channel=channel,
+            variables={"customer_name": walkout_row.get("customer_name", "Customer")},
+            category="PROMOTIONAL",
+            triggered_by=f"walkout_fu:{walkout_row.get('walkout_id')}:{round_num}",
+            related_entity_type="walkout",
+            related_entity_id=walkout_row.get("walkout_id"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[WALKOUT] dark FU outbound failed: {e}")
+        return "error"
+    # Record the cap ledger row so the 30-day cap stays accurate.
+    try:
+        reminder_rail.record_outbound(
+            db, customer_id, channel=channel, category="MARKETING"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return "queued"
+
+
+# ============================================================================
 # ENDPOINTS
 # ============================================================================
 
@@ -701,6 +1020,29 @@ async def create_walkout(
         current_user,
     )
 
+    # F45 D3 -- reason-driven follow-up policy. Pure compute, then stamp on
+    # the doc. STAFF BEHAVIOUR additionally fires an immediate P1 staff Task
+    # to the store manager (an in-app task, never an outbound message).
+    suggestion = _compute_policy_suggestion(
+        payload.primary_walkout_reason.value,
+        payload.secondary_walkout_reason.value
+        if payload.secondary_walkout_reason
+        else None,
+    )
+    if suggestion.get("escalate_immediate"):
+        task_id = _create_manager_escalation_task(
+            saved["walkout_id"],
+            store_id,
+            payload.sales_person_id,
+            saved,
+            current_user,
+        )
+        if task_id:
+            suggestion["escalation_task_id"] = task_id
+    enriched = repo.update_policy_suggestion(saved["walkout_id"], suggestion)
+    if enriched is not None:
+        saved = enriched
+
     # JSON-serialize the datetime fields
     return _serialize_walkout(saved)
 
@@ -783,6 +1125,45 @@ async def list_walkouts(
 # ----------------------------------------------------------------------------
 
 
+@router.get("/pos-compliance-check")
+async def pos_compliance_check(
+    current_user: dict = Depends(get_current_user),
+    store_id: str = Query(..., description="Store to check"),
+    sales_person_id: str = Query(..., description="Salesperson to check"),
+):
+    """F45 D5 -- POS soft-block compliance counter.
+
+    Returns {open_count, overdue_count, oldest_open_date} for a
+    (store, salesperson): walkouts with NO result yet. SOFT-BLOCK ONLY --
+    this is a read-only counter that drives a dismissable POS banner; it
+    NEVER blocks a sale (DECISIONS sec 2 item 10). overdue_count counts the
+    open walkouts logged more than 48h ago.
+    """
+    repo = _walkout_repo()
+    if repo is None:
+        return {"open_count": 0, "overdue_count": 0, "oldest_open_date": None}
+
+    rows = repo.list_open_for_staff(store_id, sales_person_id)
+    open_count = len(rows)
+    from datetime import timedelta
+
+    cutoff = (datetime.now() - timedelta(hours=48)).date().isoformat()
+    overdue_count = 0
+    oldest: Optional[str] = None
+    for r in rows:
+        ds = r.get("date_str") or ""
+        if ds:
+            if oldest is None or ds < oldest:
+                oldest = ds
+            if ds <= cutoff:
+                overdue_count += 1
+    return {
+        "open_count": open_count,
+        "overdue_count": overdue_count,
+        "oldest_open_date": oldest,
+    }
+
+
 @router.get("/followups/due-today")
 async def followups_due_today(
     current_user: dict = Depends(get_current_user),
@@ -845,6 +1226,7 @@ async def escalate_overdue_followups(
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+    db = get_db()
     today = datetime.now().date().isoformat()
     overdue = repo.list_overdue_followups(today)
 
@@ -854,6 +1236,8 @@ async def escalate_overdue_followups(
         task_repo = None
 
     created = []
+    # F45 D4 -- dark-outbound tally (no live send; PENDING / cap-suppressed).
+    outbound = {"queued": 0, "capped": 0, "no_customer": 0, "unavailable": 0, "error": 0}
     for row in overdue:
         round_num = int(row.get("round") or 0)
         priority = "P1" if round_num >= 2 else "P2"
@@ -896,6 +1280,24 @@ async def escalate_overdue_followups(
                 logger.warning(f"[WALKOUT] task create failed: {e}")
                 continue
         repo.stamp_followup_escalation(row.get("walkout_id"), round_num, task_id)
+
+        # F45 D4 -- for WHATSAPP/SMS/EMAIL mode FUs, ALSO ride the DARK E6
+        # outbound path (freq-capped, PENDING, DISPATCH_MODE-gated -- never a
+        # live provider send). CALL / IN-PERSON modes stay TASK-ONLY. The Task
+        # above is created unconditionally regardless of this outcome.
+        mode = str(row.get("mode") or "").strip().upper()
+        outbound_status = None
+        if mode in _MESSAGE_FU_MODES:
+            outbound_status = await _maybe_queue_followup_outbound(
+                db,
+                walkout_row=row,
+                round_num=round_num,
+                mode=mode,
+                current_user=current_user,
+            )
+            if outbound_status in outbound:
+                outbound[outbound_status] += 1
+
         _audit_walkout_action(
             action="walkout.followup.escalate",
             walkout_id=row.get("walkout_id"),
@@ -906,6 +1308,8 @@ async def escalate_overdue_followups(
                 "task_id": task_id,
                 "priority": priority,
                 "assignee": assignee,
+                "mode": mode,
+                "outbound": outbound_status,
             },
         )
         created.append(
@@ -915,12 +1319,14 @@ async def escalate_overdue_followups(
                 "task_id": task_id,
                 "priority": priority,
                 "assignee": assignee,
+                "outbound": outbound_status,
             }
         )
 
     return {
         "escalated": len(created),
         "created_tasks": created,
+        "outbound": outbound,
         "as_of": today,
     }
 
@@ -1779,6 +2185,7 @@ async def set_walkout_result(
         raise HTTPException(status_code=404, detail="Walkout not found")
     _check_edit_permission(existing, current_user)
 
+    db = get_db()
     if payload.result == WalkoutResult.CONVERTED:
         if not payload.converted_order_id:
             raise HTTPException(
@@ -1789,7 +2196,6 @@ async def set_walkout_result(
         # (keeps tests + dev-mode fail-soft, prod path always
         # validates).
         try:
-            db = get_db()
             if db is not None:
                 orders_coll = db.get_collection("orders")
                 order = orders_coll.find_one(
@@ -1810,6 +2216,8 @@ async def set_walkout_result(
     # / collection (true for the FakeCollection used in tests).
     prior_result = existing.get("result")
     prior_store = existing.get("store_id", "")
+    logging_user_id = existing.get("sales_person_id") or ""
+    logging_user_name = existing.get("sales_person_name")
 
     updated = repo.set_result(
         walkout_id,
@@ -1819,6 +2227,30 @@ async def set_walkout_result(
     )
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to set result")
+
+    # F45 D2 -- 50/50 sale-credit split on CONVERTED. Resolve the closing
+    # associate from the order; if absent, the logging associate closes it
+    # too (both 50% rows then point at the same user). P0-1 compliant: two
+    # single-doc upserts to walkout_sale_credits + one $set on the walkout.
+    if payload.result == WalkoutResult.CONVERTED:
+        closing_user_id, closing_user_name = _resolve_closing_user(
+            db, payload.converted_order_id
+        )
+        if not closing_user_id:
+            closing_user_id, closing_user_name = logging_user_id, logging_user_name
+        credits = _write_sale_credits(
+            db,
+            walkout_id=walkout_id,
+            store_id=prior_store,
+            order_id=payload.converted_order_id,
+            logging_user_id=logging_user_id,
+            logging_user_name=logging_user_name,
+            closing_user_id=closing_user_id,
+            closing_user_name=closing_user_name,
+        )
+        embedded = repo.set_sale_credits(walkout_id, credits)
+        if embedded is not None:
+            updated = embedded
 
     _audit_walkout_action(
         action="walkout.result.set",
