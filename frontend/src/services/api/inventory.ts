@@ -553,7 +553,50 @@ export const vendorsApi = {
     );
     return response.data;
   },
+
+  // F8: PO-vs-GRN variance / backorder report. Open/partial PO lines whose
+  // ACCEPTED received qty trails the ordered qty, with open qty + aging enum.
+  getVarianceReport: async (params?: { store_id?: string; skip?: number; limit?: number }) => {
+    const response = await api.get('/vendors/variance-report', { params });
+    return response.data as { lines: VarianceLine[]; total: number };
+  },
+
+  // F8: dismiss a variance/backorder line with a mandatory justification.
+  dismissVariance: async (
+    poId: string,
+    body: { product_id: string; reason: string; grn_id?: string; bill_id?: string },
+  ) => {
+    const response = await api.post(`/vendors/purchase-orders/${poId}/dismiss-variance`, body);
+    return response.data as {
+      dismissed: boolean;
+      po_id: string;
+      product_id: string;
+      vendor_id?: string;
+      debit_note_suggested: boolean;
+      suggested_amount?: number | null;
+    };
+  },
 };
+
+// F8 variance report row (one open PO line). aging_status is an explicit enum,
+// never a colour string.
+export interface VarianceLine {
+  po_id: string;
+  po_number?: string;
+  vendor_id?: string;
+  vendor_name?: string;
+  product_id: string;
+  product_name?: string;
+  ordered_qty: number;
+  received_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  open_qty: number;
+  variance_status: 'SHORT' | 'OVER' | 'EXACT' | 'UNMATCHED';
+  days_overdue: number;
+  aging_status: 'ON_TIME' | 'OVERDUE' | 'CRITICALLY_OVERDUE';
+  dismissed?: boolean;
+}
 
 // ============================================================================
 // Reorder Settings API (per-product reorder configuration)

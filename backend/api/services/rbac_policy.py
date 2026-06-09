@@ -4594,10 +4594,26 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders/{po_id}/send",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # F8 PO-vs-GRN variance: dismiss a variance/backorder line with a mandatory
+    # justification (single-doc PO $push + one audit row). An accounting-style
+    # decision -> ACCOUNTANT/ADMIN only (SUPERADMIN auto-passes).
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}/dismiss-variance",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendors/sku-alias-lookup",
         "allowed": "AUTHENTICATED",
+    },
+    # F8 PO-vs-GRN variance report (read-only). Open/partial PO lines whose
+    # received qty trails the order, with open qty + aging enum. Visible to the
+    # AP pair plus the managers who chase late deliveries.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/variance-report",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {
         "method": "GET",

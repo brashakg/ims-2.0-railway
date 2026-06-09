@@ -14,6 +14,7 @@ import {
   TrendingUp,
   Loader2,
   AlertTriangle,
+  PackageX,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -21,6 +22,7 @@ import { vendorsApi } from '../../services/api';
 import { VendorReturns } from './VendorReturns';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseInvoicesTab } from './PurchaseInvoicesTab';
+import { PurchaseVarianceTab } from './PurchaseVarianceTab';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
 import { PurchaseOrderDetail } from './PurchaseOrderDetail';
 import { SupplierPanel } from './SupplierPanel';
@@ -113,7 +115,7 @@ export function PurchaseManagementPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: TabType[] = ['purchase-orders', 'purchase-invoices', 'suppliers', 'vendor-returns', 'analytics'];
+      const validTabs: TabType[] = ['purchase-orders', 'purchase-invoices', 'variance', 'suppliers', 'vendor-returns', 'analytics'];
       if (validTabs.includes(tabParam as TabType)) {
         setActiveTab(tabParam as TabType);
       }
@@ -221,8 +223,9 @@ export function PurchaseManagementPage() {
           <h1>Stock, from upstream.</h1>
           <div className="hint">Vendor ledger, purchase orders, GRN verification with quantity + price variance, payment aging, credit notes.</div>
         </div>
-        {/* Invoices tab carries its own Create-from-GRN / Manual buttons. */}
-        {activeTab !== 'purchase-invoices' && (
+        {/* Invoices tab carries its own Create-from-GRN / Manual buttons; the
+            variance tab is read-mostly (its own Dismiss action lives inline). */}
+        {(activeTab === 'purchase-orders' || activeTab === 'suppliers') && (
           <button
             onClick={() => activeTab === 'purchase-orders' ? setShowCreatePO(true) : setShowSupplierModal(true)}
             className="btn sm primary"
@@ -280,6 +283,19 @@ export function PurchaseManagementPage() {
             </div>
           </button>
           <button
+            onClick={() => setActiveTab('variance')}
+            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
+              activeTab === 'variance'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <PackageX className="w-4 h-4" />
+              Variance
+            </div>
+          </button>
+          <button
             onClick={() => setActiveTab('suppliers')}
             className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
               activeTab === 'suppliers'
@@ -321,8 +337,8 @@ export function PurchaseManagementPage() {
         </nav>
       </div>
 
-      {/* Search & Filters (invoices tab has its own controls) */}
-      {activeTab !== 'purchase-invoices' && (
+      {/* Search & Filters (invoices + variance tabs have their own controls) */}
+      {activeTab !== 'purchase-invoices' && activeTab !== 'variance' && (
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
@@ -361,6 +377,8 @@ export function PurchaseManagementPage() {
         <PurchaseTable purchaseOrders={filteredPOs} onViewPO={setSelectedPO} />
       ) : activeTab === 'purchase-invoices' ? (
         <PurchaseInvoicesTab suppliers={suppliers} />
+      ) : activeTab === 'variance' ? (
+        <PurchaseVarianceTab />
       ) : activeTab === 'suppliers' ? (
         <SupplierPanel suppliers={filteredSuppliers} />
       ) : activeTab === 'vendor-returns' ? (

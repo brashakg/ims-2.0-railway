@@ -76,6 +76,11 @@ class TaskmasterAgent(JarvisAgent):
         # 2. Auto-reorder: stock items below reorder_point → draft PO
         actions.extend(await self._draft_reorders())
 
+        # 2b. F8: aged-backorder sweep. Open PO lines past their expected_date
+        # get an accountable P2 task (P1 once critically overdue 14d+). Tier 1
+        # auto-act -- task creation is fully reversible. Fail-soft.
+        actions.extend(await self._sweep_aged_backorders())
+
         # 3. E4: expire stale approval requests past their 60-min TTL. This is a
         # status flip (REQUESTED -> EXPIRED), not a delete -- rows stay
         # auditable. Fail-soft: a missing DB / engine error never breaks the tick.
@@ -265,6 +270,170 @@ class TaskmasterAgent(JarvisAgent):
                     logger.warning(f"[TASKMASTER] Failed to draft PO for {sku}: {e}")
         except Exception as e:
             logger.debug(f"[TASKMASTER] Reorder scan error: {e}")
+        return actions
+
+    async def _sweep_aged_backorders(self) -> List[Dict[str, Any]]:
+        """F8: turn aged open PO lines into accountable backorder tasks.
+
+        Scans open POs (SENT/ACKNOWLEDGED/PARTIALLY_RECEIVED) past their
+        expected_date. For each open line still un-received (and NOT dismissed),
+        creates a P2 task deduped by source_ref="backorder:{po_id}:{product_id}".
+        Once a PO line is critically overdue (14d+), a still-OPEN P2 task for it
+        is escalated to P1 via a single find_one_and_update. Tier 1 auto-act --
+        task creation is fully reversible. Every accessor is fail-soft so a
+        missing DB never breaks the tick.
+        """
+        po_coll = self.get_collection("purchase_orders")
+        tasks_coll = self.get_collection("tasks")
+        if po_coll is None or tasks_coll is None:
+            return []
+        grn_coll = self.get_collection("grns")
+
+        try:
+            from api.services import po_variance_engine
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[TASKMASTER] backorder engine import failed: {e}")
+            return []
+
+        actions: List[Dict[str, Any]] = []
+        now = datetime.now()
+        try:
+            pos = list(
+                po_coll.find(
+                    {
+                        "status": {
+                            "$in": ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"]
+                        }
+                    }
+                ).limit(200)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[TASKMASTER] backorder PO scan error: {e}")
+            return []
+
+        # Fetch ACCEPTED GRNs per PO (the engine itself ignores non-accepted).
+        grns_by_po: Dict[str, List[Dict[str, Any]]] = {}
+        for po in pos:
+            pid = po.get("po_id")
+            if not pid:
+                continue
+            if grn_coll is None:
+                grns_by_po[pid] = []
+                continue
+            try:
+                grns_by_po[pid] = list(grn_coll.find({"po_id": pid}))
+            except Exception:  # noqa: BLE001
+                grns_by_po[pid] = []
+
+        specs = po_variance_engine.aged_backorder_tasks_needed(pos, grns_by_po, now=now)
+
+        for spec in specs:
+            ref = spec.get("source_ref")
+            if not ref:
+                continue
+            # Find any existing task for this backorder line.
+            try:
+                existing = list(tasks_coll.find({"source_ref": ref}))
+            except Exception:  # noqa: BLE001
+                existing = []
+            active = [
+                t
+                for t in existing
+                if str(t.get("status", "")).upper() in {"OPEN", "IN_PROGRESS", "ESCALATED"}
+            ]
+
+            po_label = spec.get("po_number") or spec.get("po_id")
+            product = spec.get("product_name") or spec.get("product_id")
+            if not active:
+                # No live task yet -> create one (deduped by source_ref).
+                title = (
+                    f"Critically overdue backorder: {product} on PO {po_label}"
+                    if spec.get("escalate")
+                    else f"Overdue backorder: {product} on PO {po_label}"
+                )
+                description = (
+                    f"PO {po_label} is {spec.get('days_overdue')} day(s) past its "
+                    f"expected date with {spec.get('open_qty')} unit(s) of {product} "
+                    f"still un-received. Chase the vendor or short-close the line."
+                )
+                task = {
+                    "task_id": f"TSK-{datetime.now().strftime('%y%m%d%H%M%S')}-{str(spec.get('product_id'))[:6]}",
+                    "title": title,
+                    "description": description,
+                    "category": "Purchase",
+                    "priority": spec.get("priority", "P2"),
+                    "status": "OPEN",
+                    "source": "SYSTEM",
+                    "source_ref": ref,
+                    "assigned_to": None,
+                    "assigned_by": "system",
+                    "store_id": None,
+                    "created_at": now,
+                    "updated_at": now,
+                    "escalation_level": 0,
+                    "history": [
+                        {
+                            "status": "OPEN",
+                            "timestamp": now,
+                            "by": self.agent_id,
+                            "notes": "Auto-created from aged backorder",
+                        }
+                    ],
+                }
+                try:
+                    tasks_coll.insert_one(task)
+                    actions.append(
+                        {
+                            "action": "backorder_task_created",
+                            "po_id": spec.get("po_id"),
+                            "product_id": spec.get("product_id"),
+                            "priority": spec.get("priority"),
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"[TASKMASTER] backorder task create failed for {ref}: {e}"
+                    )
+            elif spec.get("escalate"):
+                # A live P2 task exists and the line is now critically overdue
+                # -> escalate to P1 (single find_one_and_update). Skip if already P1.
+                needs_bump = any(
+                    str(t.get("priority", "")).upper() != "P1" for t in active
+                )
+                if not needs_bump:
+                    continue
+                try:
+                    tasks_coll.find_one_and_update(
+                        {
+                            "source_ref": ref,
+                            "status": {"$in": ["OPEN", "IN_PROGRESS", "ESCALATED"]},
+                            "priority": {"$ne": "P1"},
+                        },
+                        {
+                            "$set": {"priority": "P1", "updated_at": now},
+                            "$push": {
+                                "history": {
+                                    "action": "priority_escalated",
+                                    "to": "P1",
+                                    "reason": "Backorder critically overdue (14d+)",
+                                    "by": self.agent_id,
+                                    "at": now,
+                                }
+                            },
+                        },
+                    )
+                    actions.append(
+                        {
+                            "action": "backorder_task_escalated",
+                            "po_id": spec.get("po_id"),
+                            "product_id": spec.get("product_id"),
+                            "to": "P1",
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"[TASKMASTER] backorder escalate failed for {ref}: {e}"
+                    )
         return actions
 
     async def _audit_log(self, action: str, target: str, before: Dict, after: Dict, tier: int):
