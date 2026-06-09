@@ -34,6 +34,7 @@ import clsx from 'clsx';
 // re-exports fail to resolve, TS2614).
 import { ScanToAdvance } from '../../components/labels/ScanToAdvance';
 import { StageMonitorBoard } from '../../components/labels/StageMonitorBoard';
+import { StationQueueBoard } from '../../components/labels/StationQueueBoard';
 import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
@@ -63,6 +64,9 @@ interface Job {
   lens_received_at?: string;
   lens_mounted_at?: string;
   ready_notified_at?: string;
+  // F2 -- in-house lab station the job is currently at (snake_case, passes
+  // through job_to_frontend as-is). Null until the first lab scan.
+  current_station?: string | null;
 }
 
 // Lens-order lifecycle: forward-only NOT_ORDERED -> ORDERED -> RECEIVED -> MOUNTED.
@@ -561,6 +565,15 @@ const loadJobs = async () => {
         }}
       />
 
+      {/* F2 -- lab floor map: per-station queues with SLA-aged dwell chips +
+          links to each bench scan terminal. Managers can edit SLA inline. */}
+      <StationQueueBoard
+        storeId={user?.activeStoreId}
+        canConfigure={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'].includes(
+          user?.activeRole || '',
+        )}
+      />
+
       {/* Jobs-by-stage monitor board (store-scoped live visibility). */}
       <StageMonitorBoard
         jobs={jobs.map((j) => ({
@@ -570,6 +583,7 @@ const loadJobs = async () => {
           status: j.status,
           priority: j.priority,
           promisedDate: j.promisedDate,
+          currentStation: j.current_station,
         }))}
         onPrintStage={(jobId) => setLabelSpec({ kind: 'job', jobId, type: 'stage' })}
         onSelectJob={(jobId) => {

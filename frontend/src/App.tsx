@@ -55,6 +55,7 @@ const PrescriptionsPage = lazy(() => import('./pages/clinical/PrescriptionsPage'
 const FamilyRxPage = lazy(() => import('./pages/clinical/FamilyRxPage').then(m => ({ default: m.FamilyRxPage })));
 const ContactLensFittingPage = lazy(() => import('./pages/clinical/ContactLensFittingPage').then(m => ({ default: m.ContactLensFittingPage })));
 const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m => ({ default: m.WorkshopPage })));
+const StationScanPage = lazy(() => import('./pages/workshop/StationScanPage').then(m => ({ default: m.StationScanPage })));
 const PurchaseManagementPage = lazy(() => import('./pages/purchase/PurchaseManagementPage').then(m => ({ default: m.PurchaseManagementPage })));
 const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage').then(m => ({ default: m.TaskManagementPage })));
 const TasksDashboard = lazy(() => import('./pages/tasks/TasksDashboard').then(m => ({ default: m.TasksDashboard })));
@@ -695,6 +696,20 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF']}
                       >
                         <WorkshopPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* F2 -- fullscreen lab-bench station scan terminal. CASHIER is
+                      included for the front-desk PICKUP scan (mirrors the backend
+                      _LAB_SCAN_ROLES gate). */}
+                  <Route
+                    path="workshop/station/:stationCode"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF', 'CASHIER']}
+                      >
+                        <StationScanPage />
                       </ProtectedRoute>
                     }
                   />

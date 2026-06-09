@@ -5,7 +5,8 @@
 // internal `StaffHeader` (no GSTIN / CIN / supplier identity block) per the
 // council decision to keep statutory ID off internal docs.
 
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
+import JsBarcode from 'jsbarcode';
 import { Printer, X } from 'lucide-react';
 import {
   buildStaffHeader,
@@ -77,6 +78,27 @@ export function WorkshopJobCardPrint({
   onClose,
 }: WorkshopJobCardPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
+  // F2 -- disposable job card carries a scannable Code128 barcode of the job
+  // number; a USB/Bluetooth wedge scanner at each lab bench reads it to route
+  // the job (POST /workshop/scan). Rendered as inline SVG so it prints cleanly.
+  const barcodeRef = useRef<SVGSVGElement>(null);
+
+  useEffect(() => {
+    if (barcodeRef.current && job.jobNumber) {
+      try {
+        JsBarcode(barcodeRef.current, job.jobNumber, {
+          format: 'CODE128',
+          width: 1.6,
+          height: 42,
+          displayValue: false,
+          margin: 0,
+        });
+      } catch {
+        // Fail-soft: if encoding fails the card still prints, just without a
+        // barcode (the job number text below remains scannable by hand entry).
+      }
+    }
+  }, [job.jobNumber]);
 
   const handlePrint = () => {
     window.print();
@@ -234,6 +256,27 @@ export function WorkshopJobCardPrint({
               {header.footer_terms}
             </div>
           )}
+
+          {/* F2 -- scannable Code128 job-card barcode (full width). The lab
+              benches scan THIS to route the job through the stations. */}
+          <div
+            style={{
+              padding: '8px 14px 4px',
+              borderTop: '1px solid #aaa9a3',
+              textAlign: 'center',
+            }}
+          >
+            <svg
+              ref={barcodeRef}
+              data-testid="job-card-barcode"
+              data-value={job.jobNumber}
+              style={{ width: '100%', height: 42 }}
+            />
+            <div style={{ fontSize: 9, fontFamily: 'ui-monospace, Menlo, monospace', color: '#1a1a19', marginTop: 2 }}>
+              {job.jobNumber}
+            </div>
+          </div>
+
           <div
             style={{
               padding: '7px 14px',
