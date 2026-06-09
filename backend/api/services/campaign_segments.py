@@ -154,6 +154,19 @@ SEGMENT_DEFS: List[Dict[str, Any]] = [
         "campaign_type": "custom",
         "store_scoped": True,
     },
+    # --- F41 lapsed-patient reactivation (#41) --------------------------------
+    {
+        "key": "lapsed_patient",
+        "label": "Lapsed patients (reactivation)",
+        "description": "Patients with NEITHER a confirmed order NOR a prescription "
+        "exam in the lapse window (default 24 months). Clinically lapsed -- their "
+        "Rx has likely expired and they have not returned. Surfaces an in-app "
+        "reactivation work-list for staff (CALL); sends NO message (WhatsApp ban).",
+        "default_channel": "CALL",
+        "default_template_id": "WALKOUT_RECOVERY",
+        "campaign_type": "winback",
+        "store_scoped": True,
+    },
 ]
 
 SEGMENT_KEYS = {d["key"] for d in SEGMENT_DEFS}
@@ -452,6 +465,166 @@ def _resolve_cl_reorder(
     return rows
 
 
+# F41: order statuses that count as a REAL confirmed sale -- a DRAFT/CANCELLED
+# order does NOT keep a patient "active". Mirrors crm._SOLD_STATUSES intent but
+# expressed as the exclusion the resolver needs (anything not draft/cancelled is
+# a real touch). Lapse threshold default (24 months) lives in E2 policy.
+LAPSED_THRESHOLD_MONTHS = 24
+_NON_SALE_STATUSES = {"DRAFT", "draft", "Draft", "CANCELLED", "cancelled", "Cancelled"}
+
+
+def _customers_with_recent_exam(db, store_id: Optional[str], since: datetime) -> set:
+    """Set of customer_ids with at least one prescription EXAM at/after `since`.
+
+    A prescription exam (clinical visit) keeps a patient "active" for
+    reactivation purposes even with no purchase. Reads prescriptions.created_at /
+    prescription_date / test_date (the codebase writes any of these). An unknown
+    timestamp is treated as recent (conservative -- never mis-flag a recently
+    examined patient as lapsed). Fail-soft -> empty set."""
+    recent_ids: set = set()
+    try:
+        rx_coll = db.get_collection("prescriptions")
+    except Exception:  # noqa: BLE001
+        return recent_ids
+    q: Dict[str, Any] = {}
+    if store_id:
+        q["store_id"] = store_id
+    try:
+        for rx in rx_coll.find(
+            q, {"customer_id": 1, "created_at": 1, "prescription_date": 1, "test_date": 1}
+        ).limit(_SCAN_LIMIT):
+            cid = rx.get("customer_id")
+            if not cid:
+                continue
+            created = _coerce_dt(
+                rx.get("prescription_date") or rx.get("created_at") or rx.get("test_date")
+            )
+            if created is None or created >= since:
+                recent_ids.add(cid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recent-exam scan failed: %s", exc)
+    return recent_ids
+
+
+def _customers_with_recent_sale(db, store_id: Optional[str], since: datetime) -> set:
+    """Set of customer_ids with at least one CONFIRMED order (not DRAFT/CANCELLED)
+    at/after `since`. Distinct from `_customers_with_recent_order` which counts
+    every order regardless of status -- a lapsed-patient gate must ignore an
+    abandoned draft. Unknown timestamp -> treated as recent (conservative)."""
+    recent_ids: set = set()
+    try:
+        order_coll = db.get_collection("orders")
+    except Exception:  # noqa: BLE001
+        return recent_ids
+    q: Dict[str, Any] = {}
+    if store_id:
+        q["store_id"] = store_id
+    try:
+        for o in order_coll.find(
+            q, {"customer_id": 1, "created_at": 1, "status": 1}
+        ).limit(_SCAN_LIMIT):
+            cid = o.get("customer_id")
+            if not cid:
+                continue
+            if str(o.get("status") or "") in _NON_SALE_STATUSES:
+                continue  # a draft/cancelled order is not a real touch
+            created = _coerce_dt(o.get("created_at"))
+            if created is None or created >= since:
+                recent_ids.add(cid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recent-sale scan failed: %s", exc)
+    return recent_ids
+
+
+def _resolve_lapsed_patient(
+    db,
+    store_id: Optional[str],
+    lapse_threshold_months: int = LAPSED_THRESHOLD_MONTHS,
+    now: Optional[datetime] = None,
+    **_kw,
+) -> List[Dict[str, Any]]:
+    """F41 -- patients with NEITHER a confirmed order NOR a prescription exam in
+    the last `lapse_threshold_months` months. These are CLINICALLY lapsed: their
+    Rx has likely expired and they have not returned.
+
+    Dual-gap, ANDed: a patient is lapsed only when BOTH the no-recent-sale gate
+    AND the no-recent-exam gate hold. A patient who had an exam but never bought
+    is NOT lapsed if the exam is recent (they are clinically engaged); a patient
+    who bought recently is NOT lapsed even if their last exam is old. Absence of
+    any record at all = infinitely lapsed (qualifies).
+
+    Each audience row carries `months_lapsed` (whole months since the patient's
+    most recent touch of EITHER kind) so the work-list can rank most-lapsed first.
+
+    REUSES the merged scan helpers -- no new signal logic, no fork. marketing_consent
+    is NOT filtered here (campaign_segments contract: consent is a SEND-time gate;
+    F41 is dark / in-app, but the contract is preserved for parity)."""
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=lapse_threshold_months * 30)
+    recent_sale = _customers_with_recent_sale(db, store_id, cutoff)
+    recent_exam = _customers_with_recent_exam(db, store_id, cutoff)
+    active = recent_sale | recent_exam  # active if EITHER touch is recent
+
+    # Build a per-customer "most recent touch" map so we can report months_lapsed
+    # for the lapsed ones (only needed for the lapsed set, but computed in one
+    # pass over the same capped scans).
+    last_touch: Dict[str, datetime] = {}
+
+    def _note(cid: str, dt: Optional[datetime]):
+        if not cid or dt is None:
+            return
+        if cid not in last_touch or dt > last_touch[cid]:
+            last_touch[cid] = dt
+
+    try:
+        order_coll = db.get_collection("orders")
+        oq: Dict[str, Any] = {}
+        if store_id:
+            oq["store_id"] = store_id
+        for o in order_coll.find(
+            oq, {"customer_id": 1, "created_at": 1, "status": 1}
+        ).limit(_SCAN_LIMIT):
+            if str(o.get("status") or "") in _NON_SALE_STATUSES:
+                continue
+            _note(o.get("customer_id"), _coerce_dt(o.get("created_at")))
+        rx_coll = db.get_collection("prescriptions")
+        rq: Dict[str, Any] = {}
+        if store_id:
+            rq["store_id"] = store_id
+        for rx in rx_coll.find(
+            rq, {"customer_id": 1, "created_at": 1, "prescription_date": 1, "test_date": 1}
+        ).limit(_SCAN_LIMIT):
+            _note(
+                rx.get("customer_id"),
+                _coerce_dt(rx.get("prescription_date") or rx.get("created_at") or rx.get("test_date")),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("lapsed_patient touch scan failed: %s", exc)
+
+    cust_coll = db.get_collection("customers")
+    customers = list(cust_coll.find(_customers_query(store_id)).limit(_SCAN_LIMIT))
+    rows: List[Dict[str, Any]] = []
+    for cust in customers:
+        cid = cust.get("customer_id", "")
+        if not cid or cid in active:
+            continue  # active (recent sale OR recent exam) -> not lapsed
+        touch = last_touch.get(cid)
+        if touch is not None:
+            months = max(lapse_threshold_months, int((now - touch).days // 30))
+        else:
+            months = None  # no record at all -> infinitely lapsed
+        rows.append(
+            _audience_row(
+                cust,
+                {
+                    "months_lapsed": months,
+                    "last_touch_date": touch.date().isoformat() if touch else None,
+                },
+            )
+        )
+    return rows
+
+
 def _resolve_churn_risk(
     db,
     store_id: Optional[str],
@@ -652,6 +825,7 @@ _RESOLVERS = {
     "cl_reorder": _resolve_cl_reorder,
     "churn_risk": _resolve_churn_risk,
     "fu_due_today": _resolve_fu_due_today,
+    "lapsed_patient": _resolve_lapsed_patient,
 }
 
 

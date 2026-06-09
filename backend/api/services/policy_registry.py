@@ -228,6 +228,26 @@ _REGISTRY_LIST: List[PolicySpec] = [
           scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),
           group="NBA", label="NBA VIP reserved slots", minimum=0, maximum=50),
 
+    # --- F41 Lapsed-patient reactivation (#41) -----------------------------
+    # The lapse window (months with NEITHER a confirmed order NOR a prescription
+    # exam) that marks a patient "lapsed", and the per-store cap on the
+    # reactivation work-list. DARK feature: builds an in-app cohort/work-list for
+    # staff to act on -- it queues NO outbound customer message (WhatsApp ban;
+    # STATUS COMMS DIRECTIVE 2026-06-07 -- #41 reactivation-send is DEFERRED).
+    _spec(key="reactivation.lapse_months", type="int", default=24,
+          scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Reactivation", label="Lapsed-patient window (months)",
+          minimum=6, maximum=60,
+          help="A patient with NO confirmed order AND no prescription exam in this "
+               "many months is treated as clinically lapsed and surfaces on the "
+               "reactivation work-list."),
+    _spec(key="reactivation.cohort_size", type="int", default=50,
+          scopes=("global",), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Reactivation", label="Reactivation work-list size per store",
+          minimum=1, maximum=500,
+          help="Maximum lapsed patients surfaced per store per day on the "
+               "reactivation work-list (most-lapsed first)."),
+
     # --- Clinical -> Retail Handover (F50 / #50) ---
     # Off by default. The orchestrator flips this ON per-store for the 1-2 pilot
     # stores (DECISIONS: "pilot 1-2 stores"); a fresh DB keeps the feature dark

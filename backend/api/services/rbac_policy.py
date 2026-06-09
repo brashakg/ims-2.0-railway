@@ -1068,6 +1068,28 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
         "store_scoped": True,
     },
+    # F41 lapsed-patient reactivation (#41): in-app reactivation work-list +
+    # outcome log (store-scoped via validate_store_access). DARK -- the work-list
+    # never sends a message and never mints a voucher. Store-facing roles work it;
+    # ACCOUNTANT additionally sees the read-only analytics (outcome counts).
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/reactivation/{store_id}",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/reactivation/{store_id}/log",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/reactivation/{store_id}/analytics",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER", "ACCOUNTANT"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/360/{customer_id}",

@@ -874,6 +874,243 @@ async def complete_nba_card(
     return {"ok": True, "next_follow_up_id": next_follow_up_id}
 
 
+# ============================================================================
+# F41 - Lapsed-patient reactivation (#41)
+# An in-app, per-store REACTIVATION WORK-LIST of clinically lapsed patients (no
+# confirmed order AND no prescription exam in the lapse window, default 24
+# months). This is a WORK-LIST, not a message channel: nothing here sends
+# WhatsApp/SMS and nothing mints a voucher. Marking an entry Reached/Skipped
+# records an in-app reactivation_call follow_up doc (the durable audit), NEVER a
+# provider send (WhatsApp ban -- STATUS COMMS DIRECTIVE; #41 reactivation-send is
+# DEFERRED; F41 ships DARK exactly like the #39 NBA call list).
+#
+# Reuses the merged campaign_segments._resolve_lapsed_patient resolver + the
+# persisted vip_churn_risk subdoc (READ, never recomputed). Lapse window + cohort
+# size from E2 policy. Single-doc writes only (standalone Mongo, no transactions).
+# ============================================================================
+
+
+class ReactivationLogBody(BaseModel):
+    customer_id: str = Field(..., description="Lapsed patient being actioned")
+    outcome: Literal["reached", "no_answer", "not_interested", "wrong_number", "scheduled_visit"]
+    notes: str = Field(default="", max_length=2000)
+    follow_up_scheduled_date: Optional[str] = Field(
+        default=None, description="Optional YYYY-MM-DD to schedule a next reactivation touch"
+    )
+
+
+def _reactivation_entry_for(doc: dict, customer_id: str) -> Optional[dict]:
+    for e in (doc or {}).get("entries", []):
+        if e.get("customer_id") == customer_id:
+            return e
+    return None
+
+
+@router.get("/reactivation/{store_id}")
+async def get_reactivation_worklist(
+    store_id: str = Path(..., description="Store ID"),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today (IST)"),
+    preview: bool = Query(False, description="Read-only: never persists a cohort doc"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Today's reactivation work-list for a store: ranked lapsed patients (VIPs
+    first, then most-lapsed), capped by the E2 cohort size. Reads the
+    MEGAPHONE-built reactivation_cohorts doc; if absent, builds synchronously as a
+    fallback so the page is never empty. `preview=true` ALWAYS computes live and
+    NEVER persists (a pure read-only count for Settings).
+
+    Store-scoped (validate_store_access): a store-scoped role gets 403 for another
+    store. NO message is sent and NO voucher is minted -- this is an in-app
+    work-list only. Fail-soft: no DB -> empty list."""
+    from ..dependencies import validate_store_access
+    from ..services import lapsed_reactivation as react
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    target_date = date or react._today_ist()
+    if db is None:
+        return {"store_id": store_id, "date": target_date, "generated_at": None, "entries": []}
+
+    if not preview:
+        doc = None
+        try:
+            doc = db.get_collection("reactivation_cohorts").find_one(
+                {"store_id": store_id, "date": target_date}
+            )
+        except Exception:  # noqa: BLE001
+            doc = None
+        if doc:
+            return {
+                "store_id": store_id,
+                "date": target_date,
+                "generated_at": doc.get("generated_at"),
+                "lapse_months": doc.get("lapse_months"),
+                "entries": react.public_entries(doc.get("entries", [])),
+            }
+
+    # Fallback / preview: build synchronously (read-only -- no persist, no send).
+    entries = react.build_cohort(db, store_id)
+    return {
+        "store_id": store_id,
+        "date": target_date,
+        "generated_at": datetime.utcnow().isoformat(),
+        "entries": react.public_entries(entries),
+    }
+
+
+@router.post("/reactivation/{store_id}/log")
+async def log_reactivation_outcome(
+    store_id: str = Path(..., description="Store ID"),
+    body: ReactivationLogBody = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record the outcome of a reactivation outreach after the staff member calls
+    / visits the lapsed patient: mark the entry done in today's
+    reactivation_cohorts doc (single-doc update), resolve the linked
+    reactivation_call follow_up (creating one if MEGAPHONE has not pre-created it),
+    and optionally schedule a NEXT reactivation touch. Writes an audit row.
+
+    NO message is sent and NO voucher is minted -- this is a pure in-app record of
+    a manual outreach (WhatsApp ban; F41 is dark)."""
+    from ..dependencies import validate_store_access
+    from ..services import lapsed_reactivation as react
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    target_date = react._today_ist()
+    updated = db.get_collection("reactivation_cohorts").find_one_and_update(
+        {"store_id": store_id, "date": target_date, "entries.customer_id": body.customer_id},
+        {"$set": {"entries.$.dismissed": True}},
+        return_document=True,
+    )
+    entry = _reactivation_entry_for(updated, body.customer_id) if updated else None
+    follow_up_id = (entry or {}).get("follow_up_id")
+    now_iso = datetime.now().isoformat()
+    user_id = current_user.get("user_id") or current_user.get("id")
+    reached = body.outcome in ("reached", "scheduled_visit")
+
+    if follow_up_id:
+        try:
+            db.get_collection("follow_ups").find_one_and_update(
+                {"follow_up_id": follow_up_id, "store_id": store_id},
+                {"$set": {
+                    "status": "completed" if reached else "skipped",
+                    "outcome": body.outcome,
+                    "notes": body.notes,
+                    "completed_at": now_iso,
+                    "completed_by": user_id,
+                }},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        # MEGAPHONE had not pre-created one (e.g. synchronous fallback work-list):
+        # write the in-app reactivation_call follow_up RECORD now (NOT a message).
+        follow_up_id = f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            db.get_collection("follow_ups").insert_one({
+                "follow_up_id": follow_up_id,
+                "customer_id": body.customer_id,
+                "customer_name": (entry or {}).get("customer_name", ""),
+                "customer_phone": (entry or {}).get("customer_mobile", ""),
+                "store_id": store_id,
+                "type": "reactivation_call",
+                "scheduled_date": target_date,
+                "status": "completed" if reached else "skipped",
+                "outcome": body.outcome,
+                "notes": body.notes,
+                "created_at": now_iso,
+                "completed_at": now_iso,
+                "completed_by": user_id,
+            })
+        except Exception:  # noqa: BLE001
+            follow_up_id = None
+
+    next_follow_up_id = None
+    if body.follow_up_scheduled_date:
+        next_follow_up_id = f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            db.get_collection("follow_ups").insert_one({
+                "follow_up_id": next_follow_up_id,
+                "customer_id": body.customer_id,
+                "customer_name": (entry or {}).get("customer_name", ""),
+                "customer_phone": (entry or {}).get("customer_mobile", ""),
+                "store_id": store_id,
+                "type": "reactivation_call",
+                "scheduled_date": body.follow_up_scheduled_date,
+                "status": "pending",
+                "outcome": None,
+                "notes": "Scheduled from reactivation work-list",
+                "created_at": now_iso,
+                "completed_at": None,
+                "completed_by": None,
+            })
+        except Exception:  # noqa: BLE001
+            next_follow_up_id = None
+
+    _nba_audit("reactivation.logged", body.customer_id, store_id, current_user,
+               {"outcome": body.outcome, "follow_up_id": follow_up_id,
+                "next_follow_up_id": next_follow_up_id})
+    return {"ok": True, "follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id}
+
+
+@router.get("/reactivation/{store_id}/analytics")
+async def get_reactivation_analytics(
+    store_id: str = Path(..., description="Store ID"),
+    days: int = Query(90, ge=1, le=365, description="Look-back window (days)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reactivation outcomes for a store over the look-back window, aggregated from
+    the in-app reactivation_call follow_up records (the durable outcome log -- NOT
+    a notification/send log). Returns total reached / no_answer / not_interested /
+    scheduled_visit + the count of patients currently on the live work-list.
+
+    Store-scoped. Read-only. Fail-soft: no DB -> zeroed envelope."""
+    from ..dependencies import validate_store_access
+    from ..services import lapsed_reactivation as react
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    empty = {
+        "store_id": store_id, "window_days": days,
+        "logged": 0, "reached": 0, "no_answer": 0, "not_interested": 0,
+        "scheduled_visit": 0, "wrong_number": 0, "currently_lapsed": 0,
+    }
+    if db is None:
+        return empty
+
+    since_iso = (datetime.now() - timedelta(days=days)).isoformat()
+    counts = {"reached": 0, "no_answer": 0, "not_interested": 0,
+              "scheduled_visit": 0, "wrong_number": 0}
+    logged = 0
+    try:
+        for fu in db.get_collection("follow_ups").find(
+            {"store_id": store_id, "type": "reactivation_call",
+             "completed_at": {"$gte": since_iso}},
+            {"_id": 0, "outcome": 1},
+        ).limit(50000):
+            logged += 1
+            oc = str(fu.get("outcome") or "")
+            if oc in counts:
+                counts[oc] += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    currently_lapsed = 0
+    try:
+        currently_lapsed = len(react.build_cohort(db, store_id))
+    except Exception:  # noqa: BLE001
+        currently_lapsed = 0
+
+    return {
+        "store_id": store_id, "window_days": days, "logged": logged,
+        **counts, "currently_lapsed": currently_lapsed,
+    }
+
+
 @router.get("/customers/{customer_id}/cl-refill-status")
 async def get_cl_refill_status(
     customer_id: str = Path(..., description="Customer ID"),

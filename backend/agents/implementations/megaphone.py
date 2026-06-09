@@ -132,6 +132,23 @@ class MegaphoneAgent(JarvisAgent):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[MEGAPHONE] NBA daily scoring failed: %s", exc)
 
+        # 0b. F41: lapsed-patient reactivation work-list. Build each active
+        #     store's ranked cohort of clinically lapsed patients (no confirmed
+        #     order AND no Rx exam in the lapse window) and pre-create a
+        #     reactivation_call follow_up per entry. This is a WORK-LIST -- it
+        #     queues NO messages and mints NO voucher; staff act on it manually
+        #     in-app (WhatsApp ban; #41 reactivation-send DEFERRED, F41 is dark).
+        #     Idempotent + per-store fail-soft.
+        try:
+            react_stats = self._build_reactivation_cohorts()
+            if react_stats.get("stores_built", 0) > 0:
+                logger.info(
+                    "[MEGAPHONE] Reactivation: stores_built=%d entries=%d follow_ups=%d",
+                    react_stats["stores_built"], react_stats["entries"], react_stats["follow_ups"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MEGAPHONE] reactivation cohort build failed: %s", exc)
+
         # 1+2. Rx-expiry + birthday reminders are NO LONGER hard-coded scans here.
         #      E6 (the reminder rail) is now the SINGLE config-driven path for every
         #      recurring reminder type. The legacy _scan_rx_expiring/_scan_birthdays_today
@@ -278,6 +295,91 @@ class MegaphoneAgent(JarvisAgent):
                 logger.warning("[MEGAPHONE] NBA score failed store %s: %s", store_id, exc)
                 continue
         return {"stores_scored": stores_scored, "cards": total_cards, "follow_ups": total_fu}
+
+    # -------------------------------------------------------------------------
+    # F41: lapsed-patient reactivation work-list (#41)
+    # -------------------------------------------------------------------------
+
+    def _build_reactivation_cohorts(self) -> Dict[str, int]:
+        """Build each active store's lapsed-patient reactivation work-list for
+        today (IST) and persist it.
+
+        For every store:
+          * If today's reactivation_cohorts doc already exists, SKIP (idempotent).
+          * Else build via lapsed_reactivation.build_cohort (which REUSES the
+            merged campaign_segments._resolve_lapsed_patient resolver + the
+            persisted vip_churn_risk subdoc -- no recompute/fork), upsert the
+            reactivation_cohorts doc (one document, one collection -- P0-1
+            compliant), and pre-create a `reactivation_call` follow_up per entry
+            (idempotent via a find_one pre-check).
+        Per-store fail-soft: one store's error never stops the others. NO message
+        is queued and NO voucher is minted -- this only builds the staff
+        work-list (WhatsApp ban; #41 send DEFERRED, F41 is dark / in-app)."""
+        import uuid as _uuid
+
+        from api.services import lapsed_reactivation as react
+
+        db = self.db
+        if db is None:
+            return {"stores_built": 0, "entries": 0, "follow_ups": 0}
+        cohort_coll = self.get_collection("reactivation_cohorts")
+        fu_coll = self.get_collection("follow_ups")
+        if cohort_coll is None:
+            return {"stores_built": 0, "entries": 0, "follow_ups": 0}
+
+        today = react._today_ist()
+        lapse_months = react._get_cap(react.POLICY_LAPSE_MONTHS, react.DEFAULT_LAPSE_MONTHS)
+        stores_built = 0
+        total_entries = 0
+        total_fu = 0
+        for store_id in self._active_store_ids():
+            try:
+                if cohort_coll.find_one({"store_id": store_id, "date": today}):
+                    continue
+                entries = react.build_cohort(db, store_id, lapse_months=lapse_months)
+                if fu_coll is not None:
+                    for entry in entries:
+                        cid = entry.get("customer_id")
+                        if not cid:
+                            continue
+                        existing = fu_coll.find_one({
+                            "customer_id": cid, "store_id": store_id,
+                            "type": "reactivation_call", "scheduled_date": today,
+                        })
+                        if existing:
+                            entry["follow_up_id"] = existing.get("follow_up_id")
+                            continue
+                        fu_id = f"FU-{today.replace('-', '')}-{_uuid.uuid4().hex[:8].upper()}"
+                        fu_coll.insert_one({
+                            "follow_up_id": fu_id,
+                            "customer_id": cid,
+                            "customer_name": entry.get("customer_name", ""),
+                            "customer_phone": entry.get("customer_mobile", ""),
+                            "store_id": store_id,
+                            "type": "reactivation_call",
+                            "scheduled_date": today,
+                            "status": "pending",
+                            "outcome": None,
+                            "notes": entry.get("headline", ""),
+                            "created_at": datetime.now().isoformat(),
+                            "completed_at": None,
+                            "completed_by": None,
+                        })
+                        entry["follow_up_id"] = fu_id
+                        total_fu += 1
+                doc = react.build_cohort_doc(store_id, entries, date_str=today,
+                                             lapse_months=lapse_months)
+                cohort_coll.find_one_and_update(
+                    {"store_id": store_id, "date": today},
+                    {"$set": doc},
+                    upsert=True,
+                )
+                stores_built += 1
+                total_entries += len(entries)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[MEGAPHONE] reactivation build failed store %s: %s", store_id, exc)
+                continue
+        return {"stores_built": stores_built, "entries": total_entries, "follow_ups": total_fu}
 
     # -------------------------------------------------------------------------
     # E6: reminder rail tick + event handler
