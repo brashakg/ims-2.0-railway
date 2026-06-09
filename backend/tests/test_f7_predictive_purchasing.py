@@ -364,6 +364,31 @@ class TestT2Fallback:
 
 
 # ============================================================================
+# RESERVED stock is held for an order -> NOT sellable on-hand (adversarial P2)
+# ============================================================================
+
+
+class TestReservedNotOnHand:
+    def test_reserved_stock_not_counted_as_on_hand(self):
+        """P2 regression (adversarial): RESERVED units are held for an order and
+        must NOT count as sellable on-hand. A SKU with strong 7d demand whose ONLY
+        stock is RESERVED must still trigger a reorder -- counting RESERVED would
+        over-state on-hand and SUPPRESS the legit reorder (the opposite of this
+        feature's job)."""
+        db = FakeDB()
+        orders = db.get_collection("orders")
+        for i in range(8):
+            orders.insert_one(_order("S1", "P1", days_ago=i % 7))  # strong 7d demand
+        # 50 units, but ALL RESERVED -> zero sellable on-hand.
+        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 50, status="RESERVED"))
+        db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+        assert _run_oracle(db) == 1  # reorder fired despite 50 RESERVED units
+        pl = _pending(db)[0]["payload"]
+        assert pl["product_id"] == "P1"
+        assert pl["days_remaining"] < 14  # on-hand treated as 0 -> imminent stockout
+
+
+# ============================================================================
 # T3 - separate proposals per store
 # ============================================================================
 

@@ -483,12 +483,13 @@ class OracleAgent(JarvisAgent):
                     if not pid:
                         continue
                     status = str(su.get("status") or "").upper()
-                    if status and status not in (
-                        "AVAILABLE", "IN_STOCK", "RESERVED",
-                    ) and status != "":
-                        # Count AVAILABLE/IN_STOCK toward sellable on-hand only.
-                        if status not in ("AVAILABLE", "IN_STOCK"):
-                            continue
+                    # RESERVED is held for an order -> NOT sellable on-hand (mirrors
+                    # item_events.ON_HAND_STATUSES + inventory.py). Only AVAILABLE/
+                    # IN_STOCK (or a legacy blank status) count toward the reorder
+                    # on-hand signal; counting RESERVED would over-state stock and
+                    # SUPPRESS a legitimate reorder (the opposite of this feature's job).
+                    if status and status not in ("AVAILABLE", "IN_STOCK"):
+                        continue
                     key = (str(pid), str(su.get("store_id") or "UNKNOWN"))
                     qty = su.get("quantity")
                     qty = 1 if qty is None else qty
