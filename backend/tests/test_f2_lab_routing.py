@@ -180,6 +180,10 @@ def _mk_job(db: FakeDB, job_id: str, **extra):
         "store_id": "BV-TEST-01",
         "customer_name": "Asha Verma",
         "customer_phone": "9876500000",
+        # A lab-routable job has, by workflow, already had sales confirm the fitting
+        # (the INTAKE -> IN_PROGRESS safety gate). Tests pass fitting_details={} to
+        # exercise the SALES_CONFIRM_REQUIRED block.
+        "fitting_details": {"confirmed_by_sales": True},
     }
     doc.update(extra)
     db.get_collection("workshop_jobs").insert_one(doc)
@@ -273,7 +277,7 @@ def test_3_dispatch_sets_ready_and_notifies(client, auth_headers, fake_env, monk
     import agents.providers as prov
     monkeypatch.setattr(prov, "send_whatsapp", _fake_wa)
 
-    _mk_job(db, "j3")
+    _mk_job(db, "j3", qc_passed=True)  # QC recorded at QC_LAB -> DISPATCH may mark READY
     for st in ("INTAKE", "EDGING", "COATING", "QC_LAB"):
         assert _scan(client, auth_headers, "WS-j3", st)["ok"] is True
 
@@ -283,6 +287,42 @@ def test_3_dispatch_sets_ready_and_notifies(client, auth_headers, fake_env, monk
     assert job["status"] == "READY"
     assert job["current_station"] == "DISPATCH"
     assert job.get("ready_notified_at")  # auto-notify fired
+
+
+def test_3b_dispatch_blocked_without_qc(client, auth_headers, fake_env, monkeypatch):
+    """P1 (adversarial, patient safety): a DISPATCH scan must NOT flip a job to
+    READY when QC was never recorded/waived, and NO customer 'ready' notify may
+    fire. The physical scan is kept; the status is HELD with QC_REQUIRED."""
+    db, repo = fake_env
+
+    async def _fake_wa(phone, text):
+        return type("R", (), {"status": "SIMULATED"})()
+
+    import agents.providers as prov
+    monkeypatch.setattr(prov, "send_whatsapp", _fake_wa)
+
+    _mk_job(db, "j3b")  # confirmed_by_sales defaulted True; qc NOT set/waived
+    for st in ("INTAKE", "EDGING", "COATING", "QC_LAB"):
+        assert _scan(client, auth_headers, "WS-j3b", st)["ok"] is True
+    body = _scan(client, auth_headers, "WS-j3b", "DISPATCH")
+    assert body["ok"] is True
+    assert body.get("status_gate_blocked") == "QC_REQUIRED"
+    assert body.get("auto_notify") is False
+    job = repo.find_by_id("j3b")
+    assert job["status"] != "READY"          # held -- no QC, no patient pickup
+    assert not job.get("ready_notified_at")  # NO customer notify fired
+
+
+def test_3c_intake_blocked_without_sales_confirm(client, auth_headers, fake_env):
+    """P1 (adversarial): an INTAKE scan must NOT start a job (-> IN_PROGRESS) until
+    sales confirm the fitting (power/product correct)."""
+    db, repo = fake_env
+    _mk_job(db, "j3c", fitting_details={})  # NOT confirmed_by_sales
+    body = _scan(client, auth_headers, "WS-j3c", "INTAKE")
+    assert body["ok"] is True
+    assert body.get("status_gate_blocked") == "SALES_CONFIRM_REQUIRED"
+    job = repo.find_by_id("j3c")
+    assert job["status"] != "IN_PROGRESS"  # held until sales confirm
 
 
 def test_4_concurrency_one_winner(client, auth_headers, fake_env):
@@ -411,7 +451,7 @@ def test_8_auto_notify_failsoft_does_not_rollback(client, auth_headers, fake_env
     import agents.providers as prov
     monkeypatch.setattr(prov, "send_whatsapp", _boom)
 
-    _mk_job(db, "j8")
+    _mk_job(db, "j8", qc_passed=True)  # QC recorded -> DISPATCH may mark READY + notify
     for st in ("INTAKE", "EDGING", "COATING", "QC_LAB"):
         assert _scan(client, auth_headers, "WS-j8", st)["ok"] is True
 

@@ -472,19 +472,38 @@ def advance_lab_station(
     # repo so status timestamps stay consistent with the rest of workshop.py.
     advances_to = station_cfg.get("advances_job_status")
     new_status = job_status
+    gate_block = None
     if advances_to:
         advances_to = str(advances_to).strip().upper() or None
     if advances_to and advances_to != job_status:
-        try:
-            from ..dependencies import get_workshop_repository
+        # SAFETY GATES (BUG-116c / BUG-116a): the scan-driven status flip must
+        # enforce the SAME gates as the workshop PATCH handler -- a scan may NOT
+        # start a job (-> IN_PROGRESS) until sales confirm the fitting, nor mark it
+        # READY (-> patient pickup) without a QC pass/waiver. On a gate fail we keep
+        # the physical-station scan but DO NOT flip status and DO NOT auto-notify.
+        if advances_to == "IN_PROGRESS" and not (
+            (updated.get("fitting_details") or {}).get("confirmed_by_sales")
+        ):
+            gate_block = "SALES_CONFIRM_REQUIRED"
+        elif advances_to == "READY" and not (
+            updated.get("qc_passed") is True or updated.get("qc_waived") is True
+        ):
+            gate_block = "QC_REQUIRED"
+        if gate_block is None:
+            try:
+                from ..dependencies import get_workshop_repository
 
-            repo = get_workshop_repository()
-            if repo is not None:
-                repo.update_status(job_id, advances_to, operator_id, "lab-scan")
-                new_status = advances_to
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[LAB_ROUTING] status transition failed: %s", e)
+                repo = get_workshop_repository()
+                if repo is not None:
+                    repo.update_status(job_id, advances_to, operator_id, "lab-scan")
+                    new_status = advances_to
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[LAB_ROUTING] status transition failed: %s", e)
 
+    _gate_msg = {
+        "QC_REQUIRED": " Status held: record/waive lens QC before marking READY.",
+        "SALES_CONFIRM_REQUIRED": " Status held: sales must confirm the fitting before work starts.",
+    }
     return {
         "ok": True,
         "job_id": job_id,
@@ -495,10 +514,15 @@ def advance_lab_station(
         "current_station": code,
         "station_label": STATION_LABELS.get(code, code),
         "stage": new_status,
-        "advanced_status": new_status if advances_to else None,
-        "auto_notify": bool(station_cfg.get("auto_notify_customer")) and new_status == "READY",
+        "advanced_status": new_status if (advances_to and gate_block is None) else None,
+        "status_gate_blocked": gate_block,
+        "auto_notify": (
+            bool(station_cfg.get("auto_notify_customer"))
+            and new_status == "READY"
+            and gate_block is None
+        ),
         "stamped_at": now.isoformat(),
-        "message": f"Scanned in at {STATION_LABELS.get(code, code)}.",
+        "message": f"Scanned in at {STATION_LABELS.get(code, code)}." + _gate_msg.get(gate_block, ""),
     }
 
 
