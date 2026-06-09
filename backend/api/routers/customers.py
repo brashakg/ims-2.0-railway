@@ -299,10 +299,11 @@ class CustomerUpdate(BaseModel):
     # POS-4: per-customer credit limit (khata). 0 = no limit (unlimited).
     # B2B accounts typically carry a non-zero limit; B2C defaults to 0.
     credit_limit: Optional[float] = Field(default=None, ge=0)
-    # F39: manager-approved free-form tags (e.g. "VIP", "Zeiss fan"). Feed the
-    # NBA daily call list (VIP slot + sub-headlines). Replaced wholesale on a
-    # PATCH /tags; PII-bearing tags are stripped server-side.
-    tags: Optional[List[str]] = None
+    # F39 note: `tags` are deliberately NOT a field here. The generic
+    # PUT /{customer_id} is only AUTHENTICATED -- exposing tags on this model
+    # would let any role set them, bypassing the STORE_MANAGER+ gate, the
+    # _clean_tag PII strip, and the suggest->approve workflow. Tags are written
+    # ONLY via the governed PATCH /{customer_id}/tags endpoint.
 
     @field_validator("name", mode="before")
     @classmethod
@@ -677,6 +678,10 @@ async def update_customer(
             raise HTTPException(status_code=404, detail="Customer not found")
 
         update_data = customer.model_dump(exclude_unset=True)
+        # Defense-in-depth: `tags` are governed by PATCH /{id}/tags (STORE_MANAGER+
+        # + PII strip + suggest->approve). Never let them be written through this
+        # AUTHENTICATED generic update, even if a client smuggles the field in.
+        update_data.pop("tags", None)
 
         # Serialize date fields to ISO strings — Mongo + downstream JSON
         # consumers prefer strings over datetime objects on this doc.

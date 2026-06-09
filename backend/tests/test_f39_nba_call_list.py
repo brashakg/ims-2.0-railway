@@ -554,6 +554,28 @@ def test_t7_tag_suggest_approve_visible(monkeypatch):
     assert "Zeiss fan" in (cust.get("tags") or [])
 
 
+def test_t7c_generic_update_cannot_inject_tags(monkeypatch):
+    """P1 regression (adversarial): tags must NOT be writable through the generic
+    AUTHENTICATED PUT /customers/{id}. That path skips the STORE_MANAGER+ gate, the
+    PII strip, and the suggest->approve workflow -- tags are governed ONLY by
+    PATCH /{id}/tags. A SALES_STAFF smuggling tags via the generic update is a no-op."""
+    db = _FakeDB({
+        "customers": _FakeColl([{"customer_id": "C1", "name": "Cust", "store_id": STORE}]),
+        "audit_logs": _FakeColl([]),
+    })
+    monkeypatch.setattr(cust_mod, "get_audit_repository", lambda: None)
+    client, repo = _cust_client(db, monkeypatch)
+
+    r = client.put("/api/v1/customers/C1",
+                   json={"name": "Cust Edited", "tags": ["VIP", "sneaky"]},
+                   headers=_hdr(("SALES_STAFF",)))
+    assert r.status_code == 200, r.text  # the legit field edit still succeeds
+    cust = repo.find_by_id("C1")
+    assert cust.get("name") == "Cust Edited"          # non-tag field updated
+    assert "VIP" not in (cust.get("tags") or [])       # injected tags dropped
+    assert "sneaky" not in (cust.get("tags") or [])
+
+
 # ===========================================================================
 # T8 -- tag PII stripping (phone / email / GSTIN rejected; clean tag kept).
 # ===========================================================================
