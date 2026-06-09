@@ -956,6 +956,13 @@ async def approve_expense(
     is_petty = (existing.get("category") or "").upper() == _PETTY_CASH_CATEGORY
     amount = float(existing.get("amount") or 0.0)
 
+    # F17 cross-store guard: a petty-cash approval DEBITS the expense's store float,
+    # but find_by_id above is store-agnostic -- a non-HQ approver must be scoped to
+    # that store (mirrors the open/topup/balance routes). Without this a store-A
+    # manager could drain store B's float via its expense_id (cross-store IDOR).
+    if is_petty:
+        validate_store_access(existing.get("store_id"), current_user)
+
     # F17 Gate 2 (receipt-required): a petty-cash claim above Rs 200 must have a
     # bill on file before any approver can approve. Enforced server-side; the FE
     # also disables the button (defence in depth).
@@ -1056,6 +1063,11 @@ def _petty_cash_approve(existing: dict, current_user: dict):
             amount=amount,
             context={"expense_id": expense_id, "description": existing.get("description")},
             reason="Petty-cash payout above auto-approval threshold",
+            # Over-threshold petty cash needs an ADMIN-tier approver (AREA_MANAGER+),
+            # not a peer STORE_MANAGER -- combined with petty_cash now being a
+            # MAKER_CHECKER action (approver != requester), this is real two-person
+            # control. required_tier may only RAISE the resolved tier, never lower it.
+            required_tier="admin",
             dedupe_key=f"petty:{expense_id}",
         )
         if not res or not res.get("ok"):
@@ -1157,6 +1169,11 @@ async def reject_expense(
             raise HTTPException(
                 status_code=403, detail="You cannot reject your own expense."
             )
+
+        # F17 cross-store guard (mirror approve): a petty-cash reject REVERSES the
+        # expense's store float -> a non-HQ approver must be scoped to that store.
+        if (existing.get("category") or "").upper() == _PETTY_CASH_CATEGORY:
+            validate_store_access(existing.get("store_id"), current_user)
 
         # A PENDING claim rejects directly. An already-APPROVED petty-cash claim
         # that carries a float debit can be voided + reversed.

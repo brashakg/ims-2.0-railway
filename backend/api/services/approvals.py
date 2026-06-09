@@ -89,7 +89,9 @@ ACTION_TYPES: frozenset = frozenset({
 })
 
 # Actions that REQUIRE separation of duties (approver != maker).
-MAKER_CHECKER_ACTIONS: frozenset = frozenset({"journal_entry"})
+# petty_cash: an over-threshold petty-cash payout is real two-person control --
+# the manager who raises the request cannot also PIN-approve it (F17).
+MAKER_CHECKER_ACTIONS: frozenset = frozenset({"journal_entry", "petty_cash"})
 
 # Role tiers. A request resolved to a tier may be approved by any role at or
 # above that tier. SUPERADMIN passes everything.

@@ -398,9 +398,17 @@ def debit_float(db, *, store_id: str, amount: float, expense_id: Optional[str],
     res = mg.debit(
         db, ACCOUNT_TYPE, store_id, amt,
         reason=reason, actor=actor, ref=(expense_id or txn_id), store_id=store_id,
+        # Exactly-once per logical payout: an expense-tied debit dedups on the
+        # expense_id (two racing /approve of the SAME expense -> one debit, the
+        # other returns reason="duplicate"); an ad-hoc payout keys on its txn_id.
+        idempotency_key=f"payout:{expense_id or txn_id}",
         push_extra={"ledger": _ledger_row(txn_id, "DEBIT", amt, reason, actor, expense_id)},
         record_ledger=False,
     )
+    if res.ok and res.reason == "duplicate":
+        # The payout for this expense already moved -> do NOT re-stamp/re-audit a
+        # second time; surface a 409 so the caller treats it as already-processed.
+        return {"ok": False, "http": 409, "error": "duplicate", "balance": res.balance}
     if not res.ok:
         # reason machine-codes from money_guard: insufficient / inactive /
         # not_found / no_atomic / unavailable.
@@ -460,10 +468,15 @@ def reverse_payout(db, *, store_id: str, txn_id: str, actor: str,
     res = mg.credit(
         db, ACCOUNT_TYPE, store_id, amt,
         reason=reason, actor=actor, ref=txn_id, store_id=store_id,
+        # Exactly-once reversal: two racing /reject of the same payout -> one
+        # credit, the other returns reason="duplicate" (not a second credit).
+        idempotency_key=f"reverse:{txn_id}",
         push_extra={"ledger": row}, record_ledger=False,
     )
     if not res.ok:
         return {"ok": False, "http": 409, "error": res.reason or "reverse_failed"}
+    if res.reason == "duplicate":
+        return {"ok": False, "http": 409, "error": "already_reversed", "balance": res.balance}
     _stamp_balance_after(coll, store_id, rev_txn)
     _audit(db, "petty_cash.reversal", store_id, delta=amt, balance_after=res.balance,
            reason=reason, actor=actor, expense_id=debit_row.get("expense_id"), txn_id=rev_txn)

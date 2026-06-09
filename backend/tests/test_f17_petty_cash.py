@@ -577,3 +577,64 @@ def test_petty_cash_account_type_is_live(db):
     assert spec.coll == "petty_cash_floats"
     assert spec.key_field == "store_id"
     assert spec.status_field == "status"
+
+
+# ============================================================================
+# Adversarial P1 regressions: cross-store IDOR, maker-checker, idempotency
+# ============================================================================
+
+
+def test_t11_cross_store_approve_blocked(wired):
+    """P1 (adversarial): a petty-cash approval DEBITS the expense's store float, so a
+    non-HQ approver scoped to another store must be 403'd -- without this a store-A
+    manager could drain store B's float via its expense_id (cross-store IDOR). HQ
+    (ADMIN) may approve any store."""
+    db, repo = wired
+    _open(db, store_id="B", amount=5000.0)
+    _seed_expense(repo, expense_id="E1", amount=150.0, store_id="B", bill=None)
+    client_a = _client(db, repo, ["STORE_MANAGER"], user_id="mgrA",
+                       store_ids=("A",), active="A")
+    resp = client_a.post("/api/v1/expenses/E1/approve")
+    assert resp.status_code == 403
+    assert db.get_collection("petty_cash_floats").find_one({"store_id": "B"})["balance"] == 5000.0
+    client_admin = _client(db, repo, ["ADMIN"], user_id="adm", store_ids=(), active=None)
+    resp2 = client_admin.post("/api/v1/expenses/E1/approve")
+    assert resp2.status_code == 200, resp2.text
+    assert db.get_collection("petty_cash_floats").find_one({"store_id": "B"})["balance"] == 4850.0
+
+
+def test_t12_maker_cannot_self_approve_petty_e4(wired):
+    """P1 (adversarial): petty_cash is now a MAKER_CHECKER action -- the manager who
+    OPENS the over-threshold E4 request cannot also PIN-approve it (real two-person
+    control). mgr1 is given ADMIN here so the ONLY rejection reason is the maker==
+    approver bar, not a tier/role failure."""
+    db, repo = wired
+    _open(db, amount=5000.0)
+    _seed_expense(repo, expense_id="E1", amount=800.0, employee_id="emp1", bill="file-1")
+    client = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1")
+    resp = client.post("/api/v1/expenses/E1/approve")  # opens the E4 request
+    assert resp.status_code == 202, resp.text
+    request_id = resp.json()["detail"]["request_id"]
+    db.get_collection("users").insert_one({
+        "user_id": "mgr1", "roles": ["STORE_MANAGER", "ADMIN"],
+        "approval_pin_hash": hash_password("1234"),
+        "pin_attempts": {"count": 0, "window_start": appr._now()},
+    })
+    eng = appr.ApprovalEngine(db=db)
+    self_appr = eng.approve(request_id, approver_user_id="mgr1",
+                            approver_roles=["ADMIN"], pin="1234")
+    assert self_appr.get("ok") is False
+    assert self_appr.get("error") == "cannot_approve_own"
+
+
+def test_t13_idempotent_debit_no_double(db):
+    """P1 (adversarial): two debits for the SAME expense_id dedupe via the money_guard
+    idempotency_key -- the float moves EXACTLY once, so a concurrent / retried
+    /approve cannot double-debit the same expense (the atomic floor caps loss; the
+    idempotency key makes it exactly-once)."""
+    _open(db, amount=5000.0)
+    r1 = pcs.debit_float(db, store_id="S1", amount=300.0, expense_id="E1", actor="mgr1")
+    assert r1["ok"] is True and r1["balance"] == 4700.0
+    r2 = pcs.debit_float(db, store_id="S1", amount=300.0, expense_id="E1", actor="mgr1")
+    assert r2["ok"] is False and r2["error"] == "duplicate"
+    assert db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"] == 4700.0
