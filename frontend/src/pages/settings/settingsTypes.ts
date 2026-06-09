@@ -16,6 +16,7 @@ export type SettingsTab =
   | 'hsn-rates'
   | 'tds-rates'
   | 'notifications'
+  | 'reminders'
   | 'integrations'
   | 'printers'
   | 'audit-logs'

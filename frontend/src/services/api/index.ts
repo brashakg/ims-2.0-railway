@@ -84,6 +84,22 @@ export type { PolicySpecPublic, PolicyEffective } from './settings';
 // Marketing Automation
 export { marketingApi } from './marketing';
 
+// Configurable Reminders (F46 / Engine E6) — config only, send-dark
+export { remindersApi } from './reminders';
+export type {
+  ReminderRule,
+  ReminderRuleCreate,
+  ReminderRuleUpdate,
+  ReminderRuleType,
+  ReminderChannel,
+  ReminderScope,
+  ReminderTrigger,
+  ReminderTriggerKind,
+  ReminderVoucherTemplate,
+  ReminderPreviewResult,
+  ReminderHistoryRow,
+} from './reminders';
+
 // Analytics V2
 export { analyticsV2Api } from './analytics';
 

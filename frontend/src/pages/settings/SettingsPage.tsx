@@ -49,6 +49,7 @@ import { UserManagementSection } from './SettingsAuth';
 import { StoreManagementSection, CategorySection, BrandSection, DiscountSection } from './SettingsStore';
 import { LensMasterSection } from './SettingsLens';
 import { LensCatalogEnumsSection } from './SettingsLensEnums';
+import { RemindersSettings } from './RemindersSettings';
 import type { SettingsTab } from './settingsTypes';
 
 // ============================================================================
@@ -109,6 +110,7 @@ const SETTINGS_SECTIONS = [
   { id: 'tds-rates' as SettingsTab, label: 'TDS Rates', icon: Percent, description: 'TDS rates on vendor / rent / contractor payments', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
   { id: 'policies' as SettingsTab, label: 'Policy Matrix', icon: Sliders, description: 'Scoped operational policies — discount caps, cash variance, refund tiers, promo, reminders (global → entity → store)', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT', 'STORE_MANAGER'] },
   { id: 'notifications' as SettingsTab, label: 'Notifications', icon: Bell, description: 'SMS, WhatsApp templates', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'reminders' as SettingsTab, label: 'Reminders', icon: Bell, description: 'Configurable reminder rules — segment, channel, schedule, on/off (config only; no live send)', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
   { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, Tally, Shopify', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'printers' as SettingsTab, label: 'Printers', icon: Printer, description: 'Receipt and label printers', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
   { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules; set your approval PIN', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
@@ -132,7 +134,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'notifications', 'reminders', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -212,7 +214,7 @@ export function SettingsPage() {
     { id: 'account', label: 'Account',      members: ['profile'] },
     { id: 'org',     label: 'Organisation', members: ['business', 'stores', 'users'] },
     { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts'] },
-    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'printers', 'notifications', 'integrations', 'loyalty'] },
+    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'printers', 'notifications', 'reminders', 'integrations', 'loyalty'] },
     { id: 'system',  label: 'System',       members: ['approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'] },
   ];
 
@@ -421,6 +423,7 @@ export function SettingsPage() {
             </div>
           )}
           {activeTab === 'notifications' && <div><NotificationSettings /></div>}
+          {activeTab === 'reminders' && <div><RemindersSettings /></div>}
           {activeTab === 'approvals' && <div><ApprovalWorkflows /></div>}
           {activeTab === 'agents' && <div><AgentControlPanel /></div>}
           {activeTab === 'loyalty' && <div><LoyaltySettingsSection /></div>}
