@@ -41,6 +41,15 @@ _REVIEW_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # inside require_roles, so it is intentionally omitted here.
 _CAP_EDIT_ROLES = ("ADMIN",)
 
+# F17 petty cash: who may open / top up a store float. SUPERADMIN auto-passes.
+_PETTY_FLOAT_MANAGE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+# Who may read a float balance + ledger (adds the ACCOUNTANT to the manage set).
+_PETTY_FLOAT_VIEW_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# The expense category that identifies a petty-cash payout. Petty cash is a
+# CATEGORY of expense (not a separate collection); an APPROVED claim in this
+# category debits the store float (F17).
+_PETTY_CASH_CATEGORY = "PETTY_CASH"
+
 # Single-document settings collection holding the per-(role, category) caps.
 _CAPS_COLLECTION = "expense_category_caps"
 _CAPS_DOC_ID = "expense_category_caps"
@@ -898,47 +907,228 @@ async def approve_expense(
     expense_id: str,
     current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
-    """Approve an expense"""
+    """Approve an expense.
+
+    For a PETTY_CASH claim (F17) three extra gates run before the approval:
+      * receipt-required: a claim strictly above Rs 200 must have a bill uploaded.
+      * E4 over-threshold gate: a claim strictly above the auto-approval threshold
+        (default Rs 500, E2-configurable) routes through a PIN-gated E4
+        ``petty_cash`` approval (REUSE of the shared ApprovalEngine -- not forked).
+        The first call opens the request and returns 202 with a request_id; a
+        DIFFERENT approver PIN-approves it via the E4 inbox; the next /approve
+        consumes the approval EXACTLY once and then debits the float.
+      * float debit: an APPROVED petty-cash payout debits the store float via a
+        single guarded ``petty_cash_service.debit_float`` (the floor lives in the
+        money_guard filter -- it can never go negative).
+    """
     expense_repo = get_expense_repository()
 
-    if expense_repo is not None:
-        existing = expense_repo.find_by_id(expense_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Expense not found")
+    if expense_repo is None:
+        return {"message": "Expense approved", "expense_id": expense_id}
 
-        # Separation of duties (SYSTEM_INTENT s7): a requester cannot approve
-        # their own claim, even with an approver role.
-        if existing.get("employee_id") == current_user.get("user_id"):
+    existing = expense_repo.find_by_id(expense_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Expense not found")
+
+    # Separation of duties (SYSTEM_INTENT s7): a requester cannot approve
+    # their own claim, even with an approver role.
+    if existing.get("employee_id") == current_user.get("user_id"):
+        raise HTTPException(
+            status_code=403, detail="You cannot approve your own expense."
+        )
+
+    if existing.get("status") != "PENDING":
+        raise HTTPException(
+            status_code=400, detail="Expense is not pending approval"
+        )
+
+    ed = existing.get("expense_date", "") or ""
+    try:
+        d = datetime.fromisoformat(ed[:10]) if ed else None
+    except Exception:
+        d = None
+    if d is not None and _period_locked(d.year, d.month):
+        raise HTTPException(
+            status_code=423,
+            detail=f"Accounting period {d.month:02d}/{d.year} is locked; cannot approve.",
+        )
+
+    is_petty = (existing.get("category") or "").upper() == _PETTY_CASH_CATEGORY
+    amount = float(existing.get("amount") or 0.0)
+
+    # F17 Gate 2 (receipt-required): a petty-cash claim above Rs 200 must have a
+    # bill on file before any approver can approve. Enforced server-side; the FE
+    # also disables the button (defence in depth).
+    if is_petty:
+        from ..services import petty_cash_service as pcs
+
+        if amount > pcs.receipt_required_above() and not existing.get("bill_file_id"):
             raise HTTPException(
-                status_code=403, detail="You cannot approve your own expense."
+                status_code=400,
+                detail="Receipt required for petty-cash claims above Rs 200. Upload a bill first.",
             )
 
-        if existing.get("status") != "PENDING":
-            raise HTTPException(
-                status_code=400, detail="Expense is not pending approval"
-            )
-
-        ed = existing.get("expense_date", "") or ""
-        try:
-            d = datetime.fromisoformat(ed[:10]) if ed else None
-        except Exception:
-            d = None
-        if d is not None and _period_locked(d.year, d.month):
-            raise HTTPException(
-                status_code=423,
-                detail=f"Accounting period {d.month:02d}/{d.year} is locked; cannot approve.",
-            )
-
+    # F17 Gates 3 + 4: over-threshold E4 routing + the float debit. Only for
+    # PETTY_CASH; every other category keeps the exact prior approve behavior.
+    # _petty_cash_approve RAISES HTTPException(202) when an E4 approval is still
+    # pending (no debit yet); otherwise it returns the debit envelope.
+    if is_petty:
+        approved = _petty_cash_approve(existing, current_user)
+        # approved is the debit result envelope; the float is already debited.
         expense_repo.update(
             expense_id,
             {
                 "status": "APPROVED",
                 "approved_by": current_user.get("user_id"),
                 "approved_at": datetime.now().isoformat(),
+                "petty_cash_txn_id": approved.get("txn_id"),
             },
         )
+        return {
+            "message": "Petty-cash expense approved; float debited",
+            "expense_id": expense_id,
+            "petty_cash_txn_id": approved.get("txn_id"),
+            "float_balance": approved.get("balance"),
+        }
+
+    expense_repo.update(
+        expense_id,
+        {
+            "status": "APPROVED",
+            "approved_by": current_user.get("user_id"),
+            "approved_at": datetime.now().isoformat(),
+        },
+    )
 
     return {"message": "Expense approved", "expense_id": expense_id}
+
+
+def _petty_cash_approve(existing: dict, current_user: dict):
+    """Drive the F17 petty-cash approval gates for one expense.
+
+    Returns the ``debit_float`` success envelope (``{"ok", "balance", "txn_id"}``)
+    when the float HAS been debited -- the router then stamps the expense APPROVED.
+
+    RAISES:
+      * HTTPException(202) -- an over-threshold E4 ``petty_cash`` request was
+        opened (or is still pending PIN approval); the float is NOT debited.
+      * HTTPException(4xx/5xx) -- insufficient float, E4 consume error, etc.
+
+    The E4 ApprovalEngine is REUSED verbatim (action_type="petty_cash"); nothing
+    about approvals / PIN / single-use is reimplemented here.
+    """
+    from ..services import petty_cash_service as pcs
+    from ..services.approvals import ApprovalEngine
+
+    db = get_db()
+    db = getattr(db, "db", db)  # accept the connection wrapper or a raw db
+    store_id = existing.get("store_id")
+    if not store_id:
+        raise HTTPException(status_code=400, detail="Petty-cash expense has no store_id")
+    amount = float(existing.get("amount") or 0.0)
+    expense_id = existing.get("expense_id")
+    actor = current_user.get("user_id")
+    roles = list(current_user.get("roles") or [])
+    store_ids = list(current_user.get("store_ids") or [])
+    if current_user.get("active_store_id"):
+        store_ids.append(current_user.get("active_store_id"))
+
+    threshold = pcs.auto_approval_threshold_for(db, store_id, existing.get("entity_id"))
+
+    # Below / at threshold: the approver-role gate + separation-of-duties IS the
+    # control; debit the float inline (no E4 round-trip for small payouts).
+    if amount <= threshold:
+        return _do_petty_debit(db, store_id, amount, expense_id, actor)
+
+    # Above threshold: PIN-gated E4 petty_cash approval. Single-document writes
+    # throughout (request / approve / consume are each one guarded op in E4).
+    engine = ApprovalEngine(db=db)
+    request_id = existing.get("petty_cash_request_id")
+
+    if not request_id:
+        # First call: open the approval request, return 202 (no debit yet).
+        res = engine.request(
+            action_type="petty_cash",
+            requested_by=actor,
+            requested_by_roles=roles,
+            store_id=store_id,
+            entity_id=existing.get("entity_id"),
+            amount=amount,
+            context={"expense_id": expense_id, "description": existing.get("description")},
+            reason="Petty-cash payout above auto-approval threshold",
+            dedupe_key=f"petty:{expense_id}",
+        )
+        if not res or not res.get("ok"):
+            raise HTTPException(status_code=503, detail="Could not open approval request")
+        rid = res.get("request_id")
+        get_expense_repository().update(expense_id, {"petty_cash_request_id": rid})
+        raise _http_202({
+            "_http_202": True,
+            "message": "Approval required: petty-cash payout above threshold.",
+            "expense_id": expense_id,
+            "request_id": rid,
+            "required_roles": res.get("required_roles"),
+        })
+
+    # An approval request already exists -- it must be APPROVED (by a different
+    # approver via the E4 inbox) before we can consume it and debit the float.
+    req = engine.get(request_id)
+    status = (req or {}).get("status")
+    if status == "APPROVED":
+        consume = engine.consume_approval(
+            consumed_by=actor,
+            action_type="petty_cash",
+            request_id=request_id,
+            amount=amount,
+        )
+        if not consume.get("ok"):
+            err = consume.get("error")
+            code = {"already_consumed": 409, "expired": 410, "not_approved": 409,
+                    "action_mismatch": 400, "amount_exceeded": 400,
+                    "not_found": 404}.get(err, 409)
+            raise HTTPException(status_code=code, detail={"error": err or "consume_failed"})
+        return _do_petty_debit(db, store_id, amount, expense_id, actor)
+
+    # Still pending (REQUESTED) / rejected / expired -> 202 with the live state.
+    raise _http_202({
+        "_http_202": True,
+        "message": "Awaiting PIN approval for this petty-cash payout.",
+        "expense_id": expense_id,
+        "request_id": request_id,
+        "approval_status": status,
+    })
+
+
+def _do_petty_debit(db, store_id: str, amount: float, expense_id: str, actor: str):
+    """Debit the store float for an approved petty-cash payout. Maps the
+    petty_cash_service failure envelope to an HTTPException."""
+    from ..services import petty_cash_service as pcs
+
+    res = pcs.debit_float(
+        db, store_id=store_id, amount=amount, expense_id=expense_id,
+        actor=actor, reason="payout",
+    )
+    if not res.get("ok"):
+        err = res.get("error")
+        if err == "insufficient":
+            raise HTTPException(
+                status_code=409,
+                detail="Petty-cash float insufficient. Top up the float before approving.",
+            )
+        if err in ("inactive", "float_not_active"):
+            raise HTTPException(status_code=409, detail="Petty-cash float is not active.")
+        if err in ("not_found", "float_not_open"):
+            raise HTTPException(status_code=404, detail="No petty-cash float open for this store.")
+        raise HTTPException(status_code=int(res.get("http", 409)),
+                            detail={"error": err or "debit_failed"})
+    return res
+
+
+def _http_202(payload: dict) -> HTTPException:
+    """Build a 202 HTTPException carrying the approval-request envelope. Using an
+    exception keeps the early-return flow uniform; FastAPI renders it as the JSON
+    body under ``detail``. The caller re-raises it."""
+    return HTTPException(status_code=202, detail=payload)
 
 
 @router.post("/{expense_id}/reject")
@@ -947,7 +1137,14 @@ async def reject_expense(
     reason: str = Query(...),
     current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
-    """Reject an expense"""
+    """Reject an expense.
+
+    F17: a PENDING reject never touched the float. But a petty-cash claim that was
+    already APPROVED+debited and is later VOIDED (re-rejected via an admin path)
+    carries a ``petty_cash_txn_id``; rejecting it restores the float by the exact
+    payout amount via a single guarded ``reverse_payout``. The reversal is
+    idempotent, so a double-reject cannot double-credit.
+    """
     expense_repo = get_expense_repository()
 
     if expense_repo is not None:
@@ -961,10 +1158,36 @@ async def reject_expense(
                 status_code=403, detail="You cannot reject your own expense."
             )
 
-        if existing.get("status") != "PENDING":
+        # A PENDING claim rejects directly. An already-APPROVED petty-cash claim
+        # that carries a float debit can be voided + reversed.
+        status = existing.get("status")
+        txn_id = existing.get("petty_cash_txn_id")
+        if status not in ("PENDING", "APPROVED"):
             raise HTTPException(
                 status_code=400, detail="Expense is not pending approval"
             )
+        if status == "APPROVED" and not txn_id:
+            # An approved non-petty (or un-debited) expense is not rejectable here.
+            raise HTTPException(
+                status_code=400, detail="Expense is not pending approval"
+            )
+
+        # Reverse the float debit FIRST (idempotent). Only on success do we flip
+        # the expense to REJECTED, so a reversal failure never strands the books.
+        if status == "APPROVED" and txn_id:
+            from ..services import petty_cash_service as pcs
+
+            db = get_db()
+            db = getattr(db, "db", db)
+            rev = pcs.reverse_payout(
+                db, store_id=existing.get("store_id"), txn_id=txn_id,
+                actor=current_user.get("user_id"), reason="reversal",
+            )
+            if not rev.get("ok") and rev.get("error") != "already_reversed":
+                raise HTTPException(
+                    status_code=int(rev.get("http", 409)),
+                    detail={"error": rev.get("error") or "reverse_failed"},
+                )
 
         expense_repo.update(
             expense_id,
@@ -1173,6 +1396,107 @@ async def list_duplicate_bills(
         return {"expenses": [], "total": 0}
 
     return {"expenses": expenses, "total": len(expenses)}
+
+
+# ============================================================================
+# F17 - PETTY CASH FLOAT ENDPOINTS
+# ============================================================================
+# A store float is opened by a manager, replenished via topup, and drawn down by
+# APPROVED petty-cash expense payouts (the approve_expense path). Every balance
+# mutation is a single guarded find_one_and_update via petty_cash_service ->
+# money_guard (PETTY_CASH account type) -- the float can never go negative.
+
+
+class PettyCashOpen(BaseModel):
+    store_id: str
+    amount: float = Field(..., gt=0)
+    float_limit: Optional[float] = Field(default=None, gt=0)
+    low_balance_threshold: Optional[float] = Field(default=None, ge=0)
+    entity_id: Optional[str] = None
+
+
+class PettyCashTopup(BaseModel):
+    store_id: str
+    amount: float = Field(..., gt=0)
+    reason: Optional[str] = None
+
+
+@router.post("/petty-cash/open", status_code=201)
+async def open_petty_cash_float(
+    payload: PettyCashOpen,
+    current_user: dict = Depends(require_roles(*_PETTY_FLOAT_MANAGE_ROLES)),
+):
+    """Initialise a store's petty-cash float (Store Manager / Admin).
+
+    Store-scoped: a manager can only open the float for a store they have access
+    to (validate_store_access 403s otherwise). Double-open returns 409 -- the
+    balance is never doubled.
+    """
+    store_id = validate_store_access(payload.store_id, current_user)
+    if not store_id:
+        raise HTTPException(status_code=400, detail="store_id required")
+    from ..services import petty_cash_service as pcs
+
+    db = get_db()
+    db = getattr(db, "db", db)
+    res = pcs.open_float(
+        db, store_id=store_id, amount=payload.amount,
+        actor=current_user.get("user_id"),
+        float_limit=payload.float_limit,
+        low_balance_threshold=payload.low_balance_threshold,
+        entity_id=payload.entity_id,
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=int(res.get("http", 400)),
+                            detail={"error": res.get("error", "open_failed"),
+                                    **{k: v for k, v in res.items()
+                                       if k in ("balance", "float_limit")}})
+    return {"message": "Petty-cash float opened", "store_id": store_id, **res}
+
+
+@router.post("/petty-cash/topup")
+async def topup_petty_cash_float(
+    payload: PettyCashTopup,
+    current_user: dict = Depends(require_roles(*_PETTY_FLOAT_MANAGE_ROLES)),
+):
+    """Replenish a store's petty-cash float (Store Manager / Admin). Store-scoped.
+    Capped at the float limit. A single guarded credit -> no double-credit."""
+    store_id = validate_store_access(payload.store_id, current_user)
+    if not store_id:
+        raise HTTPException(status_code=400, detail="store_id required")
+    from ..services import petty_cash_service as pcs
+
+    db = get_db()
+    db = getattr(db, "db", db)
+    res = pcs.topup_float(
+        db, store_id=store_id, amount=payload.amount,
+        actor=current_user.get("user_id"),
+        reason=(payload.reason or "float_topup"),
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=int(res.get("http", 400)),
+                            detail={"error": res.get("error", "topup_failed"),
+                                    **{k: v for k, v in res.items()
+                                       if k in ("balance", "float_limit", "status")}})
+    return {"message": "Petty-cash float topped up", "store_id": store_id, **res}
+
+
+@router.get("/petty-cash/balance")
+async def get_petty_cash_balance(
+    store_id: str = Query(...),
+    current_user: dict = Depends(require_roles(*_PETTY_FLOAT_VIEW_ROLES)),
+):
+    """Current float balance, limit, low-balance flag, and recent ledger for a
+    store. Store-scoped (an accountant/manager only sees their stores; admins see
+    any). Fail-soft to a not-open envelope when no float exists."""
+    scoped = validate_store_access(store_id, current_user)
+    if not scoped:
+        raise HTTPException(status_code=400, detail="store_id required")
+    from ..services import petty_cash_service as pcs
+
+    db = get_db()
+    db = getattr(db, "db", db)
+    return pcs.get_balance(db, scoped)
 
 
 # ============================================================================

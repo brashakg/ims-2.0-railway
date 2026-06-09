@@ -80,6 +80,33 @@ export interface AgingReport {
   total_amount: number;
 }
 
+// F17 petty-cash float ledger entry (one row per movement).
+export interface PettyCashLedgerEntry {
+  txn_id: string;
+  type: 'CREDIT' | 'DEBIT';
+  delta: number;
+  balance_after?: number | null;
+  reason?: string;
+  expense_id?: string | null;
+  actor?: string;
+  created_at?: string;
+  reverses?: string;
+}
+
+export interface PettyCashBalance {
+  ok: boolean;
+  store_id: string;
+  exists: boolean;
+  balance: number;
+  float_limit: number;
+  low_balance_threshold: number;
+  status?: string | null;
+  is_low: boolean;
+  opened_by?: string;
+  opened_at?: string;
+  recent_ledger: PettyCashLedgerEntry[];
+}
+
 export const expensesApi = {
   getExpenses: async (params?: { store_id?: string; status?: string; from_date?: string; to_date?: string }) => {
     const response = await api.get('/expenses/', { params });
@@ -164,6 +191,30 @@ export const expensesApi = {
   // Reimbursement aging (admin/accountant only).
   getAging: async (storeId?: string): Promise<AgingReport> => {
     const response = await api.get('/expenses/aging', { params: { store_id: storeId } });
+    return response.data;
+  },
+
+  // F17 petty-cash float: balance + recent ledger for a store (manager /
+  // accountant / admin). Fail-soft to a not-open envelope on the server side.
+  getPettyCashBalance: async (storeId: string): Promise<PettyCashBalance> => {
+    const response = await api.get('/expenses/petty-cash/balance', { params: { store_id: storeId } });
+    return response.data;
+  },
+
+  // Open a store float (manager / admin). amount + optional limit/threshold.
+  openPettyCashFloat: async (data: {
+    store_id: string;
+    amount: number;
+    float_limit?: number;
+    low_balance_threshold?: number;
+  }) => {
+    const response = await api.post('/expenses/petty-cash/open', data);
+    return response.data;
+  },
+
+  // Top up a store float (manager / admin).
+  topupPettyCashFloat: async (data: { store_id: string; amount: number; reason?: string }) => {
+    const response = await api.post('/expenses/petty-cash/topup', data);
     return response.data;
   },
 };
