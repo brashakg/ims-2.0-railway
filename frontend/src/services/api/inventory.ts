@@ -483,11 +483,18 @@ export const vendorsApi = {
   },
 
   createGRN: async (grn: {
-    po_id: string;
-    vendor_invoice_no: string;
-    vendor_invoice_date: string;
+    // F9 — po_id + vendor_invoice_no optional for a Delivery Challan (the tax
+    // invoice arrives later); required for a STANDARD GRN (backend-enforced).
+    po_id?: string;
+    vendor_invoice_no?: string;
+    vendor_invoice_date?: string;
+    // F9 — Delivery-Challan subtype + fields.
+    grn_subtype?: 'STANDARD' | 'DELIVERY_CHALLAN';
+    dc_number?: string;
+    dc_date?: string;
+    vendor_id?: string;
     items: Array<{
-      po_item_id: string;
+      po_item_id?: string;
       product_id: string;
       received_qty: number;
       accepted_qty: number;
@@ -497,6 +504,32 @@ export const vendorsApi = {
     notes?: string;
   }) => {
     const response = await api.post('/vendors/grn', grn);
+    return response.data;
+  },
+
+  // F9 — list open (unmatched) Delivery Challans for the bulk DC->invoice tally.
+  getOpenDCs: async (params: {
+    vendor_id?: string;
+    store_id?: string;
+    date_from?: string;
+    date_to?: string;
+  }) => {
+    const response = await api.get('/vendors/grn', {
+      params: {
+        ...params,
+        grn_subtype: 'DELIVERY_CHALLAN',
+        dc_matched: false,
+        status: 'ACCEPTED',
+      },
+    });
+    return response.data;
+  },
+
+  // F9 — draft a consolidated invoice from a set of DCs (does not persist).
+  draftInvoiceFromDCs: async (dcIds: string[], vendorId?: string) => {
+    const response = await api.get('/vendors/purchase-invoices/from-dcs', {
+      params: { dc_ids: dcIds.join(','), vendor_id: vendorId },
+    });
     return response.data;
   },
 

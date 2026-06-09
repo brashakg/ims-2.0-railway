@@ -133,6 +133,12 @@ export function GoodsReceiptNote() {
   const [qualityNotes, setQualityNotes] = useState('');
   const [vendorInvoiceNo, setVendorInvoiceNo] = useState('');
   const [discrepancies, setDiscrepancies] = useState('');
+  // F9 — Delivery-Challan mode: lenses physically arrive with a DC; the tax
+  // invoice comes later. In DC mode dc_number/dc_date are required and the
+  // vendor invoice no. is optional.
+  const [isDcMode, setIsDcMode] = useState(false);
+  const [dcNumber, setDcNumber] = useState('');
+  const [dcDate, setDcDate] = useState(new Date().toISOString().split('T')[0]);
   const [grns, setGrns] = useState<GRN[]>([]);
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
@@ -260,13 +266,22 @@ export function GoodsReceiptNote() {
       toast.error('No line items to receive on this PO');
       return;
     }
+    if (isDcMode && !dcNumber.trim()) {
+      toast.error('DC Number is required for a Delivery Challan');
+      return;
+    }
     setSubmitting(true);
     try {
       // Step 1 — create the GRN doc (status PENDING). This records the receipt
       // + per-line accept/reject and stamps each line's short/exact/over flag.
       const created = await vendorsApi.createGRN({
         po_id: poNumber,
-        vendor_invoice_no: vendorInvoiceNo,
+        // F9 — in DC mode the vendor invoice no. arrives later; send the
+        // subtype + dc_number/dc_date so the bulk DC->invoice tally can pick it.
+        grn_subtype: isDcMode ? 'DELIVERY_CHALLAN' : 'STANDARD',
+        dc_number: isDcMode ? dcNumber.trim() : undefined,
+        dc_date: isDcMode ? dcDate : undefined,
+        vendor_invoice_no: vendorInvoiceNo || undefined,
         vendor_invoice_date: new Date().toISOString().split('T')[0],
         items: receivedItems.map((item) => ({
           po_item_id: item.po_item_id,
@@ -318,6 +333,8 @@ export function GoodsReceiptNote() {
       setQualityNotes('');
       setVendorInvoiceNo('');
       setDiscrepancies('');
+      setIsDcMode(false);
+      setDcNumber('');
       // Posting changes which POs are still receivable — refresh both lists.
       await Promise.all([reloadGrns(), reloadPurchaseOrders()]);
     } catch (err) {
@@ -461,9 +478,51 @@ export function GoodsReceiptNote() {
           <div className="card">
             <div className="card-head">
               <h3>Select purchase order</h3>
-              <span className="meta">PO precedes GRN · GRN is the GST document</span>
+              <span className="meta">
+                {isDcMode ? 'DC · invoice arrives later' : 'PO precedes GRN · GRN is the GST document'}
+              </span>
             </div>
             <div className="card-body">
+              {/* F9 — Delivery-Challan mode toggle. Light/restrained: a plain
+                  checkbox row, no colour-coded flag. */}
+              <label
+                className="flex items-center gap-2 mb-4 text-sm cursor-pointer"
+                style={{ color: 'var(--ink-3)' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isDcMode}
+                  onChange={(e) => setIsDcMode(e.target.checked)}
+                />
+                This is a Delivery Challan (no invoice yet)
+              </label>
+              {isDcMode && (
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                      DC Number
+                    </label>
+                    <input
+                      type="text"
+                      value={dcNumber}
+                      onChange={(e) => startTransition(() => setDcNumber(e.target.value))}
+                      placeholder="e.g. DC/26/05/118"
+                      className="input w-full"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                      DC Date
+                    </label>
+                    <input
+                      type="date"
+                      value={dcDate}
+                      onChange={(e) => setDcDate(e.target.value)}
+                      className="input w-full"
+                    />
+                  </div>
+                </div>
+              )}
               {pos.length === 0 ? (
                 <div className="text-center py-6" style={{ color: 'var(--ink-4)', fontSize: 13 }}>
                   <Package className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
@@ -493,7 +552,7 @@ export function GoodsReceiptNote() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
-                      Vendor invoice no.
+                      {isDcMode ? 'Vendor invoice no. (optional — arrives later)' : 'Vendor invoice no.'}
                     </label>
                     <input
                       type="text"

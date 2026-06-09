@@ -134,7 +134,9 @@ class POCreate(BaseModel):
 
 
 class GRNItemCreate(BaseModel):
-    po_item_id: str
+    # F9: optional -- a no-PO Delivery Challan line has no PO item to reference.
+    # A standard GRN line still carries it (the frontend always sends it).
+    po_item_id: Optional[str] = None
     product_id: str
     # Receipt quantities are counts of physical units -- never negative. A
     # negative received/accepted/rejected qty would mint a negative stock
@@ -174,14 +176,66 @@ class GRNItemCreate(BaseModel):
         return self
 
 
+# F9: GRN subtypes. A STANDARD GRN is received against a PO + the vendor's tax
+# invoice (vendor_invoice_no is mandatory). A DELIVERY_CHALLAN (DC) is the
+# physical goods-receipt doc a lens lab sends WITH external-lab lenses -- the tax
+# invoice comes later (monthly/fortnightly), so vendor_invoice_no is optional and
+# the DC carries its own dc_number + dc_date. A missing grn_subtype on legacy
+# docs reads as STANDARD (backward-compatible).
+GRN_SUBTYPE_STANDARD = "STANDARD"
+GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
+_GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC)
+
+
 class GRNCreate(BaseModel):
-    po_id: str
-    vendor_invoice_no: str
-    vendor_invoice_date: str
+    # F9: po_id is REQUIRED for a STANDARD GRN but OPTIONAL for a DELIVERY_CHALLAN
+    # (a lens top-up DC often arrives with no pre-logged PO). Enforced in the
+    # model_validator below so the field default can be None.
+    po_id: Optional[str] = None
+    # F9: vendor_invoice_no is REQUIRED for a STANDARD GRN but OPTIONAL for a DC
+    # (the tax invoice arrives later and is reconciled via the bulk DC->invoice
+    # tally). Enforced in the validator.
+    vendor_invoice_no: Optional[str] = None
+    vendor_invoice_date: Optional[str] = None
     # A GRN with zero items is meaningless and would mark a PO as having
     # been received without actually recording any goods.
     items: List[GRNItemCreate] = Field(..., min_length=1)
     notes: Optional[str] = None
+    # F9: Delivery-Challan fields.
+    grn_subtype: str = GRN_SUBTYPE_STANDARD
+    dc_number: Optional[str] = None
+    dc_date: Optional[str] = None
+    # F9: the vendor a no-PO DC is for (a STANDARD GRN derives this from the PO).
+    vendor_id: Optional[str] = None
+
+    @field_validator("grn_subtype", mode="before")
+    @classmethod
+    def _normalize_subtype(cls, v):
+        s = str(v or GRN_SUBTYPE_STANDARD).strip().upper().replace("-", "_")
+        return s if s in _GRN_SUBTYPES else GRN_SUBTYPE_STANDARD
+
+    @model_validator(mode="after")
+    def _validate_subtype_fields(self):
+        """F9 subtype-specific required-field guard.
+
+        STANDARD: po_id + vendor_invoice_no are both required (the existing
+                  contract -- a standard GRN is always against a PO + invoice).
+        DELIVERY_CHALLAN: dc_number + dc_date are required; po_id +
+                  vendor_invoice_no are optional (they come later).
+        """
+        if self.grn_subtype == GRN_SUBTYPE_DC:
+            if not (self.dc_number and str(self.dc_number).strip()):
+                raise ValueError("dc_number is required for a Delivery Challan")
+            if not (self.dc_date and str(self.dc_date).strip()):
+                raise ValueError("dc_date is required for a Delivery Challan")
+        else:
+            if not (self.po_id and str(self.po_id).strip()):
+                raise ValueError("po_id is required for a standard GRN")
+            if not (self.vendor_invoice_no and str(self.vendor_invoice_no).strip()):
+                raise ValueError(
+                    "vendor_invoice_no is required for a standard GRN"
+                )
+        return self
 
 
 # ============================================================================
@@ -1138,24 +1192,49 @@ async def list_grns(
     store_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     po_id: Optional[str] = Query(None),
+    # F9: Delivery-Challan filters. The accountant's open-DC panel queries
+    # grn_subtype=DELIVERY_CHALLAN & dc_matched=false & vendor_id=X & status=ACCEPTED
+    # to pick the DCs to reconcile into one bulk invoice.
+    grn_subtype: Optional[str] = Query(None),
+    dc_matched: Optional[bool] = Query(None),
+    vendor_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="DC date >= (ISO)"),
+    date_to: Optional[str] = Query(None, description="DC date <= (ISO)"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """List GRNs with filters"""
+    """List GRNs with filters (incl. F9 Delivery-Challan filters)."""
     grn_repo = get_grn_repository()
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
     if grn_repo is None:
         return {"grns": [], "total": 0}
 
-    filter_dict = {}
+    filter_dict: dict = {}
     if active_store:
         filter_dict["store_id"] = active_store
     if status:
         filter_dict["status"] = status
     if po_id:
         filter_dict["po_id"] = po_id
+    if grn_subtype:
+        # Normalise to the canonical subtype string.
+        sub = str(grn_subtype).strip().upper().replace("-", "_")
+        if sub in _GRN_SUBTYPES:
+            filter_dict["grn_subtype"] = sub
+    if dc_matched is not None:
+        filter_dict["dc_matched"] = bool(dc_matched)
+    if vendor_id:
+        filter_dict["vendor_id"] = vendor_id
+    # dc_date range filter (string ISO compares lexicographically for YYYY-MM-DD).
+    if date_from or date_to:
+        rng: dict = {}
+        if date_from:
+            rng["$gte"] = date_from
+        if date_to:
+            rng["$lte"] = date_to
+        filter_dict["dc_date"] = rng
 
     grns = grn_repo.find_many(filter_dict, skip=skip, limit=limit)
 
@@ -1166,16 +1245,19 @@ async def list_grns(
 async def create_grn(
     grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
 ):
-    """Create a new GRN"""
+    """Create a new GRN (STANDARD) or log a Delivery Challan (F9 DC subtype)."""
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
 
     grn_id = str(uuid.uuid4())
-    grn_number = generate_grn_number(current_user.get("active_store_id"))
+    store_id = current_user.get("active_store_id")
+    grn_number = generate_grn_number(store_id)
+    is_dc = grn.grn_subtype == GRN_SUBTYPE_DC
 
-    # Validate PO exists
+    # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
+    # no pre-logged PO) -- only validate when one was supplied.
     po = None
-    if po_repo is not None:
+    if po_repo is not None and grn.po_id:
         po = po_repo.find_by_id(grn.po_id)
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -1184,6 +1266,56 @@ async def create_grn(
             raise HTTPException(
                 status_code=400, detail="PO is not in receivable status"
             )
+
+    # F9: the vendor a DC is for -- from the PO when linked, else the body field.
+    vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
+
+    # F9: DC-specific guards (uniqueness + period lock). Both are best-effort on
+    # a DB error (fail-soft) but a found duplicate is a hard 409.
+    if is_dc:
+        db = None
+        try:
+            db = _get_db()
+        except Exception:
+            db = None
+        # Application-level DC-number uniqueness per (vendor_id, dc_number,
+        # store_id) -- vendors reuse the same DC number across branches, so the
+        # key is per store, not just per vendor. (The unique partial index is
+        # added post-dedup per the prod-data-blockers convention.)
+        if db is not None and grn.dc_number:
+            try:
+                dup = db.get_collection("grns").find_one(
+                    {
+                        "grn_subtype": GRN_SUBTYPE_DC,
+                        "vendor_id": vendor_id,
+                        "dc_number": grn.dc_number,
+                        "store_id": store_id,
+                    },
+                    {"_id": 0, "grn_id": 1},
+                )
+                if dup:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Delivery Challan '{grn.dc_number}' is already "
+                            f"logged for this vendor at this store. Duplicate "
+                            f"DC numbers are not allowed."
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass  # fail-soft: skip dup check on DB error, proceed
+        # Period lock on the DC date (goods movement into a closed month).
+        if db is not None and grn.dc_date:
+            try:
+                from .finance import check_period_locked
+
+                check_period_locked(db, grn.dc_date)
+            except HTTPException:
+                raise
+            except Exception:
+                pass
 
     # Calculate totals
     total_received = sum(item.received_qty for item in grn.items)
@@ -1230,9 +1362,9 @@ async def create_grn(
         "grn_number": grn_number,
         "po_id": grn.po_id,
         "po_number": po.get("po_number") if po else None,
-        "vendor_id": po.get("vendor_id") if po else None,
+        "vendor_id": vendor_id,
         "vendor_name": po.get("vendor_name") if po else None,
-        "store_id": current_user.get("active_store_id"),
+        "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
         "vendor_invoice_date": grn.vendor_invoice_date,
         "items": item_docs,
@@ -1242,6 +1374,13 @@ async def create_grn(
         "total_ordered": total_ordered,
         "notes": grn.notes,
         "status": "PENDING",
+        # F9: subtype + DC fields. dc_matched/linked_bulk_invoice_id are flipped
+        # when the DC is reconciled into a bulk invoice (see purchase_invoices).
+        "grn_subtype": grn.grn_subtype,
+        "dc_number": grn.dc_number if is_dc else None,
+        "dc_date": grn.dc_date if is_dc else None,
+        "dc_matched": False if is_dc else None,
+        "linked_bulk_invoice_id": None,
         "created_by": current_user.get("user_id"),
         "created_at": datetime.now().isoformat(),
     }
@@ -1249,11 +1388,39 @@ async def create_grn(
     if grn_repo is not None:
         grn_repo.create(grn_doc)
 
+    # F9: audit the DC log (immutable; a DC is the accountable checkpoint between
+    # physical lens arrival and workshop work). Fail-soft -- never blocks save.
+    if is_dc:
+        try:
+            audit = get_audit_repository()
+            if audit is not None:
+                audit.create(
+                    {
+                        "action": "vendor.dc_log",
+                        "entity_type": "grn",
+                        "entity_id": grn_id,
+                        "user_id": current_user.get("user_id"),
+                        "detail": {
+                            "grn_number": grn_number,
+                            "dc_number": grn.dc_number,
+                            "dc_date": grn.dc_date,
+                            "vendor_id": vendor_id,
+                            "store_id": store_id,
+                            "total_received": total_received,
+                            "total_accepted": total_accepted,
+                        },
+                    }
+                )
+        except Exception:
+            pass
+
     # Anti-fraud / variance: a receiving discrepancy (rejected goods or a
     # short/over shipment vs the PO) raises an accountable SYSTEM task so it is
-    # investigated rather than silently absorbed. Fail-soft -- a task failure
-    # must never break the GRN save.
-    if grn_has_discrepancy(grn_doc):
+    # investigated rather than silently absorbed. A DC with no PO has nothing to
+    # compare ordered-against, so the PO-discrepancy task only fires for a GRN
+    # that has an ordered baseline. Fail-soft -- a task failure must never break
+    # the GRN save.
+    if total_ordered is not None and grn_has_discrepancy(grn_doc):
         try:
             from ..services.task_triggers import create_system_task
             from ..dependencies import get_task_repository
@@ -1285,9 +1452,11 @@ async def create_grn(
     return {
         "grn_id": grn_id,
         "grn_number": grn_number,
+        "grn_subtype": grn.grn_subtype,
+        "dc_number": grn.dc_number if is_dc else None,
         "total_received": total_received,
         "has_discrepancy": grn_has_discrepancy(grn_doc),
-        "message": "GRN created",
+        "message": "Delivery Challan logged" if is_dc else "GRN created",
     }
 
 

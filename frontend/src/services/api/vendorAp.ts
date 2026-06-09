@@ -214,6 +214,8 @@ export interface PurchaseInvoiceCreate {
   store_id?: string;
   lines: PurchaseInvoiceLine[];
   notes?: string;
+  // F9 — grn_ids of the Delivery Challans this consolidated invoice covers.
+  linked_dc_ids?: string[];
 }
 
 // Server-prepared draft returned by create-from-GRN: a NOT-yet-booked invoice
@@ -376,6 +378,7 @@ export const purchaseInvoicesApi = {
       grn_id: payload.grn_id,
       store_id: payload.store_id,
       notes: payload.notes,
+      linked_dc_ids: payload.linked_dc_ids,
       lines: payload.lines.map((l) => ({
         product_id: l.product_id,
         description: l.product_name,
@@ -396,6 +399,44 @@ export const purchaseInvoicesApi = {
   // vendor_invoice_no / vendor_invoice_date so the form prefill works.
   createFromGrn: async (grnId: string) => {
     const res = await api.get(`/vendors/purchase-invoices/from-grn/${grnId}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const d = res.data as Record<string, any>;
+    return {
+      ...d,
+      vendor_invoice_no: d.vendor_invoice_no ?? d.invoice_number ?? '',
+      vendor_invoice_date: d.vendor_invoice_date ?? d.invoice_date ?? '',
+    } as PurchaseInvoiceDraft;
+  },
+  // F9 — open (unmatched, ACCEPTED) Delivery Challans for a vendor/date range,
+  // for the "Match DCs to Invoice" picker. Fail-soft -> [] so the tab renders.
+  getOpenDcs: async (params: {
+    vendor_id?: string;
+    store_id?: string;
+    date_from?: string;
+    date_to?: string;
+  }) => {
+    try {
+      const res = await api.get('/vendors/grn', {
+        params: {
+          ...params,
+          grn_subtype: 'DELIVERY_CHALLAN',
+          dc_matched: false,
+          status: 'ACCEPTED',
+        },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d = res.data as Record<string, any>;
+      return (d.grns ?? []) as Record<string, any>[];
+    } catch {
+      return [] as Record<string, any>[];
+    }
+  },
+  // F9 — draft a consolidated invoice from N DCs (does NOT persist). The draft
+  // carries linked_dc_ids so create() flips dc_matched on each DC when booked.
+  createFromDcs: async (dcIds: string[], vendorId?: string) => {
+    const res = await api.get('/vendors/purchase-invoices/from-dcs', {
+      params: { dc_ids: dcIds.join(','), vendor_id: vendorId },
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const d = res.data as Record<string, any>;
     return {
