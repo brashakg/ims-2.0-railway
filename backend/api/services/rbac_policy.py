@@ -1510,6 +1510,39 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/reconciliation",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # --- E5 tender / cash reconciliation (mounted on /finance behind the finance
+    # role gate; map-write + lock narrow further inline in the handler) ---
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/tender-ledger-map",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        # Global/entity writes are SUPERADMIN/ADMIN; a store-scope write also
+        # allows ACCOUNTANT/AREA_MANAGER/STORE_MANAGER (own store) -- the handler
+        # enforces the per-scope split. The route is reachable by the finance set.
+        "method": "PUT",
+        "path": "/api/v1/finance/tender-ledger-map",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/reconciliation/by-mode",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/reconciliation/snapshot",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        # Lock narrows to SUPERADMIN/ADMIN/ACCOUNTANT inline (atomic + immutable).
+        "method": "POST",
+        "path": "/api/v1/finance/reconciliation/{snapshot_id}/lock",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",
