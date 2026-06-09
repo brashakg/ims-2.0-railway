@@ -645,55 +645,15 @@ def test_referral_invite_allows_no_consent_preference(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# BUG-8: /walkout — consent gate for recovery notification
+# F45 D1: the legacy /marketing/walkout* stubs are RETIRED to HTTP 410.
+# (Was BUG-8 consent-gate. The zombie duplicate of /api/v1/walkouts no longer
+# writes a partial-schema doc nor fires a WALKOUT_RECOVERY message -- WhatsApp
+# is banned and the canonical 30-field capture lives at /api/v1/walkouts.)
 # ---------------------------------------------------------------------------
 
 
-def test_walkout_records_but_skips_notification_for_opted_out(monkeypatch):
-    """Walkout must be stored for all customers; the PROMOTIONAL recovery
-    notification must be silently skipped for opted-out customers."""
-    notif_calls = []
-
-    async def _capture_send(**kwargs):
-        notif_calls.append(kwargs)
-        return {"status": "queued"}
-
-    db = _FakeDB(
-        {
-            "customers": _FakeColl(
-                [{"customer_id": "C1", "mobile": "9000000001", "marketing_consent": False}]
-            ),
-            "walkouts": _FakeColl([]),
-            "stores": _FakeColl([]),
-        }
-    )
-
-    monkeypatch.setattr(marketing_mod, "_get_db", lambda: db)
-    monkeypatch.setattr(marketing_mod, "send_notification", _capture_send)
-    monkeypatch.setattr(marketing_mod, "_check_notification_rate", _noop_rate)
-
-    app = FastAPI()
-    app.include_router(marketing_mod.router, prefix="/api/v1/marketing")
-    client = TestClient(app)
-
-    tok = _tok(["STORE_MANAGER"])
-    r = client.post(
-        "/api/v1/marketing/walkout/C1",
-        json={"frames_tried": ["Ray-Ban RB3025"]},
-        headers={"Authorization": f"Bearer {tok}"},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    # Walkout recorded
-    assert "walkout_id" in body["walkout"]
-    # No notification fired
-    assert len(notif_calls) == 0
-    # Response clearly reports the skip
-    assert body["recovery_message"] == "skipped (opted out)"
-
-
-def test_walkout_sends_notification_for_consented(monkeypatch):
-    """Consented customer's walkout triggers the recovery notification."""
+def test_walkout_legacy_record_endpoint_retired_410(monkeypatch):
+    """POST /marketing/walkout/{id} no longer records or sends -> 410 Gone."""
     notif_calls = []
 
     async def _capture_send(**kwargs):
@@ -712,7 +672,6 @@ def test_walkout_sends_notification_for_consented(monkeypatch):
 
     monkeypatch.setattr(marketing_mod, "_get_db", lambda: db)
     monkeypatch.setattr(marketing_mod, "send_notification", _capture_send)
-    monkeypatch.setattr(marketing_mod, "_check_notification_rate", _noop_rate)
 
     app = FastAPI()
     app.include_router(marketing_mod.router, prefix="/api/v1/marketing")
@@ -724,12 +683,27 @@ def test_walkout_sends_notification_for_consented(monkeypatch):
         json={"frames_tried": ["Ray-Ban RB3025"]},
         headers={"Authorization": f"Bearer {tok}"},
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    # Notification fired
-    assert len(notif_calls) == 1
-    assert notif_calls[0]["template_id"] == "WALKOUT_RECOVERY"
-    assert body["recovery_message"] == "scheduled"
+    assert r.status_code == 410, r.text
+    # No doc written, no message fired.
+    assert db.get_collection("walkouts").docs == []
+    assert len(notif_calls) == 0
+
+
+def test_walkout_legacy_recoveries_list_retired_410(monkeypatch):
+    """GET /marketing/walkout-recoveries -> 410 Gone (use /api/v1/walkouts)."""
+    db = _FakeDB({"walkouts": _FakeColl([])})
+    monkeypatch.setattr(marketing_mod, "_get_db", lambda: db)
+
+    app = FastAPI()
+    app.include_router(marketing_mod.router, prefix="/api/v1/marketing")
+    client = TestClient(app)
+
+    tok = _tok(["STORE_MANAGER"])
+    r = client.get(
+        "/api/v1/marketing/walkout-recoveries",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 410, r.text
 
 
 # ---------------------------------------------------------------------------

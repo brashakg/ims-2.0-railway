@@ -458,6 +458,7 @@ class WalkoutRepository(BaseRepository):
                 out.append({
                     "walkout_id": w.get("walkout_id"),
                     "store_id": w.get("store_id"),
+                    "customer_id": w.get("customer_id"),
                     "customer_name": w.get("customer_name"),
                     "mobile": w.get("mobile"),
                     "sales_person_id": w.get("sales_person_id"),
@@ -492,6 +493,7 @@ class WalkoutRepository(BaseRepository):
                 out.append({
                     "walkout_id": w.get("walkout_id"),
                     "store_id": w.get("store_id"),
+                    "customer_id": w.get("customer_id"),
                     "customer_name": w.get("customer_name"),
                     "mobile": w.get("mobile"),
                     "sales_person_id": w.get("sales_person_id"),
@@ -534,3 +536,69 @@ class WalkoutRepository(BaseRepository):
         except Exception as e:
             print(f"[WALKOUT] stamp_followup_escalation failed: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # F45 — reason-driven policy suggestion (D3) + 50/50 credit (D2) +
+    # POS compliance cohort (D5)
+    # ------------------------------------------------------------------
+    def update_policy_suggestion(
+        self, walkout_id: str, suggestion: Dict
+    ) -> Optional[Dict]:
+        """Stamp the computed reason-driven policy_suggestion dict onto a
+        walkout. Additive single-doc $set; returns the post-update doc."""
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {
+                    "$set": {
+                        "policy_suggestion": suggestion,
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+        except Exception as e:
+            print(f"[WALKOUT] update_policy_suggestion failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
+    def set_sale_credits(
+        self, walkout_id: str, credits: List[Dict]
+    ) -> Optional[Dict]:
+        """Write the embedded sale_credits array onto a walkout doc.
+
+        This is the single-document mirror of the flat walkout_sale_credits
+        collection (which the SC engine queries). Called AFTER the flat-
+        collection upserts succeed so the embedded array is never ahead of
+        the canonical flat rows. Single-doc $set; returns the post-update doc.
+        """
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {
+                    "$set": {
+                        "sale_credits": credits,
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+        except Exception as e:
+            print(f"[WALKOUT] set_sale_credits failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
+    def list_open_for_staff(
+        self, store_id: str, sales_person_id: str
+    ) -> List[Dict]:
+        """Return non-deleted walkouts for a (store, salesperson) pair that
+        have NO result yet (result is None) -- the POS soft-block compliance
+        cohort (D5). Pure read, fail-soft -> []."""
+        f: Dict = {
+            "deleted_at": None,
+            "store_id": store_id,
+            "sales_person_id": sales_person_id,
+            "result": None,
+        }
+        try:
+            return list(self.collection.find(f))
+        except Exception:
+            return []

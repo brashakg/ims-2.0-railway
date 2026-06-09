@@ -513,20 +513,89 @@ _FU_TYPE_TO_MODE = {
 }
 
 
+def _resolve_walkout_fu_due_today(
+    db,
+    store_id: Optional[str],
+    today: str,
+    cust_coll,
+) -> List[Dict[str, Any]]:
+    """F45 D4 -- pending WALKOUT follow-up sub-docs due today or earlier.
+
+    The walkout CRM (F45) stores its 2/3-round follow-ups as embedded
+    `walkouts.followups[]` sub-docs whose `mode` IS the delivery channel
+    (CALL / WHATSAPP / SMS / EMAIL / IN-PERSON) -- distinct from the generic
+    `follow_ups` collection (whose `type` is a PURPOSE enum, per CORRECTIONS
+    P1). This resolver reads those walkout sub-docs so the reminder rail's
+    fu_due_today segment covers BOTH sources. CALL / IN-PERSON modes route to
+    a staff task in evaluate_rule; WHATSAPP / SMS / EMAIL ride the dark send.
+    """
+    rows: List[Dict[str, Any]] = []
+    try:
+        wo_coll = db.get_collection("walkouts")
+    except Exception:  # noqa: BLE001
+        return rows
+    wq: Dict[str, Any] = {"deleted_at": None}
+    if store_id:
+        wq["store_id"] = store_id
+    try:
+        walkouts = list(wo_coll.find(wq).limit(_SCAN_LIMIT))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("walkout fu_due_today scan failed: %s", exc)
+        return rows
+    for w in walkouts:
+        cid = w.get("customer_id") or ""
+        name = w.get("customer_name") or "Customer"
+        phone = w.get("mobile") or ""
+        if (not phone) and cid:
+            cust = cust_coll.find_one({"customer_id": cid}) or {}
+            phone = cust.get("mobile", "") or cust.get("phone", "")
+        for fu in w.get("followups") or []:
+            if fu.get("status") != "PENDING":
+                continue
+            scheduled = fu.get("scheduled_date")
+            if isinstance(scheduled, datetime):
+                sched_str = scheduled.date().isoformat()
+            else:
+                sched_str = str(scheduled)[:10] if scheduled else ""
+            if not sched_str or sched_str > today:
+                continue
+            # The walkout FU `mode` IS the channel (no purpose-enum mapping).
+            mode = str(fu.get("mode") or "CALL").strip().upper()
+            rows.append(
+                {
+                    "customer_id": cid,
+                    "phone": phone,
+                    "name": name,
+                    "variables": {
+                        "name": name,
+                        "customer_name": name,
+                        "mode": mode,
+                        "walkout_id": w.get("walkout_id", ""),
+                        "follow_up_round": fu.get("round"),
+                        "source": "walkout",
+                    },
+                }
+            )
+    return rows
+
+
 def _resolve_fu_due_today(
     db,
     store_id: Optional[str],
     now: Optional[datetime] = None,
     **_kw,
 ) -> List[Dict[str, Any]]:
-    """Customers with a PENDING follow_ups doc scheduled for today or earlier.
+    """Customers with a PENDING follow-up scheduled for today or earlier.
 
-    Reconciles with the real follow-ups source (follow_ups.py GET /due-today):
-    same collection, same `status=pending` + `scheduled_date <= today` filter.
-    Adds a `mode` to the audience row's variables so the rule evaluator routes
-    CALL / IN-PERSON to a staff task and WHATSAPP / SMS to send_notification.
-    `mode` is read from an explicit `mode`/`channel` field when present, else
-    derived from the follow-up `type` (a purpose enum, not a channel).
+    Reads BOTH follow-up sources and merges them (CORRECTIONS P1 / F45 D4):
+      - the generic `follow_ups` collection (follow_ups.py GET /due-today):
+        same `status=pending` + `scheduled_date <= today` filter; the FU
+        `type` is a PURPOSE enum mapped to a delivery mode.
+      - the F45 walkout `walkouts.followups[]` sub-docs, whose `mode` IS the
+        delivery channel.
+    Each audience row carries a `mode` in variables so the rule evaluator
+    routes CALL / IN-PERSON to a staff task and WHATSAPP / SMS / EMAIL to
+    send_notification (the dark, DISPATCH_MODE-gated path).
     """
     now = now or datetime.now()
     today = now.date().isoformat()
@@ -540,7 +609,7 @@ def _resolve_fu_due_today(
         follow_ups = list(fu_coll.find(q).limit(_SCAN_LIMIT))
     except Exception as exc:  # noqa: BLE001
         logger.warning("fu_due_today scan failed: %s", exc)
-        return []
+        follow_ups = []
     for fu in follow_ups:
         cid = fu.get("customer_id", "")
         # Explicit mode/channel wins; else map the purpose enum to a mode.
@@ -567,6 +636,8 @@ def _resolve_fu_due_today(
             },
         }
         rows.append(row)
+    # Merge in the F45 walkout follow-up sub-docs.
+    rows.extend(_resolve_walkout_fu_due_today(db, store_id, today, cust_coll))
     return rows
 
 

@@ -179,6 +179,15 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
         mobile: (form.mobile || '').trim(),
       });
       toast.success(`Walkout logged · ${saved.walkout_id}`);
+      // F45 D3 -- surface the reason-driven follow-up policy (non-blocking).
+      const action = saved.policy_suggestion?.action;
+      if (action === 'MANAGER_ESCALATE') {
+        toast.warning('Staff-behaviour flagged — a manager escalation task was created.');
+      } else if (action === 'PROMO_VOUCHER') {
+        toast.info('Price objection — this customer may be eligible for a promo voucher (see reminder rules).');
+      } else if (action === 'RESTOCK_WATCH') {
+        toast.info('Availability objection — flagged for a restock follow-up.');
+      }
       onSaved(saved.walkout_id);
       onClose();
     } catch (e: any) {

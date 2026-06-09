@@ -74,6 +74,11 @@ export function ResultPanel({ walkout, canEdit, onChanged }: ResultPanelProps) {
   const isConverted = walkout.result === 'CONVERTED';
   const currentResult = walkout.result;
 
+  // F45 D7 -- 50/50 sale-credit split (logging + closing associate).
+  const credits = walkout.sale_credits ?? [];
+  const samePerson =
+    credits.length === 2 && credits[0].user_id === credits[1].user_id;
+
   return (
     <section className="card p-5 space-y-3">
       <div className="flex items-center justify-between">
@@ -84,6 +89,37 @@ export function ResultPanel({ walkout, canEdit, onChanged }: ResultPanelProps) {
       {isConverted && walkout.converted_order_id && (
         <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-3 py-2">
           Linked to order <span className="font-mono font-medium">{walkout.converted_order_id}</span>
+        </div>
+      )}
+
+      {isConverted && credits.length > 0 && (
+        <div className="border-l-2 border-bv-red-300 bg-gray-50 rounded px-3 py-2 space-y-1">
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+            Sale credit
+          </div>
+          {samePerson ? (
+            <div className="text-sm text-gray-700">
+              Single-associate conversion (100% credit) —{' '}
+              <span className="font-medium">
+                {credits[0].user_name || credits[0].user_id}
+              </span>
+            </div>
+          ) : (
+            credits.map((c) => (
+              <div
+                key={c.credit_type}
+                className="flex items-center justify-between text-sm text-gray-700"
+              >
+                <span>
+                  <span className="text-gray-500">
+                    {c.credit_type === 'LOGGING' ? 'Logged by' : 'Closed by'}:
+                  </span>{' '}
+                  <span className="font-medium">{c.user_name || c.user_id}</span>
+                </span>
+                <span className="text-gray-500 tabular-nums">{c.pct}%</span>
+              </div>
+            ))
+          )}
         </div>
       )}
 

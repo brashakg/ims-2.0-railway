@@ -1,5 +1,6 @@
 import { ProtectedRoute } from '../../components/layout/ProtectedRoute';
 import POSLayout from '../../components/pos/POSLayout';
+import WalkoutComplianceBanner from '../../components/pos/WalkoutComplianceBanner';
 
 /**
  * Enterprise Point of Sale (POS) System
@@ -15,6 +16,10 @@ import POSLayout from '../../components/pos/POSLayout';
 export function POSPage() {
   return (
     <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}>
+      {/* F45 D8 -- soft-block walkout nudge. Renders null + no fetch when the
+          VITE_ENABLE_POS_WALKOUT_COMPLIANCE_BANNER flag is off (default), so
+          POSLayout is unchanged. Never blocks a sale. */}
+      <WalkoutComplianceBanner />
       <POSLayout />
     </ProtectedRoute>
   );

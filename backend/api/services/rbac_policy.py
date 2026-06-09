@@ -2726,6 +2726,10 @@ POLICY: List[Dict[str, object]] = [
     },
     {"method": "POST", "path": "/api/v1/marketing/walkin", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/marketing/walkins", "allowed": "AUTHENTICATED"},
+    # F45 D1 -- RETIRED to HTTP 410 Gone (zombie duplicate of /api/v1/walkouts).
+    # The routes remain registered (returning 410) so coverage-lock + no-stale
+    # stay green; the canonical 30-field walkout path is /api/v1/walkouts. A
+    # logged-in caller simply receives 410 -- AUTHENTICATED is correct here.
     {
         "method": "GET",
         "path": "/api/v1/marketing/walkout-recoveries",
@@ -4666,6 +4670,12 @@ POLICY: List[Dict[str, object]] = [
     {"method": "POST", "path": "/api/v1/walkouts", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/walkouts/", "allowed": "AUTHENTICATED"},
     {"method": "POST", "path": "/api/v1/walkouts/", "allowed": "AUTHENTICATED"},
+    # F45 D5 -- POS soft-block compliance counter (read-only; never blocks a sale).
+    {
+        "method": "GET",
+        "path": "/api/v1/walkouts/pos-compliance-check",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/walkouts/conversion-feed",
