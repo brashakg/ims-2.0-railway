@@ -1392,6 +1392,22 @@ POLICY: List[Dict[str, object]] = [
     },
     {"method": "GET", "path": "/api/v1/expenses/caps", "allowed": "AUTHENTICATED"},
     {"method": "PUT", "path": "/api/v1/expenses/caps", "allowed": ["ADMIN"]},
+    # F17 petty-cash float (manage = open/topup; view = balance+ledger).
+    {
+        "method": "POST",
+        "path": "/api/v1/expenses/petty-cash/open",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/expenses/petty-cash/topup",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/expenses/petty-cash/balance",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/expenses/duplicate-bills",

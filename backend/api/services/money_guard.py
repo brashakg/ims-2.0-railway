@@ -13,9 +13,15 @@ Account types (Phase A):
   GIFT_VOUCHER -> existing `vouchers` collection      (balance, key=code)
   LOYALTY      -> existing `loyalty_accounts`         (balance_points, key=customer_id)
   STORE_CREDIT -> existing `customers`                (store_credit, key=customer_id)
-  PETTY_CASH / FAMILY_WALLET / CONSIGNMENT -> DEFERRED. No collection is created
-    in Phase A (P0-1). These return GuardResult(ok=False, reason="unavailable")
-    until a future packet authorizes their storage on a replica-set deployment.
+  PETTY_CASH   -> `petty_cash_floats` (one doc per store, balance, key=store_id).
+    Registered live per CORRECTIONS R1 (the unified money_accounts SoR is
+    CANCELLED; each new balance type owns its own single-doc collection and is
+    registered in ACCOUNT_TYPES). The guarded debit (balance >= amount in the
+    FILTER) is the float floor -- it can never go negative or be double-spent.
+    Owned + opened by feature #17 (petty_cash_service.open_float).
+  FAMILY_WALLET / CONSIGNMENT -> still DEFERRED (greenfield). They return
+    GuardResult(ok=False, reason="unavailable") until #49 / #3 add their own
+    single-doc collection (CORRECTIONS R1) and flip greenfield off here.
 
 Contract:
   * Never raises on a business failure -- returns a typed GuardResult with ok=False
@@ -105,10 +111,14 @@ ACCOUNT_TYPES: Dict[str, AccountSpec] = {
         coll="customers", key_field="customer_id", balance_field="store_credit",
         integer=False, round_dp=2, status_field=None, mechanism="update_reread",
     ),
-    # Deferred per CORRECTIONS P0-1 -- no money_accounts collection/index in Phase A.
+    # LIVE per CORRECTIONS R1: petty cash is a per-store single-doc float in its
+    # OWN collection (NOT the cancelled money_accounts SoR). The debit floor lives
+    # in the find_one_and_update filter (balance >= amount), so the float can never
+    # go negative nor be double-spent under concurrency. status must be ACTIVE to
+    # spend (a FROZEN/CLOSED float blocks payouts). Opened by feature #17.
     "PETTY_CASH": AccountSpec(
-        coll="money_accounts", key_field="account_key", balance_field="balance",
-        integer=False, round_dp=2, status_field="status", greenfield=True,
+        coll="petty_cash_floats", key_field="store_id", balance_field="balance",
+        integer=False, round_dp=2, status_field="status", mechanism="find_modify",
     ),
     "FAMILY_WALLET": AccountSpec(
         coll="money_accounts", key_field="account_key", balance_field="balance",
@@ -416,6 +426,11 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     if "updated_at" not in sets:
         sets["updated_at"] = _now_iso()
     update["$set"] = sets
+    # push_extra symmetry with debit(): a caller that keeps its own in-document
+    # ledger array (e.g. petty_cash_floats.ledger) can append a row in the SAME
+    # guarded write. Defaults to None -> no existing caller is affected.
+    if push_extra:
+        update["$push"] = dict(push_extra)
 
     if callable(getattr(coll, "find_one_and_update", None)):
         try:

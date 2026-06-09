@@ -199,6 +199,14 @@ async def lifespan(app: FastAPI):
                     logger.info(f"[OK] Ensured {_cn} chart-of-accounts row(s)")
             except Exception as e:
                 logger.warning(f"[WARN] Chart-of-accounts seed skipped: {e}")
+            # F17 petty cash: one-doc-per-store float collection. The unique
+            # store_id index backs the double-open 409. Idempotent; fail-soft.
+            try:
+                from .services.petty_cash_service import ensure_indexes as _pc_indexes
+
+                _pc_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Petty-cash index creation skipped: {e}")
             # E6 reminder rail: indexes + 6 GLOBAL inactive seed rules (idempotent,
             # non-destructive). active=False -> ZERO automated sends on deploy; the
             # owner opts each rule on later (comms channel currently build-dark).
