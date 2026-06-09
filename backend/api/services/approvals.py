@@ -76,6 +76,10 @@ ACTION_TYPES: frozenset = frozenset({
     "petty_cash",
     "endless_aisle",
     "rtv",
+    # E3w: a manager override for a return blocked by a serial mismatch. Resolves to
+    # the "auto" tier (STORE_MANAGER+); single-use + store-bound at approve-time, so
+    # a manager of store A cannot approve an override consumed against store B.
+    "RETURN_SERIAL_OVERRIDE",
 })
 
 # Actions that REQUIRE separation of duties (approver != maker).

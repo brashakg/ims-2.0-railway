@@ -579,3 +579,25 @@ def test_return_serial_override_denied_still_blocks(ret_env, monkeypatch):
             current_user=_MANAGER, idempotency_key=None))
     assert exc.value.status_code == 409
     assert exc.value.detail.get("reason") == "SERIAL_MISMATCH"
+
+
+def test_return_serial_override_action_type_is_registered(ret_env):
+    """P1 regression (adversarial): RETURN_SERIAL_OVERRIDE must be a REGISTERED E4
+    action type. If it is not, ApprovalEngine.request() rejects it as
+    unknown_action_type -> no token can ever be minted -> the manager override is
+    DEAD and every serial mismatch is an un-overridable 409. Prove request() mints
+    it (does NOT reject the action type), so the escape valve is operable."""
+    from api.services.approvals import ACTION_TYPES, ApprovalEngine
+
+    assert "RETURN_SERIAL_OVERRIDE" in ACTION_TYPES
+    engine = ApprovalEngine(db=ret_env["db"])
+    res = engine.request(
+        action_type="RETURN_SERIAL_OVERRIDE",
+        requested_by="cashier1",
+        store_id="BV-1",
+        reason="serial mismatch on a high-value frame return",
+    )
+    # The action type is accepted (NOT unknown_action_type) -> a token is mintable.
+    assert res.get("error") != "unknown_action_type"
+    assert res.get("ok") is True
+    assert res.get("required_tier") in ("auto", "admin", "super")
