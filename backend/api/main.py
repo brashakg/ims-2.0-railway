@@ -945,7 +945,7 @@ async def seed_database(secret: str = "", force: str = ""):
 
             if coll_name in force_collections:
                 collection.delete_many({})
-                results[coll_name] = f"FORCE-DROPPED"
+                results[coll_name] = "FORCE-DROPPED"
 
             existing = collection.count_documents({})
             if existing > 0:

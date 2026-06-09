@@ -4,6 +4,8 @@ IMS 2.0 - Vendor Returns Router
 Vendor returns, debit notes, and credit note management
 """
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
@@ -11,6 +13,8 @@ from datetime import datetime
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access
+
+logger = logging.getLogger("ims.vendor_returns")
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict create + status changes to the same roles that manage vendors
@@ -174,6 +178,7 @@ async def list_vendor_returns(
         return {"returns": returns, "total": total}
 
     except Exception as e:
+        logger.exception("[vendor_returns] list_vendor_returns failed: %s", e)
         raise HTTPException(
             status_code=500,
             detail="A database error occurred. Please try again or contact support.",
@@ -256,6 +261,7 @@ async def create_vendor_return(
         }
 
     except Exception as e:
+        logger.exception("[vendor_returns] create_vendor_return failed: %s", e)
         raise HTTPException(
             status_code=500, detail="Failed to create return. Please try again."
         )
@@ -286,6 +292,7 @@ async def get_vendor_return(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("[vendor_returns] get_vendor_return failed: %s", e)
         raise HTTPException(
             status_code=500,
             detail="A database error occurred. Please try again or contact support.",
@@ -375,6 +382,7 @@ async def update_return_status(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("[vendor_returns] update_return_status failed: %s", e)
         raise HTTPException(
             status_code=500,
             detail="A database error occurred. Please try again or contact support.",

@@ -1129,7 +1129,7 @@ class JarvisAnalyticsEngine:
                             {
                                 "$match": {
                                     "is_active": {"$ne": False},
-                                    "brand": {"$ne": "", "$ne": None},
+                                    "brand": {"$nin": ["", None]},
                                 }
                             },
                             {
