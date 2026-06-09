@@ -408,6 +408,163 @@ def three_way_match(
 
 
 # ---------------------------------------------------------------------------
+# F9 -- DELIVERY-CHALLAN -> BULK-INVOICE TALLY (month-end DC reconciliation)
+# ---------------------------------------------------------------------------
+
+
+def _dc_accepted_by_product(dc_docs: Optional[List[dict]]) -> Dict[str, int]:
+    """{product_id: accepted_qty} summed across EVERY accepted line of EVERY
+    Delivery-Challan GRN in dc_docs.
+
+    A DC carries the same line shape as a standard GRN (items: [{product_id,
+    accepted_qty}]); this rolls the accepted (billable) units up per product
+    across the whole set of DCs being reconciled into one bulk invoice. Pure +
+    total: a non-dict doc / item or missing field coerces to 0 and is skipped,
+    so a malformed DC never raises here.
+    """
+    out: Dict[str, int] = {}
+    for dc in dc_docs or []:
+        if not isinstance(dc, dict):
+            continue
+        for it in dc.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            pid = it.get("product_id")
+            if pid is None:
+                continue
+            out[pid] = out.get(pid, 0) + _i(it.get("accepted_qty"))
+    return out
+
+
+def dc_bulk_match(
+    dc_docs: Optional[List[dict]],
+    invoice_lines: Optional[List[dict]],
+    tolerance_pct: float = DEFAULT_MATCH_TOLERANCE_PCT,
+) -> dict:
+    """Tally a set of Delivery Challans against one consolidated vendor invoice.
+
+    The month-end / fortnightly control: a vendor sends goods over several DCs
+    (physical goods-receipt docs, no tax invoice) and later bills them on ONE
+    consolidated tax invoice. The accountant must confirm the billed quantity
+    matches what physically arrived BEFORE the payable is treated as clean --
+    otherwise the store pays for lenses it never got (cash leakage) or absorbs a
+    short-bill silently.
+
+    This is the DC analogue of ``three_way_match`` but WITHOUT a PO: we compare
+    the aggregated DC-accepted qty per product to the invoice-billed qty per
+    product. Price is NOT matched here (a consolidated DC invoice often carries
+    a single negotiated rate the DCs never recorded); only QUANTITY is tallied,
+    which is the leakage the DC->invoice control exists to catch.
+
+    Args:
+      dc_docs:        accepted GRN docs with grn_subtype=DELIVERY_CHALLAN, each
+                      {items:[{product_id, accepted_qty}]}.
+      invoice_lines:  computed invoice lines ({product_id, qty, ...}) from
+                      purchase_invoice_engine.compute_invoice.
+      tolerance_pct:  +/- percentage within which billed vs received qty tally.
+
+    Returns:
+      {
+        match_status: "MATCHED" | "ON_HOLD_EXCEPTION",
+        tolerance_pct,
+        dc_qty_by_product: {product_id: int},   # aggregated accepted across DCs
+        detail: [ {product_id, dc_qty_total, invoice_qty,
+                   variance_pct, verdict: "MATCHED" | "EXCEPTION",
+                   reasons: [str, ...]} ],
+        exceptions: [str, ...],
+        summary: {matched_lines, exception_lines, total_lines},
+      }
+
+    Rules (each per product, against tolerance_pct):
+      * billed qty within +/-tolerance of the aggregated DC-accepted qty -> MATCHED.
+      * billed-but-no-DC (invoiced a product no DC covers) -> EXCEPTION.
+      * received-on-a-DC-but-not-billed -> EXCEPTION (the vendor under-billed; the
+        liability shouldn't silently drop those units).
+    Overall MATCHED only when there are comparable lines AND every line is MATCHED.
+    Pure: no DB calls. Reuses the same _pct_diff tolerance logic as three_way_match.
+    """
+    tol = normalize_tolerance_pct(tolerance_pct)
+    dc_idx = _dc_accepted_by_product(dc_docs)
+    inv_idx = _invoice_by_product(invoice_lines)
+
+    # Every product on EITHER side gets a line so an under-bill (DC unit not
+    # invoiced) and an over-bill (invoiced unit no DC covers) both surface.
+    product_ids: List[str] = []
+    for pid in list(inv_idx.keys()) + list(dc_idx.keys()):
+        if pid not in product_ids:
+            product_ids.append(pid)
+
+    detail: List[dict] = []
+    all_exceptions: List[str] = []
+    matched_lines = 0
+    exception_lines = 0
+
+    for pid in product_ids:
+        dc_qty = dc_idx.get(pid)
+        inv_line = inv_idx.get(pid)
+        invoice_qty = _f(inv_line.get("invoiced_qty")) if inv_line else 0.0
+        dc_qty_total = _i(dc_qty) if dc_qty is not None else 0
+
+        reasons: List[str] = []
+        variance_pct = None
+
+        if dc_qty is None:
+            # Billed a product no selected DC covers.
+            reasons.append("Invoiced product not covered by any selected DC")
+        elif inv_line is None or invoice_qty == 0:
+            # Received on a DC but the invoice never billed it.
+            reasons.append(
+                f"DC received qty {dc_qty_total:g} for this product was not billed"
+            )
+        else:
+            variance_pct = _pct_diff(invoice_qty, dc_qty_total)
+            if abs(variance_pct) > tol:
+                reasons.append(
+                    f"Billed qty {invoice_qty:g} differs from DC-received "
+                    f"{dc_qty_total:g} by {variance_pct:.1f}% (> {tol:g}%)"
+                )
+
+        verdict = MATCH_MATCHED if not reasons else "EXCEPTION"
+        if reasons:
+            exception_lines += 1
+            all_exceptions.extend(reasons)
+        else:
+            matched_lines += 1
+
+        detail.append(
+            {
+                "product_id": pid,
+                "dc_qty_total": dc_qty_total,
+                "invoice_qty": invoice_qty,
+                "variance_pct": variance_pct,
+                "verdict": verdict,
+                "reasons": reasons,
+            }
+        )
+
+    if not detail:
+        match_status = MATCH_ON_HOLD
+        all_exceptions.append("No comparable lines across the selected DCs / invoice")
+    elif exception_lines > 0:
+        match_status = MATCH_ON_HOLD
+    else:
+        match_status = MATCH_MATCHED
+
+    return {
+        "match_status": match_status,
+        "tolerance_pct": tol,
+        "dc_qty_by_product": dict(dc_idx),
+        "detail": detail,
+        "exceptions": all_exceptions,
+        "summary": {
+            "matched_lines": matched_lines,
+            "exception_lines": exception_lines,
+            "total_lines": len(detail),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # INVENTORY VALUATION -- moving-average cost true-up
 # ---------------------------------------------------------------------------
 

@@ -102,6 +102,9 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pickingGrn, setPickingGrn] = useState(false);
+  // F9 — "Match DCs to Invoice": pick open Delivery Challans -> draft a
+  // consolidated invoice that flips dc_matched on each DC when booked.
+  const [pickingDcs, setPickingDcs] = useState(false);
   // form: either prefilled from a GRN draft or a fresh manual invoice
   const [form, setForm] = useState<{ prefill: Partial<PurchaseInvoice>; lines: EditLine[] } | null>(null);
   // Phase 2: the invoice whose 3-way-match detail drawer is open, + the active
@@ -167,6 +170,9 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
           <button type="button" onClick={() => setPickingGrn(true)} className="btn sm">
             <PackageCheck className="w-4 h-4" /> Create from GRN
           </button>
+          <button type="button" onClick={() => setPickingDcs(true)} className="btn sm">
+            <PackageCheck className="w-4 h-4" /> Match DCs to Invoice
+          </button>
           <button type="button" onClick={openManual} className="btn sm primary">
             <Plus className="w-4 h-4" /> Manual invoice
           </button>
@@ -196,6 +202,17 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
         <GrnPickerModal
           onClose={() => setPickingGrn(false)}
           onPicked={openFromGrnDraft}
+        />
+      )}
+
+      {pickingDcs && (
+        <DcPickerModal
+          suppliers={suppliers}
+          onClose={() => setPickingDcs(false)}
+          onPicked={(prefill, lines) => {
+            setPickingDcs(false);
+            openFromGrnDraft(prefill, lines);
+          }}
         />
       )}
 
@@ -432,6 +449,151 @@ function GrnPickerModal({
 }
 
 // ============================================================================
+// F9 — DC picker: select open Delivery Challans, consolidate into one draft
+// invoice. The accountant filters by vendor + date range (last 30 days
+// default), ticks one or more open DCs, and "Generate Draft Invoice" calls the
+// from-dcs aggregation. Booking the draft runs the DC->invoice tally.
+// ============================================================================
+function DcPickerModal({
+  suppliers, onClose, onPicked,
+}: {
+  suppliers: Supplier[];
+  onClose: () => void;
+  onPicked: (prefill: Partial<PurchaseInvoice>, lines: PurchaseInvoiceLine[]) => void;
+}) {
+  const toast = useToast();
+  const { user } = useAuth();
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const thirtyAgoIso = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const [vendorId, setVendorId] = useState('');
+  const [dateFrom, setDateFrom] = useState(thirtyAgoIso);
+  const [dateTo, setDateTo] = useState(todayIso);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [dcs, setDcs] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const storeId = user?.activeStoreId;
+      const rows = await purchaseInvoicesApi.getOpenDcs({
+        vendor_id: vendorId || undefined,
+        store_id: storeId || undefined,
+        date_from: dateFrom || undefined,
+        date_to: dateTo || undefined,
+      });
+      setDcs(rows);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.activeStoreId, vendorId, dateFrom, dateTo]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const chosenIds = Object.keys(selected).filter((k) => selected[k]);
+
+  const generate = async () => {
+    if (chosenIds.length === 0) { toast.error('Select at least one DC'); return; }
+    setBusy(true);
+    try {
+      const draft = await purchaseInvoicesApi.createFromDcs(chosenIds, vendorId || undefined);
+      onPicked(
+        {
+          vendor_id: draft.vendor_id,
+          vendor_name: draft.vendor_name,
+          vendor_invoice_no: '',
+          vendor_invoice_date: todayIso,
+          place_of_supply: draft.place_of_supply,
+          recipient_gstin: draft.recipient_gstin,
+          store_id: user?.activeStoreId,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          linked_dc_ids: (draft as any).linked_dc_ids ?? chosenIds,
+        } as Partial<PurchaseInvoice>,
+        draft.lines ?? [],
+      );
+    } catch (e) {
+      toast.error(errMsg(e, 'Could not build a draft invoice from the selected DCs'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white w-full max-w-2xl rounded-lg shadow-xl max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3 sticky top-0 bg-white">
+          <h3 className="font-semibold text-gray-900 flex items-center gap-2"><PackageCheck className="w-5 h-5" /> Match Delivery Challans to one invoice</h3>
+          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-700"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Vendor</label>
+              <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} className="border border-gray-300 rounded px-2 py-1.5 text-sm w-full">
+                <option value="">All vendors</option>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">DC date from</label>
+              <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="border border-gray-300 rounded px-2 py-1.5 text-sm w-full" title="DC date from" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">DC date to</label>
+              <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="border border-gray-300 rounded px-2 py-1.5 text-sm w-full" title="DC date to" />
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="flex items-center gap-2 text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Loading open Delivery Challans...</div>
+          ) : dcs.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              <PackageCheck className="w-10 h-10 text-gray-300 mx-auto mb-2" />
+              No open Delivery Challans for this filter. Log + accept a DC in the GRN flow first.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {dcs.map((g) => {
+                const id = g.grn_id;
+                return (
+                  <label key={id} className="flex items-center gap-3 border border-gray-200 rounded-lg px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selected[id])}
+                      onChange={(e) => setSelected((prev) => ({ ...prev, [id]: e.target.checked }))}
+                    />
+                    <div className="flex-1">
+                      <div className="font-medium text-gray-900">
+                        DC {g.dc_number || g.grn_number}
+                        <span className="text-xs font-normal text-gray-500"> · {g.vendor_name || g.vendor_id}</span>
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {(g.dc_date || '').slice(0, 10)} · {g.total_accepted ?? 0} units accepted · store {g.store_id || '-'}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
+            <button type="button" onClick={onClose} className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-100">Cancel</button>
+            <button type="button" onClick={generate} disabled={busy || chosenIds.length === 0} className="btn sm primary disabled:opacity-60">
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Generate Draft Invoice ({chosenIds.length})
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // Invoice form drawer: header + editable lines + live GST split + Book
 // ============================================================================
 function InvoiceFormDrawer({
@@ -514,6 +676,9 @@ function InvoiceFormDrawer({
           line_total: Math.round((lt + t) * 100) / 100,
         };
       });
+      // F9 — when this draft consolidates Delivery Challans, pass linked_dc_ids
+      // so the backend runs the DC tally + flips dc_matched on each DC.
+      const linkedDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
       const payload: PurchaseInvoiceCreate = {
         vendor_id: vendorId,
         vendor_invoice_no: vendorInvoiceNo.trim(),
@@ -525,6 +690,7 @@ function InvoiceFormDrawer({
         store_id: prefill.store_id ?? user?.activeStoreId,
         lines: payloadLines,
         notes: notes.trim() || undefined,
+        linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
       };
       await purchaseInvoicesApi.create(payload);
       toast.success('Purchase invoice booked');

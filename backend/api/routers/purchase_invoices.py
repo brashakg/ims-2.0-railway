@@ -118,6 +118,10 @@ class PurchaseInvoiceCreate(BaseModel):
     # Client-computed grand total, if provided, is reconciled against the
     # server-computed taxable+tax (Rs 1 slack) -- a tamper / drift guard.
     total: Optional[float] = Field(default=None, ge=0)
+    # F9: grn_ids of the Delivery Challans this ONE consolidated invoice covers.
+    # When present, the booking runs dc_bulk_match (DC-received vs billed qty)
+    # and flips dc_matched=true on each linked DC.
+    linked_dc_ids: Optional[List[str]] = None
 
 
 def _clean(doc: dict) -> dict:
@@ -150,6 +154,82 @@ def _read_purchase_settings(db) -> Optional[dict]:
 def _resolved_purchase_config(db) -> dict:
     """Effective {valuation_method, match_tolerance_pct} with safe defaults."""
     return pmatch.resolve_config(_read_purchase_settings(db))
+
+
+# F9: Delivery-Challan subtype string (kept here to avoid a cross-router import
+# cycle with vendors.py; the canonical constant lives in vendors.GRN_SUBTYPE_DC).
+GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
+
+
+def _load_linked_dcs(db, dc_ids):
+    """Load the DC (Delivery-Challan GRN) docs for the given grn_ids and verify
+    each is a usable, still-open DC. Returns the list of DC docs.
+
+    Raises HTTPException (404 / 409 / 400) if any id is missing, is not a DC, is
+    not ACCEPTED, or is already matched to another bulk invoice -- so a DC can
+    never be double-billed. Fail-soft only on db-None (returns []).
+    """
+    if db is None or not dc_ids:
+        return []
+    coll = db.get_collection("grns")
+    docs = []
+    for dc_id in dc_ids:
+        try:
+            doc = coll.find_one({"grn_id": dc_id}, {"_id": 0})
+        except Exception:
+            doc = None
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"DC {dc_id} not found")
+        if doc.get("grn_subtype") != GRN_SUBTYPE_DC:
+            raise HTTPException(
+                status_code=400, detail=f"{dc_id} is not a Delivery Challan"
+            )
+        if doc.get("status") != "ACCEPTED":
+            raise HTTPException(
+                status_code=400,
+                detail=f"DC {dc_id} must be ACCEPTED before it can be billed",
+            )
+        if doc.get("dc_matched"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"DC {dc_id} is already matched to invoice "
+                    f"{doc.get('linked_bulk_invoice_id')}"
+                ),
+            )
+        docs.append(doc)
+    return docs
+
+
+def _stamp_dcs_matched(db, dc_ids, invoice_id):
+    """F9: flip dc_matched=true + linked_bulk_invoice_id on each linked DC.
+
+    PROTOCOL P0-1: one single-document find_one_and_update per DC, one at a time
+    -- never a cross-collection / multi-document transaction. The guarded filter
+    (dc_matched != True) makes a concurrent second booking of the same DC a
+    no-op (it returns None), so the same DC can never be linked twice even under
+    a race. Returns the list of grn_ids actually stamped."""
+    if db is None or not dc_ids:
+        return []
+    coll = db.get_collection("grns")
+    stamped = []
+    for dc_id in dc_ids:
+        try:
+            updated = coll.find_one_and_update(
+                {"grn_id": dc_id, "dc_matched": {"$ne": True}},
+                {
+                    "$set": {
+                        "dc_matched": True,
+                        "linked_bulk_invoice_id": invoice_id,
+                        "dc_matched_at": datetime.now().isoformat(),
+                    }
+                },
+            )
+            if updated is not None:
+                stamped.append(dc_id)
+        except Exception:
+            continue
+    return stamped
 
 
 class PurchaseConfigUpdate(BaseModel):
@@ -448,6 +528,42 @@ async def create_purchase_invoice(
     )
     match_status = match.get("match_status") if match else None
 
+    # F9 -- DELIVERY-CHALLAN BULK TALLY: when the invoice consolidates a set of
+    # DCs, verify each DC is a still-open ACCEPTED Delivery Challan (raises 404/
+    # 400/409 otherwise so a DC can't be double-billed), period-lock the EARLIEST
+    # DC date (goods may have arrived in a now-closed month even if the invoice
+    # date is in the open month), and run dc_bulk_match (DC-received vs billed
+    # qty). A quantity mismatch -> ON_HOLD_EXCEPTION (auto-hold, same as the
+    # 3-way match): the AP liability is still recorded, just flagged for review.
+    dc_docs = []
+    dc_match = None
+    dc_match_status = "N_A"
+    if body.linked_dc_ids:
+        dc_docs = _load_linked_dcs(db, body.linked_dc_ids)
+        # Period-lock the earliest DC date.
+        earliest = None
+        for dc in dc_docs:
+            d = dc.get("dc_date")
+            if d and (earliest is None or d < earliest):
+                earliest = d
+        if earliest:
+            try:
+                from .finance import check_period_locked
+
+                check_period_locked(db, earliest)
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+        dc_match = pmatch.dc_bulk_match(
+            dc_docs, computed["lines"], config["match_tolerance_pct"]
+        )
+        dc_match_status = dc_match.get("match_status")
+        # The DC tally verdict feeds the header match_status too, so an existing
+        # ON_HOLD review surfaces in the standard invoice list / dashboards.
+        if match_status is None:
+            match_status = dc_match_status
+
     invoice_id = str(uuid.uuid4())
     taxable_total = computed["taxable_total"]
     tax_total = computed["tax_total"]
@@ -486,6 +602,11 @@ async def create_purchase_invoice(
         # invoice has no PO/GRN to match against).
         "match_status": match_status,
         "match_detail": match,
+        # F9 -- DC bulk-tally verdict + which DCs this invoice consolidates.
+        # dc_match_status is N_A for a non-DC invoice (backward-compatible).
+        "linked_dc_ids": body.linked_dc_ids or None,
+        "dc_match_status": dc_match_status,
+        "dc_match_detail": dc_match,
         "lines": computed["lines"],
         # Header money mirrors the split so the ITC register (taxable_amount /
         # tax_amount) AND the new GST report (cgst/sgst/igst_total) both read it.
@@ -514,6 +635,14 @@ async def create_purchase_invoice(
             raise HTTPException(
                 status_code=500, detail="Failed to save purchase invoice"
             ) from exc
+
+    # F9 -- stamp dc_matched=true + linked_bulk_invoice_id on each linked DC.
+    # PROTOCOL P0-1: one single-document find_one_and_update per DC (no cross-
+    # collection transaction). Done AFTER the bill insert so the AP liability is
+    # the source of truth; the guarded filter blocks a concurrent double-link.
+    stamped_dc_ids = []
+    if body.linked_dc_ids:
+        stamped_dc_ids = _stamp_dcs_matched(db, body.linked_dc_ids, invoice_id)
 
     # Phase 2 -- INVENTORY VALUATION TRUE-UP. The invoice's per-unit landed price
     # is the authoritative cost; blend it into each product's moving-average cost
@@ -548,6 +677,11 @@ async def create_purchase_invoice(
                         "match_exceptions": (match or {}).get("exceptions"),
                         "valuation_method": config.get("valuation_method"),
                         "valuation_updates": valuation_updates,
+                        # F9 -- DC bulk-tally audit trail.
+                        "linked_dc_ids": body.linked_dc_ids,
+                        "dc_matched_ids": stamped_dc_ids,
+                        "dc_match_status": dc_match_status,
+                        "dc_match_exceptions": (dc_match or {}).get("exceptions"),
                     },
                 }
             )
@@ -668,6 +802,104 @@ async def draft_invoice_from_grn(
         "po_id": po_id,
         "grn_id": grn_id,
         "grn_number": grn.get("grn_number"),
+        "lines": computed["lines"],
+        "taxable_total": computed["taxable_total"],
+        "cgst_total": computed["cgst_total"],
+        "sgst_total": computed["sgst_total"],
+        "igst_total": computed["igst_total"],
+        "tax_total": computed["tax_total"],
+        "total": computed["total"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# F9 -- draft a consolidated invoice from a SET of Delivery Challans
+# ---------------------------------------------------------------------------
+# Registered BEFORE the GET /{invoice_id} catch-all (same route-order discipline
+# as /from-grn) so the literal /from-dcs path wins over the {invoice_id} param.
+
+
+@router.get("/from-dcs")
+async def draft_invoice_from_dcs(
+    dc_ids: str = Query(..., description="Comma-separated DC grn_ids to consolidate"),
+    vendor_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Build a DRAFT consolidated purchase invoice from N Delivery Challans --
+    does NOT persist or book. Loads each DC, aggregates accepted lines by
+    product_id (summing qty across DCs), and returns the prefilled draft with
+    ``linked_dc_ids`` set so the accountant reviews then POSTs it as one bulk
+    invoice.
+
+    The aggregated lines + totals are ready to drop into POST / (the create
+    body) after the accountant confirms / adjusts the billed quantities."""
+    ids = [d.strip() for d in (dc_ids or "").split(",") if d.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="No DC ids provided")
+
+    db = _get_db()
+    dc_docs = _load_linked_dcs(db, ids)
+
+    # Aggregate accepted lines across all DCs by product_id. Reuse lines_from_grn
+    # per DC (no PO -> unit_price 0 + gst_rate 0; the accountant fills the rate),
+    # then sum qty per product.
+    agg: dict = {}
+    order: list = []
+    resolved_vendor_id = vendor_id
+    store_id = None
+    for dc in dc_docs:
+        resolved_vendor_id = resolved_vendor_id or dc.get("vendor_id")
+        store_id = store_id or dc.get("store_id")
+        for ln in pinv.lines_from_grn(dc, None):
+            pid = ln.get("product_id")
+            key = pid if pid is not None else f"_noid_{len(order)}"
+            if key not in agg:
+                agg[key] = dict(ln)
+                order.append(key)
+            else:
+                try:
+                    agg[key]["qty"] = (agg[key].get("qty") or 0) + (ln.get("qty") or 0)
+                except (TypeError, ValueError):
+                    pass
+    raw_lines = [agg[k] for k in order]
+
+    vendor = None
+    vendor_repo = get_vendor_repository()
+    if vendor_repo is not None and resolved_vendor_id:
+        vendor = vendor_repo.find_by_id(resolved_vendor_id)
+    supplier_gstin = (
+        _vendor_gstin(db, vendor, resolved_vendor_id) if resolved_vendor_id else None
+    )
+    # Default the recipient to the entity that owns the receiving store.
+    recipient_entity_id = None
+    try:
+        if db is not None and store_id:
+            store = db.get_collection("stores").find_one(
+                {"store_id": store_id}, {"_id": 0, "entity_id": 1}
+            )
+            recipient_entity_id = (store or {}).get("entity_id")
+    except Exception:
+        recipient_entity_id = None
+    recipient = _resolve_recipient(db, recipient_entity_id, None, None)
+
+    computed = pinv.compute_invoice(
+        raw_lines, supplier_gstin, recipient.get("recipient_gstin"), None
+    )
+
+    return {
+        "status": "DRAFT",
+        "vendor_id": resolved_vendor_id,
+        "vendor_name": (vendor or {}).get("trade_name")
+        or (vendor or {}).get("legal_name"),
+        "vendor_gstin": supplier_gstin,
+        "recipient_entity_id": recipient.get("recipient_entity_id"),
+        "recipient_gstin": recipient.get("recipient_gstin"),
+        "place_of_supply": computed["itc_place_of_supply"],
+        "supply_place_recipient": computed["place_of_supply"],
+        "supplier_state": computed["supplier_state"],
+        "interstate": computed["interstate"],
+        "linked_dc_ids": ids,
+        "dc_count": len(dc_docs),
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],
@@ -806,6 +1038,38 @@ async def get_invoice_match(
         "match_detail": detail,
         "po_id": doc.get("po_id"),
         "grn_id": doc.get("grn_id"),
+    }
+
+
+@router.get("/{invoice_id}/dc-match")
+async def get_invoice_dc_match(
+    invoice_id: str, current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """F9 -- return the stored Delivery-Challan bulk-tally detail for an invoice.
+
+    For a non-DC invoice dc_match_status is N_A (or null on a pre-F9 row) and
+    dc_match_detail is None. Read-only; role-gated to ACCOUNTANT / ADMIN."""
+    db = _get_db()
+    if db is None:
+        return {
+            "invoice_id": invoice_id,
+            "dc_match_status": "N_A",
+            "dc_match_detail": None,
+            "linked_dc_ids": None,
+        }
+    try:
+        doc = db.get_collection("vendor_bills").find_one(
+            {"bill_id": invoice_id}, {"_id": 0}
+        )
+    except Exception:
+        doc = None
+    if not doc:
+        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    return {
+        "invoice_id": invoice_id,
+        "dc_match_status": doc.get("dc_match_status") or "N_A",
+        "dc_match_detail": doc.get("dc_match_detail"),
+        "linked_dc_ids": doc.get("linked_dc_ids"),
     }
 
 

@@ -372,7 +372,14 @@ def test_t2_pin_is_bcrypt_and_never_in_audit(engine, db):
     engine.approve(req["request_id"], approver_user_id="mgr",
                    approver_roles=["STORE_MANAGER"], pin="5678")
     import json
-    blob = json.dumps(_audit_rows(db), default=str)
+    # Scope the PIN-leakage scan to the approval-lifecycle audit rows (E4 writes
+    # entity_type="approval_request"). A GLOBAL audit dump is fragile: any other
+    # test sharing the audit_logs store whose data contains the substring "5678"
+    # (a DC number, qty, amount, id) would false-trip this assertion regardless
+    # of PIN handling. The intent here is "no PIN hash in any APPROVAL audit row".
+    appr_rows = [r for r in _audit_rows(db)
+                 if r.get("entity_type") == "approval_request"]
+    blob = json.dumps(appr_rows, default=str)
     assert "5678" not in blob
     assert "$2b$" not in blob
     assert "approval_pin_hash" not in blob

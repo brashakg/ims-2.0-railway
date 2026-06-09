@@ -484,6 +484,8 @@ export const workshopApi = {
     fitting_instructions?: string;
     special_notes?: string;
     expected_date: string;
+    // F9 — ADMIN+ override of the lens DC hardlock (audited server-side).
+    override_reason?: string;
   }) => {
     const response = await api.post('/workshop/jobs', data);
     return response.data;

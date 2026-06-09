@@ -274,6 +274,11 @@ const loadJobs = async () => {
   const [createPriority, setCreatePriority] = useState<'NORMAL' | 'EXPRESS' | 'URGENT'>('NORMAL');
   const [createExpectedDate, setCreateExpectedDate] = useState(new Date(Date.now() + 3 * 86400000).toISOString().split('T')[0]);
   const [createLoading, setCreateLoading] = useState(false);
+  // F9 — DC hardlock: when the backend returns 422 DC_HARDLOCK, show a banner
+  // in the create-job modal. ADMIN+ may enter an override reason and resubmit.
+  const [dcHardlock, setDcHardlock] = useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = useState('');
+  const canOverrideHardlock = ['ADMIN', 'SUPERADMIN'].includes(user?.activeRole || '');
 
   const searchOrdersForJob = async () => {
     if (!createOrderSearch.trim()) return;
@@ -290,6 +295,7 @@ const loadJobs = async () => {
   const handleCreateJob = async () => {
     if (!createSelectedOrder) return;
     setCreateLoading(true);
+    setDcHardlock(null);
     try {
       const rxItem = (createSelectedOrder.items || []).find((i: any) => i.category === 'RX_LENSES' || i.is_optical);
       const created = await workshopApi.createJob({
@@ -300,11 +306,17 @@ const loadJobs = async () => {
         fitting_instructions: createFitting || undefined,
         special_notes: createNotes || undefined,
         expected_date: createExpectedDate,
+        // F9 — include the override reason only when an ADMIN+ supplied one.
+        override_reason: overrideReason.trim() || undefined,
       });
       setShowCreateJob(false);
       setCreateSelectedOrder(null);
       setCreateFitting('');
       setCreateNotes('');
+      setOverrideReason('');
+      if (created?.dc_hardlock_override) {
+        toast.success('Override logged. Job created.');
+      }
       await loadJobs();
       // Offer the work-order traveler label for the freshly created job so it
       // can be attached to the physical job + scanned through the workflow.
@@ -312,8 +324,18 @@ const loadJobs = async () => {
       if (newJobId) {
         setLabelSpec({ kind: 'job', jobId: newJobId, type: 'traveler' });
       }
-    } catch {
-      // Error handling — silently retry
+    } catch (err: any) {
+      // F9 — surface the DC hardlock as an actionable banner inside the modal.
+      const detail = err?.response?.data?.detail;
+      const code = typeof detail === 'object' ? detail?.code : undefined;
+      if (code === 'DC_HARDLOCK' || code === 'DC_HARDLOCK_OVERRIDE_FORBIDDEN') {
+        setDcHardlock(
+          (typeof detail === 'object' && detail?.message) ||
+            'No Delivery Challan logged for this lens.',
+        );
+      } else {
+        toast.error('Failed to create workshop job');
+      }
     } finally {
       setCreateLoading(false);
     }
@@ -1146,6 +1168,32 @@ const loadJobs = async () => {
                       placeholder="Tint, drill mount, special coating, customer preferences..."
                       className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
                   </div>
+
+                  {/* F9 — DC hardlock banner. Semantic amber = action required;
+                      not a decorative colour. */}
+                  {dcHardlock && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                      <p className="font-medium">Delivery Challan required</p>
+                      <p className="mt-1">{dcHardlock}</p>
+                      <a href="/purchase/grn" className="mt-2 inline-block underline">
+                        Go to GRN / DC entry
+                      </a>
+                      {canOverrideHardlock && (
+                        <div className="mt-3">
+                          <label className="block text-xs font-medium mb-1">
+                            Override reason (Admin)
+                          </label>
+                          <input
+                            type="text"
+                            value={overrideReason}
+                            onChange={e => setOverrideReason(e.target.value)}
+                            placeholder="e.g. Emergency — DC in transit"
+                            className="w-full px-3 py-2 border border-amber-300 bg-white text-gray-900 rounded-lg text-sm"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>

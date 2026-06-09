@@ -4545,6 +4545,19 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-invoices/from-grn/{grn_id}",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # F9: consolidate N Delivery Challans into a draft bulk invoice (accounting
+    # action -> ACCOUNTANT/ADMIN, same gate as from-grn).
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchase-invoices/from-dcs",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # F9: stored DC bulk-tally detail (accounting read -> ACCOUNTANT/ADMIN).
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/dc-match",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # Phase 2: 3-way-match config + per-invoice match detail + exception override.
     # Config read is AUTHENTICATED; config write + exception override are
     # accounting actions -> ACCOUNTANT/ADMIN. Match detail read is AUTHENTICATED.
