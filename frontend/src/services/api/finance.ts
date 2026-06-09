@@ -5,6 +5,7 @@
 // fabricated generateSampleData the Finance dashboard used to render.
 
 import api from './client';
+import type { JournalEntry, ChartAccount } from '../../pages/finance/financeTypes';
 
 export const financeApi = {
   getRevenue: async (params?: { period?: string; store_id?: string }) => {
@@ -96,6 +97,67 @@ export const financeApi = {
   updateTickerSettings: async (payload: { milestone_pcts: number[]; refresh_seconds: number }) => {
     const response = await api.post('/finance/target-ticker/settings', payload);
     return response.data as { milestone_pcts: number[]; refresh_seconds: number; saved: boolean };
+  },
+
+  // --- F17/#25 Maker-checker journal entries -------------------------------
+  // The maker drafts a balanced voucher, submits it (opens an E4 approval), a
+  // DIFFERENT checker PIN-approves, then posts. The PIN is sent in the body and
+  // never stored client-side.
+  listJournalEntries: async (params?: { store_id?: string; status?: string; maker_id?: string }) => {
+    const response = await api.get('/finance/journal-entries', { params });
+    return response.data as { journal_entries: JournalEntry[]; total: number };
+  },
+
+  getJournalEntry: async (jeId: string) => {
+    const response = await api.get(`/finance/journal-entries/${jeId}`);
+    return response.data as JournalEntry;
+  },
+
+  createJournalEntry: async (payload: {
+    description: string;
+    lines: Array<{ account_code: string; debit: number; credit: number; narration?: string }>;
+    store_id?: string;
+    entity_id?: string;
+    entry_date?: string;
+    reference?: string;
+  }) => {
+    const response = await api.post('/finance/journal-entries', payload);
+    return response.data as { ok: boolean; je: JournalEntry };
+  },
+
+  submitJournalEntry: async (jeId: string) => {
+    const response = await api.post(`/finance/journal-entries/${jeId}/submit`, {});
+    return response.data;
+  },
+
+  approveJournalEntry: async (jeId: string, pin: string) => {
+    const response = await api.post(`/finance/journal-entries/${jeId}/approve`, { pin });
+    return response.data;
+  },
+
+  rejectJournalEntry: async (jeId: string, pin: string, note: string) => {
+    const response = await api.post(`/finance/journal-entries/${jeId}/reject`, { pin, note });
+    return response.data;
+  },
+
+  postJournalEntry: async (jeId: string) => {
+    const response = await api.post(`/finance/journal-entries/${jeId}/post`, {});
+    return response.data;
+  },
+
+  reverseJournalEntry: async (jeId: string) => {
+    const response = await api.post(`/finance/journal-entries/${jeId}/reverse`, {});
+    return response.data;
+  },
+
+  getChartOfAccounts: async (params?: { manual_only?: boolean }) => {
+    const response = await api.get('/finance/chart-of-accounts', { params });
+    return response.data as { accounts: ChartAccount[] };
+  },
+
+  downloadTallyJournalJv: async (params: { from_date?: string; to_date?: string; store_id?: string }) => {
+    const response = await api.get('/finance/tally/journal-jv', { params, responseType: 'blob' });
+    return response.data as Blob;
   },
 };
 
