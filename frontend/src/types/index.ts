@@ -625,6 +625,10 @@ export const FOLLOWUP_STATUSES: FollowUpStatus[] = [
 ];
 
 // Phase 4 — walk-in counter + dashboard types
+// N3 footfall status enum: PENDING (no entry yet) / PARTIAL (some staff
+// missing) / COMPLETE (every expected staff has a count).
+export type FootfallEntryStatus = 'PENDING' | 'PARTIAL' | 'COMPLETE';
+
 export interface WalkinTodayResponse {
   store_id: string;
   date_str: string;
@@ -632,12 +636,53 @@ export interface WalkinTodayResponse {
   manual_topup: number;
   total: number;
   per_staff: Record<string, number>;
+  // N3 — footfall capture status (PENDING / PARTIAL / COMPLETE).
+  entry_status?: FootfallEntryStatus;
+  per_staff_log?: Array<{
+    staff_id: string;
+    old_val: number | null;
+    new_val: number;
+    updated_by: string;
+    updated_at: string;
+    reason?: string | null;
+  }>;
 }
 
 export interface ManualTopupRequest {
   delta: number;
   reason: string;
   sales_person_id?: string;
+}
+
+// N3 — footfall capture status for a (store, date).
+export interface WalkinStatusResponse {
+  store_id: string;
+  date_str: string;
+  status: FootfallEntryStatus;
+  staff_with_data: { staff_id: string; walk_ins: number }[];
+  staff_missing: string[];
+  total_walk_ins: number;
+  store_conversion_pct: number | null;
+}
+
+// N3 — manager sets/updates one staff member's walk-in count for a day.
+export interface PerStaffWalkinRequest {
+  staff_id: string;
+  walk_ins: number;
+  date_str?: string;
+  reason?: string;
+}
+
+// N3 — one row of the conversion feed (per salesperson, per day). The
+// conversion_score is null + footfall_missing=true when walk-ins are missing.
+export interface ConversionFeedRow {
+  sales_person_id: string;
+  name: string | null;
+  walk_ins_today: number;
+  walkouts_today: number;
+  retro_conversions_today: number;
+  conversion_score: number | null;
+  footfall_missing: boolean;
 }
 
 export interface PerStaffCard {

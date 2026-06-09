@@ -4822,6 +4822,19 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/walkouts/walkins/mtd",
         "allowed": "AUTHENTICATED",
     },
+    # N3 -- manager sets/updates a per-staff walk-in count (drives the SC
+    # conversion denominator). Managers + admin only so sales staff cannot
+    # self-inflate their own conversion %. In-handler role gate mirrors this.
+    {
+        "method": "PATCH",
+        "path": "/api/v1/walkouts/walkins/per-staff",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+        ],
+    },
     {
         "method": "POST",
         "path": "/api/v1/walkouts/walkins/pos-increment",
@@ -4836,6 +4849,13 @@ POLICY: List[Dict[str, object]] = [
             "STORE_MANAGER",
             "SUPERADMIN",
         ],
+    },
+    # N3 -- footfall capture status (PENDING / PARTIAL / COMPLETE). Same
+    # store-scoping + access class as walkins/today (the SC scorecard input).
+    {
+        "method": "GET",
+        "path": "/api/v1/walkouts/walkins/status",
+        "allowed": "AUTHENTICATED",
     },
     {
         "method": "GET",

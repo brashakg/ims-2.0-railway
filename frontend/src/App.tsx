@@ -27,6 +27,7 @@ const NotificationsPage = lazy(() => import('./pages/notifications/Notifications
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
 const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
 const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
+const FootfallPage = lazy(() => import('./pages/pos/FootfallPage').then(m => ({ default: m.FootfallPage })));
 const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
 const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
 const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
@@ -243,14 +244,14 @@ function App() {
                     }
                   />
 
-                  {/* POS: Footfall Tracking */}
+                  {/* POS: Footfall Tracking (N3 — manual walk-in capture + conversion %) */}
                   <Route
                     path="pos/footfall"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}
                       >
-                        <div className="p-6"><h1 className="text-2xl font-bold text-gray-900">Footfall Tracking</h1><p className="text-gray-500 mt-2">Coming soon</p></div>
+                        <FootfallPage />
                       </ProtectedRoute>
                     }
                   />

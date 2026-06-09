@@ -23,7 +23,7 @@ Side effects on POST:
   2. An audit-log row is written (`action: "walkout.create"`).
 """
 
-from datetime import datetime, date as date_type
+from datetime import datetime, date as date_type, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
@@ -1356,24 +1356,108 @@ def _resolve_dashboard_store(current_user: dict, store_override: Optional[str]) 
     return store
 
 
+# ----------------------------------------------------------------------------
+# N3 — manual footfall capture (per-staff walk-in entry + status)
+# ----------------------------------------------------------------------------
+# Roles allowed to SET a per-staff walk-in count. Narrower than the POS "+1"
+# button: only managers + admin may set/edit attribution, so sales staff cannot
+# self-inflate their own conversion denominator.
+_WALKIN_EDIT_ROLES = _GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES
+# Customer-facing roles whose presence on the roster is expected to carry a
+# walk-in count -- this is the "expected staff" set the entry-status enum is
+# computed against (accountants / workshop staff don't handle walk-ins).
+_FOOTFALL_STAFF_ROLES = {
+    "STORE_MANAGER",
+    "SALES_STAFF",
+    "SALES_CASHIER",
+    "CASHIER",
+    "OPTOMETRIST",
+}
+# IST = UTC+5:30. The footfall day is the store's local (Indian) day, so the
+# "no future date" guard must compare against IST, not the server's UTC clock.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_today_str() -> str:
+    """Today's date in IST (the store's local day)."""
+    return datetime.now(_IST).date().isoformat()
+
+
+def _validate_not_future(date_str: str) -> str:
+    """Reject a footfall date in the future (IST). Returns the validated
+    ISO date string; raises 422 on a malformed or future date."""
+    try:
+        d = date_type.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+    if d.isoformat() > _ist_today_str():
+        raise HTTPException(
+            status_code=422,
+            detail="Footfall date cannot be in the future",
+        )
+    return d.isoformat()
+
+
+def _expected_footfall_staff(store_id: str) -> List[str]:
+    """Active customer-facing staff ids for a store -- the roster the footfall
+    entry-status enum is measured against. Fail-soft: user repo unavailable ->
+    empty list (status then collapses to PENDING/COMPLETE on entries alone)."""
+    try:
+        user_repo = get_user_repository()
+        if user_repo is None:
+            return []
+        users = user_repo.find_by_store(store_id, active_only=True) or []
+    except Exception:  # noqa: BLE001
+        return []
+    out: List[str] = []
+    for u in users:
+        roles = set(u.get("roles", []) or [])
+        if roles & _FOOTFALL_STAFF_ROLES:
+            uid = u.get("user_id") or u.get("id")
+            if uid:
+                out.append(uid)
+    return out
+
+
+class PerStaffWalkinRequest(BaseModel):
+    """N3 — manager sets/updates one staff member's walk-in count for a day."""
+
+    staff_id: str = Field(..., min_length=1)
+    walk_ins: int = Field(..., ge=0, le=1000)
+    date_str: Optional[str] = Field(
+        None, description="ISO date (YYYY-MM-DD); defaults to today (IST)"
+    )
+    reason: Optional[str] = Field(None, max_length=200)
+
+
 @router.get("/walkins/today")
 async def walkins_today(
     current_user: dict = Depends(get_current_user),
     store_id: Optional[str] = Query(None),
 ):
-    """Today's walk-in count + per-staff breakdown for the dashboard."""
+    """Today's walk-in count + per-staff breakdown for the dashboard.
+
+    N3: annotates the response with the footfall ``entry_status`` enum
+    (PENDING / PARTIAL / COMPLETE) computed from the per-staff entries against
+    the active customer-facing roster."""
     store = _resolve_dashboard_store(current_user, store_id)
     repo = get_walkin_counter_repository()
     if repo is None:
         return {
             "store_id": store,
-            "date_str": datetime.now().date().isoformat(),
+            "date_str": _ist_today_str(),
             "pos_auto_count": 0,
             "manual_topup": 0,
             "total": 0,
             "per_staff": {},
+            "entry_status": "PENDING",
         }
-    return _serialize_value(repo.get_today(store))
+    # Use the IST day so this read reconciles with the per-staff PATCH (which
+    # writes against the IST date) around the UTC midnight boundary.
+    doc = repo.get_today(store, date_str=_ist_today_str())
+    expected = _expected_footfall_staff(store)
+    doc["entry_status"] = repo.compute_entry_status(doc.get("per_staff") or {}, expected)
+    return _serialize_value(doc)
 
 
 @router.get("/walkins/mtd")
@@ -1482,6 +1566,110 @@ async def walkins_pos_increment(
         store_id=store,
         sales_person_id=payload.sales_person_id,
         mobile=payload.mobile,
+    )
+    return _serialize_value(result)
+
+
+@router.get("/walkins/status")
+async def walkins_status(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    date: Optional[str] = Query(
+        None, description="ISO date (YYYY-MM-DD); defaults to today (IST)"
+    ),
+):
+    """N3 footfall capture status for a (store, date).
+
+    Returns the PENDING / PARTIAL / COMPLETE enum plus the staff who have a
+    walk-in entry and those still missing, so the manager dashboard + SC
+    scorecard header can show a compliance badge. Future dates are rejected."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    target_date = _validate_not_future(date or _ist_today_str())
+
+    repo = get_walkin_counter_repository()
+    expected = _expected_footfall_staff(store)
+    per_staff: Dict[str, int] = {}
+    if repo is not None:
+        doc = repo.get_today(store, date_str=target_date)
+        per_staff = {
+            sp: int(n) for sp, n in (doc.get("per_staff") or {}).items() if sp
+        }
+
+    entered_ids = set(per_staff.keys())
+    expected_ids = {s for s in expected if s}
+    staff_missing = sorted(expected_ids - entered_ids)
+    status = (
+        repo.compute_entry_status(per_staff, expected)
+        if repo is not None
+        else "PENDING"
+    )
+
+    total_walk_ins = sum(per_staff.values())
+    # Store conversion % is only meaningful once every expected staff is
+    # accounted for; otherwise it's a partial (misleading) denominator -> null.
+    store_conversion_pct: Optional[float] = None
+
+    return {
+        "store_id": store,
+        "date_str": target_date,
+        "status": status,
+        "staff_with_data": [
+            {"staff_id": sp, "walk_ins": n} for sp, n in sorted(per_staff.items())
+        ],
+        "staff_missing": staff_missing,
+        "total_walk_ins": total_walk_ins,
+        "store_conversion_pct": store_conversion_pct,
+    }
+
+
+@router.patch("/walkins/per-staff")
+async def walkins_per_staff(
+    payload: PerStaffWalkinRequest,
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """N3 — manager sets/updates ONE staff member's walk-in count for a day.
+
+    Unlike pos-increment (a +1 floor) or manual-topup (an aggregate store
+    delta), this OVERWRITES the per-staff attribution that drives the SC
+    conversion denominator -- so it is gated to managers + admin only (a sales
+    person cannot inflate their own conversion %). ``walk_ins=0`` is allowed
+    (a staff with no customers today is real data). Atomic single-doc write;
+    audited as ``walkin.per_staff_update``. Future dates rejected (IST)."""
+    roles = _user_role_set(current_user)
+    if not (roles & _WALKIN_EDIT_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only managers / admin can set per-staff walk-in counts",
+        )
+    store = _resolve_dashboard_store(current_user, store_id)
+    target_date = _validate_not_future(payload.date_str or _ist_today_str())
+
+    repo = get_walkin_counter_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    expected = _expected_footfall_staff(store)
+    result = repo.set_per_staff(
+        store_id=store,
+        staff_id=payload.staff_id,
+        walk_ins=payload.walk_ins,
+        updated_by=current_user.get("user_id") or "",
+        date_str=target_date,
+        reason=payload.reason,
+        expected_staff=expected,
+    )
+    _audit_walkout_action(
+        action="walkin.per_staff_update",
+        walkout_id=f"walkin:{store}:{target_date}",
+        store_id=store,
+        current_user=current_user,
+        detail={
+            "staff_id": payload.staff_id,
+            "walk_ins": payload.walk_ins,
+            "date_str": target_date,
+            "reason": payload.reason,
+        },
     )
     return _serialize_value(result)
 
@@ -1751,8 +1939,9 @@ async def conversion_feed(
 
     where retro_conversions_today is "walkouts from prior days that
     flipped to CONVERTED today" — i.e. retroactive credit. The 20-point
-    cap implicitly bounds. If walk_ins == 0 the score is 0 (no
-    denominator).
+    cap implicitly bounds. N3 / CORRECTIONS.md HARDENING line 92: if
+    walk_ins == 0 there is no denominator, so the score is null (unscored)
+    with footfall_missing=true -- NOT a silent 0.
     """
     store = _resolve_dashboard_store(current_user, store_id)
     repo = _walkout_repo()
@@ -1823,11 +2012,16 @@ async def conversion_feed(
         walk_ins = int(walkins_per_staff.get(sp, 0))
         walkouts = int(walkouts_count.get(sp, 0))
         retro = int(retro_count.get(sp, 0))
+        # N3 / CORRECTIONS.md HARDENING line 92 (binding): no walk-in footfall
+        # -> conversion is UNSCORED (null + footfall_missing flag), never a
+        # silent 0 that would corrupt the SC conversion component / payout.
         if walk_ins > 0:
             raw = (walk_ins - walkouts + retro) / walk_ins * 20.0
-            score = round(max(0.0, min(20.0, raw)), 2)
+            score: Optional[float] = round(max(0.0, min(20.0, raw)), 2)
+            footfall_missing = False
         else:
-            score = 0.0
+            score = None
+            footfall_missing = True
         out.append(
             {
                 "sales_person_id": sp,
@@ -1836,6 +2030,7 @@ async def conversion_feed(
                 "walkouts_today": walkouts,
                 "retro_conversions_today": retro,
                 "conversion_score": score,
+                "footfall_missing": footfall_missing,
             }
         )
     return out
