@@ -19,6 +19,7 @@ export type { OnlineStatus } from './products';
 
 // Inventory & Vendors
 export { inventoryApi, vendorsApi, reorderApi } from './inventory';
+export type { VarianceLine } from './inventory';
 
 // Sales / Billing / Orders (orders, prescriptions, workshop, discounts)
 export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sales';

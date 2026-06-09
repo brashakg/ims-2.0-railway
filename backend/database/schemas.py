@@ -721,7 +721,12 @@ INDEXES = {
         {"keys": [("po_number", 1)], "unique": True},
         {"keys": [("vendor_id", 1)]},
         {"keys": [("status", 1)]},
-        {"keys": [("created_at", -1)]}
+        {"keys": [("created_at", -1)]},
+        # F8 PO-vs-GRN variance: the aged-backorder TASKMASTER sweep and the
+        # variance report both scan open POs (SENT/ACKNOWLEDGED/
+        # PARTIALLY_RECEIVED) past their expected_date. A {status, expected_date}
+        # compound index keeps that scan efficient.
+        {"keys": [("status", 1), ("expected_date", 1)]}
     ],
     "grns": [
         {"keys": [("grn_number", 1)], "unique": True},

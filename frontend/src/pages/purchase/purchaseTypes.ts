@@ -2,7 +2,7 @@
 // IMS 2.0 - Purchase Management Types
 // ============================================================================
 
-export type TabType = 'purchase-orders' | 'purchase-invoices' | 'suppliers' | 'vendor-returns' | 'analytics';
+export type TabType = 'purchase-orders' | 'purchase-invoices' | 'variance' | 'suppliers' | 'vendor-returns' | 'analytics';
 export type POStatus =
   | 'DRAFT'
   | 'PENDING'
