@@ -2488,6 +2488,20 @@ async def close_cash_register(
         summary["variance"], body.tolerance
     )
 
+    # E5 (ADDITIVE): by-mode reconciliation over the same session window. This
+    # does NOT touch the CASH-only variance above (build_close_summary is
+    # unchanged) -- it stores a per-tender breakdown alongside it so the close
+    # screen / Tally JV can see UPI/CARD/etc. net. Fail-soft: any error leaves
+    # the cash close exactly as before.
+    by_mode_breakdown = None
+    try:
+        from ..services.tender_reconciliation import reconcile_window
+
+        _recon = reconcile_window(db, store_id, start_iso, end_iso)
+        by_mode_breakdown = _recon.get("by_mode")
+    except Exception:  # noqa: BLE001
+        by_mode_breakdown = None
+
     update = {
         "status": "CLOSED",
         "closed_at": end_iso,
@@ -2497,6 +2511,7 @@ async def close_cash_register(
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
+        "by_mode_breakdown": by_mode_breakdown,
         "bank_deposit": summary["bank_deposit"],
         "counted": counted,
         "expected": summary["expected"],

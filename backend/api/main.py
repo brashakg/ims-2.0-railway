@@ -55,6 +55,7 @@ from .routers import (
     expenses_router,
     finance_router,
     finance_ticker_router,
+    reconciliation_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -199,6 +200,16 @@ async def lifespan(app: FastAPI):
                     logger.info(f"[OK] Seeded {_rn} GLOBAL inactive reminder rule(s)")
             except Exception as e:
                 logger.warning(f"[WARN] Reminder-rule seed skipped: {e}")
+            # E5 tender reconciliation: partial-unique index so a store/IST-day can
+            # be LOCKED once (greenfield collection -> safe). Idempotent, fail-soft.
+            try:
+                from .services.tender_reconciliation import (
+                    ensure_reconciliation_indexes,
+                )
+
+                ensure_reconciliation_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Reconciliation index creation skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:
@@ -1028,6 +1039,16 @@ app.include_router(
     finance_ticker_router,
     prefix="/api/v1/finance",
     tags=["Finance"],
+)
+# E5 tender / cash reconciliation: mounted at the SAME /api/v1/finance prefix
+# behind the finance role gate (its reads match _FINANCE_ROLES; map-write + lock
+# narrow further inline per the E5 packet). READS order.payments[] only -- POS
+# capture is UNCHANGED.
+app.include_router(
+    reconciliation_router,
+    prefix="/api/v1/finance",
+    tags=["Finance"],
+    dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
 )
 app.include_router(
     hr_router,
