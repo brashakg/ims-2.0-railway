@@ -721,8 +721,12 @@ async def get_pnl(
     # charges, prior-period corrections). EXPENSE-type debits raise cost;
     # REVENUE-type credits raise revenue. DRAFT/SUBMITTED/APPROVED JEs do NOT
     # touch the ledger -- only POSTED ones (je_service filters on status).
-    je_from_dt = _parse_range_dt(from_date)
-    je_to_dt = _parse_range_dt(to_date, end=True)
+    # JE entry_date is stored as a CALENDAR-day midnight (see _je_parse_entry_date),
+    # so range it on calendar-day bounds -- NOT the ist_day_start_utc-shifted
+    # created_at bounds used for orders above -- so a JE on the first/last day of
+    # the window isn't mis-bucketed (the two frames must agree).
+    je_from_dt = _je_cal_day(from_date)
+    je_to_dt = _je_cal_day(to_date, end=True)
     je_adj = je_service.pnl_adjustments(db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt)
     je_rev = je_adj.get("je_revenue_adjustment", 0.0)
     je_exp = je_adj.get("je_expense_adjustment", 0.0)
@@ -3227,19 +3231,49 @@ def _require_roles_for(current_user: dict, allowed: set, msg: str) -> None:
         raise HTTPException(status_code=403, detail=msg)
 
 
-def _je_parse_entry_date(s, current_user: dict) -> datetime:
-    """Parse the maker-supplied entry_date (YYYY-MM-DD / ISO) to a naive-UTC
-    datetime. Defaults to today (IST) as the naive-UTC IST-day-start so the
-    stored frame matches the P&L date-filter bounds (also _parse_range_dt).
-    Non-SUPERADMIN makers cannot back-date before the current financial-year
-    start."""
-    if not s:
-        dt = ist_day_start_utc()
+def _je_cal_day(s, *, end: bool = False) -> Optional[datetime]:
+    """Parse a 'YYYY-MM-DD' (or ISO) string as an ACCOUNTING CALENDAR day -> a
+    naive datetime at that day's midnight (``end=True`` -> 23:59:59.999999).
+
+    Unlike _parse_range_dt this does NOT shift through ist_day_start_utc(): a JE's
+    entry_date IS the maker's intended calendar day, so its stored frame and the
+    P&L window bounds must BOTH be calendar-day -- otherwise ``.date()/.month/
+    .year`` (period-lock month, FY serial bucket, display, FY-guard) read the
+    PRIOR IST day (IST-midnight maps to 18:30 UTC the day before). None when
+    empty / unparseable."""
+    if s is None:
+        return None
+    if isinstance(s, datetime):
+        d = s.date()
     else:
-        parsed = _parse_range_dt(s)
-        if parsed is None:
+        txt = str(s).strip()
+        if not txt:
+            return None
+        try:
+            d = datetime.fromisoformat(txt[:10]).date()
+        except ValueError:
+            return None
+    dt = datetime(d.year, d.month, d.day)
+    if end:
+        return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
+
+
+def _je_parse_entry_date(s, current_user: dict) -> datetime:
+    """Parse the maker-supplied entry_date (YYYY-MM-DD / ISO) to the naive datetime
+    at MIDNIGHT of the intended IST CALENDAR day. entry_date is an ACCOUNTING day,
+    NOT a created_at instant -- it must NOT be routed through ist_day_start_utc()
+    (which maps IST-midnight to 18:30 UTC the PRIOR day, mis-bucketing the
+    period-lock month + the Rule-46(b) FY serial + the displayed date, and wrongly
+    rejecting a legit 1-April entry at the FY-guard). Defaults to today (IST).
+    Non-SUPERADMIN makers cannot back-date before the current financial-year start."""
+    if not s:
+        _t = ist_today()
+        dt = datetime(_t.year, _t.month, _t.day)
+    else:
+        dt = _je_cal_day(s)
+        if dt is None:
             raise HTTPException(status_code=400, detail="invalid_entry_date")
-        dt = parsed
     roles = set(current_user.get("roles") or [])
     if "SUPERADMIN" not in roles:
         fy_year = fy_start_year_ist(now_ist())

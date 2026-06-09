@@ -263,6 +263,31 @@ def _entry_date() -> datetime:
     return datetime(2026, 5, 15)
 
 
+def test_entry_date_is_calendar_day_not_ist_shifted():
+    """P1 regression (adversarial): the HTTP entry_date parser must yield the
+    maker's CALENDAR day, NOT a value shifted back one IST day. The old code routed
+    a date-only string through ist_day_start_utc() -> 2026-04-01 became
+    2026-03-31 18:30, mis-bucketing the period-lock month + the FY serial + the
+    displayed date, and wrongly rejecting a legit 1-April entry at the FY-guard.
+    The 15 service-level tests missed this (they call create_je with a bare
+    datetime, bypassing the router parser)."""
+    from datetime import date as _date
+    from api.routers import finance as fin
+
+    # Non-SUPERADMIN accountant entering 1-April (the FY 2026-27 start). With the
+    # bug this RAISED 400 (2026-03-31 18:30 < datetime(2026,4,1)); fixed it returns
+    # the calendar midnight.
+    user = {"roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
+    dt = fin._je_parse_entry_date("2026-04-01", user)
+    assert (dt.year, dt.month, dt.day) == (2026, 4, 1)   # NOT 2026-03-31
+    assert dt.date() == _date(2026, 4, 1)
+    # FY serial bucket is 2026-27 (month >= 4), not 2025-26.
+    assert je_service._fy_start_for(dt) == 2026
+    # An ISO datetime string also collapses to the calendar day.
+    dt2 = fin._je_parse_entry_date("2026-04-01T09:30:00", user)
+    assert (dt2.year, dt2.month, dt2.day) == (2026, 4, 1)
+
+
 def _draft(db, maker_id: str, amount: float = 5000.0, store_id: Optional[str] = None) -> str:
     res = je_service.create_je(
         db, store_id=store_id, entity_id=None, entry_date=_entry_date(),
