@@ -537,6 +537,22 @@ def test_T10_expired_handoff_absent_from_inbox(client, f50):
     assert r.json()["total"] == 0
 
 
+def test_T10b_inbox_handles_naive_expires_at_from_mongo(client, f50):
+    # P1 regression (adversarial): pymongo (no tz_aware) returns NAIVE datetimes,
+    # but _now() is aware UTC -> the inbox expiry compare raised TypeError -> 500 on
+    # every real handover. Store a NAIVE future expires_at (the prod read shape) and
+    # assert the inbox resolves it WITHOUT a 500 and still shows the live handover.
+    _seed_test(f50)
+    _send(client, _token("opto-1", ["OPTOMETRIST"]))
+    f50["handoffs"].collection.docs[0]["expires_at"] = datetime.utcnow() + timedelta(hours=4)  # NAIVE
+    r = client.get(
+        "/api/v1/handoffs/clinical-inbox",
+        headers={"Authorization": f"Bearer {_token('sales-a1', ['SALES_STAFF'])}"},
+    )
+    assert r.status_code == 200, r.text  # was 500 (offset-naive vs offset-aware)
+    assert r.json()["total"] == 1
+
+
 def test_T11_accountant_cannot_read_inbox(client, f50):
     r = client.get(
         "/api/v1/handoffs/clinical-inbox",

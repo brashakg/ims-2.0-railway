@@ -438,9 +438,15 @@ async def list_clinical_inbox(
     visible: List[Dict] = []
     for h in rows:
         # Expiry guard (immediate hide; TTL index does the eventual delete).
+        # pymongo (no tz_aware) returns NAIVE datetimes from Mongo, but _now() is
+        # aware UTC -- comparing them raises TypeError (500 on every real inbox row).
+        # Normalize the stored value to aware UTC before comparing.
         exp = h.get("expires_at")
-        if isinstance(exp, datetime) and exp <= now:
-            continue
+        if isinstance(exp, datetime):
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp <= now:
+                continue
         my_r = next(
             (r for r in h.get("recipients", []) if r.get("user_id") == uid),
             None,
