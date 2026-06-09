@@ -392,6 +392,81 @@ def record_event_atomic(db, **kw) -> Tuple[bool, Optional[dict]]:
     return (ev is not None), ev
 
 
+def record_post_write_event(
+    db,
+    *,
+    event_type: ItemEventType,
+    actor_id: str,
+    stock_id: Optional[str] = None,
+    from_state=None,
+    to_state=None,
+    store_id: Optional[str] = None,
+    to_store_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    source_id: Optional[str] = None,
+    serial: Optional[str] = None,
+    payload: Optional[dict] = None,
+    lens_line_id: Optional[str] = None,
+    cell_key: Optional[str] = None,
+) -> Optional[dict]:
+    """Record ONE ledger row for a transition an EXISTING path already wrote.
+
+    E3w wiring case: the legacy F21 quarantine / transfers ship-receive / GRN
+    mint paths already perform their own status / stock write (and own the
+    `stock_units` projection). This helper is **purely additive** -- it inserts
+    one immutable `item_events` row (+ one AuditRepository.create audit row for
+    material events) recording the REAL `from_state -> to_state` transition, but
+    it performs NO CAS and NO projection onto `stock_units`. It therefore can
+    NEVER fail the already-succeeded business write, never roll it back, and
+    never lose to a CAS race against the write that already happened.
+
+    Returns the inserted ledger doc, or None when no DB / counter is reachable
+    (fail-soft). Callers MUST wrap this in their own try/except that logs and
+    swallows so a ledger hiccup cannot raise into the existing path.
+    """
+    if db is None:
+        return None
+
+    frm = from_state.value if isinstance(from_state, StockState) else from_state
+    to = to_state.value if isinstance(to_state, StockState) else to_state
+
+    seq = _allocate_seq(db)
+    if seq is None:
+        return None
+
+    doc = {
+        "event_id": str(uuid.uuid4()),
+        "event_seq": seq,
+        "stock_id": stock_id,
+        "lens_line_id": lens_line_id,
+        "cell_key": cell_key,
+        "serial": serial,
+        "event_type": event_type.value if isinstance(event_type, ItemEventType) else event_type,
+        "from_state": frm,
+        "to_state": to,
+        "product_id": product_id,
+        "store_id": store_id,
+        "to_store_id": to_store_id,
+        "actor_id": actor_id,
+        "source_type": source_type,
+        "source_id": source_id,
+        "payload": payload or {},
+        "at": _now(),
+    }
+    try:
+        db.get_collection("item_events").insert_one(dict(doc))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ITEM_EVENTS] post-write ledger insert failed: %s", e)
+        return None
+
+    et = event_type if isinstance(event_type, ItemEventType) else None
+    if et is not None:
+        _write_audit_row(et, doc)
+
+    return doc
+
+
 # ---------------------------------------------------------------------------
 # Ledger read helper
 # ---------------------------------------------------------------------------

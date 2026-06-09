@@ -3711,6 +3711,34 @@ async def quarantine_stock_unit(
         {"notes": update["quarantine_notes"], "rtv_vendor_id": req.rtv_vendor_id},
     )
 
+    # E3w: converge this legacy F21 write-path onto the item-event ledger. The
+    # status write + audit above already succeeded; this is a PURELY ADDITIVE
+    # ledger row (no CAS, no projection) recording the AVAILABLE/DAMAGED ->
+    # QUARANTINED transition so /items/{id}/events sees it. Fail-soft: any error
+    # is logged and swallowed -- it can never undo the quarantine just written.
+    try:
+        from ..services import item_events as ie
+
+        db_le = _get_db()
+        if db_le is not None:
+            frm = ie.canonical_state(current_status) or current_status
+            ie.record_post_write_event(
+                db_le,
+                event_type=ie.ItemEventType.QUARANTINE_IN,
+                actor_id=actor,
+                stock_id=stock_id,
+                from_state=frm,
+                to_state=ie.StockState.QUARANTINED,
+                store_id=store_id,
+                product_id=unit.get("product_id"),
+                source_type="F21",
+                payload={"quarantine_reason": reason,
+                         "notes": update["quarantine_notes"],
+                         "rtv_vendor_id": req.rtv_vendor_id},
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] quarantine ledger emit failed: %s", e)
+
     # Event bus (fail-soft): lets TASKMASTER raise an RTV follow-up after 7 days.
     try:
         from agents.registry import dispatch_event
@@ -3785,6 +3813,29 @@ async def lift_quarantine_stock_unit(
         {"status": "AVAILABLE"},
         {"lift_reason": req.lift_reason},
     )
+
+    # E3w: ledger the QUARANTINED -> AVAILABLE release (additive, no CAS) so the
+    # two divergent QUARANTINED write-paths both land in item_events. Fail-soft.
+    try:
+        from ..services import item_events as ie
+
+        db_le = _get_db()
+        if db_le is not None:
+            ie.record_post_write_event(
+                db_le,
+                event_type=ie.ItemEventType.QUARANTINE_OUT,
+                actor_id=actor,
+                stock_id=stock_id,
+                from_state=ie.StockState.QUARANTINED,
+                to_state=ie.StockState.AVAILABLE,
+                store_id=store_id,
+                product_id=unit.get("product_id"),
+                source_type="F21",
+                payload={"disposition": "RESTOCK",
+                         "lift_reason": req.lift_reason},
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] lift-quarantine ledger emit failed: %s", e)
 
     updated = stock_repo.find_by_id(stock_id) or {**unit, **update}
     return {"stock_unit": updated, "message": "Quarantine lifted"}

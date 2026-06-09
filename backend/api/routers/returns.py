@@ -97,6 +97,13 @@ class ReturnLine(BaseModel):
     # The till can set this False to hold a GOOD-looking unit off the shelf.
     restock: bool = True
     notes: Optional[str] = None
+    # E3w (E3 acceptance #8, return half): the physical serial scanned at the
+    # till for THIS returned unit. When BOTH this and the matched stock unit's
+    # `stock_units.serial` are present and they DIFFER, the return is hard-
+    # blocked (409 SERIAL_MISMATCH) unless a manager override is consumed.
+    # Permissive: if EITHER serial is absent (legacy / dirty data) the check is
+    # skipped -- never block a legitimate return on missing serial data.
+    serial: Optional[str] = None
 
 
 class ReplacementLine(BaseModel):
@@ -124,6 +131,15 @@ class ReturnCreate(BaseModel):
     # refund. Must be >= 0 and <= the GST-inclusive gross refund (enforced in
     # the handler -> 422). Net refund = gross - restocking_fee.
     restocking_fee: float = Field(default=0.0, ge=0)
+    # E3w (E3 acceptance #8): a manager-approved override token for a
+    # SERIAL_MISMATCH hard-block. When a return line's scanned serial differs
+    # from the matched stock unit's serial, the return is 409'd UNLESS this
+    # token resolves to a valid, single-use, not-expired E4 approval of
+    # action_type RETURN_SERIAL_OVERRIDE (atomically consumed by create_return).
+    # If the E4 approval engine is unreachable, the override is DENIED (safe
+    # default = block) -- the till must clear the mismatch the normal way.
+    serial_mismatch_override_token: Optional[str] = None
+    serial_mismatch_override_request_id: Optional[str] = None
 
 
 # ============================================================================
@@ -920,6 +936,129 @@ def _reason_summary(items: List[ReturnLine]) -> str:
     return ", ".join(seen)
 
 
+def _matched_unit_serial(stock_repo, product_id, store_id, order_id) -> Optional[str]:
+    """Best-effort lookup of the serial on the SOLD stock unit a return line
+    refers to. Mirrors `_reactivate_original_unit`'s most-specific-first search
+    (order_id+product+store SOLD, then product+store SOLD). Returns the unit's
+    `serial` or None. Pure read, fail-soft -> None."""
+    if stock_repo is None or not product_id:
+        return None
+    base: Dict[str, Any] = {"product_id": product_id, "status": "SOLD"}
+    if store_id:
+        base["store_id"] = store_id
+    try:
+        candidates: List[Dict[str, Any]] = []
+        if order_id:
+            q = dict(base)
+            q["order_id"] = order_id
+            candidates = stock_repo.find_many(q) or []
+        if not candidates:
+            candidates = stock_repo.find_many(dict(base)) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] serial-match lookup failed: %s", exc)
+        return None
+    for unit in candidates:
+        serial = unit.get("serial")
+        if serial:
+            return str(serial).strip().upper()
+    return None
+
+
+def _consume_serial_override(body: "ReturnCreate", current_user: dict) -> bool:
+    """Try to consume a manager-approved RETURN_SERIAL_OVERRIDE approval (E4).
+
+    Returns True only when the E4 engine atomically consumes a valid, single-
+    use, not-expired approval of the right action_type. SAFE DEFAULT: any
+    missing token, missing engine, or error -> False (the mismatch stays
+    blocked). E3w wires the EXISTING E4 `consume_approval` -- it does NOT
+    reimplement approvals.
+
+    TODO(E4-FE / #25-#27): expose the approval-request + PIN-approve flow in the
+    POS returns UI so the till can mint this token; until then a manager mints
+    it via POST /approvals/requests + /approvals/requests/{id}/approve."""
+    token = (body.serial_mismatch_override_token or "").strip() or None
+    request_id = (body.serial_mismatch_override_request_id or "").strip() or None
+    if not token and not request_id:
+        return False
+    try:
+        from ..services.approvals import ApprovalEngine
+
+        engine = ApprovalEngine(db=_get_db())
+        res = engine.consume_approval(
+            consumed_by=current_user.get("user_id") or "",
+            action_type="RETURN_SERIAL_OVERRIDE",
+            request_id=request_id,
+            approval_token=token,
+        )
+        return bool(res.get("ok"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] serial-override consume failed: %s", exc)
+        return False
+
+
+def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
+                                  resolved_order_id, store_id, current_user):
+    """E3 acceptance #8 (return half): hard-block a serial-mismatched return.
+
+    For each resolved return line that carries a scanned `serial`, compare it to
+    the matched SOLD stock unit's `serial`. A MISMATCH -> HTTP 409 with
+    `reason=SERIAL_MISMATCH`, UNLESS a manager override is consumed (then the
+    return proceeds and `override_by` is recorded on the response of the caller).
+
+    PERMISSIVE: when EITHER serial is absent the check is skipped -- a legitimate
+    return is never blocked on missing / dirty serial data. Returns the override
+    actor id when an override was consumed (so the caller can stamp it), else
+    None. Raises HTTPException(409) on an un-overridden mismatch."""
+    # No serialized return line carries a serial -> nothing to compare; skip
+    # before touching the stock repo (the common case, fully permissive).
+    if not any((getattr(e["ret_line"], "serial", None) or "").strip()
+               for e in resolved_lines):
+        return None
+    try:
+        stock_repo = get_stock_repository()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] serial-guard stock repo unavailable: %s", exc)
+        return None  # cannot compare -> permissive
+    if stock_repo is None:
+        return None  # no serialized stock to compare against -> permissive
+    override_consumed: Optional[bool] = None  # lazy: only consume once if needed
+    override_by: Optional[str] = None
+    for entry in resolved_lines:
+        ret_line = entry["ret_line"]
+        orig_line = entry["orig_line"]
+        scanned = (getattr(ret_line, "serial", None) or "").strip().upper()
+        if not scanned:
+            continue  # no till serial -> skip (permissive)
+        product_id = orig_line.get("product_id") or ret_line.product_id
+        unit_serial = _matched_unit_serial(
+            stock_repo, product_id, store_id, resolved_order_id
+        )
+        if not unit_serial:
+            continue  # no recorded serial -> skip (permissive)
+        if scanned == unit_serial:
+            continue  # match -> fine
+        # MISMATCH. Allow ONLY a consumed manager override.
+        if override_consumed is None:
+            override_consumed = _consume_serial_override(body, current_user)
+            if override_consumed:
+                override_by = current_user.get("user_id")
+        if not override_consumed:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "SERIAL_MISMATCH",
+                    "message": (
+                        "Scanned serial does not match the sold unit's serial. "
+                        "A manager override is required to proceed."
+                    ),
+                    "product_id": product_id,
+                    "scanned_serial": scanned,
+                    "expected_serial": unit_serial,
+                },
+            )
+    return override_by
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -1069,6 +1208,16 @@ async def create_return(
                 ),
             )
         resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
+
+    # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
+    #     the quantity guard and BEFORE any money math / atomic claim, so a
+    #     mismatched return rejects with nothing reserved. Permissive: skipped
+    #     when either the scanned or the recorded serial is absent. A consumed
+    #     manager override (E4) lets it proceed; `serial_override_by` is stamped
+    #     on the return doc below.
+    serial_override_by = _guard_return_serial_mismatch(
+        resolved_lines, body, resolved_order_id, store_id, current_user
+    )
 
     # 1. Money math (pure engine; validates negatives). returned_value is the
     #    GST-INCLUSIVE gross the customer paid: the original order line's
@@ -1328,6 +1477,10 @@ async def create_return(
         "loyalty_reversal_failed": loyalty_reversal_failed,
         "reason_summary": _reason_summary(active_lines),
         "approval_note": body.approval_note or "",
+        # E3w: stamped only when a manager override cleared a SERIAL_MISMATCH on
+        # this return (None for the normal / matched-serial path) -- the override
+        # actor for the audit trail.
+        "serial_override_by": serial_override_by,
         "created_by": current_user.get("user_id"),
         "created_by_name": current_user.get(
             "full_name", current_user.get("username", "")

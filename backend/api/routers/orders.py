@@ -1108,6 +1108,11 @@ def _mark_units_sold(
             if sid:
                 used.add(sid)
                 marked.append(sid)
+                # E3w-DEFERRED: POS-sell ledger emit needs POS sign-off. The
+                # AVAILABLE -> SOLD item_events emit for this revenue-critical
+                # path is intentionally NOT wired here; it is owner-gated to a
+                # separate item (and the /items/{id}/sell route gates it behind
+                # FF_E3_POS_SELL). Do NOT add a record_event call here.
 
     return marked
 

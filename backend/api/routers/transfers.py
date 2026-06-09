@@ -303,6 +303,38 @@ def _audit_stock_move(prior_status, new_status, stock_id, transfer, extra=None):
         logger.warning("[TRANSFER] stock audit skipped: %s", exc)
 
 
+def _ledger_transfer_event(event_type_name: str, stock_id, from_state, to_state,
+                           product_id, store_id, to_store_id, transfer):
+    """E3w: additively ledger one transfer ship/receive unit move into
+    item_events AFTER the existing status write + stock_audit row succeed.
+
+    No CAS, no projection -- the transfer path already owns the stock_units
+    write. Fail-soft: any error is logged and swallowed so a ledger hiccup can
+    never undo the move that already happened or fail the transfer."""
+    try:
+        from ..services import item_events as ie
+
+        db = _get_db()
+        if db is None:
+            return
+        ie.record_post_write_event(
+            db,
+            event_type=getattr(ie.ItemEventType, event_type_name),
+            actor_id="",
+            stock_id=str(stock_id),
+            from_state=from_state,
+            to_state=to_state,
+            product_id=product_id,
+            store_id=store_id,
+            to_store_id=to_store_id,
+            source_type="TRANSFER",
+            source_id=transfer.get("id"),
+            payload={"transfer_number": transfer.get("transfer_number")},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TRANSFER] item-event ledger emit skipped: %s", exc)
+
+
 def _apply_ship_stock_move(transfer: Dict) -> Dict:
     """Move source on-hand OUT when a transfer ships.
 
@@ -401,6 +433,16 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
                     str(sid),
                     transfer,
                     {"product_id": product_id},
+                )
+                _ledger_transfer_event(
+                    "TRANSFER_SHIP",
+                    str(sid),
+                    STOCK_STATUS_AVAILABLE,
+                    STOCK_STATUS_TRANSFERRED,
+                    product_id,
+                    from_store,
+                    transfer.get("to_location_id"),
+                    transfer,
                 )
 
         line["shipped_stock_ids"] = moved_ids
@@ -516,6 +558,16 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
                     str(sid),
                     transfer,
                     {"product_id": product_id, "moved_to": to_store},
+                )
+                _ledger_transfer_event(
+                    "TRANSFER_RECEIVE",
+                    str(sid),
+                    STOCK_STATUS_TRANSFERRED,
+                    STOCK_STATUS_AVAILABLE,
+                    product_id,
+                    to_store,
+                    None,
+                    transfer,
                 )
 
         line["received_stock_ids"] = received_ids

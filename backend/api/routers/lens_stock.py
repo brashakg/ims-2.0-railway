@@ -272,6 +272,41 @@ def _write_audit(
         )
 
 
+def _ledger_lens_event(event_type_name: str, *, lens_line_id, store_id, qty,
+                       sph, cyl, add, source_type, source_id):
+    """E3w: additively ledger a lens reserve/release into item_events.
+
+    The lens stock model is the AGGREGATE `lens_stock_lines` cell (on_hand /
+    reserved counts) -- there is NO `stock_units` row and NO serialized status,
+    so this records a CELL-level event (lens_line_id + cell_key, no stock_id, no
+    CAS, no projection) AFTER the atomic cell update + lens_stock_audit row have
+    already succeeded. Fail-soft: any error is logged + swallowed so a ledger
+    hiccup can never undo the reserve/release that already happened.
+
+    NOTE (E3w report): there is no COMMIT ItemEventType in the merged enum, so
+    the lens `commit` endpoint is intentionally NOT wired here."""
+    try:
+        from ..services import item_events as ie
+
+        db = _get_db()
+        if db is None:
+            return
+        cell_key = "sph={s};cyl={c};add={a}".format(s=sph, c=cyl, a=add)
+        ie.record_post_write_event(
+            db,
+            event_type=getattr(ie.ItemEventType, event_type_name),
+            actor_id="",
+            lens_line_id=lens_line_id,
+            cell_key=cell_key,
+            store_id=store_id,
+            source_type=source_type,
+            source_id=source_id,
+            payload={"qty": int(qty), "sph": sph, "cyl": cyl, "add": add},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[LENS_STOCK] item-event ledger emit skipped: %s", exc)
+
+
 def _return_document_after():
     """Resolve ReturnDocument.AFTER without hard-importing pymongo at
     module load. Fail-soft to None (the driver default) when pymongo is
@@ -806,6 +841,17 @@ async def reserve_cell(
         source_id=payload.source_id,
         notes=payload.notes,
     )
+    _ledger_lens_event(
+        "RESERVE",
+        lens_line_id=lens_line_id,
+        store_id=active_store,
+        qty=payload.qty,
+        sph=payload.sph,
+        cyl=payload.cyl,
+        add=payload.add,
+        source_type=payload.source_type or "POS",
+        source_id=payload.source_id,
+    )
     return {"status": "success", "cell": _enrich(result)}
 
 
@@ -950,5 +996,16 @@ async def release_cell(
         source_type=payload.source_type or "ORDER_CANCEL",
         source_id=payload.source_id,
         notes=payload.notes,
+    )
+    _ledger_lens_event(
+        "RELEASE",
+        lens_line_id=lens_line_id,
+        store_id=active_store,
+        qty=payload.qty,
+        sph=payload.sph,
+        cyl=payload.cyl,
+        add=payload.add,
+        source_type=payload.source_type or "ORDER_CANCEL",
+        source_id=payload.source_id,
     )
     return {"status": "success", "cell": _enrich(result)}
