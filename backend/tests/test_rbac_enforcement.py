@@ -215,14 +215,30 @@ def test_self_enforced_jarvis_defers_to_route_404(client):
 
 
 def test_self_enforced_proposals_defers_to_route_404(client):
-    for method, path in (
-        ("get", "/api/v1/jarvis/proposals"),
-        ("post", "/api/v1/jarvis/proposals/P1/approve"),
-        ("post", "/api/v1/jarvis/proposals/P1/reject"),
-    ):
-        r = getattr(client, method)(path, headers=_auth(["ADMIN"]))
-        assert r.status_code == 404, (method, path, r.text)
-        assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX)
+    # #7: ADMIN is now ALLOWED on /jarvis/proposals (predictive-purchasing
+    # review queue). A role BELOW ADMIN (AREA_MANAGER / STORE_MANAGER) is still
+    # denied AND self-enforced, so it must get the route's 404 existence-hiding
+    # response - NOT the middleware's generic 403.
+    for role in ("AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF"):
+        for method, path in (
+            ("get", "/api/v1/jarvis/proposals"),
+            ("post", "/api/v1/jarvis/proposals/P1/approve"),
+            ("post", "/api/v1/jarvis/proposals/P1/reject"),
+        ):
+            r = getattr(client, method)(path, headers=_auth([role]))
+            assert r.status_code == 404, (role, method, path, r.text)
+            assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX)
+
+
+def test_proposals_admin_now_allowed_through_middleware(client):
+    """#7: ADMIN may reach the proposal review queue (the middleware must NOT
+    block it). The fail-soft store returns an empty list (no Mongo in tests),
+    so a 200 envelope proves ADMIN got THROUGH - not a 403/404."""
+    r = client.get("/api/v1/jarvis/proposals?type=draft_po", headers=_auth(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "proposals" in body
+    assert body.get("filter_type") == "draft_po"
 
 
 def test_self_enforced_prescription_create_defers_to_route_clinical_403(client):

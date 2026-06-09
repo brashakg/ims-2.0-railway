@@ -125,11 +125,29 @@ def test_store_write_is_hq_only():
 
 
 def test_all_jarvis_routes_superadmin_only():
-    """Non-negotiable: every /api/v1/jarvis/* route is SUPERADMIN-only."""
+    """Non-negotiable: every /api/v1/jarvis/* route is SUPERADMIN-only, with ONE
+    documented exception - the #7 predictive-purchasing proposal review queue is
+    SUPERADMIN + ADMIN (DECISIONS). Those 4 routes still 404 every role below
+    ADMIN (self_enforced); all OTHER jarvis routes remain strictly SUPERADMIN."""
+    # The proposal-review routes that DECISIONS scopes to SUPERADMIN + ADMIN.
+    _PROPOSAL_ROUTES = {
+        ("GET", "/api/v1/jarvis/proposals"),
+        ("GET", "/api/v1/jarvis/proposals/{proposal_id}"),
+        ("POST", "/api/v1/jarvis/proposals/{proposal_id}/approve"),
+        ("POST", "/api/v1/jarvis/proposals/{proposal_id}/reject"),
+    }
     jarvis = [e for e in rbac.POLICY if e["path"].startswith("/api/v1/jarvis")]
     assert jarvis, "no jarvis routes catalogued"
     for e in jarvis:
-        assert e["allowed"] == ["SUPERADMIN"], f"jarvis route not superadmin: {e}"
+        if (e["method"], e["path"]) in _PROPOSAL_ROUTES:
+            assert e["allowed"] == ["SUPERADMIN", "ADMIN"], (
+                f"jarvis proposal route should be SUPERADMIN+ADMIN: {e}"
+            )
+            assert e.get("self_enforced") is True, (
+                f"jarvis proposal route must stay self_enforced (404-hiding): {e}"
+            )
+        else:
+            assert e["allowed"] == ["SUPERADMIN"], f"jarvis route not superadmin: {e}"
 
 
 def test_reports_inventory_valuation_is_finance_roles():

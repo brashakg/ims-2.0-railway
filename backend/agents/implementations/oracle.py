@@ -392,71 +392,213 @@ class OracleAgent(JarvisAgent):
                     f"across {len(by_store)} store(s); {len(high_anomalies)} HIGH")
         return high_anomalies
 
+    # Static lead-time used in the recommended-qty cover when a product carries
+    # no per-product lead time. Conservative single value; the suggestion is a
+    # human-reviewed DRAFT, so over/under by a few units is corrected at approve.
+    _DEFAULT_LEAD_TIME_DAYS = 7
+
+    def _reorder_horizon_days(self) -> int:
+        """E2-configurable stockout horizon (#7). days_remaining below this
+        triggers a reorder suggestion. Fail-soft to the 14-day default."""
+        try:
+            from api.services import policy_engine
+            v = policy_engine.get_policy(
+                "predictive_purchasing.horizon_days", scope={}, default=14,
+            )
+            v = int(v)
+            return v if v >= 1 else 14
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[ORACLE] reorder horizon lookup failed (default 14): {e}")
+            return 14
+
     async def _propose_reorders(self) -> int:
         """
-        For SKUs below their reorder point, enqueue a reversible ``draft_po``
-        change-proposal instead of acting. Approving it (Superadmin) creates
-        a DRAFT purchase order via the shared executor; sending the PO to the
-        vendor remains a separate, non-reversible, human step.
+        #7 Predictive purchasing. For every (product, store) that is on track to
+        run OUT of stock within the configured horizon (default 14 days) at its
+        recent SALES VELOCITY, enqueue a reversible ``draft_po`` change-proposal
+        for human review. Approving it (SUPERADMIN/ADMIN) creates a DRAFT
+        purchase order via the shared executor; SENDING the PO to the vendor
+        remains a separate, non-reversible, human step.
 
-        De-duped per SKU+day so the hourly tick doesn't stack identical
-        suggestions. Fully fail-soft — returns the count enqueued (0 on any
-        problem) and never raises.
+        This is READ-ONLY analytics + a suggestion record only. It NEVER auto-
+        creates or sends a PO that commits money. The trigger is the projected
+        days-of-stock horizon (NOT a static reorder_point breach): a fast-moving
+        SKU above its reorder point can still be flagged, and a slow SKU below it
+        is left alone if demand won't exhaust it inside the horizon.
+
+        Burn rate (units/day) is computed in PYTHON from booked ``orders`` line
+        items over a 7-day + 30-day trailing window (no aggregation pipeline, so
+        the behaviour is identical over a fake in-memory DB and real Mongo). The
+        7-day rate is primary; a SKU with zero 7-day sales falls back to its 30-
+        day rate so a weekly-selling SKU is not mistaken for a dead one.
+
+        One proposal per (product_id, store_id) per day, de-duped on
+        ``draft_po:{product_id}:{store_id}:{date}``. Capped at 50 per tick. Fully
+        fail-soft - returns the count enqueued (0 on any problem) and never raises.
         """
-        stock_coll = self.get_collection("stock_units")
-        if stock_coll is None:
+        orders_coll = self.get_collection("orders")
+        if orders_coll is None:
             return 0
-        # Lazy import keeps ORACLE importable even if proposals module is absent
+        # Lazy imports keep ORACLE importable even if a module is absent.
         try:
             from ..proposals import create_proposal
+            from ..predictive_reorder import (
+                tally_demand_by_product_store, burn_rates, days_remaining,
+                recommended_qty, projected_stockout_iso,
+            )
         except Exception as e:  # pragma: no cover
-            logger.debug(f"[ORACLE] proposals module import failed: {e}")
+            logger.debug(f"[ORACLE] predictive-reorder import failed: {e}")
             return 0
 
-        enqueued = 0
+        now = now_ist_naive()
+        horizon = self._reorder_horizon_days()
+
+        # 1. Booked-order demand over the trailing 30 days (Python-side tally).
         try:
-            low_stock = list(stock_coll.find({
-                "$expr": {"$lt": ["$quantity", "$reorder_point"]},
-            }).limit(20))
+            orders = list(orders_coll.find({
+                "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                "created_at": {"$gte": now - timedelta(days=30)},
+            }))
         except Exception as e:
-            logger.debug(f"[ORACLE] low-stock scan error: {e}")
+            logger.debug(f"[ORACLE] order demand scan error: {e}")
+            # Fall back to an unfiltered scan if the DB rejects the filter shape
+            # (e.g. a fake DB that ignores comparison operators on created_at).
+            try:
+                orders = list(orders_coll.find({}))
+            except Exception:  # noqa: BLE001
+                return 0
+
+        demand = tally_demand_by_product_store(orders, now=now)
+        if not demand:
             return 0
 
-        today = datetime.now(timezone.utc).strftime("%y%m%d")
-        for item in low_stock:
-            sku = item.get("sku")
-            if not sku:
-                continue
-            on_hand = item.get("quantity", 0)
-            reorder_point = item.get("reorder_point", 0)
-            suggested_qty = max(reorder_point * 2 - on_hand, 1)
+        # 2. On-hand per (product_id, store_id) from stock_units (AVAILABLE),
+        #    summed in Python. Missing collection -> on_hand defaults to 0.
+        on_hand_map: Dict[tuple, int] = {}
+        stock_coll = self.get_collection("stock_units")
+        if stock_coll is not None:
+            try:
+                for su in stock_coll.find({}):
+                    pid = su.get("product_id") or su.get("sku")
+                    if not pid:
+                        continue
+                    status = str(su.get("status") or "").upper()
+                    # RESERVED is held for an order -> NOT sellable on-hand (mirrors
+                    # item_events.ON_HAND_STATUSES + inventory.py). Only AVAILABLE/
+                    # IN_STOCK (or a legacy blank status) count toward the reorder
+                    # on-hand signal; counting RESERVED would over-state stock and
+                    # SUPPRESS a legitimate reorder (the opposite of this feature's job).
+                    if status and status not in ("AVAILABLE", "IN_STOCK"):
+                        continue
+                    key = (str(pid), str(su.get("store_id") or "UNKNOWN"))
+                    qty = su.get("quantity")
+                    qty = 1 if qty is None else qty
+                    try:
+                        qty = int(qty)
+                    except (TypeError, ValueError):
+                        qty = 0
+                    on_hand_map[key] = on_hand_map.get(key, 0) + qty
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[ORACLE] stock_units scan error: {e}")
+
+        # 3. Product master lookup for preferred_vendor_id + reorder_point.
+        products_coll = self.get_collection("products")
+        prod_by_id: Dict[str, Dict[str, Any]] = {}
+        if products_coll is not None:
+            wanted = {pid for (pid, _store) in demand.keys()}
+            try:
+                for p in products_coll.find({}):
+                    for idf in ("product_id", "sku", "_id"):
+                        val = p.get(idf)
+                        if val is not None and str(val) in wanted:
+                            prod_by_id.setdefault(str(val), p)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[ORACLE] products scan error: {e}")
+
+        today = now.strftime("%y%m%d")
+        enqueued = 0
+        CAP = 50
+        for (pid, store_id), d in demand.items():
+            if enqueued >= CAP:
+                break
+            rates = burn_rates(d["units_7d"], d["units_30d"])
+            eff = rates["effective"]
+            on_hand = on_hand_map.get((pid, store_id), 0)
+            d_left = days_remaining(on_hand, eff)
+            if not (d_left < horizon):
+                continue  # not at risk inside the horizon -> no suggestion
+
+            prod = prod_by_id.get(pid, {})
+            preferred_vendor_id = (
+                prod.get("preferred_vendor_id")
+                or prod.get("default_vendor_id")
+                or prod.get("vendor_id")
+            )
+            reorder_point = prod.get("reorder_point") or 0
+            try:
+                reorder_point = int(reorder_point)
+            except (TypeError, ValueError):
+                reorder_point = 0
+            qty = recommended_qty(
+                on_hand=on_hand, effective_rate=eff, horizon_days=horizon,
+                lead_time_days=self._DEFAULT_LEAD_TIME_DAYS,
+                reorder_point=reorder_point,
+            )
+            name = d.get("name") or pid
+            brand = d.get("brand") or ""
+            label = (f"{brand} {name}".strip()) or pid
+            stockout = projected_stockout_iso(now, d_left)
+            vendor_missing = not bool(preferred_vendor_id)
+
             try:
                 result = create_proposal(
                     self.db,
                     created_by_agent=self.agent_id,
                     proposal_type="draft_po",
-                    title=f"Reorder {sku} — stock {on_hand} < reorder point {reorder_point}",
+                    title=f"Reorder {label} - {d_left:.1f} days of stock left",
                     rationale=(
-                        f"On-hand quantity {on_hand} for SKU {sku} is below its "
-                        f"reorder point of {reorder_point}. Approving drafts a "
-                        f"purchase order for {suggested_qty} unit(s) (NOT sent to "
-                        f"the vendor — sending is a separate manual step)."
+                        f"{label} at store {store_id} has {on_hand} on hand and is "
+                        f"selling ~{eff:.2f}/day, so stock runs out in about "
+                        f"{d_left:.1f} days - inside the {horizon}-day horizon. "
+                        f"Approving drafts a purchase order for {qty} unit(s) "
+                        f"(NOT sent to the vendor - sending is a separate manual "
+                        f"step)."
+                        + ("" if not vendor_missing else
+                           " No preferred vendor is set on this product - assign "
+                           "one before ordering.")
                     ),
                     payload={
-                        "sku": sku,
-                        "quantity": suggested_qty,
-                        "vendor_id": item.get("default_vendor_id"),
+                        "product_id": pid,
+                        "sku": pid,
+                        "store_id": store_id,
+                        "quantity": qty,
+                        "vendor_id": preferred_vendor_id,
+                        "vendor_missing": vendor_missing,
                         "on_hand": on_hand,
                         "reorder_point": reorder_point,
+                        "burn_rate_7d": round(rates["burn_rate_7d"], 4),
+                        "burn_rate_30d": round(rates["burn_rate_30d"], 4),
+                        "days_remaining": round(d_left, 2),
+                        "projected_stockout_date": stockout,
+                        "horizon_days": horizon,
+                        "product_name": name,
+                        "brand": brand,
+                        "category": d.get("category") or "",
                     },
-                    before_state={"sku": sku, "on_hand": on_hand,
-                                  "reorder_point": reorder_point},
-                    dedupe_key=f"draft_po:{sku}:{today}",
+                    before_state={
+                        "product_id": pid, "store_id": store_id,
+                        "on_hand": on_hand, "days_remaining": round(d_left, 2),
+                        "draft_po": None,
+                    },
+                    dedupe_key=f"draft_po:{pid}:{store_id}:{today}",
                 )
                 if result:
                     enqueued += 1
-            except Exception as e:  # pragma: no cover — defensive
-                logger.debug(f"[ORACLE] failed to enqueue reorder proposal for {sku}: {e}")
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug(
+                    f"[ORACLE] failed to enqueue reorder proposal for "
+                    f"{pid}@{store_id}: {e}"
+                )
         return enqueued
 
     async def _detect_sales_anomalies(self) -> List[Dict[str, Any]]:

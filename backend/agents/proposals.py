@@ -237,6 +237,7 @@ class ProposalStore:
         self,
         status: Optional[str] = None,
         limit: int = 50,
+        proposal_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         coll = self._coll()
         if coll is None:
@@ -244,6 +245,8 @@ class ProposalStore:
         q: Dict[str, Any] = {}
         if status:
             q["status"] = status
+        if proposal_type:
+            q["type"] = proposal_type
         try:
             rows = list(
                 coll.find(q, {"_id": 0}).sort("created_at", -1).limit(int(limit))
@@ -587,12 +590,19 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
     the PO to the vendor is a SEPARATE, non-reversible action gated by the
     /vendors '.../send' endpoint and is never auto-executed here.
 
-    payload: { sku, quantity, vendor_id?, reorder_point?, on_hand? }
+    payload: { sku, quantity, vendor_id?, reorder_point?, on_hand?,
+               store_id?, product_id? }
+
+    When ``store_id`` is present (F7 predictive purchasing), it is stamped onto
+    the DRAFT PO as ``delivery_store_id`` so the draft is store-attributed - the
+    same field vendors.py's from-forecast POs carry. A draft for a SKU with no
+    preferred vendor still drafts (vendor_id null); assigning a vendor before
+    SENDING is the human step.
     """
     if db is None:
         raise RuntimeError("database unavailable")
     payload = proposal.get("payload") or {}
-    sku = payload.get("sku")
+    sku = payload.get("sku") or payload.get("product_id")
     if not sku:
         raise ValueError("draft_po payload missing 'sku'")
     qty = int(payload.get("quantity") or 1)
@@ -608,11 +618,14 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
         f"PO-PROP-{datetime.now(timezone.utc).strftime('%y%m%d-%H%M%S')}"
         f"-{str(sku)[:6]}"
     )
+    store_id = payload.get("store_id")
     po_doc = {
         "po_id": uuid.uuid4().hex,
         "po_number": po_number,
         "sku": sku,
+        "product_id": payload.get("product_id") or sku,
         "vendor_id": payload.get("vendor_id"),
+        "delivery_store_id": store_id,           # store-attributed (F7)
         "quantity": qty,
         "status": "DRAFT",                       # DRAFT only - not sent
         "auto_drafted_by": proposal.get("created_by_agent"),
@@ -624,6 +637,7 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "before_state": {
             "sku": sku,
+            "store_id": store_id,
             "on_hand": payload.get("on_hand"),
             "reorder_point": payload.get("reorder_point"),
             "draft_po": None,
@@ -631,6 +645,7 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
         "after_state": {
             "po_number": po_number,
             "po_status": "DRAFT",
+            "delivery_store_id": store_id,
             "quantity": qty,
         },
         "po_number": po_number,

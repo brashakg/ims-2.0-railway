@@ -104,7 +104,7 @@ interface LiveAgent {
 }
 
 export function JarvisPage() {
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
   const toast = useToast();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -130,6 +130,9 @@ export function JarvisPage() {
   // AI change-proposals (SYSTEM_INTENT section 8 review loop)
   const [proposals, setProposals] = useState<AIProposal[] | null>(null);
   const [proposalBusyId, setProposalBusyId] = useState<string | null>(null);
+  // #7 predictive purchasing: pending reorder draft-PO suggestions (loaded
+  // separately so the two sections refresh independently). Visible to ADMIN too.
+  const [poProposals, setPoProposals] = useState<AIProposal[] | null>(null);
   // PIXEL audit history — last N audit runs from ui_audits
   const [pixelAudits, setPixelAudits] = useState<{
     audits: Array<{
@@ -189,15 +192,26 @@ export function JarvisPage() {
   // requires hooks to be called in the same order every render, and an early-return
   // before the useEffect/useState block would skip them on subsequent renders if the
   // role changes, throwing "rendered fewer hooks than expected" at runtime.
+  // hasRole(['SUPERADMIN']) is TRUE for ADMIN too (ADMIN inherits everything),
+  // so it gates "may see the Jarvis page" - which now includes ADMIN for the
+  // #7 Recommended-POs section. `isStrictSuperAdmin` is the EXACT role check
+  // used to keep the AI agent toggles + ORACLE config + the rest of Jarvis's
+  // SUPERADMIN-only surfaces (and their SUPERADMIN-only API fetches) hidden
+  // from an ADMIN, who would otherwise 404 on those endpoints.
   const isSuperAdmin = hasRole(['SUPERADMIN']);
+  const userRoles = user?.roles ?? [];
+  const isStrictSuperAdmin =
+    userRoles.includes('SUPERADMIN') && user?.activeRole !== 'ADMIN';
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Load the available LLM models for the chat selector
+  // Load the available LLM models for the chat selector (SUPERADMIN-only
+  // endpoint; the chat surface is hidden from ADMIN, so don't fetch it).
   useEffect(() => {
+    if (!isStrictSuperAdmin) return;
     api.get<{
       models: Array<{ id: string; label: string; tier?: 'free' | 'standard' | 'premium' }>;
       default: string | null;
@@ -208,7 +222,8 @@ export function JarvisPage() {
         else if (data.models?.length) setSelectedModel(data.models[0].id);
       })
       .catch(() => setLlmModels([]));
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStrictSuperAdmin]);
 
   // Gated model switching — premium models (Opus etc.) trigger a confirm
   // modal that surfaces the rough cost so users opt in deliberately.
@@ -229,15 +244,22 @@ export function JarvisPage() {
     setSelectedModel(newId);
   };
 
-  // Load initial insights + live agent list + activity feed + PIXEL + SENTINEL
+  // Load initial insights + live agent list + activity feed + PIXEL + SENTINEL.
+  // The agent-grid / insights / PIXEL / SENTINEL fetches are SUPERADMIN-only
+  // endpoints, so only fire them for a strict SUPERADMIN; an ADMIN viewing the
+  // page solely for the #7 Recommended-POs section loads ONLY the proposals.
   useEffect(() => {
-    loadInsights();
-    loadRecommendations();
-    loadAgents();
-    loadActivity();
-    loadProposals();
-    loadPixelAudits();
-    loadSentinelHealth();
+    // #7 reorder suggestions — visible to ADMIN + SUPERADMIN.
+    loadPoProposals();
+    if (isStrictSuperAdmin) {
+      loadInsights();
+      loadRecommendations();
+      loadAgents();
+      loadActivity();
+      loadProposals();
+      loadPixelAudits();
+      loadSentinelHealth();
+    }
     // Add initial greeting
     setMessages([
       {
@@ -247,7 +269,8 @@ export function JarvisPage() {
         timestamp: new Date(),
       },
     ]);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStrictSuperAdmin]);
 
   // PIXEL audit history fetch
   const loadPixelAudits = async () => {
@@ -307,6 +330,62 @@ export function JarvisPage() {
       // eslint-disable-next-line no-console
       console.error('[JARVIS] proposals fetch failed:', e);
       setProposals(null);
+    }
+  };
+
+  // #7: pull ONLY the pending reorder draft-PO suggestions for the
+  // Recommended-POs section (separate from the generic change-proposals list).
+  const loadPoProposals = async () => {
+    try {
+      const data = await proposalsApi.list({
+        status: 'PENDING',
+        type: 'draft_po',
+        limit: 100,
+      });
+      setPoProposals(data.proposals ?? []);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] reorder proposals fetch failed:', e);
+      setPoProposals(null);
+    }
+  };
+
+  // Act On It / Ignore for a reorder draft-PO. Approving auto-executes the
+  // reversible draft_po (creates a DRAFT PO, store-attributed) - it NEVER
+  // sends a PO or commits money. Refreshes only the Recommended-POs list.
+  const handleApprovePo = async (p: AIProposal) => {
+    setProposalBusyId(p.proposal_id);
+    try {
+      const res = await proposalsApi.approve(p.proposal_id);
+      if (res.executed) {
+        toast.success(`Draft PO created: ${p.title}`);
+      } else {
+        toast.error(`Could not draft PO: ${res.error ?? 'unknown error'}`);
+      }
+      await loadPoProposals();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] reorder approve failed:', e);
+      toast.error('Could not act on this reorder suggestion.');
+    } finally {
+      setProposalBusyId(null);
+    }
+  };
+
+  const handleIgnorePo = async (p: AIProposal) => {
+    const reason = window.prompt(`Ignore "${p.title}"?\n\nOptional reason:`, '');
+    if (reason === null) return; // Cancel -> don't ignore
+    setProposalBusyId(p.proposal_id);
+    try {
+      await proposalsApi.reject(p.proposal_id, reason);
+      toast.info(`Ignored: ${p.title}`);
+      await loadPoProposals();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] reorder reject failed:', e);
+      toast.error('Could not ignore this reorder suggestion.');
+    } finally {
+      setProposalBusyId(null);
     }
   };
 
@@ -759,6 +838,152 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
   const totalActs24h = agentsForGrid.reduce((s, a) => s + (a.run_count || 0), 0);
   // Real count of pending AI change-proposals awaiting Superadmin review.
   const awaitingApproval = proposals?.length ?? 0;
+  const poPending = poProposals?.length ?? 0;
+
+  // ── #7 Recommended POs section ──────────────────────────────────────
+  // Burn-rate reorder suggestions. Visible to ADMIN + SUPERADMIN. Each card
+  // surfaces the full reasoning (on-hand, burn rate, days left, projected
+  // stockout, recommended qty) so the reviewer acts with the same signal
+  // ORACLE used. Approve ("Act On It") creates a DRAFT PO only - it never
+  // sends a PO or commits money. SKUs with no vendor are flagged and their
+  // Act-On-It button is disabled until a vendor is assigned.
+  const renderPoNumber = (v: unknown): string =>
+    typeof v === 'number' && isFinite(v) ? String(Math.round(v * 100) / 100) : '-';
+  const recommendedPosSection = (
+    <>
+      <div className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Package className="w-3 h-3" /> Recommended POs · {poPending} pending
+        </span>
+        <button
+          type="button"
+          onClick={loadPoProposals}
+          className="btn sm ghost"
+          style={{ marginLeft: 'auto', fontSize: 10, height: 22, padding: '0 10px' }}
+        >
+          Refresh
+        </button>
+      </div>
+      <div
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--r-lg)',
+          marginBottom: 24,
+          overflow: 'hidden',
+        }}
+      >
+        {poProposals === null && (
+          <div style={{ padding: 20, color: 'var(--ink-4)', fontSize: 12.5, textAlign: 'center' }}>
+            Loading reorder suggestions…
+          </div>
+        )}
+        {poProposals !== null && poProposals.length === 0 && (
+          <div style={{ padding: 20, color: 'var(--ink-4)', fontSize: 12.5, textAlign: 'center' }}>
+            No reorder recommendations. ORACLE runs hourly and will surface SKUs approaching stockout.
+          </div>
+        )}
+        {poProposals !== null && poProposals.length > 0 && poProposals.map((p, i) => {
+          const busy = proposalBusyId === p.proposal_id;
+          const pl = (p.payload ?? {}) as Record<string, unknown>;
+          const vendorMissing = pl.vendor_missing === true;
+          const daysRemaining = typeof pl.days_remaining === 'number' ? pl.days_remaining : null;
+          const stockoutIso = typeof pl.projected_stockout_date === 'string' ? pl.projected_stockout_date : null;
+          const storeId = typeof pl.store_id === 'string' ? pl.store_id : '—';
+          const qty = typeof pl.quantity === 'number' ? pl.quantity : null;
+          // Urgency: semantic colour ONLY (red <7d critical, amber <14d watch).
+          const urgent = daysRemaining !== null && daysRemaining < 7;
+          const watch = daysRemaining !== null && daysRemaining >= 7 && daysRemaining < 14;
+          return (
+            <div
+              key={p.proposal_id}
+              style={{
+                padding: '14px 16px',
+                borderBottom: i === poProposals.length - 1 ? 'none' : '1px solid var(--line-soft)',
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 16,
+                alignItems: 'flex-start',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                  {/* Store badge */}
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    color: '#fff',
+                    background: 'var(--ink)',
+                    padding: '3px 6px',
+                    borderRadius: 3,
+                    textTransform: 'uppercase',
+                    letterSpacing: '.06em',
+                  }}>
+                    {storeId}
+                  </span>
+                  {/* Urgency chip — semantic colour only */}
+                  {urgent && (
+                    <span style={{ fontSize: 9.5, fontFamily: 'var(--font-mono)', color: '#fff', background: '#cd201a', padding: '3px 6px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+                      Critical · under 7 days
+                    </span>
+                  )}
+                  {watch && (
+                    <span style={{ fontSize: 9.5, fontFamily: 'var(--font-mono)', color: '#7a4f00', background: '#fbe6b4', padding: '3px 6px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+                      Watch · under 14 days
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 3 }}>
+                  {p.title}
+                </div>
+                {/* Signal row (mono) */}
+                <div style={{ fontSize: 11.5, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)', lineHeight: 1.6 }}>
+                  On hand: {renderPoNumber(pl.on_hand)} · Burn 7d: {renderPoNumber(pl.burn_rate_7d)}/day · Days left: {renderPoNumber(pl.days_remaining)}
+                  {stockoutIso && (
+                    <> · Stockout: {new Date(stockoutIso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</>
+                  )}
+                </div>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ink)', marginTop: 4 }}>
+                  Order {qty ?? '—'} unit{qty === 1 ? '' : 's'}
+                </div>
+                {/* Vendor row */}
+                {vendorMissing ? (
+                  <span style={{ display: 'inline-block', marginTop: 6, fontSize: 10.5, color: '#cd201a', border: '1px solid #cd201a', padding: '3px 7px', borderRadius: 3 }}>
+                    No vendor assigned — assign before ordering
+                  </span>
+                ) : (
+                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 5 }}>
+                    Vendor: {String(pl.vendor_id ?? '—')}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                <button
+                  type="button"
+                  onClick={() => handleApprovePo(p)}
+                  disabled={busy || vendorMissing}
+                  className="btn sm primary"
+                  style={{ fontSize: 11, opacity: busy || vendorMissing ? 0.5 : 1 }}
+                  title={vendorMissing ? 'Assign a vendor before ordering' : 'Create a DRAFT purchase order (not sent)'}
+                >
+                  <Check className="w-3.5 h-3.5" /> Act On It
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleIgnorePo(p)}
+                  disabled={busy}
+                  className="btn sm ghost"
+                  style={{ fontSize: 11, opacity: busy ? 0.5 : 1 }}
+                >
+                  <X className="w-3.5 h-3.5" /> Ignore
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
 
   // STRICT ACCESS CONTROL — render nothing for non-SUPERADMIN.
   // This guard MUST live after every hook declaration above; an
@@ -767,6 +992,23 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
   // "rendered fewer hooks than expected".
   if (!isSuperAdmin) {
     return null;
+  }
+
+  // ADMIN (not SUPERADMIN) sees ONLY the #7 Recommended-POs surface — the rest
+  // of Jarvis (agent toggles, ORACLE config, chat) is SUPERADMIN-only.
+  if (!isStrictSuperAdmin) {
+    return (
+      <div style={{ padding: '24px 28px 60px', background: 'var(--bg)', minHeight: 'calc(100vh - 52px)', overflowY: 'auto' }}>
+        <div className="eyebrow" style={{ marginBottom: 6 }}>Predictive purchasing</div>
+        <h1 style={{ margin: '0 0 18px', fontFamily: 'var(--font-display)', fontSize: 28, letterSpacing: '-0.02em', color: 'var(--ink)', fontWeight: 500 }}>
+          Recommended purchase orders
+        </h1>
+        <p style={{ margin: '0 0 20px', color: 'var(--ink-3)', maxWidth: 560, fontSize: 13, lineHeight: 1.55 }}>
+          ORACLE projects which SKUs will run out within the reorder horizon from recent sales velocity. Act On It drafts a purchase order for review — nothing is sent to a vendor automatically.
+        </p>
+        {recommendedPosSection}
+      </div>
+    );
   }
 
   return (
@@ -1239,6 +1481,9 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
           );
         })}
       </div>
+
+      {/* ── #7 Recommended POs (burn-rate reorder suggestions) ── */}
+      {recommendedPosSection}
 
       {/* ── Change proposals (SYSTEM_INTENT section 8 review loop) ── */}
       <div className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
