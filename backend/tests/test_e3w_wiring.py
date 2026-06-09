@@ -32,6 +32,7 @@ live Mongo is required.
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 
@@ -484,9 +485,17 @@ def ret_env(monkeypatch):
 
     monkeypatch.setattr(ret, "_get_db", lambda: db)
     monkeypatch.setattr(ret, "get_stock_repository", lambda: stock_repo)
-    monkeypatch.setattr(ret, "_resolve_order", lambda body: dict(_ORDER))
+    monkeypatch.setattr(ret, "_resolve_order", lambda body: copy.deepcopy(_ORDER))
     # Neutralise period-lock + the heavier downstream writes the guard precedes.
     monkeypatch.setattr(dep, "get_audit_repository", lambda: None, raising=False)
+    # _orders_coll() PREFERS get_order_repository().collection; in CI (real Mongo)
+    # that binds to the empty real orders collection -> the atomic returnable-qty
+    # claim finds no O-1 -> 409 (locally there is no Mongo so it fell back to the
+    # test db). Pin the repo to None so the claim uses OUR monkeypatched _get_db,
+    # and seed O-1 there (deepcopy: the $inc on returned_qty must not mutate the
+    # shared _ORDER template across tests).
+    monkeypatch.setattr(ret, "get_order_repository", lambda: None, raising=False)
+    db.get_collection("orders").insert_one(copy.deepcopy(_ORDER))
 
     def add_sold_unit(stock_id, serial=None, product_id="P-FRAME", store_id="S-A"):
         db.get_collection("stock_units").insert_one(
