@@ -148,6 +148,7 @@ import CashFlowPanel from './CashFlowPanel';
 import PeriodManagement from './PeriodManagement';
 import BudgetPanel from './BudgetPanel';
 import VendorPayments from './VendorPayments';
+import JournalEntriesPanel from './JournalEntriesPanel';
 
 export default function FinanceDashboard() {
   const { user } = useAuth();
@@ -505,6 +506,7 @@ export default function FinanceDashboard() {
           {activeTab === 'vendor-payments' && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
+          {activeTab === 'journal-entries' && <JournalEntriesPanel />}
         </div>
       </div>
     </div>

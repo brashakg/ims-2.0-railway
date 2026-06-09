@@ -12,6 +12,7 @@ import {
   CreditCard,
   Target,
   Building2,
+  BookOpen,
 } from 'lucide-react';
 import clsx from 'clsx';
 import type { TabType } from './financeTypes';
@@ -35,6 +36,7 @@ const TABS: { id: TabType; label: string; icon: typeof TrendingUp }[] = [
   { id: 'period', label: 'Period Management', icon: Calendar },
   { id: 'budgets', label: 'Budgets', icon: Target },
   { id: 'vendor-payments', label: 'Vendor Payments', icon: Building2 },
+  { id: 'journal-entries', label: 'Journal Entries', icon: BookOpen },
 ];
 
 export default function FinanceFilters({

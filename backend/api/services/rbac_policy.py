@@ -1618,6 +1618,69 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/tally/sales-jv",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # --- F17/#25 maker-checker journal entries (mounted on /finance behind the
+    # finance role gate; each handler narrows further inline -- create/submit to
+    # the JE-maker set, approve/post/reject/reverse to ADMIN/SUPERADMIN, COA POST
+    # to SUPERADMIN). The maker-checker PIN + single-use is the shared E4 engine. ---
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/journal-entries",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/journal-entries",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/journal-entries/{je_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/journal-entries/{je_id}/submit",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/journal-entries/{je_id}/approve",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/journal-entries/{je_id}/reject",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/journal-entries/{je_id}/post",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/journal-entries/{je_id}/reverse",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/chart-of-accounts",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/chart-of-accounts",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/tally/journal-jv",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/vendor-payments",

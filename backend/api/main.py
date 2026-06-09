@@ -184,6 +184,21 @@ async def lifespan(app: FastAPI):
                 ApprovalEngine(db=get_db().db).ensure_indexes()
             except Exception as e:
                 logger.warning(f"[WARN] Approval index creation skipped: {e}")
+            # F17/#25 maker-checker journal entries: JE indexes + idempotent seed
+            # of the minimal chart of accounts (allow_manual_je gates which heads
+            # accept a manual JE; system accounts seeded with it False). Non-
+            # destructive upsert; fail-soft.
+            try:
+                from .services.je_service import ensure_indexes as _je_indexes
+                from .services.je_service import seed_chart_of_accounts
+
+                _jdb = get_db().db
+                _je_indexes(_jdb)
+                _cn = seed_chart_of_accounts(_jdb)
+                if _cn:
+                    logger.info(f"[OK] Ensured {_cn} chart-of-accounts row(s)")
+            except Exception as e:
+                logger.warning(f"[WARN] Chart-of-accounts seed skipped: {e}")
             # E6 reminder rail: indexes + 6 GLOBAL inactive seed rules (idempotent,
             # non-destructive). active=False -> ZERO automated sends on deploy; the
             # owner opts each rule on later (comms channel currently build-dark).
