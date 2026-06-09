@@ -4888,6 +4888,18 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/workshop/jobs/{job_id}/notify-ready",
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "WORKSHOP_STAFF"],
     },
+    # F2 -- disposable job-card print stamp (workshop fulfilment ladder).
+    {
+        "method": "POST",
+        "path": "/api/v1/workshop/jobs/{job_id}/print-job-card",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+    },
     # /qc gate tightened to WORKSHOP_ROLES (not AUTHENTICATED) — sales staff
     # cannot run or override QC. Mirrors require_roles(*WORKSHOP_ROLES) on the handler.
     {
@@ -4963,6 +4975,42 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {"method": "GET", "path": "/api/v1/workshop/ready", "allowed": "AUTHENTICATED"},
+    # F2 -- internal lab routing (disposable barcoded job cards).
+    {
+        "method": "POST",
+        "path": "/api/v1/workshop/scan",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/workshop/stations",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/workshop/stations",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/workshop/stations/{code}/queue",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/workshop/technician-workload",

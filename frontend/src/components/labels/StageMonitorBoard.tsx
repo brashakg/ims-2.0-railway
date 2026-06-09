@@ -16,7 +16,18 @@ export interface BoardJob {
   status?: string;
   priority?: string;
   promisedDate?: string;
+  /** F2 -- the in-house lab station the job is currently at (null until intake). */
+  currentStation?: string | null;
 }
+
+const STATION_LABEL: Record<string, string> = {
+  INTAKE: 'Intake',
+  EDGING: 'Edging',
+  COATING: 'Coating',
+  QC_LAB: 'Lab QC',
+  DISPATCH: 'Dispatch',
+  PICKUP: 'Pickup',
+};
 
 interface StageMonitorBoardProps {
   jobs: BoardJob[];
@@ -120,6 +131,13 @@ export function StageMonitorBoard({ jobs, onPrintStage, onSelectJob }: StageMoni
                       </div>
                       {job.customerName && (
                         <div className="text-gray-600 truncate">{job.customerName}</div>
+                      )}
+                      {job.currentStation && (
+                        <div className="mt-1">
+                          <span className="inline-block rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
+                            At {STATION_LABEL[job.currentStation] || job.currentStation}
+                          </span>
+                        </div>
                       )}
                       <div className="flex items-center justify-between mt-1">
                         {isOverdue(job.promisedDate) ? (
