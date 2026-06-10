@@ -12,6 +12,12 @@ from datetime import datetime, date, timezone
 from html import escape as _html_escape
 import uuid
 from .auth import get_current_user, require_roles
+
+# Clinical eye-test READS reuse the SAME role gate as prescription reads
+# (prescriptions.require_rx_read / _RX_READ_ROLES): an eye test carries the
+# same medical data (SPH/CYL/AXIS, SOAP notes) + patient PII as the Rx it
+# mints, so the read surface must be identical -- never a divergent copy.
+from .prescriptions import require_rx_read
 from ..dependencies import (
     get_db,
     get_eye_test_queue_repository,
@@ -24,6 +30,8 @@ from ..dependencies import (
     get_handoff_repository,
     get_user_repository,
     validate_store_access,
+    can_access_store_scoped,
+    user_store_scope,
 )
 from ..services import clinical_abuse as _abuse
 from ..services import conversion_analytics as _conversion
@@ -115,6 +123,40 @@ def _conversion_can_see_revenue(current_user: dict) -> bool:
 # allow-list so the router can reject an invalid status with a clean 400 BEFORE
 # the repo silently no-ops (which used to surface as a misleading 200 "updated").
 _VALID_QUEUE_STATUSES = ("WAITING", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW")
+
+
+def _store_scope_or_404(doc, current_user: dict, entity: str = "Test") -> None:
+    """Per-OBJECT store-scope guard for clinical docs (same IDOR class as the
+    prescriptions BUG-088 fix): a store-scoped caller may only touch an eye
+    test / queue item stamped with one of THEIR stores. Raises 404 -- never
+    403 -- so an out-of-scope caller cannot even confirm the record exists.
+
+    A doc with NO store_id (legacy / pre-store-stamp / demo data) is
+    deliberately left to the ROLE gate alone (fail-open on missing store_id):
+    clinical roles must keep working on legacy records, and every contemporary
+    write path stamps store_id at creation (add_to_queue -> start_test ->
+    complete_test). NOTE this is intentionally looser than prescriptions'
+    can_access_store_scoped (which hides unattributed docs from store-level
+    roles) -- eye tests pre-date the store stamp and must stay servable.
+    """
+    store_id = (doc or {}).get("store_id")
+    if store_id and not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(status_code=404, detail=f"{entity} not found")
+
+
+def _filter_tests_by_store_scope(tests, current_user: dict):
+    """Scope a LIST of eye-test docs to the caller's stores. Cross-store roles
+    (SUPERADMIN/ADMIN) see everything; store-level roles only see docs stamped
+    with one of their stores. Unattributed (no store_id) legacy docs stay
+    visible to the role-gated caller -- same fail-open as _store_scope_or_404."""
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return list(tests or [])
+    return [
+        t
+        for t in (tests or [])
+        if isinstance(t, dict) and (not t.get("store_id") or t.get("store_id") in stores)
+    ]
 
 
 # ============================================================================
@@ -601,6 +643,11 @@ async def update_queue_status(
         # The item may legitimately be absent (sample/demo data); the repo
         # no-ops in that case. We don't 404 -- the frontend treats this as a
         # best-effort state sync -- but we DO echo the normalised status.
+        # Cross-store IDOR guard: when the item IS found, a store-scoped
+        # caller may only mutate their own store's queue (404-hide otherwise).
+        queue_item = queue_repo.find_by_id(queue_id)
+        if queue_item:
+            _store_scope_or_404(queue_item, current_user, "Queue item")
         queue_repo.update_status(queue_id, status)
 
     return {"message": "Status updated", "status": status}
@@ -614,6 +661,12 @@ async def remove_from_queue(
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:
+        # Cross-store IDOR guard: a store-scoped caller may only remove items
+        # from their own store's queue (404-hide otherwise). Absent items keep
+        # the historical best-effort 200.
+        queue_item = queue_repo.find_by_id(queue_id)
+        if queue_item:
+            _store_scope_or_404(queue_item, current_user, "Queue item")
         queue_repo.remove_from_queue(queue_id)
 
     return {"message": "Removed from queue"}
@@ -632,6 +685,9 @@ async def start_test(
         queue_item = queue_repo.find_by_id(queue_id)
 
         if queue_item:
+            # Cross-store IDOR guard: a store-scoped caller may only start a
+            # test for their own store's queue item (404-hide otherwise).
+            _store_scope_or_404(queue_item, current_user, "Queue item")
             # Update queue status
             queue_repo.update_status(queue_id, "IN_PROGRESS")
 
@@ -792,13 +848,21 @@ async def get_tests(
 
 
 @router.get("/tests/{test_id}")
-async def get_test(test_id: str, current_user: dict = Depends(get_current_user)):
-    """Get a specific eye test"""
+async def get_test(test_id: str, current_user: dict = Depends(require_rx_read)):
+    """Get a specific eye test.
+
+    An eye test is clinical PII (full Rx + exam findings), so the read is
+    role-gated to the SAME set as prescription reads (require_rx_read) and
+    store-scoped per object: an out-of-scope caller gets 404 (existence
+    hidden), exactly like GET /prescriptions/{id}. Previously this was
+    readable by ANY authenticated role in ANY store (P1 IDOR).
+    """
     test_repo = get_eye_test_repository()
 
     if test_repo is not None:
         test = test_repo.find_by_id(test_id)
         if test:
+            _store_scope_or_404(test, current_user)
             result = _convert_to_camel(test)
             result["id"] = test.get("test_id")
             return result
@@ -835,6 +899,10 @@ async def complete_test(
         existing_test = test_repo.find_by_id(test_id)
         if existing_test is None:
             raise HTTPException(status_code=404, detail="Test not found")
+
+        # Cross-store IDOR guard: a store-scoped clinician may only complete
+        # (and thereby mint an Rx for) a test in their OWN store (404-hide).
+        _store_scope_or_404(existing_test, current_user)
 
         rx_repo = get_prescription_repository()
 
@@ -1279,13 +1347,23 @@ def _notify_handover_recipients(
 
 @router.get("/tests/patient/{customer_phone}")
 async def get_patient_tests(
-    customer_phone: str, current_user: dict = Depends(get_current_user)
+    customer_phone: str, current_user: dict = Depends(require_rx_read)
 ):
-    """Get all tests for a patient by phone number"""
+    """Get all tests for a patient by phone number.
+
+    Phone numbers are trivially enumerable, so this lookup was a P1 medical
+    data leak: ANY authenticated role could pull a patient's full eye-test
+    history chain-wide. Now role-gated to the prescription-read set
+    (require_rx_read) and store-scoped: a store-level caller only sees their
+    own store's tests (legacy unattributed docs stay visible -- see
+    _filter_tests_by_store_scope).
+    """
     test_repo = get_eye_test_repository()
 
     if test_repo is not None:
-        tests = test_repo.get_patient_tests(customer_phone)
+        tests = _filter_tests_by_store_scope(
+            test_repo.get_patient_tests(customer_phone), current_user
+        )
         result = []
         for test in tests:
             converted = _convert_to_camel(test)
@@ -1298,13 +1376,19 @@ async def get_patient_tests(
 
 @router.get("/tests/customer/{customer_id}")
 async def get_customer_tests(
-    customer_id: str, current_user: dict = Depends(get_current_user)
+    customer_id: str, current_user: dict = Depends(require_rx_read)
 ):
-    """Get all tests for a customer by ID"""
+    """Get all tests for a customer by ID.
+
+    Same P1 IDOR class as the phone lookup above: role-gated to the
+    prescription-read set + store-scoped per object.
+    """
     test_repo = get_eye_test_repository()
 
     if test_repo is not None:
-        tests = test_repo.get_customer_tests(customer_id)
+        tests = _filter_tests_by_store_scope(
+            test_repo.get_customer_tests(customer_id), current_user
+        )
         result = []
         for test in tests:
             converted = _convert_to_camel(test)
@@ -1467,7 +1551,7 @@ async def get_conversion_dashboard(
 @router.get("/tests/{test_id}/soap-note")
 async def get_soap_note(
     test_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
     """Return the structured SOAP exam note for a completed eye test.
 
@@ -1476,7 +1560,12 @@ async def get_soap_note(
     Returns the note as-is (snake_case) wrapped in ``{soapNote: {...}}``.
     Returns 404 when the test does not exist; returns ``{soapNote: null}`` when
     the test exists but no SOAP note has been saved yet (a refraction-only
-    test).  Accessible to any AUTHENTICATED clinical user.
+    test).
+
+    A SOAP note is the most sensitive clinical artifact we store (exam
+    narrative + Dx codes), so the read is role-gated to the prescription-read
+    set (require_rx_read) and store-scoped per object (404-hide cross-store) --
+    it was previously readable by ANY authenticated role in ANY store (P1).
     """
     test_repo = get_eye_test_repository()
     if test_repo is None:
@@ -1485,6 +1574,7 @@ async def get_soap_note(
     test = test_repo.find_by_id(test_id)
     if test is None:
         raise HTTPException(status_code=404, detail="Test not found")
+    _store_scope_or_404(test, current_user)
 
     raw = test.get("soap_note")
     if not raw:
@@ -1520,6 +1610,9 @@ async def save_soap_note(
     test = test_repo.find_by_id(test_id)
     if test is None:
         raise HTTPException(status_code=404, detail="Test not found")
+    # Cross-store IDOR guard: a store-scoped clinician may only chart on their
+    # OWN store's tests (404-hide otherwise).
+    _store_scope_or_404(test, current_user)
 
     now_iso = datetime.utcnow().isoformat()
     note_dict = note.model_dump(exclude_none=True)
