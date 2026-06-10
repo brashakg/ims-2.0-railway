@@ -29,7 +29,7 @@
     "react": "^19.2.6",
     "react-barcode": "^1.6.1",
     "react-dom": "^19.2.6",
-    "react-router-dom": "^6.30.3",
+    "react-router-dom": "^6.30.4",
     "zustand": "^5.0.13"
   },
   "devDependencies": {

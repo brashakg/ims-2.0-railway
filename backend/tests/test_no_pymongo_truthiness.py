@@ -25,17 +25,13 @@ from pathlib import Path
 # where <name> is one of the pymongo-collection variable names we know about.
 # We restrict the names so unrelated truthy checks (`if config:` etc.) don't
 # fire false positives.
-_COLLECTION_NAMES = (
-    "coll",
-    "collection",
-)
-
+# Match any variable that IS or ENDS WITH the word "collection" or "coll"
+# (e.g. orders_collection, tests_collection, products_collection, coll, collection).
 _PATTERNS = [
     re.compile(
-        rf"^\s*if(\s+not)?\s+({name})\s*:\s*$",
+        r"^\s*if(\s+not)?\s+(\w+_collection|collection|coll)\s*:\s*$",
         re.MULTILINE,
     )
-    for name in _COLLECTION_NAMES
 ]
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent / "api"

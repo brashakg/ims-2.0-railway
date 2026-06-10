@@ -13,7 +13,7 @@ Why pure functions:
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # ============================================================================
 # Tier helpers
@@ -61,12 +61,6 @@ def category_multiplier(category: str, settings: Dict[str, Any]) -> float:
             except (TypeError, ValueError):
                 continue
     return 1.0
-
-
-def _line_categories(items: Iterable[Dict[str, Any]]) -> List[Tuple[float, float]]:
-    """Return (line_value, category_multiplier_factor) for each line."""
-    out: List[Tuple[float, float]] = []
-    return out
 
 
 def calc_earn_points(

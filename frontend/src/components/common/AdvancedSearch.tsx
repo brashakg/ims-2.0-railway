@@ -3,7 +3,7 @@
 // ============================================================================
 // Global search with filters across all modules
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Search, X, Filter } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -47,12 +47,12 @@ export function AdvancedSearch({
   const [isLoading, setIsLoading] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
-  const [debounceTimer, setDebounceTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Debounced search
   const handleSearch = useCallback(
     async (searchQuery: string, searchFilters: Record<string, any>) => {
-      if (debounceTimer) clearTimeout(debounceTimer);
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
 
       if (searchQuery.length < minChars && Object.keys(searchFilters).length === 0) {
         setResults([]);
@@ -60,7 +60,7 @@ export function AdvancedSearch({
         return;
       }
 
-      const timer = setTimeout(async () => {
+      debounceTimer.current = setTimeout(async () => {
         setIsLoading(true);
         try {
           const searchResults = await onSearch(searchQuery, searchFilters);
@@ -72,10 +72,8 @@ export function AdvancedSearch({
           setIsLoading(false);
         }
       }, debounceMs);
-
-      setDebounceTimer(timer);
     },
-    [onSearch, minChars, debounceMs, debounceTimer]
+    [onSearch, minChars, debounceMs]
   );
 
   const handleQueryChange = (newQuery: string) => {

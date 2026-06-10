@@ -48,14 +48,14 @@ def _get_categories_from_db() -> List[str]:
         if db and db.is_connected:
             # Get categories collection or distinct from products
             categories_collection = db.db.get_collection("product_categories")
-            if categories_collection:
+            if categories_collection is not None:
                 cats = list(categories_collection.find({}, {"name": 1}))
                 if cats:
                     return [c.get("name") for c in cats if c.get("name")]
 
             # Fallback: get distinct categories from products collection
             products_collection = db.db.get_collection("products")
-            if products_collection:
+            if products_collection is not None:
                 categories = products_collection.distinct("category")
                 if categories:
                     return categories

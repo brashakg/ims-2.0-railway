@@ -109,15 +109,11 @@ export function WhatsAppInboxPage() {
 
   const allowed = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'];
   const activeRole = (user as { activeRole?: string })?.activeRole ?? '';
-  if (!allowed.includes(activeRole)) {
-    return (
-      <div className="p-8 text-center text-gray-500">
-        You do not have permission to view the WhatsApp inbox.
-      </div>
-    );
-  }
+  const hasPermission = allowed.includes(activeRole);
 
+  // Hooks must be called unconditionally — permission guard happens in render.
   const load = useCallback(async () => {
+    if (!hasPermission) return;
     setLoading(true);
     try {
       const data = await fetchConversations(filterHuman, offset, LIMIT);
@@ -129,11 +125,19 @@ export function WhatsAppInboxPage() {
     } finally {
       setLoading(false);
     }
-  }, [filterHuman, offset]);
+  }, [filterHuman, offset, hasPermission]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  if (!hasPermission) {
+    return (
+      <div className="p-8 text-center text-gray-500">
+        You do not have permission to view the WhatsApp inbox.
+      </div>
+    );
+  }
 
   const lastMsg = (conv: WaConversation) => {
     const msgs = conv.messages ?? [];

@@ -21,7 +21,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 import uuid
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
@@ -573,7 +573,7 @@ async def loyalty_tiers(
 @router.post("/loyalty/earn")
 async def loyalty_earn(
     req: LoyaltyEarnRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("SUPERADMIN", "ADMIN", "STORE_MANAGER", "AREA_MANAGER")),
 ):
     """Award loyalty points (1 point per Rs.100 spent)."""
     db = _get_db()
@@ -621,22 +621,27 @@ async def loyalty_redeem(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    customer = db.get_collection("customers").find_one({"customer_id": req.customer_id})
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    current_points = int(customer.get("loyalty_points", 0) or 0)
-    if req.points > current_points:
+    # Atomic check-and-deduct: guard-in-filter prevents double-spend race.
+    # Only succeeds if customer exists AND loyalty_points >= req.points.
+    updated = db.get_collection("customers").find_one_and_update(
+        {"customer_id": req.customer_id, "loyalty_points": {"$gte": req.points}},
+        {"$inc": {"loyalty_points": -req.points}},
+        return_document=True,
+    )
+    if updated is None:
+        # Disambiguate: check if customer exists at all.
+        exists = db.get_collection("customers").find_one(
+            {"customer_id": req.customer_id}, {"loyalty_points": 1}
+        )
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        current_points = int(exists.get("loyalty_points", 0) or 0)
         raise HTTPException(
             status_code=400, detail=f"Insufficient points. Available: {current_points}"
         )
 
+    current_points = int(updated.get("loyalty_points", 0) or 0)
     discount_value = req.points  # 100 points = Rs.100
-
-    db.get_collection("customers").update_one(
-        {"customer_id": req.customer_id},
-        {"$inc": {"loyalty_points": -req.points}},
-    )
 
     db.get_collection("loyalty_transactions").insert_one(
         {
@@ -655,7 +660,7 @@ async def loyalty_redeem(
         "message": f"{req.points} points redeemed for Rs.{discount_value} discount",
         "points_redeemed": req.points,
         "discount_value": discount_value,
-        "remaining_points": current_points - req.points,
+        "remaining_points": current_points,  # already post-deduction (return_document=True)
     }
 
 

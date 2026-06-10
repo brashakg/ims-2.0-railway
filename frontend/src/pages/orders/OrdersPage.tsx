@@ -225,22 +225,26 @@ export function OrdersPage() {
     }).format(Math.round(amount || 0));
   };
 
+  // Escape a string for safe HTML interpolation.
+  const escHtml = (s: unknown) =>
+    String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
   // Print order invoice — use hidden iframe if popup blocked
   const printOrder = (order: Order) => {
     const items = (order.items || []).map((item: any, i: number) =>
-      `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
+      `<tr><td>${i + 1}</td><td>${escHtml(item.productName || item.product_name || item.name || 'Item')}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
     ).join('');
     const payments = (order.payments || []).map((p: any) =>
-      `<div>${p.mode || p.method}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${p.reference})` : ''}</div>`
+      `<div>${escHtml(p.mode || p.method)}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${escHtml(p.reference)})` : ''}</div>`
     ).join('');
-    const html = `<!DOCTYPE html><html><head><title>Invoice ${order.orderNumber || 'N/A'}</title>
+    const html = `<!DOCTYPE html><html><head><title>Invoice ${escHtml(order.orderNumber || 'N/A')}</title>
       <style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto}
       table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left}
       th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
       .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button,.no-print{display:none}}</style></head><body>
       <div class="header"><h2>Better Vision Opticals</h2><p>Tax Invoice</p></div>
-      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
-      <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
+      <div class="row"><div><strong>Invoice:</strong> ${escHtml(order.orderNumber || 'N/A')}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
+      <div class="row"><div><strong>Customer:</strong> ${escHtml(order.customerName || 'Walk-in')}</div><div><strong>Phone:</strong> ${escHtml(order.customerPhone || '-')}</div></div>
       <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
       <div style="text-align:right;margin-top:10px">
       <div class="row"><span>Subtotal:</span><span>₹${Math.round(order.subtotal || 0).toLocaleString('en-IN')}</span></div>

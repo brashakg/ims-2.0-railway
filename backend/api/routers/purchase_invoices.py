@@ -704,7 +704,7 @@ async def list_purchase_invoices(
     unmatched: Optional[bool] = Query(
         None, description="true -> only invoices with no po_id/grn_id link"
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List first-class purchase invoices (doc_type=PURCHASE_INVOICE), newest
     first. Header-only legacy bills are excluded from this view. Filterable by

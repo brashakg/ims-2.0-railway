@@ -15,10 +15,10 @@ bcrypt==4.2.0
 python-multipart==0.0.30
 # RSA-SHA256 signing for QZ Tray silent label printing (labels.py). The
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
-# 48.0.0 fixes CVE-2024-12797, PYSEC-2026-35 (X.509 DNS name-constraint
+# 48.0.1 fixes CVE-2024-12797, PYSEC-2026-35 (X.509 DNS name-constraint
 # bypass) and CVE-2026-26007 (EC public-key subgroup check) without
 # breaking API changes for our RSA-sign-only usage.
-cryptography==48.0.0
+cryptography==48.0.1
 
 # Database
 pymongo==4.17.0
