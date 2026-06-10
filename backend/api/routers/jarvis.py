@@ -23,6 +23,10 @@ import logging
 
 from .auth import get_current_user
 
+# IST (TZ-P3): the server clock is UTC; every business "today" key below must be
+# the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
+from ..utils.ist import ist_today, now_ist
+
 logger = logging.getLogger(__name__)
 
 # Anthropic Claude Configuration
@@ -625,7 +629,7 @@ class JarvisAnalyticsEngine:
         present_today = on_leave_today = 0
         if attendance_col is not None:
             try:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 present_today = attendance_col.count_documents(
                     {
                         "date": today,
@@ -639,7 +643,7 @@ class JarvisAnalyticsEngine:
                 pass
         if leaves_col is not None and on_leave_today == 0:
             try:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 on_leave_today = leaves_col.count_documents(
                     {
                         "status": {"$in": ["APPROVED", "approved"]},
@@ -802,7 +806,7 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("tasks")
             if col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 open_count = col.count_documents(
                     {"status": {"$in": ["OPEN", "open", "IN_PROGRESS"]}}
                 )
@@ -848,7 +852,7 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("workshop_jobs")
             if col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 ctx["workshop"] = {
                     "pending": col.count_documents({"status": "PENDING"}),
                     "in_progress": col.count_documents({"status": "IN_PROGRESS"}),
@@ -890,7 +894,7 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("eye_tests")
             if col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 ctx["eye_tests"] = {
                     "today": col.count_documents({"test_date": today}),
                     "pending": col.count_documents(
@@ -904,13 +908,13 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("walkouts")
             if col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 ctx["walkouts"] = {
                     "today": col.count_documents({"date": today}),
                     "this_week": col.count_documents(
                         {
                             "date": {
-                                "$gte": (datetime.now() - timedelta(days=7)).strftime(
+                                "$gte": (now_ist() - timedelta(days=7)).strftime(
                                     "%Y-%m-%d"
                                 )
                             },
@@ -1129,7 +1133,10 @@ class JarvisAnalyticsEngine:
                             {
                                 "$match": {
                                     "is_active": {"$ne": False},
-                                    "brand": {"$ne": "", "$ne": None},
+                                    # $nin, NOT {"$ne": "", "$ne": None}: duplicate
+                                    # dict keys silently keep only the LAST $ne, so
+                                    # empty-string brands leaked into the rollup.
+                                    "brand": {"$nin": ["", None]},
                                 }
                             },
                             {
@@ -1391,7 +1398,7 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("stock_counts")
             if col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 ctx["stock_counts"] = {
                     "today": col.count_documents({"count_date": today}),
                     "open_discrepancies": col.count_documents(
@@ -1664,12 +1671,12 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("eye_camps")
             if col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 ctx["eye_camps"] = {
                     "upcoming": col.count_documents({"camp_date": {"$gte": today}}),
                     "this_month": col.count_documents(
                         {
-                            "camp_date": {"$gte": datetime.now().strftime("%Y-%m-01")},
+                            "camp_date": {"$gte": now_ist().strftime("%Y-%m-01")},
                         }
                     ),
                 }
@@ -1774,7 +1781,7 @@ class JarvisAnalyticsEngine:
             users_col = get_db_collection("users")
             attendance_col = get_db_collection("attendance")
             if users_col is not None and attendance_col is not None:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = ist_today().isoformat()
                 total_active = users_col.count_documents({"is_active": {"$ne": False}})
                 present = attendance_col.count_documents(
                     {
@@ -2222,7 +2229,9 @@ Current date and time: {current_datetime}
 
         system_prompt = cls.JARVIS_SYSTEM_PROMPT.replace(
             "{current_datetime}",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+            # IST (TZ-P3): the label says "IST", so the wall-clock must BE IST --
+            # datetime.now() on the UTC box was 5h30m behind what it claimed.
+            now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
         )
         return await llm_provider.complete(
             system_prompt,

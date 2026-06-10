@@ -11,6 +11,7 @@ from datetime import date, datetime
 import uuid
 import re
 from .auth import get_current_user, require_roles
+from ..utils.ist import ist_day_start_utc, now_ist
 
 # Roles allowed to mint customer monetary value (store credit, loyalty points).
 # Defined above the endpoints so it can gate the add/issue/redeem routes.
@@ -1655,7 +1656,11 @@ async def suggest_customer_tag(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     # Rate-limit: max 5 PENDING-or-not suggestions by this user since today's start.
-    today_start = datetime.utcnow().date().isoformat()
+    # IST (TZ-P3): "per day" means the IST business day. suggested_at is stored as
+    # a naive-UTC ISO string, so the window bound must be the naive-UTC instant of
+    # IST-midnight (ist_day_start_utc) -- both sides stay on ONE frame (naive UTC)
+    # while the day boundary itself is the IST calendar day.
+    today_start = ist_day_start_utc().isoformat()
     try:
         recent = sug_coll.count_documents(
             {"suggested_by": user_id, "suggested_at": {"$gte": today_start}}
@@ -1665,7 +1670,8 @@ async def suggest_customer_tag(
     if recent >= _MAX_SUGGESTIONS_PER_DAY:
         raise HTTPException(status_code=429, detail="Daily tag-suggestion limit reached")
 
-    suggestion_id = f"TAGSUG-{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
+    # IST day in the human-readable id (the stored timestamp stays naive UTC).
+    suggestion_id = f"TAGSUG-{now_ist().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
     sug = {
         "suggestion_id": suggestion_id,
         "customer_id": customer_id,

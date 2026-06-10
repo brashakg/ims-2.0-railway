@@ -22,6 +22,10 @@ Events beyond the horizon are excluded from the weeks but summed separately.
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+# IST (TZ-P3): the as_of default must be the IST business day, not the UTC box
+# clock (00:00-05:30 IST would otherwise anchor week 0 on YESTERDAY).
+from api.utils.ist import now_ist_naive
+
 
 def _parse(s) -> Optional[datetime]:
     if isinstance(s, datetime):
@@ -95,7 +99,7 @@ def build_forecast(
         lowest: {week_index, week_start, balance}   # cash-crunch low point
       }
     """
-    as_of = _parse(as_of_iso) or datetime.utcnow()
+    as_of = _parse(as_of_iso) or now_ist_naive()
     buckets = week_buckets(as_of, days)
     num_weeks = len(buckets)
 

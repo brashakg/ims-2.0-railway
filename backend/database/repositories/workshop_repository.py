@@ -5,6 +5,7 @@ Workshop job data access operations
 """
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
+from api.utils.ist import ist_today
 from .base_repository import BaseRepository
 
 
@@ -53,7 +54,10 @@ class WorkshopJobRepository(BaseRepository):
         # Using datetime.now().isoformat() (which includes time) would cause a
         # same-day date string ("2026-05-30") to compare LESS-THAN the datetime
         # string ("2026-05-30T14:00:00") and incorrectly mark today's jobs overdue.
-        today_str = datetime.now().date().isoformat()  # "2026-05-30"
+        # IST (TZ-P3): expected_date is a BUSINESS date; the server runs UTC, so
+        # datetime.now() between 00:00-05:30 IST is still on the PREVIOUS day and
+        # would under-flag jobs that are already overdue in India.
+        today_str = ist_today().isoformat()  # "2026-05-30"
         filter_dict = {
             "status": {"$in": ["PENDING", "IN_PROGRESS"]},
             "expected_date": {"$lt": today_str},

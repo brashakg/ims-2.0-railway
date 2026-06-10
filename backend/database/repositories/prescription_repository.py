@@ -5,6 +5,7 @@ Prescription data access operations
 """
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
+from api.utils.ist import now_ist_naive
 from .base_repository import BaseRepository
 
 
@@ -65,17 +66,23 @@ class PrescriptionRepository(BaseRepository):
         return self.find_many(filter, sort=[("prescription_date", -1)])
     
     def find_valid(self, patient_id: str) -> List[Dict]:
-        """Find prescriptions still within validity"""
+        """Find prescriptions still within validity.
+
+        IST (TZ-P3): Rx validity is a business-calendar boundary; the server
+        clock is UTC, so between 00:00-05:30 IST a plain datetime.now() is
+        still on YESTERDAY and would mis-judge expiry by a day.
+        """
         return self.find_many({
             "patient_id": patient_id,
-            "expiry_date": {"$gte": datetime.now()}
+            "expiry_date": {"$gte": now_ist_naive()}
         }, sort=[("prescription_date", -1)])
-    
+
     def find_expiring_soon(self, days: int = 30) -> List[Dict]:
-        """Find prescriptions expiring soon"""
-        cutoff = datetime.now() + timedelta(days=days)
+        """Find prescriptions expiring soon (IST business clock, see find_valid)"""
+        now = now_ist_naive()
+        cutoff = now + timedelta(days=days)
         return self.find_many({
-            "expiry_date": {"$gte": datetime.now(), "$lte": cutoff}
+            "expiry_date": {"$gte": now, "$lte": cutoff}
         })
     
     def get_optometrist_stats(self, optometrist_id: str, from_date: date, to_date: date) -> Dict:
