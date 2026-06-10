@@ -137,7 +137,7 @@ def map_variant(row: Dict) -> Dict:
     - Natural key / upsert key: `sku`.
     - parent_product_id is the BVI Product.id (a CUID string).
     """
-    return {
+    doc = {
         # Identity
         "sku": _str(row.get("sku")),
         "parent_product_id": _str(row.get("productId")),
@@ -180,6 +180,15 @@ def map_variant(row: Dict) -> Dict:
         "migrated_at": _now_utc(),
         "bvi_variant_id": _str(row.get("id")),
     }
+    # store_barcode and shopify_variant_id both carry UNIQUE+SPARSE indexes in
+    # prod (verified live) -- writing "" for the thousands of variants without a
+    # physical barcode / not-yet-pushed collides them all on the first such doc
+    # (E11000 dup on ""). OMIT blank values entirely: sparse indexes skip docs
+    # missing the field, so only real values enforce uniqueness.
+    for uniq in ("store_barcode", "shopify_variant_id"):
+        if not doc.get(uniq):
+            doc.pop(uniq, None)
+    return doc
     # NOTE: VariantLocation.quantity is deliberately NOT mapped.
     # On-hand = COUNT(stock_units WHERE sku, store, AVAILABLE).
     # Online qty = stock_allocation.recommend_allocation(on_hand, buffer).
@@ -473,9 +482,12 @@ def _upsert_one(
     """Idempotent upsert using update_one with upsert=True.
     Returns True on success."""
     try:
-        from pymongo import UpdateOne  # noqa: PLC0415
         now = datetime.now(tz=timezone.utc)
-        doc.setdefault("created_at", now)
+        # created_at must live ONLY in $setOnInsert -- having it in BOTH $set
+        # (via doc) and $setOnInsert is a Mongo path conflict (error 40) that
+        # failed EVERY upsert on the first live run. Stamped once at insert,
+        # never overwritten on a re-run; updated_at refreshes every run.
+        doc.pop("created_at", None)
         doc["updated_at"] = now
         collection.update_one(
             filter_doc,
