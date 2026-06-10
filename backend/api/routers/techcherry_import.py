@@ -30,7 +30,6 @@ business data and can't be undone without a restore.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
@@ -38,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
+from ..services.phone import normalize_indian_mobile
 
 router = APIRouter()
 
@@ -59,21 +59,21 @@ async def _require_superadmin(current_user: dict = Depends(get_current_user)) ->
 # ---------------------------------------------------------------------------
 
 
-_PHONE_DIGITS = re.compile(r"\D+")
-
-
 def _normalise_phone(raw: Any) -> str:
-    """Strip everything except digits. Trim leading 91/0 country prefix so
-    9876543210 / 09876543210 / +91 9876543210 / 91-9876543210 all collapse
-    to '9876543210'. Returns '' if nothing usable is left."""
-    if not raw:
+    """Normalize a TechCherry phone to the ONE canonical Indian-mobile form via
+    api.services.phone.normalize_indian_mobile -- a valid number (with/without
+    +91, 0, spaces, dashes) collapses to the bare 10-digit 6-9 form so the
+    imported doc dedups + matches against natively-created customers.
+
+    Bulk-import contract preserved: this is best-effort migration, so a legacy
+    value that is NOT a valid Indian mobile (landline, junk, foreign) must NOT
+    crash the batch row -- normalize_indian_mobile raises ValueError there, so
+    we swallow it and return '' (caller skips/keys by name, exactly as before).
+    Returns '' when nothing usable is left."""
+    try:
+        return normalize_indian_mobile(raw) or ""
+    except ValueError:
         return ""
-    s = _PHONE_DIGITS.sub("", str(raw))
-    if len(s) > 10 and s.startswith("91"):
-        s = s[2:]
-    if len(s) == 11 and s.startswith("0"):
-        s = s[1:]
-    return s[:15]
 
 
 def _safe_float(v: Any) -> float:

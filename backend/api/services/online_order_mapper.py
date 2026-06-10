@@ -50,10 +50,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from .phone import normalize_indian_mobile
 
 logger = logging.getLogger(__name__)
 
@@ -297,16 +298,14 @@ def _extract_buyer(payload: Dict[str, Any]) -> Dict[str, str]:
 def _normalize_indian_mobile(phone: str) -> str:
     """Reduce a Shopify phone (often '+91 98xxxxxxxx' / '0098...') to the bare
     10-digit Indian mobile IMS stores, so a match against an existing customer
-    works. Returns '' when no 10-digit mobile can be derived."""
-    digits = re.sub(r"\D", "", phone or "")
-    if not digits:
+    works. Delegates to the ONE canonical normalizer (api.services.phone) so the
+    stored form never drifts from natively-created customers. Returns '' when no
+    valid Indian mobile can be derived (the mapper is fail-soft and must never
+    raise -- normalize_indian_mobile's ValueError is swallowed here)."""
+    try:
+        return normalize_indian_mobile(phone) or ""
+    except ValueError:
         return ""
-    # Strip a leading country / trunk prefix down to the last 10 digits.
-    if len(digits) > 10:
-        digits = digits[-10:]
-    if len(digits) == 10 and digits[0] in "6789":
-        return digits
-    return ""
 
 
 def _match_or_create_customer(
@@ -330,9 +329,12 @@ def _match_or_create_customer(
     if repo is None:
         return None
 
-    phone = _normalize_indian_mobile(buyer.get("phone", "")) or _norm(
-        buyer.get("phone")
-    )
+    # Store ONLY the canonical normalized mobile (no raw-string fallback): a
+    # garbage/foreign number must not be persisted as a fake "mobile" that can
+    # never dedup. The original input is preserved verbatim under raw_phone on
+    # the created doc (below) for traceability.
+    raw_phone = _norm(buyer.get("phone"))
+    phone = _normalize_indian_mobile(buyer.get("phone", ""))
     email = _norm(buyer.get("email"))
 
     # --- match by phone, then email -------------------------------------------
@@ -360,6 +362,9 @@ def _match_or_create_customer(
         "name": buyer.get("name") or "Online Customer",
         "mobile": phone,
         "phone": phone,
+        # Original buyer-supplied phone string kept verbatim (the normalized
+        # form lives in mobile/phone; this is the audit/source-of-truth value).
+        "raw_phone": raw_phone,
         "email": email,
         "customer_type": "B2C",
         "source": "shopify",
