@@ -189,6 +189,27 @@ def map_variant(row: Dict) -> Dict:
 # MAPPER 2: Collection + CollectionProduct -> ecom_collections
 # ---------------------------------------------------------------------------
 
+def _normalize_rules_for_ims(rules: List[Dict]) -> List[Dict]:
+    """Convert Shopify-shape smart rules ({column, relation, condition}) to the
+    IMS engine shape ({field, relation, value}) using the CANONICAL normalizer
+    in backend/api/services/ecom_smart_rules.py (single source of truth for the
+    column map). Fail-soft: if the backend package is unavailable (standalone
+    run with a stripped checkout), return the rules as-is -- the engine's
+    read-side normalizer still revives them at evaluation time."""
+    if not rules:
+        return []
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _backend = os.path.join(os.path.dirname(_here), "backend")
+        if _backend not in sys.path:
+            sys.path.insert(0, _backend)
+        from api.services.ecom_smart_rules import normalize_rules  # noqa: PLC0415
+
+        return normalize_rules(rules)
+    except Exception:  # noqa: BLE001 -- fail-soft, never block the migration
+        return list(rules)
+
+
 def map_collection(
     collection_row: Dict,
     cp_rows: List[Dict],
@@ -215,7 +236,7 @@ def map_collection(
     for i, p in enumerate(products):
         p["position"] = i
 
-    rules_raw = row_rules = _json(collection_row.get("rules"))
+    rules_raw = _json(collection_row.get("rules"))
     if isinstance(rules_raw, list):
         rules = rules_raw
     elif isinstance(rules_raw, str):
@@ -225,6 +246,12 @@ def map_collection(
             rules = []
     else:
         rules = []
+    if not isinstance(rules, list):
+        rules = []
+    # IMS engine shape ({field, relation, value}) is what gets stored under
+    # `rules`; the original BVI/Shopify shape ({column, relation, condition})
+    # is preserved verbatim under `rules_shopify` for push-side fidelity.
+    rules_normalized = _normalize_rules_for_ims(rules)
 
     return {
         # Identity (handle is the upsert key)
@@ -250,8 +277,10 @@ def map_collection(
         # Auto-collection lineage
         "auto_source": _str(collection_row.get("autoSource")),
         "category_anchor": _str(collection_row.get("categoryAnchor")),
-        # SMART rules
-        "rules": rules,
+        # SMART rules: IMS engine shape under `rules` (so the resolver + FE
+        # editor work out of the box); original Shopify shape kept for fidelity.
+        "rules": rules_normalized,
+        "rules_shopify": rules,
         "disjunctive": _bool(collection_row.get("disjunctive"), False),
         # Manual membership (flattened from CollectionProduct join table)
         "products": products,

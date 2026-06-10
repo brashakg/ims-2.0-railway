@@ -146,6 +146,30 @@ def _with_id(doc):
     return doc
 
 
+def _with_normalized_rules(doc):
+    """Normalize-on-read for SMART rules (BVI revive, unification step 11).
+
+    The 1,160 BVI-migrated collections store rules in the SHOPIFY shape
+    ({column, relation, condition}); the FE editor + rule engine speak
+    {field, relation, value}, so those rows rendered as BLANK rule rows and
+    resolved to zero products. Serving the normalized shape here revives them
+    in the editor WITHOUT rewriting the stored docs (idempotent read-side
+    translation -- native-shape rules pass through untouched). Returns a
+    shallow COPY when a translation happened so the read never mutates a
+    cached / mock-store doc. Tolerates a list (maps each element) or a
+    non-dict (returned untouched). Fail-soft."""
+    if isinstance(doc, list):
+        return [_with_normalized_rules(d) for d in doc]
+    if isinstance(doc, dict):
+        rules = doc.get("rules")
+        if isinstance(rules, list) and rules:
+            normalized = ecom_smart_rules.normalize_rules(rules)
+            if normalized != rules:
+                doc = dict(doc)
+                doc["rules"] = normalized
+    return doc
+
+
 # ---------------------------------------------------------------------------
 # Pydantic payloads
 # ---------------------------------------------------------------------------
@@ -262,6 +286,7 @@ async def list_collections(
         skip=skip,
         limit=limit,
     )
+    rows = _with_normalized_rules(rows)
     return {"collections": _with_id(rows), "count": len(rows), "db_connected": True}
 
 
@@ -306,7 +331,7 @@ async def get_collection(
     doc = repo.get_by_id(collection_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
-    return {"collection": _with_id(doc)}
+    return {"collection": _with_id(_with_normalized_rules(doc))}
 
 
 @router.put("/{collection_id}")
@@ -340,10 +365,13 @@ async def update_collection(
 
     if not data:
         # Nothing to change -> return the unchanged doc (idempotent no-op).
-        return {"collection": _with_id(existing), "updated": False}
+        return {"collection": _with_id(_with_normalized_rules(existing)), "updated": False}
 
     repo.update(collection_id, data)
-    return {"collection": _with_id(repo.get_by_id(collection_id)), "updated": True}
+    return {
+        "collection": _with_id(_with_normalized_rules(repo.get_by_id(collection_id))),
+        "updated": True,
+    }
 
 
 @router.delete("/{collection_id}")
@@ -507,7 +535,9 @@ async def resolved_products(
             "source": "manual",
         }
 
-    rules = doc.get("rules") or []
+    # Normalize-on-read: migrated Shopify-shape rules ({column, relation,
+    # condition}) evaluate + echo in the IMS shape; stored doc is untouched.
+    rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
     disjunctive = bool(doc.get("disjunctive", False))
     products = _catalog_products()
     skus = ecom_smart_rules.resolve_skus(
