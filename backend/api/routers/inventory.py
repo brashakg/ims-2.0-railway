@@ -1454,6 +1454,8 @@ async def record_count_item(
         count_doc = collection.find_one({"count_id": count_id})
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
+        if not can_access_store_scoped(count_doc.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Stock count session not found")
         if count_doc.get("status") != "in_progress":
             raise HTTPException(
                 status_code=400, detail="Stock count is not in progress"
@@ -1518,6 +1520,8 @@ async def complete_stock_count(
         collection = db.get_collection("stock_counts")
         count_doc = collection.find_one({"count_id": count_id})
         if not count_doc:
+            raise HTTPException(status_code=404, detail="Stock count session not found")
+        if not can_access_store_scoped(count_doc.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Stock count session not found")
         if count_doc.get("status") != "in_progress":
             raise HTTPException(
@@ -1634,6 +1638,8 @@ async def get_stock_count(
         count_doc = collection.find_one({"count_id": count_id})
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
+        if not can_access_store_scoped(count_doc.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Stock count session not found")
         count_doc.pop("_id", None)
         return count_doc
     except HTTPException:
@@ -1688,6 +1694,8 @@ async def reconcile_stock_count(
 
         count_doc = counts_coll.find_one({"count_id": count_id})
         if not count_doc:
+            raise HTTPException(status_code=404, detail="Stock count session not found")
+        if not can_access_store_scoped(count_doc.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Stock count session not found")
         if count_doc.get("status") != "completed":
             raise HTTPException(
