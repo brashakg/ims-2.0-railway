@@ -121,6 +121,7 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'reports', label: 'Reports', to: '/reports', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'finance', label: 'Finance', to: '/finance/dashboard', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'cash-register', label: 'Cash Register', to: '/finance/cash-register', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF'] },
       { id: 'cashflow', label: 'Cash Flow', to: '/finance/cash-flow', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
     ],
