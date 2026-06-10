@@ -367,6 +367,10 @@ def validate_lines(db, lines: List[Dict[str, Any]]) -> Tuple[Optional[str], List
             "line_id": f"JEL-{uuid.uuid4().hex[:10]}",
             "account_code": code,
             "account_name": acct.get("account_name"),
+            # Snapshot the account TYPE at posting-time: a later COA type-edit must
+            # NOT retroactively re-class POSTED entries in the P&L (immutable
+            # ledger). pnl_adjustments prefers this snapshot over the live COA.
+            "account_type": acct.get("account_type"),
             "debit": debit,
             "credit": credit,
             "narration": (str(raw.get("narration"))[:200] if raw.get("narration") else None),
@@ -763,13 +767,18 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
             "line_id": f"JEL-{uuid.uuid4().hex[:10]}",
             "account_code": ln.get("account_code"),
             "account_name": ln.get("account_name"),
+            # Carry the posting-time type snapshot onto the mirror so the pair
+            # nets to zero under the same classification forever.
+            "account_type": ln.get("account_type"),
             "debit": int(ln.get("credit") or 0),
             "credit": int(ln.get("debit") or 0),
             "narration": ("Reversal: " + (ln.get("narration") or ""))[:200],
         })
     rev = {
         "je_id": f"JE-{uuid.uuid4().hex[:12]}",
-        "je_number": _next_je_number(db, je.get("entity_id"), today),
+        # je_number is minted AFTER the claim succeeds (below) -- minting it here
+        # would burn a consecutive serial when the claim loses the race.
+        "je_number": None,
         "store_id": je.get("store_id"),
         "entity_id": je.get("entity_id"),
         "entry_date": today,
@@ -793,27 +802,47 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         "posted_at": today,
         "updated_at": today,
     }
-    try:
-        coll.insert_one(rev)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[JE] reversal insert failed: %s", e)
-        return {"ok": False, "http": 503, "error": "write_failed"}
-
-    # Atomically flip the original to REVERSED (only if still POSTED + not
-    # already linked). If it lost the race, roll back the reversal we just made.
+    # CLAIM-FIRST (adversarial P3): atomically flip the original POSTED -> REVERSED
+    # BEFORE inserting the mirror. Two racing reversals -> exactly one wins the
+    # claim (the loser gets 409 with NO orphan mirror ever inserted). The old
+    # order (insert mirror, then flip, silent best-effort delete on lost race)
+    # left an orphan-POSTED-reversal window.
     updated = _set(
         db, je_id,
         {"status": STATUS_REVERSED, "reversed_by": rev["je_id"]},
         expect_status=STATUS_POSTED,
     )
     if updated is None:
-        try:
-            coll.delete_one({"je_id": rev["je_id"]})
-        except Exception:  # noqa: BLE001
-            pass
         cur = get_je(db, je_id)
         return {"ok": False, "http": 409, "error": "already_reversed",
                 "status": (cur or {}).get("status")}
+
+    # Claim won -- now mint the consecutive serial (no burned numbers on a lost
+    # race) and insert the mirror.
+    rev["je_number"] = _next_je_number(db, je.get("entity_id"), today)
+    try:
+        coll.insert_one(rev)
+    except Exception as e:  # noqa: BLE001
+        # The claim stands but the mirror failed -- compensate by un-flipping OUR
+        # claim (guarded on our own reversed_by link), and log LOUDLY either way:
+        # if the un-flip also fails the books need manual repair NOW.
+        logger.error("[JE] reversal mirror insert FAILED for %s (mirror %s): %s",
+                     je_id, rev["je_id"], e)
+        try:
+            restored = coll.find_one_and_update(
+                {"je_id": je_id, "status": STATUS_REVERSED, "reversed_by": rev["je_id"]},
+                {"$set": {"status": STATUS_POSTED, "reversed_by": None,
+                          "updated_at": _now()}},
+            )
+            if restored is None:
+                logger.error("[JE] compensating un-flip MISSED for %s -- original "
+                             "left REVERSED with no mirror; manual repair required",
+                             je_id)
+        except Exception as e2:  # noqa: BLE001
+            logger.error("[JE] compensating un-flip FAILED for %s: %s -- original "
+                         "left REVERSED with no mirror; manual repair required",
+                         je_id, e2)
+        return {"ok": False, "http": 503, "error": "write_failed"}
 
     rev.pop("_id", None)
     updated.pop("_id", None)
@@ -859,10 +888,15 @@ def pnl_adjustments(db, *, store_id: Optional[str], from_dt, to_dt) -> Dict[str,
     exp_net = 0
     for je in rows:
         for ln in je.get("lines") or []:
-            acct = _account(db, ln.get("account_code"))
-            if not acct:
-                continue
-            atype = acct.get("account_type")
+            # Prefer the posting-time account_type SNAPSHOT on the line (immutable
+            # ledger: a later COA type-edit must not re-class POSTED entries).
+            # Legacy lines (pre-snapshot) fall back to the live COA.
+            atype = ln.get("account_type")
+            if not atype:
+                acct = _account(db, ln.get("account_code"))
+                if not acct:
+                    continue
+                atype = acct.get("account_type")
             debit = int(ln.get("debit") or 0)
             credit = int(ln.get("credit") or 0)
             if atype == "REVENUE":

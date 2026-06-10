@@ -669,6 +669,12 @@ class ApprovalEngine:
                     "approval_token": token,
                     "reviewed_by": approver_user_id,
                     "reviewed_at": now,
+                    # Re-arm the validity window FROM THE APPROVAL (same atomic op):
+                    # without this an approval minted at minute 50 of the request's
+                    # 60-min TTL leaves only 10 min to consume -- "approve now,
+                    # post at end-of-day" dead-ended. The token is now valid for a
+                    # full validity window from the moment it was approved.
+                    "expires_at": now + timedelta(minutes=_validity_minutes()),
                 }
             },
             return_document=ReturnDocument.AFTER,
