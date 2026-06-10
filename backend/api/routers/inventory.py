@@ -3674,9 +3674,11 @@ async def quarantine_stock_unit(
         db = _get_db()
         if db is not None:
             from .finance import check_period_locked
-            from datetime import date as _pl_date
+            from api.utils.ist import ist_today
 
-            check_period_locked(db, _pl_date.today())
+            # IST business day, not the UTC box date (00:00-05:30 IST is still
+            # "yesterday" in UTC -- the wrong accounting month on the 1st).
+            check_period_locked(db, ist_today())
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
