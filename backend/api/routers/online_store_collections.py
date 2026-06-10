@@ -291,8 +291,26 @@ async def create_collection(
     data["rules"] = _rules_to_dicts(payload.rules)
     data["created_by"] = current_user.get("user_id")
 
-    created = repo.create(data)
+    # The handle pre-check above is check-then-insert and therefore racy across
+    # workers; the unique ecom_collections.handle index is the real backstop.
+    # When two concurrent creates race the same handle, the loser's insert is
+    # rejected by that index (DuplicateKeyError -- surfaced either directly or
+    # as a fail-soft None from the repository). Map BOTH shapes of that loss to
+    # the same 409 as the pre-check, not a 500.
+    try:
+        created = repo.create(data)
+    except Exception as exc:  # noqa: BLE001 -- DuplicateKeyError without a hard pymongo import
+        if type(exc).__name__ == "DuplicateKeyError":
+            raise HTTPException(
+                status_code=409, detail=f"handle already exists: {handle}"
+            ) from exc
+        raise
     if created is None:
+        if repo.get_by_handle(handle) is not None:
+            # Lost a concurrent create race -- the row now exists.
+            raise HTTPException(
+                status_code=409, detail=f"handle already exists: {handle}"
+            )
         raise HTTPException(status_code=500, detail="Failed to create collection")
     return {"collection": _with_id(created)}
 

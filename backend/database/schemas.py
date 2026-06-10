@@ -710,7 +710,20 @@ INDEXES = {
         {"keys": [("salesperson_id", 1), ("created_at", -1)]},
         {"keys": [("status", 1)]},
         {"keys": [("payment_status", 1)]},
-        {"keys": [("created_at", -1)]}
+        {"keys": [("created_at", -1)]},
+        # Unification step 1: UNIQUE partial backstop so a Shopify webhook
+        # retry / double-delivery can never double-book an online order.
+        # PARTIAL: only docs that actually carry a string shopify_order_id are
+        # constrained -- legacy / offline orders (field absent) are exempt.
+        # Built at startup by api/services/shopify_ingest.
+        # ensure_shopify_order_index (wired in main.py's lifespan); declared
+        # here with the SAME name/options for documentation + migrations parity.
+        {
+            "keys": [("shopify_order_id", 1)],
+            "unique": True,
+            "partialFilterExpression": {"shopify_order_id": {"$type": "string"}},
+            "name": "uniq_shopify_order_id",
+        }
     ],
     "vendors": [
         {"keys": [("vendor_code", 1)], "unique": True},
@@ -1567,6 +1580,35 @@ ECOM_SUBDOC_SCHEMA = {
         "locally_modified": {"bsonType": "bool"},
     },
 }
+
+# `catalog_products` (the PIM superset; BVI/Shopify lineage) is DELIBERATELY
+# schemaless -- the catalog router and the PM mirror write heterogeneous doc
+# shapes (legacy catalog rows carry id+sku; PM mirror rows carry id+parent_sku;
+# the Shopify superset hangs off `ecom`/`attributes` verbatim). This permissive
+# schema exists ONLY so the collection is registered in COLLECTIONS for
+# documentation/tooling parity (migrations.py reads config["schema"]); it
+# validates nothing beyond "is an object". The indexes below ARE real: built at
+# startup by connection.py ensure_indexes (unification step 1 -- the collection
+# previously had ZERO DB indexes, so duplicate PIM docs were physically
+# possible under the check-then-write upserts). UNIQUE sparse so legacy rows
+# missing a field are exempt and pre-existing prod dupes only WARN at build.
+CATALOG_PRODUCT_SCHEMA = {
+    "bsonType": "object",
+}
+
+COLLECTIONS.update({
+    "catalog_products": {
+        "schema": CATALOG_PRODUCT_SCHEMA,
+        "indexes": [
+            # UNIQUE sparse on `id` -- the primary PIM identity (catalog router
+            # + PM mirror both key their upserts on it).
+            {"keys": [("id", 1)], "unique": True, "sparse": True},
+            # UNIQUE sparse on `sku` -- carried by catalog-router docs; PM
+            # mirror docs carry parent_sku instead (sparse exempts them).
+            {"keys": [("sku", 1)], "unique": True, "sparse": True},
+        ],
+    },
+})
 
 COLLECTIONS.update({
     "catalog_variants": {
