@@ -82,6 +82,11 @@ def _cmp_match(actual: Any, cond: Any) -> bool:
 
 def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for k, v in (query or {}).items():
+        if k == "$or":
+            # Faithful to Mongo: at least one branch must match.
+            if not any(_matches(doc, sub) for sub in (v or [])):
+                return False
+            continue
         if k == "$expr":
             # Not used by F7 code; treat as no-match so a regression surfaces.
             return False
@@ -91,9 +96,22 @@ def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
 
 
 def _project(doc: Dict[str, Any], projection: Optional[Dict[str, int]]) -> Dict[str, Any]:
+    """Faithful Mongo projection: supports exclusion ({_id: 0}) AND inclusion
+    ({field: 1, ...} -- only listed fields come back; _id included unless
+    explicitly 0). NOTE doc.get on a projected-away field returns None, exactly
+    like real Mongo, so a too-narrow projection FAILS visibly here too."""
+    if not projection:
+        return dict(doc)
+    include = [k for k, v in projection.items() if v and k != "_id"]
+    if include:
+        out = {k: doc[k] for k in include if k in doc}
+        if projection.get("_id", 1) and "_id" in doc:
+            out["_id"] = doc["_id"]
+        return out
     out = dict(doc)
-    if projection and projection.get("_id") == 0:
-        out.pop("_id", None)
+    for k, v in projection.items():
+        if not v:
+            out.pop(k, None)
     return out
 
 
@@ -386,6 +404,78 @@ class TestReservedNotOnHand:
         pl = _pending(db)[0]["payload"]
         assert pl["product_id"] == "P1"
         assert pl["days_remaining"] < 14  # on-hand treated as 0 -> imminent stockout
+
+
+# ============================================================================
+# P2 regressions - bounded server-side scans, legacy-status semantics intact
+# ============================================================================
+
+
+class TestLegacyBlankStatusOnHand:
+    """P2 regression (bounded scans): the server-side stock_units filter must
+    keep counting legacy units whose status is MISSING, None, "" or a lowercase
+    on-hand variant -- they are sellable on-hand today, and excluding them would
+    under-state stock and OVER-fire reorder proposals."""
+
+    def _seed_demand(self, db: FakeDB) -> None:
+        orders = db.get_collection("orders")
+        for i in range(8):  # ~1.14/day burn
+            orders.insert_one(_order("S1", "P1", days_ago=i % 7))
+        db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+
+    def test_missing_and_blank_status_count_as_on_hand(self):
+        db = FakeDB()
+        self._seed_demand(db)
+        stock = db.get_collection("stock_units")
+        stock.insert_one({"product_id": "P1", "store_id": "S1", "quantity": 25})  # no status key
+        stock.insert_one({"product_id": "P1", "store_id": "S1", "quantity": 15, "status": ""})
+        stock.insert_one({"product_id": "P1", "store_id": "S1", "quantity": 10, "status": None})
+        # 50 on hand at 8/7 per day ~ 43.75 days > 14 -> NO proposal.
+        assert _run_oracle(db) == 0
+        assert _pending(db) == []
+
+    def test_lowercase_available_counts_as_on_hand(self):
+        db = FakeDB()
+        self._seed_demand(db)
+        db.get_collection("stock_units").insert_one(
+            _stock("S1", "P1", 50, status="available"))
+        assert _run_oracle(db) == 0
+        assert _pending(db) == []
+
+
+class TestBoundedScans:
+    def test_stock_and_product_scans_are_filtered_and_projected(self):
+        """P2 regression: ORACLE must NOT full-scan stock_units / products every
+        tick -- both reads carry a server-side filter + a field projection."""
+        db = FakeDB()
+        orders = db.get_collection("orders")
+        for i in range(8):
+            orders.insert_one(_order("S1", "P1", days_ago=i % 7))
+        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 5))
+        db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+        # A unit + product OUTSIDE the demanded set must not be needed (and with
+        # the filter, must not even be fetched) for the run to work.
+        db.get_collection("stock_units").insert_one(_stock("S9", "OTHER", 99))
+        db.get_collection("products").insert_one(_product("OTHER"))
+
+        seen: Dict[str, list] = {}
+        for name in ("stock_units", "products"):
+            coll = db.get_collection(name)
+            orig = coll.find
+
+            def spy(query=None, projection=None, _orig=orig, _name=name):
+                seen.setdefault(_name, []).append((query, projection))
+                return _orig(query, projection)
+
+            coll.find = spy  # type: ignore[method-assign]
+
+        assert _run_oracle(db) == 1  # the demanded SKU still gets its proposal
+        pl = _pending(db)[0]["payload"]
+        assert pl["vendor_id"] == "VEND-1"  # product lookup intact under filter
+        for name in ("stock_units", "products"):
+            query, projection = seen[name][0]
+            assert query, f"{name} was scanned with an EMPTY filter (full scan)"
+            assert projection, f"{name} was scanned without a projection"
 
 
 # ============================================================================
