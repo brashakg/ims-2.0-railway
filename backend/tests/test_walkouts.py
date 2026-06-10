@@ -293,13 +293,14 @@ def test_create_walkout_full_30_fields(client, auth_headers, patched_walkouts):
     assert body["purchase_planned_in"] == "1-7 DAYS"
 
 
-@pytest.mark.parametrize("bad_mobile", ["123456789", "12345678901", "abcdefghij"])
+@pytest.mark.parametrize("bad_mobile", ["123456789", "12345678901", "98765abcde"])
 def test_mobile_validation_rejects_non_10_digits(
     client, auth_headers, patched_walkouts, bad_mobile
 ):
-    """9 / 11 digit / non-numeric mobiles are 422. Empty string is now
-    accepted (mobile is optional) — see
-    test_walkouts_mobile_optional.py."""
+    """A present-but-invalid mobile (9 / 11 digits, or a digit-bearing string
+    that doesn't form a 6-9 mobile) is 422. Empty string is accepted (mobile is
+    optional); a string with NO digits ("abcdefghij") normalizes to None /
+    omitted — both are covered in test_walkouts_mobile_optional.py."""
     resp = client.post(
         "/api/v1/walkouts",
         json=_full_payload(mobile=bad_mobile),

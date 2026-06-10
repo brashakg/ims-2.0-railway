@@ -88,16 +88,34 @@ def test_empty_mobile_does_not_auto_create_customer(
 
 @pytest.mark.parametrize(
     "bad_mobile",
-    ["1", "12345", "123456789", "12345678901", "abcdefghij", "98765abcde"],
+    ["1", "12345", "123456789", "12345678901", "98765abcde", "0123456789"],
 )
 def test_partial_or_non_numeric_mobile_still_rejected(
     client, auth_headers, patched_walkouts, bad_mobile
 ):
-    """A 1-9 digit number or mixed-character string is still 422 — the
-    optional path only opens up empty/null, not garbage values."""
+    """A present-but-invalid number (too short/long, or a leading 0-5 that
+    isn't a real Indian mobile) is still 422 — the shared normalizer raises
+    ValueError on a value that has digits but doesn't form a 6-9 mobile."""
     payload = _full_payload(mobile=bad_mobile)
     resp = client.post("/api/v1/walkouts", json=payload, headers=auth_headers)
     assert resp.status_code == 422
+
+
+def test_all_non_digit_mobile_is_treated_as_omitted(
+    client, auth_headers, patched_walkouts
+):
+    """A string with NO digits ("abcdefghij") isn't a number at all -> the
+    canonical normalizer treats it as blank/omitted (None), so the walkout is
+    accepted with no phone link (same as an empty mobile). This is the one
+    behaviour the shared normalizer changes vs the old ^\\d{10}$ regex, and it
+    is harmless: nothing junk is persisted as a fake mobile."""
+    customer_repo = patched_walkouts["customer_repo"]
+    pre_customer_count = len(customer_repo.collection.docs)
+    payload = _full_payload(mobile="abcdefghij")
+    resp = client.post("/api/v1/walkouts", json=payload, headers=auth_headers)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["customer_id"] is None
+    assert len(customer_repo.collection.docs) == pre_customer_count
 
 
 def test_ten_digit_mobile_still_auto_creates_customer(
