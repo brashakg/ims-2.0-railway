@@ -146,6 +146,11 @@ class FakeCollection:
     def insert_one(self, doc):
         doc.setdefault("_id", f"oid-{self._n}")
         self._n += 1
+        if any(d.get("_id") == doc["_id"] for d in self.docs):
+            # Faithful to real Mongo: _id is always unique-indexed.
+            from pymongo.errors import DuplicateKeyError
+
+            raise DuplicateKeyError(f"E11000 duplicate key error: _id {doc['_id']}")
         self.docs.append(dict(doc))
         return type("R", (), {"inserted_id": doc["_id"]})()
 
@@ -545,6 +550,114 @@ def test_lock_route_403_for_cross_store_actor(db, monkeypatch):
     assert exc.value.status_code == 403
     # The foreign snapshot stays OPEN -- the IDOR lock was blocked.
     assert trec.get_snapshot(db, sid)["status"] == "OPEN"
+
+
+def test_two_concurrent_builds_converge_on_one_open_doc(db):
+    """P3 regression (adversarial): two racing FIRST builds for the same
+    store/day must converge on ONE deterministic OPEN doc
+    (RECON-<store>-<day>), not two uuid-suffixed docs whose later lock 500s on
+    the LOCKED partial-unique index. Simulated by hiding the existing-doc
+    lookup for both builds (both race BEFORE either insert lands)."""
+    db.get_collection("orders").insert_one(
+        {"order_id": "O9", "store_id": "BV-1", "created_at": "2026-06-09T10:00:00",
+         "payments": [_pay("CASH", 100.0)]}
+    )
+    coll = db.get_collection("payment_reconciliations")
+    orig_find_one = coll.find_one
+    coll.find_one = lambda *a, **k: None  # type: ignore[method-assign]
+    try:
+        s1 = trec.build_reconciliation_snapshot(db, "BV-1", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+        s2 = trec.build_reconciliation_snapshot(db, "BV-1", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+    finally:
+        coll.find_one = orig_find_one  # type: ignore[method-assign]
+    assert s1["snapshot_id"] == s2["snapshot_id"] == "RECON-BV-1-2026-06-09"
+    assert s1["persisted"] is True and s2["persisted"] is True
+    assert len(coll.docs) == 1, "concurrent builds must converge on ONE doc"
+    # The single doc locks cleanly: first wins, second is a clean 409.
+    r1 = trec.lock_reconciliation(db, s1["snapshot_id"], actor={"user_id": "U1"})
+    assert r1["ok"] is True
+    r2 = trec.lock_reconciliation(db, s2["snapshot_id"], actor={"user_id": "U2"})
+    assert r2["ok"] is False and r2["http"] == 409
+
+
+def test_legacy_uuid_suffixed_open_doc_is_reused_not_duplicated(db):
+    """Prod docs minted before the deterministic id keep working: the
+    existing-doc lookup is by (store_id, window_start), so a rebuild reuses the
+    legacy uuid-suffixed _id verbatim instead of minting a sibling."""
+    legacy_id = "RECON-BV-1-2026-06-09-deadbeef"
+    db.get_collection("payment_reconciliations").insert_one({
+        "_id": legacy_id, "snapshot_id": legacy_id, "store_id": "BV-1",
+        "window_start": "2026-06-09T00:00:00", "window_end": "2026-06-10T00:00:00",
+        "by_mode": {}, "total_net": 0.0, "status": "OPEN",
+    })
+    db.get_collection("orders").insert_one(
+        {"order_id": "O10", "store_id": "BV-1", "created_at": "2026-06-09T10:00:00",
+         "payments": [_pay("UPI", 750.0)]}
+    )
+    snap = trec.build_reconciliation_snapshot(db, "BV-1", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+    assert snap["snapshot_id"] == legacy_id  # reused, not re-minted
+    assert snap["total_net"] == 750.0
+    assert len(db.get_collection("payment_reconciliations").docs) == 1
+    # And the legacy-id doc locks normally.
+    res = trec.lock_reconciliation(db, legacy_id, actor={"user_id": "U1"})
+    assert res["ok"] is True
+
+
+def test_lock_dupkey_from_partial_unique_index_is_409_not_500(db):
+    """P3 regression (adversarial): a DuplicateKeyError raised by the LOCKED
+    partial-unique index (a sibling doc for the same store/day is already
+    LOCKED) must surface as 409 already_locked -- NOT a 500 lock_failed."""
+    from pymongo.errors import DuplicateKeyError
+
+    db.get_collection("orders").insert_one(
+        {"order_id": "O11", "store_id": "BV-1", "created_at": "2026-06-09T10:00:00",
+         "payments": [_pay("CASH", 100.0)]}
+    )
+    snap = trec.build_reconciliation_snapshot(db, "BV-1", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+    coll = db.get_collection("payment_reconciliations")
+
+    def _raise_dup(*_a, **_k):
+        raise DuplicateKeyError("E11000 duplicate key error: uniq_locked_recon_per_store_day")
+
+    orig = coll.find_one_and_update
+    coll.find_one_and_update = _raise_dup  # type: ignore[method-assign]
+    try:
+        res = trec.lock_reconciliation(db, snap["snapshot_id"], actor={"user_id": "U1"})
+    finally:
+        coll.find_one_and_update = orig  # type: ignore[method-assign]
+    assert res["ok"] is False
+    assert res["error"] == "already_locked"
+    assert res["http"] == 409
+    # The snapshot itself is untouched (still OPEN).
+    assert trec.get_snapshot(db, snap["snapshot_id"])["status"] == "OPEN"
+
+
+def test_stale_rebuild_cannot_overwrite_a_locked_snapshot(db):
+    """Race-window hardening: a rebuild whose existing-doc read went stale
+    (missed the just-LOCKED doc) must NOT overwrite the LOCKED snapshot -- the
+    guarded upsert skips it and the figures stay frozen."""
+    db.get_collection("orders").insert_one(
+        {"order_id": "O12", "store_id": "BV-1", "created_at": "2026-06-09T10:00:00",
+         "payments": [_pay("CASH", 500.0)]}
+    )
+    snap = trec.build_reconciliation_snapshot(db, "BV-1", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+    assert trec.lock_reconciliation(db, snap["snapshot_id"], actor={"user_id": "U1"})["ok"] is True
+    # A later sale lands, then a STALE rebuild races (its lookup sees nothing).
+    db.get_collection("orders").insert_one(
+        {"order_id": "O13", "store_id": "BV-1", "created_at": "2026-06-09T11:00:00",
+         "payments": [_pay("UPI", 9999.0)]}
+    )
+    coll = db.get_collection("payment_reconciliations")
+    orig_find_one = coll.find_one
+    coll.find_one = lambda *a, **k: None  # type: ignore[method-assign]
+    try:
+        rebuilt = trec.build_reconciliation_snapshot(db, "BV-1", "2026-06-09T00:00:00", "2026-06-10T00:00:00")
+    finally:
+        coll.find_one = orig_find_one  # type: ignore[method-assign]
+    assert rebuilt.get("persisted") is False  # fail-soft envelope, not a write
+    stored = trec.get_snapshot(db, snap["snapshot_id"])
+    assert stored["status"] == "LOCKED"
+    assert stored["total_net"] == 500.0  # frozen, not 10499
 
 
 def test_locked_snapshot_is_immutable_on_rebuild(db):

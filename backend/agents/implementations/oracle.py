@@ -474,46 +474,96 @@ class OracleAgent(JarvisAgent):
 
         # 2. On-hand per (product_id, store_id) from stock_units (AVAILABLE),
         #    summed in Python. Missing collection -> on_hand defaults to 0.
+        #    P2 hardening: the scan is bounded SERVER-SIDE to the demanded
+        #    product ids + on-hand-ish statuses instead of a full-collection
+        #    scan every tick (stock_units is one doc per physical unit -- the
+        #    biggest collection in the system). Semantics are preserved
+        #    exactly: the status list mirrors item_events.ON_HAND_STATUSES
+        #    (upper+lower variants, the same list inventory.py filters with),
+        #    and `$in` with None matches BOTH a null and a MISSING status in
+        #    real Mongo, so legacy blank/absent-status units still count as
+        #    on-hand. The Python-side normalization below stays as the
+        #    canonical filter so the fallback full scan behaves identically.
+        wanted_ids = sorted({pid for (pid, _store) in demand.keys()})
+        try:
+            from api.services.item_events import ON_HAND_STATUSES as _on_hand_statuses
+        except Exception:  # noqa: BLE001  # pragma: no cover - defensive
+            _on_hand_statuses = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
         on_hand_map: Dict[tuple, int] = {}
         stock_coll = self.get_collection("stock_units")
         if stock_coll is not None:
+            stock_query = {
+                "status": {"$in": list(_on_hand_statuses) + [None, ""]},
+                "$or": [
+                    {"product_id": {"$in": wanted_ids}},
+                    {"sku": {"$in": wanted_ids}},
+                ],
+            }
+            stock_proj = {"_id": 0, "product_id": 1, "sku": 1, "store_id": 1,
+                          "status": 1, "quantity": 1}
             try:
-                for su in stock_coll.find({}):
-                    pid = su.get("product_id") or su.get("sku")
-                    if not pid:
-                        continue
-                    status = str(su.get("status") or "").upper()
-                    # RESERVED is held for an order -> NOT sellable on-hand (mirrors
-                    # item_events.ON_HAND_STATUSES + inventory.py). Only AVAILABLE/
-                    # IN_STOCK (or a legacy blank status) count toward the reorder
-                    # on-hand signal; counting RESERVED would over-state stock and
-                    # SUPPRESS a legitimate reorder (the opposite of this feature's job).
-                    if status and status not in ("AVAILABLE", "IN_STOCK"):
-                        continue
-                    key = (str(pid), str(su.get("store_id") or "UNKNOWN"))
-                    qty = su.get("quantity")
-                    qty = 1 if qty is None else qty
-                    try:
-                        qty = int(qty)
-                    except (TypeError, ValueError):
-                        qty = 0
-                    on_hand_map[key] = on_hand_map.get(key, 0) + qty
+                units = list(stock_coll.find(stock_query, stock_proj))
             except Exception as e:  # noqa: BLE001
-                logger.debug(f"[ORACLE] stock_units scan error: {e}")
+                logger.debug(f"[ORACLE] filtered stock_units scan failed "
+                             f"(full-scan fallback): {e}")
+                try:
+                    units = list(stock_coll.find({}))
+                except Exception as e2:  # noqa: BLE001
+                    logger.debug(f"[ORACLE] stock_units scan error: {e2}")
+                    units = []
+            for su in units:
+                pid = su.get("product_id") or su.get("sku")
+                if not pid:
+                    continue
+                status = str(su.get("status") or "").upper()
+                # RESERVED is held for an order -> NOT sellable on-hand (mirrors
+                # item_events.ON_HAND_STATUSES + inventory.py). Only AVAILABLE/
+                # IN_STOCK (or a legacy blank status) count toward the reorder
+                # on-hand signal; counting RESERVED would over-state stock and
+                # SUPPRESS a legitimate reorder (the opposite of this feature's job).
+                if status and status not in ("AVAILABLE", "IN_STOCK"):
+                    continue
+                key = (str(pid), str(su.get("store_id") or "UNKNOWN"))
+                qty = su.get("quantity")
+                qty = 1 if qty is None else qty
+                try:
+                    qty = int(qty)
+                except (TypeError, ValueError):
+                    qty = 0
+                on_hand_map[key] = on_hand_map.get(key, 0) + qty
 
         # 3. Product master lookup for preferred_vendor_id + reorder_point.
+        #    P2 hardening: server-side filter on the demanded ids over the SAME
+        #    identifier fields the match loop reads (product_id / sku / _id --
+        #    string _ids match; IMS products always carry a string product_id)
+        #    + a projection, instead of a full products scan.
         products_coll = self.get_collection("products")
         prod_by_id: Dict[str, Dict[str, Any]] = {}
         if products_coll is not None:
-            wanted = {pid for (pid, _store) in demand.keys()}
+            wanted = set(wanted_ids)
+            prod_query = {"$or": [
+                {"product_id": {"$in": wanted_ids}},
+                {"sku": {"$in": wanted_ids}},
+                {"_id": {"$in": wanted_ids}},
+            ]}
+            prod_proj = {"product_id": 1, "sku": 1, "preferred_vendor_id": 1,
+                         "default_vendor_id": 1, "vendor_id": 1,
+                         "reorder_point": 1}
             try:
-                for p in products_coll.find({}):
-                    for idf in ("product_id", "sku", "_id"):
-                        val = p.get(idf)
-                        if val is not None and str(val) in wanted:
-                            prod_by_id.setdefault(str(val), p)
+                prods = list(products_coll.find(prod_query, prod_proj))
             except Exception as e:  # noqa: BLE001
-                logger.debug(f"[ORACLE] products scan error: {e}")
+                logger.debug(f"[ORACLE] filtered products scan failed "
+                             f"(full-scan fallback): {e}")
+                try:
+                    prods = list(products_coll.find({}))
+                except Exception as e2:  # noqa: BLE001
+                    logger.debug(f"[ORACLE] products scan error: {e2}")
+                    prods = []
+            for p in prods:
+                for idf in ("product_id", "sku", "_id"):
+                    val = p.get(idf)
+                    if val is not None and str(val) in wanted:
+                        prod_by_id.setdefault(str(val), p)
 
         today = now.strftime("%y%m%d")
         enqueued = 0

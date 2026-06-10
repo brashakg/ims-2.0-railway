@@ -21,7 +21,6 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -357,7 +356,14 @@ def build_reconciliation_snapshot(
         return existing
 
     now = datetime.utcnow()
-    snapshot_id = (existing or {}).get("_id") or f"RECON-{store_id}-{ws[:10]}-{uuid.uuid4().hex[:8]}"
+    # DETERMINISTIC OPEN id (P3 fix): concurrent first-builds for the same
+    # store/day converge on ONE doc (both upsert _id RECON-<store>-<day>)
+    # instead of each minting a distinct uuid-suffixed OPEN doc -- locking the
+    # second of those later violated the LOCKED partial-unique index and
+    # surfaced as a 500. Pre-existing prod docs with the old uuid-suffixed _id
+    # keep working: the lookup above is by (store_id, window_start), and an
+    # existing doc's _id is retained verbatim.
+    snapshot_id = (existing or {}).get("_id") or f"RECON-{store_id}-{(ws or '')[:10]}"
     doc = {
         "_id": snapshot_id,
         "snapshot_id": snapshot_id,
@@ -370,15 +376,24 @@ def build_reconciliation_snapshot(
         "updated_at": now,
         "updated_by": (actor or {}).get("user_id"),
     }
+    # The status guard keeps a stale rebuild (raced by a concurrent lock) from
+    # overwriting a just-LOCKED snapshot -- LOCKED stays immutable even inside
+    # the race window. Still a single-document upsert.
+    upsert_filter = {"_id": snapshot_id, "status": {"$ne": "LOCKED"}}
+    update = {"$set": doc, "$setOnInsert": {"created_at": now}}
     try:
-        coll.update_one(
-            {"_id": snapshot_id},
-            {"$set": doc, "$setOnInsert": {"created_at": now}},
-            upsert=True,
-        )
+        coll.update_one(upsert_filter, update, upsert=True)
     except Exception:  # noqa: BLE001
-        doc["persisted"] = False
-        return doc
+        # Two concurrent FIRST builds race the same deterministic _id: the
+        # loser's upsert-insert hits DuplicateKeyError. Retry once -- the doc
+        # now exists, so the retry is a plain update (still ONE doc). A retry
+        # that fails again (e.g. the day got LOCKED mid-race) falls back to
+        # the un-persisted envelope; the stored snapshot is untouched.
+        try:
+            coll.update_one(upsert_filter, update, upsert=True)
+        except Exception:  # noqa: BLE001
+            doc["persisted"] = False
+            return doc
     doc["persisted"] = True
     return doc
 
@@ -408,6 +423,7 @@ def lock_reconciliation(db, snapshot_id: str, actor: Optional[Dict[str, Any]] = 
         return {"ok": False, "error": "no_db", "http": 503}
 
     from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
 
     now = datetime.utcnow()
     locked = None
@@ -423,6 +439,13 @@ def lock_reconciliation(db, snapshot_id: str, actor: Optional[Dict[str, Any]] = 
             },
             return_document=ReturnDocument.AFTER,
         )
+    except DuplicateKeyError:
+        # The LOCKED partial-unique index (at most ONE LOCKED snapshot per
+        # store/day) rejected the flip: a SIBLING doc for the same store/day
+        # is already LOCKED (legacy duplicate OPEN docs from the uuid-id era).
+        # That is the business condition "day already locked" -- surface it as
+        # a clean 409, not a 500 lock_failed (P3 fix).
+        return {"ok": False, "error": "already_locked", "http": 409}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"lock_failed:{exc}", "http": 500}
 
