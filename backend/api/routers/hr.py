@@ -992,6 +992,7 @@ async def check_out_by_id(
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+    validate_store_access(existing.get("store_id"), current_user)
 
     # Must have checked in before checking out.
     if not existing.get("check_in"):
@@ -1117,6 +1118,7 @@ async def edit_attendance(
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+    validate_store_access(existing.get("store_id"), current_user)
 
     # Only the fields the caller actually sent (so null != absent).
     sent = request.model_fields_set
@@ -1476,6 +1478,7 @@ async def approve_leave(
         leave = leave_repo.find_by_id(leave_id)
         if not leave:
             raise HTTPException(status_code=404, detail="Leave request not found")
+        validate_store_access(leave.get("store_id"), current_user)
 
         # F26: self-approval is blocked. A manager applying for their own leave
         # cannot approve it -- a different eligible manager must. SUPERADMIN is no
@@ -1516,6 +1519,7 @@ async def reject_leave(
         leave = leave_repo.find_by_id(leave_id)
         if not leave:
             raise HTTPException(status_code=404, detail="Leave request not found")
+        validate_store_access(leave.get("store_id"), current_user)
 
         # F26: a manager cannot reject their own leave either -- same separation
         # of duties as approve. (Cancelling one's own leave is a different flow.)
@@ -1775,6 +1779,7 @@ async def approve_payroll(
         record = payroll_repo.find_by_id(payroll_id)
         if not record:
             raise HTTPException(status_code=404, detail="Payroll record not found")
+        validate_store_access(record.get("store_id"), current_user)
 
         payroll_repo.update(
             payroll_id,
