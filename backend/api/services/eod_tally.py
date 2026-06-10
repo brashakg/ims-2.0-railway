@@ -79,6 +79,24 @@ def _to_int_paisa_from_rupees(rupees: Any) -> int:
         return 0
 
 
+def _session_day_window(session: Dict[str, Any]):
+    """The (start, end) bounds of the session's IST calendar day as NAIVE-UTC
+    instants (the frame ``created_at`` is stored in) -- so the by-mode
+    reconciliation matches the day-close. Falls back to ``opened_at`` (open span)
+    if ``session_date`` is missing/unparseable. Never raises."""
+    from datetime import date as _date, timedelta
+
+    day = session.get("session_date")
+    try:
+        from ..utils.ist import ist_day_start_utc
+
+        d = _date.fromisoformat(str(day)[:10])
+        start = ist_day_start_utc(d)
+        return start, start + timedelta(days=1)
+    except Exception:  # noqa: BLE001
+        return session.get("opened_at"), None
+
+
 def _coerce_pieces(value: Any) -> int:
     try:
         n = int(value)
@@ -452,9 +470,17 @@ def blind_submit(
     counted = denom_total if blind_count_paisa is None else int(blind_count_paisa)
 
     store_id = session.get("store_id")
-    ws = window_start if window_start is not None else session.get("opened_at")
+    # The expected figure is computed over the SESSION WINDOW. By default that is
+    # the session's IST calendar day (derived from session_date) so the by-mode
+    # reconciliation matches the day-close; the caller may override the bounds
+    # (e.g. a sub-day shift). Computing at blind-submit time stamps computed_at so
+    # a sale finalizing the same second is bounded by the day, not missed.
+    if window_start is not None:
+        ws, we = window_start, window_end
+    else:
+        ws, we = _session_day_window(session)
     payouts = int(cash_payouts_paisa or 0)
-    exp = compute_expected(db, store_id, ws, window_end, int(session.get("opening_float_paisa", 0) or 0), payouts)
+    exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
     expected_cash_paisa = exp["expected_cash_paisa"]
     variance_paisa = counted - expected_cash_paisa
     tol = get_variance_tolerance_paisa(store_id=store_id)
