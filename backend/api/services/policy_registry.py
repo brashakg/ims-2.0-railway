@@ -103,6 +103,22 @@ _REGISTRY_LIST: List[PolicySpec] = [
           group="Pricing & Promotions", label="Cost floor % over cost",
           help="Minimum margin over cost on a priced sell line (consumer: orders sell-path, Phase 2).",
           minimum=0, maximum=100),
+    # Fcostfloor enable switch. Owner sign-off 2026-06-09: defaults ON
+    # (global) -- the post-discount cost+pct floor enforces everywhere; a
+    # store/entity override lets the orchestrator opt a store out (e.g.
+    # patchy cost data). Owner rev 2 (same date): DISCOUNTED sales only --
+    # a pure full-sticker sale is always allowed (~292 active SKUs sticker
+    # below cost+10% ex-GST and must keep selling). Missing/zero product
+    # cost always fails OPEN per line regardless of this flag (see
+    # api/services/cost_floor.py).
+    _spec(key="pricing.cost_floor_enabled", type="bool", default=True,
+          scopes=("global", "entity", "store"),
+          write_roles=("SUPERADMIN", "ADMIN"),
+          group="Pricing & Promotions", label="Enforce sell-price cost floor",
+          help="Block a DISCOUNTED sell line whose effective post-discount "
+               "price falls below cost + the cost-floor percent. Full-sticker "
+               "(undiscounted) sales and lines with no known cost are never "
+               "blocked."),
     _spec(key="promo.ceiling_pct", type="percent", default=30.0,
           scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
           group="Pricing & Promotions", label="Promo cart ceiling %",
