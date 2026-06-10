@@ -45,10 +45,12 @@ except ImportError:  # pragma: no cover - test stubs may not have pymongo
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
     get_customer_repository,
     get_order_repository,
     get_product_repository,
     get_stock_repository,
+    validate_store_access,
 )
 from ..services import restock_engine
 from ..services import returns_engine as engine
@@ -1120,11 +1122,14 @@ async def create_return(
             logger.warning("[RETURNS] idempotency lookup skipped: %s", _exc)
 
     # Accounting period lock: cannot create returns in a closed month.
+    # IST audit: lock against the IST business day, not the UTC day --
+    # date.today() on Railway (UTC) is yesterday between 00:00-05:30 IST,
+    # which falsely blocked returns for 5.5h on the 1st after a month-lock.
     db = _get_db()
     if db is not None:
         from .finance import check_period_locked
-        from datetime import date
-        check_period_locked(db, date.today())
+        from ..utils.ist import ist_today
+        check_period_locked(db, ist_today())
 
     active_lines = [it for it in body.items if it.return_qty > 0]
     if not active_lines:
@@ -1132,7 +1137,11 @@ async def create_return(
             status_code=400, detail="Select at least one item to return"
         )
 
-    store_id = body.store_id or current_user.get("active_store_id")
+    # IDOR guard (P1): the refund's store must be one the caller can access.
+    # body.store_id was previously trusted as-is, letting a store-scoped role
+    # book a refund into ANY store. Falls back to the caller's active store
+    # when omitted (validate_store_access returns it); 403 otherwise.
+    store_id = validate_store_access(body.store_id, current_user)
 
     order = _resolve_order(body)
 
@@ -1155,6 +1164,16 @@ async def create_return(
                 "Original order could not be resolved -- a return must reference "
                 "the order it is against (order_id or order_number)."
             ),
+        )
+
+    # IDOR guard (P1): the resolved order must belong to a store the caller can
+    # access. _resolve_order fetches by id/number with no ownership check, so a
+    # store-scoped role could previously create a refund against ANOTHER
+    # store's sale. HQ roles (SUPERADMIN/ADMIN) pass via can_access_store_scoped.
+    if not can_access_store_scoped(order.get("store_id"), current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="No access to the store this order belongs to.",
         )
 
     # BUG-096: only a completed sale is returnable. Reject a CANCELLED / DRAFT /
@@ -1616,6 +1635,12 @@ async def get_return(
         raise HTTPException(status_code=404, detail="Return not found")
     if not doc:
         raise HTTPException(status_code=404, detail="Return not found")
+    # IDOR guard: a return carries customer identity + refund amounts. Only a
+    # caller with access to the return's store may read it (mirrors the
+    # store-pinned list above; SUPERADMIN/ADMIN pass through). A legacy doc
+    # with no store_id falls back to the caller's active store (allowed) --
+    # same semantics as GET /orders/{order_id}.
+    validate_store_access(doc.get("store_id"), current_user)
     return doc
 
 

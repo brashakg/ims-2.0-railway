@@ -1164,12 +1164,15 @@ async def create_order(
         )
 
     # Accounting period lock: cannot create orders in a closed month.
+    # IST audit: the lock day must be the IST business day, not the UTC day --
+    # date.today() on Railway (UTC) is yesterday between 00:00-05:30 IST, which
+    # falsely blocked POS orders for 5.5h on the 1st after a month-lock.
     db = _get_db()
     if db is not None:
         from .finance import check_period_locked
-        from datetime import date as _pl_date
+        from ..utils.ist import ist_today
 
-        check_period_locked(db, _pl_date.today())
+        check_period_locked(db, ist_today())
 
     # Validate product_ids exist.
     #
@@ -2038,6 +2041,10 @@ async def update_order(
         if existing is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(existing.get("store_id"), current_user)
+
         if existing.get("status") != "DRAFT":
             raise HTTPException(
                 status_code=400, detail="Only DRAFT orders can be updated"
@@ -2091,6 +2098,10 @@ async def add_order_item(
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") != "DRAFT":
             raise HTTPException(
@@ -2227,6 +2238,10 @@ async def remove_order_item(
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") != "DRAFT":
             raise HTTPException(
@@ -2459,6 +2474,10 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
+
         if not validate_status_transition(order.get("status", ""), "CONFIRMED"):
             raise HTTPException(
                 status_code=400,
@@ -2517,6 +2536,9 @@ async def add_payment(
             try:
                 order_doc = repo.find_by_id(order_id)
                 if order_doc:
+                    # IDOR guard: the replay must not leak another store's
+                    # payment row -- same store check as the main path below.
+                    validate_store_access(order_doc.get("store_id"), current_user)
                     for existing_pmt in order_doc.get("payments") or []:
                         if existing_pmt.get("idempotency_key") == idem_key:
                             return {
@@ -2527,11 +2549,17 @@ async def add_payment(
                                 "payment_status": order_doc.get("payment_status", "UNPAID"),
                                 "_idempotent_replay": True,
                             }
+            except HTTPException:
+                raise
             except Exception as _idem_exc:  # noqa: BLE001
                 logger.warning("[ORDERS] payment idempotency lookup skipped: %s", _idem_exc)
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") == "CANCELLED":
             raise HTTPException(
@@ -2715,6 +2743,10 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
+
         if not validate_status_transition(order.get("status", ""), "READY"):
             raise HTTPException(
                 status_code=400,
@@ -2742,6 +2774,10 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
 
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(
@@ -2783,12 +2819,23 @@ async def cancel_order(
     current_user: dict = Depends(get_current_user),
 ):
     """Cancel order"""
+    # RBAC: cancelling a sale is a POS-tier action, same tier as order
+    # create/confirm/deliver. Previously ANY authenticated role (ACCOUNTANT,
+    # OPTOMETRIST, WORKSHOP_STAFF, ...) could cancel any order.
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to cancel orders."
+        )
     repo = get_order_repository()
 
     if repo is not None:
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
 
         if order.get("status") == "DELIVERED":
             raise HTTPException(
@@ -3054,6 +3101,11 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
+        # IDOR guard: mirror GET /{order_id} -- an invoice carries customer
+        # name/GSTIN + line-level pricing; only a caller with access to the
+        # order's store may read it (SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
+
         if order.get("status") == "DRAFT":
             raise HTTPException(
                 status_code=400, detail="Cannot generate invoice for DRAFT orders"
@@ -3199,6 +3251,9 @@ async def create_bopis_transfer(
         order = repo.find_by_id(order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        # IDOR guard: mirror GET /{order_id} -- only act on an order in a store
+        # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
+        validate_store_access(order.get("store_id"), current_user)
         if order.get("status") == "CANCELLED":
             raise HTTPException(
                 status_code=400, detail="Cannot add BOPIS transfer to a cancelled order"

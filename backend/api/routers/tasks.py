@@ -12,12 +12,14 @@ import uuid
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
     get_task_repository,
     get_user_repository,
     get_db,
     get_order_repository,
     validate_store_access,
 )
+from ..utils.ist import ist_today
 from ..services.task_triggers import (
     create_system_task,
     is_suspicious_closure,
@@ -52,6 +54,24 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED", "CANCELLED"}
 
 # Statuses from which no further lifecycle transitions are allowed.
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
+
+
+def _ensure_task_store_access(task: dict, current_user: dict) -> None:
+    """Object-level store guard for the single-task endpoints (P2 IDOR).
+
+    A task stamped with a store_id may only be read / acted on by a caller
+    whose store reach covers that store (SUPERADMIN/ADMIN are cross-store via
+    can_access_store_scoped). A task with NO store_id is a GLOBAL/system task
+    -> any authenticated caller may proceed (it cannot leak another store's
+    data because it belongs to none).
+    """
+    store_id = task.get("store_id")
+    if not store_id:
+        return
+    if not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(
+            status_code=403, detail="No access to this task's store"
+        )
 
 
 # ============================================================================
@@ -406,9 +426,13 @@ async def get_my_tasks(
             ]
         }
 
+    # limit=0 -> unbounded (PR-#522 idiom): find_many's default limit=100
+    # silently dropped tasks past the first 100 from the user's work list.
     tasks = [
         _canon_task_out(t)
-        for t in repo.find_many(filters, sort=[("priority", 1), ("due_at", 1)])
+        for t in repo.find_many(
+            filters, sort=[("priority", 1), ("due_at", 1)], limit=0
+        )
     ]
 
     return {"tasks": tasks, "total": len(tasks)}
@@ -436,7 +460,12 @@ async def get_overdue_tasks(
     if active_store:
         filters["store_id"] = active_store
 
-    tasks = [_canon_task_out(t) for t in repo.find_many(filters, sort=[("due_at", 1)])]
+    # limit=0 -> unbounded (PR-#522 idiom): the default limit=100 silently hid
+    # overdue tasks past the first 100 from the escalation view.
+    tasks = [
+        _canon_task_out(t)
+        for t in repo.find_many(filters, sort=[("due_at", 1)], limit=0)
+    ]
 
     return {"tasks": tasks, "total": len(tasks)}
 
@@ -463,6 +492,8 @@ async def get_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    _ensure_task_store_access(task, current_user)
+
     return _canon_task_out(task)
 
 
@@ -488,6 +519,8 @@ async def update_task(
 
     if not existing:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    _ensure_task_store_access(existing, current_user)
 
     current_status = canon_status(existing.get("status"))
 
@@ -562,6 +595,8 @@ async def complete_task(
 
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    _ensure_task_store_access(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -763,6 +798,8 @@ async def acknowledge_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    _ensure_task_store_access(task, current_user)
+
     current_status = canon_status(task.get("status"))
 
     # Only OPEN tasks need to be acknowledged (idempotent for IN_PROGRESS).
@@ -814,6 +851,8 @@ async def escalate_task(
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    _ensure_task_store_access(task, current_user)
 
     current_status = canon_status(task.get("status"))
     if current_status in TERMINAL_STATUSES:
@@ -1550,7 +1589,9 @@ async def get_sop_checklist(
         raise HTTPException(status_code=404, detail="SOP template not found")
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
-    day = date or datetime.now().strftime("%Y-%m-%d")
+    # IST audit: the checklist day key must be the IST business day. The UTC
+    # day (datetime.now() on Railway) put late-night reads on yesterday's doc.
+    day = date or ist_today().isoformat()
 
     ccol = _sop_completions_collection()
     completion = None
@@ -1593,7 +1634,9 @@ async def toggle_sop_checklist_item(
         raise HTTPException(status_code=404, detail="SOP template not found")
 
     active_store = payload.store_id or current_user.get("active_store_id")
-    day = payload.date or datetime.now().strftime("%Y-%m-%d")
+    # IST audit: same IST day key as the GET above -- a tick at 23:30 IST must
+    # land on TODAY's completion doc, not yesterday's (UTC) one.
+    day = payload.date or ist_today().isoformat()
     now = datetime.now()
     steps = tpl.get("steps") or []
 
@@ -1748,6 +1791,7 @@ async def start_task(
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    _ensure_task_store_access(task, current_user)
     existing = canon_status(task.get("status"))
     if existing == "IN_PROGRESS":
         return {
@@ -1787,6 +1831,7 @@ async def reassign_task(
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    _ensure_task_store_access(task, current_user)
     task_status = canon_status(task.get("status"))
     if task_status in TERMINAL_STATUSES:
         raise HTTPException(
