@@ -9,8 +9,11 @@ Covers: post-discount enforcement (per-line AND cart-share), the live E2
 missing/zero/virtual cost, composition with role/category/luxury-brand caps
 (the tighter bound wins), the Rs 0 / 100%-discount exemption, the boundary
 (eff == floor accepted), GST-inclusive extraction (compare GST-exclusive
-like-for-like), B2B parity, and the raw-server-cost guarantee with a
-SALES_CASHIER actor (never an F35-masked DTO).
+like-for-like), B2B parity, the raw-server-cost guarantee with a
+SALES_CASHIER actor (never an F35-masked DTO), the chair-P1 /items-path
+coverage, and the owner rev-2 DISCOUNTED-SALES-ONLY semantics (a pure
+full-sticker sale is always allowed; any line or cart discount activates
+the floor).
 
 CI-robustness: every repo/db accessor the create-order handler touches is
 monkeypatched (order/customer/product/stock/walkin/audit repos + the catalog
@@ -233,12 +236,13 @@ def test_knob_lowered_to_zero_disables_post_discount_floor(client, auth_headers,
     assert r.status_code in (200, 201), r.text
 
 
-def test_knob_raised_to_25_blocks_120(client, auth_headers, floor_env):
-    """Packet test 3b: pct = 25 -> a Rs120 line on Rs100 cost (no discount at
-    all) now 400s (floor Rs125)."""
+def test_knob_raised_to_25_blocks_eff_120(client, auth_headers, floor_env):
+    """Packet test 3b: pct = 25 -> a DISCOUNTED line netting eff Rs120 on
+    Rs100 cost (150 @ 20%) now 400s (floor Rs125) -- the same line passes at
+    the default pct 10 (see test_floor_accepts_post_discount_above_floor)."""
     _set_policy(floor_env, "pricing.cost_floor_pct", 25.0)
     pid = _seed_product(floor_env, pid="FLR-6", cost_price=100.0)
-    r = _post(client, auth_headers, [_item(pid, 120.0)])
+    r = _post(client, auth_headers, [_item(pid, 150.0, discount_percent=20.0)])
     assert r.status_code == 400, r.text
     assert "cost+25" in r.json()["detail"]
 
@@ -396,24 +400,27 @@ def test_full_line_discount_without_approval_still_400s_via_c4(
 
 
 def test_boundary_exactly_at_floor_accepted(client, auth_headers, floor_env):
-    """Packet test 7: eff == floor exactly (Rs110 on cost Rs100 @10%) is
-    ACCEPTED (the 1e-6 epsilon absorbs binary-float dust)."""
-    pid = _seed_product(floor_env, pid="FLR-19", cost_price=100.0)
-    r = _post(client, auth_headers, [_item(pid, 110.0)])
+    """Packet test 7: a DISCOUNTED line landing eff == floor exactly (Rs220
+    @ 50% = Rs110 on cost Rs100 @10%) is ACCEPTED (the 1e-6 epsilon absorbs
+    binary-float dust)."""
+    pid = _seed_product(floor_env, pid="FLR-19", cost_price=100.0, mrp=300.0)
+    r = _post(client, auth_headers, [_item(pid, 220.0, discount_percent=50.0)])
     assert r.status_code in (200, 201), r.text
 
 
 def test_inclusive_mode_compares_gst_exclusive_taxable(client, auth_headers, floor_env):
     """Default GST-INCLUSIVE mode: the counter price embeds 5% GST (FRAME).
-    Rs115 all-in -> taxable 115/1.05 = Rs109.52 < Rs110 -> 400, while Rs116
-    -> Rs110.48 -> accepted. Proves the floor compares the GST-EXCLUSIVE
-    taxable against the GST-exclusive cost, not the sticker price."""
+    A DISCOUNTED line (1%) at Rs115 nets gross Rs113.85 -- ABOVE Rs110 as a
+    sticker number, but its GST-exclusive taxable 113.85/1.05 = Rs108.43 is
+    below the Rs110 floor -> 400. The same 1% line at Rs122 nets taxable
+    Rs115.03 -> accepted. Proves the floor compares the GST-EXCLUSIVE
+    taxable against the GST-exclusive cost, not the all-in price."""
     floor_env["monkeypatch"].delenv("GST_PRICING_MODE", raising=False)
     pid = _seed_product(floor_env, pid="FLR-20", cost_price=100.0)
-    r_block = _post(client, auth_headers, [_item(pid, 115.0)])
+    r_block = _post(client, auth_headers, [_item(pid, 115.0, discount_percent=1.0)])
     assert r_block.status_code == 400, r_block.text
     assert "floor" in r_block.json()["detail"].lower()
-    r_ok = _post(client, auth_headers, [_item(pid, 116.0)])
+    r_ok = _post(client, auth_headers, [_item(pid, 122.0, discount_percent=1.0)])
     assert r_ok.status_code in (200, 201), r_ok.text
 
 
@@ -453,8 +460,8 @@ def test_unit_missing_taxable_value_fails_open(monkeypatch):
 
     _patch_policies(monkeypatch)
     enforce_cost_floor(
-        [{"product_id": "P1", "quantity": 1, "discount_percent": 0,
-          "cost_at_sale": 100.0}],  # no taxable_value
+        [{"product_id": "P1", "quantity": 1, "discount_percent": 10.0,
+          "cost_at_sale": 100.0}],  # discounted, but no taxable_value
         {"P1": 100.0}, "BV-TEST-01",
     )  # no raise
 
@@ -469,16 +476,18 @@ def test_unit_cost_by_pid_fallback_used(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         enforce_cost_floor(
             [{"product_id": "P2", "product_name": "X", "quantity": 2,
-              "discount_percent": 0, "taxable_value": 100.0}],  # eff 50/unit
+              "discount_percent": 10.0, "taxable_value": 100.0}],  # eff 50/unit
             {"P2": 100.0}, "BV-TEST-01",
         )
     assert exc.value.status_code == 400
     assert "floor" in exc.value.detail.lower()
 
 
-def test_unit_policy_engine_down_falls_back_to_defaults(monkeypatch):
+def test_unit_policy_engine_down_falls_back_to_defaults(monkeypatch, caplog):
     """If the policy engine raises, the guard uses the registry defaults
-    (enabled=True, pct=10) -- deterministic, matching a fresh DB."""
+    (enabled=True, pct=10) -- deterministic, matching a fresh DB -- and emits
+    a [COST_FLOOR] warning so the fail-closed window is observable."""
+    import logging
     from fastapi import HTTPException
     from api.services import policy_engine as pe
     from api.services.cost_floor import enforce_cost_floor
@@ -487,12 +496,44 @@ def test_unit_policy_engine_down_falls_back_to_defaults(monkeypatch):
         raise RuntimeError("policy store down")
 
     monkeypatch.setattr(pe, "get_policy", boom)
-    with pytest.raises(HTTPException):
+    with caplog.at_level(logging.WARNING, logger="api.services.cost_floor"):
+        with pytest.raises(HTTPException):
+            enforce_cost_floor(
+                [{"product_id": "P3", "quantity": 1, "discount_percent": 10.0,
+                  "taxable_value": 50.0, "cost_at_sale": 100.0}],
+                None, None,
+            )
+    assert any("[COST_FLOOR]" in rec.message for rec in caplog.records)
+
+
+def test_unit_sticker_line_exempt_without_cart_discount(monkeypatch):
+    """Owner rev 2: an UNDISCOUNTED line below the floor is exempt when the
+    order carries no cart discount (sticker sale)."""
+    from api.services.cost_floor import enforce_cost_floor
+
+    _patch_policies(monkeypatch)
+    enforce_cost_floor(
+        [{"product_id": "P4", "quantity": 1, "discount_percent": 0,
+          "discount_amount": 0, "taxable_value": 50.0, "cost_at_sale": 100.0}],
+        None, "BV-TEST-01", order_has_cart_discount=False,
+    )  # no raise
+
+
+def test_unit_cart_discount_flag_floors_undiscounted_line(monkeypatch):
+    """Owner rev 2: the same undiscounted line IS floored when the order
+    carries a cart-level discount (the cart-dilution bypass stays closed)."""
+    from fastapi import HTTPException
+    from api.services.cost_floor import enforce_cost_floor
+
+    _patch_policies(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
         enforce_cost_floor(
-            [{"product_id": "P3", "quantity": 1, "discount_percent": 0,
-              "taxable_value": 50.0, "cost_at_sale": 100.0}],
-            None, None,
+            [{"product_id": "P5", "quantity": 1, "discount_percent": 0,
+              "discount_amount": 0, "taxable_value": 50.0,
+              "cost_at_sale": 100.0}],
+            None, "BV-TEST-01", order_has_cart_discount=True,
         )
+    assert exc.value.status_code == 400
 
 
 def test_registry_flag_defaults_on_and_pct_10():
@@ -508,3 +549,160 @@ def test_registry_flag_defaults_on_and_pct_10():
     pct = preg.REGISTRY.get("pricing.cost_floor_pct")
     assert pct is not None
     assert pct.default == 10.0
+
+
+# --------------------------------------------------------------------------
+# 11. POST /orders/{id}/items honors the floor (chair P1 regression)
+# --------------------------------------------------------------------------
+
+
+def _add_item(client, headers, order_id, item):
+    return client.post(
+        f"/api/v1/orders/{order_id}/items", json=item, headers=headers
+    )
+
+
+def test_items_path_cashier_below_floor_400_and_not_persisted(
+    client, cashier_headers, floor_env
+):
+    """Chair P1 (a): a SALES_CASHIER creates a CLEAN order, then adds a line
+    via /items with a cap-legal 10% discount that nets eff Rs90 < cost Rs95
+    + 10% = Rs104.5 -> 400 AND the offending line is NOT persisted (the
+    order doc is untouched)."""
+    pid_ok = _seed_product(floor_env, pid="FLR-22", cost_price=50.0, mrp=100.0)
+    pid_low = _seed_product(floor_env, pid="FLR-23", cost_price=95.0, mrp=100.0)
+    r = _post(client, cashier_headers, [_item(pid_ok, 100.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+
+    r2 = _add_item(client, cashier_headers, order_id,
+                   _item(pid_low, 100.0, discount_percent=10.0))
+    assert r2.status_code == 400, r2.text
+    assert "floor" in r2.json()["detail"].lower()
+
+    saved = floor_env["order_repo"].find_by_id(order_id)
+    assert len(saved["items"]) == 1  # offending line NOT appended
+    assert saved["items"][0]["product_id"] == pid_ok
+
+
+def test_items_path_admin_unbounded_discount_below_floor_400(
+    client, auth_headers, floor_env
+):
+    """Chair P1 (b): ADMIN/SUPERADMIN skip the discount caps on /items too --
+    but the floor still blocks a 60% line (eff Rs60 < Rs110)."""
+    pid = _seed_product(floor_env, pid="FLR-24", cost_price=100.0)
+    r = _post(client, auth_headers, [_item(pid, 150.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+
+    r2 = _add_item(client, auth_headers, order_id,
+                   _item(pid, 150.0, discount_percent=60.0))
+    assert r2.status_code == 400, r2.text
+    assert "floor" in r2.json()["detail"].lower()
+    saved = floor_env["order_repo"].find_by_id(order_id)
+    assert len(saved["items"]) == 1
+
+
+def test_items_path_above_floor_add_works_and_stamps_cost(
+    client, auth_headers, floor_env
+):
+    """Chair P1 (c): a legit /items add above the floor (20% -> eff Rs120 >=
+    Rs110) still works, and the new line now carries the raw cost_at_sale
+    snapshot (the stamp the bypass was missing)."""
+    pid = _seed_product(floor_env, pid="FLR-25", cost_price=100.0)
+    r = _post(client, auth_headers, [_item(pid, 150.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+
+    r2 = _add_item(client, auth_headers, order_id,
+                   _item(pid, 150.0, discount_percent=20.0))
+    assert r2.status_code in (200, 201), r2.text
+    saved = floor_env["order_repo"].find_by_id(order_id)
+    assert len(saved["items"]) == 2
+    assert saved["items"][1]["cost_at_sale"] == 100.0
+    assert saved["items"][1]["product_name"] == "Floor Frame"
+
+
+def test_items_path_flag_off_unchanged(client, auth_headers, floor_env):
+    """Chair P1 (d): with the E2 flag OFF the /items path behaves exactly as
+    pre-change -- the deep-discount line (eff Rs75, pre-discount Rs150 passes
+    the legacy cost+0% check) is accepted and persisted."""
+    _set_policy(floor_env, "pricing.cost_floor_enabled", False)
+    pid = _seed_product(floor_env, pid="FLR-26", cost_price=100.0)
+    r = _post(client, auth_headers, [_item(pid, 150.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+
+    r2 = _add_item(client, auth_headers, order_id,
+                   _item(pid, 150.0, discount_percent=50.0))
+    assert r2.status_code in (200, 201), r2.text
+    saved = floor_env["order_repo"].find_by_id(order_id)
+    assert len(saved["items"]) == 2
+
+
+def test_items_path_missing_cost_fails_open(client, auth_headers, floor_env):
+    """/items inherits the fail-open contract: a no-cost product line added
+    at a deep discount sells normally (flag ON)."""
+    pid_ok = _seed_product(floor_env, pid="FLR-27", cost_price=100.0)
+    pid_nocost = _seed_product(floor_env, pid="FLR-28")  # cost_price absent
+    r = _post(client, auth_headers, [_item(pid_ok, 150.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+
+    r2 = _add_item(client, auth_headers, order_id,
+                   _item(pid_nocost, 150.0, discount_percent=50.0))
+    assert r2.status_code in (200, 201), r2.text
+    saved = floor_env["order_repo"].find_by_id(order_id)
+    assert len(saved["items"]) == 2
+    assert saved["items"][1]["cost_at_sale"] is None
+
+
+# --------------------------------------------------------------------------
+# 12. Owner rev 2 (2026-06-09): DISCOUNTED sales only -- a pure full-sticker
+#     sale is always allowed (~292 active SKUs sticker below cost+10% ex-GST)
+# --------------------------------------------------------------------------
+
+
+def test_sticker_sale_on_thin_margin_sku_allowed(client, auth_headers, floor_env):
+    """(a) A thin-margin SKU (sticker Rs105 < cost Rs100 + 10% = Rs110) sold
+    at FULL STICKER with no discounts anywhere -> allowed. The strict floor
+    would deadlock these SKUs; the owner chose discounted-sales-only."""
+    pid = _seed_product(floor_env, pid="FLR-29", cost_price=100.0, mrp=105.0)
+    r = _post(client, auth_headers, [_item(pid, 105.0)])
+    assert r.status_code in (200, 201), r.text
+
+
+def test_thin_margin_sku_with_line_discount_blocked(client, auth_headers, floor_env):
+    """(b) The SAME thin-margin SKU with even a 1% line discount -> the floor
+    activates -> 400 (eff Rs103.95 < Rs110)."""
+    pid = _seed_product(floor_env, pid="FLR-30", cost_price=100.0, mrp=105.0)
+    r = _post(client, auth_headers, [_item(pid, 105.0, discount_percent=1.0)])
+    assert r.status_code == 400, r.text
+    assert "floor" in r.json()["detail"].lower()
+
+
+def test_thin_margin_sku_with_cart_discount_blocked(client, auth_headers, floor_env):
+    """(c) Clean (undiscounted) lines + a 1% CART-level discount -> the floor
+    activates on every line -> 400. The cart-dilution bypass stays closed."""
+    pid = _seed_product(floor_env, pid="FLR-31", cost_price=100.0, mrp=105.0)
+    r = _post(client, auth_headers, [_item(pid, 105.0)],
+              cart_discount_percent=1.0)
+    assert r.status_code == 400, r.text
+    assert "floor" in r.json()["detail"].lower()
+
+
+def test_items_path_sticker_sale_thin_sku_allowed(client, auth_headers, floor_env):
+    """(d) /items consistency: an undiscounted thin-margin line added to a
+    discount-free order passes (sticker-exempt) and is persisted with its
+    raw cost_at_sale snapshot."""
+    pid_ok = _seed_product(floor_env, pid="FLR-32", cost_price=50.0, mrp=100.0)
+    pid_thin = _seed_product(floor_env, pid="FLR-33", cost_price=100.0, mrp=105.0)
+    r = _post(client, auth_headers, [_item(pid_ok, 100.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+
+    r2 = _add_item(client, auth_headers, order_id, _item(pid_thin, 105.0))
+    assert r2.status_code in (200, 201), r2.text
+    saved = floor_env["order_repo"].find_by_id(order_id)
+    assert len(saved["items"]) == 2
+    assert saved["items"][1]["cost_at_sale"] == 100.0

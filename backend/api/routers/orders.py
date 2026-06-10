@@ -1630,18 +1630,29 @@ async def create_order(
         grand_total = round(taxable_after_cart_discount + tax_amount, 2)
 
         # Fcostfloor (DECISIONS sec 9, owner sign-off 2026-06-09): E2-flag-
-        # gated post-discount cost+pct% floor on each line's EFFECTIVE
-        # per-unit taxable price (after the per-line discount AND its share
-        # of the cart discount, as stamped by _compute_per_category_gst).
-        # Read-only math over the already-computed line finals -- no GST,
-        # payment or persistence change. Fail-OPEN on missing/zero cost;
-        # Rs 0 / 100%-discount lines stay C-4-approval-gated-exempt; the
-        # floor COMPOSES with (never replaces) the role/category/brand caps
-        # above. Flag off -> immediate no-op (pre-change behavior). Raises
-        # BEFORE the lens reserve below so a floor 400 leaks no reservation.
+        # gated post-discount cost+pct% floor on each DISCOUNTED line's
+        # EFFECTIVE per-unit taxable price (after the per-line discount AND
+        # its share of the cart discount, as stamped by
+        # _compute_per_category_gst). Owner rev 2: pure full-sticker lines
+        # are exempt -- the flag below tells the guard whether a cart-level
+        # discount applies to this order (server-derived, never the raw
+        # client amount). Read-only math over the already-computed line
+        # finals -- no GST, payment or persistence change. Fail-OPEN on
+        # missing/zero cost; Rs 0 / 100%-discount lines stay
+        # C-4-approval-gated-exempt; the floor COMPOSES with (never
+        # replaces) the role/category/brand caps above. Flag off ->
+        # immediate no-op (pre-change behavior). Raises BEFORE the lens
+        # reserve below so a floor 400 leaks no reservation.
         from ..services.cost_floor import enforce_cost_floor
 
-        enforce_cost_floor(items_data, _cost_by_pid, store_id)
+        enforce_cost_floor(
+            items_data,
+            _cost_by_pid,
+            store_id,
+            order_has_cart_discount=bool(
+                cart_discount_percent > 0 or cart_discount_amount > 0
+            ),
+        )
 
         # Resolve delivery date — explicit date > expected_delivery_days
         if order.delivery_date:
@@ -2125,6 +2136,10 @@ async def add_order_item(
         _cap = _role_cap
         _eff_disc = item.discount_percent
         _pid = item.product_id or ""
+        # Fcostfloor (chair P1): raw catalog cost for THIS line; stamped as
+        # cost_at_sale below and fed to the floor pass. None (virtual id /
+        # missing product / no cost_price) keeps the line fail-open.
+        _cost = None
         if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
             try:
                 pr = get_product_repository()
@@ -2194,6 +2209,11 @@ async def add_order_item(
             "item_id": str(uuid.uuid4()),
             "item_type": item.item_type,
             "product_id": item.product_id,
+            # Parity with create_order's line shape (chair P1): the name makes
+            # the floor 400 actionable; cost_at_sale freezes COGS exactly like
+            # create does (None when unknown -> floor fails open on this line).
+            "product_name": item.product_name,
+            "cost_at_sale": _cost,
             "quantity": item.quantity,
             "unit_price": item.unit_price,
             "discount_percent": item.discount_percent,
@@ -2210,6 +2230,32 @@ async def add_order_item(
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
         gst = _compute_per_category_gst(items, cart_discount_percent)
         grand_total = round(gst["taxable"] + gst["tax"], 2)
+
+        # Fcostfloor (chair P1): the add-items path must honor the SAME
+        # post-discount cost+pct% floor as create_order -- it mirrored every
+        # legacy guard but skipped the floor, so a cap-legal line that nets
+        # below cost*(1+pct/100) could be appended to a clean DRAFT order.
+        # Validate the COMBINED line list on the just-recomputed taxable
+        # finals BEFORE persisting: a 400 here leaves the order untouched.
+        # Owner rev 2 (discounted sales only): the cart-discount presence is
+        # derived from the persisted order doc's cart_discount fields.
+        from ..services.cost_floor import enforce_cost_floor
+
+        def _f(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        enforce_cost_floor(
+            items,
+            {_pid: _cost},
+            order.get("store_id"),
+            order_has_cart_discount=bool(
+                _f(cart_discount_percent) > 0
+                or _f(order.get("cart_discount_amount")) > 0
+            ),
+        )
 
         repo.update(
             order_id,
