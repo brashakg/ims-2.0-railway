@@ -120,6 +120,12 @@ def _check_dc_hardlock(db, lens_status, lens_product_id, store_id, created_at, c
 
     An ADMIN+ may bypass with override_reason (audited by the caller). In-house
     lenses (lens_status != ORDERED) are exempt and pass straight through.
+
+    SHARED: the F2 lab-routing scan path (services/lab_routing._dc_gate_block)
+    REUSES this exact function for its scan-driven -> IN_PROGRESS gate, passing
+    no override_reason and no privileged roles, and translating the 422 raise
+    into a status-hold (gate_block="DC_REQUIRED") -- a physical scan is never
+    failed. Keep flag/cutover/exemption/DC-lookup semantics HERE, defined once.
     """
     # Only external-lab (ORDERED) lenses are gated; in-house stock is exempt.
     if lens_status != "ORDERED":
