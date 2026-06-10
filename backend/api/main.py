@@ -233,6 +233,17 @@ async def lifespan(app: FastAPI):
                 ensure_reconciliation_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Reconciliation index creation skipped: {e}")
+            # Unification step 1: UNIQUE partial index on orders.shopify_order_id
+            # so a Shopify webhook retry / double-delivery can never double-book
+            # an online order. The helper existed in shopify_ingest but was
+            # never wired into startup. Idempotent + fail-soft (the helper never
+            # raises; the try mirrors the other index blocks anyway).
+            try:
+                from .services.shopify_ingest import ensure_shopify_order_index
+
+                ensure_shopify_order_index(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Shopify order index creation skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:

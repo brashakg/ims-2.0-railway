@@ -417,6 +417,42 @@ class DatabaseConnection:
             background=True,
         )
 
+        # Catalog products (PIM superset; BVI/Shopify lineage). Unification
+        # step 1: this collection previously had ZERO DB indexes, so a
+        # duplicate PIM doc was physically possible (the catalog router and
+        # the PM mirror both do check-then-write upserts keyed on `id`).
+        # UNIQUE sparse on `id` (the primary PIM identity) and `sku` (carried
+        # by catalog-router docs; PM mirror docs carry parent_sku instead, so
+        # sparse exempts them). FAIL-SOFT like the grns dc_number precedent:
+        # pre-existing prod dupes make the build WARN via _idx, never abort.
+        # Declared in schemas.py COLLECTIONS["catalog_products"] for parity.
+        _idx("catalog_products", "id", unique=True, sparse=True, background=True)
+        _idx("catalog_products", "sku", unique=True, sparse=True, background=True)
+
+        # Lens catalog (Branch B' rebuild). schemas.py has declared these since
+        # the rebuild, but schemas.py is documentation-only -- ensure_indexes is
+        # the live startup path and never built them, so a duplicate lens LINE
+        # (same slug, or same 6-field identity combo) was DB-possible under a
+        # create race. UNIQUE slug + UNIQUE identity grid; the two non-unique
+        # filters mirror schemas.py COLLECTIONS["lens_catalog"] exactly. No
+        # custom names so a manual migrations.py run can't IndexOptionsConflict.
+        _idx("lens_catalog", "lens_line_id", unique=True, background=True)
+        _idx(
+            "lens_catalog",
+            [
+                ("brand", 1),
+                ("series", 1),
+                ("index", 1),
+                ("material", 1),
+                ("lens_type", 1),
+                ("coating", 1),
+            ],
+            unique=True,
+            background=True,
+        )
+        _idx("lens_catalog", [("brand", 1), ("is_active", 1)], background=True)
+        _idx("lens_catalog", [("is_active", 1)], background=True)
+
         # E-commerce collections / menus (BVI Phases 2-3). UNIQUE sparse handle +
         # Shopify GID so a PUSH-DARK row (handle present, GID absent) isn't
         # constrained on the missing key.
