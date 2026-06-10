@@ -718,7 +718,10 @@ class MegaphoneAgent(JarvisAgent):
         if coll is None:
             return []
         try:
-            today = datetime.now(timezone.utc).strftime("%m-%d")
+            # IST (TZ-P3): birthdays are an IST-calendar event. The UTC clock is
+            # 5h30m behind, so between 00:00-05:30 IST it still reads YESTERDAY's
+            # MM-DD and the greeting fires for the wrong day.
+            today = _now_ist().strftime("%m-%d")
             # Customers store birthday as "YYYY-MM-DD" or "DD-MM-YYYY"; we
             # match on the suffix that ends with -MM-DD.
             matches = list(coll.find(

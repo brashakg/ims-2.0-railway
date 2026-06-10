@@ -32,6 +32,10 @@ garbage fields coerce to 0 / are skipped so a malformed row never raises.
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict
 
+# IST (TZ-P3): the as_of default must be the IST business day, not the UTC box
+# clock (00:00-05:30 IST would otherwise age bills against YESTERDAY).
+from api.utils.ist import now_ist_naive
+
 # --- TDS sections (rate %) -------------------------------------------------
 # Common sections an optical retailer hits when paying vendors / contractors.
 # Rates are the post-Budget-2024 "normal" rates (no surcharge/cess, payee has
@@ -450,7 +454,7 @@ def build_aging(
     notes with no bill_id) cannot be aged against a bill, so they are summed
     into `unallocated_credits` and netted off at the end.
     """
-    as_of = parse_date(as_of_iso) or datetime.utcnow()
+    as_of = parse_date(as_of_iso) or now_ist_naive()
     buckets = {k: 0.0 for k in AGING_BUCKETS}
     items: List[dict] = []
     total_out = 0.0
@@ -578,7 +582,7 @@ def build_aging_by_vendor(
         grand_unalloc = round(grand_unalloc + ag["unallocated_credits"], 2)
 
     return {
-        "as_of": (parse_date(as_of_iso) or datetime.utcnow()).date().isoformat(),
+        "as_of": (parse_date(as_of_iso) or now_ist_naive()).date().isoformat(),
         "totals": {
             "buckets": totals,
             "total_outstanding": grand_out,

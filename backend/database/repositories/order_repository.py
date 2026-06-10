@@ -93,24 +93,35 @@ class OrderRepository(BaseRepository):
             limit=limit
         )
     
-    def find_by_store(self, store_id: str, from_date: date = None, 
+    def find_by_store(self, store_id: str, from_date: date = None,
                       to_date: date = None, status: str = None) -> List[Dict]:
         """Find orders for store with optional filters.
-        Handles both camelCase (storeId) and snake_case (store_id) field names."""
-        filter = {"$or": [{"store_id": store_id}, {"storeId": store_id}]}
-        
+        Handles both camelCase (storeId) and snake_case (store_id) field names.
+
+        TZ-P3 latent-bug fix: the from_date branch used
+        ``ist_day_start_utc(from_date).isoformat()`` -- a STRING ``$gte`` bound
+        against the BSON-Date ``created_at``, which matches NOTHING in Mongo
+        (strings and dates never compare). It also REPLACED the whole ``$or``,
+        so passing both from_date and status silently dropped the date filter.
+        Now each branch ANDs onto the two store-shape arms (mirrors
+        find_by_salesperson) and the bound stays a datetime.
+        """
+        snake: Dict = {"store_id": store_id}
+        camel: Dict = {"storeId": store_id}
+
         if from_date:
-            dt = ist_day_start_utc(from_date).isoformat()
-            filter["$or"] = [
-                {"store_id": store_id, "created_at": {"$gte": dt}},
-                {"storeId": store_id, "createdAt": {"$gte": dt}},
-            ]
+            start = ist_day_start_utc(from_date)
+            snake["created_at"] = {"$gte": start}
+            camel["createdAt"] = {"$gte": start}
+        if to_date:
+            end = ist_day_start_utc(to_date + timedelta(days=1))
+            snake.setdefault("created_at", {})["$lte"] = end
+            camel.setdefault("createdAt", {})["$lte"] = end
         if status:
-            filter["$or"] = [
-                {"store_id": store_id, "status": status},
-                {"storeId": store_id, "orderStatus": status},
-            ]
-        
+            snake["status"] = status
+            camel["orderStatus"] = status
+
+        filter = {"$or": [snake, camel]}
         return self.find_many(filter, sort=[("created_at", -1)], limit=500)
     
     def find_by_salesperson(self, user_id: str, from_date: date = None, 

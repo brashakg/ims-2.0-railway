@@ -41,6 +41,10 @@ import logging
 from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
+# IST (TZ-P3): segment "today" defaults must be the IST business day -- the
+# server clock is UTC, which between 00:00-05:30 IST is still on yesterday.
+from api.utils.ist import now_ist_naive
+
 logger = logging.getLogger(__name__)
 
 # Default tuning knobs (overridable per call where it makes sense).
@@ -300,7 +304,7 @@ def _resolve_birthday(
 ) -> List[Dict[str, Any]]:
     """Customers whose birthday (DOB month/day) lands within the next
     `window_days` days, wrapping across a year boundary."""
-    now = now or datetime.now()
+    now = now or now_ist_naive()
     today = now.date()
     cust_coll = db.get_collection("customers")
     customers = list(cust_coll.find(_customers_query(store_id)).limit(_SCAN_LIMIT))
@@ -770,7 +774,7 @@ def _resolve_fu_due_today(
     routes CALL / IN-PERSON to a staff task and WHATSAPP / SMS / EMAIL to
     send_notification (the dark, DISPATCH_MODE-gated path).
     """
-    now = now or datetime.now()
+    now = now or now_ist_naive()
     today = now.date().isoformat()
     fu_coll = db.get_collection("follow_ups")
     cust_coll = db.get_collection("customers")

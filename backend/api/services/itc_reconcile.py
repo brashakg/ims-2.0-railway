@@ -35,6 +35,10 @@ import re
 from datetime import datetime
 from typing import List, Optional
 
+# IST (TZ-P3): the as_of default must be the IST business day, not the UTC box
+# clock (00:00-05:30 IST would otherwise age invoices against YESTERDAY).
+from api.utils.ist import now_ist_naive
+
 
 def _f(v) -> float:
     try:
@@ -185,10 +189,10 @@ def reconcile_gstr2b(
         as_of = (
             datetime.fromisoformat((as_of_iso or "")[:10])
             if as_of_iso
-            else datetime.utcnow()
+            else now_ist_naive()
         )
     except ValueError:
-        as_of = datetime.utcnow()
+        as_of = now_ist_naive()
 
     # Index GSTR-2B by (gstin, invoice).
     b2 = {}

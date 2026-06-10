@@ -53,6 +53,7 @@ from api.services.points_calculator import (
     leaderboard_sort_key,
 )
 from api.services import scorecard_engine
+from api.utils.ist import ist_today
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -471,9 +472,9 @@ async def list_daily(
         return {
             "items": [],
             "store_id": store,
-            "date_str": date or datetime.now().date().isoformat(),
+            "date_str": date or ist_today().isoformat(),
         }
-    date_str = date or datetime.now().date().isoformat()
+    date_str = date or ist_today().isoformat()
     rows = repo.list_by_date(store, date_str)
     return {
         "items": [_serialize(r) for r in rows],
@@ -542,7 +543,7 @@ async def get_mtd(
     repo = _points_repo()
     if repo is None:
         return {"store_id": store, "items": []}
-    now = datetime.now().date()
+    now = ist_today()
     yr = year or now.year
     mo = month or now.month
     date_from = f"{yr:04d}-{mo:02d}-01"
@@ -578,7 +579,7 @@ async def get_leaderboard(
     repo = _points_repo()
     if repo is None:
         return {"store_id": store, "items": []}
-    today = datetime.now().date()
+    today = ist_today()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     date_to = today.isoformat()
     rows = repo.list_for_mtd(store, date_from, date_to)
@@ -608,7 +609,7 @@ async def staff_history(
     repo = _points_repo()
     if repo is None:
         return {"store_id": store, "staff_id": staff_id, "items": []}
-    today = datetime.now().date()
+    today = ist_today()
     df = date_from or today.replace(day=1).isoformat()
     dt = date_to or today.isoformat()
     rows = repo.list_by_staff_range(store, staff_id, df, dt)

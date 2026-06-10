@@ -53,6 +53,7 @@ from database.repositories.product_incentive_log_repository import (
 from api.services.points_calculator import aggregate_mtd
 from api.services import scorecard_engine
 from api.services.csv_safe import safe_writer, BOM
+from api.utils.ist import ist_today
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -465,7 +466,7 @@ async def preview(
     aren't passed."""
     _check_view_permission(current_user)
     store = _resolve_store(current_user, store_id)
-    now = datetime.now().date()
+    now = ist_today()
     yr = year or now.year
     mo = month or now.month
     overrides = PreviewOverrides(
