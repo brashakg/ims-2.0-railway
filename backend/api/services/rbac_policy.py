@@ -971,20 +971,50 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER"],
     },
     {"method": "GET", "path": "/api/v1/clinical/tests", "allowed": "AUTHENTICATED"},
+    # Eye-test READS carry clinical PII (Rx + exam findings) -> same role set
+    # as prescription reads (prescriptions._RX_READ_ROLES / require_rx_read);
+    # store-scope enforced per object in the handler (404-hide cross-store).
     {
         "method": "GET",
         "path": "/api/v1/clinical/tests/customer/{customer_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "GET",
         "path": "/api/v1/clinical/tests/patient/{customer_phone}",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "GET",
         "path": "/api/v1/clinical/tests/{test_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "POST",
@@ -1030,12 +1060,23 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/device-import",
         "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER", "SUPERADMIN"],
     },
-    # CLI-11: SOAP exam note endpoints.  GET is read-only -> any authenticated
-    # clinical user; POST replaces the note -> same roles as test completion.
+    # CLI-11: SOAP exam note endpoints.  GET carries the exam narrative + Dx
+    # codes -> same role set as prescription reads (require_rx_read) +
+    # per-object store scope; POST replaces the note -> same roles as test
+    # completion.
     {
         "method": "GET",
         "path": "/api/v1/clinical/tests/{test_id}/soap-note",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "POST",
@@ -3675,10 +3716,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/prescriptions/{prescription_id}/validate",
         "allowed": "AUTHENTICATED",
     },
+    # Version PATCH writes clinical Rx data -> same gate as PUT /{id}
+    # (update_prescription); self_enforced because the route raises the
+    # body-specific clinical 403 the enforcer must not override.
     {
         "method": "PATCH",
         "path": "/api/v1/prescriptions/{prescription_id}/version/{version_name}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ADMIN", "OPTOMETRIST", "STORE_MANAGER", "SUPERADMIN"],
+        "self_enforced": True,
     },
     {
         "method": "GET",

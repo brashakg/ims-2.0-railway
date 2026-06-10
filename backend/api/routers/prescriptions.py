@@ -59,6 +59,37 @@ def require_rx_read(current_user: dict = Depends(get_current_user)) -> dict:
     )
 
 
+# Roles permitted to WRITE/edit a prescription's clinical content (PUT edit,
+# 4-version PATCH). Same set create_prescription uses. Narrower than
+# _RX_READ_ROLES on purpose: POS/workshop roles may READ an Rx to fulfil it
+# but must never ALTER medical data.
+_RX_WRITE_ROLES = {"SUPERADMIN", "ADMIN", "STORE_MANAGER", "OPTOMETRIST"}
+
+
+def _require_rx_write_roles(current_user: dict) -> None:
+    """Inline role gate for Rx WRITE paths. Raises the canonical body-specific
+    clinical 403 (asserted by tests + mirrored as ``self_enforced`` in
+    rbac_policy) when the caller holds no clinical-write role."""
+    roles = set(current_user.get("roles") or [])
+    if roles & _RX_WRITE_ROLES:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Only optometrists and managers can edit prescriptions. "
+        "Your role does not have clinical access.",
+    )
+
+
+def _store_scope_or_404(doc: dict, current_user: dict) -> None:
+    """Per-object store-scope guard for Rx WRITE paths (BUG-088 class): the
+    caller must be scoped to the prescription's store. 404 -- not 403 -- so an
+    out-of-scope caller can't even confirm the Rx exists (same hiding the
+    sibling READ guards use). Unattributed (no store_id) docs are writable
+    only by cross-store admins, exactly like the reads."""
+    if not can_access_store_scoped((doc or {}).get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Prescription not found")
+
+
 def _audit_rx(
     action: str,
     prescription_id: Optional[str],
@@ -1007,14 +1038,7 @@ async def update_prescription(
     blanks fields it didn't touch. Identity/provenance fields are immutable.
     """
     # --- Role gate (same set create_prescription uses) ---
-    user_roles = current_user.get("roles", [])
-    CLINICAL_ROLES = {"SUPERADMIN", "ADMIN", "STORE_MANAGER", "OPTOMETRIST"}
-    if not (set(user_roles) & CLINICAL_ROLES):
-        raise HTTPException(
-            status_code=403,
-            detail="Only optometrists and managers can edit prescriptions. "
-            "Your role does not have clinical access.",
-        )
+    _require_rx_write_roles(current_user)
 
     repo = get_prescription_repository()
     if repo is None:
@@ -1023,6 +1047,9 @@ async def update_prescription(
     existing = repo.find_by_id(prescription_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Prescription not found")
+    # Store-scope the WRITE like the reads (BUG-088): an optometrist in one
+    # store must not be able to edit another store's Rx (404-hide).
+    _store_scope_or_404(existing, current_user)
 
     # Only the explicitly-supplied keys are touched (PATCH-style merge).
     body = rx.model_dump(exclude_unset=True)
@@ -1418,12 +1445,22 @@ async def patch_prescription_version(
     current_user: dict = Depends(get_current_user),
 ):
     """Write or overwrite one of the 4 Rx versions. Only writable
-    while status='in_progress'. Use POST /finalize to lock the record."""
+    while status='in_progress'. Use POST /finalize to lock the record.
+
+    Gated identically to PUT /{prescription_id} (audit P1): this path writes
+    clinical Rx data (and the `final` slot is mirrored to top-level on
+    finalize), so it must never be open to non-clinical roles or cross-store
+    callers. It previously had NO role gate at all -- any authenticated
+    cashier could overwrite Rx versions chain-wide.
+    """
     from ..services.prescription_versions import (
         VALID_VERSION_NAMES,
         merge_version,
         backfill_versions_from_top_level,
     )
+
+    # --- Role gate (same set update_prescription / create_prescription use) ---
+    _require_rx_write_roles(current_user)
 
     if version_name not in VALID_VERSION_NAMES:
         raise HTTPException(
@@ -1437,6 +1474,8 @@ async def patch_prescription_version(
     doc = repo.find_by_id(prescription_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Prescription not found")
+    # Store-scope the WRITE like the reads (BUG-088): 404-hide cross-store.
+    _store_scope_or_404(doc, current_user)
 
     # Backfill legacy single-Rx docs so they're patchable as if they
     # had a versions block from the start.
@@ -1488,6 +1527,9 @@ async def finalize_prescription(
     doc = repo.find_by_id(prescription_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Prescription not found")
+    # Store-scope the WRITE like the reads (BUG-088): 404-hide cross-store
+    # BEFORE the 409/400 checks so status is never leaked out-of-scope.
+    _store_scope_or_404(doc, current_user)
     if doc.get("status") == "finalized":
         raise HTTPException(status_code=409, detail="Already finalized")
     if not can_finalize(doc):
