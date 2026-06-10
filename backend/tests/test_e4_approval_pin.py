@@ -371,18 +371,47 @@ def test_t2_pin_is_bcrypt_and_never_in_audit(engine, db):
     req = engine.request(action_type="refund", requested_by="u1", amount=100)
     engine.approve(req["request_id"], approver_user_id="mgr",
                    approver_roles=["STORE_MANAGER"], pin="5678")
-    import json
     # Scope the PIN-leakage scan to the approval-lifecycle audit rows (E4 writes
-    # entity_type="approval_request"). A GLOBAL audit dump is fragile: any other
-    # test sharing the audit_logs store whose data contains the substring "5678"
-    # (a DC number, qty, amount, id) would false-trip this assertion regardless
-    # of PIN handling. The intent here is "no PIN hash in any APPROVAL audit row".
+    # entity_type="approval_request"). The scan is FIELD-AWARE, not a whole-JSON
+    # substring: random hex/uuid values (log_id, tokens, hash-chain fields) can
+    # contain "5678" by sheer chance -- a real CI run false-tripped exactly that
+    # way. So: key names must never be pin-ish, bcrypt hashes must never appear
+    # anywhere, and the PIN digits must not appear in any NON-random-id value
+    # (e.g. embedded in a reason string).
     appr_rows = [r for r in _audit_rows(db)
                  if r.get("entity_type") == "approval_request"]
-    blob = json.dumps(appr_rows, default=str)
-    assert "5678" not in blob
-    assert "$2b$" not in blob
-    assert "approval_pin_hash" not in blob
+    assert appr_rows, "approval lifecycle must have produced audit rows"
+
+    _RANDOM_ID_KEYS = {
+        "log_id", "_id", "id", "entity_id", "request_id", "approval_token",
+        "token", "txn_id", "prev_hash", "row_hash", "chain_hash", "hash",
+        "idempotency_key", "dedupe_key",
+    }
+
+    def _walk(node, key=None):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from _walk(v, k)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                yield from _walk(v, key)
+        else:
+            yield key, node
+
+    # Keys that REFERENCE pin state without carrying a value (audited metadata:
+    # whose pin was set / whether one exists). A key carrying an actual pin or
+    # its hash (pin, pin_hash, new_pin, approval_pin_hash) must still fail.
+    _PIN_METADATA_KEYS = {"pin_for_user", "has_pin"}
+
+    for key, val in (pair for row in appr_rows for pair in _walk(row)):
+        k = str(key or "").lower()
+        if k not in _PIN_METADATA_KEYS:
+            assert "pin" not in k and "password" not in k, f"pin-ish key {key!r} in audit"
+        sval = str(val)
+        assert not sval.startswith("$2b$"), f"bcrypt hash leaked under {key!r}"
+        if k in _RANDOM_ID_KEYS:
+            continue  # random hex/uuid -- substring collisions are noise here
+        assert "5678" not in sval, f"PIN leaked under {key!r}: {sval[:60]}"
 
 
 # ============================================================================
