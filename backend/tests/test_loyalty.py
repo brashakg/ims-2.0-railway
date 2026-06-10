@@ -168,6 +168,26 @@ class FakeDB:
         return self.get_collection(name)
 
 
+class FakeOrderRepo:
+    """Minimal stand-in for OrderRepository: POST /loyalty/earn derives its
+    rupee basis from the order (grand_total - tax_amount), so tests must seed
+    the order a customer earned against."""
+
+    def __init__(self):
+        self._orders = {}
+
+    def seed(self, order_id, customer_id, grand_total, tax_amount=0.0):
+        self._orders[order_id] = {
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "grand_total": float(grand_total),
+            "tax_amount": float(tax_amount),
+        }
+
+    def find_by_id(self, order_id):
+        return self._orders.get(order_id)
+
+
 # ============================================================================
 # Fixture
 # ============================================================================
@@ -195,11 +215,13 @@ def patched_loyalty(monkeypatch):
     )
     audit = AuditRepository(fake_db.get_collection("audit_logs"))
 
+    orders = FakeOrderRepo()
+
     monkeypatch.setattr(loyalty_module, "get_loyalty_account_repository", lambda: accounts)
     monkeypatch.setattr(loyalty_module, "get_loyalty_transaction_repository", lambda: txns)
     monkeypatch.setattr(loyalty_module, "get_loyalty_settings_repository", lambda: settings)
     monkeypatch.setattr(loyalty_module, "get_audit_repository", lambda: audit)
-    monkeypatch.setattr(loyalty_module, "get_order_repository", lambda: None)
+    monkeypatch.setattr(loyalty_module, "get_order_repository", lambda: orders)
 
     return {
         "db": fake_db,
@@ -207,6 +229,7 @@ def patched_loyalty(monkeypatch):
         "txns": txns,
         "settings": settings,
         "audit": audit,
+        "orders": orders,
     }
 
 
@@ -268,6 +291,7 @@ def test_earn_below_min_order_returns_zero():
 
 
 def test_earn_endpoint_writes_ledger_and_account(client, auth_headers, patched_loyalty):
+    patched_loyalty["orders"].seed("ORD-1", "cust-1", 10000.0)
     resp = client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-1", "order_id": "ORD-1", "rupee_value": 10000.0},
@@ -292,6 +316,7 @@ def test_earn_endpoint_writes_ledger_and_account(client, auth_headers, patched_l
 
 def test_earn_idempotent_on_same_order(client, auth_headers, patched_loyalty):
     """Same (customer, order) → only one EARN row."""
+    patched_loyalty["orders"].seed("ORD-2", "cust-2", 10000.0)
     payload = {"customer_id": "cust-2", "order_id": "ORD-2", "rupee_value": 10000.0}
     r1 = client.post("/api/v1/loyalty/earn", json=payload, headers=auth_headers)
     r2 = client.post("/api/v1/loyalty/earn", json=payload, headers=auth_headers)
@@ -309,6 +334,7 @@ def test_earn_idempotent_on_same_order(client, auth_headers, patched_loyalty):
 
 def test_redeem_deducts_and_returns_rupee_value(client, auth_headers, patched_loyalty):
     # Seed an account with 500 points
+    patched_loyalty["orders"].seed("ORD-3a", "cust-3", 50000.0)
     client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-3", "order_id": "ORD-3a", "rupee_value": 50000.0},
@@ -334,6 +360,7 @@ def test_redeem_deducts_and_returns_rupee_value(client, auth_headers, patched_lo
 
 
 def test_redeem_below_min_returns_400(client, auth_headers, patched_loyalty):
+    patched_loyalty["orders"].seed("ORD-4", "cust-4", 50000.0)
     client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-4", "order_id": "ORD-4", "rupee_value": 50000.0},
@@ -348,6 +375,7 @@ def test_redeem_below_min_returns_400(client, auth_headers, patched_loyalty):
 
 
 def test_redeem_more_than_balance_returns_400(client, auth_headers, patched_loyalty):
+    patched_loyalty["orders"].seed("ORD-5", "cust-5", 10000.0)
     client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-5", "order_id": "ORD-5", "rupee_value": 10000.0},
@@ -365,6 +393,7 @@ def test_redeem_capped_by_max_pct_of_order(client, auth_headers, patched_loyalty
     """Order 1000, max_redeem_pct=50 → max ₹500 → caps points to 500.
     But customer only has 1000 points to spend; we ask for all 1000 → cap to 500."""
     # Earn 1000 points (₹100k order)
+    patched_loyalty["orders"].seed("ORD-6a", "cust-6", 100000.0)
     client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-6", "order_id": "ORD-6a", "rupee_value": 100000.0},
@@ -423,6 +452,8 @@ def test_tier_promotion_crossing_1000_promotes_to_silver(
     client, auth_headers, patched_loyalty
 ):
     """Earn enough to cross 1000 lifetime_earned → tier flips to SILVER."""
+    patched_loyalty["orders"].seed("ORD-T1", "cust-tier-1", 99900.0)
+    patched_loyalty["orders"].seed("ORD-T2", "cust-tier-1", 1000.0)
     # First earn: 999 points worth (rupee_value 99,900 at 1% → 999)
     client.post(
         "/api/v1/loyalty/earn",
@@ -452,6 +483,7 @@ def test_tier_promotion_crossing_1000_promotes_to_silver(
 def test_expire_sweep_deducts_balance(client, auth_headers, patched_loyalty):
     """An EARN row past expires_at gets a balancing EXPIRE row + balance falls."""
     # Earn 100 points
+    patched_loyalty["orders"].seed("ORD-EXP", "cust-exp", 10000.0)
     client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-exp", "order_id": "ORD-EXP", "rupee_value": 10000.0},
@@ -562,6 +594,7 @@ def test_ledger_paginated_sorted_desc(client, auth_headers, patched_loyalty):
 
 def test_account_snapshot_returns_recent_txns(client, auth_headers, patched_loyalty):
     """Account fetch returns balance + last 20 txns + settings."""
+    patched_loyalty["orders"].seed("ORD-SNAP", "cust-snap", 10000.0)
     client.post(
         "/api/v1/loyalty/earn",
         json={"customer_id": "cust-snap", "order_id": "ORD-SNAP", "rupee_value": 10000.0},
