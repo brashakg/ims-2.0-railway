@@ -186,6 +186,39 @@ def _received_accepted_rejected(grns: List[Dict[str, Any]]) -> Dict[str, Dict[st
     return agg
 
 
+def _latest_accepted_grn_by_product(
+    grns: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """product_id -> grn_id of the most recent ACCEPTED GRN carrying it. PURE.
+
+    "Most recent" prefers created_at (parseable string or datetime); for ties /
+    unparseable timestamps the later-in-list GRN wins. Non-ACCEPTED GRNs are
+    ignored (same rule as the qty aggregation). This is what lets the variance
+    report carry `latest_accepted_grn_id` per line so the dismiss flow can pass
+    grn_id+bill_id and the debit-note prompt actually fires.
+    """
+    latest: Dict[str, Any] = {}  # pid -> ((created_at, idx), grn_id)
+    for idx, grn in enumerate(grns or []):
+        if not isinstance(grn, dict):
+            continue
+        if str(grn.get("status", "") or "").upper() not in _ACCEPTED_GRN_STATUSES:
+            continue
+        gid = grn.get("grn_id")
+        if gid is None:
+            continue
+        key = (_parse_dt(grn.get("created_at")) or datetime.min, idx)
+        for item in grn.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("product_id")
+            if pid is None:
+                continue
+            prev = latest.get(pid)
+            if prev is None or key >= prev[0]:
+                latest[pid] = (key, gid)
+    return {pid: v[1] for pid, v in latest.items()}
+
+
 def _dismissed_product_ids(po: Dict[str, Any]) -> set:
     """The set of product_ids whose variance has been dismissed on this PO."""
     out = set()
@@ -211,7 +244,8 @@ def open_qty_per_line(
           accepted_qty, rejected_qty,
           variance_status,            # SHORT/OVER/EXACT/UNMATCHED
           days_overdue, aging_status, # explicit enum, never a colour
-          dismissed                   # True if this line was dismissed
+          dismissed,                  # True if this line was dismissed
+          latest_accepted_grn_id      # newest ACCEPTED GRN with this product
         }
 
     open_qty = max(ordered - received, 0). received = cumulative ACCEPTED qty.
@@ -223,6 +257,7 @@ def open_qty_per_line(
     names = _product_name_map(po)
     received_agg = _received_accepted_rejected(grns)
     dismissed = _dismissed_product_ids(po)
+    latest_grn = _latest_accepted_grn_by_product(grns)
 
     expected_date = po.get("expected_date")
     od = days_overdue(expected_date, now=now)
@@ -261,6 +296,10 @@ def open_qty_per_line(
                 "days_overdue": od,
                 "aging_status": aging,
                 "dismissed": pid in dismissed,
+                # The newest ACCEPTED GRN covering this product (None when the
+                # line has no accepted receipt yet). Carried so the dismiss
+                # call can link grn_id and reach the debit-note suggestion.
+                "latest_accepted_grn_id": latest_grn.get(pid),
             }
         )
     return rows

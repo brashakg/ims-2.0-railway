@@ -188,8 +188,13 @@ def create_system_task(
         grace = sla_for(priority)["grace_minutes"]
         due_at = now + timedelta(minutes=grace)
 
+    task_id = f"TSK-{uuid.uuid4().hex[:10].upper()}"
     task = {
-        "task_id": f"TSK-{uuid.uuid4().hex[:10].upper()}",
+        "task_id": task_id,
+        # The tasks schema declares a unique human-facing task_number; system
+        # tasks previously omitted it. Mirror the id so every SYSTEM task is
+        # addressable by number like a user-created one.
+        "task_number": task_id,
         "title": title,
         "description": description,
         "category": category or "Variance",

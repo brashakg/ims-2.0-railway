@@ -445,6 +445,25 @@ class DatabaseConnection:
         _idx("product_images", "status", background=True)
         _idx("product_images", "assigned_to", sparse=True, background=True)
 
+        # GRNs / Delivery Challans (F9 P3). Partial UNIQUE backstop on
+        # (vendor_id, dc_number, store_id) for DELIVERY_CHALLAN rows only --
+        # the app-level duplicate check in vendors.create_grn is check-then-
+        # insert and racy across workers. Declared in schemas.py too; created
+        # HERE because ensure_indexes is the live startup path. FAIL-SOFT: prod
+        # may hold duplicate DC rows until the dedup script runs -- _idx
+        # collects the failure as a startup warning, never aborts.
+        _idx(
+            "grns",
+            [("vendor_id", 1), ("dc_number", 1), ("store_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "grn_subtype": "DELIVERY_CHALLAN",
+                "dc_number": {"$exists": True},
+            },
+            name="uniq_dc_vendor_number_store",
+            background=True,
+        )
+
         # Vendor bills / purchase invoices (AP + ITC). bill_id UNIQUE sparse;
         # (vendor_id, bill_number) is NON-unique on purpose -- the duplicate-
         # invoice guard lives in app code (legacy prod data may already have one).

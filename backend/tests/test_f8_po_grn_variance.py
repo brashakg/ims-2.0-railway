@@ -330,6 +330,22 @@ def test_taskmaster_sweep_creates_task():
     assert any(a["action"] == "backorder_task_created" for a in actions)
 
 
+def test_taskmaster_sweep_uses_canonical_task_shape():
+    """The sweep routes through the canonical system-task creator: a created
+    backorder task carries due_at (priority SLA grace) + a task_number, like
+    every other SYSTEM task -- not the old bespoke dict (no due_at, id-only)."""
+    po = _po(po_id="PO-1", ordered=10, expected_offset_days=-5)
+    _actions, tasks = _sweep([po], [_grn(accepted=6)], [])
+    created = [t for t in tasks.docs if t.get("source_ref") == "backorder:PO-1:P1"]
+    assert len(created) == 1
+    task = created[0]
+    assert task.get("due_at") is not None
+    assert isinstance(task.get("task_number"), str) and task["task_number"]
+    assert task.get("task_id")
+    assert task["source"] == "SYSTEM"
+    assert task["category"] == "Purchase"
+
+
 def test_taskmaster_sweep_dedupe():
     """An existing OPEN task for the same backorder -> no duplicate."""
     po = _po(po_id="PO-1", ordered=10, expected_offset_days=-5)
@@ -426,6 +442,16 @@ class _FakeMongo:
         class _C:
             def find_one(self, query, _proj=None):
                 return bills.get(query.get("bill_id"))
+
+            def find(self, query=None, _proj=None):
+                query = query or {}
+                rows = [dict(b) for b in bills.values()]
+                po_cond = query.get("po_id")
+                if isinstance(po_cond, dict) and "$in" in po_cond:
+                    rows = [b for b in rows if b.get("po_id") in po_cond["$in"]]
+                elif po_cond is not None:
+                    rows = [b for b in rows if b.get("po_id") == po_cond]
+                return rows
 
         return _C()
 
@@ -569,6 +595,89 @@ def test_variance_report_endpoint_omits_fully_received(monkeypatch):
     short = next(ln for ln in lines if ln["po_id"] == "PO-SHORT")
     assert short["open_qty"] == 4
     assert short["aging_status"] == "OVERDUE"
+
+
+# ===========================================================================
+# F8 P3: the debit-note prompt must be REACHABLE -- report rows resolve the
+# GRN + booked-invoice links the Dismiss call needs.
+# ===========================================================================
+
+
+def test_engine_stamps_latest_accepted_grn_id():
+    """Rows carry the grn_id of the NEWEST ACCEPTED GRN covering the product
+    (created_at wins; non-ACCEPTED GRNs are ignored)."""
+    po = _po(ordered=10)
+    g_old = _grn(accepted=3)
+    g_old["grn_id"] = "G-OLD"
+    g_old["created_at"] = "2026-05-01T10:00:00"
+    g_new = _grn(accepted=3)
+    g_new["grn_id"] = "G-NEW"
+    g_new["created_at"] = "2026-06-01T10:00:00"
+    g_disputed = _grn(accepted=2, status="DISPUTED")
+    g_disputed["grn_id"] = "G-DISPUTED"
+    g_disputed["created_at"] = "2026-06-05T10:00:00"
+    # Order shuffled on purpose: created_at must decide, not list position.
+    rows = eng.open_qty_per_line(po, [g_new, g_disputed, g_old], now=NOW)
+    assert rows[0]["latest_accepted_grn_id"] == "G-NEW"
+
+
+def test_engine_latest_grn_none_when_no_accepted_receipt():
+    po = _po(ordered=10)
+    rows = eng.open_qty_per_line(po, [], now=NOW)
+    assert rows[0]["latest_accepted_grn_id"] is None
+
+
+def test_variance_report_rows_carry_grn_and_bill_links(monkeypatch):
+    """The report endpoint resolves latest_accepted_grn_id + booked_bill_id so
+    the FE Dismiss call can pass grn_id + bill_id and the debit-note prompt
+    actually fires (it used to be unreachable: rows carried neither id)."""
+    po = _po(po_id="PO-1", ordered=10, expected_offset_days=-5)
+    grn = _grn(po_id="PO-1", accepted=6)
+    bill = {
+        "bill_id": "B1",
+        "po_id": "PO-1",
+        "doc_type": "PURCHASE_INVOICE",
+        "invoice_date": "2026-06-01",
+        "lines": [{"product_id": "P1", "qty": 10, "unit_price": 100.0}],
+    }
+    # An older bill for the same PO/product -- the NEWEST must win.
+    bill_old = {
+        "bill_id": "B0",
+        "po_id": "PO-1",
+        "doc_type": "PURCHASE_INVOICE",
+        "invoice_date": "2026-05-01",
+        "lines": [{"product_id": "P1", "qty": 2, "unit_price": 100.0}],
+    }
+    _patch_all(
+        monkeypatch,
+        po_repo=_FakePoRepo([po]),
+        grn_repo=_FakeGrnRepo(grns_by_po={"PO-1": [grn]}),
+        audit_repo=_RecordingAuditRepo(),
+        db=_FakeMongo(bills=[bill_old, bill]),
+    )
+    cli = _client()
+    r = cli.get("/api/v1/vendors/variance-report")
+    assert r.status_code == 200, r.text
+    line = next(ln for ln in r.json()["lines"] if ln["po_id"] == "PO-1")
+    assert line["latest_accepted_grn_id"] == grn["grn_id"]
+    assert line["booked_bill_id"] == "B1"
+
+
+def test_variance_report_links_fail_soft_without_db(monkeypatch):
+    """No DB -> booked_bill_id is present-but-null; the report still serves."""
+    po = _po(po_id="PO-1", ordered=10, expected_offset_days=-5)
+    _patch_all(
+        monkeypatch,
+        po_repo=_FakePoRepo([po]),
+        grn_repo=_FakeGrnRepo(grns_by_po={"PO-1": [_grn(po_id="PO-1", accepted=6)]}),
+        audit_repo=_RecordingAuditRepo(),
+        db=None,
+    )
+    cli = _client()
+    r = cli.get("/api/v1/vendors/variance-report")
+    assert r.status_code == 200, r.text
+    line = r.json()["lines"][0]
+    assert "booked_bill_id" in line and line["booked_bill_id"] is None
 
 
 # ===========================================================================

@@ -1386,7 +1386,39 @@ async def create_grn(
     }
 
     if grn_repo is not None:
-        grn_repo.create(grn_doc)
+        created = grn_repo.create(grn_doc)
+        # F9 P3: the repository swallows insert errors (returns None). With the
+        # partial UNIQUE (vendor_id, dc_number, store_id) index on DC rows
+        # (schemas.py uniq_dc_vendor_number_store), a concurrent duplicate that
+        # raced past the app-level check above surfaces as a DuplicateKeyError
+        # inside create() -> None. Re-probe the dup key: if a rival row now
+        # holds it, map to the SAME 409 as the app-level guard; any other save
+        # failure on a DC is a loud 500 (never a false 201).
+        if created is None and is_dc:
+            dup = None
+            try:
+                dup = grn_repo.find_one(
+                    {
+                        "grn_subtype": GRN_SUBTYPE_DC,
+                        "vendor_id": vendor_id,
+                        "dc_number": grn.dc_number,
+                        "store_id": store_id,
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                dup = None
+            if dup is not None and dup.get("grn_id") != grn_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Delivery Challan '{grn.dc_number}' is already "
+                        f"logged for this vendor at this store. Duplicate "
+                        f"DC numbers are not allowed."
+                    ),
+                )
+            raise HTTPException(
+                status_code=500, detail="Failed to save Delivery Challan"
+            )
 
     # F9: audit the DC log (immutable; a DC is the accountable checkpoint between
     # physical lens arrival and workshop work). Fail-soft -- never blocks save.
@@ -2720,6 +2752,70 @@ async def export_26q(
 _VARIANCE_READ_ROLES = ("ADMIN", "ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER")
 
 
+def _resolve_booked_bills(lines: list) -> None:
+    """F8 P3: stamp booked_bill_id on each variance-report row, in place.
+
+    The dismiss endpoint only suggests a debit note when BOTH grn_id and
+    bill_id are supplied -- but report rows never carried them, so the prompt
+    was unreachable from the UI. The engine now stamps latest_accepted_grn_id
+    (pure, from the GRNs it already reads); this helper resolves the booked
+    invoice side: the newest vendor_bill linked to the row's PO whose lines
+    contain the row's product. Read-only + strictly fail-soft -- no DB / any
+    error leaves booked_bill_id None and the report still serves.
+    """
+    if not lines:
+        return
+    for ln in lines:
+        ln.setdefault("booked_bill_id", None)
+    db = None
+    try:
+        db = _get_db()
+    except Exception:  # noqa: BLE001
+        db = None
+    if db is None:
+        return
+    po_ids = sorted({ln.get("po_id") for ln in lines if ln.get("po_id")})
+    if not po_ids:
+        return
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find(
+                {"po_id": {"$in": po_ids}},
+                {
+                    "_id": 0,
+                    "bill_id": 1,
+                    "po_id": 1,
+                    "lines": 1,
+                    "invoice_date": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return
+    # Newest first (string-coerced so mixed str/datetime stamps can't raise),
+    # so the FIRST bill matching a (po, product) is the latest booking.
+    bills.sort(
+        key=lambda b: (
+            str(b.get("invoice_date") or ""),
+            str(b.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+    bills_by_po: dict = {}
+    for b in bills:
+        bills_by_po.setdefault(b.get("po_id"), []).append(b)
+    for ln in lines:
+        pid = ln.get("product_id")
+        for b in bills_by_po.get(ln.get("po_id"), []):
+            if any(
+                isinstance(bl, dict) and bl.get("product_id") == pid
+                for bl in (b.get("lines") or [])
+            ):
+                ln["booked_bill_id"] = b.get("bill_id")
+                break
+
+
 class DismissVarianceRequest(BaseModel):
     product_id: str
     # Mandatory justification, >= 10 chars: a dismiss is an accountable decision
@@ -2782,6 +2878,10 @@ async def po_grn_variance_report(
     lines = po_variance_engine.variance_report_lines(pos, grns_by_po)
     total = len(lines)
     page = lines[skip : skip + limit]
+    # F8 P3: resolve booked_bill_id per (po, product) for the served page only
+    # (one $in query), so the Dismiss flow can pass grn_id + bill_id and the
+    # debit-note prompt is reachable. Fail-soft -- never blocks the report.
+    _resolve_booked_bills(page)
     return {"lines": page, "total": total}
 
 

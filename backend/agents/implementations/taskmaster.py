@@ -291,9 +291,17 @@ class TaskmasterAgent(JarvisAgent):
 
         try:
             from api.services import po_variance_engine
+            from api.services.task_triggers import create_system_task
+            from database.repositories.task_repository import TaskRepository
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[TASKMASTER] backorder engine import failed: {e}")
             return []
+
+        # Canonical system-task path: the SAME repo + creator the GRN-
+        # discrepancy and payment-variance scans use (task_triggers.
+        # create_system_task), so a backorder task carries task_number + due_at
+        # (priority SLA grace) + the standard SYSTEM shape -- not a bespoke dict.
+        task_repo = TaskRepository(tasks_coll)
 
         actions: List[Dict[str, Any]] = []
         now = datetime.now()
@@ -345,7 +353,10 @@ class TaskmasterAgent(JarvisAgent):
             po_label = spec.get("po_number") or spec.get("po_id")
             product = spec.get("product_name") or spec.get("product_id")
             if not active:
-                # No live task yet -> create one (deduped by source_ref).
+                # No live task yet -> create one through the CANONICAL system-
+                # task creator (dedupe-by-source_ref incl. OPEN/IN_PROGRESS/
+                # ESCALATED lives inside create_system_task too, so a re-run
+                # between the scan above and this call still cannot duplicate).
                 title = (
                     f"Critically overdue backorder: {product} on PO {po_label}"
                     if spec.get("escalate")
@@ -356,43 +367,30 @@ class TaskmasterAgent(JarvisAgent):
                     f"expected date with {spec.get('open_qty')} unit(s) of {product} "
                     f"still un-received. Chase the vendor or short-close the line."
                 )
-                task = {
-                    "task_id": f"TSK-{datetime.now().strftime('%y%m%d%H%M%S')}-{str(spec.get('product_id'))[:6]}",
-                    "title": title,
-                    "description": description,
-                    "category": "Purchase",
-                    "priority": spec.get("priority", "P2"),
-                    "status": "OPEN",
-                    "source": "SYSTEM",
-                    "source_ref": ref,
-                    "assigned_to": None,
-                    "assigned_by": "system",
-                    "store_id": None,
-                    "created_at": now,
-                    "updated_at": now,
-                    "escalation_level": 0,
-                    "history": [
-                        {
-                            "status": "OPEN",
-                            "timestamp": now,
-                            "by": self.agent_id,
-                            "notes": "Auto-created from aged backorder",
-                        }
-                    ],
-                }
+                created = None
                 try:
-                    tasks_coll.insert_one(task)
+                    created = create_system_task(
+                        task_repo,
+                        title=title,
+                        description=description,
+                        priority=spec.get("priority", "P2"),
+                        category="Purchase",
+                        store_id=None,
+                        dedupe_ref=ref,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"[TASKMASTER] backorder task create failed for {ref}: {e}"
+                    )
+                if created:
                     actions.append(
                         {
                             "action": "backorder_task_created",
                             "po_id": spec.get("po_id"),
                             "product_id": spec.get("product_id"),
                             "priority": spec.get("priority"),
+                            "task_id": created.get("task_id"),
                         }
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"[TASKMASTER] backorder task create failed for {ref}: {e}"
                     )
             elif spec.get("escalate"):
                 # A live P2 task exists and the line is now critically overdue
