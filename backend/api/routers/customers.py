@@ -46,6 +46,48 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _VALID_CUSTOMER_TYPES = {"B2C", "B2B"}
 
 
+# ---------------------------------------------------------------------------
+# Shared field validators -- the ONE place customer field rules live, so the
+# CREATE model and the UPDATE model can never drift apart again (the audit
+# flagged PUT /customers as skipping every validation POST /customers enforces).
+# Each helper is the exact rule CustomerCreate used; both models call them.
+# ---------------------------------------------------------------------------
+
+
+def _check_gstin(v):
+    """Validate 15-char Indian GSTIN FORMAT when a non-empty value is supplied.
+    Absent/blank passes here (presence for B2B is enforced separately)."""
+    if v and not _GSTIN_RE.match(v):
+        raise ValueError(
+            "GSTIN must be a valid 15-character Indian GSTIN (e.g. 27AAPFU0939F1ZV)"
+        )
+    return v
+
+
+def _check_email(v):
+    """Basic email FORMAT check when a non-empty value is provided."""
+    if v and not _EMAIL_RE.match(v):
+        raise ValueError("email must be a valid email address (e.g. a@b.com)")
+    return v
+
+
+def _check_customer_type(v):
+    """Restrict to the known set {B2C, B2B}; reject unknown values early.
+    None passes (UPDATE leaves the field unchanged when omitted)."""
+    if v is not None and v not in _VALID_CUSTOMER_TYPES:
+        raise ValueError(
+            f"customer_type must be one of {sorted(_VALID_CUSTOMER_TYPES)}, got '{v}'"
+        )
+    return v
+
+
+def _check_dob_not_future(v):
+    """Reject a DOB that is in the future -- a birthdate cannot be tomorrow."""
+    if v is not None and v > date.today():
+        raise ValueError("Date of birth cannot be in the future")
+    return v
+
+
 from ..dependencies import (
     get_customer_repository,
     get_audit_repository,
@@ -222,48 +264,22 @@ class CustomerCreate(BaseModel):
     @field_validator("customer_type", mode="after")
     @classmethod
     def validate_customer_type(cls, v):
-        """Restrict to the known set {B2C, B2B}; reject unknown values early."""
-        if v not in _VALID_CUSTOMER_TYPES:
-            raise ValueError(
-                f"customer_type must be one of {sorted(_VALID_CUSTOMER_TYPES)}, got '{v}'"
-            )
-        return v
+        return _check_customer_type(v)
 
     @field_validator("gstin", mode="after")
     @classmethod
     def validate_gstin(cls, v):
-        """Validate 15-char Indian GSTIN FORMAT when a non-empty value is supplied.
-
-        Absent/blank is accepted at this (format-only) layer; B2C may omit GSTIN
-        entirely. PRESENCE of a GSTIN for B2B customers is enforced separately by
-        the b2b_requires_gstin model validator.
-        """
-        if v and not _GSTIN_RE.match(v):
-            raise ValueError(
-                "GSTIN must be a valid 15-character Indian GSTIN "
-                "(e.g. 27AAPFU0939F1ZV)"
-            )
-        return v
+        return _check_gstin(v)
 
     @field_validator("email", mode="after")
     @classmethod
     def validate_email(cls, v):
-        """Basic email format check when a non-empty value is provided.
-
-        Uses a simple local regex -- the email-validator package is NOT a
-        dependency and must not be added here.
-        """
-        if v and not _EMAIL_RE.match(v):
-            raise ValueError("email must be a valid email address (e.g. a@b.com)")
-        return v
+        return _check_email(v)
 
     @field_validator("dob", mode="after")
     @classmethod
     def dob_not_future(cls, v):
-        """Reject a DOB that is in the future -- a birthdate cannot be tomorrow."""
-        if v is not None and v > date.today():
-            raise ValueError("Date of birth cannot be in the future")
-        return v
+        return _check_dob_not_future(v)
 
     @model_validator(mode="after")
     def b2b_requires_gstin(self):
@@ -310,6 +326,38 @@ class CustomerUpdate(BaseModel):
     @classmethod
     def sanitize_name_update(cls, v):
         return _sanitize_text(v) if isinstance(v, str) else v
+
+    # Reuse CustomerCreate's exact field rules so the EDIT door no longer skips
+    # the validation the CREATE door enforces (audit P1). All fields are
+    # OPTIONAL on update: a None/omitted value passes the helper unchanged so a
+    # partial edit that doesn't touch the field is never rejected.
+    @field_validator("mobile", "phone", mode="before")
+    @classmethod
+    def normalize_mobile_update(cls, v):
+        """Normalize an edited mobile/phone to the canonical bare 10-digit form
+        (accepts +91 / 0 / spaced input); blank/None stays None. A present but
+        INVALID number now 422s instead of silently persisting (was unvalidated)."""
+        return normalize_indian_mobile(v)
+
+    @field_validator("customer_type", mode="after")
+    @classmethod
+    def validate_customer_type_update(cls, v):
+        return _check_customer_type(v)
+
+    @field_validator("gstin", mode="after")
+    @classmethod
+    def validate_gstin_update(cls, v):
+        return _check_gstin(v)
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def validate_email_update(cls, v):
+        return _check_email(v)
+
+    @field_validator("dob", mode="after")
+    @classmethod
+    def dob_not_future_update(cls, v):
+        return _check_dob_not_future(v)
 
 
 # ============================================================================
@@ -699,6 +747,45 @@ async def update_customer(
         elif update_data.get("mobile") and not update_data.get("phone"):
             update_data["phone"] = update_data["mobile"]
 
+        # GATE: credit_limit (khata) is a monetary control. The audit found a
+        # cashier could raise a customer's credit ceiling through this only-
+        # AUTHENTICATED edit. Restrict credit_limit edits to manager+ roles
+        # (the same _CREDIT_ROLES that gate issuing store-credit / loyalty).
+        if "credit_limit" in update_data:
+            roles = current_user.get("roles", []) or []
+            if not any(r in roles for r in _CREDIT_ROLES):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Setting a customer credit limit (khata) requires a "
+                        "Store Manager, Area Manager, Accountant or Admin role."
+                    ),
+                )
+
+        # Duplicate-mobile guard: a changed mobile must not collide with ANOTHER
+        # customer (was unguarded -- a dup write surfaced as a 500). Same-customer
+        # (idempotent re-save of the same number) is allowed.
+        new_mobile_for_dup = update_data.get("mobile") or update_data.get("phone")
+        if new_mobile_for_dup:
+            other = repo.find_by_mobile(new_mobile_for_dup)
+            other_id = (other or {}).get("customer_id") if other else None
+            if other and other_id and other_id != customer_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Another customer already uses this mobile number",
+                )
+
+        # B2B-requires-GSTIN on the MERGED state: enforce presence using the
+        # effective customer_type + gstin after this edit is applied, so you
+        # cannot flip a customer to B2B (or save a B2B) without a GSTIN. Format
+        # is already checked by the field validator; this enforces PRESENCE.
+        eff_type = update_data.get("customer_type", existing.get("customer_type"))
+        eff_gstin = update_data.get("gstin", existing.get("gstin"))
+        if eff_type == "B2B" and not (eff_gstin and str(eff_gstin).strip()):
+            raise HTTPException(
+                status_code=422, detail="A B2B customer requires a valid GSTIN"
+            )
+
         # Handle patients additively
         if "patients" in update_data:
             incoming = update_data.pop("patients") or []
@@ -785,6 +872,22 @@ async def add_patient(
         existing = repo.find_by_id(customer_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Customer not found")
+
+        # Family-member dedup -- same (name, mobile) key the additive PUT uses.
+        # Adding the same family member twice (e.g. a double-tap or a re-saved
+        # clinical visit) returns the EXISTING patient instead of duplicating
+        # the row, so the customer's patient list can't accumulate clones.
+        new_name = (patient.name or "").strip()
+        new_mobile = (patient.mobile or "").strip()
+        new_key = (new_name.lower(), new_mobile)
+        for p in existing.get("patients") or []:
+            key = ((p.get("name") or "").strip().lower(), (p.get("mobile") or "").strip())
+            if new_name and key == new_key:
+                return {
+                    "patient_id": p.get("patient_id"),
+                    "name": p.get("name"),
+                    "deduped": True,
+                }
 
         patient_data = {
             "patient_id": str(uuid.uuid4()),
