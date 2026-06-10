@@ -6,8 +6,9 @@ Customer points engine — earn / redeem / tier multipliers / expiry sweep.
 Endpoints (mounted at /api/v1/loyalty):
   GET    /loyalty/account/{customer_id}        account + recent 20 txns
   GET    /loyalty/account/{customer_id}/ledger paginated full ledger
-  POST   /loyalty/earn                         award points for an order
-  POST   /loyalty/redeem                       deduct points -> rupee discount
+  POST   /loyalty/earn     (POS roles)         award points for an order --
+                                               value derived from the order
+  POST   /loyalty/redeem   (POS roles)         deduct points -> rupee discount
   POST   /loyalty/adjust   (admin only)        manual credit/debit
   GET    /loyalty/settings                     read engine config
   PUT    /loyalty/settings (SUPERADMIN only)   patch engine config
@@ -28,7 +29,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_audit_repository,
     get_loyalty_account_repository,
@@ -46,6 +47,21 @@ from ..services.loyalty_engine import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Roles permitted to move points at the POS (earn on an order / redeem as a
+# tender). Points are MONEY, so this mirrors the POS payment family exactly:
+# vouchers._REDEEM_ROLES (gift-card redeem at payment time) and the POST
+# /api/v1/orders policy row. SUPERADMIN auto-passes inside require_roles.
+# Clinical / workshop / catalog / accounting roles are NOT in the set -- a
+# manual no-order credit is POST /loyalty/adjust (ADMIN/SUPERADMIN only).
+_POS_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "SALES_CASHIER",
+    "SALES_STAFF",
+    "CASHIER",
+)
 
 
 # ============================================================================
@@ -66,8 +82,14 @@ class EarnItem(BaseModel):
 
 class EarnRequest(BaseModel):
     customer_id: str
+    # order_id is REQUIRED by the route (400 without it) -- kept Optional in the
+    # schema only so the error is a clean 400 pointing at /loyalty/adjust
+    # rather than a generic 422.
     order_id: Optional[str] = None
-    rupee_value: float = Field(..., ge=0)
+    # Client value is ADVISORY only: the authoritative earn basis is derived
+    # server-side from the order. A supplied value may only LOWER the basis
+    # (partial award); anything above the order's value is clamped down.
+    rupee_value: Optional[float] = Field(None, ge=0)
     items: Optional[List[EarnItem]] = None
     reason: Optional[str] = None
 
@@ -232,9 +254,19 @@ async def get_ledger(
 @router.post("/earn")
 async def earn(
     body: EarnRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_roles(*_POS_ROLES)),
 ):
-    """Award loyalty points for an order. Idempotent on (customer, order)."""
+    """Award loyalty points for an order. Idempotent on (customer, order).
+
+    IDOR/value-trust hardening: points are money, so the earn basis is
+    derived from the ORDER (grand_total - tax_amount, i.e. the taxable value
+    after all discounts -- exactly what orders.create_order passes to
+    earn_for_order_internal), never trusted from the client. order_id is
+    REQUIRED; a no-order manual credit is POST /loyalty/adjust (admin-gated).
+    A client rupee_value may only LOWER the basis; an inflated value is
+    clamped to the order's, so no caller can mint more points than the order
+    supports.
+    """
     accounts = get_loyalty_account_repository()
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
@@ -244,8 +276,47 @@ async def earn(
     if not settings.get("enabled", True):
         return {"awarded": 0, "skipped_reason": "loyalty_disabled"}
 
+    if not body.order_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "order_id is required: earn points are derived from the "
+                "order's value. Use POST /loyalty/adjust (admin) for a "
+                "manual credit."
+            ),
+        )
+
+    orders = get_order_repository()
+    if orders is None:
+        raise HTTPException(status_code=503, detail="Order store unavailable")
+    order_doc = orders.find_by_id(body.order_id)
+    if not order_doc:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if (order_doc.get("customer_id") or "") != body.customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Order does not belong to this customer",
+        )
+
+    # Authoritative earn basis: the order's taxable value (pre-GST, after all
+    # discounts) = grand_total - tax_amount, both persisted at order create.
+    order_basis = max(
+        round(
+            float(order_doc.get("grand_total") or 0.0)
+            - float(order_doc.get("tax_amount") or 0.0),
+            2,
+        ),
+        0.0,
+    )
+    rupee_value = order_basis
+    value_clamped = False
+    if body.rupee_value is not None:
+        client_value = float(body.rupee_value)
+        value_clamped = client_value > order_basis
+        rupee_value = min(client_value, order_basis)
+
     # Idempotency
-    if body.order_id and txns.has_earn_for_order(body.customer_id, body.order_id):
+    if txns.has_earn_for_order(body.customer_id, body.order_id):
         existing = txns.find_for_customer(body.customer_id, limit=20)
         for t in existing:
             if t.get("order_id") == body.order_id and t.get("type") == "EARN":
@@ -258,7 +329,7 @@ async def earn(
     account = accounts.find_or_create(body.customer_id)
     items = [i.model_dump(exclude_none=True) for i in (body.items or [])]
     earn_result = calc_earn_points(
-        body.rupee_value,
+        rupee_value,
         items,
         account.get("tier", "BRONZE"),
         settings,
@@ -275,7 +346,7 @@ async def earn(
             "customer_id": body.customer_id,
             "type": "EARN",
             "points": points,
-            "rupee_value": float(body.rupee_value or 0.0),
+            "rupee_value": float(rupee_value or 0.0),
             "order_id": body.order_id,
             "reason": body.reason
             or (f"Order {body.order_id}" if body.order_id else "Loyalty earn"),
@@ -302,7 +373,9 @@ async def earn(
         {
             "points": points,
             "order_id": body.order_id,
-            "rupee_value": body.rupee_value,
+            "rupee_value": rupee_value,
+            "client_rupee_value": body.rupee_value,
+            "value_clamped": value_clamped,
             "tier_before": account.get("tier"),
             "tier_after": new_tier,
         },
@@ -314,16 +387,22 @@ async def earn(
         "txn_id": txn_id,
         "tier": new_tier,
         "tier_changed": new_tier != account.get("tier"),
-        "rupee_value": body.rupee_value,
+        "rupee_value": rupee_value,
+        "value_clamped": value_clamped,
     }
 
 
 @router.post("/redeem")
 async def redeem(
     body: RedeemRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_roles(*_POS_ROLES)),
 ):
-    """Deduct points and return the rupee discount they map to."""
+    """Deduct points and return the rupee discount they map to.
+
+    Gated to the POS money family (_POS_ROLES) -- redeem debits a customer's
+    balance, so it must not be reachable by every authenticated role. The
+    atomic guarded debit below is unchanged.
+    """
     accounts = get_loyalty_account_repository()
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:

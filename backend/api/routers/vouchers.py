@@ -42,7 +42,11 @@ from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 
 from .auth import get_current_user, require_roles
-from ..dependencies import resolve_store_scope
+from ..dependencies import (
+    can_access_store_scoped,
+    resolve_store_scope,
+    validate_store_access,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -377,7 +381,11 @@ async def issue_voucher(
             status_code=400, detail="type must be GIFT_CARD or DISCOUNT"
         )
 
-    store_id = body.store_id or current_user.get("active_store_id")
+    # IDOR hardening: an explicit store_id must be inside the caller's reach
+    # (403 otherwise). ADMIN/SUPERADMIN may issue for any store; store-scoped
+    # roles (STORE_MANAGER / AREA_MANAGER / ACCOUNTANT) only for their own.
+    # No store_id -> the caller's active store (same default as before).
+    store_id = validate_store_access(body.store_id, current_user)
     expiry_iso = body.expiry_date.isoformat() if body.expiry_date else None
     kw = dict(
         vtype=vtype, amount=body.amount, store_id=store_id,
@@ -524,13 +532,29 @@ async def cancel_voucher(
 ):
     """Cancel a voucher. Only an ACTIVE voucher can be cancelled — the
     status guard is in the filter so this is itself race-safe (you can't
-    cancel one that's mid-redemption-to-REDEEMED)."""
+    cancel one that's mid-redemption-to-REDEEMED).
+
+    IDOR hardening: cancellation is STORE-SCOPED. A STORE_MANAGER /
+    AREA_MANAGER may only cancel a voucher issued by a store in their reach;
+    ADMIN/SUPERADMIN bypass (cross-store via can_access_store_scoped). A
+    voucher with NO store_id is admin-only. Redemption deliberately stays
+    chain-wide (gift cards are redeemable at any store) -- only cancel is
+    scoped, because it destroys a customer's stored value."""
     db = _get_db()
     coll = _coll(db)
     if coll is None:
         raise HTTPException(status_code=503, detail="Voucher store unavailable")
 
     code_u = code.strip().upper()
+    existing = coll.find_one({"code": code_u})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Voucher not found")
+    if not can_access_store_scoped(existing.get("store_id"), current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="No access to this voucher's store",
+        )
+
     updated = coll.find_one_and_update(
         {"code": code_u, "status": "ACTIVE"},
         {
@@ -544,12 +568,12 @@ async def cancel_voucher(
         return_document=ReturnDocument.AFTER,
     )
     if updated is None:
-        existing = coll.find_one({"code": code_u})
-        if not existing:
-            raise HTTPException(status_code=404, detail="Voucher not found")
+        # Pre-read found the voucher, so the guarded update failing means the
+        # status is not ACTIVE (or a concurrent redeem/cancel won the race).
+        fresh = coll.find_one({"code": code_u}) or existing
         raise HTTPException(
             status_code=400,
-            detail=f"Only ACTIVE vouchers can be cancelled (current: {existing.get('status')})",
+            detail=f"Only ACTIVE vouchers can be cancelled (current: {fresh.get('status')})",
         )
     return _public_view(updated)
 

@@ -2819,7 +2819,23 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/loyalty/adjust",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
-    {"method": "POST", "path": "/api/v1/loyalty/earn", "allowed": "AUTHENTICATED"},
+    # IDOR/value-trust hardening: earn + redeem MOVE MONEY (points), so they
+    # are gated to the POS payment family (loyalty._POS_ROLES) -- the same
+    # role set as POST /vouchers/{code}/redeem. earn additionally derives its
+    # rupee basis from the order server-side (route-level, not expressible
+    # here). SUPERADMIN passes via check_access.
+    {
+        "method": "POST",
+        "path": "/api/v1/loyalty/earn",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+        ],
+    },
     {
         "method": "POST",
         "path": "/api/v1/loyalty/expire",
@@ -2830,7 +2846,18 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/loyalty/program-stats",
         "allowed": "AUTHENTICATED",
     },
-    {"method": "POST", "path": "/api/v1/loyalty/redeem", "allowed": "AUTHENTICATED"},
+    {
+        "method": "POST",
+        "path": "/api/v1/loyalty/redeem",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+        ],
+    },
     {"method": "GET", "path": "/api/v1/loyalty/settings", "allowed": "AUTHENTICATED"},
     {"method": "PUT", "path": "/api/v1/loyalty/settings", "allowed": ["SUPERADMIN"]},
     # CRM-13: Loyalty reward catalog. READ is open to all authenticated staff
@@ -4951,31 +4978,42 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # --- /api/v1/vouchers ---
+    # IDOR hardening: issue validates an explicit store_id against the
+    # caller's reach (validate_store_access) and cancel is scoped to the
+    # voucher's issuing store (can_access_store_scoped; ADMIN/SUPERADMIN
+    # cross-store). REDEEM stays chain-wide BY DESIGN -- a gift card is
+    # redeemable at any store -- so the redeem row is deliberately NOT
+    # store_scoped.
     {
         "method": "GET",
         "path": "/api/v1/vouchers",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vouchers",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vouchers/",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/vouchers/",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {"method": "GET", "path": "/api/v1/vouchers/{code}", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
         "path": "/api/v1/vouchers/{code}/cancel",
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
     },
     {
         "method": "POST",
