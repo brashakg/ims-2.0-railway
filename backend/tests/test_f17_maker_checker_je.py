@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -632,3 +632,182 @@ def test_fail_soft_no_db():
     # list_accounts falls back to the static catalogue with no DB.
     accts = je_service.list_accounts(None, manual_only=True)
     assert any(a["account_code"] == "5001" for a in accts)
+
+
+# ============================================================================
+# Wave-3 hardening regressions (adversarial-chair follow-ups on merged #25)
+# ============================================================================
+
+
+def _post_revenue_je(db, amount=1000.0):
+    """Helper: full maker-checker flow posting a REVENUE JE (credit 4001)."""
+    _seed_user(db, "user_A", pin="1111", roles=["ADMIN"])
+    _seed_user(db, "user_B", pin="2222", roles=["ADMIN"])
+    res = je_service.create_je(
+        db, store_id=None, entity_id=None, entry_date=_entry_date(),
+        description="Misc income",
+        lines=[{"account_code": "2001", "debit": amount, "credit": 0},
+               {"account_code": "4001", "debit": 0, "credit": amount}],
+        maker_id="user_A", maker_name="user_A",
+    )
+    assert res["ok"], res
+    je_id = res["je"]["je_id"]
+    _submit(db, je_id, "user_A")
+    je_service.approve_je(db, je_id=je_id, approver_id="user_B",
+                          approver_roles=["ADMIN"], pin="2222")
+    assert je_service.post_je(db, je_id=je_id, poster_id="user_B")["ok"] is True
+    return je_id
+
+
+def test_pnl_je_revenue_is_below_gross_profit():
+    """P2 regression: a POSTED REVENUE JE (misc income) must NOT inflate trading
+    revenue / gross_profit / gross_margin -- it surfaces as its own
+    je_revenue_adjustment line and lifts only net_profit."""
+    import asyncio
+    import unittest.mock as _m
+    from api.routers import finance as fin
+
+    class _Coll:
+        def aggregate(self, _p):
+            return iter([])
+
+        def find(self, *_a, **_k):
+            return []
+
+    class _Db:
+        def get_collection(self, _n):
+            return _Coll()
+
+    su = {"roles": ["SUPERADMIN"], "user_id": "su"}
+    with _m.patch.object(fin, "_get_db", lambda: _Db()), \
+         _m.patch.object(fin, "_cost_by_product", lambda _db: {}), \
+         _m.patch.object(fin, "_payroll_cost", lambda *_a, **_k: 0.0), \
+         _m.patch.object(fin.je_service, "pnl_adjustments",
+                         lambda *_a, **_k: {"je_revenue_adjustment": 100.0,
+                                            "je_expense_adjustment": 40.0}):
+        pnl = asyncio.run(fin.get_pnl(store_id=None, from_date=None,
+                                      to_date=None, current_user=su))
+    assert pnl["revenue"] == 0            # trading revenue untouched by the JE
+    assert pnl["gross_profit"] == 0       # NOT 100 -- the old bug
+    assert pnl["je_revenue_adjustment"] == 100.0
+    assert pnl["je_expense_adjustment"] == 40.0
+    assert pnl["total_expenses"] == 40.0
+    assert pnl["net_profit"] == 60.0      # 0 - 40 + 100
+
+
+def test_account_type_snapshot_survives_coa_edit(db):
+    """P2 regression: pnl_adjustments must classify a POSTED JE by the
+    posting-time account_type SNAPSHOT on its lines -- a later COA type-edit
+    must not re-class history (immutable ledger)."""
+    _post_revenue_je(db, amount=1000.0)
+    adj = je_service.pnl_adjustments(db, store_id=None,
+                                     from_dt=datetime(2026, 4, 1),
+                                     to_dt=datetime(2026, 6, 30))
+    assert adj["je_revenue_adjustment"] == 1000.0
+
+    # A SUPERADMIN edits the COA: 4001 REVENUE -> EXPENSE. History must not move.
+    db.get_collection("chart_of_accounts").update_one(
+        {"account_code": "4001"}, {"$set": {"account_type": "EXPENSE"}})
+    adj2 = je_service.pnl_adjustments(db, store_id=None,
+                                      from_dt=datetime(2026, 4, 1),
+                                      to_dt=datetime(2026, 6, 30))
+    assert adj2["je_revenue_adjustment"] == 1000.0   # snapshot wins
+    assert adj2["je_expense_adjustment"] == 0.0
+
+    # Legacy rows (no snapshot on the line) still fall back to the live COA.
+    coll = db.get_collection("journal_entries")
+    for d in coll.docs:
+        for ln in d.get("lines") or []:
+            ln.pop("account_type", None)
+    adj3 = je_service.pnl_adjustments(db, store_id=None,
+                                      from_dt=datetime(2026, 4, 1),
+                                      to_dt=datetime(2026, 6, 30))
+    # With the edited COA (4001 now EXPENSE) the legacy path re-resolves live.
+    assert adj3["je_revenue_adjustment"] == 0.0
+
+
+def test_reverse_je_claims_first_no_orphan_mirror(db):
+    """P3 regression: reverse_je must CLAIM the original (POSTED->REVERSED)
+    BEFORE inserting the mirror. If the mirror insert fails, the claim is
+    compensated (original back to POSTED) and NO orphan mirror exists."""
+    je_id = _post_revenue_je(db, amount=500.0)
+    coll = db.get_collection("journal_entries")
+    real_insert = coll.insert_one
+
+    def _boom(doc):
+        raise RuntimeError("disk full")
+
+    coll.insert_one = _boom
+    try:
+        res = je_service.reverse_je(db, je_id=je_id, actor_id="user_B")
+    finally:
+        coll.insert_one = real_insert
+    assert res["ok"] is False and res["error"] == "write_failed"
+    # Original restored to POSTED; no orphan mirror anywhere.
+    assert je_service.get_je(db, je_id)["status"] == "POSTED"
+    assert not [d for d in coll.docs if d.get("reversal_of") == je_id]
+    # And a normal reversal afterwards still works (state not corrupted).
+    res2 = je_service.reverse_je(db, je_id=je_id, actor_id="user_B")
+    assert res2["ok"] is True
+
+
+def test_approve_rearms_validity_window(db):
+    """P3 regression (shared E4 engine): approving re-arms expires_at from the
+    APPROVAL moment, so an approve at minute 55 of the request TTL no longer
+    leaves a 5-minute consume window ('approve now, post EOD' dead-end)."""
+    _seed_user(db, "user_A", pin="1111", roles=["ADMIN"])
+    _seed_user(db, "user_B", pin="2222", roles=["ADMIN"])
+    je_id = _draft(db, "user_A", amount=700.0)
+    request_id = _submit(db, je_id, "user_A")
+
+    # Simulate minute 55: shrink the request expiry to 5 minutes from now.
+    soon = appr._now() + timedelta(minutes=5)
+    db.get_collection("approval_requests").update_one(
+        {"request_id": request_id}, {"$set": {"expires_at": soon}})
+
+    res = je_service.approve_je(db, je_id=je_id, approver_id="user_B",
+                                approver_roles=["ADMIN"], pin="2222")
+    assert res["ok"], res
+    req = db.get_collection("approval_requests").find_one({"request_id": request_id})
+    # Re-armed: well beyond the old 5-minute remainder.
+    assert req["expires_at"] > appr._now() + timedelta(minutes=30)
+    # And the post (consume) succeeds inside the re-armed window.
+    assert je_service.post_je(db, je_id=je_id, poster_id="user_B")["ok"] is True
+
+
+def test_requested_expiry_still_enforced(db):
+    """Companion to the re-arm: a REQUESTED approval past its TTL still cannot
+    be approved (the re-arm happens only ON approval, never resurrects)."""
+    _seed_user(db, "user_A", pin="1111", roles=["ADMIN"])
+    _seed_user(db, "user_B", pin="2222", roles=["ADMIN"])
+    je_id = _draft(db, "user_A", amount=700.0)
+    request_id = _submit(db, je_id, "user_A")
+    past = appr._now() - timedelta(minutes=1)
+    db.get_collection("approval_requests").update_one(
+        {"request_id": request_id}, {"$set": {"expires_at": past}})
+    res = je_service.approve_je(db, je_id=je_id, approver_id="user_B",
+                                approver_roles=["ADMIN"], pin="2222")
+    assert res["ok"] is False
+
+
+def test_hq_je_not_readable_by_store_roles():
+    """P3 regression: a store-LESS (HQ) JE must not be readable by store-scoped
+    finance roles via GET /journal-entries/{id}; HQ roles still can."""
+    import asyncio
+    import unittest.mock as _m
+    from fastapi import HTTPException
+    from api.routers import finance as fin
+
+    hq_je = {"je_id": "JE-HQ1", "store_id": None, "status": "POSTED", "lines": []}
+    with _m.patch.object(fin, "_get_db", lambda: object()), \
+         _m.patch.object(fin.je_service, "get_je", lambda _db, _id: dict(hq_je)):
+        acct = {"roles": ["ACCOUNTANT"], "user_id": "a1",
+                "active_store_id": "S1", "store_ids": ["S1"]}
+        try:
+            asyncio.run(fin.get_journal_entry("JE-HQ1", current_user=acct))
+            raise AssertionError("store-scoped role read an HQ JE")
+        except HTTPException as e:
+            assert e.status_code == 403
+        admin = {"roles": ["ADMIN"], "user_id": "ad"}
+        out = asyncio.run(fin.get_journal_entry("JE-HQ1", current_user=admin))
+        assert out["je_id"] == "JE-HQ1"

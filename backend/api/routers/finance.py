@@ -730,10 +730,13 @@ async def get_pnl(
     je_adj = je_service.pnl_adjustments(db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt)
     je_rev = je_adj.get("je_revenue_adjustment", 0.0)
     je_exp = je_adj.get("je_expense_adjustment", 0.0)
-    revenue = round(revenue + je_rev, 2)
+    # JE EXPENSE debits are genuine period expenses (depreciation, bank charges)
+    # and sit below gross profit with the other expenses. JE REVENUE credits are
+    # NON-OPERATING income (misc income, prior-period corrections) -- they must
+    # NOT inflate trading revenue / gross profit / gross margin (adversarial P2):
+    # they enter as their own line below gross profit and only lift net_profit.
     total_expenses = round(total_expenses + je_exp, 2)
-    gross_profit = revenue - cogs
-    net_profit = gross_profit - total_expenses - payroll_cost
+    net_profit = gross_profit - total_expenses - payroll_cost + je_rev
 
     pnl = {
         "revenue": revenue,
@@ -748,6 +751,9 @@ async def get_pnl(
         "gross_margin": round(gross_profit / revenue * 100, 1) if revenue > 0 else 0,
         "expenses": {e["_id"]: e["amount"] for e in expenses},
         "total_expenses": total_expenses,
+        # Manual-JE adjustments surfaced as their own lines (below gross profit).
+        "je_revenue_adjustment": round(je_rev, 2),
+        "je_expense_adjustment": round(je_exp, 2),
         "payroll_cost": payroll_cost,
         "net_profit": round(net_profit, 2),
         "net_margin": round(net_profit / revenue * 100, 1) if revenue > 0 else 0,
@@ -3385,6 +3391,14 @@ async def get_journal_entry(
     # Store-scope read: a store-level role cannot read another store's JE.
     if je.get("store_id"):
         _scope_store(je.get("store_id"), current_user)
+    else:
+        # Store-LESS (HQ/entity-level) voucher: skipping the guard here let any
+        # store-scoped finance role read HQ vouchers by id (adversarial P3).
+        # HQ vouchers are HQ-readable only.
+        roles = set(current_user.get("roles") or [])
+        if not (roles & {"SUPERADMIN", "ADMIN"}):
+            raise HTTPException(status_code=403,
+                                detail="HQ journal entries are not store-readable")
     je.pop("_id", None)
     return je_service._jsonable(je)
 
