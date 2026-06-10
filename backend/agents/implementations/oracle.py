@@ -28,7 +28,7 @@ import uuid
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from ..claude_client import call_claude, call_claude_json, is_claude_available
-from api.utils.ist import now_ist, now_ist_naive
+from api.utils.ist import now_ist, now_ist_naive, ist_day_start_utc
 
 logger = logging.getLogger(__name__)
 
@@ -657,13 +657,17 @@ class OracleAgent(JarvisAgent):
         if coll is None:
             return []
         try:
-            now = datetime.now(timezone.utc)
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # IST business day expressed in the naive-UTC frame `created_at` is
+            # stored in. The old `.isoformat()` STRING bound never matched a
+            # BSON Date (Mongo type bracketing) -- this scan silently found
+            # ZERO orders on every tick. Datetime bounds also fix the
+            # UTC-midnight (05:30 IST) day boundary.
+            today_start = ist_day_start_utc()
             today_total = sum(
                 o.get("grand_total", 0) or 0
-                for o in coll.find({"created_at": {"$gte": today_start.isoformat()}})
+                for o in coll.find({"created_at": {"$gte": today_start}})
             )
-            # Trailing 4 same-weekdays
+            # Trailing 4 same-weekdays (IST days are a constant 24h: no DST)
             same_weekday_totals = []
             for weeks_ago in (1, 2, 3, 4):
                 day = today_start - timedelta(days=7 * weeks_ago)
@@ -671,7 +675,7 @@ class OracleAgent(JarvisAgent):
                 day_total = sum(
                     o.get("grand_total", 0) or 0
                     for o in coll.find({
-                        "created_at": {"$gte": day.isoformat(), "$lt": day_end.isoformat()},
+                        "created_at": {"$gte": day, "$lt": day_end},
                     })
                 )
                 same_weekday_totals.append(day_total)
@@ -700,7 +704,9 @@ class OracleAgent(JarvisAgent):
         if coll is None:
             return []
         try:
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # Naive-UTC instant of IST midnight -- a string bound here matched
+            # ZERO BSON-Date docs (type bracketing), making this scan dead.
+            today_start = ist_day_start_utc()
             tally: Dict[str, int] = {}
             for o in coll.find({"created_at": {"$gte": today_start}, "max_cap_discount": True}):
                 staff = o.get("created_by") or "unknown"
@@ -726,7 +732,9 @@ class OracleAgent(JarvisAgent):
         if coll is None:
             return []
         try:
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # Naive-UTC instant of IST midnight -- a string bound here matched
+            # ZERO BSON-Date docs (type bracketing), making this scan dead.
+            today_start = ist_day_start_utc()
             anomalies = []
             for rx in coll.find({"created_at": {"$gte": today_start}}).limit(200):
                 for eye_key in ("right_eye", "left_eye"):

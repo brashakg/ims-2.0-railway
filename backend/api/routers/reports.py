@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
-from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist
+from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist, ist_day_start_utc
 from calendar import monthrange
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
@@ -203,6 +203,20 @@ async def get_reports_root():
     }
 
 
+# `created_at` is stored as a NAIVE-UTC instant; the dashboard's "today" is the
+# IST business day. Shift by the fixed IST offset (India has no DST) before
+# taking the calendar day, otherwise 00:00-05:30-IST orders bucket into
+# "yesterday". Legacy string created_at passes through to_date_str unchanged.
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _ist_date_str(value: Any) -> str:
+    """IST calendar-day string ('YYYY-MM-DD') for a stored naive-UTC value."""
+    if isinstance(value, datetime):
+        return to_date_str(value + _IST_OFFSET)
+    return to_date_str(value)
+
+
 @router.get("/dashboard")
 async def dashboard_stats(
     store_id: Optional[str] = Query(None),
@@ -242,7 +256,7 @@ async def dashboard_stats(
         # Calculate totals
         for order in all_orders:
             status = order.get("status", "")
-            order_date = to_date_str(order.get("created_at"))
+            order_date = _ist_date_str(order.get("created_at"))
 
             # Today's orders
             if order_date == today_str:
@@ -276,7 +290,7 @@ async def dashboard_stats(
         # Count customers created today
         all_customers = customer_repo.find_many({"store_id": active_store}, limit=0)
         for customer in all_customers:
-            created_date = to_date_str(customer.get("created_at"))
+            created_date = _ist_date_str(customer.get("created_at"))
             if created_date == today_str:
                 today_new_customers += 1
 
@@ -2122,12 +2136,18 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     Validation report (`validation`) flags B2B invoices missing GSTIN
     so the CA can fix them before downloading.
     """
-    # Parse month to date range
+    # Parse month to date range. The GST tax period is an IST calendar month,
+    # but `created_at` is stored as a naive-UTC instant (BaseRepository) -- so
+    # the month boundaries must be shifted through ist_day_start_utc. With the
+    # old UTC-frame window an invoice minted 01-Jun 02:00 IST (= 31-May 20:30
+    # UTC) filed into MAY's GSTR-1, contradicting its IST-minted Rule 46(b)
+    # serial; on 1-Apr it even fell into the prior FY. The half-open
+    # [from_dt, to_dt) window also closes the old `$lte 23:59:59` 1-second hole.
     try:
         year, mon = int(month[:4]), int(month[5:7])
-        _, last_day = monthrange(year, mon)
-        from_dt = datetime(year, mon, 1, 0, 0, 0)
-        to_dt = datetime(year, mon, last_day, 23, 59, 59)
+        from_dt = ist_day_start_utc(date(year, mon, 1))
+        nxt_y, nxt_m = (year + 1, 1) if mon == 12 else (year, mon + 1)
+        to_dt = ist_day_start_utc(date(nxt_y, nxt_m, 1))
     except Exception:
         from fastapi import HTTPException
 
@@ -2183,7 +2203,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             query = {
                 "store_id": active_store,
                 "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
-                "created_at": {"$gte": from_dt, "$lte": to_dt},
+                "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
 
             for order in orders_col.find(query):
@@ -2356,11 +2376,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         try:
             ledger_col = db.get_collection("credit_note_ledger") or db["credit_note_ledger"]
             if ledger_col is not None:
-                # Query credit notes issued in the period
+                # Query credit notes issued in the period. The ledger writes
+                # created_at as a naive-UTC ISO STRING (store_credit_ledger.
+                # make_entry), so the bounds stay strings -- the isoformat of
+                # the IST-month window above is frame-consistent with them.
                 ledger_query = {
                     "store_id": active_store,
                     "type": "ISSUED",
-                    "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+                    "created_at": {"$gte": from_dt.isoformat(), "$lt": to_dt.isoformat()},
                 }
                 # Allow for date stored as datetime or ISO string
                 try:
@@ -2696,9 +2719,14 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     """
     try:
         year, mon = int(month[:4]), int(month[5:7])
+        # last_day feeds the vendor-bill helpers, which filter on bill_date --
+        # a CALENDAR date, deliberately kept in calendar (not instant) frame.
         _, last_day = monthrange(year, mon)
-        from_dt = datetime(year, mon, 1, 0, 0, 0)
-        to_dt = datetime(year, mon, last_day, 23, 59, 59)
+        # Same IST-month -> naive-UTC created_at window as _compute_gstr1, so
+        # GSTR-1 and GSTR-3B agree on which invoices belong to the period.
+        from_dt = ist_day_start_utc(date(year, mon, 1))
+        nxt_y, nxt_m = (year + 1, 1) if mon == 12 else (year, mon + 1)
+        to_dt = ist_day_start_utc(date(nxt_y, nxt_m, 1))
     except Exception:
         from fastapi import HTTPException
 
@@ -2762,7 +2790,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                 {
                     "store_id": active_store,
                     "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
-                    "created_at": {"$gte": from_dt, "$lte": to_dt},
+                    "created_at": {"$gte": from_dt, "$lt": to_dt},
                 }
             ):
                 # Orders carry `tax_amount` + `grand_total`, NOT `taxable` /

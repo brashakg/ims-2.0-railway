@@ -3,7 +3,7 @@
 import csv
 import io
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from ..utils.ist import now_ist, now_ist_naive, ist_today, ist_day_start_utc, fy_start_year_ist
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
@@ -818,11 +818,17 @@ async def get_gst_summary(
     m = month or now.month
     y = year or now.year
 
-    start = datetime(y, m, 1)
-    if m == 12:
-        end = datetime(y + 1, 1, 1)
-    else:
-        end = datetime(y, m + 1, 1)
+    # The GST tax period is an IST calendar month; orders.created_at is a
+    # naive-UTC instant -- shift the month boundaries through ist_day_start_utc
+    # (same pattern as /cash-flow). With plain datetime(y, m, 1) bounds an
+    # invoice at 01-Jun 02:00 IST (= 31-May 20:30 UTC) summed into MAY.
+    start = ist_day_start_utc(date(y, m, 1))
+    end = ist_day_start_utc(date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1))
+    # bill_date is a CALENDAR date (not an instant), so the ITC filter below
+    # keeps calendar-day month bounds -- do NOT shift it through IST (see the
+    # /itc-register note on bill_date framing).
+    bill_start = datetime(y, m, 1)
+    bill_end = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
 
     # GST collected (from sales). Orders store `created_at` as a BSON
     # datetime, so the match MUST use datetime objects -- an .isoformat()
@@ -879,7 +885,7 @@ async def get_gst_summary(
             },
         ):
             _bd = ap_engine.parse_date(_b.get("bill_date"))
-            if _bd is None or not (start <= _bd < end):
+            if _bd is None or not (bill_start <= _bd < bill_end):
                 continue
             _tax = float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
             if _itc_eligible_bill(_b):
@@ -1955,8 +1961,10 @@ async def get_gst_reconciliation(
     now = now_ist()
     m = month or now.month
     y = year or now.year
-    start = datetime(y, m, 1)
-    end = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
+    # IST calendar month -> naive-UTC created_at bounds (same as /gst/summary),
+    # so the reconciliation and GSTR-1/3B agree on the period's invoices.
+    start = ist_day_start_utc(date(y, m, 1))
+    end = ist_day_start_utc(date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1))
 
     s2e, enames = _store_maps(db)
     store_ids = None
@@ -1985,7 +1993,11 @@ async def get_gst_reconciliation(
         )
     )
 
-    p_match = {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    # purchase_orders.date is a CALENDAR-date string -- keep calendar-frame
+    # month bounds for it (do NOT reuse the IST-shifted created_at instants).
+    p_lo = datetime(y, m, 1).isoformat()
+    p_hi = (datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)).isoformat()
+    p_match = {"date": {"$gte": p_lo, "$lt": p_hi}}
     if store_ids is not None:
         p_match["delivery_store_id"] = {"$in": store_ids}
     purchases = list(

@@ -12,8 +12,9 @@ domain router's /{id} catch-all could shadow them.
 
 from fastapi import APIRouter, Depends, Query
 from typing import Optional, Dict, Any, List
-from datetime import datetime, date
+from datetime import datetime
 
+from ..utils.ist import ist_day_start_utc, ist_today, now_ist
 from .auth import get_current_user, require_roles
 
 # /admin/* widgets surface cross-store escalations + system status and were
@@ -45,12 +46,22 @@ def _store(user: dict, override: Optional[str]) -> Optional[str]:
     return user.get("active_store_id") or override
 
 
-def _month_start() -> str:
-    return datetime.now().strftime("%Y-%m-01")
+def _month_start() -> datetime:
+    """First instant of the current IST month, in the naive-UTC frame
+    `created_at` is stored in. The old "%Y-%m-01" STRING never matched a
+    BSON Date (Mongo type bracketing) -- the widgets always read 0."""
+    return ist_day_start_utc(ist_today().replace(day=1))
+
+
+def _today_start() -> datetime:
+    """IST midnight today as a naive-UTC instant (for `created_at` bounds)."""
+    return ist_day_start_utc()
 
 
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    """IST calendar-day string, for date-keyed STRING fields (attendance.date,
+    eye_test_queue.created_date) -- NOT for `created_at` instants."""
+    return ist_today().isoformat()
 
 
 _COUNTED = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
@@ -181,7 +192,7 @@ async def finance_gst_status(
 ):
     return {
         "filed": False,
-        "period": datetime.now().strftime("%Y-%m"),
+        "period": now_ist().strftime("%Y-%m"),
         "pending_returns": [],
     }
 
@@ -280,9 +291,11 @@ async def owner_digest(
     derives both MTD and today (today is the tail of the month). Fail-soft: each
     metric degrades to 0 / [] rather than erroring the card.
     """
-    t = date.today()
-    today_start = datetime(t.year, t.month, t.day)
-    month_start = datetime(t.year, t.month, 1)
+    # IST business day; bounds are naive-UTC instants of the IST day/month
+    # start (the frame `created_at` is stored in), not the UTC box date.
+    t = ist_today()
+    today_start = ist_day_start_utc(t)
+    month_start = ist_day_start_utc(t.replace(day=1))
     excluded = {"CANCELLED", "DRAFT", "REFUNDED"}
 
     sales_today = collections_today = sales_mtd = 0.0
@@ -519,7 +532,7 @@ async def analytics_store_target_today(
     sid = _store(current_user, store_id)
     achieved = 0.0
     if orders is not None:
-        q: Dict[str, Any] = {"created_at": {"$gte": _today()}}
+        q: Dict[str, Any] = {"created_at": {"$gte": _today_start()}}
         if sid:
             q["store_id"] = sid
         for o in orders.find(q):
