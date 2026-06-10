@@ -141,28 +141,37 @@ class DatabaseMigration:
             return MigrationResult(False, f"Collection '{name}' error: {e}")
     
     def _create_index(self, collection_name: str, index_config: Dict) -> MigrationResult:
-        """Create index on collection"""
+        """Create index on collection.
+
+        Passes partialFilterExpression / name / expireAfterSeconds through when
+        declared on the spec (e.g. the F9 partial-unique DC-number backstop on
+        `grns` -- dropping the partial filter would build a GLOBAL unique index
+        that blocks every STANDARD GRN on its null dc_number). Fail-soft: any
+        creation error (e.g. pre-existing duplicate prod rows) only returns a
+        failed MigrationResult (a warning line) -- it never raises.
+        """
         try:
             collection = self.db[collection_name]
-            
+
             keys = index_config["keys"]
-            unique = index_config.get("unique", False)
-            sparse = index_config.get("sparse", False)
-            
-            index_name = collection.create_index(
-                keys,
-                unique=unique,
-                sparse=sparse,
-                background=True
-            )
-            
+            kwargs = {
+                "unique": index_config.get("unique", False),
+                "sparse": index_config.get("sparse", False),
+                "background": True,
+            }
+            for opt in ("partialFilterExpression", "name", "expireAfterSeconds"):
+                if index_config.get(opt) is not None:
+                    kwargs[opt] = index_config[opt]
+
+            index_name = collection.create_index(keys, **kwargs)
+
             key_names = [k[0] for k in keys]
             return MigrationResult(
-                True, 
+                True,
                 f"Index on {collection_name}.{'+'.join(key_names)}",
                 {"index_name": index_name}
             )
-        
+
         except Exception as e:
             return MigrationResult(False, f"Index on {collection_name} failed: {e}")
 

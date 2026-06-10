@@ -122,6 +122,13 @@ class _FakeCollection:
                 return {k: v for k, v in d.items() if k != "_id"}
         return None
 
+    def delete_one(self, flt):
+        for i, d in enumerate(self._store):
+            if self._match(d, flt):
+                del self._store[i]
+                return type("R", (), {"deleted_count": 1})()
+        return type("R", (), {"deleted_count": 0})()
+
     def count_documents(self, flt):
         return sum(1 for d in self._store if self._match(d, flt or {}))
 
@@ -190,6 +197,9 @@ class _GRNRepo:
 
     def find_by_id(self, grn_id):
         return self._coll.find_one({"grn_id": grn_id})
+
+    def find_one(self, flt):
+        return self._coll.find_one(flt)
 
     def find_many(self, flt=None, sort=None, skip=0, limit=100):
         rows = list(self._coll.find(flt or {}))
@@ -706,14 +716,15 @@ class TestWorkshopHardlock:
 # ===========================================================================
 
 
-def _seed_accepted_dc(db, grn_id, items, dc_date="2026-05-10", vendor_id="V1"):
+def _seed_accepted_dc(db, grn_id, items, dc_date="2026-05-10", vendor_id="V1",
+                      store_id="S1"):
     db.collections["grns"].append(
         {
             "grn_id": grn_id,
             "grn_number": grn_id,
             "grn_subtype": "DELIVERY_CHALLAN",
             "status": "ACCEPTED",
-            "store_id": "S1",
+            "store_id": store_id,
             "vendor_id": vendor_id,
             "dc_number": grn_id,
             "dc_date": dc_date,
@@ -909,3 +920,299 @@ class TestGrnListFilters:
         assert r.status_code == 200, r.text
         ids = [g["grn_id"] for g in r.json()["grns"]]
         assert "D1" in ids and "D2" not in ids
+
+
+# ===========================================================================
+# 6. F9 P2 -- concurrent same-DC double-booking must NOT leave an orphan bill
+# ===========================================================================
+
+
+class TestDcDoubleBookingRollback:
+    def test_sequential_double_booking_second_409_no_second_bill(self):
+        """Two sequential creates with the SAME DC set: first 201, second 409,
+        and exactly ONE bill doc exists afterwards (no orphan payable)."""
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)])
+        c = _pi_client_full(db, _GRNRepo(db))
+        lines = [{"product_id": "P1", "qty": 50, "unit_price": 100, "gst_rate": 5}]
+        r1 = c.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(lines, linked_dc_ids=["D1"]),
+        )
+        assert r1.status_code == 201, r1.text
+        r2 = c.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(
+                lines, invoice_number="BULK-DUP", linked_dc_ids=["D1"]
+            ),
+        )
+        assert r2.status_code == 409, r2.text
+        assert len(db.collections["vendor_bills"]) == 1
+
+    def test_race_lost_stamp_deletes_orphan_bill(self, monkeypatch):
+        """Simulated race: the pre-check passes but a rival stamps the DC
+        before our guarded stamp -> the just-inserted bill is DELETED, 409
+        dc_already_matched, and the rival's stamp is untouched."""
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)])
+        c = _pi_client_full(db, _GRNRepo(db))
+
+        real_load = pi_router._load_linked_dcs
+
+        def racing_load(db_, dc_ids):
+            docs = real_load(db_, dc_ids)
+            # The racer wins between the open-DC check and our stamp.
+            for d in db.collections["grns"]:
+                if d.get("grn_id") in dc_ids:
+                    d["dc_matched"] = True
+                    d["linked_bulk_invoice_id"] = "INV-RACER"
+            return docs
+
+        monkeypatch.setattr(pi_router, "_load_linked_dcs", racing_load)
+        r = c.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(
+                [{"product_id": "P1", "qty": 50, "unit_price": 100, "gst_rate": 5}],
+                linked_dc_ids=["D1"],
+            ),
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "dc_already_matched"
+        # NO orphan bill is left behind.
+        assert db.collections["vendor_bills"] == []
+        # The rival's link is untouched.
+        dc = _FakeCollection(db.collections["grns"]).find_one({"grn_id": "D1"})
+        assert dc["linked_bulk_invoice_id"] == "INV-RACER"
+
+    def test_partial_race_unstamps_only_our_dcs(self, monkeypatch):
+        """Race on a 2-DC set where the rival stole only ONE: our stamp on the
+        other DC is compensated (un-stamped), the bill is deleted, 409."""
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)])
+        _seed_accepted_dc(db, "D2", [_grn_item("P1", 30)])
+        c = _pi_client_full(db, _GRNRepo(db))
+
+        real_load = pi_router._load_linked_dcs
+
+        def racing_load(db_, dc_ids):
+            docs = real_load(db_, dc_ids)
+            for d in db.collections["grns"]:
+                if d.get("grn_id") == "D2":
+                    d["dc_matched"] = True
+                    d["linked_bulk_invoice_id"] = "INV-RACER"
+            return docs
+
+        monkeypatch.setattr(pi_router, "_load_linked_dcs", racing_load)
+        r = c.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(
+                [{"product_id": "P1", "qty": 80, "unit_price": 100, "gst_rate": 5}],
+                linked_dc_ids=["D1", "D2"],
+            ),
+        )
+        assert r.status_code == 409, r.text
+        assert db.collections["vendor_bills"] == []
+        grns = _FakeCollection(db.collections["grns"])
+        d1 = grns.find_one({"grn_id": "D1"})
+        # Our stamp on D1 was rolled back -- it is open again, not orphaned.
+        assert d1["dc_matched"] is False
+        assert d1["linked_bulk_invoice_id"] is None
+        # The rival's stamp on D2 was NOT touched.
+        d2 = grns.find_one({"grn_id": "D2"})
+        assert d2["linked_bulk_invoice_id"] == "INV-RACER"
+
+
+# ===========================================================================
+# 7. F9 P3 -- a consolidated invoice cannot mix vendors (or stores)
+# ===========================================================================
+
+
+class TestMixedVendorGuard:
+    def test_from_dcs_mixed_vendors_409(self):
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)], vendor_id="V1")
+        _seed_accepted_dc(db, "D2", [_grn_item("P2", 20)], vendor_id="V2")
+        c = _pi_client_full(db, _GRNRepo(db))
+        r = c.get(
+            "/api/v1/vendors/purchase-invoices/from-dcs",
+            params={"dc_ids": "D1,D2"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "mixed_vendors"
+
+    def test_from_dcs_explicit_vendor_mismatch_409(self):
+        """All DCs share one vendor but the explicit vendor_id differs ->
+        still a mis-attribution -> 409 mixed_vendors."""
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)], vendor_id="V1")
+        c = _pi_client_full(db, _GRNRepo(db))
+        r = c.get(
+            "/api/v1/vendors/purchase-invoices/from-dcs",
+            params={"dc_ids": "D1", "vendor_id": "V2"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "mixed_vendors"
+
+    def test_from_dcs_mixed_stores_409(self):
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)], store_id="S1")
+        _seed_accepted_dc(db, "D2", [_grn_item("P2", 20)], store_id="S2")
+        c = _pi_client_full(db, _GRNRepo(db))
+        r = c.get(
+            "/api/v1/vendors/purchase-invoices/from-dcs",
+            params={"dc_ids": "D1,D2", "vendor_id": "V1"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "mixed_stores"
+
+    def test_create_mixed_vendors_409_and_no_bill(self):
+        """Booking a cross-vendor DC set is hard-blocked BEFORE any write."""
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)], vendor_id="V1")
+        _seed_accepted_dc(db, "D2", [_grn_item("P2", 20)], vendor_id="V2")
+        c = _pi_client_full(db, _GRNRepo(db))
+        r = c.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(
+                [
+                    {"product_id": "P1", "qty": 50, "unit_price": 100, "gst_rate": 5},
+                    {"product_id": "P2", "qty": 20, "unit_price": 100, "gst_rate": 5},
+                ],
+                linked_dc_ids=["D1", "D2"],
+            ),
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "mixed_vendors"
+        assert db.collections["vendor_bills"] == []
+        # Neither DC was stamped.
+        for dc_id in ("D1", "D2"):
+            dc = _FakeCollection(db.collections["grns"]).find_one({"grn_id": dc_id})
+            assert dc["dc_matched"] is False
+
+    def test_create_single_vendor_still_books(self):
+        """Regression: a same-vendor multi-DC booking is unaffected."""
+        db = _FakeDB()
+        _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)])
+        _seed_accepted_dc(db, "D2", [_grn_item("P1", 30)])
+        c = _pi_client_full(db, _GRNRepo(db))
+        r = c.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(
+                [{"product_id": "P1", "qty": 80, "unit_price": 100, "gst_rate": 5}],
+                linked_dc_ids=["D1", "D2"],
+            ),
+        )
+        assert r.status_code == 201, r.text
+
+
+# ===========================================================================
+# 8. F9 P3 -- DC-number uniqueness: DuplicateKeyError mapping + index spec
+# ===========================================================================
+
+
+class TestDcNumberUniquenessHardening:
+    def test_duplicate_insert_maps_to_409(self):
+        """The app-level check passes (no rival yet) but the INSERT loses the
+        unique-index race (repo.create -> None with a rival row now holding the
+        key) -> the handler maps it to the SAME 409, never a false 201."""
+        db = _FakeDB()
+
+        class _RacingGrnRepo(_GRNRepo):
+            def __init__(self, db_):
+                super().__init__(db_)
+                self._raced = False
+
+            def create(self, doc):
+                if not self._raced and doc.get("grn_subtype") == "DELIVERY_CHALLAN":
+                    self._raced = True
+                    rival = dict(doc)
+                    rival["grn_id"] = "RIVAL"
+                    self._coll.insert_one(rival)
+                    # Simulates BaseRepository.create swallowing the
+                    # DuplicateKeyError from uniq_dc_vendor_number_store.
+                    return None
+                return super().create(doc)
+
+        c = _vendors_client(db, _RacingGrnRepo(db))
+        r = _log_dc(c, "DC-RACE", [_grn_item("L1", 5)])
+        assert r.status_code == 409, r.text
+        assert "already logged" in r.json()["detail"]
+
+    def test_unexplained_dc_save_failure_is_500_not_false_201(self):
+        """repo.create -> None with NO rival row -> loud 500 (was a false 201)."""
+        db = _FakeDB()
+
+        class _BrokenGrnRepo(_GRNRepo):
+            def create(self, doc):
+                return None
+
+        c = _vendors_client(db, _BrokenGrnRepo(db))
+        r = _log_dc(c, "DC-FAIL", [_grn_item("L1", 5)])
+        assert r.status_code == 500
+
+    def test_partial_unique_index_declared_in_schemas(self):
+        """The grns partial unique index (DB backstop for the racy app check)
+        is declared with the exact key + partial filter."""
+        from database.schemas import get_all_indexes
+
+        grn_indexes = get_all_indexes()["grns"]
+        target = [
+            i
+            for i in grn_indexes
+            if i.get("keys") == [("vendor_id", 1), ("dc_number", 1), ("store_id", 1)]
+        ]
+        assert len(target) == 1
+        spec = target[0]
+        assert spec.get("unique") is True
+        assert spec.get("partialFilterExpression") == {
+            "grn_subtype": "DELIVERY_CHALLAN",
+            "dc_number": {"$exists": True},
+        }
+
+    def test_migrations_pass_partial_filter_through_and_fail_soft(self):
+        """migrations._create_index must forward partialFilterExpression/name
+        (a plain unique build would block STANDARD GRNs on null dc_number) and
+        must only WARN (failed result, no raise) when creation fails."""
+        from database.migrations import DatabaseMigration
+        from database.schemas import get_all_indexes
+
+        spec = [
+            i
+            for i in get_all_indexes()["grns"]
+            if i.get("name") == "uniq_dc_vendor_number_store"
+        ][0]
+
+        calls = {}
+
+        class _Coll:
+            def create_index(self, keys, **kw):
+                calls["keys"] = keys
+                calls["kw"] = kw
+                return kw.get("name")
+
+        class _Db:
+            def __getitem__(self, name):
+                return _Coll()
+
+        mig = DatabaseMigration(_Db())
+        res = mig._create_index("grns", spec)
+        assert res.success, res.message
+        assert calls["keys"] == [("vendor_id", 1), ("dc_number", 1), ("store_id", 1)]
+        assert calls["kw"]["unique"] is True
+        assert calls["kw"]["partialFilterExpression"] == {
+            "grn_subtype": "DELIVERY_CHALLAN",
+            "dc_number": {"$exists": True},
+        }
+        assert calls["kw"]["name"] == "uniq_dc_vendor_number_store"
+
+        class _DupColl:
+            def create_index(self, keys, **kw):
+                raise RuntimeError("E11000 duplicate key (pre-existing dupes)")
+
+        class _DupDb:
+            def __getitem__(self, name):
+                return _DupColl()
+
+        mig2 = DatabaseMigration(_DupDb())
+        res2 = mig2._create_index("grns", spec)  # must NOT raise
+        assert res2.success is False

@@ -629,6 +629,12 @@ export interface VarianceLine {
   days_overdue: number;
   aging_status: 'ON_TIME' | 'OVERDUE' | 'CRITICALLY_OVERDUE';
   dismissed?: boolean;
+  // Server-resolved links for the dismiss flow: the newest ACCEPTED GRN
+  // covering this product + the booked invoice (if any). When both are
+  // carried on the dismiss call, an over-billed line triggers the
+  // debit-note suggestion in the response.
+  latest_accepted_grn_id?: string | null;
+  booked_bill_id?: string | null;
 }
 
 // ============================================================================

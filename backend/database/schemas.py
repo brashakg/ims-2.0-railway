@@ -734,7 +734,24 @@ INDEXES = {
         {"keys": [("vendor_id", 1)]},
         {"keys": [("store_id", 1)]},
         {"keys": [("status", 1)]},
-        {"keys": [("created_at", -1)]}
+        {"keys": [("created_at", -1)]},
+        # F9 P3: DB-level backstop for the app-level DC-number duplicate check
+        # in vendors.create_grn (check-then-insert is racy across workers).
+        # PARTIAL: only DELIVERY_CHALLAN rows that actually carry a dc_number
+        # are constrained -- STANDARD GRNs (dc_number null) are exempt.
+        # Creation is FAIL-SOFT everywhere it is built (migrations.py
+        # _create_index returns a failure result; connection.py ensure_indexes
+        # collects a warning): prod may still hold duplicate DC rows until the
+        # dedup script runs, and that must only warn, never abort startup.
+        {
+            "keys": [("vendor_id", 1), ("dc_number", 1), ("store_id", 1)],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "DELIVERY_CHALLAN",
+                "dc_number": {"$exists": True},
+            },
+            "name": "uniq_dc_vendor_number_store",
+        }
     ],
     "tasks": [
         {"keys": [("task_number", 1)], "unique": True},

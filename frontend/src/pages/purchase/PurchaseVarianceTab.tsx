@@ -206,6 +206,11 @@ function DismissModal({
       const res = await vendorsApi.dismissVariance(row.po_id, {
         product_id: row.product_id,
         reason: reason.trim(),
+        // Carry the server-resolved GRN + booked-invoice links so the backend
+        // can compare accepted vs billed qty and suggest a debit note when the
+        // invoice over-bills (without both ids the prompt never fires).
+        grn_id: row.latest_accepted_grn_id ?? undefined,
+        bill_id: row.booked_bill_id ?? undefined,
       });
       if (res.debit_note_suggested) {
         // Keep the modal open to show the debit-note prompt; the dismissal has
@@ -228,7 +233,7 @@ function DismissModal({
           <h3 className="font-semibold text-gray-900 flex items-center gap-2">
             <PackageX className="w-5 h-5" /> Dismiss variance
           </h3>
-          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-700"><X className="w-5 h-5" /></button>
+          <button type="button" onClick={onClose} title="Close" aria-label="Close" className="text-gray-400 hover:text-gray-700"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 space-y-4">
           <div className="text-sm text-gray-600">

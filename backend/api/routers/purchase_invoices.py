@@ -43,6 +43,7 @@ Roles: create / book is an accounting action -> ADMIN / ACCOUNTANT (+SUPERADMIN
 via require_roles). Reads are AUTHENTICATED.
 """
 
+import logging
 import uuid
 from datetime import datetime
 from typing import List, Optional
@@ -62,6 +63,7 @@ from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Money-out / books action: limited to ADMIN / ACCOUNTANT. SUPERADMIN auto-passes
 # via require_roles. Mirrors the _AP_ROLES gate on vendor bills/payments.
@@ -199,6 +201,46 @@ def _load_linked_dcs(db, dc_ids):
             )
         docs.append(doc)
     return docs
+
+
+def _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=None):
+    """F9 P3: a consolidated invoice covers ONE vendor's DCs at ONE store.
+
+    The from-dcs draft used to resolve vendor_id/store_id first-wins, so a
+    cross-vendor multi-select silently booked vendor B's goods on vendor A's
+    payable (and the ITC under A's GSTIN). Hard 409 instead:
+      * mixed_vendors -- the DCs span more than one vendor_id, or the explicit
+        invoice vendor doesn't match the (single) DC vendor.
+      * mixed_stores  -- the DCs were received at more than one store.
+    DCs with no vendor_id/store_id (legacy rows) are ignored by the check.
+    """
+    vendor_ids = {dc.get("vendor_id") for dc in dc_docs or [] if dc.get("vendor_id")}
+    store_ids = {dc.get("store_id") for dc in dc_docs or [] if dc.get("store_id")}
+    if len(vendor_ids) > 1 or (
+        expected_vendor_id and vendor_ids and expected_vendor_id not in vendor_ids
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "mixed_vendors",
+                "message": (
+                    "All linked Delivery Challans must belong to one vendor "
+                    "(and match the invoice's vendor). A consolidated invoice "
+                    "cannot mix vendors."
+                ),
+            },
+        )
+    if len(store_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "mixed_stores",
+                "message": (
+                    "All linked Delivery Challans must have been received at "
+                    "one store. Draft one consolidated invoice per store."
+                ),
+            },
+        )
 
 
 def _stamp_dcs_matched(db, dc_ids, invoice_id):
@@ -540,6 +582,10 @@ async def create_purchase_invoice(
     dc_match_status = "N_A"
     if body.linked_dc_ids:
         dc_docs = _load_linked_dcs(db, body.linked_dc_ids)
+        # F9 P3: hard-block a cross-vendor / cross-store consolidation BEFORE
+        # any write -- the payable + ITC would be booked against the wrong
+        # vendor/GSTIN otherwise.
+        _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=body.vendor_id)
         # Period-lock the earliest DC date.
         earliest = None
         for dc in dc_docs:
@@ -643,6 +689,90 @@ async def create_purchase_invoice(
     stamped_dc_ids = []
     if body.linked_dc_ids:
         stamped_dc_ids = _stamp_dcs_matched(db, body.linked_dc_ids, invoice_id)
+        # F9 P2 race guard: a concurrent booking of the same DC set passes the
+        # _load_linked_dcs pre-check on both requests, but only ONE wins each
+        # guarded stamp. The loser used to leave an ORPHAN bill (payable + ITC
+        # booked twice with zero DCs linked, only auditable via stamped_dc_ids).
+        # Compensate: un-stamp whatever WE stamped (guarded by our own
+        # invoice_id so a rival's stamp is never touched), delete the
+        # just-inserted bill (single-document delete), log loudly, 409.
+        if db is not None and len(stamped_dc_ids) != len(body.linked_dc_ids):
+            lost_dc_ids = [
+                d for d in body.linked_dc_ids if d not in set(stamped_dc_ids)
+            ]
+            grn_coll = db.get_collection("grns")
+            for dc_id in stamped_dc_ids:
+                try:
+                    grn_coll.find_one_and_update(
+                        {"grn_id": dc_id, "linked_bulk_invoice_id": invoice_id},
+                        {
+                            "$set": {
+                                "dc_matched": False,
+                                "linked_bulk_invoice_id": None,
+                                "dc_matched_at": None,
+                            }
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.error(
+                        "[F9] dc-race rollback: could not un-stamp DC %s from "
+                        "rolled-back invoice %s -- manual reconciliation needed",
+                        dc_id,
+                        invoice_id,
+                    )
+            try:
+                db.get_collection("vendor_bills").delete_one(
+                    {"bill_id": invoice_id}
+                )
+            except Exception:  # noqa: BLE001
+                logger.error(
+                    "[F9] CRITICAL: dc-race rollback could not delete orphan "
+                    "bill %s (invoice %s, vendor %s) -- the payable is "
+                    "double-booked until manually removed",
+                    invoice_id,
+                    body.invoice_number,
+                    body.vendor_id,
+                )
+            logger.error(
+                "[F9] concurrent DC double-booking rejected: invoice %s "
+                "(vendor %s) lost the stamp race on DC(s) %s; bill rolled back",
+                body.invoice_number,
+                body.vendor_id,
+                ",".join(lost_dc_ids),
+            )
+            # Best-effort audit row for the rejected booking (fail-soft).
+            try:
+                audit = get_audit_repository()
+                if audit is not None:
+                    audit.create(
+                        {
+                            "action": "purchase_invoice.dc_race_rollback",
+                            "entity_type": "vendor_bill",
+                            "entity_id": invoice_id,
+                            "user_id": current_user.get("user_id"),
+                            "detail": {
+                                "vendor_id": body.vendor_id,
+                                "invoice_number": body.invoice_number,
+                                "linked_dc_ids": body.linked_dc_ids,
+                                "stamped_dc_ids": stamped_dc_ids,
+                                "lost_dc_ids": lost_dc_ids,
+                            },
+                        }
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "dc_already_matched",
+                    "message": (
+                        "One or more Delivery Challans were matched to another "
+                        "invoice while this booking was in flight "
+                        f"({', '.join(lost_dc_ids)}). The booking was rolled "
+                        "back; re-draft from the remaining open DCs."
+                    ),
+                },
+            )
 
     # Phase 2 -- INVENTORY VALUATION TRUE-UP. The invoice's per-unit landed price
     # is the authoritative cost; blend it into each product's moving-average cost
@@ -839,6 +969,9 @@ async def draft_invoice_from_dcs(
 
     db = _get_db()
     dc_docs = _load_linked_dcs(db, ids)
+    # F9 P3: the draft must not consolidate across vendors (or stores) -- the
+    # old first-wins resolution silently mis-attributed a cross-vendor select.
+    _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=vendor_id)
 
     # Aggregate accepted lines across all DCs by product_id. Reuse lines_from_grn
     # per DC (no PO -> unit_price 0 + gst_rate 0; the accountant fills the rate),
