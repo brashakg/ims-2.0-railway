@@ -27,6 +27,10 @@ CONSTRAINTS honoured (CORRECTIONS + PROTOCOL):
   * This feature calls NO money/loyalty/settings/E3 engine. It does not touch a
     stocked unit, so it does NOT call `item_events.record_event` (that ledger is
     for `stock_units` state, not job routing -- forking it here would be wrong).
+    The ONLY cross-domain read is the F9 DC hardlock on a scan-driven
+    -> IN_PROGRESS flip, and that is delegated to the canonical
+    `workshop._check_dc_hardlock` (purchase_settings flags + grns lookup live
+    there, defined once) -- see `_dc_gate_block`.
   * Dwell time is ALWAYS server-computed from the stored station_timestamps;
     any client-supplied dwell is ignored.
 """
@@ -320,6 +324,55 @@ def _dwell_ms(previous_ts: Optional[str], now: datetime) -> Optional[int]:
     return max(0, delta_ms)
 
 
+def _dc_gate_block(db, job_doc: dict) -> Optional[str]:
+    """F9 DC HARDLOCK, evaluated for a SCAN-driven -> IN_PROGRESS status flip.
+
+    Closes the F2 bypass of the F9 gate: the workshop status PATCH refuses to
+    start an external-lab lens job (top-level lens_status == "ORDERED") until an
+    accepted DELIVERY_CHALLAN GRN covers its lens SKU at that store -- but a lab
+    INTAKE scan also flips the job to IN_PROGRESS, so the same lock must hold
+    here.
+
+    REUSES the canonical ``workshop._check_dc_hardlock`` (single source of
+    truth: the require_dc_for_workshop flag default, the dc_hardlock_from_date
+    cutover, the in-house exemption and the accepted-DC GRN lookup are all
+    defined exactly once there -- nothing is duplicated in this module). That
+    helper RAISES 422 (code DC_HARDLOCK) when blocked; the F2 scan contract
+    must NEVER fail a physical scan (the card was really scanned at the bench:
+    record it, HOLD the status), so the raise is translated into the
+    "DC_REQUIRED" gate label consumed by the existing gate_block plumbing.
+
+    NO override path on a scan BY DESIGN: a station worker scanning a job card
+    is not an approval surface. The audited ADMIN+ ``override_reason`` bypass
+    stays on the manager-facing status PATCH in workshop.py. The helper is
+    therefore always called with no override_reason and no privileged roles,
+    which makes the 422 raise the ONLY reachable block signal (the 403
+    override-forbidden branch requires a non-empty reason).
+
+    Returns "DC_REQUIRED" when the hardlock blocks the flip, else None.
+    """
+    # Lazy imports: workshop.py itself imports this module lazily, so a
+    # module-load cycle is impossible; an import failure here is a programming
+    # error and fails loudly (it is NOT caught below).
+    from fastapi import HTTPException
+
+    from ..routers.workshop import _check_dc_hardlock
+
+    try:
+        _check_dc_hardlock(
+            db,
+            job_doc.get("lens_status"),  # TOP-LEVEL lifecycle field (F9)
+            (job_doc.get("lens_details") or {}).get("product_id"),
+            job_doc.get("store_id"),
+            job_doc.get("created_at"),
+            {"roles": []},  # scan path: never privileged, never overriding
+            None,  # no override_reason on a scan (see docstring)
+        )
+    except HTTPException:
+        return "DC_REQUIRED"
+    return None
+
+
 def advance_lab_station(
     db,
     job: dict,
@@ -476,11 +529,14 @@ def advance_lab_station(
     if advances_to:
         advances_to = str(advances_to).strip().upper() or None
     if advances_to and advances_to != job_status:
-        # SAFETY GATES (BUG-116c / BUG-116a): the scan-driven status flip must
-        # enforce the SAME gates as the workshop PATCH handler -- a scan may NOT
-        # start a job (-> IN_PROGRESS) until sales confirm the fitting, nor mark it
-        # READY (-> patient pickup) without a QC pass/waiver. On a gate fail we keep
-        # the physical-station scan but DO NOT flip status and DO NOT auto-notify.
+        # SAFETY GATES (BUG-116c / BUG-116a / F9): the scan-driven status flip
+        # must enforce the SAME gates as the workshop PATCH handler -- a scan may
+        # NOT start a job (-> IN_PROGRESS) until sales confirm the fitting AND
+        # (for an external-lab ORDERED lens) a Delivery Challan covers its SKU,
+        # nor mark it READY (-> patient pickup) without a QC pass/waiver. On a
+        # gate fail we keep the physical-station scan but DO NOT flip status and
+        # DO NOT auto-notify. Gate precedence mirrors the PATCH handler: sales
+        # confirm first, then the F9 DC hardlock.
         if advances_to == "IN_PROGRESS" and not (
             (updated.get("fitting_details") or {}).get("confirmed_by_sales")
         ):
@@ -489,6 +545,10 @@ def advance_lab_station(
             updated.get("qc_passed") is True or updated.get("qc_waived") is True
         ):
             gate_block = "QC_REQUIRED"
+        elif advances_to == "IN_PROGRESS":
+            # F9 DC hardlock (shared check; see _dc_gate_block for the
+            # no-override-on-scan rationale).
+            gate_block = _dc_gate_block(db, updated)
         if gate_block is None:
             try:
                 from ..dependencies import get_workshop_repository
@@ -503,6 +563,10 @@ def advance_lab_station(
     _gate_msg = {
         "QC_REQUIRED": " Status held: record/waive lens QC before marking READY.",
         "SALES_CONFIRM_REQUIRED": " Status held: sales must confirm the fitting before work starts.",
+        "DC_REQUIRED": (
+            " Status held: no Delivery Challan logged for this lens. Ask the"
+            " Store Manager to record the DC before work starts."
+        ),
     }
     return {
         "ok": True,
