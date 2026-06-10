@@ -3373,10 +3373,19 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     {"method": "PUT", "path": "/api/v1/orders/{order_id}", "allowed": "AUTHENTICATED"},
+    # Cancelling a sale is POS-tier (mirrors POST /orders' POS_WRITE_ROLES
+    # in-function gate in orders.py::cancel_order -- keep the two in sync).
     {
         "method": "POST",
         "path": "/api/v1/orders/{order_id}/cancel",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+        ],
     },
     {
         "method": "POST",
