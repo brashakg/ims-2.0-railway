@@ -35,6 +35,7 @@ os.environ.setdefault("DISPATCH_MODE", "off")
 
 import jwt  # noqa: E402
 import pytest  # noqa: E402
+from datetime import timezone  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -697,6 +698,41 @@ def test_t13_cross_store_idor_blocked(monkeypatch):
     # SALES_STAFF whose token is scoped to STORE asks for OTHER_STORE.
     r = client.get(f"/api/v1/crm/nba/{OTHER_STORE}", headers=_hdr(("SALES_STAFF",), store_id=STORE))
     assert r.status_code == 403
+
+
+# ===========================================================================
+# T14 -- IST day-key + TTL anchor (audit F39-P3 timezone class). nba_scores is
+# keyed on the IST calendar day and TTL-anchored on the NAIVE-UTC instant of
+# the next IST midnight (the migrations TTL index is expireAfterSeconds=0 on
+# ttl_expires_at, and Mongo reads naive BSON dates as UTC).
+# ===========================================================================
+
+
+def test_t14_ttl_anchor_is_utc_instant_of_ist_midnight():
+    # IST midnight after 2026-06-10 = 2026-06-11T00:00+05:30 = 2026-06-10T18:30Z.
+    # Regression: the old bare `.astimezone()` converted to the SERVER-LOCAL
+    # zone (not UTC) -- correct on a UTC Railway box but 5h30m late on any
+    # non-UTC host (an IST box stamped 2026-06-11T00:00 naive, which Mongo's
+    # TTL monitor reads as UTC -> the list out-lived its IST day).
+    assert nba._ist_midnight_utc("2026-06-10") == datetime(2026, 6, 10, 18, 30)
+    doc = nba.build_nba_doc(STORE, [], date_str="2026-06-10")
+    assert doc["ttl_expires_at"] == datetime(2026, 6, 10, 18, 30)
+    assert doc["date"] == "2026-06-10"
+    assert doc["nba_id"] == f"NBA-20260610-{STORE}"
+
+
+def test_t14b_day_key_boundary_early_morning_ist():
+    # 01:00 IST on 2026-06-10 == 19:30 UTC on 2026-06-09: a list built in the
+    # early IST morning must key on the IST day, never the prior UTC day (the
+    # old fallback used utcnow().date()).
+    early = datetime(2026, 6, 9, 19, 30, tzinfo=timezone.utc)
+    assert nba._today_ist(early) == "2026-06-10"
+    # 23:59 IST (18:29 UTC) stays on the same IST day.
+    late = datetime(2026, 6, 9, 18, 29, tzinfo=timezone.utc)
+    assert nba._today_ist(late) == "2026-06-09"
+    # The TTL anchor for that early-morning day key is the SAME IST-midnight
+    # instant regardless of when in the IST day the list was built.
+    assert nba._ist_midnight_utc(nba._today_ist(early)) == datetime(2026, 6, 10, 18, 30)
 
 
 # ===========================================================================

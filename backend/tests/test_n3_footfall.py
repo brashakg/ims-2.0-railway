@@ -579,6 +579,77 @@ def test_future_date_blocked(client, patched):
 # ===========================================================================
 
 
+# ===========================================================================
+# 9 -- IST day-boundary (wave-2a audit, N3-P2): the walk-in day key and the
+# conversion-feed default date are the store's IST business day, never the
+# server-local/UTC date. An entry at 00:30 IST belongs to the IST day.
+# ===========================================================================
+
+
+def test_walkin_day_key_is_ist_not_utc():
+    """Unit boundary: 19:00 UTC on Jun 9 == 00:30 IST on Jun 10 -> the day key
+    must be 2026-06-10 (the IST day), not the prior UTC day. Regression for the
+    old `date.today()` (server-local/UTC) keying."""
+    from datetime import datetime, timezone
+    from database.repositories.walkin_counter_repository import (
+        WalkInCounterRepository,
+    )
+
+    early = datetime(2026, 6, 9, 19, 0, tzinfo=timezone.utc)  # 00:30 IST Jun 10
+    assert WalkInCounterRepository._today_str(early) == "2026-06-10"
+    late = datetime(2026, 6, 9, 18, 29, tzinfo=timezone.utc)  # 23:59 IST Jun 9
+    assert WalkInCounterRepository._today_str(late) == "2026-06-09"
+
+
+def test_walkin_default_day_key_rides_ist_clock(patched, monkeypatch):
+    """The repo's DEFAULT day key (no date_str supplied -- the POS '+1' path)
+    rides the canonical IST clock helper, so a 00:30-IST tap lands on the IST
+    day's doc."""
+    from datetime import date
+    from database.repositories import walkin_counter_repository as wmod
+
+    monkeypatch.setattr(wmod, "ist_today", lambda: date(2026, 6, 10))
+    repo = patched["walkin_repo"]
+    repo.auto_increment(store_id=STORE, sales_person_id="S1", mobile="9876500001")
+    doc = repo.get_today(STORE, date_str="2026-06-10")
+    assert doc["per_staff"]["S1"] == 1
+    assert doc["pos_auto_count"] == 1
+    # Nothing leaked onto any other day's doc.
+    assert repo.get_today(STORE, date_str="2026-06-09")["total"] == 0
+
+
+def test_conversion_feed_defaults_to_ist_day(client, patched, monkeypatch):
+    """The conversion-feed DEFAULT date (no ?date=) is the IST business day --
+    regression for the old naive `datetime.now().date()` (UTC) default that
+    pointed at YESTERDAY's feed between 00:00-05:30 IST."""
+    from api.routers import walkouts as walkouts_module
+
+    fixed_ist_day = "2026-06-10"
+    monkeypatch.setattr(
+        walkouts_module, "_ist_today_str", lambda: fixed_ist_day
+    )
+    # Seed footfall + one walkout ON the IST day.
+    patched["walkin_repo"].set_per_staff(
+        store_id=STORE, staff_id="S1", walk_ins=10, updated_by="MGR",
+        date_str=fixed_ist_day,
+    )
+    patched["walkout_repo"].create_walkout({
+        "store_id": STORE, "date_str": fixed_ist_day,
+        "sales_person_id": "S1", "sales_person_name": "Staff One",
+        "customer_name": "B", "mobile": "9000000009",
+        "primary_walkout_reason": "BUDGET/PRICE",
+    })
+
+    hdr = _hdr("MGR", ["STORE_MANAGER"])
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=hdr)
+    assert resp.status_code == 200, resp.text
+    items = {r["sales_person_id"]: r for r in resp.json()}
+    # The defaulted feed found the IST-day docs: (10-1)/10*20 = 18.
+    assert items["S1"]["walk_ins_today"] == 10
+    assert items["S1"]["walkouts_today"] == 1
+    assert items["S1"]["conversion_score"] == 18.0
+
+
 def test_pos_autoincrement_dedup_and_independence(patched):
     repo = patched["walkin_repo"]
     today = _today()

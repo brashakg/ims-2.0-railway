@@ -15,8 +15,10 @@ Design notes (docs/PUNE_INCENTIVE_BUILD_PLAN.md):
   - mobiles_seen: hidden field used as a dedup set (lifted out of
     the dashboard response shape so it doesn't leak)
 """
-from datetime import datetime, date as date_type
+from datetime import datetime
 from typing import Dict, List, Optional
+
+from api.utils.ist import IST, ist_today
 
 from .base_repository import BaseRepository
 
@@ -40,8 +42,14 @@ class WalkInCounterRepository(BaseRepository):
         return f"{store_id}_{date_str}"
 
     @staticmethod
-    def _today_str() -> str:
-        return date_type.today().isoformat()
+    def _today_str(now: Optional[datetime] = None) -> str:
+        """The IST calendar day key (BUG-104): a walk-in belongs to the store's
+        IST business day, never the server-local/UTC date -- the old
+        ``date.today()`` keyed a 00:30-IST entry on the PRIOR UTC day. A
+        tz-aware ``now`` is injectable for boundary tests."""
+        if now is not None and now.tzinfo is not None:
+            return now.astimezone(IST).date().isoformat()
+        return ist_today().isoformat()
 
     def _get_or_init(self, store_id: str, date_str: str) -> Dict:
         """Fetch the doc for this (store, date), creating an empty

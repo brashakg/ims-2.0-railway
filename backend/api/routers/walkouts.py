@@ -23,7 +23,7 @@ Side effects on POST:
   2. An audit-log row is written (`action: "walkout.create"`).
 """
 
-from datetime import datetime, date as date_type, timedelta, timezone
+from datetime import datetime, date as date_type, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import get_current_user
+from ..utils.ist import ist_today, now_ist
 from ..dependencies import (
     can_access_store_scoped,
     get_audit_repository,
@@ -802,8 +803,13 @@ def _write_sale_credits(
 
     Returns the list of credit dicts written (for the response / embed).
     """
+    # month_key is the IST business month (BUG-104): an un-injected `now` is
+    # the server's UTC wall-clock, and a conversion credited at 00:30 IST on
+    # the 1st must not roll into the PRIOR month's SC rollup. An injected
+    # `now` (tests) stays authoritative for determinism.
+    explicit_now = now is not None
     now = now or datetime.now()
-    month_key = now.strftime("%Y-%m")
+    month_key = now.strftime("%Y-%m") if explicit_now else now_ist().strftime("%Y-%m")
     plan = [
         ("LOGGING", logging_user_id, logging_user_name),
         ("CLOSING", closing_user_id, closing_user_name),
@@ -967,7 +973,10 @@ async def create_walkout(
 
     sales_person_name = _resolve_sales_person_name(payload.sales_person_id)
 
-    target_date = payload.date or datetime.now().date()
+    # The walkout day key is the store's IST business day (BUG-104): a walkout
+    # logged at 00:30 IST must NOT land on the prior UTC day, or the
+    # conversion-feed (which filters on date_str) misses it.
+    target_date = payload.date or ist_today()
     date_str = target_date.isoformat()
 
     # Customer link / auto-create. None is acceptable — the row gets
@@ -1145,9 +1154,9 @@ async def pos_compliance_check(
 
     rows = repo.list_open_for_staff(store_id, sales_person_id)
     open_count = len(rows)
-    from datetime import timedelta
 
-    cutoff = (datetime.now() - timedelta(hours=48)).date().isoformat()
+    # date_str is an IST day key, so the 48h overdue cutoff must be IST too.
+    cutoff = (now_ist() - timedelta(hours=48)).date().isoformat()
     overdue_count = 0
     oldest: Optional[str] = None
     for r in rows:
@@ -1191,7 +1200,7 @@ async def followups_due_today(
                 detail="No active store on this session",
             )
 
-    today = datetime.now().date().isoformat()
+    today = _ist_today_str()
     rows = repo.list_followups_due_today(today, store_id=effective_store)
 
     # Sales-staff RBAC scope: own only.
@@ -1227,7 +1236,7 @@ async def escalate_overdue_followups(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     db = get_db()
-    today = datetime.now().date().isoformat()
+    today = _ist_today_str()
     overdue = repo.list_overdue_followups(today)
 
     try:
@@ -1373,14 +1382,14 @@ _FOOTFALL_STAFF_ROLES = {
     "CASHIER",
     "OPTOMETRIST",
 }
-# IST = UTC+5:30. The footfall day is the store's local (Indian) day, so the
-# "no future date" guard must compare against IST, not the server's UTC clock.
-_IST = timezone(timedelta(hours=5, minutes=30))
+# The footfall day is the store's local (Indian, IST=UTC+5:30) day, so every
+# day key / "no future date" guard must compare against IST, not the server's
+# UTC clock (BUG-104). Rides the canonical api.utils.ist helpers.
 
 
 def _ist_today_str() -> str:
     """Today's date in IST (the store's local day)."""
-    return datetime.now(_IST).date().isoformat()
+    return ist_today().isoformat()
 
 
 def _validate_not_future(date_str: str) -> str:
@@ -1469,7 +1478,7 @@ async def walkins_mtd(
 ):
     """Month-to-date walk-in totals + per-staff breakdown."""
     store = _resolve_dashboard_store(current_user, store_id)
-    now = datetime.now()
+    now = now_ist()  # IST month boundary, not the server's UTC month
     yr = year or now.year
     mo = month or now.month
     repo = get_walkin_counter_repository()
@@ -1514,7 +1523,7 @@ async def walkins_manual_topup(
     )
     _audit_walkout_action(
         action="walkin.manual_topup",
-        walkout_id=f"walkin:{store}:{datetime.now().date().isoformat()}",
+        walkout_id=f"walkin:{store}:{_ist_today_str()}",
         store_id=store,
         current_user=current_user,
         detail={
@@ -1718,7 +1727,7 @@ async def dashboard_per_staff(
     if walkout_repo is None:
         return {"store_id": store, "items": []}
 
-    now = datetime.now().date()
+    now = ist_today()  # IST business day, not the server's UTC date (BUG-104)
     today = now.isoformat()
     mtd_from = now.replace(day=1).isoformat()
 
@@ -1770,7 +1779,7 @@ async def dashboard_per_staff(
     total_walk_ins_mtd = 0
     attributed_walk_ins_mtd = 0
     if walkin_repo is not None:
-        today_doc = walkin_repo.get_today(store)
+        today_doc = walkin_repo.get_today(store, date_str=today)
         total_walk_ins_today = int(today_doc.get("total") or 0)
         for sp, count in (today_doc.get("per_staff") or {}).items():
             if not sp:
@@ -1863,9 +1872,8 @@ async def dashboard_top_reasons(
     repo = _walkout_repo()
     if repo is None:
         return {"store_id": store, "items": []}
-    from datetime import timedelta
 
-    today = datetime.now().date()
+    today = ist_today()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     walkouts = repo.list_walkouts(
         store_id=store,
@@ -1897,9 +1905,8 @@ async def dashboard_result_breakdown(
     repo = _walkout_repo()
     if repo is None:
         return {"store_id": store, "buckets": {}}
-    from datetime import timedelta
 
-    today = datetime.now().date()
+    today = ist_today()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     walkouts = repo.list_walkouts(
         store_id=store,
@@ -1948,7 +1955,10 @@ async def conversion_feed(
     if repo is None:
         return []
 
-    target_date = date or datetime.now().date().isoformat()
+    # Default to the IST business day (BUG-104): walkout date_str + the walk-in
+    # counter day key are both IST, so the conversion-date filter must be too --
+    # at 00:30 IST the UTC default pointed at YESTERDAY's feed.
+    target_date = date or _ist_today_str()
 
     # Walkouts logged that day
     walkouts_today = repo.list_walkouts(
@@ -2048,9 +2058,8 @@ async def dashboard_fu_status(
     repo = _walkout_repo()
     if repo is None:
         return {"store_id": store, "fu1": {}, "fu2": {}, "fu3": {}}
-    from datetime import timedelta
 
-    today = datetime.now().date()
+    today = ist_today()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     walkouts = repo.list_walkouts(
         store_id=store,

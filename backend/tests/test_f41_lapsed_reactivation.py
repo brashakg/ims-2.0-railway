@@ -36,6 +36,7 @@ os.environ.setdefault("DISPATCH_MODE", "off")
 
 import jwt  # noqa: E402
 import pytest  # noqa: E402
+from datetime import timezone  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -466,6 +467,53 @@ def test_t4b_log_skip_marks_followup_skipped(monkeypatch):
     assert db.get_collection("notification_logs").inserts == 0
 
 
+def test_t4d_off_list_outcome_rejected_and_writes_nothing(monkeypatch):
+    """Adversarial regression (audit F41-P3): logging an outcome for a customer
+    NOT on today's persisted work-list must 404 (not_on_todays_list) and insert
+    NO reactivation_call follow_up -- the old else-branch wrote an orphan record
+    that polluted the analytics aggregation."""
+    db = _seed_population()
+    entries = react.build_cohort(db, STORE, now=NOW, lapse_months=24)
+    doc = react.build_cohort_doc(STORE, entries, date_str=TODAY, lapse_months=24)
+    db.get_collection("reactivation_cohorts").docs.append(doc)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    client = _crm_client(db, monkeypatch)
+
+    # ACTIVE_O is a real customer but NOT lapsed -> not in today's cohort.
+    r = client.post(f"/api/v1/crm/reactivation/{STORE}/log",
+                    json={"customer_id": "ACTIVE_O", "outcome": "reached",
+                          "notes": "Should never be recorded."},
+                    headers=_hdr(("STORE_MANAGER",)))
+    assert r.status_code == 404
+    assert r.json()["detail"] == "not_on_todays_list"
+    # NOTHING was written: no follow_up insert, no analytics pollution.
+    assert db.get_collection("follow_ups").inserts == 0
+    assert db.get_collection("follow_ups").docs == []
+
+    # Even WITH a next-touch date supplied, an off-list log writes nothing.
+    r2 = client.post(f"/api/v1/crm/reactivation/{STORE}/log",
+                     json={"customer_id": "GHOST-404", "outcome": "no_answer",
+                           "notes": "", "follow_up_scheduled_date": "2030-01-01"},
+                     headers=_hdr(("STORE_MANAGER",)))
+    assert r2.status_code == 404
+    assert db.get_collection("follow_ups").inserts == 0
+
+
+def test_t4e_log_without_todays_cohort_doc_is_404(monkeypatch):
+    """No persisted cohort doc for today at all -> the log endpoint refuses
+    (404 not_on_todays_list) rather than minting an orphan follow_up."""
+    db = _seed_population()  # reactivation_cohorts EMPTY
+    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    client = _crm_client(db, monkeypatch)
+    r = client.post(f"/api/v1/crm/reactivation/{STORE}/log",
+                    json={"customer_id": "LAPSED", "outcome": "reached",
+                          "notes": "Cohort never persisted today."},
+                    headers=_hdr(("STORE_MANAGER",)))
+    assert r.status_code == 404
+    assert r.json()["detail"] == "not_on_todays_list"
+    assert db.get_collection("follow_ups").inserts == 0
+
+
 def test_t4c_log_schedules_next_touch(monkeypatch):
     db = _seed_population()
     entries = react.build_cohort(db, STORE, now=NOW, lapse_months=24)
@@ -508,7 +556,9 @@ def test_t5_analytics_aggregation(monkeypatch):
     db = _seed(follow_ups=follow_ups,
                customers=[{"customer_id": "L", "name": "L", "mobile": "9", "store_id": STORE}])
     client = _crm_client(db, monkeypatch)
-    r = client.get(f"/api/v1/crm/reactivation/{STORE}/analytics", headers=_hdr(("ACCOUNTANT",)))
+    # STORE_MANAGER: a store-facing role on the F41 policy rows (ACCOUNTANT was
+    # dropped to match the FE route gate -- see test_t6).
+    r = client.get(f"/api/v1/crm/reactivation/{STORE}/analytics", headers=_hdr(("STORE_MANAGER",)))
     assert r.status_code == 200
     body = r.json()
     assert body["logged"] == 3  # F4 (nba_call) excluded
@@ -540,14 +590,47 @@ def test_t6_rbac_policy_rows():
     for role in ("OPTOMETRIST", "WORKSHOP_STAFF", "CATALOG_MANAGER"):
         assert rbac.check_access("GET", wl, [role]) is False, role
 
-    # ACCOUNTANT sees analytics but NOT the work-list (no PII outreach surface).
-    assert rbac.check_access("GET", an, ["ACCOUNTANT"]) is True
+    # ACCOUNTANT is NOT on any F41 surface: the policy mirrors the (stricter)
+    # FE route gate -- App.tsx customers/reactivation has no ACCOUNTANT -- so
+    # the FE/BE role drift flagged by the adversarial audit (F41-P3) is closed.
+    assert rbac.check_access("GET", an, ["ACCOUNTANT"]) is False
     assert rbac.check_access("GET", wl, ["ACCOUNTANT"]) is False
     assert rbac.check_access("POST", log, ["ACCOUNTANT"]) is False
+    # The store-facing roles still see analytics.
+    for role in ("SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"):
+        assert rbac.check_access("GET", an, [role]) is True, role
 
     # Store-scope is declared so the request-time enforcer applies validate_store_access.
     assert rbac.is_store_scoped("GET", wl) is True
     assert rbac.is_store_scoped("POST", log) is True
+
+
+# ===========================================================================
+# T7 -- IST day-key + TTL anchor (audit F39/F41-P3 timezone class). The cohort
+# day key is the IST calendar day and the TTL anchor is the NAIVE-UTC instant
+# of the next IST midnight (Mongo reads naive BSON dates as UTC).
+# ===========================================================================
+
+
+def test_t7_ttl_anchor_is_utc_instant_of_ist_midnight():
+    # IST midnight after 2026-06-10 = 2026-06-11T00:00+05:30 = 2026-06-10T18:30Z.
+    # The old bare `.astimezone()` used the SERVER-LOCAL zone, so on a non-UTC
+    # host (e.g. an IST dev box) this returned 2026-06-11T00:00 naive -> Mongo
+    # read it as UTC and the work-list lingered 5h30m past the IST midnight.
+    assert react._ist_midnight_utc("2026-06-10") == datetime(2026, 6, 10, 18, 30)
+    doc = react.build_cohort_doc(STORE, [], date_str="2026-06-10", lapse_months=24)
+    assert doc["ttl_expires_at"] == datetime(2026, 6, 10, 18, 30)
+    assert doc["date"] == "2026-06-10"
+
+
+def test_t7b_day_key_boundary_early_morning_ist():
+    # 01:00 IST on 2026-06-10 == 19:30 UTC on 2026-06-09: the day key must be
+    # the IST day (2026-06-10), never the prior UTC day.
+    early = datetime(2026, 6, 9, 19, 30, tzinfo=timezone.utc)
+    assert react._today_ist(early) == "2026-06-10"
+    # 23:59 IST stays on the same IST day (18:29 UTC).
+    late = datetime(2026, 6, 9, 18, 29, tzinfo=timezone.utc)
+    assert react._today_ist(late) == "2026-06-09"
 
 
 # ===========================================================================
