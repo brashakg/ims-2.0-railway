@@ -1629,6 +1629,20 @@ async def create_order(
         tax_rate = gst["dominant_rate"]
         grand_total = round(taxable_after_cart_discount + tax_amount, 2)
 
+        # Fcostfloor (DECISIONS sec 9, owner sign-off 2026-06-09): E2-flag-
+        # gated post-discount cost+pct% floor on each line's EFFECTIVE
+        # per-unit taxable price (after the per-line discount AND its share
+        # of the cart discount, as stamped by _compute_per_category_gst).
+        # Read-only math over the already-computed line finals -- no GST,
+        # payment or persistence change. Fail-OPEN on missing/zero cost;
+        # Rs 0 / 100%-discount lines stay C-4-approval-gated-exempt; the
+        # floor COMPOSES with (never replaces) the role/category/brand caps
+        # above. Flag off -> immediate no-op (pre-change behavior). Raises
+        # BEFORE the lens reserve below so a floor 400 leaks no reservation.
+        from ..services.cost_floor import enforce_cost_floor
+
+        enforce_cost_floor(items_data, _cost_by_pid, store_id)
+
         # Resolve delivery date — explicit date > expected_delivery_days
         if order.delivery_date:
             expected_delivery = datetime.combine(
