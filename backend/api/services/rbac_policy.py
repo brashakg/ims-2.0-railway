@@ -1070,8 +1070,9 @@ POLICY: List[Dict[str, object]] = [
     },
     # F41 lapsed-patient reactivation (#41): in-app reactivation work-list +
     # outcome log (store-scoped via validate_store_access). DARK -- the work-list
-    # never sends a message and never mints a voucher. Store-facing roles work it;
-    # ACCOUNTANT additionally sees the read-only analytics (outcome counts).
+    # never sends a message and never mints a voucher. Store-facing roles ONLY,
+    # matching the FE route gate (App.tsx customers/reactivation). ACCOUNTANT was
+    # dropped from analytics to close the FE/BE role drift (audit F41-P3).
     {
         "method": "GET",
         "path": "/api/v1/crm/reactivation/{store_id}",
@@ -1087,7 +1088,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/crm/reactivation/{store_id}/analytics",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER", "ACCOUNTANT"],
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
         "store_scoped": True,
     },
     {

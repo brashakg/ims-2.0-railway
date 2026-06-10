@@ -26,8 +26,9 @@ Design contract
   policy_engine.get_policy("nba.cards_per_day") / ("nba.vip_reserved_slots"),
   not hard-coded constants (owner-tunable via Settings).
 - `score` is internal-only: the API layer strips it. Associates see `rank`.
-- IST clock: the "today" date is the IST calendar date (quiet_hours._IST), never
-  a UTC date -- so a 00:30-IST run lands on the right calendar day.
+- IST clock: the "today" date is the IST calendar date (api.utils.ist), never
+  a UTC date -- so a 00:30-IST run lands on the right calendar day, and the
+  TTL anchor is the naive-UTC instant of the next IST midnight.
 
 No emoji (Windows cp1252). No POS touch. No money mutation.
 """
@@ -89,26 +90,35 @@ def _get_cap(policy_key: str, default: int) -> int:
         return default
 
 
-def _today_ist() -> str:
-    """The IST calendar date as YYYY-MM-DD (the one clock, per E6)."""
-    try:
-        from agents.quiet_hours import _IST
+def _today_ist(now: Optional[datetime] = None) -> str:
+    """The IST calendar date as YYYY-MM-DD (the one clock, per E6 / BUG-104).
 
-        return datetime.now(_IST).date().isoformat()
-    except Exception:  # noqa: BLE001
-        return datetime.utcnow().date().isoformat()
+    Rides api.utils.ist (zoneinfo with an exact +05:30 fallback), so it NEVER
+    degrades to a UTC date -- the old fallback returned utcnow().date(), which
+    between 00:00-05:30 IST keyed the list on the PREVIOUS day. A tz-aware
+    `now` is injectable for boundary tests (e.g. 01:00 IST == 19:30 UTC of the
+    prior day must key on the IST day)."""
+    from ..utils.ist import IST, now_ist
+
+    moment = now.astimezone(IST) if now is not None and now.tzinfo is not None else now_ist()
+    return moment.date().isoformat()
 
 
 def _ist_midnight_utc(date_str: str) -> datetime:
-    """The UTC datetime corresponding to the NEXT IST midnight after `date_str`
-    -- used as the TTL expiry so the day's list drops at end-of-IST-day."""
+    """The NAIVE-UTC instant of the NEXT IST midnight after `date_str` -- the
+    TTL expiry so the day's list drops at end-of-IST-day.
+
+    Naive-UTC because Mongo treats naive BSON dates as UTC (BUG-104). The old
+    code used bare `.astimezone()` (the SERVER-LOCAL zone, not UTC): correct on
+    a UTC host, but on any non-UTC host it stamped a local wall-clock that
+    Mongo then read as UTC, sliding the TTL (5h30m late on an IST box)."""
     try:
-        from agents.quiet_hours import _IST
+        from ..utils.ist import IST, to_utc_naive
 
         d = datetime.fromisoformat(date_str)
         # next IST midnight = start of the following IST day
-        next_ist_midnight = datetime(d.year, d.month, d.day, tzinfo=_IST) + timedelta(days=1)
-        return next_ist_midnight.astimezone().replace(tzinfo=None)
+        next_ist_midnight = datetime(d.year, d.month, d.day, tzinfo=IST) + timedelta(days=1)
+        return to_utc_naive(next_ist_midnight)
     except Exception:  # noqa: BLE001
         return datetime.utcnow() + timedelta(days=1)
 

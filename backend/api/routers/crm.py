@@ -970,6 +970,10 @@ async def log_reactivation_outcome(
     reactivation_call follow_up (creating one if MEGAPHONE has not pre-created it),
     and optionally schedule a NEXT reactivation touch. Writes an audit row.
 
+    A customer NOT on today's persisted work-list is a 404 (not_on_todays_list)
+    and writes NOTHING -- an off-list outcome must not orphan a reactivation_call
+    follow_up into the analytics (audit F41-P3).
+
     NO message is sent and NO voucher is minted -- this is a pure in-app record of
     a manual outreach (WhatsApp ban; F41 is dark)."""
     from ..dependencies import validate_store_access
@@ -986,7 +990,13 @@ async def log_reactivation_outcome(
         {"$set": {"entries.$.dismissed": True}},
         return_document=True,
     )
-    entry = _reactivation_entry_for(updated, body.customer_id) if updated else None
+    if updated is None:
+        # Off-list outcome (audit F41-P3): the customer is NOT on today's
+        # persisted work-list (no cohort doc for today, or no matching entry).
+        # Inserting a reactivation_call follow_up here would orphan-pollute the
+        # analytics, so record NOTHING and fail loudly.
+        raise HTTPException(status_code=404, detail="not_on_todays_list")
+    entry = _reactivation_entry_for(updated, body.customer_id)
     follow_up_id = (entry or {}).get("follow_up_id")
     now_iso = datetime.now().isoformat()
     user_id = current_user.get("user_id") or current_user.get("id")

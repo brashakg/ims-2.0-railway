@@ -193,7 +193,12 @@ def score_daily(
         legacy/lenient (non-blocking) path where a 0 was substituted for a
         missing footfall.
     """
-    today = today_str or datetime.now().date().isoformat()
+    # "Today" is the IST business day (BUG-104): scorecard dates are IST day
+    # keys, so a UTC default here skipped the conversion auto-fill (and the
+    # footfall block) for an IST-today row scored between 00:00-05:30 IST.
+    from api.utils.ist import ist_today
+
+    today = today_str or ist_today().isoformat()
     scores = dict(raw_scores)
 
     conversion_missing_footfall = False
