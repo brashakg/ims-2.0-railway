@@ -309,6 +309,7 @@ async def update_return_status(
 
         if not return_doc:
             raise HTTPException(status_code=404, detail="Return not found")
+        validate_store_access(return_doc.get("store_id"), current_user)
 
         # Valid status transitions
         current_status = return_doc.get("status")

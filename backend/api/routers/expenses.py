@@ -1619,6 +1619,7 @@ async def approve_advance(
         existing = advance_repo.find_by_id(advance_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
+        validate_store_access(existing.get("store_id"), current_user)
 
         # Separation of duties (SYSTEM_INTENT s7): cannot approve your own advance.
         if existing.get("employee_id") == current_user.get("user_id"):
@@ -1656,6 +1657,7 @@ async def disburse_advance(
         existing = advance_repo.find_by_id(advance_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
+        validate_store_access(existing.get("store_id"), current_user)
 
         if existing.get("status") != "APPROVED":
             raise HTTPException(
@@ -1691,6 +1693,7 @@ async def settle_advance(
         existing = advance_repo.find_by_id(advance_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
+        validate_store_access(existing.get("store_id"), current_user)
 
         if existing.get("status") != "DISBURSED":
             raise HTTPException(
