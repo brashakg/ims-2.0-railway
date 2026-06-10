@@ -2088,10 +2088,26 @@ async def get_tally_sales_jv(
 
     xml = tally_build_day_voucher_xml(orders, store_meta)
     fname = f"sales_jv_{(from_date or 'all')[:10]}_{(to_date or 'all')[:10]}.xml"
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+    # E5 wiring (flag-gated, ADDITIVE): when policy tally.tender_receipt_voucher
+    # is ON, OFFER the companion tender-routed Receipt voucher via a response
+    # header. The XML BODY of this Sales export is byte-identical whether the
+    # flag is on or off -- per the adversarial-chair guidance, receipt legs are
+    # NEVER injected into the existing Sales vouchers; they live on the sibling
+    # route below. Fail-dark: a policy-read error adds nothing.
+    try:
+        from .reconciliation import tender_receipt_policy_enabled
+
+        if tender_receipt_policy_enabled(store_id=store_id, entity_id=entity_id):
+            headers["X-Tally-Tender-Receipt"] = (
+                "/api/v1/finance/tally/tender-receipt-jv"
+            )
+    except Exception:  # noqa: BLE001
+        pass
     return Response(
         content=xml,
         media_type="application/xml",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        headers=headers,
     )
 
 

@@ -194,6 +194,20 @@ _REGISTRY_LIST: List[PolicySpec] = [
           scopes=("global", "entity"), write_roles=("SUPERADMIN", "ADMIN", "ACCOUNTANT"),
           group="Serial & Integrity", label="Tally ledger map", secret=True,
           help="Account-head mapping for the Tally export (stored encrypted)."),
+    # E5 wiring: the tender-routed Receipt voucher next to the Sales day-JV.
+    # DARK by default -- a fresh deploy keeps the Tally export byte-identical to
+    # today. When ON, GET /finance/tally/tender-receipt-jv serves Receipt
+    # vouchers whose legs come from the E5 tender->ledger engine (UPI/CARD to
+    # bank ledgers, voucher/loyalty/credit to liability/receivable, unknown to
+    # Suspense -- never Cash), and the sales-JV response ADDITIVELY advertises
+    # it via an X-Tally-Tender-Receipt header (body untouched either way).
+    _spec(key="tally.tender_receipt_voucher", type="bool", default=False,
+          scopes=("global", "entity", "store"),
+          write_roles=("SUPERADMIN", "ADMIN", "ACCOUNTANT"),
+          group="Serial & Integrity", label="Tally tender Receipt voucher",
+          help="Offer the E5 tender-routed Receipt voucher alongside the Tally "
+               "sales JV (instruments book to their mapped bank/liability "
+               "ledgers, never Cash). OFF keeps the export byte-identical."),
 
     # --- Own-use allowances (DECISIONS sec 3) -- paisa ---
     _spec(key="own_use.allowance.staff", type="money_paisa", default=300000,
