@@ -195,6 +195,11 @@ def frozen_points_now(monkeypatch):
             return frozen
 
     monkeypatch.setattr(points_module, "datetime", _FrozenDateTime)
+    # tz-p3 sweep: points.py now defaults its day/month windows off ist_today()
+    # (IST), not datetime.now() -- freeze that too so the seeded `today - N days`
+    # rows still fall inside the leaderboard / staff-history window.
+    if hasattr(points_module, "ist_today"):
+        monkeypatch.setattr(points_module, "ist_today", lambda: frozen.date())
     return frozen.date()
 
 
