@@ -1657,6 +1657,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/tally/sales-jv",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # E5 wiring: tender-routed Receipt voucher, sibling of the sales-JV export
+    # (same finance role set). DARK by default -- the handler additionally 403s
+    # until policy tally.tender_receipt_voucher is enabled.
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/tally/tender-receipt-jv",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     # --- F17/#25 maker-checker journal entries (mounted on /finance behind the
     # finance role gate; each handler narrows further inline -- create/submit to
     # the JE-maker set, approve/post/reject/reverse to ADMIN/SUPERADMIN, COA POST

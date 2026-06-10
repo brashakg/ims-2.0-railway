@@ -13,6 +13,8 @@ Routes (mirrors rbac_policy POLICY):
   GET  /finance/reconciliation/by-mode       reads (store-scoped to own store)
   POST /finance/reconciliation/snapshot      SUPERADMIN/ADMIN/ACCOUNTANT/STORE_MANAGER (own store)
   POST /finance/reconciliation/{id}/lock     SUPERADMIN/ADMIN/ACCOUNTANT (atomic + immutable)
+  GET  /finance/tally/tender-receipt-jv      finance roles (mirrors /finance/tally/sales-jv);
+                                             DARK unless policy tally.tender_receipt_voucher is ON
 
 No emoji (Windows cp1252).
 """
@@ -21,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
@@ -204,6 +207,126 @@ async def lock_reconciliation_snapshot(
     if not res.get("ok"):
         raise HTTPException(status_code=int(res.get("http", 400)), detail=res.get("error", "lock_failed"))
     return res
+
+
+# ---------------------------------------------------------------------------
+# E5 wiring: Tally tender Receipt voucher (sibling of /finance/tally/sales-jv)
+# ---------------------------------------------------------------------------
+
+
+def tender_receipt_policy_enabled(
+    store_id: Optional[str] = None, entity_id: Optional[str] = None
+) -> bool:
+    """The E2 policy gate for the tender Receipt voucher. Registry default is
+    False -> the feature is DARK on deploy. FAIL-DARK: any read error counts as
+    disabled (a broken policy store must never light up a new accounting
+    output)."""
+    try:
+        from ..services import policy_engine
+
+        scope: Dict[str, Any] = {}
+        if store_id:
+            scope["store_id"] = store_id
+        elif entity_id:
+            scope["entity_id"] = entity_id
+        return bool(
+            policy_engine.get_policy("tally.tender_receipt_voucher", scope, default=False)
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@router.get("/tally/tender-receipt-jv")
+async def get_tally_tender_receipt_jv(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    store_id: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Tally **Receipt**-voucher XML for a period + scope -- the E5 tender legs
+    the Sales day-JV is missing. One Receipt voucher per order, legs from the
+    merged E5 engine (UPI/CARD -> bank ledgers, gift-voucher/loyalty/credit ->
+    liability/receivable, unknown -> Suspense; NEVER folded into Cash), each
+    voucher balance-asserted before emit.
+
+    ADDITIVE + DARK BY DEFAULT: gated by policy ``tally.tender_receipt_voucher``
+    (registry default False) -> 403 until the owner enables it; the existing
+    /finance/tally/sales-jv output is untouched either way. READ-ONLY over
+    ``order.payments[]`` -- no stamp, no capture mutation. The order set is
+    selected with the SAME filters as the sales-JV (real orders only, same
+    created_at range semantics) so the two exports cover identical days."""
+    if not tender_receipt_policy_enabled(store_id=store_id, entity_id=entity_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Tender receipt voucher is disabled (policy tally.tender_receipt_voucher)",
+        )
+
+    db = _get_db()
+    # SAME order selection as finance.get_tally_sales_jv -- never DRAFT/CANCELLED,
+    # same datetime-typed created_at range -- so Sales + Receipt vouchers cover
+    # the exact same order set.
+    from .finance import _REAL_ORDER_STATUS_FILTER, _apply_created_at_range, _store_maps
+
+    match: Dict[str, Any] = {"status": _REAL_ORDER_STATUS_FILTER}
+    store_ids = None
+    if store_id:
+        store_ids = [store_id]
+    elif entity_id:
+        s2e, _ = _store_maps(db)
+        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    if store_ids is not None:
+        match["store_id"] = {"$in": store_ids}
+    _apply_created_at_range(match, from_date, to_date)
+
+    # READ-ONLY projection: only the fields the Receipt builder needs.
+    orders = list(
+        db.get_collection("orders").find(
+            match,
+            {
+                "_id": 0,
+                "order_id": 1,
+                "store_id": 1,
+                "customer_name": 1,
+                "created_at": 1,
+                "payments": 1,
+            },
+        )
+    )
+
+    # E2-layered tender->ledger map, memoized per store (a multi-store export
+    # resolves each order against its own store's overrides).
+    _maps: Dict[str, Dict[str, str]] = {}
+
+    def _map_for(sid: Optional[str]) -> Dict[str, str]:
+        key = sid or ""
+        if key not in _maps:
+            _maps[key] = tr.get_effective_tender_map(db, store_id=sid, entity_id=entity_id)
+        return _maps[key]
+
+    store_meta = {}
+    if store_id:
+        s = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+        store_meta = {
+            "store_id": store_id,
+            "store_code": s.get("store_code"),
+            "store_name": s.get("store_name"),
+        }
+
+    from ..services.tally_tender_receipt import tally_build_tender_receipt_xml
+
+    try:
+        xml = tally_build_tender_receipt_xml(orders, _map_for, store_meta)
+    except ValueError as exc:
+        # assert_voucher_balanced tripped: fail LOUDLY (an unbalanced voucher
+        # must never reach Tally) -- surface which voucher, no partial file.
+        raise HTTPException(status_code=500, detail=str(exc))
+    fname = f"tender_receipt_jv_{(from_date or 'all')[:10]}_{(to_date or 'all')[:10]}.xml"
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
