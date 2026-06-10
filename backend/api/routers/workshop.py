@@ -459,6 +459,18 @@ def generate_job_number(repo=None) -> str:
     return f"WS-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:12].upper()}"
 
 
+def _assert_job_store_access(job: dict, current_user: dict) -> None:
+    """Object-level IDOR guard: existence-hide a workshop job whose store the
+    caller can't reach. A workshop job carries customer + medical Rx data and
+    drives real lens-lifecycle / QC state, so a store-scoped caller must never
+    read or mutate another store's job. SUPERADMIN/ADMIN bypass; an unattributed
+    legacy doc (no store_id) is admin-only -- both handled by
+    dependencies.can_access_store_scoped. 404 (not 403) mirrors GET /{id} so the
+    job's existence isn't confirmed to a cross-store caller."""
+    if not can_access_store_scoped(job.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+
+
 def job_to_frontend(job: dict) -> dict:
     """Convert workshop job from snake_case to camelCase for frontend"""
     if job is None:
@@ -987,6 +999,7 @@ async def update_fitting_details(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
 
     # Stamp metadata we want server-controlled rather than trusting the client.
     fd = payload.fitting_details.model_dump(mode="json")
@@ -1097,6 +1110,7 @@ async def update_job_status(
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(job, current_user)
 
         current_status = job.get("status", "PENDING")
 
@@ -1236,6 +1250,7 @@ async def assign_job(
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(job, current_user)
 
         if job.get("status") not in ["PENDING", "IN_PROGRESS"]:
             raise HTTPException(
@@ -1283,6 +1298,7 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(job, current_user)
 
         if job.get("status") != "PENDING":
             raise HTTPException(status_code=400, detail="Job must be PENDING to start")
@@ -1312,6 +1328,7 @@ async def complete_job(job_id: str, current_user: dict = Depends(get_current_use
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(job, current_user)
 
         if job.get("status") != "IN_PROGRESS":
             raise HTTPException(
@@ -1359,6 +1376,7 @@ async def qc_job(
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(job, current_user)
 
         if job.get("status") not in ["COMPLETED", "QC_FAILED"]:
             raise HTTPException(
@@ -1412,6 +1430,7 @@ async def qc_checklist(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
 
     if job.get("status") not in ["COMPLETED", "QC_FAILED"]:
         raise HTTPException(
@@ -1523,6 +1542,7 @@ async def rework_job(
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(job, current_user)
 
         if job.get("status") != "QC_FAILED":
             raise HTTPException(
@@ -1586,6 +1606,7 @@ async def update_lens_status(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
 
     current = job.get("lens_status") or "NOT_ORDERED"
     if not _next_lens_status_ok(current, target):
@@ -1786,6 +1807,7 @@ async def notify_ready(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
 
     result = await _perform_ready_notify(job, current_user.get("user_id"))
     return {
@@ -2074,6 +2096,7 @@ async def patch_job_vendor(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
 
     # Only admin / store-manager / workshop-staff can assign vendors. Sales
     # staff can see jobs but shouldn't be touching vendor IDs.
@@ -2155,6 +2178,7 @@ async def post_admin_vendor_status(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
     if not job.get("vendor_id"):
         raise HTTPException(
             status_code=400,
