@@ -14,7 +14,12 @@ import logging
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_stock_repository
+from ..dependencies import (
+    get_stock_repository,
+    can_access_store_scoped,
+    user_store_scope,
+    validate_store_access,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +218,48 @@ def _all_transfers() -> List[Dict]:
     if coll is not None:
         return list(coll.find({}, {"_id": 0}))
     return list(STOCK_TRANSFERS.values())
+
+
+# ============================================================================
+# OBJECT-LEVEL STORE AUTHORIZATION  (IDOR guard)
+# ============================================================================
+# The per-endpoint role gates say WHO may run a lifecycle action; they say
+# nothing about WHICH transfer. Before this guard, any STORE_MANAGER /
+# WORKSHOP_STAFF / AREA_MANAGER could ship / receive / cancel / complete ANY
+# transfer by id -- including one between two stores they don't belong to --
+# and ship/receive move REAL stock_units. Every object-level endpoint now
+# asserts the caller's store membership against the relevant SIDE of the
+# transfer:
+#
+#   side="source"  -> caller must reach from_location_id (update / approve /
+#                     picking / ship / cancel / bulk-approve / shiprocket)
+#   side="dest"    -> caller must reach to_location_id (receive / complete)
+#   side="either"  -> either side suffices (single GET / tracking reads)
+#
+# SUPERADMIN / ADMIN are cross-store by design (user_store_scope) and always
+# pass. Purely additive: in-scope callers see zero behavior change. A transfer
+# whose relevant side is unstamped (legacy doc) is admin-only, mirroring the
+# can_access_store_scoped contract for unattributed records.
+
+
+def _assert_transfer_access(
+    transfer: Dict, current_user: dict, side: str = "either"
+) -> None:
+    """Raise 403 unless the caller's store scope reaches the transfer's `side`."""
+    from_id = transfer.get("from_location_id")
+    to_id = transfer.get("to_location_id")
+    if side == "source":
+        allowed = can_access_store_scoped(from_id, current_user)
+    elif side == "dest":
+        allowed = can_access_store_scoped(to_id, current_user)
+    else:  # "either" -- reads where both parties legitimately need visibility
+        allowed = can_access_store_scoped(
+            from_id, current_user
+        ) or can_access_store_scoped(to_id, current_user)
+    if not allowed:
+        raise HTTPException(
+            status_code=403, detail="No access to this transfer's store"
+        )
 
 
 def generate_transfer_number() -> str:
@@ -677,6 +724,19 @@ async def get_pending_transfers(
 
     transfers = [t for t in transfers if t.get("status") in pending_statuses]
 
+    # IDOR guard: store-scoped callers (incl. AREA_MANAGER) only see pending
+    # transfers touching THEIR stores (either side). SUPERADMIN/ADMIN see all.
+    # Applied before the optional location_id narrowing so a foreign
+    # location_id can never widen a store user's view.
+    is_cross_store, allowed_stores = user_store_scope(current_user)
+    if not is_cross_store:
+        transfers = [
+            t
+            for t in transfers
+            if t.get("from_location_id") in allowed_stores
+            or t.get("to_location_id") in allowed_stores
+        ]
+
     if location_id:
         transfers = [
             t
@@ -710,6 +770,9 @@ async def get_transfer(
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
+    # IDOR guard: both parties (source + destination stores) may read.
+    _assert_transfer_access(transfer, current_user, side="either")
+
     return {"transfer": transfer}
 
 
@@ -724,6 +787,13 @@ async def create_transfer(
         for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # IDOR guard: the SOURCE store must be one the caller may act for. Without
+    # this, a store-A manager could draft a transfer that drains store B (ship
+    # claims AVAILABLE units at from_location_id). SUPERADMIN/ADMIN pass;
+    # 403 otherwise (validate_store_access raises).
+    if transfer.from_location_id:
+        validate_store_access(transfer.from_location_id, current_user)
 
     # BUG FIX: a self-transfer (source == destination) would mark source units
     # TRANSFERRED then re-home them back to the same store on receive — the
@@ -854,6 +924,9 @@ async def update_transfer(
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
+    # IDOR guard: only someone scoped to the SOURCE store may edit the transfer.
+    _assert_transfer_access(transfer, current_user, side="source")
+
     # Can only update certain statuses
     if transfer["status"] in [TransferStatus.COMPLETED, TransferStatus.CANCELLED]:
         raise HTTPException(
@@ -884,6 +957,9 @@ async def approve_transfer(
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
+
+    # IDOR guard: approval authority follows the SOURCE store's chain.
+    _assert_transfer_access(transfer, current_user, side="source")
 
     if transfer["status"] != TransferStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="Transfer is not pending approval")
@@ -933,6 +1009,9 @@ async def start_picking(
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
+    # IDOR guard: picking happens at the SOURCE store.
+    _assert_transfer_access(transfer, current_user, side="source")
+
     if transfer["status"] != TransferStatus.APPROVED:
         raise HTTPException(
             status_code=400, detail="Transfer must be approved before picking"
@@ -974,6 +1053,9 @@ async def complete_picking(
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
+
+    # IDOR guard: packing happens at the SOURCE store.
+    _assert_transfer_access(transfer, current_user, side="source")
 
     if transfer["status"] != TransferStatus.PICKING:
         raise HTTPException(
@@ -1027,6 +1109,10 @@ async def ship_transfer(
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
+
+    # IDOR guard: shipping moves REAL stock_units OUT of the SOURCE store --
+    # only someone scoped to that store may trigger it.
+    _assert_transfer_access(transfer, current_user, side="source")
 
     if transfer["status"] not in [TransferStatus.APPROVED, TransferStatus.PACKED]:
         raise HTTPException(
@@ -1099,6 +1185,10 @@ async def receive_transfer(
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
+
+    # IDOR guard: receiving re-homes REAL stock_units INTO the DESTINATION
+    # store -- only someone scoped to that store may confirm arrival.
+    _assert_transfer_access(transfer, current_user, side="dest")
 
     if transfer["status"] not in [
         TransferStatus.IN_TRANSIT,
@@ -1230,6 +1320,9 @@ async def complete_transfer(
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
+    # IDOR guard: completion is the DESTINATION's sign-off that goods arrived.
+    _assert_transfer_access(transfer, current_user, side="dest")
+
     if transfer["status"] not in [
         TransferStatus.RECEIVED,
         TransferStatus.PARTIALLY_RECEIVED,
@@ -1279,6 +1372,9 @@ async def cancel_transfer(
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
+
+    # IDOR guard: cancellation authority follows the SOURCE store's chain.
+    _assert_transfer_access(transfer, current_user, side="source")
 
     if transfer["status"] in [TransferStatus.COMPLETED, TransferStatus.CANCELLED]:
         raise HTTPException(
@@ -1703,6 +1799,15 @@ async def bulk_approve_transfers(
             errors.append({"id": tid, "error": "Not found"})
             continue
 
+        # IDOR guard: same SOURCE-side rule as single /approve. Out-of-scope
+        # ids become per-item errors (mirroring "Not found"), so a mixed
+        # batch still approves the caller's own transfers.
+        if not can_access_store_scoped(
+            transfer.get("from_location_id"), current_user
+        ):
+            errors.append({"id": tid, "error": "No access to this transfer's store"})
+            continue
+
         if transfer["status"] != TransferStatus.PENDING_APPROVAL:
             errors.append({"id": tid, "error": "Not pending approval"})
             continue
@@ -1755,6 +1860,9 @@ async def create_shiprocket_shipment_for_transfer(
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
+    # IDOR guard: shipment booking is a SOURCE-store action.
+    _assert_transfer_access(transfer, current_user, side="source")
+
     if transfer["status"] not in [TransferStatus.APPROVED, TransferStatus.PACKED]:
         raise HTTPException(
             status_code=400, detail="Transfer must be approved or packed"
@@ -1789,6 +1897,9 @@ async def get_transfer_tracking(
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
+
+    # IDOR guard: both parties (source + destination stores) may track.
+    _assert_transfer_access(transfer, current_user, side="either")
 
     if not transfer.get("tracking_number"):
         raise HTTPException(status_code=400, detail="No tracking information available")
