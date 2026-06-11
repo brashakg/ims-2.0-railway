@@ -23,6 +23,7 @@ from ..services.online_catalog import (
 from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
+from ..services import product_master as _pm
 from .inventory import _on_hand_by_product
 
 router = APIRouter()
@@ -165,14 +166,14 @@ async def online_stock_reconcile(
 # is the legacy /catalog door's accepted set; every value below is a registered
 # SKU-prefix alias the registry resolves via product_master.resolve_category()
 # (e.g. "SG" -> SUNGLASS, "CL" -> CONTACT_LENS, "LS" -> OPTICAL_LENS). It is
-# deliberately LEFT IN PLACE (not repointed) because:
-#   * this enum is the /catalog door's accepted-category contract -- replacing
-#     it would change which categories the door accepts (a behaviour change), and
-#   * the per-category required fields below DISAGREE with the registry for two
-#     categories (see the CATEGORY_FIELDS flag) -- so this door cannot delegate
-#     to the registry without an owner decision.
-# Step-9 (canonical product-create) is where /catalog will delegate to the
-# registry; step-8 only records the canonical source.
+# deliberately LEFT IN PLACE (not repointed) because this enum is the /catalog
+# door's accepted-category contract -- replacing it would change which categories
+# the door accepts (a behaviour change).
+# Step-9 (canonical product-create) repointed this door's VALIDATION to the
+# registry via build_canonical_product; the per-category required fields below
+# now AGREE with the registry (the two former divergences -- CONTACT_LENS and
+# HEARING_AID -- were reconciled by owner sign-off). Only the nested
+# catalog_products persistence stays here, pending the owner-gated step-10 spine.
 
 
 class ProductCategory(str, Enum):
@@ -212,20 +213,19 @@ CATEGORY_NAMES = {
 # ============================================================================
 #
 # Unification step-8 FLAG -- DO NOT auto-reconcile, owner decision required.
-# These per-category required-field sets are the /catalog door's contract. The
-# canonical registry (services/product_master._CATEGORY_SPECS) AGREES with all
-# of these EXCEPT two categories, where the two sources DISAGREE today:
+# These per-category required-field sets are the /catalog door's contract and
+# now AGREE byte-for-byte with the canonical registry
+# (services/product_master._CATEGORY_SPECS) for every category. The two former
+# divergences were reconciled by owner sign-off in step-9:
 #
-#   * CONTACT_LENS: this door requires {brand_name, model_name, POWER};
-#       the registry requires {brand_name, model_name, EXPIRY_DATE}.
-#   * HEARING_AID:  this door requires {brand_name, model_no};
-#       the registry additionally requires SERIAL_NO.
+#   * CONTACT_LENS: requires {brand_name, model_name, power, expiry_date}
+#       (both power AND expiry -- a contact lens is a powered medical device
+#       with a shelf life).
+#   * HEARING_AID:  requires {brand_name, model_no} only -- serial_no is NOT
+#       required at catalogue (it is captured per-UNIT at stock-in).
 #
-# (The registry's stricter HEARING_AID/CONTACT_LENS rules are the deliberate PM
-# tightening -- see product_master._CATEGORY_SPECS docstring.) Repointing this
-# dict to the registry would CHANGE which fields /catalog requires -- a
-# behaviour change -- so step-8 leaves the values UNTOUCHED and only records the
-# divergence here. Reconciling the two is a step-9 / owner-sign-off task.
+# Step-9 routes this door's validation through build_canonical_product, so these
+# sets and the registry cannot drift; a parity test locks them equal.
 #
 # Define which fields each category needs
 CATEGORY_FIELDS = {
@@ -273,8 +273,10 @@ CATEGORY_FIELDS = {
         ],
     },
     ProductCategory.CONTACT_LENS: {
-        "required": ["brand_name", "model_name", "power"],
-        "optional": ["subbrand", "colour_name", "pack", "expiry_date"],
+        # Step-9 owner-decided reconcile: a contact lens needs BOTH power AND
+        # expiry_date -- now matches the canonical product_master registry.
+        "required": ["brand_name", "model_name", "power", "expiry_date"],
+        "optional": ["subbrand", "colour_name", "pack"],
         "fields": [
             {
                 "name": "brand_name",
@@ -318,7 +320,7 @@ CATEGORY_FIELDS = {
                 "name": "expiry_date",
                 "label": "Expiry Date",
                 "type": "date",
-                "required": False,
+                "required": True,
             },
         ],
     },
@@ -1401,19 +1403,45 @@ async def create_catalog_product(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Validate required fields for category
+    # Validate the category is one this door accepts.
     category_config = CATEGORY_FIELDS.get(product.category)
     if not category_config:
         raise HTTPException(status_code=400, detail="Invalid category")
 
-    for required_field in category_config["required"]:
-        if (
-            required_field not in product.attributes
-            or not product.attributes[required_field]
-        ):
+    # Unification step-9: delegate the STRICT category-conditional required-field
+    # gate to the ONE canonical product-master registry (resolve_category ->
+    # validate_attributes), so this door enforces the SAME rulebook as
+    # POST /products and /products/bulk-create. The catalog CATEGORY_FIELDS now
+    # AGREE with the registry (reconciled), so a payload that passes here passes
+    # there and vice-versa. ProductMasterError (422) is mapped to the catalog
+    # door's existing 400 "Missing required field" contract so the response
+    # shape is unchanged. (Persistence stays the catalog_products nested doc --
+    # the spine-unification of this door is step-10, owner-gated.)
+    try:
+        _pm.build_canonical_product(
+            {
+                "category": product.category.value,
+                "attributes": dict(product.attributes or {}),
+                "mrp": product.pricing.mrp,
+                "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                "discount_category": product.pricing.discount_category,
+                "hsn_code": product.hsn_code,
+                "gst_rate": product.gst_rate,
+            },
+            source="CATALOG",
+        )
+    except _pm.ProductMasterError as err:
+        # A missing-required-field breach (registry status 422) keeps this door's
+        # historical "Missing required field: <x>" 400 message + code, so the
+        # catalog response contract is unchanged. Any OTHER breach (e.g. the
+        # MRP-rule, status 400) surfaces with its own engine status/message --
+        # the pricing guard below also re-checks MRP>=offer, so this is belt+
+        # braces, not a new behaviour.
+        if err.status == 422 and err.field and err.field != "category":
             raise HTTPException(
-                status_code=400, detail=f"Missing required field: {required_field}"
-            )
+                status_code=400, detail=f"Missing required field: {err.field}"
+            ) from err
+        raise HTTPException(status_code=err.status, detail=err.message) from err
 
     # Non-negotiable pricing guards (block offer > MRP; derive GST from
     # HSN/category) -- same rules the canonical /products path enforces.
@@ -1772,6 +1800,31 @@ async def import_products(
             category_config = CATEGORY_FIELDS.get(product.category)
             if not category_config:
                 errors.append({"index": i, "error": "Invalid category"})
+                continue
+
+            # Step-9: enforce the SAME registry required-field rulebook as the
+            # single /catalog create. A row missing a required field is recorded
+            # + skipped (per-row), never a batch abort.
+            try:
+                _pm.build_canonical_product(
+                    {
+                        "category": product.category.value,
+                        "attributes": dict(product.attributes or {}),
+                        "mrp": product.pricing.mrp,
+                        "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                        "discount_category": product.pricing.discount_category,
+                        "hsn_code": product.hsn_code,
+                        "gst_rate": product.gst_rate,
+                    },
+                    source="CATALOG",
+                )
+            except _pm.ProductMasterError as req_exc:
+                detail = (
+                    f"Missing required field: {req_exc.field}"
+                    if req_exc.status == 422 and req_exc.field and req_exc.field != "category"
+                    else req_exc.message
+                )
+                errors.append({"index": i, "error": detail})
                 continue
 
             # Same pricing guards as the single-create path: block offer > MRP

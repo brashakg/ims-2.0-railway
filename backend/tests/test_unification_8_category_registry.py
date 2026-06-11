@@ -182,8 +182,11 @@ def test_validate_attributes_accepts_any_input_form_of_the_category():
     # Short code resolves to the same required-field gate as the long form.
     with pytest.raises(pm.ProductMasterError) as exc:
         pm.validate_attributes("HA", {"brand_name": "Phonak"})
-    # HEARING_AID requires model_no + serial_no on top of brand_name.
-    assert exc.value.field in {"model_no", "serial_no"}
+    # Step-9 reconcile: HEARING_AID requires only model_no on top of brand_name
+    # (serial_no is per-unit at stock-in, not a catalogue required field).
+    assert exc.value.field == "model_no"
+    # brand+model alone is a complete HEARING_AID catalogue entry.
+    pm.validate_attributes("HA", {"brand_name": "Phonak", "model_no": "Audeo"})
 
 
 # ===========================================================================
@@ -297,31 +300,38 @@ def test_product_schema_category_enum_mirrors_registry():
 
 
 # ===========================================================================
-# 4. Regression-lock the two KNOWN divergences between the /catalog door and
-#    the registry, so neither side is silently "fixed" without an owner call.
-#    (These are FLAGGED in catalog.py + the step-8 return notes, not resolved.)
+# 4. Step-9 RECONCILE: the two formerly-divergent categories now AGREE between
+#    the /catalog door and the registry (owner-decided field reconcile). These
+#    locks were FROZEN in step-8 pending owner sign-off; step-9 updated them
+#    from the old divergent values to the reconciled values below.
 # ===========================================================================
 
 
-def test_catalog_contact_lens_required_field_still_diverges_from_registry():
+def test_catalog_contact_lens_required_field_matches_registry():
     from api.routers.catalog import CATEGORY_FIELDS, ProductCategory
 
     catalog_req = set(CATEGORY_FIELDS[ProductCategory.CONTACT_LENS]["required"])
     registry_req = set(pm.required_fields("CONTACT_LENS"))
-    # Documented divergence: /catalog requires power; registry requires expiry.
-    assert "power" in catalog_req
-    assert "expiry_date" in registry_req
-    assert catalog_req != registry_req
+    # Reconciled (step-9): a contact lens needs BOTH power AND expiry_date on
+    # the /catalog door AND the registry -- the two now agree.
+    assert {"power", "expiry_date"} <= catalog_req
+    assert {"power", "expiry_date"} <= registry_req
+    assert catalog_req == registry_req
+    assert registry_req == {"brand_name", "model_name", "power", "expiry_date"}
 
 
-def test_catalog_hearing_aid_required_field_still_diverges_from_registry():
+def test_catalog_hearing_aid_required_field_matches_registry():
     from api.routers.catalog import CATEGORY_FIELDS, ProductCategory
 
     catalog_req = set(CATEGORY_FIELDS[ProductCategory.HEARING_AID]["required"])
     registry_req = set(pm.required_fields("HEARING_AID"))
-    # Documented divergence: registry adds serial_no, /catalog does not.
+    # Reconciled (step-9): a HEARING_AID catalogue entry needs only brand+model
+    # on BOTH sides; serial_no is per-unit at stock-in, NOT a catalogue required
+    # field -- so it must NOT appear in either required set.
     assert "serial_no" not in catalog_req
-    assert "serial_no" in registry_req
+    assert "serial_no" not in registry_req
+    assert catalog_req == registry_req
+    assert registry_req == {"brand_name", "model_no"}
 
 
 def test_catalog_short_codes_all_resolve_through_the_registry():

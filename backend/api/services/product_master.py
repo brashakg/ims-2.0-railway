@@ -128,13 +128,16 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
     ),
     "CONTACT_LENS": CategorySpec(
         "CONTACT_LENS", "CL", "Contact Lens",
-        required=("brand_name", "model_name", "expiry_date"),
-        optional=("subbrand", "colour_name", "pack", "power", "modality"),
+        # Owner-decided reconcile (step-9): a contact lens catalogue entry needs
+        # BOTH power AND expiry_date -- power so the SKU/stock grid is unambiguous
+        # and expiry_date so a medical-device shelf-life is always recorded.
+        required=("brand_name", "model_name", "power", "expiry_date"),
+        optional=("subbrand", "colour_name", "pack", "modality"),
     ),
     "COLORED_CONTACT_LENS": CategorySpec(
         "COLORED_CONTACT_LENS", "CL", "Colored Contact Lens",
-        required=("brand_name", "model_name", "expiry_date"),
-        optional=("subbrand", "colour_name", "pack", "power"),
+        required=("brand_name", "model_name", "power", "expiry_date"),
+        optional=("subbrand", "colour_name", "pack"),
     ),
     "WATCH": CategorySpec(
         "WATCH", "WT", "Wrist Watch",
@@ -169,10 +172,11 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
     ),
     "HEARING_AID": CategorySpec(
         "HEARING_AID", "HA", "Hearing Aid",
-        # serial_no is REQUIRED for a hearing aid (PM packet); the catalog
-        # CATEGORY_FIELDS had it optional -- this is the intended tightening.
-        required=("brand_name", "model_no", "serial_no"),
-        optional=("subbrand", "machine_capacity", "machine_type"),
+        # Owner-decided reconcile (step-9): a hearing-aid CATALOGUE entry needs
+        # only {brand_name, model_no}. serial_no is per-UNIT (recorded at
+        # stock-in, not at catalogue), so it is NOT required here.
+        required=("brand_name", "model_no"),
+        optional=("subbrand", "serial_no", "machine_capacity", "machine_type"),
         forced_discount_category="NON_DISCOUNTABLE",
     ),
 }
@@ -437,11 +441,18 @@ def normalise_payload(
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
     created_by: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     db=None,
 ) -> Dict[str, Any]:
     """Build the persisted `products` spine doc. GST/HSN derived server-side,
     offer<=MRP enforced, discount_category validated, SKU minted if absent.
+
+    `extra_fields` are ADDITIVE door-specific top-level columns (e.g. the FORM
+    door's CL/spectacle power identity that POS power-grid reads top-level, or a
+    `variant`). They are merged onto the spine WITHOUT overriding any canonical
+    key, and only for non-None values -- so a door's persisted shape is preserved
+    while the canonical validation + GST/HSN/discount derivation stays unified.
 
     Raises ProductMasterError on any invariant breach.
     """
@@ -521,6 +532,11 @@ def normalise_payload(
         doc["warranty_months"] = int(warranty_months)
     if weight_grams is not None:
         doc["weight_grams"] = float(weight_grams)
+    # Door-specific additive columns -- never override a canonical key, never a
+    # None value (keeps the spine lean + behaviour-preserving per door).
+    for _k, _v in (extra_fields or {}).items():
+        if _v is not None and _k not in doc:
+            doc[_k] = _v
     return doc
 
 
@@ -682,6 +698,151 @@ def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
     }
 
 
+# ===========================================================================
+# Unification step-9: ONE canonical product-create door every entry path uses
+# ===========================================================================
+# Every product-entry door (the FORM POST /products, the BULK /products/bulk-
+# create, and the CATALOG POST /catalog/products) calls create_via_door() so the
+# registry is the rulebook at EVERY door (owner ask #1). The door keeps its own
+# auth/RBAC + response shape; only the validate+create CORE unifies here.
+#
+# STRICT (owner decision #7): an incomplete product is REJECTED at entry. The
+# core validates through the registry (resolve_category -> validate_attributes ->
+# required_fields) and enforces the existing invariants (MRP>=offer blocked,
+# category->GST/HSN, category->discount-cap) -- it never changes those values.
+
+# The known source labels. FORM = POST /products; BULK = /products/bulk-create;
+# CATALOG = POST /catalog/products; MASTER = the engine door (POST /products/master).
+VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER"})
+
+# Top-level identity fields some doors (FORM/BULK) carry OUTSIDE `attributes`.
+# Mapped INTO the canonical attribute keys the registry validates, so a frame
+# created via the flat /products schema is gated identically to one created via
+# the attribute-dict /catalog schema. Only fills a key the caller did not
+# already set in attributes (attributes win -- they are the explicit source).
+_DOOR_IDENTITY_ALIASES = {
+    "brand": "brand_name",
+    "model": "model_no",
+    "color": "colour_code",
+    "colour": "colour_code",
+    "size": "size",
+}
+
+
+def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str, Any]:
+    """Fold a door's create payload into the canonical create kwargs.
+
+    Produces the attribute dict the registry validates by merging any top-level
+    identity fields (brand/model/color/size on the flat FORM/BULK schema) into
+    `attributes` under the registry's canonical keys, WITHOUT clobbering a value
+    already present in `attributes`. Behaviour-preserving: a CATALOG payload that
+    already carries brand_name/model_no in `attributes` is untouched.
+    """
+    p = dict(payload or {})
+    attrs: Dict[str, Any] = dict(p.get("attributes") or {})
+    for top_key, attr_key in _DOOR_IDENTITY_ALIASES.items():
+        val = p.get(top_key)
+        if val is not None and not (isinstance(val, str) and not val.strip()):
+            attrs.setdefault(attr_key, val)
+    p["attributes"] = attrs
+    p["_source"] = source if source in VALID_DOOR_SOURCES else "FORM"
+    return p
+
+
+def build_canonical_product(
+    payload: Dict[str, Any],
+    *,
+    source: str,
+    extra_fields: Optional[Dict[str, Any]] = None,
+    product_repo=None,
+    db=None,
+) -> Dict[str, Any]:
+    """Validate + build the canonical `products` spine doc for a door payload.
+
+    This is the SHARED validate-and-build core every door runs so the SAME
+    complete payload yields an IDENTICAL canonical product at all three doors,
+    and the SAME incomplete payload is rejected (422) at all three. Raises
+    ProductMasterError on any registry / invariant breach (the caller maps it to
+    HTTP). Does NOT persist -- create_via_door() layers persistence on top.
+
+    `extra_fields` are additive door-specific top-level columns (see
+    normalise_payload) merged onto the spine without overriding a canonical key.
+    """
+    p = normalise_door_payload(payload, source=source)
+    return normalise_payload(
+        category=p.get("category"),
+        attributes=p.get("attributes") or {},
+        mrp=p.get("mrp"),
+        offer_price=p.get("offer_price"),
+        sku=p.get("sku"),
+        discount_category=p.get("discount_category"),
+        hsn_code=p.get("hsn_code"),
+        gst_rate=p.get("gst_rate"),
+        country_of_origin=p.get("country_of_origin"),
+        warranty_months=p.get("warranty_months"),
+        weight_grams=p.get("weight_grams"),
+        created_by=p.get("created_by") or p.get("actor"),
+        extra_fields=extra_fields,
+        product_repo=product_repo,
+        db=db,
+    )
+
+
+def create_via_door(
+    payload: Dict[str, Any],
+    *,
+    source: str,
+    actor: str,
+    extra_fields: Optional[Dict[str, Any]] = None,
+    product_repo=None,
+    catalog_repo=None,
+    variant_repo=None,
+    audit_repo=None,
+    db=None,
+) -> Dict[str, Any]:
+    """THE single create path every product-entry door delegates to (step-9).
+
+    Validates through the registry (STRICT), enforces the existing invariants,
+    writes the canonical `products` spine, and (mirror ON by default) writes the
+    fail-soft catalog/variant shadow. Returns the created canonical spine doc
+    (with `sync_status`). Raises ProductMasterError on a validation failure
+    (before any write) -- the calling router maps `.status`/`.field` to HTTP.
+
+    `source` (FORM|BULK|CATALOG|MASTER) is recorded on the doc for provenance;
+    the validation + write behaviour is identical across sources. `extra_fields`
+    are additive door-specific top-level columns (e.g. the FORM door's CL/lens
+    power identity) merged onto the spine without overriding a canonical key.
+    """
+    p = normalise_door_payload(payload, source=source)
+    created = create_product(
+        category=p.get("category"),
+        attributes=p.get("attributes") or {},
+        mrp=p.get("mrp"),
+        offer_price=p.get("offer_price"),
+        actor=actor,
+        sku=p.get("sku"),
+        discount_category=p.get("discount_category"),
+        hsn_code=p.get("hsn_code"),
+        gst_rate=p.get("gst_rate"),
+        country_of_origin=p.get("country_of_origin"),
+        warranty_months=p.get("warranty_months"),
+        weight_grams=p.get("weight_grams"),
+        extra_fields=extra_fields,
+        product_repo=product_repo,
+        catalog_repo=catalog_repo,
+        variant_repo=variant_repo,
+        audit_repo=audit_repo,
+        db=db,
+    )
+    # Record the entry door for provenance (additive; never affects validation).
+    try:
+        if created is not None:
+            created.setdefault("source_door", p["_source"])
+    except Exception:  # noqa: BLE001
+        pass
+    return created
+
+
 def create_product(
     *,
     category: Any,
@@ -696,6 +857,7 @@ def create_product(
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
     variant_repo=None,
@@ -711,6 +873,9 @@ def create_product(
          external. A mirror failure NEVER rolls back the spine.
       3. write the per-target sync status back on the spine (single-doc update).
       4. write the immutable audit row (AuditRepository.create).
+
+    `extra_fields` are additive door-specific top-level columns merged onto the
+    spine without overriding a canonical key (see normalise_payload).
 
     Returns the created spine doc (with `sync_status`). Raises
     ProductMasterError on a validation failure (before any write).
@@ -728,6 +893,7 @@ def create_product(
         warranty_months=warranty_months,
         weight_grams=weight_grams,
         created_by=actor,
+        extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
     )

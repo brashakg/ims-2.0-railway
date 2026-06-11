@@ -70,18 +70,32 @@ def _frame_attrs(**over):
 # ---------------------------------------------------------------------------
 
 
-def test_contact_lens_missing_expiry_rejected():
+def test_contact_lens_missing_power_or_expiry_rejected():
+    # Step-9 reconcile: a contact lens needs BOTH power AND expiry_date.
+    # Missing power (validated first) is rejected.
     with pytest.raises(pm.ProductMasterError) as ei:
         pm.validate_attributes("CONTACT_LENS", {"brand_name": "Acuvue", "model_name": "Oasys"})
     assert ei.value.status == 422
-    assert ei.value.field == "expiry_date"
+    assert ei.value.field == "power"
+    # With power present but expiry missing, expiry_date is the rejected field.
+    with pytest.raises(pm.ProductMasterError) as ei2:
+        pm.validate_attributes(
+            "CONTACT_LENS",
+            {"brand_name": "Acuvue", "model_name": "Oasys", "power": "-2.00"},
+        )
+    assert ei2.value.status == 422
+    assert ei2.value.field == "expiry_date"
 
 
-def test_hearing_aid_missing_serial_rejected():
+def test_hearing_aid_catalogue_serial_not_required():
+    # Step-9 reconcile: a HEARING_AID catalogue entry needs only brand+model;
+    # serial_no is per-unit at stock-in, so brand+model alone is accepted.
+    pm.validate_attributes("HEARING_AID", {"brand_name": "Phonak", "model_no": "Audeo"})
+    # Missing model_no is still rejected (it stays required).
     with pytest.raises(pm.ProductMasterError) as ei:
-        pm.validate_attributes("HEARING_AID", {"brand_name": "Phonak", "model_no": "Audeo"})
+        pm.validate_attributes("HEARING_AID", {"brand_name": "Phonak"})
     assert ei.value.status == 422
-    assert ei.value.field == "serial_no"
+    assert ei.value.field == "model_no"
 
 
 def test_frame_missing_colour_code_rejected():
@@ -254,7 +268,12 @@ def test_gst_derived_for_sunglass_and_hearing_aid(product_repo, audit_repo):
 def test_contact_lens_gst_is_5(product_repo, audit_repo):
     cl = pm.create_product(
         category="CONTACT_LENS",
-        attributes={"brand_name": "Acuvue", "model_name": "Oasys", "expiry_date": "2027-01-01"},
+        attributes={
+            "brand_name": "Acuvue",
+            "model_name": "Oasys",
+            "power": "-2.00",
+            "expiry_date": "2027-01-01",
+        },
         mrp=1200, offer_price=1100, actor="u1", product_repo=product_repo, audit_repo=audit_repo,
     )
     assert cl["gst_rate"] == 5.0
