@@ -51,6 +51,7 @@ from .routers import (
     purchase_invoices_router,
     vendor_returns_router,
     vendor_rma_router,
+    rtv_debit_notes_router,
     returns_router,
     tasks_router,
     expenses_router,
@@ -275,6 +276,15 @@ async def lifespan(app: FastAPI):
                 VendorRMAEngine(db=get_db().db).ensure_indexes()
             except Exception as e:
                 logger.warning(f"[WARN] Vendor-RMA index creation skipped: {e}")
+            # F20 RTV debit note: UNIQUE indexes on debit_note_number (Rule 46(b)
+            # consecutive-serial backstop) + rtv_ref_id (one note per RTV ->
+            # idempotent re-issue). Idempotent, fail-soft.
+            try:
+                from .services.rtv_debit_note import DebitNoteEngine
+
+                DebitNoteEngine(db=get_db().db).ensure_indexes()
+            except Exception as e:
+                logger.warning(f"[WARN] RTV debit-note index creation skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:
@@ -1082,6 +1092,9 @@ app.include_router(
 )
 app.include_router(
     vendor_rma_router, prefix="/api/v1/vendor-rma", tags=["Vendor RMA"]
+)
+app.include_router(
+    rtv_debit_notes_router, prefix="/api/v1/rtv-debit-notes", tags=["RTV Debit Note"]
 )
 app.include_router(returns_router, prefix="/api/v1/returns", tags=["Returns"])
 app.include_router(shipping_router, prefix="/api/v1/shipping", tags=["Shipping"])
