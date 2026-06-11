@@ -1771,6 +1771,41 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #14 Non-adaptation / remake tracking (own /api/v1/non-adapt
+    # prefix; clinical + store management record + remake -- a cashier/sales role
+    # can never record or initiate a (possibly waived) remake; every route
+    # store-scopes). ---
+    {
+        "method": "POST",
+        "path": "/api/v1/non-adapt/record",
+        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/non-adapt/{record_id}/remake",
+        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/non-adapt/order/{order_id}",
+        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/non-adapt/{record_id}",
+        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Quality report (counts by reason/optometrist/brand) -> management + finance.
+        "method": "GET",
+        "path": "/api/v1/non-adapt",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",

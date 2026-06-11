@@ -60,6 +60,7 @@ from .routers import (
     reconciliation_router,
     till_router,
     bank_reconciliation_router,
+    non_adapt_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -1140,6 +1141,10 @@ app.include_router(till_router, prefix="/api/v1/till", tags=["Till"])
 # router-level gate (each route gates inline to finance/manager + store-scopes).
 # READ-ONLY over orders/till; reuses E5 reconcile_window + the #23 till close.
 app.include_router(bank_reconciliation_router, prefix="/api/v1/bank-recon", tags=["BankReconciliation"])
+# Feature #14 Non-adaptation / remake tracking: own /api/v1/non-adapt prefix, each
+# route gates inline (clinical/manager; cashier 403) + store-scopes. READ-ONLY over
+# orders/workshop; only records the non-adapt + remake link + policy charge decision.
+app.include_router(non_adapt_router, prefix="/api/v1/non-adapt", tags=["NonAdapt"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",
