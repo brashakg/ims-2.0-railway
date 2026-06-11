@@ -62,13 +62,51 @@ def _cmp_op(actual: Any, op: str, expected: Any) -> bool:
     return False
 
 
+def _resolve_path(doc: Dict[str, Any], key: str) -> Any:
+    """Resolve a (possibly dotted) field. For an ``array.field`` path where the
+    array holds sub-docs, return the LIST of that field across elements -- this
+    is what Mongo matches an embedded query against (e.g.
+    ``credit_notes.credit_note_number`` -> [cn1, cn2, ...]). A plain key is a
+    direct get."""
+    if "." not in key:
+        return doc.get(key)
+    head, rest = key.split(".", 1)
+    val = doc.get(head)
+    if isinstance(val, list):
+        return [(_resolve_path(el, rest) if isinstance(el, dict) else None) for el in val]
+    if isinstance(val, dict):
+        return _resolve_path(val, rest)
+    return None
+
+
 def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for k, v in query.items():
-        actual = doc.get(k)
+        actual = _resolve_path(doc, k)
         if isinstance(v, dict) and any(str(kk).startswith("$") for kk in v):
             for op, expected in v.items():
+                # Mongo array semantics: ``arr.field {$ne: x}`` matches when NO
+                # element equals x; ``$in`` / equality match when ANY does.
+                if isinstance(actual, list) and "." in k:
+                    if op == "$ne":
+                        if any(_v == expected for _v in actual):
+                            return False
+                        continue
+                    if op == "$in":
+                        if not any(_v in expected for _v in actual):
+                            return False
+                        continue
+                    if op == "$exists":
+                        present = len(actual) > 0
+                        if bool(expected) != present:
+                            return False
+                        continue
                 if not _cmp_op(actual, op, expected):
                     return False
+            continue
+        if isinstance(actual, list) and "." in k:
+            # bare equality against an embedded array path -> ANY element matches
+            if v not in actual:
+                return False
             continue
         if actual != v:
             return False
@@ -590,15 +628,6 @@ def test_large_credit_proceeds_with_valid_approval(rt, db):
                       "approval_pin_hash": hash_password("1234"),
                       "pin_attempts": {"count": 0, "window_start": vr._now()}})
 
-    appr = ApprovalEngine(db=db)
-    req = appr.request(action_type="rtv", requested_by="acc", amount=80000.0,
-                       store_id="S1")
-    assert req["required_tier"] == "super"
-    approved = appr.approve(req["request_id"], approver_user_id="sa",
-                            approver_roles=["SUPERADMIN"], pin="1234")
-    assert approved["ok"] is True
-    token = approved["approval_token"]
-
     eng = VendorRMAEngine(db=db)
     rma_id = eng.raise_rma(
         vendor_id="V1", vendor_name="Luxottica", store_id="S1",
@@ -607,8 +636,213 @@ def test_large_credit_proceeds_with_valid_approval(rt, db):
     eng.authorize(rma_id, vendor_rma_number="LRMA-1", actor="mgr")
     eng.dispatch(rma_id, carrier="X", awb="W", dispatch_date=None, actor="mgr")
 
+    # P1-2: the rtv approval is minted BOUND to this RMA + store (context.rma_id +
+    # store_id). The router supplies approval_request_id at consume time.
+    appr = ApprovalEngine(db=db)
+    req = appr.request(action_type="rtv", requested_by="acc", amount=80000.0,
+                       store_id="S1", context={"rma_id": rma_id})
+    assert req["required_tier"] == "super"
+    approved = appr.approve(req["request_id"], approver_user_id="sa",
+                            approver_roles=["SUPERADMIN"], pin="1234")
+    assert approved["ok"] is True
+    token = approved["approval_token"]
+
     body = RMACreditNote(credit_note_number="CN-BIG", received_amount=80000.0,
-                         approval_token=token)
+                         approval_token=token, approval_request_id=req["request_id"])
     res = _run(record_credit_note(rma_id, body, current_user=_user(["ACCOUNTANT"], uid="acc")))
     assert res["ok"] is True
     assert res["received_credit_paise"] == 8_000_000  # Rs 80,000 in paise
+
+
+# ============================================================================
+# P1-1: atomic credit accumulation -- no lost update; dup-CN race -> one only
+# ============================================================================
+
+
+def test_concurrent_distinct_credit_notes_sum_exact_no_lost_update(engine, db, monkeypatch):
+    """Two concurrent DISTINCT credit notes against one dispatched RMA. Both READ
+    the same stale pre-credit doc (the real lost-update race), then each commits
+    via the atomic $inc. The received total MUST be the exact SUM of both notes --
+    the old read-then-absolute-$set would have clobbered the first with the
+    second (lost update)."""
+    rma_id = _dispatched(engine)  # expected 300000 paise
+
+    # Force BOTH calls to read the identical stale snapshot (status DISPATCHED,
+    # received 0) so a non-atomic absolute-$set engine would compute both totals
+    # off the same base and clobber. The atomic $inc is immune.
+    stale = db.get_collection("vendor_rmas").find_one({"rma_id": rma_id})
+    real_get = engine.get
+    calls = {"n": 0}
+
+    def _staleable_get(rid):
+        # First two reads (one per concurrent credit) see the stale snapshot; any
+        # later read (variance recompute / audit) sees the live doc.
+        if rid == rma_id and calls["n"] < 2:
+            calls["n"] += 1
+            return dict(stale)
+        return real_get(rid)
+
+    monkeypatch.setattr(engine, "get", _staleable_get)
+
+    r1 = engine.record_credit_note(rma_id, credit_note_number="CN-A",
+                                   received_amount=1000.00, actor="acc")  # 100000
+    r2 = engine.record_credit_note(rma_id, credit_note_number="CN-B",
+                                   received_amount=500.00, actor="acc")   # 50000
+    assert r1["ok"] and r2["ok"]
+    doc = db.get_collection("vendor_rmas").find_one({"rma_id": rma_id})
+    # Exact sum -- no lost update.
+    assert doc["received_credit_paise"] == 100000 + 50000 == 150000
+    assert doc["variance_paise"] == 300000 - 150000 == 150000
+    assert len(doc["credit_notes"]) == 2
+
+
+def test_concurrent_duplicate_credit_note_records_exactly_once(engine, db, monkeypatch):
+    """Two concurrent records of the SAME credit-note number. Both read the doc
+    before either commits (no dup present yet at read time). The in-filter
+    $ne-on-credit_notes guard lets exactly ONE commit; the loser gets a 409
+    duplicate_credit_note -- no double-credit."""
+    rma_id = _dispatched(engine)  # expected 300000
+
+    stale = db.get_collection("vendor_rmas").find_one({"rma_id": rma_id})
+    real_get = engine.get
+    calls = {"n": 0}
+
+    def _staleable_get(rid):
+        if rid == rma_id and calls["n"] < 2:
+            calls["n"] += 1
+            return dict(stale)
+        return real_get(rid)
+
+    monkeypatch.setattr(engine, "get", _staleable_get)
+
+    r1 = engine.record_credit_note(rma_id, credit_note_number="CN-DUP",
+                                   received_amount=1000.00, actor="acc")
+    r2 = engine.record_credit_note(rma_id, credit_note_number="CN-DUP",
+                                   received_amount=1000.00, actor="acc")
+    oks = [r for r in (r1, r2) if r.get("ok")]
+    losers = [r for r in (r1, r2) if not r.get("ok")]
+    assert len(oks) == 1
+    assert len(losers) == 1
+    assert losers[0]["http"] == 409 and losers[0]["error"] == "duplicate_credit_note"
+    doc = db.get_collection("vendor_rmas").find_one({"rma_id": rma_id})
+    # Exactly one note recorded; received reflects a SINGLE credit (no double).
+    assert len(doc["credit_notes"]) == 1
+    assert doc["received_credit_paise"] == 100000
+
+
+# ============================================================================
+# P1-2: an rtv token bound to store-A/RMA-A is rejected on store-B or RMA-B
+# ============================================================================
+
+
+def _seed_super_approver(db):
+    from api.routers.auth import hash_password
+
+    db.get_collection("users").insert_one({
+        "user_id": "sa", "roles": ["SUPERADMIN"],
+        "approval_pin_hash": hash_password("1234"),
+        "pin_attempts": {"count": 0, "window_start": vr._now()},
+    })
+
+
+def _mint_rtv_token(db, *, store_id, rma_id, amount=80000.0):
+    """Mint an APPROVED rtv approval bound (context.rma_id + store_id) to a
+    specific store + RMA. Returns (request_id, token)."""
+    from api.services.approvals import ApprovalEngine
+
+    appr = ApprovalEngine(db=db)
+    req = appr.request(action_type="rtv", requested_by="acc", amount=amount,
+                       store_id=store_id, context={"rma_id": rma_id})
+    approved = appr.approve(req["request_id"], approver_user_id="sa",
+                            approver_roles=["SUPERADMIN"], pin="1234")
+    assert approved["ok"] is True
+    return req["request_id"], approved["approval_token"]
+
+
+def _big_dispatched_rma(eng, *, store_id, vendor_rma_number):
+    """A DISPATCHED RMA with a Rs-100,000 expected credit (so an Rs-80,000 credit
+    note crosses the Rs-50,000 maker-checker tier)."""
+    rma_id = eng.raise_rma(
+        vendor_id="V1", vendor_name="Luxottica", store_id=store_id,
+        lines=[{"product_id": "P1", "product_name": "Frame", "quantity": 100,
+                "reason": "WARRANTY", "unit_cost": 1000.0}], created_by="mgr")["rma_id"]
+    eng.authorize(rma_id, vendor_rma_number=vendor_rma_number, actor="mgr")
+    eng.dispatch(rma_id, carrier="X", awb="W", dispatch_date=None, actor="mgr")
+    return rma_id
+
+
+def test_rtv_token_rejected_on_different_rma(rt, db):
+    """An rtv token minted bound to RMA-A is REJECTED (403 approval_invalid) when
+    consumed against a DIFFERENT RMA-B in the SAME store -- the consume re-checks
+    context.rma_id == the RMA being credited and rolls back on mismatch."""
+    from fastapi import HTTPException
+
+    from api.routers.vendor_rma import record_credit_note, RMACreditNote
+
+    _seed_super_approver(db)
+    eng = VendorRMAEngine(db=db)
+    rma_a = _big_dispatched_rma(eng, store_id="S1", vendor_rma_number="A-1")
+    rma_b = _big_dispatched_rma(eng, store_id="S1", vendor_rma_number="B-1")
+
+    # Token bound to RMA-A...
+    req_id, token = _mint_rtv_token(db, store_id="S1", rma_id=rma_a)
+
+    # ...replayed against RMA-B -> rejected.
+    body = RMACreditNote(credit_note_number="CN-X", received_amount=80000.0,
+                         approval_token=token, approval_request_id=req_id)
+    with pytest.raises(HTTPException) as ei:
+        _run(record_credit_note(rma_b, body, current_user=_user(["ACCOUNTANT"], uid="acc")))
+    assert ei.value.status_code == 403
+    assert ei.value.detail.get("error") == "approval_invalid"
+    # The token was rolled back (not burned) by the mismatch, so it still works
+    # against its OWN RMA-A.
+    body_ok = RMACreditNote(credit_note_number="CN-A", received_amount=80000.0,
+                            approval_token=token, approval_request_id=req_id)
+    res = _run(record_credit_note(rma_a, body_ok,
+                                  current_user=_user(["ACCOUNTANT"], uid="acc")))
+    assert res["ok"] is True
+
+
+def test_rtv_token_rejected_on_different_store(rt, db):
+    """An rtv token minted for store-A is REJECTED when consumed against an RMA in
+    store-B -- the consume re-checks store_id == the RMA's store. ADMIN caller so
+    the cross-store RMA read itself is allowed; the BLOCK is the approval binding,
+    not the store-IDOR guard."""
+    from fastapi import HTTPException
+
+    from api.routers.vendor_rma import record_credit_note, RMACreditNote
+
+    _seed_super_approver(db)
+    eng = VendorRMAEngine(db=db)
+    rma_b = _big_dispatched_rma(eng, store_id="S2", vendor_rma_number="B-1")
+
+    # Token minted for store S1 but carrying RMA-B's id (so only the STORE differs).
+    req_id, token = _mint_rtv_token(db, store_id="S1", rma_id=rma_b)
+
+    body = RMACreditNote(credit_note_number="CN-X", received_amount=80000.0,
+                         approval_token=token, approval_request_id=req_id)
+    with pytest.raises(HTTPException) as ei:
+        _run(record_credit_note(rma_b, body,
+                                current_user=_user(["ADMIN"], store_ids=[], active=None,
+                                                   uid="acc")))
+    assert ei.value.status_code == 403
+    assert ei.value.detail.get("error") == "approval_invalid"
+
+
+def test_rtv_floating_token_without_request_id_rejected(rt, db):
+    """P1-2: a bare floating token (no approval_request_id) is rejected with
+    approval_required -- a concrete request id is mandatory so the binding can be
+    re-validated against the named request."""
+    from fastapi import HTTPException
+
+    from api.routers.vendor_rma import record_credit_note, RMACreditNote
+
+    eng = VendorRMAEngine(db=db)
+    rma_id = _big_dispatched_rma(eng, store_id="S1", vendor_rma_number="A-1")
+
+    body = RMACreditNote(credit_note_number="CN-X", received_amount=80000.0,
+                         approval_token="some-floating-token")  # no request id
+    with pytest.raises(HTTPException) as ei:
+        _run(record_credit_note(rma_id, body, current_user=_user(["ACCOUNTANT"], uid="acc")))
+    assert ei.value.status_code == 403
+    assert ei.value.detail.get("error") == "approval_required"

@@ -855,16 +855,19 @@ class ApprovalEngine:
 
         # Post-match validation. A mismatch must NOT keep the approval burned --
         # roll the doc back to APPROVED (atomic re-claim on consumed==True by us).
+        # These are INDEPENDENT guards (not an elif chain): an in-bounds amount
+        # must NOT short-circuit the store / context binding checks below.
         mismatch: Optional[str] = None
         if updated.get("action_type") != action_type:
             mismatch = "action_mismatch"
-        elif amount is not None and updated.get("amount") is not None:
+        if mismatch is None and amount is not None and updated.get("amount") is not None:
             if float(amount) > float(updated.get("amount")):
                 mismatch = "amount_exceeded"
-        elif expected_store_id is not None and updated.get("store_id") != expected_store_id:
+        if mismatch is None and expected_store_id is not None \
+                and updated.get("store_id") != expected_store_id:
             # P1-2: a token minted for store A cannot be consumed against store B.
             mismatch = "store_mismatch"
-        elif expected_context:
+        if mismatch is None and expected_context:
             # P1-2: every supplied context key (e.g. rma_id) must match the value
             # the approval was minted with -- binds the token to its exact resource.
             stored_ctx = updated.get("context") or {}
