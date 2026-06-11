@@ -244,10 +244,25 @@ def test_segment_by_customer_type_b2b():
     assert {r["customer_id"] for r in rows} == {"C2"}
 
 
-def test_segment_birthday_matches_today():
-    db = _FakeDB({"customers": _seed_customers(), "prescriptions": _FakeColl(), "orders": _FakeColl()})
+def test_segment_birthday_matches_today(monkeypatch):
+    # IST-boundary determinism: _resolve_birthday windows off now_ist_naive()
+    # (IST), but _seed_customers() stamps C1's DOB with datetime.now() (UTC).
+    # In the 00:00-05:30 IST (18:30-24:00 UTC) window the IST date is a day
+    # ahead of the UTC date, so the UTC-dated DOB falls just before the IST
+    # forward window and C1 drops out. Freeze the segment clock and seed the
+    # DOB for that SAME frozen IST date so the match is clock-independent.
+    frozen = datetime(2026, 6, 15, 12, 0, 0)
+    monkeypatch.setattr(seg, "now_ist_naive", lambda: frozen)
+    customers = _FakeColl(
+        [
+            {"customer_id": "C1", "name": "Alpha", "mobile": "9000000001",
+             "store_id": "BV-PUN-01", "customer_type": "B2C",
+             "dob": frozen.date().replace(year=1990).isoformat()},
+        ]
+    )
+    db = _FakeDB({"customers": customers, "prescriptions": _FakeColl(), "orders": _FakeColl()})
     rows = seg.resolve_segment(db, "birthday", store_id="BV-PUN-01")
-    # C1's DOB is set to today's month/day -> in the 7-day window.
+    # C1's DOB is set to the frozen IST today's month/day -> in the 7-day window.
     assert "C1" in {r["customer_id"] for r in rows}
 
 
