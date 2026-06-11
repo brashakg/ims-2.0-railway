@@ -23,6 +23,7 @@ from ..services.online_catalog import (
 from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
+from ..services import product_master as _pm
 from .inventory import _on_hand_by_product
 
 router = APIRouter()
@@ -273,8 +274,10 @@ CATEGORY_FIELDS = {
         ],
     },
     ProductCategory.CONTACT_LENS: {
-        "required": ["brand_name", "model_name", "power"],
-        "optional": ["subbrand", "colour_name", "pack", "expiry_date"],
+        # Step-9 owner-decided reconcile: a contact lens needs BOTH power AND
+        # expiry_date -- now matches the canonical product_master registry.
+        "required": ["brand_name", "model_name", "power", "expiry_date"],
+        "optional": ["subbrand", "colour_name", "pack"],
         "fields": [
             {
                 "name": "brand_name",
@@ -318,7 +321,7 @@ CATEGORY_FIELDS = {
                 "name": "expiry_date",
                 "label": "Expiry Date",
                 "type": "date",
-                "required": False,
+                "required": True,
             },
         ],
     },
@@ -1401,19 +1404,45 @@ async def create_catalog_product(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Validate required fields for category
+    # Validate the category is one this door accepts.
     category_config = CATEGORY_FIELDS.get(product.category)
     if not category_config:
         raise HTTPException(status_code=400, detail="Invalid category")
 
-    for required_field in category_config["required"]:
-        if (
-            required_field not in product.attributes
-            or not product.attributes[required_field]
-        ):
+    # Unification step-9: delegate the STRICT category-conditional required-field
+    # gate to the ONE canonical product-master registry (resolve_category ->
+    # validate_attributes), so this door enforces the SAME rulebook as
+    # POST /products and /products/bulk-create. The catalog CATEGORY_FIELDS now
+    # AGREE with the registry (reconciled), so a payload that passes here passes
+    # there and vice-versa. ProductMasterError (422) is mapped to the catalog
+    # door's existing 400 "Missing required field" contract so the response
+    # shape is unchanged. (Persistence stays the catalog_products nested doc --
+    # the spine-unification of this door is step-10, owner-gated.)
+    try:
+        _pm.build_canonical_product(
+            {
+                "category": product.category.value,
+                "attributes": dict(product.attributes or {}),
+                "mrp": product.pricing.mrp,
+                "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                "discount_category": product.pricing.discount_category,
+                "hsn_code": product.hsn_code,
+                "gst_rate": product.gst_rate,
+            },
+            source="CATALOG",
+        )
+    except _pm.ProductMasterError as err:
+        # A missing-required-field breach (registry status 422) keeps this door's
+        # historical "Missing required field: <x>" 400 message + code, so the
+        # catalog response contract is unchanged. Any OTHER breach (e.g. the
+        # MRP-rule, status 400) surfaces with its own engine status/message --
+        # the pricing guard below also re-checks MRP>=offer, so this is belt+
+        # braces, not a new behaviour.
+        if err.status == 422 and err.field and err.field != "category":
             raise HTTPException(
-                status_code=400, detail=f"Missing required field: {required_field}"
-            )
+                status_code=400, detail=f"Missing required field: {err.field}"
+            ) from err
+        raise HTTPException(status_code=err.status, detail=err.message) from err
 
     # Non-negotiable pricing guards (block offer > MRP; derive GST from
     # HSN/category) -- same rules the canonical /products path enforces.
@@ -1772,6 +1801,31 @@ async def import_products(
             category_config = CATEGORY_FIELDS.get(product.category)
             if not category_config:
                 errors.append({"index": i, "error": "Invalid category"})
+                continue
+
+            # Step-9: enforce the SAME registry required-field rulebook as the
+            # single /catalog create. A row missing a required field is recorded
+            # + skipped (per-row), never a batch abort.
+            try:
+                _pm.build_canonical_product(
+                    {
+                        "category": product.category.value,
+                        "attributes": dict(product.attributes or {}),
+                        "mrp": product.pricing.mrp,
+                        "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                        "discount_category": product.pricing.discount_category,
+                        "hsn_code": product.hsn_code,
+                        "gst_rate": product.gst_rate,
+                    },
+                    source="CATALOG",
+                )
+            except _pm.ProductMasterError as req_exc:
+                detail = (
+                    f"Missing required field: {req_exc.field}"
+                    if req_exc.status == 422 and req_exc.field and req_exc.field != "category"
+                    else req_exc.message
+                )
+                errors.append({"index": i, "error": detail})
                 continue
 
             # Same pricing guards as the single-create path: block offer > MRP

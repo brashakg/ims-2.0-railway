@@ -441,11 +441,18 @@ def normalise_payload(
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
     created_by: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     db=None,
 ) -> Dict[str, Any]:
     """Build the persisted `products` spine doc. GST/HSN derived server-side,
     offer<=MRP enforced, discount_category validated, SKU minted if absent.
+
+    `extra_fields` are ADDITIVE door-specific top-level columns (e.g. the FORM
+    door's CL/spectacle power identity that POS power-grid reads top-level, or a
+    `variant`). They are merged onto the spine WITHOUT overriding any canonical
+    key, and only for non-None values -- so a door's persisted shape is preserved
+    while the canonical validation + GST/HSN/discount derivation stays unified.
 
     Raises ProductMasterError on any invariant breach.
     """
@@ -525,6 +532,11 @@ def normalise_payload(
         doc["warranty_months"] = int(warranty_months)
     if weight_grams is not None:
         doc["weight_grams"] = float(weight_grams)
+    # Door-specific additive columns -- never override a canonical key, never a
+    # None value (keeps the spine lean + behaviour-preserving per door).
+    for _k, _v in (extra_fields or {}).items():
+        if _v is not None and _k not in doc:
+            doc[_k] = _v
     return doc
 
 
@@ -738,7 +750,12 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
 
 
 def build_canonical_product(
-    payload: Dict[str, Any], *, source: str, product_repo=None, db=None
+    payload: Dict[str, Any],
+    *,
+    source: str,
+    extra_fields: Optional[Dict[str, Any]] = None,
+    product_repo=None,
+    db=None,
 ) -> Dict[str, Any]:
     """Validate + build the canonical `products` spine doc for a door payload.
 
@@ -747,6 +764,9 @@ def build_canonical_product(
     and the SAME incomplete payload is rejected (422) at all three. Raises
     ProductMasterError on any registry / invariant breach (the caller maps it to
     HTTP). Does NOT persist -- create_via_door() layers persistence on top.
+
+    `extra_fields` are additive door-specific top-level columns (see
+    normalise_payload) merged onto the spine without overriding a canonical key.
     """
     p = normalise_door_payload(payload, source=source)
     return normalise_payload(
@@ -762,6 +782,7 @@ def build_canonical_product(
         warranty_months=p.get("warranty_months"),
         weight_grams=p.get("weight_grams"),
         created_by=p.get("created_by") or p.get("actor"),
+        extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
     )
@@ -772,6 +793,7 @@ def create_via_door(
     *,
     source: str,
     actor: str,
+    extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
     variant_repo=None,
@@ -787,7 +809,9 @@ def create_via_door(
     (before any write) -- the calling router maps `.status`/`.field` to HTTP.
 
     `source` (FORM|BULK|CATALOG|MASTER) is recorded on the doc for provenance;
-    the validation + write behaviour is identical across sources.
+    the validation + write behaviour is identical across sources. `extra_fields`
+    are additive door-specific top-level columns (e.g. the FORM door's CL/lens
+    power identity) merged onto the spine without overriding a canonical key.
     """
     p = normalise_door_payload(payload, source=source)
     created = create_product(
@@ -803,6 +827,7 @@ def create_via_door(
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
         weight_grams=p.get("weight_grams"),
+        extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
         variant_repo=variant_repo,
@@ -832,6 +857,7 @@ def create_product(
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
     variant_repo=None,
@@ -847,6 +873,9 @@ def create_product(
          external. A mirror failure NEVER rolls back the spine.
       3. write the per-target sync status back on the spine (single-doc update).
       4. write the immutable audit row (AuditRepository.create).
+
+    `extra_fields` are additive door-specific top-level columns merged onto the
+    spine without overriding a canonical key (see normalise_payload).
 
     Returns the created spine doc (with `sync_status`). Raises
     ProductMasterError on a validation failure (before any write).
@@ -864,6 +893,7 @@ def create_product(
         warranty_months=warranty_months,
         weight_grams=weight_grams,
         created_by=actor,
+        extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
     )

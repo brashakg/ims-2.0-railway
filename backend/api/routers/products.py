@@ -234,6 +234,95 @@ _OPTIONAL_PRODUCT_FIELDS = (
 )
 
 
+# Unification step-9: the ONE canonical product-create door. The FORM
+# (POST /products) and BULK (/products/bulk-create) paths build their canonical
+# payload here and delegate to product_master.create_via_door so the registry is
+# the rulebook at this door too (strict required-field validation), while the
+# persisted {product_id, sku} response shape + the additive FORM-only identity
+# columns (CL/spectacle power, variant, discount_category) are preserved.
+from ..services import product_master as _pm
+
+# FORM/BULK-only optional top-level columns the canonical core doesn't model but
+# this door has always persisted (POS power-grid reads cl_power/sph/base_curve
+# top-level; discount_category drives the POS cap tier). Passed to the core as
+# `extra_fields` so they round-trip onto the spine without re-deriving anything.
+_FORM_EXTRA_FIELDS = ("variant",) + _OPTIONAL_PRODUCT_FIELDS
+
+
+def _canonical_door_payload(product: "ProductCreate") -> dict:
+    """Map a validated flat ProductCreate into the canonical create payload the
+    product_master door expects (category + attributes + pricing + identity)."""
+    return {
+        "category": product.category,
+        "attributes": dict(product.attributes or {}),
+        "mrp": product.mrp,
+        "offer_price": product.offer_price,
+        "sku": product.sku,
+        "discount_category": product.discount_category,
+        "hsn_code": product.hsn_code,
+        "gst_rate": product.gst_rate,
+        # Flat identity columns -- normalise_door_payload folds these into the
+        # registry's attribute keys (brand->brand_name, model->model_no,
+        # color->colour_code) so the required-field gate sees them.
+        "brand": product.brand,
+        "model": product.model,
+        "color": product.color,
+        "size": product.size,
+    }
+
+
+def _form_extra_fields(product: "ProductCreate") -> dict:
+    """The additive FORM-only top-level columns to persist on the spine
+    (variant + the CL/spectacle identity + discount_category). None values are
+    dropped by the core; canonical keys are never overridden."""
+    out: dict = {}
+    for f in _FORM_EXTRA_FIELDS:
+        v = getattr(product, f, None)
+        if v is not None:
+            out[f] = v
+    return out
+
+
+def _create_via_canonical_door(
+    product: "ProductCreate", current_user: dict, *, source: str
+) -> dict:
+    """Delegate a FORM/BULK create to the ONE canonical product_master door.
+
+    Maps ProductMasterError -> the same HTTP codes this router already used
+    (422 validation / 400 MRP-or-SKU). Returns the created canonical spine doc
+    (with product_id + sku). Assumes the repo is available (caller checked)."""
+    from ..dependencies import (
+        get_audit_repository as _get_audit_repository,
+        get_db as _get_db_dep,
+    )
+
+    db = _get_db_dep()
+    variant_repo = None
+    try:
+        if db is not None and getattr(db, "is_connected", False):
+            from database.repositories.catalog_variant_repository import (
+                CatalogVariantRepository,
+            )
+
+            variant_repo = CatalogVariantRepository(db.get_collection("catalog_variants"))
+    except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
+        variant_repo = None
+
+    try:
+        return _pm.create_via_door(
+            _canonical_door_payload(product),
+            source=source,
+            actor=current_user.get("user_id"),
+            extra_fields=_form_extra_fields(product),
+            product_repo=get_product_repository(),
+            variant_repo=variant_repo,
+            audit_repo=_get_audit_repository(),
+            db=db,
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+
+
 def _build_product_data(product: "ProductCreate", created_by) -> dict:
     """Map a validated ProductCreate into the persisted product doc.
 
@@ -531,7 +620,16 @@ async def create_product(
     product: ProductCreate,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
-    """Create a new product"""
+    """Create a new product.
+
+    Unification step-9: delegates the validate + create CORE to the ONE
+    canonical product-create door (product_master.create_via_door, source=FORM)
+    so this door enforces the SAME registry rulebook as /products/bulk-create
+    and /catalog/products. Category, MRP>=offer, and category->GST/HSN are still
+    enforced; STRICT now adds the registry's category-conditional required-field
+    gate (e.g. a FRAME without colour_code is rejected at entry). Auth/RBAC and
+    the {product_id, sku} response shape are unchanged.
+    """
     # Block save when category is blank/null/missing (server-side guard for the
     # GST-default bug: an uncategorized product would otherwise fall back to a
     # default GST rate). Normalizes the category to the validated value.
@@ -540,29 +638,16 @@ async def create_product(
     # Validate MRP >= Offer Price via the shared pricing_caps validator.
     _assert_mrp_ge_offer(product.mrp, product.offer_price)
 
+    if product.modality and product.modality not in CL_MODALITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+        )
+
     repo = get_product_repository()
 
     if repo is not None:
-        # Check if SKU already exists
-        existing = repo.find_by_sku(product.sku)
-        if existing is not None:
-            raise HTTPException(
-                status_code=400, detail="Product with this SKU already exists"
-            )
-
-        if product.modality and product.modality not in CL_MODALITIES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
-            )
-
-        # Build the persisted doc via the shared helper so the single + bulk
-        # create paths stay byte-identical (HSN/GST defaults, additive CL/lens
-        # identity fields). OPTICAL_LENS / READING_GLASSES / COLORED_CONTACT_LENS
-        # get their correct 5% instead of the old blanket 18% non-CL default.
-        product_data = _build_product_data(product, current_user.get("user_id"))
-
-        created = repo.create(product_data)
+        created = _create_via_canonical_door(product, current_user, source="FORM")
         if created:
             # Invalidate product cache for this store
             from ..services.cache import cache
@@ -593,6 +678,8 @@ def _validate_bulk_row(product: ProductCreate, seen_skus: set) -> List[str]:
     """Validate one bulk-create row WITHOUT raising. Returns a list of human
     error strings (empty == valid). Mirrors the single-create checks:
       - category present + recognized (_validate_category_or_422)
+      - registry category-conditional required fields (STRICT, step-9) so a bulk
+        row is rejected for the SAME incomplete payload the FORM door 422s on
       - MRP >= offer_price (_assert_mrp_ge_offer)
       - modality (CL) within the allowed set
       - SKU not duplicated earlier in THIS batch
@@ -607,6 +694,19 @@ def _validate_bulk_row(product: ProductCreate, seen_skus: set) -> List[str]:
         product.category = _validate_category_or_422(product.category)
     except HTTPException as exc:
         errors.append(str(exc.detail))
+
+    # Registry strict required-field gate (step-9). Build the canonical payload
+    # the same way the FORM door does so a missing colour_code / power / expiry
+    # is reported here exactly as the FORM door would 422 on it. Captures the
+    # ProductMasterError message instead of raising (bulk reports per row).
+    try:
+        _pm.build_canonical_product(
+            _canonical_door_payload(product), source="BULK"
+        )
+    except _pm.ProductMasterError as exc:
+        errors.append(exc.message)
+    except Exception:  # noqa: BLE001 - any builder error is a row-level failure
+        errors.append("Product failed validation")
 
     # MRP >= offer_price (reuse the single-create validator; capture its 400).
     try:
@@ -691,8 +791,17 @@ async def bulk_create_products(
             continue
 
         try:
-            product_data = _build_product_data(product, current_user.get("user_id"))
-            created = repo.create(product_data)
+            # Delegate to the ONE canonical product-create door (step-9,
+            # source=BULK) so a bulk row is created through the SAME registry +
+            # invariant core as the FORM door. The row was already strict-
+            # validated above, so this should not raise; a stray
+            # ProductMasterError is treated as a row-level create failure.
+            created = _create_via_canonical_door(
+                product, current_user, source="BULK"
+            )
+        except HTTPException as exc:
+            logger.warning("[BULK-CREATE] create rejected for %s: %s", sku_norm, exc.detail)
+            created = None
         except Exception as exc:  # noqa: BLE001
             logger.warning("[BULK-CREATE] create failed for %s: %s", sku_norm, exc)
             created = None
