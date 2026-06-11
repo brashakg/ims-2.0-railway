@@ -50,6 +50,7 @@ from .routers import (
     vendors_router,
     purchase_invoices_router,
     vendor_returns_router,
+    vendor_rma_router,
     returns_router,
     tasks_router,
     expenses_router,
@@ -1058,6 +1059,9 @@ app.include_router(
 app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
 app.include_router(
     vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
+)
+app.include_router(
+    vendor_rma_router, prefix="/api/v1/vendor-rma", tags=["Vendor RMA"]
 )
 app.include_router(returns_router, prefix="/api/v1/returns", tags=["Returns"])
 app.include_router(shipping_router, prefix="/api/v1/shipping", tags=["Shipping"])

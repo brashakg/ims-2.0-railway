@@ -4783,6 +4783,73 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendor-returns/{return_id}/status",
         "allowed": "AUTHENTICATED",
     },
+    # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
+    # An RMA + its vendor credit note are financial instruments against a
+    # vendor; create + every lifecycle transition is gated to the same vendor/AP
+    # role set vendor_returns hardened to (SUPERADMIN implicit via require_roles).
+    # GET list/detail are AUTHENTICATED but store-scoped per object in the
+    # handler (validate_store_access / resolve_store_scope), so a cashier can
+    # read but never authorize an RMA or record a credit.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-rma",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-rma/",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendor-rma/{rma_id}",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/{rma_id}/authorize",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/{rma_id}/dispatch",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/{rma_id}/credit-note",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/{rma_id}/reject",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/{rma_id}/close",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     # --- /api/v1/vendors ---
     {"method": "GET", "path": "/api/v1/vendors", "allowed": "AUTHENTICATED"},
     {
