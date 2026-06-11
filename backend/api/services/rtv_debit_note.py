@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
@@ -113,6 +113,23 @@ def paise_to_rupees(paise: Any) -> float:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _now_ist() -> datetime:
+    """Current instant as a tz-aware IST datetime.
+
+    P1-2: the FY serial + issue_date are a GST document boundary (Rule 46(b)) and
+    MUST be computed in IST, not UTC. Railway runs in UTC, so between 00:00-05:30
+    IST near the 1-Apr FY boundary a UTC ``now`` still reads the PRIOR IST day ->
+    the note would land in the previous financial year's serial series. Mirror
+    ``je_service`` (which passes an IST instant) by sourcing the clock from
+    ``utils.ist.now_ist``. Safe inline +05:30 fallback (India has no DST)."""
+    try:
+        from api.utils.ist import now_ist
+
+        return now_ist()
+    except Exception:  # noqa: BLE001
+        return datetime.now(timezone(timedelta(hours=5, minutes=30)))
 
 
 # ============================================================================
@@ -608,7 +625,9 @@ def next_debit_note_number(
     consecutive series per financial year (Rule 46(b))."""
     from pymongo import ReturnDocument
 
-    dt = issue_dt or _now()
+    # P1-2: derive the FY from an IST instant (Rule 46(b)). A UTC ``now`` near the
+    # 1-Apr boundary (00:00-05:30 IST) would mis-assign the PRIOR FY's series.
+    dt = issue_dt or _now_ist()
     fy_label = financial_year_label(dt)
     fy_start = fy_label.split("-")[0]
     prefix = _entity_prefix(db, entity_id)
