@@ -50,6 +50,7 @@ from .routers import (
     vendors_router,
     purchase_invoices_router,
     vendor_returns_router,
+    vendor_rma_router,
     returns_router,
     tasks_router,
     expenses_router,
@@ -254,6 +255,16 @@ async def lifespan(app: FastAPI):
                 ensure_shopify_order_index(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Shopify order index creation skipped: {e}")
+            # N4 vendor RMA: indexes incl. the P1-1 partial-UNIQUE on
+            # (rma_id, credit_notes.credit_note_number) so a racing duplicate
+            # vendor credit note can never double-credit one RMA. Idempotent,
+            # fail-soft (the engine's ensure_indexes never raises).
+            try:
+                from .services.vendor_rma import VendorRMAEngine
+
+                VendorRMAEngine(db=get_db().db).ensure_indexes()
+            except Exception as e:
+                logger.warning(f"[WARN] Vendor-RMA index creation skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:
@@ -1058,6 +1069,9 @@ app.include_router(
 app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
 app.include_router(
     vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
+)
+app.include_router(
+    vendor_rma_router, prefix="/api/v1/vendor-rma", tags=["Vendor RMA"]
 )
 app.include_router(returns_router, prefix="/api/v1/returns", tags=["Returns"])
 app.include_router(shipping_router, prefix="/api/v1/shipping", tags=["Shipping"])
