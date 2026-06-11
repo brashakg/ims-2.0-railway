@@ -1731,6 +1731,46 @@ POLICY: List[Dict[str, object]] = [
                     "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #16 Bank / Cash / POS reconciliation (own /api/v1/bank-recon
+    # prefix; finance + store management only -- a cashier can NEVER run or sign
+    # off a reconciliation; every route store-scopes via validate_store_access). ---
+    {
+        "method": "POST",
+        "path": "/api/v1/bank-recon/reconciliations",
+        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/bank-recon/reconciliations",
+        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/bank-recon/reconciliations/{run_id}",
+        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/bank-recon/reconciliations/{run_id}/lock",
+        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Sign-off is a management attestation: managers + finance, NOT a cashier.
+        "method": "POST",
+        "path": "/api/v1/bank-recon/reconciliations/{run_id}/sign-off",
+        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/bank-recon/bank-lines",
+        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",
