@@ -58,6 +58,7 @@ from .routers import (
     finance_ticker_router,
     reconciliation_router,
     till_router,
+    bank_reconciliation_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -245,6 +246,14 @@ async def lifespan(app: FastAPI):
                 ensure_till_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Till index creation skipped: {e}")
+            # Feature #16 bank reconciliation: indexes on the two new collections
+            # (bank_reconciliations + bank_statement_lines). Idempotent, fail-soft.
+            try:
+                from .services.bank_reconciliation import ensure_indexes as ensure_bank_recon_indexes
+
+                ensure_bank_recon_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Bank-reconciliation index creation skipped: {e}")
             # Unification step 1: UNIQUE partial index on orders.shopify_order_id
             # so a Shopify webhook retry / double-delivery can never double-book
             # an online order. The helper existed in shopify_ingest but was
@@ -1114,6 +1123,10 @@ app.include_router(
 # gates inline + store-scopes. Expected-cash is derived from the SAME E5
 # reconcile_window over order.payments[] -- POS capture is UNCHANGED.
 app.include_router(till_router, prefix="/api/v1/till", tags=["Till"])
+# Feature #16 Bank / Cash / POS reconciliation: own /api/v1/bank-recon prefix, no
+# router-level gate (each route gates inline to finance/manager + store-scopes).
+# READ-ONLY over orders/till; reuses E5 reconcile_window + the #23 till close.
+app.include_router(bank_reconciliation_router, prefix="/api/v1/bank-recon", tags=["BankReconciliation"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",

@@ -24,6 +24,7 @@ from .finance import router as finance_router
 from .finance import ticker_router as finance_ticker_router
 from .reconciliation import router as reconciliation_router
 from .till import router as till_router
+from .bank_reconciliation import router as bank_reconciliation_router
 from .hr import router as hr_router
 from .workshop import router as workshop_router
 from .reports import router as reports_router
@@ -105,6 +106,7 @@ __all__ = [
     "finance_ticker_router",
     "reconciliation_router",
     "till_router",
+    "bank_reconciliation_router",
     "hr_router",
     "workshop_router",
     "reports_router",
