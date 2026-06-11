@@ -75,10 +75,26 @@ _SOURCE_CHANNEL = {
 }
 
 
-def _get_repo():
-    """Resolve the CustomerRepository the same way every door does, so this service
-    sees exactly the data the doors see. Returns None when the DB is unavailable
-    (the caller then proceeds with a null customer link / fall-through)."""
+def _get_repo(db=None):
+    """Resolve the CustomerRepository this service reads/writes through.
+
+    Prefers the DB HANDLE the door passed in -- the doors patch their own
+    ``get_db`` in tests and resolve their repos from that same handle, so honouring
+    it here keeps this service looking at EXACTLY the data the door sees (and keeps
+    the doors' existing test wiring working without re-patching a second accessor).
+    Falls back to the shared ``dependencies.get_customer_repository`` accessor when
+    no usable handle is supplied. Returns None when the DB is unavailable (the
+    caller then proceeds with a null customer link / fall-through)."""
+    # 1) Build straight off the passed handle when it's a connected DB exposing the
+    #    customers collection (matches dependencies.get_customer_repository's shape).
+    if db is not None and getattr(db, "is_connected", False):
+        try:
+            from database.repositories.customer_repository import CustomerRepository
+
+            return CustomerRepository(db.customers)
+        except Exception:  # noqa: BLE001 -- fall through to the shared accessor
+            logger.debug("[ENSURE_CUSTOMER] repo-from-handle failed", exc_info=True)
+    # 2) Shared accessor (its own get_db()).
     try:
         from ..dependencies import get_customer_repository
 
@@ -199,10 +215,10 @@ def ensure_customer(
     door. See the module docstring for the full contract.
 
     Args:
-        db: the database handle (accepted for caller symmetry / future direct-index
-            use). The repo is resolved via the shared accessor so this service sees
-            the same data the doors do; ``db`` being None does not by itself prevent
-            resolution.
+        db: the database handle the door already holds. When it's a connected DB
+            the customer repo is built straight off it (so this service sees exactly
+            the data the door sees, and the doors' test wiring keeps working); a
+            None/unusable handle falls back to the shared customer-repo accessor.
         mobile: human-entered phone (any surface form). Normalized internally.
         name: optional display name for a NEW record (ignored when matching existing).
         store_id: optional store to home a NEW record to.
@@ -241,7 +257,7 @@ def ensure_customer(
     if not norm_mobile:
         return (None, False)
 
-    repo = _get_repo()
+    repo = _get_repo(db)
     if repo is None:
         return (None, False)
 

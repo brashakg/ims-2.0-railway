@@ -378,7 +378,11 @@ def test_customer_auto_created_when_mobile_new(
     cust = docs[0]
     assert cust["mobile"] == "9876543210"
     assert cust["name"] == "New Walker"
-    assert cust["source"] == "walkout"
+    # unification step-5: the walkout door now delegates to the canonical
+    # ensure_customer service, which tags the source "WALKOUT" (canonical
+    # upper-case form, was the lower-case "walkout") and homes the record on
+    # every store key the customer lists filter on (primary_store_id kept).
+    assert cust["source"] == "WALKOUT"
     assert cust["primary_store_id"] == "BV-TEST-01"
 
     # Walkout response is linked

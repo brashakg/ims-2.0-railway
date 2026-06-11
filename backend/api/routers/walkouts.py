@@ -468,77 +468,64 @@ def _ensure_customer(
     current_user: dict,
 ) -> Optional[str]:
     """
-    Phase 1 customer auto-create.
+    Phase 1 customer auto-create -- now a THIN WRAPPER over the canonical
+    ``api.services.customer_service.ensure_customer`` (unification step-5).
 
-    If the mobile matches an existing customer, return that customer's
-    id. Otherwise create a skeleton customer row tagged
-    `source="walkout"` and return the new id. Both branches are
-    audit-logged via the caller (separate audit row for the
-    auto-create vs the walkout-create itself).
+    If the mobile matches an existing customer, return that customer's id.
+    Otherwise the service creates the ONE canonical skeleton (source="WALKOUT")
+    and returns the new id. This router keeps the side-effect audit row for the
+    auto-create -- written here only when the service reports it CREATED a record,
+    so a dedup match no longer logs a phantom create.
 
-    Returns None if the customer repo is unreachable; caller decides
-    whether to proceed with `customer_id=None` or 503.
+    Returns None if the repo is unreachable OR there's nothing to key on; caller
+    decides whether to proceed with `customer_id=None` or 503.
 
-    When mobile is empty/None (some customers don't share their
-    number), skip the auto-link/create entirely and return None. The
-    walkout doc stores customer_id=None and downstream follow-ups via
-    call/SMS/WhatsApp won't be possible — only IN-PERSON.
+    When mobile is empty/None (some customers don't share their number), the
+    service skips the link/create and returns (None, False). The walkout doc
+    stores customer_id=None and downstream follow-ups via call/SMS won't be
+    possible -- only IN-PERSON.
+
+    Behaviour change (intentional, step-5): a newly minted record now carries a
+    uuid customer_id (was ``cust-``+hex8), the full canonical skeleton (is_active
+    + every store key the customer lists actually filter on, so the walk-in is no
+    longer invisible in store-scoped lists), and source tag "WALKOUT" (was
+    "walkout"). The auto-link + audit semantics are preserved.
     """
-    # Mobile is optional now; without it there's no key to link a
-    # customer record by, so don't auto-create.
-    if not mobile:
+    from ..services.customer_service import ensure_customer
+
+    customer_id, created = ensure_customer(
+        get_db(),
+        mobile=mobile,
+        name=customer_name,
+        store_id=store_id,
+        source="WALKOUT",
+    )
+    if customer_id is None:
         return None
 
-    customer_repo = get_customer_repository()
-    if customer_repo is None:
-        return None
+    # Audit-log the side-effect creation ONLY when a new record was actually
+    # minted (a dedup match is not a create).
+    if created:
+        audit_repo = get_audit_repository()
+        if audit_repo is not None:
+            try:
+                audit_repo.create(
+                    {
+                        "log_id": uuid.uuid4().hex,
+                        "timestamp": datetime.now(),
+                        "user_id": current_user.get("user_id"),
+                        "action": "customer.create",
+                        "entity_type": "customer",
+                        "entity_id": customer_id,
+                        "store_id": store_id,
+                        "severity": "info",
+                        "detail": {"via_walkout": True, "mobile": mobile},
+                    }
+                )
+            except Exception:
+                pass
 
-    existing = customer_repo.find_by_mobile(mobile)
-    if existing:
-        return existing.get("customer_id")
-
-    # Auto-create skeleton
-    new_id = f"cust-{uuid.uuid4().hex[:8]}"
-    skeleton = {
-        "customer_id": new_id,
-        "name": customer_name,
-        "mobile": mobile,
-        "primary_store_id": store_id,
-        "store_ids": [store_id],
-        "source": "walkout",
-        "created_via": "walkout_intake",
-        "customer_type": "B2C",
-        "loyalty_points": 0,
-        "store_credit": 0.0,
-        "patients": [],
-    }
-    try:
-        customer_repo.create(skeleton)
-    except Exception as e:
-        logger.warning(f"[WALKOUT] customer auto-create failed: {e}")
-        return None
-
-    # Audit-log the side-effect creation
-    audit_repo = get_audit_repository()
-    if audit_repo is not None:
-        try:
-            audit_repo.create(
-                {
-                    "log_id": uuid.uuid4().hex,
-                    "timestamp": datetime.now(),
-                    "user_id": current_user.get("user_id"),
-                    "action": "customer.create",
-                    "entity_type": "customer",
-                    "entity_id": new_id,
-                    "store_id": store_id,
-                    "severity": "info",
-                    "detail": {"via_walkout": True, "mobile": mobile},
-                }
-            )
-        except Exception:
-            pass
-
-    return new_id
+    return customer_id
 
 
 def _audit_walkout_create(
@@ -741,7 +728,9 @@ def _create_manager_escalation_task(
     return task_id
 
 
-def _resolve_closing_user(db, converted_order_id: str) -> Tuple[Optional[str], Optional[str]]:
+def _resolve_closing_user(
+    db, converted_order_id: str
+) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the closing associate (who actually sold the order) from the
     orders collection. Returns (user_id, user_name). Fail-soft -> (None, None).
     """
@@ -1023,9 +1012,11 @@ async def create_walkout(
     # to the store manager (an in-app task, never an outbound message).
     suggestion = _compute_policy_suggestion(
         payload.primary_walkout_reason.value,
-        payload.secondary_walkout_reason.value
-        if payload.secondary_walkout_reason
-        else None,
+        (
+            payload.secondary_walkout_reason.value
+            if payload.secondary_walkout_reason
+            else None
+        ),
     )
     if suggestion.get("escalate_immediate"):
         task_id = _create_manager_escalation_task(
@@ -1235,7 +1226,13 @@ async def escalate_overdue_followups(
 
     created = []
     # F45 D4 -- dark-outbound tally (no live send; PENDING / cap-suppressed).
-    outbound = {"queued": 0, "capped": 0, "no_customer": 0, "unavailable": 0, "error": 0}
+    outbound = {
+        "queued": 0,
+        "capped": 0,
+        "no_customer": 0,
+        "unavailable": 0,
+        "error": 0,
+    }
     for row in overdue:
         round_num = int(row.get("round") or 0)
         priority = "P1" if round_num >= 2 else "P2"
@@ -1454,7 +1451,9 @@ async def walkins_today(
     # writes against the IST date) around the UTC midnight boundary.
     doc = repo.get_today(store, date_str=_ist_today_str())
     expected = _expected_footfall_staff(store)
-    doc["entry_status"] = repo.compute_entry_status(doc.get("per_staff") or {}, expected)
+    doc["entry_status"] = repo.compute_entry_status(
+        doc.get("per_staff") or {}, expected
+    )
     return _serialize_value(doc)
 
 
@@ -1589,9 +1588,7 @@ async def walkins_status(
     per_staff: Dict[str, int] = {}
     if repo is not None:
         doc = repo.get_today(store, date_str=target_date)
-        per_staff = {
-            sp: int(n) for sp, n in (doc.get("per_staff") or {}).items() if sp
-        }
+        per_staff = {sp: int(n) for sp, n in (doc.get("per_staff") or {}).items() if sp}
 
     entered_ids = set(per_staff.keys())
     expected_ids = {s for s in expected if s}
