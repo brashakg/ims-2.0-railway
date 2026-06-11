@@ -207,6 +207,18 @@ class VendorRMAEngine:
             coll.create_index("rma_id", unique=True)
             coll.create_index([("store_id", 1), ("status", 1), ("created_at", -1)])
             coll.create_index([("vendor_id", 1), ("status", 1)])
+            # P1-1 DB backstop: at most ONE credit note per (rma_id, CN number).
+            # A partial index keyed on the embedded credit_notes element so a racing
+            # duplicate-CN double-credit is rejected at the storage layer even if the
+            # in-filter $ne guard were ever bypassed. partialFilterExpression skips
+            # docs with no credit notes yet (the embedded path is absent at DRAFT).
+            coll.create_index(
+                [("rma_id", 1), ("credit_notes.credit_note_number", 1)],
+                unique=True,
+                partialFilterExpression={
+                    "credit_notes.credit_note_number": {"$exists": True}
+                },
+            )
         except Exception:  # noqa: BLE001
             logger.debug("[VENDOR_RMA] ensure_indexes skipped", exc_info=True)
 
@@ -503,11 +515,10 @@ class VendorRMAEngine:
         if cur is None:
             return {"ok": False, "http": 404, "error": "not_found"}
 
-        # Idempotency / dup guard: the same vendor CN number cannot be recorded
-        # twice against one RMA (double-credit).
-        existing_cns = {c.get("credit_note_number") for c in (cur.get("credit_notes") or [])}
-        if cn_number in existing_cns:
-            return {"ok": False, "http": 409, "error": "duplicate_credit_note"}
+        # NOTE (P1-1): the duplicate-credit-note guard is NOT a read-then-check
+        # here -- it is enforced atomically inside the find_one_and_update filter
+        # below (``credit_notes.credit_note_number {$ne}``) plus the partial UNIQUE
+        # index in ensure_indexes, so a racing duplicate cannot slip through.
 
         # Allowed source states: DISPATCHED (first credit) or CREDIT_RECEIVED
         # (partial follow-ups). Atomic guard encodes this via $in.
@@ -521,19 +532,27 @@ class VendorRMAEngine:
             "notes": notes or "",
             "approval_token": approval_token,
         }
-        new_received = int(cur.get("received_credit_paise") or 0) + recv_paise
-        new_variance = int(cur.get("expected_credit_paise") or 0) - new_received
 
+        # ATOMIC ACCUMULATION (P1-1). The received total is incremented with
+        # ``$inc`` -- NOT a read-then-absolute-$set -- so two concurrent partial
+        # credits cannot clobber each other (lost update). The dup-CN guard moves
+        # INTO the filter (``credit_notes.credit_note_number {$ne}``) so a racing
+        # duplicate note cannot slip past the read-then-check window; a partial
+        # UNIQUE index (ensure_indexes) is the DB backstop. The guarded filter
+        # therefore encodes BOTH the from-state ($in recordable) AND the dup guard.
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": {"$in": recordable}},
+                {
+                    "rma_id": rma_id,
+                    "status": {"$in": recordable},
+                    "credit_notes.credit_note_number": {"$ne": cn_number},
+                },
                 {
                     "$set": {
                         "status": RMAStatus.CREDIT_RECEIVED.value,
-                        "received_credit_paise": new_received,
-                        "variance_paise": new_variance,
                         "updated_at": now,
                     },
+                    "$inc": {"received_credit_paise": recv_paise},
                     "$push": {
                         "credit_notes": cn_entry,
                         "status_history": {
@@ -551,8 +570,27 @@ class VendorRMAEngine:
             return {"ok": False, "http": 500, "error": "write_failed"}
 
         if updated is None:
-            return self._conflict(rma_id)
+            return self._credit_conflict(rma_id, cn_number)
         updated.pop("_id", None)
+
+        # Derive the variance from the ATOMICALLY-incremented received total and
+        # persist it (a CAS keyed on the exact received value we just observed, so
+        # a concurrent credit that lands between the $inc and this write recomputes
+        # its OWN variance against the latest total -- never a stale overwrite).
+        new_received = int(updated.get("received_credit_paise") or 0)
+        new_variance = int(updated.get("expected_credit_paise") or 0) - new_received
+        try:
+            varianced = coll.find_one_and_update(
+                {"rma_id": rma_id, "received_credit_paise": new_received},
+                {"$set": {"variance_paise": new_variance}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if varianced is not None:
+                varianced.pop("_id", None)
+                updated = varianced
+        except Exception:  # noqa: BLE001 - variance is derivable on read; fail-soft
+            updated["variance_paise"] = new_variance
+
         self._audit("rma_credit_recorded", updated, actor=actor,
                     before=self._snapshot(cur), after=self._snapshot(updated),
                     reason=notes)
@@ -707,6 +745,21 @@ class VendorRMAEngine:
         doc = self.get(rma_id)
         if doc is None:
             return {"ok": False, "http": 404, "error": "not_found"}
+        return {"ok": False, "http": 409, "error": "invalid_transition",
+                "status": doc.get("status")}
+
+    def _credit_conflict(self, rma_id: str, cn_number: str) -> Dict[str, Any]:
+        """The credit-note atomic filter matched nothing. The filter encodes BOTH
+        the from-state ($in recordable) AND the dup-CN guard ($ne cn_number), so a
+        miss is one of: not-found (404), this exact CN already recorded (409
+        duplicate_credit_note), or the RMA is not in a creditable state (409
+        invalid_transition). Read back to disambiguate for a precise message."""
+        doc = self.get(rma_id)
+        if doc is None:
+            return {"ok": False, "http": 404, "error": "not_found"}
+        existing = {c.get("credit_note_number") for c in (doc.get("credit_notes") or [])}
+        if cn_number in existing:
+            return {"ok": False, "http": 409, "error": "duplicate_credit_note"}
         return {"ok": False, "http": 409, "error": "invalid_transition",
                 "status": doc.get("status")}
 
