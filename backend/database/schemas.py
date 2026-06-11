@@ -102,6 +102,13 @@ PRODUCT_SCHEMA = {
             # collMod/run_migrations, so no validator is enforced at runtime (HA was
             # never actually code-121 rejected). The PM engine's own category
             # registry is what gates writes; this keeps the schema doc in sync.
+            #
+            # Unification step-8: the canonical category taxonomy lives in
+            # services/product_master.canonical_categories(). This literal enum
+            # MIRRORS that list (kept as a literal because a $jsonSchema is a
+            # static DB-validator document, not Python-evaluated against the
+            # registry). test_unification_8_category_registry asserts this enum
+            # stays equal to the registry so the two can never silently drift.
             "enum": ["FRAME", "SUNGLASS", "READING_GLASSES", "OPTICAL_LENS",
                     "CONTACT_LENS", "COLORED_CONTACT_LENS", "WATCH", "SMARTWATCH",
                     "SMARTGLASSES", "WALL_CLOCK", "ACCESSORIES", "SERVICES",

@@ -88,29 +88,23 @@ CL_HSN_DEFAULT = "90013000"
 CL_GST_DEFAULT = 5.0
 CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
 
-# Canonical set of accepted product categories. Pulled from the single source of
-# truth -- the GST/HSN table keys -- so master, billing and this guard never
-# drift. A category MUST normalize (upper/trim) to one of these keys; anything
-# blank/null/missing or unrecognized is rejected at create/update.
+# Unification step-8: the canonical product-category taxonomy lives in ONE
+# place -- the product_master registry. This guard reads its canonical list from
+# there instead of hand-maintaining a duplicate.
+from ..services.product_master import canonical_categories as _pm_canonical_categories
+
+# Accepted-category superset for the create/update guard. Behaviour-preserving:
+# kept as the GST/HSN table keys (the canonical 13 registry categories PLUS the
+# legacy aliases + 2-letter UI codes + order-only item_types that older data and
+# other call sites still use). The registry's canonical list is a subset of this
+# set, so every category the registry knows is accepted, and nothing that was
+# accepted before is now rejected. A category MUST normalize (upper/trim) to one
+# of these keys; anything blank/null/missing or unrecognized is rejected.
 _VALID_CATEGORY_KEYS = frozenset(GST_CATEGORY_TABLE.keys())
-# Short, human-friendly subset surfaced in the 422 message (the full key set also
-# carries legacy aliases + 2-letter UI codes, which would make the message
-# noisy). These are the canonical product categories from schemas.py.
-_VALID_CATEGORY_DISPLAY = (
-    "FRAME",
-    "OPTICAL_LENS",
-    "READING_GLASSES",
-    "CONTACT_LENS",
-    "COLORED_CONTACT_LENS",
-    "SUNGLASS",
-    "WATCH",
-    "SMARTWATCH",
-    "SMARTGLASSES",
-    "WALL_CLOCK",
-    "ACCESSORIES",
-    "SERVICES",
-    "HEARING_AID",
-)
+# Human-friendly list surfaced in the 422 message: the canonical product
+# categories, sourced from the registry (the single source of truth) rather than
+# a copy. Same 13 categories as before -- only the source moved.
+_VALID_CATEGORY_DISPLAY = tuple(_pm_canonical_categories())
 
 
 def _validate_category_or_422(category) -> str:

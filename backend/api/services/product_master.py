@@ -250,6 +250,31 @@ def required_fields(category: Any) -> List[str]:
     return list(spec.required) if spec else []
 
 
+def optional_fields(category: Any) -> List[str]:
+    spec = category_spec(category)
+    return list(spec.optional) if spec else []
+
+
+def canonical_categories() -> List[str]:
+    """The canonical long-form category keys, in registry order.
+
+    This is THE single source of truth for the product-category taxonomy
+    (unification step-8). Every other module that needs to know "what are the
+    valid product categories" reads this list (or `resolve_category` to
+    normalise an input to one of these) instead of hardcoding its own enum / key
+    set. A copy is returned (not the live dict) so callers cannot mutate the
+    registry.
+    """
+    return list(_CATEGORY_SPECS.keys())
+
+
+def is_known_category(category: Any) -> bool:
+    """True when `category` (any input form -- long, short code, or alias)
+    resolves to a canonical registry category. The authoritative membership test
+    other writers should use instead of maintaining their own key set."""
+    return resolve_category(category) is not None
+
+
 # ===========================================================================
 # SKU rule (REWRITE -- NOT a wrapper of catalog.generate_sku)
 # ===========================================================================

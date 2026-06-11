@@ -159,6 +159,20 @@ async def online_stock_reconcile(
 # ============================================================================
 # PRODUCT CATEGORIES WITH SKU PREFIXES
 # ============================================================================
+#
+# Unification step-8 note: the CANONICAL product-category taxonomy is owned by
+# services/product_master (its _CATEGORY_SPECS registry). This short-code enum
+# is the legacy /catalog door's accepted set; every value below is a registered
+# SKU-prefix alias the registry resolves via product_master.resolve_category()
+# (e.g. "SG" -> SUNGLASS, "CL" -> CONTACT_LENS, "LS" -> OPTICAL_LENS). It is
+# deliberately LEFT IN PLACE (not repointed) because:
+#   * this enum is the /catalog door's accepted-category contract -- replacing
+#     it would change which categories the door accepts (a behaviour change), and
+#   * the per-category required fields below DISAGREE with the registry for two
+#     categories (see the CATEGORY_FIELDS flag) -- so this door cannot delegate
+#     to the registry without an owner decision.
+# Step-9 (canonical product-create) is where /catalog will delegate to the
+# registry; step-8 only records the canonical source.
 
 
 class ProductCategory(str, Enum):
@@ -196,7 +210,23 @@ CATEGORY_NAMES = {
 # ============================================================================
 # CATEGORY-SPECIFIC FIELD DEFINITIONS
 # ============================================================================
-
+#
+# Unification step-8 FLAG -- DO NOT auto-reconcile, owner decision required.
+# These per-category required-field sets are the /catalog door's contract. The
+# canonical registry (services/product_master._CATEGORY_SPECS) AGREES with all
+# of these EXCEPT two categories, where the two sources DISAGREE today:
+#
+#   * CONTACT_LENS: this door requires {brand_name, model_name, POWER};
+#       the registry requires {brand_name, model_name, EXPIRY_DATE}.
+#   * HEARING_AID:  this door requires {brand_name, model_no};
+#       the registry additionally requires SERIAL_NO.
+#
+# (The registry's stricter HEARING_AID/CONTACT_LENS rules are the deliberate PM
+# tightening -- see product_master._CATEGORY_SPECS docstring.) Repointing this
+# dict to the registry would CHANGE which fields /catalog requires -- a
+# behaviour change -- so step-8 leaves the values UNTOUCHED and only records the
+# divergence here. Reconciling the two is a step-9 / owner-sign-off task.
+#
 # Define which fields each category needs
 CATEGORY_FIELDS = {
     ProductCategory.SUNGLASS: {
