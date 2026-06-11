@@ -56,6 +56,7 @@ from .routers import (
     finance_router,
     finance_ticker_router,
     reconciliation_router,
+    till_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -233,6 +234,15 @@ async def lifespan(app: FastAPI):
                 ensure_reconciliation_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Reconciliation index creation skipped: {e}")
+            # F23 blind EOD cash tally: partial-unique index so at most ONE active
+            # till session exists per (store, cashier, IST-day). Greenfield
+            # collection -> safe. Idempotent, fail-soft.
+            try:
+                from .services.eod_tally import ensure_till_indexes
+
+                ensure_till_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Till index creation skipped: {e}")
             # Unification step 1: UNIQUE partial index on orders.shopify_order_id
             # so a Shopify webhook retry / double-delivery can never double-book
             # an online order. The helper existed in shopify_ingest but was
@@ -1084,6 +1094,11 @@ app.include_router(
     tags=["Finance"],
     dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
 )
+# F23 Blind EOD cash tally & Z-Read: its OWN /api/v1/till prefix WITHOUT the
+# finance role gate (a SALES_CASHIER must reach open + blind-submit); every route
+# gates inline + store-scopes. Expected-cash is derived from the SAME E5
+# reconcile_window over order.payments[] -- POS capture is UNCHANGED.
+app.include_router(till_router, prefix="/api/v1/till", tags=["Till"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",

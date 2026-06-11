@@ -1669,6 +1669,68 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/finance/reconciliation/{snapshot_id}/lock",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # --- F23 Blind EOD cash tally & Z-Read (mounted on its OWN /api/v1/till
+    # prefix WITHOUT the finance role gate; each route gates inline + store-scopes.
+    # Expected/variance are blind-redacted for cashier-only callers at the data
+    # layer). ---
+    {
+        # Open + blind-submit: cashier roles + store management. Cashiers get a
+        # redacted response (no expected figure) -- blind enforcement.
+        "method": "POST",
+        "path": "/api/v1/till/sessions",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/till/sessions/{session_id}/blind-submit",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Reveal variance + soft-lock the Z-Read: managers + above only.
+        "method": "POST",
+        "path": "/api/v1/till/sessions/{session_id}/lock",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Release the transparent soft-lock (mandatory reason + E2 reopen-role set
+        # re-checked in the service): managers + above.
+        "method": "POST",
+        "path": "/api/v1/till/sessions/{session_id}/reopen",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Session list reveals expected/variance -> manager/finance read roles.
+        "method": "GET",
+        "path": "/api/v1/till/sessions",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT",
+                    "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # One session: reachable by the OPERATE set (cashiers get a redacted
+        # view; manager sees the full figures). The handler fail-closes on
+        # _TILL_OPERATE_ROLES which EXCLUDES ACCOUNTANT -- this row matches that
+        # (ACCOUNTANT reads the Z-Read via /zread + the session list, not here).
+        "method": "GET",
+        "path": "/api/v1/till/sessions/{session_id}",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Full Z-Read (reveals expected) -> manager/finance read roles only.
+        "method": "GET",
+        "path": "/api/v1/till/sessions/{session_id}/zread",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT",
+                    "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",

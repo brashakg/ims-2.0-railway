@@ -102,6 +102,7 @@ const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 const CashFlowPage = lazy(() => import('./pages/finance/CashFlowPage'));
 const ItcReconcilePage = lazy(() => import('./pages/finance/ItcReconcilePage'));
 const CashRegisterPage = lazy(() => import('./pages/finance/CashRegisterPage'));
+const BlindEodTallyPage = lazy(() => import('./pages/finance/BlindEodTallyPage'));
 const BudgetingPage = lazy(() => import('./pages/finance/BudgetingPage'));
 const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
 const WalkoutDetailPage = lazy(() => import('./pages/walkouts/WalkoutDetailPage').then(m => ({ default: m.WalkoutDetailPage })));
@@ -1119,6 +1120,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <CashRegisterPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  {/* F23 Blind EOD cash tally & Z-Read -- cashiers reach it to
+                      open + blind-submit; managers reveal variance + lock. */}
+                  <Route
+                    path="finance/blind-eod"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF']}>
+                        <BlindEodTallyPage />
                       </ProtectedRoute>
                     }
                   />

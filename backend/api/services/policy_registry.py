@@ -288,6 +288,28 @@ _REGISTRY_LIST: List[PolicySpec] = [
           group="Clinical", label="Clinical->retail handover enabled",
           help="Let optometrists send a completed Rx to the sales floor "
                "(in-app bell). Enable per store for the pilot."),
+
+    # --- F23 Blind EOD cash tally & Z-Read (#23) ---
+    # The variance tolerance band (absolute paisa): a counted-vs-expected gap
+    # within this band closes BALANCED; beyond it is flagged OVERAGE/SHORTAGE.
+    # Default 0 = exact-match required (any gap is flagged); raise it per store
+    # to allow a small rounding band. The reopen-roles key controls WHICH roles
+    # may release the transparent soft-lock on a closed Z-Read (the router also
+    # gates this; the policy lets the owner widen/narrow it per scope).
+    _spec(key="till.variance_tolerance_paisa", type="money_paisa", default=0,
+          scopes=("global", "entity", "store"),
+          write_roles=("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"),
+          group="Cash Register", label="Till variance tolerance",
+          minimum=0,
+          help="Absolute counted-vs-expected gap (paisa) within which an EOD "
+               "cash tally is treated as BALANCED. 0 = exact match required."),
+    _spec(key="till.reopen_roles", type="json",
+          default=["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+          scopes=("global", "entity", "store"),
+          write_roles=("SUPERADMIN", "ADMIN"),
+          group="Cash Register", label="Till reopen roles",
+          help="Roles permitted to reopen a soft-locked EOD Z-Read (with a "
+               "mandatory reason; the reopen is audited)."),
 ]
 
 REGISTRY = {s.key: s for s in _REGISTRY_LIST}
