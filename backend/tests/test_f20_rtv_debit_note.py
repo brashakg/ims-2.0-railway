@@ -276,6 +276,61 @@ def _seller():
 
 
 # ============================================================================
+# Adversarial P1 regression -- the REAL production line shape (no gst_rate/hsn
+# on the source line) + IST FY boundary. The original suite seeded a fabricated
+# line shape carrying gst_rate, which MASKED the zero-GST-in-production bug.
+# ============================================================================
+
+
+def test_line_gst_hsn_resolved_from_product_when_absent_on_line(db):
+    """P1-1: a vendor_returns line as PRODUCTION writes it (sku + qty + rate, NO
+    gst_rate/hsn) must resolve GST + HSN from the PRODUCT -- not silently emit 0%."""
+    db.get_collection("products").insert_one(
+        {"product_id": "P9", "sku": "SKU-9", "category": "FRAME",
+         "gst_rate": 5.0, "hsn": "9003"}
+    )
+    rtv = _seed_return(db, return_id="VR-REAL", lines=[
+        # NO gst_rate, NO hsn -- exactly what vendor_returns/vendor_rma persist.
+        {"product_id": "P9", "sku": "SKU-9", "product_name": "Acetate Frame",
+         "quantity": 2, "rate_paise": 100000}])
+    res = DebitNoteEngine(db).issue(
+        rtv, db.get_collection("vendors").find_one({"vendor_id": "V1"}),
+        actor="u1", seller=_seller())
+    assert res["ok"] is True
+    line = res["debit_note"]["lines"][0]
+    assert line["gst_rate"] == 5.0            # resolved from the product (was 0)
+    assert line["hsn"] == "9003"              # resolved from the product (was blank)
+    assert line["tax_paise"] == 10000         # 200000 @5% -- NON-zero
+    assert line["cgst_paise"] == 5000 and line["sgst_paise"] == 5000
+
+
+def test_unresolvable_gst_fails_loud(db):
+    """P1-1: a taxable line whose GST cannot be resolved (no rate, no product,
+    no category) must FAIL LOUD (422), never silently emit a 0% tax document."""
+    rtv = _seed_return(db, return_id="VR-NOGST", lines=[
+        {"sku": "GHOST-SKU", "product_name": "?", "quantity": 1, "rate_paise": 50000}])
+    res = DebitNoteEngine(db).issue(
+        rtv, db.get_collection("vendors").find_one({"vendor_id": "V1"}),
+        actor="u1", seller=_seller())
+    assert res["ok"] is False
+    assert res.get("http") == 422
+    assert str(res.get("error", "")).startswith("gst_unresolved")
+
+
+def test_fy_serial_uses_ist_at_apr_boundary(db, monkeypatch):
+    """P1-2: a debit note issued ~02:00 IST on 1-Apr lands in the NEW FY series
+    (Rule 46(b)) -- a UTC clock would mis-assign the prior FY."""
+    import api.services.rtv_debit_note as ram
+    from datetime import datetime, timezone, timedelta
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    monkeypatch.setattr(ram, "_now_ist", lambda: datetime(2026, 4, 1, 2, 0, tzinfo=ist))
+    serial = ram.next_debit_note_number(db, "E1")
+    # 2026-04-01 IST -> FY 2026-27 (NOT 2025-26 that a UTC 2026-03-31 would give).
+    assert "/2026-27/" in serial
+
+
+# ============================================================================
 # 1. FY serial: consecutive per entity+FY + collision-safe (atomic)
 # ============================================================================
 
