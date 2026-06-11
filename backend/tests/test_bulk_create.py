@@ -49,7 +49,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _row(**overrides) -> Any:
-    """Build a valid ProductCreate, overriding any field."""
+    """Build a valid ProductCreate, overriding any field.
+
+    Step-9: the canonical registry is now the rulebook at the bulk door, so a
+    VALID frame row must carry its category-conditional required fields. A FRAME
+    needs colour_code -- supplied here via `color` (the flat schema folds
+    color -> colour_code) so the default row is genuinely complete.
+    """
     from api.routers.products import ProductCreate
 
     base = {
@@ -57,8 +63,32 @@ def _row(**overrides) -> Any:
         "category": "FRAME",
         "brand": "Acme",
         "model": "M1",
+        "color": "BLK",
         "mrp": 1000.0,
         "offer_price": 900.0,
+    }
+    base.update(overrides)
+    return ProductCreate(**base)
+
+
+def _cl_row(**overrides) -> Any:
+    """Build a VALID contact-lens ProductCreate. A CONTACT_LENS needs
+    model_name + power + expiry_date (step-9 reconcile) in `attributes`."""
+    from api.routers.products import ProductCreate
+
+    base = {
+        "sku": "RG-CL-1",
+        "category": "CONTACT_LENS",
+        "brand": "Acuvue",
+        "model": "Oasys",
+        "mrp": 1200.0,
+        "offer_price": 1100.0,
+        "attributes": {
+            "brand_name": "Acuvue",
+            "model_name": "Oasys",
+            "power": "-2.00",
+            "expiry_date": "2027-01-01",
+        },
     }
     base.update(overrides)
     return ProductCreate(**base)
@@ -107,18 +137,15 @@ class TestValidateBulkRow:
     def test_bad_modality_rejected(self):
         from api.routers.products import _validate_bulk_row
 
-        errors = _validate_bulk_row(
-            _row(category="CONTACT_LENS", modality="WEEKLY"), set()
-        )
+        errors = _validate_bulk_row(_cl_row(modality="WEEKLY"), set())
         assert any("modality" in e.lower() for e in errors)
 
     def test_good_modality_ok(self):
         from api.routers.products import _validate_bulk_row
 
-        assert (
-            _validate_bulk_row(_row(category="CONTACT_LENS", modality="DAILY"), set())
-            == []
-        )
+        # A complete CL row (model_name + power + expiry_date) with a good
+        # modality has no errors.
+        assert _validate_bulk_row(_cl_row(modality="DAILY"), set()) == []
 
     def test_duplicate_sku_in_batch_rejected(self):
         from api.routers.products import _validate_bulk_row
@@ -245,6 +272,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M1",
+                "color": "BLK",
                 "mrp": 1000.0,
                 "offer_price": 900.0,
             },
@@ -253,6 +281,7 @@ class TestBulkCreateEndpoint:
                 "category": "SUNGLASS",
                 "brand": "B",
                 "model": "M2",
+                "color": "BLK",
                 "mrp": 2000.0,
                 "offer_price": 1800.0,
             },
@@ -274,6 +303,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M1",
+                "color": "BLK",
                 "mrp": 1000.0,
                 "offer_price": 900.0,
             },
@@ -283,6 +313,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M2",
+                "color": "BLK",
                 "mrp": 1000.0,
                 "offer_price": 1500.0,
             },
@@ -292,6 +323,7 @@ class TestBulkCreateEndpoint:
                 "category": "WIDGET",
                 "brand": "B",
                 "model": "M3",
+                "color": "BLK",
                 "mrp": 500.0,
                 "offer_price": 400.0,
             },
@@ -318,6 +350,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M1",
+                "color": "BLK",
                 "mrp": 1000.0,
                 "offer_price": 900.0,
             },
@@ -326,6 +359,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M2",
+                "color": "BLK",
                 "mrp": 1100.0,
                 "offer_price": 1000.0,
             },
@@ -350,6 +384,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M0",
+                "color": "BLK",
                 "mrp": 999.0,
                 "offer_price": 999.0,
                 "is_active": True,
@@ -362,6 +397,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M1",
+                "color": "BLK",
                 "mrp": 1000.0,
                 "offer_price": 900.0,
             },
@@ -384,6 +420,7 @@ class TestBulkCreateEndpoint:
                 "category": "FRAME",
                 "brand": "B",
                 "model": "M1",
+                "color": "BLK",
                 "mrp": 1000.0,
                 "offer_price": 900.0,
             },
@@ -424,6 +461,7 @@ _VALID_BATCH = {
             "category": "FRAME",
             "brand": "B",
             "model": "M1",
+            "color": "BLK",
             "mrp": 1000.0,
             "offer_price": 900.0,
         }

@@ -68,6 +68,11 @@ _BASE_BODY = {
     "sku": "SKU-GSTTEST-1",
     "brand": "Fastrack",
     "model": "P357BK1",
+    # Step-9: a FRAME now needs colour_code (folded from `color`) to pass the
+    # canonical registry's required-field gate. The category-rejection tests
+    # below fail earlier on the (blank/null/unknown) category, so this is inert
+    # for them and only makes the accepts-FRAME case a genuinely complete frame.
+    "color": "BLK",
     "mrp": 1000.0,
     "offer_price": 900.0,
 }
