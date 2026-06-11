@@ -18,6 +18,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
+import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 
 interface ReturnItem {
   product_id: string;
@@ -96,6 +97,10 @@ export function VendorReturns() {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [expandedReturn, setExpandedReturn] = useState<string | null>(null);
+  // F20: issued GST debit notes keyed by source return_id (one per return). The
+  // physical return is unchanged; this is the formal debiting document layer.
+  const [debitNotes, setDebitNotes] = useState<Record<string, DebitNote>>({});
+  const [dnBusy, setDnBusy] = useState<string | null>(null);
 
   // Form state
   const [selectedVendor, setSelectedVendor] = useState('');
@@ -121,6 +126,22 @@ export function VendorReturns() {
 
         setReturns(returnsResp.data.returns || []);
         setVendors(vendorsResp.data.vendors || vendorsResp.data.items || []);
+
+        // F20: map any already-issued debit notes to their source return so the
+        // row shows "Issued" + serial (fail-soft: a load error just hides them).
+        try {
+          const dnResp = await rtvDebitNotesApi.list({
+            store_id: activeStoreId || undefined,
+            limit: 100,
+          });
+          const map: Record<string, DebitNote> = {};
+          for (const dn of dnResp.debit_notes || []) {
+            if (dn.rtv_ref_id) map[dn.rtv_ref_id] = dn;
+          }
+          setDebitNotes(map);
+        } catch {
+          /* debit notes optional; ignore */
+        }
       } catch {
         toast.error('Failed to load vendor returns');
       } finally {
@@ -201,6 +222,53 @@ export function VendorReturns() {
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch {
       toast.error('Failed to update return status');
+    }
+  };
+
+  // F20: issue (or re-fetch the existing) GST debit note for a return. Idempotent
+  // server-side -- a re-issue returns the first note with no new serial.
+  const handleIssueDebitNote = async (returnId: string) => {
+    setDnBusy(returnId);
+    try {
+      const res = await rtvDebitNotesApi.issue(returnId, 'vendor_return');
+      setDebitNotes((prev) => ({ ...prev, [returnId]: res.debit_note }));
+      toast.success(
+        res.idempotent
+          ? `Debit note already issued: ${res.debit_note.debit_note_number}`
+          : `Debit note ${res.debit_note.debit_note_number} issued`,
+      );
+    } catch {
+      toast.error('Failed to issue debit note (vendor/AP role required)');
+    } finally {
+      setDnBusy(null);
+    }
+  };
+
+  const handlePrintDebitNote = async (debitNoteId: string) => {
+    try {
+      const html = await rtvDebitNotesApi.fetchPrintHtml(debitNoteId);
+      const w = window.open('', '_blank');
+      if (w) {
+        w.document.write(html);
+        w.document.close();
+      }
+    } catch {
+      toast.error('Failed to open debit note');
+    }
+  };
+
+  const handleExportTally = async (debitNoteId: string, serial: string) => {
+    try {
+      const xml = await rtvDebitNotesApi.fetchTallyXml(debitNoteId);
+      const blob = new Blob([xml], { type: 'application/xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${serial.replace(/[/\\]/g, '-')}-tally.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('Failed to export Tally voucher');
     }
   };
 
@@ -364,6 +432,62 @@ export function VendorReturns() {
                         <p className="text-green-600 font-semibold">{ret.credit_note_number}</p>
                       </div>
                     )}
+                  </div>
+
+                  {/* F20: GST Debit Note (the formal document debiting the vendor) */}
+                  <div className="pt-4 border-t border-gray-300">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-gray-500 text-sm mb-1">GST Debit Note</p>
+                        {debitNotes[ret.return_id] ? (
+                          <p className="text-gray-900 font-semibold">
+                            {debitNotes[ret.return_id].debit_note_number}
+                            <span className="ml-2 text-gray-500 font-normal text-sm">
+                              ₹
+                              {(
+                                debitNotes[ret.return_id].totals_rupees?.grand_total ?? 0
+                              ).toLocaleString()}
+                              {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
+                            </span>
+                          </p>
+                        ) : (
+                          <p className="text-gray-400 text-sm">Not yet issued</p>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        {debitNotes[ret.return_id] ? (
+                          <>
+                            <button
+                              onClick={() =>
+                                handlePrintDebitNote(debitNotes[ret.return_id].debit_note_id)
+                              }
+                              className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
+                            >
+                              Print
+                            </button>
+                            <button
+                              onClick={() =>
+                                handleExportTally(
+                                  debitNotes[ret.return_id].debit_note_id,
+                                  debitNotes[ret.return_id].debit_note_number,
+                                )
+                              }
+                              className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
+                            >
+                              Export Tally
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            disabled={dnBusy === ret.return_id}
+                            onClick={() => handleIssueDebitNote(ret.return_id)}
+                            className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white px-3 py-1.5 rounded text-sm font-medium transition"
+                          >
+                            {dnBusy === ret.return_id ? 'Issuing...' : 'Issue Debit Note'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
 
                   {/* Action Buttons */}
