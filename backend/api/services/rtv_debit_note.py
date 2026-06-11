@@ -183,14 +183,16 @@ def state_code_of(*candidates: Any) -> str:
 
 def financial_year_label(dt: Optional[datetime] = None) -> str:
     """Indian FY label (e.g. ``2026-27``) for an instant (FY starts 1 April IST).
-    Reuses ``utils.ist.fy_start_year_ist`` with a safe inline fallback."""
+    Reuses ``utils.ist.fy_start_year_ist`` with a safe inline fallback. P1-2: when
+    no instant is given, default to an IST instant (NOT UTC) so the FY boundary is
+    correct in the 00:00-05:30 IST window near 1-Apr."""
+    dt = dt or _now_ist()
     try:
         from api.utils.ist import fy_start_year_ist
 
         start = fy_start_year_ist(dt)
     except Exception:  # noqa: BLE001
-        d = dt or _now()
-        start = d.year if d.month >= 4 else d.year - 1
+        start = dt.year if dt.month >= 4 else dt.year - 1
     return f"{start}-{str(start + 1)[-2:]}"
 
 
@@ -322,7 +324,7 @@ def build_debit_note(
     totals["grand_total_paise"] = totals["taxable_paise"] + totals["tax_paise"]
 
     fy = financial_year or financial_year_label()
-    issued = issue_date or _now().date().isoformat()
+    issued = issue_date or _now_ist().date().isoformat()
 
     rtv_type = "vendor_rma" if rtv_doc.get("rma_id") else "vendor_return"
     rtv_id = rtv_doc.get("rma_id") or rtv_doc.get("return_id") or rtv_doc.get("id")
@@ -746,6 +748,84 @@ class DebitNoteEngine:
         except Exception:  # noqa: BLE001
             return []
 
+    def _find_product(self, key: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Look up a product by sku or product_id (products, then catalog_products)."""
+        if self._db is None or not key:
+            return None
+        try:
+            for coll_name in ("products", "catalog_products"):
+                c = self._db.get_collection(coll_name)
+                doc = c.find_one({"sku": key}) or c.find_one({"product_id": key})
+                if doc:
+                    return doc
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def _enrich_lines_gst(self, src_lines):
+        """P1: the source vendor_returns / vendor_rma line docs do NOT persist
+        gst_rate or hsn, so a debit note built straight off them would compute
+        ZERO tax + blank HSN (a silently tax-free ITC-reversal document). Resolve
+        both PER LINE from the PRODUCT -- the same source the sales invoice uses
+        (product.gst_rate -> category GST map; product.hsn -> category HSN map).
+        An explicit non-zero rate already on the line wins (manual override).
+
+        FAIL LOUD: a line with a taxable qty whose GST rate cannot be resolved at
+        all (no explicit rate, no product, no category) returns an error rather
+        than silently emitting 0% -- a tax document must never carry an unknown
+        rate. A legitimately resolved 0% (e.g. a 0%-GST category) is fine.
+        Returns (enriched_lines, error_or_None)."""
+        try:
+            from api.services.gst_rates import gst_rate_for_category, hsn_for_category
+        except Exception:  # noqa: BLE001
+            gst_rate_for_category = None  # type: ignore[assignment]
+            hsn_for_category = None  # type: ignore[assignment]
+
+        out: List[Dict[str, Any]] = []
+        for raw in (src_lines or []):
+            ln = dict(raw)
+            explicit = ln.get("gst_rate")
+            if explicit in (None, "", 0, 0.0):
+                explicit = ln.get("tax_rate")
+            has_explicit = explicit not in (None, "", 0, 0.0)
+            has_hsn = bool(ln.get("hsn") or ln.get("hsn_code"))
+
+            prod = None
+            if not (has_explicit and has_hsn):
+                prod = self._find_product(ln.get("sku") or ln.get("product_id"))
+            category = (prod or {}).get("category") or ln.get("category")
+
+            resolved_rate: Optional[float] = float(explicit) if has_explicit else None
+            if resolved_rate is None:
+                pr = (prod or {}).get("gst_rate")
+                if pr not in (None, ""):
+                    resolved_rate = float(pr)
+                elif category and gst_rate_for_category is not None:
+                    try:
+                        resolved_rate = float(gst_rate_for_category(category))
+                    except Exception:  # noqa: BLE001
+                        resolved_rate = None
+
+            if not has_hsn:
+                hsn = (prod or {}).get("hsn") or (prod or {}).get("hsn_code")
+                if not hsn and category and hsn_for_category is not None:
+                    try:
+                        hsn = hsn_for_category(category)
+                    except Exception:  # noqa: BLE001
+                        hsn = None
+                if hsn:
+                    ln["hsn"] = str(hsn)
+
+            qty = ln.get("qty") or ln.get("return_qty") or ln.get("quantity") or 0
+            if resolved_rate is None:
+                # Truly unresolved (no explicit rate, no product, no category).
+                if qty:
+                    return [], f"gst_unresolved:{ln.get('sku') or ln.get('product_id') or '?'}"
+                resolved_rate = 0.0
+            ln["gst_rate"] = resolved_rate
+            out.append(ln)
+        return out, None
+
     def issue(
         self,
         rtv_doc: Dict[str, Any],
@@ -771,9 +851,17 @@ class DebitNoteEngine:
         if existing is not None:
             return {"ok": True, "idempotent": True, "debit_note": existing}
 
+        # P1: resolve the source lines + enrich each with product-derived GST
+        # rate + HSN (the source RTV docs don't persist them). Fail loud on a
+        # taxable line whose GST is unresolvable rather than emit a 0% tax doc.
+        src_lines = lines if lines else (rtv_doc.get("lines") or rtv_doc.get("items") or [])
+        enriched, gst_err = self._enrich_lines_gst(src_lines)
+        if gst_err:
+            return {"ok": False, "http": 422, "error": gst_err}
+
         entity_id = rtv_doc.get("entity_id") or (seller or {}).get("entity_id")
         serial = next_debit_note_number(self._db, entity_id)
-        note = build_debit_note(rtv_doc, vendor, lines or [], serial, seller=seller)
+        note = build_debit_note(rtv_doc, vendor, enriched, serial, seller=seller)
 
         debit_note_id = f"DN-{uuid.uuid4().hex[:12].upper()}"
         doc = dict(note)
