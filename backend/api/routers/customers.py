@@ -360,6 +360,80 @@ class CustomerUpdate(BaseModel):
         return _check_dob_not_future(v)
 
 
+# ---------------------------------------------------------------------------
+# Channel segregation (unification step-4)
+# ---------------------------------------------------------------------------
+# Online buyers and in-store customers live in the ONE `customers` collection
+# (parity -- a person who shops both is a single mobile-deduped record). They are
+# told apart not by a separate silo but by an ORIGIN tag: the canonical
+# ensure_customer skeleton stamps channel='ONLINE'/source='ONLINE' on a
+# Shopify-created record, and every online-joined customer (new skeleton OR
+# pre-step-5) carries a `shopify_customer_id`. Any of those three marks a row as
+# online-origin; their ABSENCE marks an in-store/staff-entered (POS/CLINIC/
+# WALKOUT) customer. This builder turns a ?channel= value into the Mongo clause
+# that segregates the two.
+
+# Aliases the FE/segments may pass for the in-store side.
+_ONLINE_CHANNEL_VALUES = {"ONLINE", "SHOPIFY", "ECOM", "ECOMMERCE", "WEB"}
+_STORE_CHANNEL_VALUES = {"STORE", "WALKIN", "WALK-IN", "WALK_IN", "POS", "OFFLINE", "INSTORE", "IN-STORE"}
+
+
+def _online_origin_or() -> List[Dict[str, Any]]:
+    """The OR-branches that identify an online-origin customer (any one matches)."""
+    return [
+        {"channel": "ONLINE"},
+        {"source": "ONLINE"},
+        # Legacy Shopify-joined rows predate the channel/source tag but always
+        # carry the Shopify linkage id.
+        {"shopify_customer_id": {"$exists": True, "$nin": [None, ""]}},
+    ]
+
+
+def _row_is_online_origin(row: Dict[str, Any]) -> bool:
+    """True when a customer DOC is online-origin (mirrors `_online_origin_or`):
+    channel/source == 'ONLINE' OR a non-empty shopify_customer_id."""
+    if str(row.get("channel") or "").upper() == "ONLINE":
+        return True
+    if str(row.get("source") or "").upper() == "ONLINE":
+        return True
+    sid = row.get("shopify_customer_id")
+    return bool(sid) and sid not in (None, "")
+
+
+def _row_matches_channel(row: Dict[str, Any], channel: Optional[str]) -> bool:
+    """In-Python equivalent of `_build_channel_clause` for the search path (which
+    returns repo rows, not a Mongo cursor). Unknown channel -> keep the row."""
+    if not channel:
+        return True
+    val = str(channel).strip().upper()
+    if val in _ONLINE_CHANNEL_VALUES:
+        return _row_is_online_origin(row)
+    if val in _STORE_CHANNEL_VALUES:
+        return not _row_is_online_origin(row)
+    return True
+
+
+def _build_channel_clause(channel: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Return a Mongo filter fragment segregating online-origin vs in-store
+    customers, or None when no recognised channel was requested (no filtering).
+
+    - channel in {ONLINE, SHOPIFY, ...}  -> only online-origin rows ($or of the
+      three online markers).
+    - channel in {STORE, WALKIN, POS, ...} -> only in-store rows (NONE of the
+      three online markers -> a $nor).
+    Unknown / blank values return None (caller leaves the list unfiltered) so a
+    stray query value can never silently empty the customer list.
+    """
+    if not channel:
+        return None
+    val = str(channel).strip().upper()
+    if val in _ONLINE_CHANNEL_VALUES:
+        return {"$or": _online_origin_or()}
+    if val in _STORE_CHANNEL_VALUES:
+        return {"$nor": _online_origin_or()}
+    return None
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -369,6 +443,19 @@ class CustomerUpdate(BaseModel):
 async def list_customers(
     search: Optional[str] = Query(None),
     customer_type: Optional[str] = Query(None),
+    channel: Optional[str] = Query(
+        None,
+        description=(
+            "Segregate by ORIGIN channel (unification step-4). 'ONLINE' (aliases "
+            "SHOPIFY/ECOM/WEB) returns only online-origin buyers; 'STORE' (aliases "
+            "WALKIN/POS/OFFLINE) returns only in-store/staff-entered customers. "
+            "Online and in-store customers live in the ONE customers collection -- "
+            "this tag, not a separate silo, is how they are told apart. An online "
+            "buyer later served in-store keeps channel=ONLINE (their origin) but "
+            "still shows in-store activity via their orders. Omit to see everyone. "
+            "An unrecognised value is ignored (never silently empties the list)."
+        ),
+    ),
     store_id: Optional[str] = Query(
         None,
         description=(
@@ -395,6 +482,12 @@ async def list_customers(
     customers). Before May 2026 only home_store_id was checked, which
     silently hid the 5,022 TechCherry-imported customers from /customers
     even when filtered by BV-PUN-01.
+
+    Channel segregation (unification step-4): pass ?channel=ONLINE to see only
+    online-origin (Shopify) buyers, or ?channel=STORE to exclude them. Online
+    customers are unified into the SAME collection but stay identifiable by the
+    canonical channel/source/shopify_customer_id tag -- this filter exposes that
+    segregation to every list/segment built on /customers.
     """
     repo = get_customer_repository()
 
@@ -414,19 +507,38 @@ async def list_customers(
             # Store-level roles: always pinned to active_store_id.
             effective_store = current_user.get("active_store_id")
 
+        store_clause: Optional[Dict[str, Any]] = None
         if effective_store:
             # Match either home_store_id (seed/old) or preferred_store_id
             # (TechCherry import + future inserts).
-            filter_dict["$or"] = [
-                {"home_store_id": effective_store},
-                {"preferred_store_id": effective_store},
-            ]
+            store_clause = {
+                "$or": [
+                    {"home_store_id": effective_store},
+                    {"preferred_store_id": effective_store},
+                ]
+            }
 
-        # If search provided, use search method (also respects store filter)
+        # Channel segregation (step-4): online-origin vs in-store, by tag.
+        channel_clause = _build_channel_clause(channel)
+
+        # Compose the store + channel clauses. Both can carry their own top-level
+        # boolean operator ($or for store, $or/$nor for channel), so when BOTH are
+        # present we AND them under $and rather than letting one overwrite the
+        # other's key. (Before this, only the store $or existed.)
+        sub_clauses = [c for c in (store_clause, channel_clause) if c]
+        if len(sub_clauses) == 2:
+            filter_dict["$and"] = sub_clauses
+        elif sub_clauses:
+            filter_dict.update(sub_clauses[0])
+
+        # If search provided, use search method (also respects store filter).
+        # The search path can't compose the $and, so the channel tag is applied
+        # post-hoc to the search results to keep segregation consistent.
         if search:
-            customers = _annotate_customer_matches(
-                repo.search_customers(search, effective_store), search
-            )
+            rows = repo.search_customers(search, effective_store)
+            if channel_clause is not None:
+                rows = [r for r in rows if _row_matches_channel(r, channel)]
+            customers = _annotate_customer_matches(rows, search)
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 

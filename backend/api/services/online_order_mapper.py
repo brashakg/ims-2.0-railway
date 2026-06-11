@@ -539,18 +539,38 @@ def _sync_existing_order_status(
         return False
 
 
-def _stamp_order_customer(db, shopify_order_id: str, customer_id: str) -> None:
-    """Best-effort: stamp the resolved customer_id onto the freshly created order
-    doc (ingest doesn't know about the matched IMS customer). Fail-soft."""
-    if db is None or not shopify_order_id or not customer_id:
+def _stamp_order_customer(
+    db, shopify_order_id: str, customer_id: Optional[str]
+) -> None:
+    """Best-effort: reconcile the freshly created order doc's customer linkage with
+    the customer the MAPPER actually resolved (ingest doesn't know about the matched
+    IMS customer -- it copies the raw Shopify ``customer.id`` onto the order).
+
+    Two cases (unification step-4 -- phantom-profile fix):
+      * customer_id resolved -> stamp the canonical IMS ``customer_id`` so CRM /
+        loyalty / AR see the same buyer.
+      * customer_id is None (a GUEST: no usable phone AND no email, so NO IMS
+        customer was minted) -> NULL the order's ``customer_id`` (it currently holds
+        the raw Shopify id, a dangling non-IMS reference) and mark the order as a
+        guest. The buyer's name/phone remain on the order's ``customer_name`` /
+        ``customer_phone`` snapshot, so the sale is fully recorded against an
+        unidentified buyer instead of a phantom customer record.
+
+    Fail-soft: any error is swallowed (the order itself is already created)."""
+    if db is None or not shopify_order_id:
         return
     try:
         orders_coll = db.get_collection("orders")
         if orders_coll is None:
             return
+        if customer_id:
+            update = {"customer_id": customer_id, "is_guest_order": False}
+        else:
+            # GUEST path: clear the phantom Shopify-id link, mark unidentified.
+            update = {"customer_id": None, "is_guest_order": True}
         orders_coll.update_one(
             {"shopify_order_id": shopify_order_id},
-            {"$set": {"customer_id": customer_id}},
+            {"$set": update},
         )
     except Exception:  # noqa: BLE001
         logger.debug("[ONLINE_MAP] customer_id stamp failed", exc_info=True)
@@ -656,7 +676,12 @@ def map_shopify_order(
         result = result if isinstance(result, dict) else {"status": "error"}
         status = result.get("status")
 
-        if status == "created" and customer_id:
+        # Reconcile the created order's customer linkage with what the mapper
+        # resolved. ALWAYS run on a create (not only when a customer matched): a
+        # GUEST (no phone + no email -> customer_id is None) must have the raw
+        # Shopify-id link cleared to NULL + be marked is_guest_order, so a buyer we
+        # can never dedup is recorded as an unidentified sale, NOT a phantom record.
+        if status == "created":
             _stamp_order_customer(db, shopify_order_id, customer_id)
 
         # On a duplicate / replayed delivery the order already exists -> SYNC its
