@@ -193,6 +193,7 @@ def _create(sku: str):
         category="FRAME",
         brand="B",
         model="M",
+        color="Black",  # FRAME requires colour_code under the step-9 strict gate
         mrp=1000.0,
         offer_price=900.0,
     )
