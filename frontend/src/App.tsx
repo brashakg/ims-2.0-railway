@@ -87,6 +87,7 @@ const GoLiveChecklistPage = lazy(() => import('./pages/settings/GoLiveChecklistP
 // now redirect to the real PurchaseManagementPage tabs below.
 const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
 const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
+const VendorRMA = lazy(() => import('./pages/purchase/VendorRMA').then(m => ({ default: m.VendorRMA })));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const OpeningStockImport = lazy(() => import('./pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
@@ -785,6 +786,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']}>
                         <VendorReturns />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* N4: Vendor RMA + credit-note reconciliation (vendor/AP roles) */}
+                  <Route
+                    path="purchase/vendor-rma"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <VendorRMA />
                       </ProtectedRoute>
                     }
                   />
