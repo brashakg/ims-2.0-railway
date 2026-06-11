@@ -78,6 +78,38 @@ def _mk_job(
     return doc
 
 
+# ---------------------------------------------------------------------------
+# IST day-boundary flake freeze (mirrors the #629 pattern)
+# ---------------------------------------------------------------------------
+# The overdue tests below seed "yesterday"/"today"/"tomorrow" jobs and assert an
+# overdue count. The code under test resolves "today" from a wall clock:
+#   * dashboard-kpis handler -> workshop_module.datetime.now().date()  (server/UTC)
+#   * repo.find_overdue      -> workshop_repository.ist_today()        (IST)
+# A naive seed via date.today() (UTC on the CI runner) diverges from the IST date
+# resolved by find_overdue between 18:30-24:00 UTC (= 00:00-05:30 IST): a job
+# seeded for UTC-"today" is then compared against IST-"tomorrow" and flips
+# overdue/not-overdue nondeterministically -> nightly CI flake that blocks
+# unrelated merges (it just blocked #640).
+#
+# Fix: freeze the SAME clock symbol the code-under-test reads to a fixed mid-month
+# date, and seed yesterday/today/tomorrow RELATIVE to that frozen date (not the
+# wall clock). The frozen date removes the UTC-vs-IST divergence entirely, so the
+# assertions hold regardless of wall-clock time / runner timezone.
+FROZEN_TODAY = date(2026, 6, 15)  # mid-month: no month/year rollover at +/-1 day
+
+
+class _FrozenDateTime(datetime):
+    """datetime subclass whose .now() is pinned to FROZEN_TODAY @ 10:00.
+
+    Used to freeze the dashboard-kpis handler's ``datetime.now()`` (it reads
+    ``workshop_module.datetime``) so ``now.date()`` == FROZEN_TODAY deterministically.
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(FROZEN_TODAY.year, FROZEN_TODAY.month, FROZEN_TODAY.day, 10, 0, 0)
+
+
 class FakeRepo:
     """Lightweight WorkshopJobRepository double — holds an in-memory job dict."""
 
@@ -301,9 +333,17 @@ class TestUpdateJobImmutabilityGuard:
 
 
 class TestOverdueDetection:
-    """Dashboard KPIs overdue count: today's jobs must NOT be flagged overdue."""
+    """Dashboard KPIs overdue count: today's jobs must NOT be flagged overdue.
+
+    IST day-boundary determinism: the dashboard-kpis handler computes "today" from
+    ``datetime.now().date()`` (it reads ``workshop_module.datetime``). We freeze
+    that symbol to FROZEN_TODAY and seed expected_date RELATIVE to FROZEN_TODAY so
+    the comparison is clock-independent regardless of the runner timezone.
+    """
 
     def _kpi_overdue(self, monkeypatch, expected_date: str) -> int:
+        # Freeze the handler's datetime.now() so today_str == FROZEN_TODAY.
+        monkeypatch.setattr(workshop_module, "datetime", _FrozenDateTime)
         job = _mk_job("j1", "PENDING", expected_date=expected_date)
         repo = FakeRepo([job])
         client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
@@ -312,17 +352,17 @@ class TestOverdueDetection:
         return resp.json()["overdue"]
 
     def test_yesterday_overdue(self, monkeypatch):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (FROZEN_TODAY - timedelta(days=1)).isoformat()
         assert self._kpi_overdue(monkeypatch, yesterday) == 1
 
     def test_today_not_overdue(self, monkeypatch):
         # Bug fix: was comparing datetime string vs date string, causing
-        # same-day jobs to appear overdue.
-        today = date.today().isoformat()
+        # same-day jobs to appear overdue. Seed relative to the frozen "today".
+        today = FROZEN_TODAY.isoformat()
         assert self._kpi_overdue(monkeypatch, today) == 0
 
     def test_tomorrow_not_overdue(self, monkeypatch):
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        tomorrow = (FROZEN_TODAY + timedelta(days=1)).isoformat()
         assert self._kpi_overdue(monkeypatch, tomorrow) == 0
 
 
@@ -510,12 +550,27 @@ class TestQcHistory:
 
 
 class TestWorkshopRepositoryOverdue:
-    """find_overdue: date-only boundary (today NOT overdue, yesterday IS)."""
+    """find_overdue: date-only boundary (today NOT overdue, yesterday IS).
 
-    def _make_repo_with_jobs(self, jobs):
-        """Return a WorkshopJobRepository backed by an in-memory store."""
+    IST day-boundary determinism: ``find_overdue`` resolves "today" via
+    ``ist_today()`` (it reads ``workshop_repository.ist_today``). We freeze that
+    symbol to FROZEN_TODAY and seed expected_date RELATIVE to FROZEN_TODAY. Without
+    the freeze, a job seeded for UTC ``date.today()`` is compared against the IST
+    date, which leads UTC by one day in the 00:00-05:30 IST window, flipping the
+    overdue verdict nondeterministically (the nightly flake that blocked #640).
+    """
+
+    def _make_repo_with_jobs(self, monkeypatch, jobs):
+        """Return a WorkshopJobRepository backed by an in-memory store.
+
+        Freezes ``workshop_repository.ist_today`` to FROZEN_TODAY so find_overdue's
+        "today" boundary is wall-clock independent.
+        """
+        from database.repositories import workshop_repository as workshop_repo_module
         from database.repositories.workshop_repository import WorkshopJobRepository
         from unittest.mock import MagicMock
+
+        monkeypatch.setattr(workshop_repo_module, "ist_today", lambda: FROZEN_TODAY)
 
         fake_collection = MagicMock()
         repo = WorkshopJobRepository(fake_collection)
@@ -542,18 +597,18 @@ class TestWorkshopRepositoryOverdue:
         repo.find_many = _find_many
         return repo
 
-    def test_yesterday_is_overdue(self):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+    def test_yesterday_is_overdue(self, monkeypatch):
+        yesterday = (FROZEN_TODAY - timedelta(days=1)).isoformat()
         repo = self._make_repo_with_jobs(
-            [_mk_job("yesterday", "PENDING", expected_date=yesterday)]
+            monkeypatch, [_mk_job("yesterday", "PENDING", expected_date=yesterday)]
         )
         overdue = repo.find_overdue("BV-TEST-01")
         assert any(j["job_id"] == "yesterday" for j in overdue)
 
-    def test_today_not_overdue(self):
-        today = date.today().isoformat()
+    def test_today_not_overdue(self, monkeypatch):
+        today = FROZEN_TODAY.isoformat()
         repo = self._make_repo_with_jobs(
-            [_mk_job("today", "PENDING", expected_date=today)]
+            monkeypatch, [_mk_job("today", "PENDING", expected_date=today)]
         )
         overdue = repo.find_overdue("BV-TEST-01")
         assert not any(j["job_id"] == "today" for j in overdue)
