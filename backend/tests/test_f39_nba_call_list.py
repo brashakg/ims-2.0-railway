@@ -373,6 +373,19 @@ def test_t2_vip_slots_reserved_at_top():
 
 
 def test_t3_fifteen_card_cap_via_api(monkeypatch):
+    # IST-boundary determinism: the API path does NOT inject `now`, so
+    # score_nba falls back to datetime.now() (UTC), but the 20 filler follow-ups
+    # are seeded with scheduled_date=TODAY (= nba._today_ist(), an IST date). In
+    # the 00:00-05:30 IST (18:30-24:00 UTC) window the IST date leads the UTC
+    # date, so the fu_due_today filter (scheduled_date <= now.date()) drops every
+    # filler and the card count falls below 15. Freeze the scoring clock to the
+    # same NOW (TODAY @ 10:00 IST-date) the seed is built from so the API path is
+    # clock-independent.
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+    monkeypatch.setattr(nba, "datetime", _FrozenDateTime)
     db = _seed_db_for_scoring()
     client = _crm_client(db, monkeypatch)
     r = client.get(f"/api/v1/crm/nba/{STORE}", headers=_hdr(("STORE_MANAGER",)))
