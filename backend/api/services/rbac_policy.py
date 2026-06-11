@@ -4913,6 +4913,48 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
         "store_scoped": True,
     },
+    # --- /api/v1/rtv-debit-notes (F20 GST debit note ON TOP of an RTV) ---
+    # The GST-compliant debit-note DOCUMENT issued to a vendor when goods are
+    # returned. Issuing + Tally export are gated to the same vendor/AP role set
+    # vendor_returns / vendor_rma use (a cashier can NEVER issue a debit note).
+    # GET list/detail/print are AUTHENTICATED but store-scoped per object in the
+    # handler (validate_store_access / resolve_store_scope).
+    {
+        "method": "GET",
+        "path": "/api/v1/rtv-debit-notes",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/rtv-debit-notes/",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/rtv-debit-notes/issue",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/rtv-debit-notes/{debit_note_id}",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     # --- /api/v1/vendors ---
     {"method": "GET", "path": "/api/v1/vendors", "allowed": "AUTHENTICATED"},
     {
