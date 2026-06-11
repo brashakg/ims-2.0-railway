@@ -63,23 +63,40 @@ def _now_iso() -> str:
 @router.get("/discounts/rules")
 async def get_discount_rules():
     """Category + brand caps. Returns the canonical caps from CLAUDE.md
-    as defaults, overlaid with any DB overrides."""
+    as defaults, overlaid with any DB overrides.
+
+    Unification step-8: the cap NUMBERS are sourced from the single source of
+    truth -- services/pricing_caps (the same constants the POS actually enforces
+    and that GET /discounts/enforced-caps exposes) -- instead of a hand-copied
+    duplicate that could silently drift from what POS bills. The output shape is
+    preserved exactly (whole-number values, title-cased luxury brand display
+    names) so this endpoint's response is byte-for-byte unchanged.
+    """
+    from ..services.pricing_caps import (
+        CATEGORY_DISCOUNT_CAPS,
+        LUXURY_BRAND_CAPS,
+    )
+
+    # Whole-number presentation (15, not 15.0) preserved for back-compat.
+    def _whole(v: float):
+        return int(v) if float(v).is_integer() else v
+
+    # Title-cased display names preserved for the brand keys (the canonical
+    # constants store them upper-cased; this maps back to the original casing).
+    _BRAND_DISPLAY = {
+        "CARTIER": "Cartier",
+        "CHOPARD": "Chopard",
+        "BVLGARI": "Bvlgari",
+        "GUCCI": "Gucci",
+        "PRADA": "Prada",
+        "VERSACE": "Versace",
+        "BURBERRY": "Burberry",
+    }
     defaults = {
-        "category_caps": {
-            "MASS": 15,
-            "PREMIUM": 20,
-            "LUXURY": 5,
-            "SERVICE": 10,
-            "NON_DISCOUNTABLE": 0,
-        },
+        "category_caps": {k: _whole(v) for k, v in CATEGORY_DISCOUNT_CAPS.items()},
         "luxury_brand_caps": {
-            "Cartier": 2,
-            "Chopard": 2,
-            "Bvlgari": 2,
-            "Gucci": 5,
-            "Prada": 5,
-            "Versace": 5,
-            "Burberry": 5,
+            _BRAND_DISPLAY.get(k, k.title()): _whole(v)
+            for k, v in LUXURY_BRAND_CAPS.items()
         },
     }
     coll = _coll("discount_rules")
