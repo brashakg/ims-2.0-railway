@@ -796,15 +796,24 @@ class ApprovalEngine:
         request_id: Optional[str] = None,
         approval_token: Optional[str] = None,
         amount: Optional[float] = None,
+        expected_store_id: Optional[str] = None,
+        expected_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Spend an APPROVED approval EXACTLY ONCE. A SINGLE atomic
         find_one_and_update guards status==APPROVED, consumed==false, not
         expired; flips to CONSUMED in the same op. Two racing consumes -> exactly
         one wins; the loser gets "already_consumed".
 
-        Post-match checks on the returned doc: action_type matches and (if an
-        amount is supplied) amount <= the approved amount. A mismatch is rolled
-        back so the approval is not silently burned on a bad spend.
+        Post-match checks on the returned doc: action_type matches; (if an amount
+        is supplied) amount <= the approved amount; and -- the P1-2 binding -- if
+        ``expected_store_id`` is supplied it must equal the approval's store_id,
+        and any key in ``expected_context`` must equal the approval's stored
+        ``context`` value for that key (e.g. {"rma_id": "RMA-..."}). This binds a
+        token to the exact resource + store it was minted for, so an APPROVED rtv
+        token cannot be replayed against another store or another RMA. The
+        binding is OPT-IN: callers that pass neither (the historical refund /
+        discount_override / journal_entry / leave consumers) are UNAFFECTED. Any
+        mismatch is rolled back so the approval is not silently burned.
         """
         from pymongo import ReturnDocument
 
@@ -852,6 +861,17 @@ class ApprovalEngine:
         elif amount is not None and updated.get("amount") is not None:
             if float(amount) > float(updated.get("amount")):
                 mismatch = "amount_exceeded"
+        elif expected_store_id is not None and updated.get("store_id") != expected_store_id:
+            # P1-2: a token minted for store A cannot be consumed against store B.
+            mismatch = "store_mismatch"
+        elif expected_context:
+            # P1-2: every supplied context key (e.g. rma_id) must match the value
+            # the approval was minted with -- binds the token to its exact resource.
+            stored_ctx = updated.get("context") or {}
+            for _k, _v in expected_context.items():
+                if stored_ctx.get(_k) != _v:
+                    mismatch = "context_mismatch"
+                    break
 
         if mismatch:
             try:

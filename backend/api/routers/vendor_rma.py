@@ -317,21 +317,31 @@ async def record_credit_note(
                                 store_id=doc.get("store_id")):
         token = (body.approval_token or "").strip() or None
         request_id = (body.approval_request_id or "").strip() or None
-        if not token and not request_id:
+        # P1-2: a concrete approval_request_id is REQUIRED -- a bare floating token
+        # alone is rejected so the consume path can re-validate the RMA/store
+        # binding against the named request (not just any token at/below tier).
+        if not request_id:
             raise HTTPException(
                 status_code=403,
                 detail={
                     "error": "approval_required",
                     "message": "This credit exceeds the maker-checker threshold; "
-                               "obtain an E4 approval (action_type 'rtv') and supply "
-                               "approval_token.",
+                               "obtain an E4 approval (action_type 'rtv') bound to "
+                               "this RMA + store and supply approval_request_id "
+                               "(and approval_token).",
                 },
             )
-        if not _consume_rtv_approval(token, request_id, recv_paise, current_user):
+        # P1-2: bind the consume to THIS rma + store. consume_approval re-validates
+        # the approval's store_id == the RMA's store AND its context.rma_id == this
+        # RMA, rolling back on a mismatch -- so a token minted for store-A/RMA-A
+        # cannot be replayed against store-B or RMA-B (maker-checker bypass).
+        if not _consume_rtv_approval(token, request_id, recv_paise, current_user,
+                                     store_id=doc.get("store_id"), rma_id=rma_id):
             raise HTTPException(
                 status_code=403,
                 detail={"error": "approval_invalid",
-                        "message": "approval token missing / expired / wrong tier"},
+                        "message": "approval missing / expired / wrong tier / "
+                                   "not bound to this RMA or store"},
             )
 
     res = eng.record_credit_note(
@@ -395,13 +405,19 @@ async def close_rma(
 # ============================================================================
 
 
-def _consume_rtv_approval(token, request_id, amount_paise, current_user) -> bool:
+def _consume_rtv_approval(token, request_id, amount_paise, current_user,
+                          *, store_id=None, rma_id=None) -> bool:
     """Atomically consume an E4 approval of action_type 'rtv'. SAFE DEFAULT: any
-    missing token, missing engine, or error -> False (the credit stays blocked).
-    Reuses the EXISTING E4 consume_approval -- it does NOT reimplement approvals.
-    The approval amount is in RUPEES (E4 stores amount in rupees); pass the
-    rupee value so the engine's amount<=approved guard holds."""
-    if not token and not request_id:
+    missing identifier, missing engine, or error -> False (the credit stays
+    blocked). Reuses the EXISTING E4 consume_approval -- it does NOT reimplement
+    approvals. The approval amount is in RUPEES (E4 stores amount in rupees);
+    pass the rupee value so the engine's amount<=approved guard holds.
+
+    P1-2: passes ``expected_store_id`` + ``expected_context={"rma_id": ...}`` so
+    consume_approval re-validates that the approval was minted for THIS store and
+    THIS RMA (rolling back on a mismatch). A token bound to store-A/RMA-A is
+    therefore rejected here when replayed on store-B or RMA-B."""
+    if not request_id:
         return False
     try:
         from ..services.approvals import ApprovalEngine
@@ -413,6 +429,8 @@ def _consume_rtv_approval(token, request_id, amount_paise, current_user) -> bool
             request_id=request_id,
             approval_token=token,
             amount=round(int(amount_paise) / 100.0, 2),
+            expected_store_id=store_id,
+            expected_context={"rma_id": rma_id} if rma_id else None,
         )
         return bool(res.get("ok"))
     except Exception as exc:  # noqa: BLE001
