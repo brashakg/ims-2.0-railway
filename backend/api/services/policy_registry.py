@@ -221,6 +221,16 @@ _REGISTRY_LIST: List[PolicySpec] = [
           group="Ageing & AR", label="Idle stock threshold (days)", minimum=1, maximum=730),
 
     # --- Serial / integrity ---
+    # F6 per-unit serial tracking: which CATEGORIES (UPPER-cased) require a unique
+    # serial captured per physical unit at stock-in (hearing aids, luxury frames,
+    # watches). DARK by default: an empty list forces NO serial anywhere, so a
+    # fresh deploy behaves exactly as today (non-serialized category is a no-op).
+    # Owner enables per scope (e.g. ["HEARING_AID","LUXURY"]).
+    _spec(key="inventory.serialized_categories", type="json", default=[],
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Serial & Integrity", label="Serialized categories (per-unit serial)",
+          help="Categories whose units carry a unique serial captured at stock-in "
+               "and tracked through sale to warranty/recall. Empty -> feature dark."),
     _spec(key="serial.return_mismatch_hard_block", type="bool", default=True,
           scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
           group="Serial & Integrity", label="Hard-block serial mismatch on return",
