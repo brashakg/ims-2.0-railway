@@ -109,13 +109,7 @@ export function WhatsAppInboxPage() {
 
   const allowed = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'];
   const activeRole = (user as { activeRole?: string })?.activeRole ?? '';
-  if (!allowed.includes(activeRole)) {
-    return (
-      <div className="p-8 text-center text-gray-500">
-        You do not have permission to view the WhatsApp inbox.
-      </div>
-    );
-  }
+  const hasAccess = allowed.includes(activeRole);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -132,8 +126,16 @@ export function WhatsAppInboxPage() {
   }, [filterHuman, offset]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (hasAccess) load();
+  }, [load, hasAccess]);
+
+  if (!hasAccess) {
+    return (
+      <div className="p-8 text-center text-gray-500">
+        You do not have permission to view the WhatsApp inbox.
+      </div>
+    );
+  }
 
   const lastMsg = (conv: WaConversation) => {
     const msgs = conv.messages ?? [];

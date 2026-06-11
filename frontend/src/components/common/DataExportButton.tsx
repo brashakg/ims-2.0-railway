@@ -52,7 +52,7 @@ export function DataExportButton({
       case 'excel': {
         // Excel export using TSV format that Excel can read natively.
         // BUG-139: convertToTSV neutralizes formula-injection per cell; the
-        // ﻿ BOM makes Excel open it as UTF-8 and keeps quoted cells as text.
+        // UTF-8 BOM (U+FEFF) makes Excel open it as UTF-8 and keeps quoted cells as text.
         const tsvContent = convertToTSV(exportData, columns);
         const blob = new Blob(['﻿' + tsvContent], { type: 'application/vnd.ms-excel;charset=utf-8;' });
         downloadBlob(blob, `${filenameWithTime}.xls`);
