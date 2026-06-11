@@ -133,6 +133,22 @@ def _require_repo():
     return repo
 
 
+def _materialize(collection_id: Optional[str]) -> None:
+    """Recompute a collection's materialised membership after a create/rule edit
+    (step-13). FULLY fail-soft -- never raises into the CRUD path; a no-op when
+    there is no live DB."""
+    if not collection_id:
+        return
+    try:
+        from ..services import collection_materializer as _mat
+
+        db = _get_db()
+        if db is not None:
+            _mat.refresh_collection(db, collection_id)
+    except Exception:  # noqa: BLE001 - materialise must never block a rule edit
+        pass
+
+
 def _with_id(doc):
     """Mirror the internal `collection_id` onto a stable `id` key so every FE
     consumer (which reads `row.id`) gets the same handle regardless of entity.
@@ -337,6 +353,8 @@ async def create_collection(
                 status_code=409, detail=f"handle already exists: {handle}"
             )
         raise HTTPException(status_code=500, detail="Failed to create collection")
+    # Step-13: materialise the new collection's membership (fail-soft).
+    _materialize(created.get("collection_id") or created.get("id"))
     return {"collection": _with_id(created)}
 
 
@@ -386,6 +404,9 @@ async def update_collection(
         return {"collection": _with_id(_with_normalized_rules(existing)), "updated": False}
 
     repo.update(collection_id, data)
+    # Step-13: a rule / type / membership-affecting edit re-materialises the
+    # collection so the browse view stays in step (fail-soft).
+    _materialize(collection_id)
     return {
         "collection": _with_id(_with_normalized_rules(repo.get_by_id(collection_id))),
         "updated": True,
@@ -428,6 +449,7 @@ async def add_collection_product(
     updated = repo.add_product(collection_id, sku, payload.position)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to add product")
+    _materialize(collection_id)
     return {"collection": _with_id(updated)}
 
 
@@ -445,6 +467,7 @@ async def remove_collection_product(
     updated = repo.remove_product(collection_id, sku)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to remove product")
+    _materialize(collection_id)
     return {"collection": _with_id(updated)}
 
 
@@ -462,6 +485,7 @@ async def reorder_collection_products(
     updated = repo.reorder_products(collection_id, payload.skus or [])
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to reorder products")
+    _materialize(collection_id)
     return {"collection": _with_id(updated)}
 
 

@@ -3,6 +3,7 @@ IMS 2.0 - Product Repository
 =============================
 Product and Stock data access operations
 """
+import re
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
 from .base_repository import BaseRepository
@@ -59,6 +60,26 @@ class ProductRepository(BaseRepository):
             {"$match": filter},
             {"$group": {"_id": "$brand"}},
             {"$sort": {"_id": 1}}
+        ]
+        return [r["_id"] for r in self.aggregate(pipeline)]
+
+    def get_tags(self, prefix: str = None, limit: int = 200) -> List[str]:
+        """Distinct normalised product tags (step-12 autocomplete backbone).
+
+        Optional case-insensitive `prefix` narrows for typeahead. Tags are
+        already stored lowercased; we unwind the `tags` array and group."""
+        match: Dict = {"is_active": True, "tags": {"$exists": True, "$ne": []}}
+        pipeline: List[Dict] = [
+            {"$match": match},
+            {"$unwind": "$tags"},
+        ]
+        if prefix:
+            safe = re.escape(str(prefix).strip().lower())
+            pipeline.append({"$match": {"tags": {"$regex": f"^{safe}"}}})
+        pipeline += [
+            {"$group": {"_id": "$tags", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1, "_id": 1}},
+            {"$limit": int(limit)},
         ]
         return [r["_id"] for r in self.aggregate(pipeline)]
 

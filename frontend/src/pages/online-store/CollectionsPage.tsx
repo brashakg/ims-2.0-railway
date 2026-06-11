@@ -356,6 +356,13 @@ export default function CollectionsPage() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            to="/online-store/collections/browse"
+            className="btn-outline inline-flex items-center gap-1.5 text-sm"
+            title="Browse materialised collection membership"
+          >
+            <Eye className="w-4 h-4" /> Browse
+          </Link>
           <button
             type="button"
             onClick={() => openCreate('SMART')}

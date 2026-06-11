@@ -107,6 +107,7 @@ from .routers import (
     budgets_router,
     online_store_router,
     online_store_collections_router,
+    collections_browse_router,
     online_store_menus_router,
     online_store_images_router,
     online_store_push_router,
@@ -1277,6 +1278,18 @@ app.include_router(
     online_store_collections_router,
     prefix="/api/v1/online-store/collections",
     tags=["Online Store - Collections"],
+)
+# Collection BROWSE (unification step-13). Read-only fast-path over the
+# materialised `collection_products` view: GET /collections (list) +
+# GET /collections/{handle}/products (paged browse) + POST .../refresh (recompute,
+# catalogue roles). AUTHENTICATED reads (same posture as GET /products); browse
+# resolves against the materialiser so a SMART collection's tag/category/brand/
+# price rules render fast without a per-request full-catalogue scan. Catalogued in
+# rbac_policy.POLICY. Mounted at /api/v1/collections.
+app.include_router(
+    collections_browse_router,
+    prefix="/api/v1/collections",
+    tags=["Collections - Browse"],
 )
 # Menus / Mega-menu sub-module (BVI Phase 3, FLAGSHIP #2). ecom_menus CRUD + an
 # embedded recursive item-tree editor (add/move/remove/reorder nodes) -- PUSH-DARK
