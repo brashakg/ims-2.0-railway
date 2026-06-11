@@ -46,6 +46,7 @@ const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
 const OnlineStorePage = lazy(() => import('./pages/online-store/OnlineStorePage'));
 const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'));
+const CollectionBrowsePage = lazy(() => import('./pages/online-store/CollectionBrowsePage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
@@ -428,6 +429,20 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <CollectionsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Collection BROWSE (unification step-13).
+                      Read-only fast-path over materialised membership
+                      (/api/v1/collections). Same module role gate. */}
+                  <Route
+                    path="online-store/collections/browse"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <CollectionBrowsePage />
                       </ProtectedRoute>
                     }
                   />
