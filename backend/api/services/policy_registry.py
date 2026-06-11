@@ -237,12 +237,16 @@ _REGISTRY_LIST: List[PolicySpec] = [
           group="Own-use Allowances", label="Own-use allowance - admin", minimum=0),
 
     # --- Product Master (PM / N5) ---
-    # OFF by default: gates the catalog/external (Postgres/BVI/Shopify) mirror of
-    # the product-master triple-write. The Mongo `products` spine is ALWAYS
-    # written (single-doc, atomic, source of truth) regardless of this flag; only
-    # the secondary best-effort mirror is gated. A live EXTERNAL write additionally
-    # requires NEXUS DISPATCH_MODE=live, so a fresh deploy NEVER mirrors externally.
-    _spec(key="pm.mirror_enabled", type="bool", default=False,
+    # ON by default (unification step-9): mirrors the product-master spine to the
+    # INTERNAL Mongo PIM catalog (catalog_products / catalog_variants) so the
+    # canonical product and its PIM shadow stay in sync from creation. The Mongo
+    # `products` spine is ALWAYS written (single-doc, atomic, source of truth)
+    # regardless of this flag; the secondary mirror is best-effort + FAIL-SOFT
+    # (a mirror error never fails the create). A live EXTERNAL (Postgres/BVI/
+    # Shopify) write additionally requires NEXUS DISPATCH_MODE=live, which
+    # defaults to `off`, so flipping this ON NEVER causes an external write on a
+    # fresh deploy -- only the internal PIM shadow is written.
+    _spec(key="pm.mirror_enabled", type="bool", default=True,
           scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
           group="Product Master", label="Product-master mirror enabled",
           help="Mirror new/updated products to the PIM catalog (and, when DISPATCH_MODE=live, "
