@@ -3199,6 +3199,22 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/summary",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # --- /api/v1/collections ---  (unification step-13: materialised collection
+    # BROWSE). Read-only, fast-path over the collection_products materialised
+    # view. AUTHENTICATED -- same posture as GET /products + GET /catalog/products
+    # (an internal-app catalogue browse, not the role-gated admin editor under
+    # /online-store/collections). See routers/collections_browse.py.
+    {"method": "GET", "path": "/api/v1/collections", "allowed": "AUTHENTICATED"},
+    {
+        "method": "GET",
+        "path": "/api/v1/collections/{handle}/products",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/collections/{handle}/refresh",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
+    },
     # --- /api/v1/online-store/collections ---  (BVI Phase 2: Collections, FLAGSHIP #1)
     # PUSH-DARK ecom_collections CRUD + manual/smart membership + smart-rule
     # resolver. All gated to the ecom role set (router-level require_roles); see
@@ -3907,6 +3923,13 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/products/categories/list",
+        "allowed": "AUTHENTICATED",
+    },
+    # Step-12: known product tags (filter + autocomplete). AUTHENTICATED, same as
+    # the sibling brands/categories list endpoints.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/tags/list",
         "allowed": "AUTHENTICATED",
     },
     # --- PM (N5) unified product-master sub-paths (router product_master.py) ---

@@ -249,6 +249,22 @@ from ..services import product_master as _pm
 _FORM_EXTRA_FIELDS = ("variant",) + _OPTIONAL_PRODUCT_FIELDS
 
 
+def _refresh_collections_after_product(created_or_updated) -> None:
+    """Recompute SMART collection membership after a product create/update
+    (step-13). The new/edited product's tags/category/brand may change which
+    SMART collections it belongs to. FULLY fail-soft: never raises into the
+    create/update path; a no-op when there is no live DB."""
+    try:
+        from ..dependencies import get_db as _get_db_dep
+        from ..services import collection_materializer as _mat
+
+        conn = _get_db_dep()
+        if conn is not None and getattr(conn, "is_connected", False):
+            _mat.refresh_for_product(conn.db, created_or_updated)
+    except Exception:  # noqa: BLE001 - membership refresh must never block a write
+        pass
+
+
 def _canonical_door_payload(product: "ProductCreate") -> dict:
     """Map a validated flat ProductCreate into the canonical create payload the
     product_master door expects (category + attributes + pricing + identity)."""
@@ -690,6 +706,8 @@ async def create_product(
             cache.delete_pattern(
                 f"products:{current_user.get('active_store_id', '')}:*"
             )
+            # Step-13: recompute SMART collections (fail-soft, never blocks).
+            _refresh_collections_after_product(created)
             return {"product_id": created["product_id"], "sku": created["sku"]}
 
         raise HTTPException(status_code=500, detail="Failed to create product")
@@ -1418,9 +1436,18 @@ async def update_product(
             eff_offer = update_data.get("offer_price", existing.get("offer_price"))
             _assert_mrp_ge_offer(eff_mrp, eff_offer)
 
+        # Step-12: normalise tags on edit so the stored shape is identical to the
+        # canonical create (lowercase/trim/dedupe). An explicit [] clears tags.
+        if "tags" in update_data:
+            update_data["tags"] = _pm.normalise_tags(update_data["tags"])
+
         update_data["updated_by"] = current_user.get("user_id")
 
         if repo.update(product_id, update_data):
+            # Step-13: recompute SMART collections (fail-soft). Use the merged doc
+            # so the resolver sees the post-update tags/category/brand.
+            merged = {**existing, **update_data}
+            _refresh_collections_after_product(merged)
             return {"message": "Product updated", "product_id": product_id}
 
         raise HTTPException(status_code=500, detail="Failed to update product")
