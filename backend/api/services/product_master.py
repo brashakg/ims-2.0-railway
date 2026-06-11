@@ -416,6 +416,35 @@ def validate_attributes(category: Any, attributes: Dict[str, Any]) -> None:
             )
 
 
+def normalise_tags(tags: Any) -> List[str]:
+    """Governed normalisation for product tags (step-12).
+
+    Accepts a list of strings OR a comma-separated string (Shopify-shape).
+    Each tag is trimmed, lower-cased, internal whitespace collapsed to single
+    spaces; empties dropped; de-duplicated PRESERVING first-seen order so the
+    same input always yields the same canonical `tags` array at every door
+    (FORM/BULK/CATALOG/MASTER). Returns [] for None/empty/garbage -- never
+    raises (additive; must not break the step-9 strict create gate).
+    """
+    if tags is None:
+        return []
+    raw: List[Any]
+    if isinstance(tags, str):
+        raw = tags.split(",")
+    elif isinstance(tags, (list, tuple, set)):
+        raw = list(tags)
+    else:
+        return []
+    seen: Dict[str, None] = {}
+    for item in raw:
+        if item is None:
+            continue
+        token = " ".join(str(item).strip().lower().split())
+        if token and token not in seen:
+            seen[token] = None
+    return list(seen.keys())
+
+
 def _derive_brand_model_color_size(attributes: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """Map category attribute keys onto the spine identity columns."""
     attrs = attributes or {}
@@ -440,6 +469,7 @@ def normalise_payload(
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
+    tags: Any = None,
     created_by: Optional[str] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
@@ -532,6 +562,9 @@ def normalise_payload(
         doc["warranty_months"] = int(warranty_months)
     if weight_grams is not None:
         doc["weight_grams"] = float(weight_grams)
+    # Normalised, governed tags (step-12). Always present as a list (possibly
+    # empty) so collection rules + the tag filter have a consistent shape.
+    doc["tags"] = normalise_tags(tags)
     # Door-specific additive columns -- never override a canonical key, never a
     # None value (keeps the spine lean + behaviour-preserving per door).
     for _k, _v in (extra_fields or {}).items():
@@ -781,6 +814,7 @@ def build_canonical_product(
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
         weight_grams=p.get("weight_grams"),
+        tags=p.get("tags"),
         created_by=p.get("created_by") or p.get("actor"),
         extra_fields=extra_fields,
         product_repo=product_repo,
@@ -827,6 +861,7 @@ def create_via_door(
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
         weight_grams=p.get("weight_grams"),
+        tags=p.get("tags"),
         extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
@@ -857,6 +892,7 @@ def create_product(
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
+    tags: Any = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -892,6 +928,7 @@ def create_product(
         country_of_origin=country_of_origin,
         warranty_months=warranty_months,
         weight_grams=weight_grams,
+        tags=tags,
         created_by=actor,
         extra_fields=extra_fields,
         product_repo=product_repo,
@@ -1012,6 +1049,12 @@ def update_product(
                 field="discount_category",
             )
         clean["discount_category"] = dc
+
+    # Tags: normalise on edit too so the canonical shape is identical to create
+    # (step-12). An explicit [] clears tags, hence we re-admit it after the
+    # None-strip above (a caller intending to clear sends [] not None).
+    if "tags" in (patch or {}) and patch.get("tags") is not None:
+        clean["tags"] = normalise_tags(patch.get("tags"))
 
     before = {k: current.get(k) for k in clean.keys()}
 

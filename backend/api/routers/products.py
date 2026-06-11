@@ -6,7 +6,7 @@ Product catalog management endpoints
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import datetime
 import logging
 import uuid
@@ -261,6 +261,7 @@ def _canonical_door_payload(product: "ProductCreate") -> dict:
         "discount_category": product.discount_category,
         "hsn_code": product.hsn_code,
         "gst_rate": product.gst_rate,
+        "tags": product.tags,
         # Flat identity columns -- normalise_door_payload folds these into the
         # registry's attribute keys (brand->brand_name, model->model_no,
         # color->colour_code) so the required-field gate sees them.
@@ -382,6 +383,11 @@ class ProductCreate(BaseModel):
     # read. Was previously `tax_rate`, which no reader looked at.
     gst_rate: Optional[float] = None
     attributes: Optional[dict] = None
+    # Governed product tags (step-12). Accepts a list or a comma-separated
+    # string; normalised (lowercase/trim/dedupe) server-side via the canonical
+    # door so FORM/BULK/CATALOG all yield an identical `tags` array. Tags back
+    # the Shopify-shape smart-collection tag rules (step-13).
+    tags: Optional[Union[List[str], str]] = None
     # BVI-10 fix: discount_category drives the pricing-cap tier (MASS/PREMIUM/
     # LUXURY/NON_DISCOUNTABLE). Was silently dropped on create so POS always
     # fell back to MASS 15% even for LUXURY products. Optional + additive;
@@ -428,6 +434,9 @@ class ProductUpdate(BaseModel):
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     is_active: Optional[bool] = None
+    # Governed product tags (step-12). Same normalisation as create; an explicit
+    # empty list clears all tags.
+    tags: Optional[Union[List[str], str]] = None
     # BVI-10 fix: allow updating the discount cap tier on existing products.
     discount_category: Optional[str] = None
 
@@ -560,6 +569,7 @@ async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None, description="Filter to products carrying this normalised tag"),
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
@@ -578,7 +588,7 @@ async def list_products(
     # any store the user can access), so it is intentionally NOT store-scoped and
     # must not call validate_store_access here.
     active_store = store_id or current_user.get("active_store_id", "")
-    cache_key = f"products:{active_store}:{category}:{brand}:{search}:{skip}:{limit}"
+    cache_key = f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -594,6 +604,20 @@ async def list_products(
             products = repo.find_by_category(category)
         else:
             products = repo.find_many({}, skip=skip, limit=limit)
+
+        # Tag filter (step-12). Normalise the requested tag the SAME way tags are
+        # stored, then keep products whose normalised `tags` array contains it.
+        if tag:
+            from ..services import product_master as _pm_tags
+
+            wanted = _pm_tags.normalise_tags(tag)
+            if wanted:
+                want = wanted[0]
+                products = [
+                    p
+                    for p in products
+                    if want in _pm_tags.normalise_tags(p.get("tags"))
+                ]
 
         # NOTE: `store_id` is INTENTIONALLY a no-op here for the product
         # search. The earlier in-place filter attempted `async for` on a
@@ -1294,6 +1318,25 @@ async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories"""
     categories = _get_categories_from_db()
     return {"categories": categories}
+
+
+@router.get("/tags/list")
+async def list_tags(
+    prefix: Optional[str] = Query(None, description="Typeahead prefix (case-insensitive)"),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: dict = Depends(get_current_user),
+):
+    """Known product tags (step-12) for filtering + autocomplete.
+
+    Returns the distinct normalised tags across active products, most-used
+    first. `prefix` narrows for typeahead. Fail-soft: no repo -> empty list."""
+    repo = get_product_repository()
+    if repo is not None:
+        try:
+            return {"tags": repo.get_tags(prefix=prefix, limit=limit)}
+        except Exception:  # noqa: BLE001 - autocomplete must never 500
+            return {"tags": []}
+    return {"tags": []}
 
 
 @router.get("/sku/{sku}")
