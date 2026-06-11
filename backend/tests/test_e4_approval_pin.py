@@ -19,6 +19,7 @@ Covers the packet's T1-T10 + the binding CORRECTIONS:
 
 from __future__ import annotations
 
+import re
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -411,6 +412,14 @@ def test_t2_pin_is_bcrypt_and_never_in_audit(engine, db):
         assert not sval.startswith("$2b$"), f"bcrypt hash leaked under {key!r}"
         if k in _RANDOM_ID_KEYS:
             continue  # random hex/uuid -- substring collisions are noise here
+        # Any opaque hex digest (audit-chain entry_hash, sha digests, etc.) can
+        # contain the 4 pin digits by sheer chance -- a real CI run false-tripped
+        # on entry_hash='...085678b257...'. The PIN leaking only matters in a
+        # HUMAN-meaningful field (reason/note) or a structured pin field, never
+        # buried in a >=16-char digest. Skip digests by VALUE shape so this never
+        # needs a new key-name allowlist entry every time the audit row grows.
+        if re.fullmatch(r"[0-9a-fA-F]{16,}", sval):
+            continue
         assert "5678" not in sval, f"PIN leaked under {key!r}: {sval[:60]}"
 
 
