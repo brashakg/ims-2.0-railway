@@ -200,6 +200,14 @@ def frozen_points_now(monkeypatch):
     # rows still fall inside the leaderboard / staff-history window.
     if hasattr(points_module, "ist_today"):
         monkeypatch.setattr(points_module, "ist_today", lambda: frozen.date())
+    # IST-boundary flake fix: scorecard_engine.score_daily resolves "today" via a
+    # function-local `from api.utils.ist import ist_today`, so it reads the SOURCE
+    # symbol, not points_module's binding. Freeze the source too so the conversion
+    # auto-fill (which only fires when date_str == IST-today) matches a row seeded
+    # for the same frozen date. Otherwise between 18:30-24:00 UTC the UTC date !=
+    # IST date and the auto-fill silently skips.
+    import api.utils.ist as ist_module
+    monkeypatch.setattr(ist_module, "ist_today", lambda: frozen.date())
     return frozen.date()
 
 
@@ -352,14 +360,24 @@ def test_eligibility_snapshot_uses_settings_at_write_time(
     assert body["eligibility_thresholds_used"]["bands"][2]["min"] == 80
 
 
-def test_get_daily_lists_today(client, auth_headers, patched_points):
-    """GET /daily returns rows for today (or specified date)."""
+def test_get_daily_lists_today(
+    client, auth_headers, patched_points, frozen_points_now
+):
+    """GET /daily returns rows for today (or specified date).
+
+    IST-boundary determinism: the handler defaults the date window to
+    ist_today(); seed rows for that SAME frozen IST date (not date.today()/UTC)
+    so the test never flakes in the 00:00-05:30 IST (18:30-24:00 UTC) window
+    where the UTC and IST dates differ."""
+    today = frozen_points_now.isoformat()
     client.post(
-        "/api/v1/incentive/points/daily", json=_payload(), headers=auth_headers,
+        "/api/v1/incentive/points/daily",
+        json=_payload(date=today),
+        headers=auth_headers,
     )
     client.post(
         "/api/v1/incentive/points/daily",
-        json=_payload(staff_id="user-rupesh"),
+        json=_payload(date=today, staff_id="user-rupesh"),
         headers=auth_headers,
     )
     resp = client.get("/api/v1/incentive/points/daily", headers=auth_headers)
@@ -475,25 +493,37 @@ def test_delete_audit_logged(client, auth_headers, patched_points):
     assert audit["detail"]["reason"] == "Mistake"
 
 
-def test_conversion_auto_fill_today(client, auth_headers, patched_points):
+def test_conversion_auto_fill_today(
+    client, auth_headers, patched_points, frozen_points_now
+):
     """conversion=null + date=today → server fetches conversion_score
-    from Module (i)'s feed math (in-process, no HTTP self-call)."""
+    from Module (i)'s feed math (in-process, no HTTP self-call).
+
+    IST-boundary determinism: the auto-fill in scorecard_engine.score_daily only
+    fires when date_str == ist_today(); freeze that clock and seed the walkout +
+    payload for the SAME frozen IST date so the auto-fill always fires (instead
+    of flaking to 0 in the 00:00-05:30 IST window where UTC date != IST date)."""
+    today = frozen_points_now.isoformat()
     walkin_repo = patched_points["walkin_repo"]
-    # Akshay has 5 walk-ins, 1 walkout today → conversion = 16 (4/5 * 20)
+    # Akshay has 5 walk-ins, 1 walkout today → conversion = 16 (4/5 * 20).
+    # Stamp the counter for the frozen date explicitly: auto_increment otherwise
+    # defaults to the repo's own ist_today() (a module-level binding), which would
+    # key the doc on the real IST day and miss the frozen-date conversion lookup.
     for mob in ("9100100001", "9100100002", "9100100003", "9100100004", "9100100005"):
         walkin_repo.auto_increment(
             store_id="BV-TEST-01", sales_person_id="user-akshay", mobile=mob,
+            date_str=today,
         )
     walkout_repo = patched_points["walkout_repo"]
     walkout_repo.create_walkout({
         "store_id": "BV-TEST-01",
-        "date_str": _today(),
+        "date_str": today,
         "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
         "customer_name": "X", "mobile": "9100100099",
         "primary_walkout_reason": "BUDGET/PRICE",
     })
 
-    payload = _payload(scores=_scores(conversion=None))
+    payload = _payload(date=today, scores=_scores(conversion=None))
     resp = client.post(
         "/api/v1/incentive/points/daily", json=payload, headers=auth_headers,
     )
