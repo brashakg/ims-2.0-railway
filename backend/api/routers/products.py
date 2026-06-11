@@ -644,6 +644,17 @@ async def create_product(
             detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
         )
 
+    # STRICT registry gate (step-9) -- runs at this door regardless of DB state so
+    # an incomplete product (e.g. FRAME w/o colour_code) is rejected the same way
+    # in stub mode as it is with a live repo. The create path below re-validates
+    # via the same core; this is the early loud 422 with the offending field.
+    try:
+        _pm.build_canonical_product(
+            _canonical_door_payload(product), source="FORM"
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+
     repo = get_product_repository()
 
     if repo is not None:
