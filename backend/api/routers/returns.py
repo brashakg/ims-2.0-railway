@@ -142,6 +142,21 @@ class ReturnCreate(BaseModel):
     # default = block) -- the till must clear the mismatch the normal way.
     serial_mismatch_override_token: Optional[str] = None
     serial_mismatch_override_request_id: Optional[str] = None
+    # F27 refund approval matrix. When the matrix is ENABLED for this scope and
+    # the resolved tier for this refund is > 0, the return is blocked UNLESS one
+    # of these resolves to a valid, single-use, not-expired E4 approval of
+    # action_type REFUND_APPROVAL_MATRIX bound to THIS order + store (the maker
+    # mints it via POST /approvals/requests + a manager PIN-approves it; the
+    # requester cannot approve their own -- it is a maker-checker action). DARK by
+    # default (matrix_enabled=False): when the matrix is off these are ignored and
+    # the refund path is byte-identical to today. The token is consumed atomically
+    # by create_return; a missing / mismatched / expired token -> 403.
+    refund_approval_token: Optional[str] = None
+    refund_approval_request_id: Optional[str] = None
+    # Overall refund reason driving the matrix (DEFECTIVE / CHANGE_OF_MIND /
+    # PRICE_MATCH / GOODWILL / ...). Optional; falls back to the first per-line
+    # reason. Only consulted when the matrix is enabled.
+    refund_reason: Optional[str] = None
 
 
 # ============================================================================
@@ -998,6 +1013,112 @@ def _consume_serial_override(body: "ReturnCreate", current_user: dict) -> bool:
         return False
 
 
+def _gate_refund_approval_matrix(
+    body: "ReturnCreate",
+    *,
+    net_amount: float,
+    store_id: Optional[str],
+    entity_id: Optional[str],
+    resolved_order_id: Optional[str],
+    current_user: dict,
+) -> Optional[str]:
+    """F27: enforce the configurable refund approval matrix in FRONT of recording
+    the refund. PURE GATE -- it changes NO money math; it only decides whether a
+    consumed E4 approval token is required and verifies it.
+
+    DARK by default: when the matrix is disabled for this scope (the flag default
+    is False) required_tier_for_refund returns None and this is a no-op -- the
+    refund path is byte-identical to today.
+
+    When the matrix is ENABLED and the resolved tier is > 0 the caller MUST supply
+    a refund_approval_token / _request_id that resolves to a valid, single-use,
+    not-expired E4 approval of action_type REFUND_APPROVAL_MATRIX that is bound to
+    THIS refund -- the approval's store_id must match and its context.order_id must
+    match this order, and its approved amount must be >= this net refund. A
+    missing / mismatched / expired token -> HTTPException(403). Separation of
+    duties (requester != approver) is enforced at approve-time by the E4 engine
+    (REFUND_APPROVAL_MATRIX is a maker-checker action).
+
+    Returns the approver's user id when a token was consumed (for stamping the
+    return doc), or None when no approval was required (gate dark / below floor).
+    """
+    role = (current_user.get("activeRole")
+            or (current_user.get("roles") or [None])[0])
+    reason = (body.refund_reason
+              or next((it.reason for it in body.items
+                       if it.return_qty > 0 and it.reason), None))
+    try:
+        from ..services.refund_approval_matrix import required_tier_for_refund
+
+        tier = required_tier_for_refund(
+            int(round(float(net_amount) * 100)),  # rupees -> integer paise
+            reason,
+            role,
+            store_id=store_id,
+            entity_id=entity_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail OPEN (no gate) on a resolver error
+        logger.warning("[RETURNS] F27 tier resolve failed; no gate: %s", exc)
+        return None
+
+    if tier is None:
+        return None  # gate dark / below the role floor -> no approval required
+
+    token = (body.refund_approval_token or "").strip() or None
+    request_id = (body.refund_approval_request_id or "").strip() or None
+    if not token and not request_id:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": "REFUND_APPROVAL_REQUIRED",
+                "required_tier": tier,
+                "message": (
+                    "This refund requires a tiered approval. A manager must "
+                    "PIN-approve an approval request, then re-submit the return "
+                    "with the approval token."
+                ),
+            },
+        )
+
+    try:
+        from ..services.approvals import ApprovalEngine
+
+        engine = ApprovalEngine(db=_get_db())
+        res = engine.consume_approval(
+            consumed_by=current_user.get("user_id") or "",
+            action_type="REFUND_APPROVAL_MATRIX",
+            request_id=request_id,
+            approval_token=token,
+            amount=float(net_amount),  # token's approved amount must be >= this refund
+            expected_store_id=store_id,
+            expected_context={"order_id": resolved_order_id} if resolved_order_id else None,
+            min_tier=tier,  # F27: the token's approver tier must MEET the matrix tier
+        )
+    except Exception as exc:  # noqa: BLE001 - a consume error must NOT let the refund through
+        logger.warning("[RETURNS] F27 approval consume failed: %s", exc)
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "REFUND_APPROVAL_INVALID",
+                    "message": "Could not validate the refund approval token."},
+        )
+
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": "REFUND_APPROVAL_INVALID",
+                "error": res.get("error"),
+                "required_tier": tier,
+                "message": (
+                    "The refund approval token is invalid, expired, already "
+                    "used, or bound to a different refund."
+                ),
+            },
+        )
+    return ((res.get("request") or {}).get("reviewed_by")
+            or current_user.get("user_id"))
+
+
 def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
                                   resolved_order_id, store_id, current_user):
     """E3 acceptance #8 (return half): hard-block a serial-mismatched return.
@@ -1289,6 +1410,21 @@ async def create_return(
             ),
         )
 
+    # F27 REFUND APPROVAL MATRIX GATE. Runs AFTER all money math + the over-refund
+    # cap (so net_amount is final) and BEFORE any recording / atomic stock claim,
+    # so a refund that needs approval rejects with nothing reserved. PURE GATE: it
+    # changes NO money math -- it only requires + verifies a consumed E4 approval
+    # token bound to this refund when the matrix is enabled and the tier is > 0.
+    # DARK by default (flag off) -> no-op, refund path byte-identical to today.
+    refund_approval_by = _gate_refund_approval_matrix(
+        body,
+        net_amount=net_amount,
+        store_id=store_id,
+        entity_id=(order or {}).get("entity_id"),
+        resolved_order_id=resolved_order_id,
+        current_user=current_user,
+    )
+
     # Back the GST out of the gross for the credit note / GSTR-1 reversal. The
     # tax is INSIDE the gross (not added on top). Use the dominant rate across
     # the returned lines when they span rates.
@@ -1500,6 +1636,10 @@ async def create_return(
         # this return (None for the normal / matched-serial path) -- the override
         # actor for the audit trail.
         "serial_override_by": serial_override_by,
+        # F27: stamped only when the refund approval matrix was enabled and a
+        # consumed E4 approval token cleared this refund (None when the gate was
+        # dark or no approval was required) -- the approver for the audit trail.
+        "refund_approval_by": refund_approval_by,
         "created_by": current_user.get("user_id"),
         "created_by_name": current_user.get(
             "full_name", current_user.get("username", "")

@@ -65,6 +65,25 @@ _REGISTRY_LIST: List[PolicySpec] = [
           scopes=("global", "entity", "store"), write_roles=("SUPERADMIN",),
           group="Refunds & Returns", label="Refund needs SUPERADMIN above",
           help="Refunds at/above this amount require SUPERADMIN approval.", minimum=0),
+    # F27 refund approval matrix. DARK by default (matrix_enabled=False) so a
+    # fresh deploy behaves exactly as today -- the refund path adds NO gate until
+    # the owner enables it per scope (like Fcostfloor). The matrix itself is a
+    # JSON doc keyed on amount bands x reason x role; see
+    # api/services/refund_approval_matrix.py (DEFAULT_MATRIX) for the shape. When
+    # ON, a refund whose resolved tier is >0 must carry a CONSUMED E4 approval
+    # token bound to that refund before it is recorded; money math is unchanged.
+    _spec(key="refund.matrix_enabled", type="bool", default=False,
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Refunds & Returns", label="Refund approval matrix enabled",
+          help="Require a tiered approval (per the refund approval matrix) before "
+               "a refund is recorded. OFF (default) keeps the refund path "
+               "byte-identical to today; enable per scope to roll out."),
+    _spec(key="refund.approval_matrix", type="json", default={},
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Refunds & Returns", label="Refund approval matrix",
+          help="Tiered refund-approval rules keyed on amount bands (paisa), reason, "
+               "and requesting role. Empty -> the code DEFAULT_MATRIX is used. "
+               "Has no effect unless 'Refund approval matrix enabled' is on."),
 
     # --- Approvals & Loyalty ---
     _spec(key="approval.pin_validity_min", type="int", default=60,

@@ -86,12 +86,25 @@ ACTION_TYPES: frozenset = frozenset({
     # applicant approving their own leave) is blocked at the leave-router layer,
     # which knows the leave doc's employee_id (the engine does not).
     "leave_approval",
+    # F27: a refund gated by the configurable refund approval matrix. The request
+    # carries an EXPLICIT required_tier (resolved by required_tier_for_refund from
+    # the amount-band x reason x role matrix) and is single-use + store/refund
+    # bound at consume-time (expected_store_id + expected_context={"refund_id":...})
+    # so a token minted for refund A cannot authorize refund B or a refund in
+    # another store. Self-approval is blocked because this is a MAKER_CHECKER
+    # action (the requester cannot PIN-approve their own refund).
+    "REFUND_APPROVAL_MATRIX",
 })
 
 # Actions that REQUIRE separation of duties (approver != maker).
 # petty_cash: an over-threshold petty-cash payout is real two-person control --
 # the manager who raises the request cannot also PIN-approve it (F17).
-MAKER_CHECKER_ACTIONS: frozenset = frozenset({"journal_entry", "petty_cash"})
+# REFUND_APPROVAL_MATRIX (F27): the cashier/manager who requests a refund cannot
+# PIN-approve their own refund -- SYSTEM_INTENT "Requester CANNOT approve own
+# request" / separation of duties for revenue-out money movement.
+MAKER_CHECKER_ACTIONS: frozenset = frozenset(
+    {"journal_entry", "petty_cash", "REFUND_APPROVAL_MATRIX"}
+)
 
 # Role tiers. A request resolved to a tier may be approved by any role at or
 # above that tier. SUPERADMIN passes everything.
@@ -798,6 +811,7 @@ class ApprovalEngine:
         amount: Optional[float] = None,
         expected_store_id: Optional[str] = None,
         expected_context: Optional[Dict[str, Any]] = None,
+        min_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Spend an APPROVED approval EXACTLY ONCE. A SINGLE atomic
         find_one_and_update guards status==APPROVED, consumed==false, not
@@ -875,6 +889,17 @@ class ApprovalEngine:
                 if stored_ctx.get(_k) != _v:
                     mismatch = "context_mismatch"
                     break
+        if mismatch is None and min_tier is not None:
+            # F27: the consumed token's approver STRENGTH must meet the caller's
+            # required tier. The token's tier (required_tier) is minted from the
+            # rupee amount alone; the refund matrix can demand MORE (reason-bump /
+            # role-floor escalation). Without this guard a Rs 1,500 GOODWILL refund
+            # (matrix -> 'admin') would be satisfiable by an amount-only 'auto'
+            # token a STORE_MANAGER PIN-approved -- defeating the matrix. Reject +
+            # roll back when the token is weaker than the matrix demands.
+            _sev = {"auto": 0, "admin": 1, "super": 2}
+            if _sev.get(updated.get("required_tier"), 0) < _sev.get(min_tier, 0):
+                mismatch = "tier_too_low"
 
         if mismatch:
             try:
