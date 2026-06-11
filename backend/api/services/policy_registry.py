@@ -301,6 +301,34 @@ _REGISTRY_LIST: List[PolicySpec] = [
           help="Maximum lapsed patients surfaced per store per day on the "
                "reactivation work-list (most-lapsed first)."),
 
+    # --- F14 Non-adaptation / remake (#14) ---
+    # The grace window (days from the original sale) inside which a non-adapt
+    # REMAKE is free / discounted per the charge policy, and the in-window charge
+    # mode + percent. A remake requested OUTSIDE the window is always chargeable
+    # at the full original lens cost (the engine clamps; see non_adapt.py). These
+    # govern only the charge DECISION recorded on the non-adapt record -- the
+    # remake order itself, if created, still goes through the normal POS pricing /
+    # payment path, so flipping these NEVER touches order money math.
+    _spec(key="non_adapt.window_days", type="days", default=45,
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Clinical", label="Non-adapt remake window (days)",
+          minimum=1, maximum=180,
+          help="Days from the original sale within which a non-adaptation remake "
+               "is free / discounted per the charge policy. Outside this window a "
+               "remake is charged at the full original lens cost."),
+    _spec(key="non_adapt.charge_policy", type="enum", default="FREE",
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Clinical", label="Non-adapt in-window charge mode",
+          enum=("FREE", "PERCENT", "FULL"),
+          help="How an in-window non-adapt remake is charged: FREE (0), PERCENT "
+               "of the original cost, or FULL. Outside the window is always FULL."),
+    _spec(key="non_adapt.charge_percent", type="percent", default=0.0,
+          scopes=("global", "entity", "store"), write_roles=("SUPERADMIN", "ADMIN"),
+          group="Clinical", label="Non-adapt in-window charge percent",
+          minimum=0, maximum=100,
+          help="When the in-window charge mode is PERCENT, the percent of the "
+               "original lens cost charged for the remake (paise-exact, half-up)."),
+
     # --- Clinical -> Retail Handover (F50 / #50) ---
     # Off by default. The orchestrator flips this ON per-store for the 1-2 pilot
     # stores (DECISIONS: "pilot 1-2 stores"); a fresh DB keeps the feature dark
