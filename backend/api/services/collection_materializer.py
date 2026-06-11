@@ -206,12 +206,12 @@ def refresh_collection(db, collection_id: str) -> int:
     if db is None or not collection_id:
         return 0
     try:
-        coll = db["ecom_collections"].find_one({"collection_id": collection_id})
+        doc = db["ecom_collections"].find_one({"collection_id": collection_id})
     except Exception:  # noqa: BLE001
         return 0
-    if not coll:
+    if doc is None:
         return 0
-    return materialize_collection(db, coll)
+    return materialize_collection(db, doc)
 
 
 def refresh_for_product(db, product: Optional[Dict] = None) -> Dict[str, int]:
