@@ -82,7 +82,7 @@ def _all_products(db) -> List[Dict]:
             sku = doc.get("sku")
             if not sku:
                 continue
-            doc.pop("_id", None)
+            doc = {k: v for k, v in doc.items() if k != "_id"}
             if sku not in by_sku:
                 order.append(sku)
             by_sku[sku] = doc
@@ -241,8 +241,7 @@ def _product_detail_by_sku(db, skus: List[str]) -> Dict[str, Dict]:
             for d in coll.find({"sku": {"$in": skus}}):
                 sku = d.get("sku")
                 if sku and sku not in out:
-                    d.pop("_id", None)
-                    out[sku] = d
+                    out[sku] = {k: v for k, v in d.items() if k != "_id"}
         except Exception:  # noqa: BLE001
             continue
     return out
