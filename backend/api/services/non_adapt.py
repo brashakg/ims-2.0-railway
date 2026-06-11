@@ -95,8 +95,15 @@ def is_within_window(
     requested on the boundary day still counts as within the window. Future
     sale dates (today < sale_date) are treated as within the window.
     """
-    sale = _as_date(sale_date)
-    now = _as_date(today)
+    # Adversarial P2: a malformed / non-ISO sale or today value must NOT crash the
+    # engine (500). Per the module contract, undeterminable dates fail SOFT to
+    # within-window (the customer-favourable side -- a free/discounted remake),
+    # never to a silent charge.
+    try:
+        sale = _as_date(sale_date)
+        now = _as_date(today)
+    except (ValueError, TypeError):
+        return True
     delta = (now - sale).days
     if delta < 0:
         return True
@@ -477,13 +484,20 @@ class NonAdaptEngine:
             from pymongo import ReturnDocument
 
             updated = coll.find_one_and_update(
-                {"record_id": record_id},
+                # ONCE-ONLY guard: only the RECORDED -> REMAKE_INITIATED transition
+                # links a remake. A concurrent/repeat /remake no longer matches, so
+                # it can't clobber the prior link or re-stamp authorized_by (which
+                # would silently re-waive). Mirrors the guarded-status pattern.
+                {"record_id": record_id, "remake_status": STATUS_RECORDED},
                 {"$set": set_fields},
                 return_document=ReturnDocument.AFTER,
             )
         except Exception as exc:  # noqa: BLE001
             raise NonAdaptError(f"failed to link remake: {exc}", status=500)
         if updated is None:
+            existing = coll.find_one({"record_id": record_id})
+            if existing is not None:
+                raise NonAdaptError("remake already initiated for this record", status=409)
             raise NonAdaptError("non-adapt record not found", status=404)
         if not isinstance(updated.get("_id"), str):
             updated["_id"] = str(updated.get("_id"))

@@ -121,6 +121,14 @@ async def record_non_adapt(body: RecordBody, current_user: Dict[str, Any] = Depe
     store_id = order.get("store_id")
     validate_store_access(store_id, current_user)
     line = svc.find_order_line(order, body.item_id)
+    # Adversarial P1: a supplied item_id that matches NO order line returns None,
+    # which would drive the charge basis to 0 -> a chargeable remake silently
+    # becomes FREE + escapes the waiver audit. Fail loud instead.
+    if body.item_id and line is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"order line {body.item_id} not found on order {body.order_id}",
+        )
     try:
         rec = _engine().record(
             order=order, line=line, reason=body.reason, store_id=store_id,

@@ -185,3 +185,41 @@ def test_route_record_happy_path(db, monkeypatch):
     out = asyncio.run(r.record_non_adapt(body, _OPTO))
     assert out["record_id"].startswith("NA-")
     assert out["reason"] == "PROGRESSIVE_INTOLERANCE"
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial fixes: bad item_id fails loud, bad date fails soft, once-only remake
+# --------------------------------------------------------------------------- #
+def test_route_bad_item_id_fails_loud(db, monkeypatch):
+    """P1: a supplied item_id matching no order line must 400 -- never silently
+    zero the charge basis into a free remake."""
+    from api.routers import non_adapt as r
+    from fastapi import HTTPException
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    monkeypatch.setattr(r, "_load_order", lambda oid: _order())
+    monkeypatch.setattr(r, "validate_store_access", lambda s, u: s)
+    body = r.RecordBody(order_id="ORD-1", item_id="GHOST", reason="PROGRESSIVE_INTOLERANCE")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(r.record_non_adapt(body, _OPTO))
+    assert ei.value.status_code == 400
+
+
+def test_bad_sale_date_fails_soft_within_window():
+    """P2: an unparseable date must not crash -- treat as within-window (free)."""
+    assert svc.is_within_window("not-a-date", "2026-06-20", 45) is True
+    assert svc.is_within_window("2026-06-01", "garbage", 45) is True
+
+
+def test_remake_is_once_only(db, monkeypatch):
+    """Idempotency: a second /remake on the same record is rejected (409), so it
+    can't clobber the prior link or re-stamp authorized_by."""
+    from api.services import policy_engine as pe
+    monkeypatch.setattr(pe, "get_policy", lambda key, scope=None, *, default=None: default)
+    eng = svc.NonAdaptEngine(db)
+    o = _order()
+    rec = eng.record(order=o, line=o["items"][0], reason="PROGRESSIVE_INTOLERANCE",
+                     store_id="S1", actor=_OPTO, today="2026-06-10")
+    eng.link_remake(rec["record_id"], remake_order_id="RMK-1", actor=_OPTO)
+    with pytest.raises(svc.NonAdaptError) as ei:
+        eng.link_remake(rec["record_id"], remake_order_id="RMK-2", actor=_OPTO)
+    assert ei.value.status == 409
