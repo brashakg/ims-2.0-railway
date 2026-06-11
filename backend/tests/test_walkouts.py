@@ -724,6 +724,29 @@ def _yesterday_iso():
     return (_d.today() - timedelta(days=1)).isoformat()
 
 
+@pytest.fixture
+def frozen_walkouts_now(monkeypatch):
+    """Freeze the walkouts router's IST clock to a fixed mid-month date.
+
+    The router resolves "today" via _ist_today_str() -> ist_today() (IST). The
+    follow-up / conversion-feed tests seed "today"/"yesterday" rows off UTC
+    (date.today() / datetime.now()), so between 00:00-05:30 IST (18:30-24:00
+    UTC) the IST day leads the UTC day and the seed lands a day off the handler
+    window -> nightly flake. Freezing ist_today() and seeding every "today" row
+    for the returned date makes those tests clock-independent. Returns the frozen
+    `date`."""
+    from datetime import datetime as _dt
+    from api.routers import walkouts as walkouts_module
+
+    frozen = _dt(2026, 6, 15, 12, 0, 0)
+    monkeypatch.setattr(walkouts_module, "ist_today", lambda: frozen.date())
+    # now_ist() backs the 48h-overdue cutoff + MTD month key; keep it consistent.
+    from datetime import timezone, timedelta as _td
+    frozen_ist = frozen.replace(tzinfo=timezone(_td(hours=5, minutes=30)))
+    monkeypatch.setattr(walkouts_module, "now_ist", lambda: frozen_ist)
+    return frozen.date()
+
+
 def test_followup_append_round_1_and_2(client, auth_headers, patched_walkouts):
     """Both round 1 and round 2 may be appended; both reach the doc."""
     walkout = _create_walkout(client, auth_headers)
@@ -869,20 +892,28 @@ def test_overdue_fu_creates_escalation_task(
 
 
 def test_round2_overdue_creates_p1_task(
-    client, auth_headers, patched_walkouts
+    client, auth_headers, patched_walkouts, frozen_walkouts_now
 ):
-    """Round 2 escalates to P1 (higher priority than round 1)."""
+    """Round 2 escalates to P1 (higher priority than round 1).
+
+    IST-boundary determinism: escalate-overdue compares scheduled_date against
+    ist_today() (IST); seed round 1 for the frozen IST date and round 2 for the
+    frozen-date-minus-1 so the UTC<->IST day skew can't make round 1 overdue too.
+    """
+    from datetime import timedelta as _td
+    today = frozen_walkouts_now.isoformat()
+    yesterday = (frozen_walkouts_now - _td(days=1)).isoformat()
     walkout = _create_walkout(client, auth_headers)
     wid = walkout["walkout_id"]
     # Add round 1 (today, doesn't escalate) and round 2 (yesterday, escalates)
     client.post(
         f"/api/v1/walkouts/{wid}/followups",
-        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        json={"round": 1, "scheduled_date": today, "mode": "CALL"},
         headers=auth_headers,
     )
     client.post(
         f"/api/v1/walkouts/{wid}/followups",
-        json={"round": 2, "scheduled_date": _yesterday_iso(), "mode": "CALL"},
+        json={"round": 2, "scheduled_date": yesterday, "mode": "CALL"},
         headers=auth_headers,
     )
     resp = client.post(
@@ -993,22 +1024,30 @@ def test_set_result_audit_logged(client, auth_headers, patched_walkouts):
 
 
 def test_followups_due_today_lists_only_pending_today(
-    client, auth_headers, patched_walkouts
+    client, auth_headers, patched_walkouts, frozen_walkouts_now
 ):
-    """due-today returns the right slice and is RBAC-scoped."""
+    """due-today returns the right slice and is RBAC-scoped.
+
+    IST-boundary determinism: due-today filters scheduled_date == ist_today()
+    (IST); seed the 'today' FU for the frozen IST date and the excluded one for
+    the day before so the UTC<->IST skew can't shift the seed out of the window.
+    """
+    from datetime import timedelta as _td
+    today = frozen_walkouts_now.isoformat()
+    yesterday = (frozen_walkouts_now - _td(days=1)).isoformat()
     a = _create_walkout(client, auth_headers, mobile="9100000001")
     b = _create_walkout(client, auth_headers, mobile="9100000002")
 
     # a — pending FU today
     client.post(
         f"/api/v1/walkouts/{a['walkout_id']}/followups",
-        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        json={"round": 1, "scheduled_date": today, "mode": "CALL"},
         headers=auth_headers,
     )
     # b — pending FU yesterday (not today)
     client.post(
         f"/api/v1/walkouts/{b['walkout_id']}/followups",
-        json={"round": 1, "scheduled_date": _yesterday_iso(), "mode": "CALL"},
+        json={"round": 1, "scheduled_date": yesterday, "mode": "CALL"},
         headers=auth_headers,
     )
 
@@ -1316,34 +1355,44 @@ def test_walkins_mtd_aggregates_across_days(
 
 
 def test_conversion_feed_includes_retro_conversions(
-    client, auth_headers, patched_walkouts
+    client, auth_headers, patched_walkouts, frozen_walkouts_now
 ):
     """Walkouts from prior days that flip to CONVERTED today count
-    in retro_conversions_today (and bump the score)."""
-    walkin_repo = patched_walkouts["walkin_repo"]
+    in retro_conversions_today (and bump the score).
 
-    # Today: akshay has 5 walk-ins, 1 walkout
+    IST-boundary determinism: conversion-feed keys everything off ist_today()
+    (IST). Seed today's walk-ins (explicit date_str), today's walkout (stamped
+    ist_today() server-side), and the retro's result_set_at to the SAME frozen
+    IST date so the retro is credited regardless of the UTC<->IST day skew."""
+    from datetime import datetime as _dt, timedelta as _td
+    walkin_repo = patched_walkouts["walkin_repo"]
+    today = frozen_walkouts_now.isoformat()
+    yest_d = frozen_walkouts_now - _td(days=1)
+
+    # Today: akshay has 5 walk-ins, 1 walkout. Stamp walk-ins for the frozen
+    # date explicitly (auto_increment otherwise defaults to the repo's own
+    # ist_today() binding, which the frozen handler date would not match).
     for mob in ("9100100001", "9100100002", "9100100003", "9100100004", "9100100005"):
         walkin_repo.auto_increment(
             store_id="BV-TEST-01", sales_person_id="user-akshay", mobile=mob,
+            date_str=today,
         )
     _create_walkout(client, auth_headers, mobile="9100110001", sales_person_id="user-akshay")
 
-    # A prior-day walkout for akshay, flipped to CONVERTED today
+    # A prior-day walkout for akshay, flipped to CONVERTED today (frozen IST date)
     repo = patched_walkouts["db"].get_collection("walkouts")
-    from datetime import datetime as _dt, timedelta as _td
-    yest = (_dt.now() - _td(days=1))
+    yest_dt = _dt.combine(yest_d, _dt.min.time())
     prior = {
         "walkout_id": "WO-TES-2026-RETRO1", "_id": "WO-TES-2026-RETRO1",
         "store_id": "BV-TEST-01",
-        "date": yest, "date_str": yest.date().isoformat(),
+        "date": yest_dt, "date_str": yest_d.isoformat(),
         "customer_name": "Retro", "mobile": "9100120001",
         "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
         "result": "CONVERTED",
-        "result_set_at": _dt.now().isoformat(),  # today
+        "result_set_at": today + "T10:00:00",  # frozen IST today
         "converted_order_id": "ORD-X",
         "followups": [], "deleted_at": None,
-        "created_at": yest, "updated_at": _dt.now(),
+        "created_at": yest_dt, "updated_at": yest_dt,
         "primary_walkout_reason": "BUDGET/PRICE",
     }
     repo.insert_one(prior)
@@ -1360,34 +1409,39 @@ def test_conversion_feed_includes_retro_conversions(
 
 
 def test_conversion_feed_score_capped_at_20(
-    client, auth_headers, patched_walkouts
+    client, auth_headers, patched_walkouts, frozen_walkouts_now
 ):
     """If retro_conversions exceeds the walkouts-today subtraction,
-    raw score can theoretically go above 20. The cap holds it at 20."""
+    raw score can theoretically go above 20. The cap holds it at 20.
+
+    IST-boundary determinism: seed walk-ins (explicit date_str) + retro
+    result_set_at for the SAME frozen IST date the handler reads."""
+    from datetime import datetime as _dt, timedelta as _td
     walkin_repo = patched_walkouts["walkin_repo"]
+    today = frozen_walkouts_now.isoformat()
+    yest_d = frozen_walkouts_now - _td(days=1)
     walkin_repo.auto_increment(
         store_id="BV-TEST-01", sales_person_id="user-akshay",
-        mobile="9200000001",
+        mobile="9200000001", date_str=today,
     )
     walkin_repo.auto_increment(
         store_id="BV-TEST-01", sales_person_id="user-akshay",
-        mobile="9200000002",
+        mobile="9200000002", date_str=today,
     )
     # 0 walkouts today, 5 retros — raw = (2 - 0 + 5) / 2 × 20 = 70 → cap 20
     repo = patched_walkouts["db"].get_collection("walkouts")
-    from datetime import datetime as _dt, timedelta as _td
-    yest = (_dt.now() - _td(days=1))
+    yest_dt = _dt.combine(yest_d, _dt.min.time())
     for i in range(5):
         repo.insert_one({
             "walkout_id": f"WO-TES-CAPED-{i:02d}", "_id": f"WO-TES-CAPED-{i:02d}",
             "store_id": "BV-TEST-01",
-            "date": yest, "date_str": yest.date().isoformat(),
+            "date": yest_dt, "date_str": yest_d.isoformat(),
             "customer_name": f"Cap {i}", "mobile": f"930000000{i}",
             "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
             "result": "CONVERTED",
-            "result_set_at": _dt.now().isoformat(),
+            "result_set_at": today + "T10:00:00",
             "followups": [], "deleted_at": None,
-            "created_at": yest, "updated_at": _dt.now(),
+            "created_at": yest_dt, "updated_at": yest_dt,
         })
 
     resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
