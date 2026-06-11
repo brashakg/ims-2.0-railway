@@ -811,6 +811,7 @@ class ApprovalEngine:
         amount: Optional[float] = None,
         expected_store_id: Optional[str] = None,
         expected_context: Optional[Dict[str, Any]] = None,
+        min_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Spend an APPROVED approval EXACTLY ONCE. A SINGLE atomic
         find_one_and_update guards status==APPROVED, consumed==false, not
@@ -888,6 +889,17 @@ class ApprovalEngine:
                 if stored_ctx.get(_k) != _v:
                     mismatch = "context_mismatch"
                     break
+        if mismatch is None and min_tier is not None:
+            # F27: the consumed token's approver STRENGTH must meet the caller's
+            # required tier. The token's tier (required_tier) is minted from the
+            # rupee amount alone; the refund matrix can demand MORE (reason-bump /
+            # role-floor escalation). Without this guard a Rs 1,500 GOODWILL refund
+            # (matrix -> 'admin') would be satisfiable by an amount-only 'auto'
+            # token a STORE_MANAGER PIN-approved -- defeating the matrix. Reject +
+            # roll back when the token is weaker than the matrix demands.
+            _sev = {"auto": 0, "admin": 1, "super": 2}
+            if _sev.get(updated.get("required_tier"), 0) < _sev.get(min_tier, 0):
+                mismatch = "tier_too_low"
 
         if mismatch:
             try:

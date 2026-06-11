@@ -188,3 +188,93 @@ def test_gate_consumes_refund_bound_token(monkeypatch):
     assert captured.get("expected_store_id") == "BV-01"
     ctx = captured.get("expected_context") or {}
     assert ctx.get("order_id") == "ORD-1" or ctx.get("refund_id") == "ORD-1"
+    # F27 P1 fix: the matrix tier MUST ride into consume so a weaker (amount-only)
+    # token can't satisfy a reason/role-escalated matrix tier.
+    assert captured.get("min_tier") == "admin"
+
+
+# --------------------------------------------------------------------------- #
+# consume_approval min_tier guard (the P1 fix) -- a weaker token is rejected
+# --------------------------------------------------------------------------- #
+class _ApprovalColl:
+    """Minimal fake supporting consume_approval's two find_one_and_update calls
+    (consume flip + rollback) and eq / $gt matching."""
+
+    def __init__(self, docs):
+        self.docs = [dict(d) for d in docs]
+
+    def _ok(self, d, q):
+        for k, v in q.items():
+            if isinstance(v, dict) and "$gt" in v:
+                if not (d.get(k) is not None and d.get(k) > v["$gt"]):
+                    return False
+            elif d.get(k) != v:
+                return False
+        return True
+
+    def find_one_and_update(self, q, u, return_document=None, **k):
+        for d in self.docs:
+            if self._ok(d, q):
+                for kk, vv in (u.get("$set") or {}).items():
+                    d[kk] = vv
+                return dict(d)
+        return None
+
+    def find_one(self, q):
+        for d in self.docs:
+            if self._ok(d, q):
+                return dict(d)
+        return None
+
+
+def _engine_with(doc):
+    from api.services.approvals import ApprovalEngine
+    eng = ApprovalEngine(db=None)
+    coll = _ApprovalColl([doc])
+    eng._coll = lambda: coll                      # type: ignore[assignment]
+    eng._consume_failure = lambda ident: {"ok": False, "error": "not_consumable"}
+    eng._write_audit = lambda *a, **k: "aud-1"    # type: ignore[assignment]
+    eng._set = lambda *a, **k: None               # type: ignore[assignment]
+    return eng, coll
+
+
+def _approved_token(tier):
+    from datetime import datetime, timedelta, timezone
+    return {
+        "request_id": "AR-9", "approval_token": "tok-9",
+        "status": "APPROVED", "consumed": False,
+        "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        "action_type": "REFUND_APPROVAL_MATRIX", "amount": 100000.0,
+        "required_tier": tier, "store_id": "BV-01", "context": {"order_id": "ORD-1"},
+    }
+
+
+def test_consume_rejects_token_below_required_tier():
+    eng, coll = _engine_with(_approved_token("auto"))
+    res = eng.consume_approval(
+        consumed_by="mgr", action_type="REFUND_APPROVAL_MATRIX", request_id="AR-9",
+        amount=1500.0, expected_store_id="BV-01",
+        expected_context={"order_id": "ORD-1"}, min_tier="admin",  # matrix demands admin
+    )
+    assert res["ok"] is False and res["error"] == "tier_too_low"
+    # rolled back -> not silently burned
+    assert coll.docs[0]["status"] == "APPROVED" and coll.docs[0]["consumed"] is False
+
+
+def test_consume_accepts_token_meeting_required_tier():
+    eng, _ = _engine_with(_approved_token("admin"))
+    res = eng.consume_approval(
+        consumed_by="mgr", action_type="REFUND_APPROVAL_MATRIX", request_id="AR-9",
+        amount=1500.0, expected_store_id="BV-01",
+        expected_context={"order_id": "ORD-1"}, min_tier="admin",
+    )
+    assert res["ok"] is True
+
+
+def test_consume_min_tier_none_is_backcompat():
+    eng, _ = _engine_with(_approved_token("auto"))
+    res = eng.consume_approval(
+        consumed_by="mgr", action_type="REFUND_APPROVAL_MATRIX", request_id="AR-9",
+        amount=1500.0,  # no min_tier -> historical consumers unaffected
+    )
+    assert res["ok"] is True

@@ -1092,6 +1092,7 @@ def _gate_refund_approval_matrix(
             amount=float(net_amount),  # token's approved amount must be >= this refund
             expected_store_id=store_id,
             expected_context={"order_id": resolved_order_id} if resolved_order_id else None,
+            min_tier=tier,  # F27: the token's approver tier must MEET the matrix tier
         )
     except Exception as exc:  # noqa: BLE001 - a consume error must NOT let the refund through
         logger.warning("[RETURNS] F27 approval consume failed: %s", exc)
