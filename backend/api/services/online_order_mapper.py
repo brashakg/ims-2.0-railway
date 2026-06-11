@@ -314,6 +314,22 @@ def _match_or_create_customer(
     """Return the IMS `customer_id` for this online buyer -- matching an existing
     customer by phone then email, else creating a minimal ONLINE customer.
 
+    Unification step-5: the MOBILE-keyed dedup+create is now delegated to the ONE
+    canonical ``api.services.customer_service.ensure_customer`` (source="ONLINE"),
+    so an online buyer resolves to the SAME single record as an in-store walk-in
+    with the same number. This wrapper keeps the two online-specific concerns the
+    generic service deliberately doesn't own: (1) the EMAIL-fallback match/create
+    for buyers with no usable phone, and (2) stamping the Shopify linkage
+    (``shopify_customer_id`` + ``email``) onto a freshly-minted ONLINE record so
+    the Online-Store dashboard's "customers joined from Shopify" count (which keys
+    on shopify_customer_id) still works.
+
+    Behaviour change (intentional, step-5): a NEW phone-keyed record now carries the
+    canonical skeleton + customer ``source="ONLINE"`` (was "shopify"; the ORDER doc
+    still carries source="shopify", untouched) and the full store-key set, and
+    dedups against in-store customers. ``channel="ONLINE"``, ``shopify_customer_id``,
+    ``raw_phone`` (step-2) and ``email`` are all preserved.
+
     Fully fail-soft: no DB / repo error / nothing to key on -> returns None and the
     order is still created (carrying the buyer's name+phone on the order doc, exactly
     as before). NEVER raises.
@@ -331,30 +347,65 @@ def _match_or_create_customer(
 
     # Store ONLY the canonical normalized mobile (no raw-string fallback): a
     # garbage/foreign number must not be persisted as a fake "mobile" that can
-    # never dedup. The original input is preserved verbatim under raw_phone on
-    # the created doc (below) for traceability.
+    # never dedup. The original input is preserved verbatim under raw_phone.
     raw_phone = _norm(buyer.get("phone"))
     phone = _normalize_indian_mobile(buyer.get("phone", ""))
     email = _norm(buyer.get("email"))
+    shopify_id = buyer.get("shopify_customer_id") or ""
 
-    # --- match by phone, then email -------------------------------------------
-    try:
-        if phone:
-            found = repo.find_by_mobile(phone)
-            if found and _norm(found.get("customer_id")):
-                return _norm(found.get("customer_id"))
-        if email:
+    # --- phone path: delegate the dedup+create to the canonical service --------
+    if phone:
+        from .customer_service import ensure_customer
+
+        try:
+            customer_id, created = ensure_customer(
+                db,
+                mobile=phone,
+                name=buyer.get("name") or "Online Customer",
+                store_id=store_id,
+                source="ONLINE",
+                raw_phone=raw_phone,
+            )
+        except Exception:  # noqa: BLE001 -- the mapper must never raise
+            logger.debug("[ONLINE_MAP] ensure_customer failed", exc_info=True)
+            customer_id, created = (None, False)
+        if customer_id:
+            # Stamp the Shopify-specific fields the generic skeleton omits onto a
+            # NEWLY created record (a dedup match keeps its existing identity).
+            if created and (email or shopify_id):
+                try:
+                    repo.update(
+                        customer_id,
+                        {
+                            k: v
+                            for k, v in {
+                                "email": email or None,
+                                "shopify_customer_id": shopify_id,
+                            }.items()
+                            if v is not None
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("[ONLINE_MAP] shopify-stamp failed", exc_info=True)
+            return _norm(customer_id)
+        # Service couldn't resolve via phone -> fall through to the email path.
+
+    # --- email path: match an existing customer by email, else create ----------
+    # The canonical service is mobile-keyed; an email-only buyer is handled here so
+    # the prior behaviour (email-only buyers DO become customers) is preserved.
+    if email:
+        try:
             found = repo.find_by_email(email)
             if found and _norm(found.get("customer_id")):
                 return _norm(found.get("customer_id"))
-    except Exception:  # noqa: BLE001
-        logger.debug("[ONLINE_MAP] customer match failed", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("[ONLINE_MAP] email match failed", exc_info=True)
 
     # Nothing to identify the buyer by -> don't mint an orphan keyless customer.
     if not phone and not email:
         return None
 
-    # --- create a minimal customer --------------------------------------------
+    # --- create an email-only (or create-failed phone) minimal ONLINE customer --
     now = datetime.now(timezone.utc).isoformat()
     customer_id = str(uuid.uuid4())
     doc = {
@@ -362,15 +413,21 @@ def _match_or_create_customer(
         "name": buyer.get("name") or "Online Customer",
         "mobile": phone,
         "phone": phone,
-        # Original buyer-supplied phone string kept verbatim (the normalized
-        # form lives in mobile/phone; this is the audit/source-of-truth value).
         "raw_phone": raw_phone,
         "email": email,
         "customer_type": "B2C",
-        "source": "shopify",
+        "source": "ONLINE",
         "channel": "ONLINE",
         "home_store_id": store_id,
-        "shopify_customer_id": buyer.get("shopify_customer_id") or "",
+        "preferred_store_id": store_id,
+        "primary_store_id": store_id,
+        "store_ids": [store_id] if store_id else [],
+        "is_active": True,
+        "loyalty_points": 0,
+        "store_credit": 0.0,
+        "total_purchases": 0,
+        "patients": [],
+        "shopify_customer_id": shopify_id,
         "created_at": now,
         "updated_at": now,
     }
@@ -380,7 +437,7 @@ def _match_or_create_customer(
             return _norm(created.get("customer_id"))
         return customer_id
     except Exception:  # noqa: BLE001
-        # A racing create (unique mobile) -> re-read by phone/email.
+        # A racing create (unique mobile/email) -> re-read by phone/email.
         try:
             if phone:
                 found = repo.find_by_mobile(phone)
