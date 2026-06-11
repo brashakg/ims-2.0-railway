@@ -71,7 +71,10 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
     { name: 'cl_axis', label: 'Axis (toric, 0-180)', type: 'number', required: false },
     { name: 'cl_add', label: 'Add (multifocal)', type: 'number', required: false },
     { name: 'pack', label: 'Pack Size', type: 'select', required: false, options: ['1', '3', '6', '30', '90'] },
-    { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: false },
+    // Contact lenses are medical devices with a shelf life -- the canonical
+    // product-create registry (step-9) hard-requires expiry_date at every door,
+    // so the wizard must block submit inline rather than 422 after POST.
+    { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: true },
   ],
   LS: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Essilor', 'Zeiss', 'Hoya', 'Crizal', 'Kodak', 'Nikon', 'Rodenstock'] },

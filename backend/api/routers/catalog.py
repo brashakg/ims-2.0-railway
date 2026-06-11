@@ -166,14 +166,14 @@ async def online_stock_reconcile(
 # is the legacy /catalog door's accepted set; every value below is a registered
 # SKU-prefix alias the registry resolves via product_master.resolve_category()
 # (e.g. "SG" -> SUNGLASS, "CL" -> CONTACT_LENS, "LS" -> OPTICAL_LENS). It is
-# deliberately LEFT IN PLACE (not repointed) because:
-#   * this enum is the /catalog door's accepted-category contract -- replacing
-#     it would change which categories the door accepts (a behaviour change), and
-#   * the per-category required fields below DISAGREE with the registry for two
-#     categories (see the CATEGORY_FIELDS flag) -- so this door cannot delegate
-#     to the registry without an owner decision.
-# Step-9 (canonical product-create) is where /catalog will delegate to the
-# registry; step-8 only records the canonical source.
+# deliberately LEFT IN PLACE (not repointed) because this enum is the /catalog
+# door's accepted-category contract -- replacing it would change which categories
+# the door accepts (a behaviour change).
+# Step-9 (canonical product-create) repointed this door's VALIDATION to the
+# registry via build_canonical_product; the per-category required fields below
+# now AGREE with the registry (the two former divergences -- CONTACT_LENS and
+# HEARING_AID -- were reconciled by owner sign-off). Only the nested
+# catalog_products persistence stays here, pending the owner-gated step-10 spine.
 
 
 class ProductCategory(str, Enum):
@@ -213,20 +213,19 @@ CATEGORY_NAMES = {
 # ============================================================================
 #
 # Unification step-8 FLAG -- DO NOT auto-reconcile, owner decision required.
-# These per-category required-field sets are the /catalog door's contract. The
-# canonical registry (services/product_master._CATEGORY_SPECS) AGREES with all
-# of these EXCEPT two categories, where the two sources DISAGREE today:
+# These per-category required-field sets are the /catalog door's contract and
+# now AGREE byte-for-byte with the canonical registry
+# (services/product_master._CATEGORY_SPECS) for every category. The two former
+# divergences were reconciled by owner sign-off in step-9:
 #
-#   * CONTACT_LENS: this door requires {brand_name, model_name, POWER};
-#       the registry requires {brand_name, model_name, EXPIRY_DATE}.
-#   * HEARING_AID:  this door requires {brand_name, model_no};
-#       the registry additionally requires SERIAL_NO.
+#   * CONTACT_LENS: requires {brand_name, model_name, power, expiry_date}
+#       (both power AND expiry -- a contact lens is a powered medical device
+#       with a shelf life).
+#   * HEARING_AID:  requires {brand_name, model_no} only -- serial_no is NOT
+#       required at catalogue (it is captured per-UNIT at stock-in).
 #
-# (The registry's stricter HEARING_AID/CONTACT_LENS rules are the deliberate PM
-# tightening -- see product_master._CATEGORY_SPECS docstring.) Repointing this
-# dict to the registry would CHANGE which fields /catalog requires -- a
-# behaviour change -- so step-8 leaves the values UNTOUCHED and only records the
-# divergence here. Reconciling the two is a step-9 / owner-sign-off task.
+# Step-9 routes this door's validation through build_canonical_product, so these
+# sets and the registry cannot drift; a parity test locks them equal.
 #
 # Define which fields each category needs
 CATEGORY_FIELDS = {
