@@ -27,13 +27,13 @@ from datetime import datetime, date as date_type, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
-import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import get_current_user
+from ..services.phone import normalize_indian_mobile
 from ..utils.ist import ist_today, now_ist
 from ..dependencies import (
     can_access_store_scoped,
@@ -173,9 +173,6 @@ class WalkoutResult(str, Enum):
 # ============================================================================
 
 
-_MOBILE_RE = re.compile(r"^\d{10}$")
-
-
 class CreateWalkoutRequest(BaseModel):
     """Phase 1 intake payload. See doc §"Schema — walkouts collection".
 
@@ -206,15 +203,13 @@ class CreateWalkoutRequest(BaseModel):
     @field_validator("mobile")
     @classmethod
     def _validate_mobile(cls, v):
-        # Empty string -> None (omitted); a present value must be 10 digits.
-        if v is None:
-            return None
-        v = (v or "").strip()
-        if v == "":
-            return None
-        if not _MOBILE_RE.match(v):
-            raise ValueError("Mobile must be exactly 10 digits or left blank")
-        return v
+        # Empty/omitted -> None. Otherwise normalize via the ONE canonical
+        # Indian-mobile util (api.services.phone): accepts +91 / 0 / spaces /
+        # dashes that walk-in staff actually type and stores the bare 10-digit
+        # 6-9 form -- so a walkout mobile matches the same person's customer doc
+        # for dedup/search. The local ^\d{10}$ regex rejected +91 and wrongly
+        # accepted 0-leading non-mobiles; normalize_indian_mobile fixes both.
+        return normalize_indian_mobile(v)
 
 
 class WalkoutResponse(BaseModel):
@@ -263,16 +258,10 @@ class UpdateWalkoutRequest(BaseModel):
     @field_validator("mobile")
     @classmethod
     def _validate_mobile(cls, v):
-        # Same shape as CreateWalkoutRequest: None / "" -> None; else
-        # must be 10 digits. Mirrors the optional-mobile policy.
-        if v is None:
-            return None
-        v = (v or "").strip()
-        if v == "":
-            return None
-        if not _MOBILE_RE.match(v):
-            raise ValueError("Mobile must be exactly 10 digits or left blank")
-        return v
+        # Same shape as CreateWalkoutRequest: empty/omitted -> None; else
+        # normalize via the canonical Indian-mobile util. Mirrors the
+        # optional-mobile policy and the same +91/0/spacing tolerance.
+        return normalize_indian_mobile(v)
 
 
 class DeleteWalkoutRequest(BaseModel):
