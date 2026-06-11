@@ -35,6 +35,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from pymongo.errors import DuplicateKeyError
+
 _SESSIONS_COLLECTION = "till_sessions"
 
 # Status lifecycle (the blind state machine):
@@ -82,19 +84,30 @@ def _to_int_paisa_from_rupees(rupees: Any) -> int:
 def _session_day_window(session: Dict[str, Any]):
     """The (start, end) bounds of the session's IST calendar day as NAIVE-UTC
     instants (the frame ``created_at`` is stored in) -- so the by-mode
-    reconciliation matches the day-close. Falls back to ``opened_at`` (open span)
-    if ``session_date`` is missing/unparseable. Never raises."""
+    reconciliation matches the day-close. ALWAYS bounded to ONE IST calendar day:
+    if ``session_date`` is missing/unparseable it falls back to the IST day that
+    contains ``opened_at`` -- it NEVER returns an open-ended ``(start, None)``
+    window (an open-ended window would reconcile EVERY order from opened_at
+    forward and over-state the expected figure). Never raises."""
     from datetime import date as _date, timedelta
+
+    from ..utils.ist import ist_day_start_utc, ist_today
 
     day = session.get("session_date")
     try:
-        from ..utils.ist import ist_day_start_utc
-
         d = _date.fromisoformat(str(day)[:10])
-        start = ist_day_start_utc(d)
-        return start, start + timedelta(days=1)
-    except Exception:  # noqa: BLE001
-        return session.get("opened_at"), None
+    except (TypeError, ValueError):
+        d = None
+    if d is None:
+        # Derive the IST day from opened_at (a naive-UTC instant). Add the IST
+        # offset back, take .date(); fall back to IST today if even that is junk.
+        opened = session.get("opened_at")
+        try:
+            d = (opened + timedelta(hours=5, minutes=30)).date()
+        except Exception:  # noqa: BLE001
+            d = ist_today()
+    start = ist_day_start_utc(d)
+    return start, start + timedelta(days=1)
 
 
 def _coerce_pieces(value: Any) -> int:
@@ -319,12 +332,19 @@ def open_session(
     note: Optional[str] = None,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Open a blind till session for a (store, cashier, date).
+    """Open a blind till session for a (store, date).
 
-    Enforces ONE active (OPEN/BLIND_SUBMITTED) session per (store, cashier, date)
-    -> a second open returns ``{"ok": False, "error": "already_open", "http":
-    409}``. Single-document insert. NO expected figure is computed or stored at
-    open time (blind enforcement). Returns ``{"ok": True, "session"}``."""
+    ONE SHARED DRAWER PER STORE: there is a single physical cash drawer per store,
+    counted ONCE at EOD. So the active session is unique on (store, date) -- NOT
+    on cashier. ``cashier_id`` is kept as the informational ``opened_by`` (who
+    declared the float) but is NOT part of the uniqueness key. A second open for
+    the same (store, date) -- by ANY cashier -- returns the EXISTING session as
+    ``{"ok": True, "session", "already_open": True}`` (so a second cashier joins
+    the shared drawer rather than spawning a phantom second drawer that the
+    store-wide cash math would falsely short).
+
+    Single-document insert. NO expected figure is computed or stored at open time
+    (blind enforcement). Returns ``{"ok": True, "session"}``."""
     coll = _sessions_coll(db)
     if coll is None:
         return {"ok": False, "error": "no_db", "http": 503}
@@ -337,12 +357,12 @@ def open_session(
         else total_paisa_from_denominations(denoms)
     )
 
-    # One active session per (store, cashier, date).
+    # One SHARED active session per (store, date) -- cashier is NOT in the key.
+    # A second open (even by a different cashier) joins the existing drawer.
     try:
         existing = coll.find_one(
             {
                 "store_id": store_id,
-                "cashier_id": cashier_id,
                 "session_date": session_date,
                 "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]},
             }
@@ -350,7 +370,9 @@ def open_session(
     except Exception:  # noqa: BLE001
         existing = None
     if existing is not None:
-        return {"ok": False, "error": "already_open", "http": 409}
+        existing["session_id"] = existing.get("_id")
+        existing.pop("_id", None)
+        return {"ok": True, "session": existing, "already_open": True}
 
     now = datetime.utcnow()
     session_id = f"TILL-{store_id}-{now.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -387,6 +409,25 @@ def open_session(
     }
     try:
         coll.insert_one(dict(doc))
+    except DuplicateKeyError:
+        # Open-race: another open for this (store, date) won the unique index
+        # between our find_one check and this insert. Return the existing shared
+        # drawer (cooperative), NOT a 500 with a leaked E11000.
+        try:
+            existing = coll.find_one(
+                {
+                    "store_id": store_id,
+                    "session_date": session_date,
+                    "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]},
+                }
+            )
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing is not None:
+            existing["session_id"] = existing.get("_id")
+            existing.pop("_id", None)
+            return {"ok": True, "session": existing, "already_open": True}
+        return {"ok": False, "error": "already_open", "http": 409}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"write_failed:{exc}", "http": 500}
 
@@ -851,18 +892,26 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
 
 
 def ensure_till_indexes(db) -> None:
-    """Idempotent. A partial-unique index so AT MOST ONE active
-    (OPEN/BLIND_SUBMITTED) session can exist per (store, cashier, date), plus a
-    listing index. Fail-soft."""
+    """Idempotent. ONE SHARED DRAWER PER STORE: a partial-unique index so AT MOST
+    ONE active (OPEN/BLIND_SUBMITTED) session can exist per (store, date) --
+    cashier is deliberately NOT in the key (the drawer is shared and counted once
+    at EOD; the store-wide cash math is only correct with a single session per
+    store/day). Plus listing indexes. Fail-soft."""
     if db is None:
         return
     try:
         coll = db.get_collection(_SESSIONS_COLLECTION)
+        # Drop the superseded per-cashier unique index (if a prior deploy created
+        # it) so the shared-drawer (store, date) uniqueness takes over.
+        try:
+            coll.drop_index("uniq_active_till_per_cashier_day")
+        except Exception:  # noqa: BLE001
+            pass
         coll.create_index(
-            [("store_id", 1), ("cashier_id", 1), ("session_date", 1)],
+            [("store_id", 1), ("session_date", 1)],
             unique=True,
             partialFilterExpression={"status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]}},
-            name="uniq_active_till_per_cashier_day",
+            name="uniq_active_till_per_store_day",
         )
         coll.create_index([("store_id", 1), ("session_date", -1)], name="till_store_date")
         coll.create_index([("store_id", 1), ("status", 1)], name="till_store_status")

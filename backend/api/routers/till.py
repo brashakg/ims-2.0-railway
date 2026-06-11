@@ -76,10 +76,30 @@ def _is_cashier_only(user: Dict[str, Any]) -> bool:
     return bool(roles & _CASHIER_ONLY_ROLES)
 
 
-def _today_ist() -> str:
+def _validate_session_date(raw: Optional[str]) -> str:
+    """Validate + normalize the opening ``session_date`` to a bounded IST day.
+
+    The expected-cash window is derived from this date; a malformed or absent
+    value must NEVER fall through to an open-ended (un-bounded) reconciliation
+    window. Rules:
+      * absent/blank -> IST today,
+      * must parse as an ISO calendar date (``YYYY-MM-DD``); junk -> 400,
+      * must be within IST today +/- 1 day (a store closes today, sometimes the
+        previous day late, or pre-opens tomorrow); out of range -> 400.
+    Returns the normalized ``YYYY-MM-DD`` string."""
+    from datetime import date as _date, timedelta
     from ..utils.ist import ist_today
 
-    return ist_today().isoformat()
+    if raw is None or not str(raw).strip():
+        return ist_today().isoformat()
+    try:
+        d = _date.fromisoformat(str(raw).strip()[:10])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid session_date (expected YYYY-MM-DD)")
+    today = ist_today()
+    if not (today - timedelta(days=1) <= d <= today + timedelta(days=1)):
+        raise HTTPException(status_code=400, detail="session_date out of range (IST today +/- 1 day)")
+    return d.isoformat()
 
 
 def _raise(res: Dict[str, Any]):
@@ -137,11 +157,12 @@ async def open_till_session(
     store_id = validate_store_access(body.store_id or "", current_user)
     if not store_id:
         raise HTTPException(status_code=400, detail="No store context for this user")
+    session_date = _validate_session_date(body.session_date)
 
     res = till.open_session(
         _get_db(),
         store_id=store_id,
-        session_date=body.session_date or _today_ist(),
+        session_date=session_date,
         opening_denominations=[d.model_dump() for d in body.opening_denominations],
         opening_float_paisa=body.opening_float_paisa,
         shift=body.shift,
@@ -151,10 +172,13 @@ async def open_till_session(
     if not res.get("ok"):
         _raise(res)
     session = res["session"]
+    session.pop("_id", None)
     # Open carries no expected figure yet, but redact defensively for cashiers.
     if _is_cashier_only(current_user):
         session = till.redact_for_cashier(session)
-    return {"ok": True, "session": session}
+    # ONE SHARED DRAWER PER STORE: a second open for the same store/day returns the
+    # EXISTING shared session (already_open=True) rather than a phantom second drawer.
+    return {"ok": True, "session": session, "already_open": res.get("already_open", False)}
 
 
 @router.post("/sessions/{session_id}/blind-submit")
@@ -187,6 +211,7 @@ async def submit_blind_count(
     if not res.get("ok"):
         _raise(res)
     out = res["session"]
+    out.pop("_id", None)
     if _is_cashier_only(current_user):
         out = till.redact_for_cashier(out)
     return {"ok": True, "session": out, "idempotent": res.get("idempotent", False)}
@@ -211,6 +236,7 @@ async def lock_till_session(
     res = till.lock_session(db, session_id, actor=current_user)
     if not res.get("ok"):
         _raise(res)
+    res["session"].pop("_id", None)
     return {"ok": True, "session": res["session"]}
 
 
@@ -236,6 +262,7 @@ async def reopen_till_session(
     res = till.reopen_session(db, session_id, reason=body.reason, actor=current_user)
     if not res.get("ok"):
         _raise(res)
+    res["session"].pop("_id", None)
     return {"ok": True, "session": res["session"]}
 
 

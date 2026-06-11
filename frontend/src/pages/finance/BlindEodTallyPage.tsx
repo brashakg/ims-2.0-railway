@@ -182,17 +182,19 @@ export default function BlindEodTallyPage() {
     }
     setBusy(true);
     try {
-      await tillApi.open({
+      // ONE SHARED DRAWER PER STORE: a second open for today returns the EXISTING
+      // shared session (already_open=true) instead of spawning a second drawer.
+      const res = await tillApi.open({
         store_id: storeId,
         shift,
         opening_denominations: openDenoms.filter((r) => r.pieces > 0),
         opening_float_paisa: openTotalPaisa,
       });
-      toast.success('Till opened');
+      toast.success(res?.already_open ? "Today's drawer is already open — joined it" : 'Till opened');
       setOpenDenoms(blankDenoms());
       await load();
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail === 'already_open' ? 'A session is already open for you today' : 'Could not open till');
+    } catch {
+      toast.error('Could not open till');
     } finally {
       setBusy(false);
     }

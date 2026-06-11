@@ -467,13 +467,67 @@ def test_denomination_mismatch_rejected(db):
     assert res["http"] == 400
 
 
-def test_second_open_for_same_cashier_day_is_409(db):
+def test_second_open_same_store_day_returns_same_shared_drawer(db):
+    """ONE SHARED DRAWER PER STORE: a second open for the SAME (store, date) --
+    even by a DIFFERENT cashier -- joins the EXISTING shared drawer (no phantom
+    second session). Otherwise the store-wide cash math would falsely short every
+    extra drawer on a multi-cashier day."""
     a = till.open_session(db, store_id="BV-1", session_date="2026-06-09",
-                          opening_float_paisa=0, actor=_cashier())
+                          opening_float_paisa=5000, actor=_cashier("C1"))
     assert a["ok"] is True
+    sid_a = a["session"]["session_id"]
+    # A DIFFERENT cashier opens the same store/day -> the SAME shared session.
     b = till.open_session(db, store_id="BV-1", session_date="2026-06-09",
-                          opening_float_paisa=0, actor=_cashier())
-    assert b["ok"] is False and b["error"] == "already_open" and b["http"] == 409
+                          opening_float_paisa=999999, actor=_cashier("C2"))
+    assert b["ok"] is True
+    assert b.get("already_open") is True
+    assert b["session"]["session_id"] == sid_a
+    # The opening float of the FIRST open stands (the join does not overwrite).
+    assert b["session"]["opening_float_paisa"] == 5000
+    # Exactly ONE session exists for the store/day (no phantom second drawer).
+    rows = db.get_collection("till_sessions").find({"store_id": "BV-1", "session_date": "2026-06-09"})
+    assert len([r for r in rows]) == 1
+
+
+def test_open_race_duplicate_insert_returns_existing_not_500(db, monkeypatch):
+    """Open-race: the find_one precheck passes (window between two concurrent
+    opens) but the unique (store, date) index makes the second INSERT collide.
+    The service must catch DuplicateKeyError and return the existing shared drawer
+    (or a clean 409) -- NEVER a 500 with a leaked E11000."""
+    coll = db.get_collection("till_sessions")
+    # First open lands a real session.
+    a = till.open_session(db, store_id="BV-1", session_date="2026-06-09",
+                          opening_float_paisa=5000, actor=_cashier("C1"))
+    assert a["ok"] is True
+    sid_a = a["session"]["session_id"]
+
+    # Simulate the race: force the precheck find_one to miss (return None) so the
+    # code reaches insert_one, and force insert_one to raise DuplicateKeyError
+    # (as the real unique index would).
+    from pymongo.errors import DuplicateKeyError
+
+    real_find_one = coll.find_one
+    calls = {"n": 0}
+
+    def racing_find_one(query, projection=None):
+        # The PRECHECK (status $in OPEN/BLIND_SUBMITTED) misses once; the post-
+        # collision recovery find_one then sees the real existing session.
+        if query.get("status", {}).get("$in") and calls["n"] == 0:
+            calls["n"] += 1
+            return None
+        return real_find_one(query, projection)
+
+    def racing_insert(doc):
+        raise DuplicateKeyError("E11000 duplicate key uniq_active_till_per_store_day")
+
+    monkeypatch.setattr(coll, "find_one", racing_find_one)
+    monkeypatch.setattr(coll, "insert_one", racing_insert)
+
+    b = till.open_session(db, store_id="BV-1", session_date="2026-06-09",
+                          opening_float_paisa=0, actor=_cashier("C2"))
+    # No 500, no leaked E11000 -- recovered to the existing shared drawer.
+    assert b["ok"] is True and b.get("already_open") is True
+    assert b["session"]["session_id"] == sid_a
 
 
 def test_blind_submit_idempotent_retry_returns_existing(db):
@@ -693,6 +747,125 @@ def test_zread_route_403_for_cashier_role(db, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(tillroute.get_zread(sid, current_user=_cashier()))
     assert exc.value.status_code == 403
+
+
+# ============================================================================
+# SESSION-DATE VALIDATION -- the window is ALWAYS bounded to an IST day; a
+# malformed/out-of-range session_date is rejected (never an open-ended window).
+# ============================================================================
+
+
+def test_session_day_window_is_always_bounded_for_valid_date():
+    """A valid session_date yields a (start, end) span of EXACTLY one IST day --
+    both bounds present (no open-ended $gte-only window)."""
+    from datetime import timedelta
+    from api.utils.ist import ist_day_start_utc
+    import datetime as _dt
+
+    session = {"session_date": "2026-06-09", "opened_at": _dt.datetime(2026, 6, 9, 12, 0, 0)}
+    start, end = till._session_day_window(session)
+    assert start is not None and end is not None
+    assert start == ist_day_start_utc(_dt.date(2026, 6, 9))
+    assert end - start == timedelta(days=1)
+
+
+def test_session_day_window_never_open_ended_on_junk_date():
+    """A missing/garbage session_date must NOT degrade to an open-ended window
+    (which would reconcile EVERY order from opened_at forward and over-state the
+    expected figure). It falls back to the IST day of opened_at -- still BOUNDED."""
+    from datetime import timedelta
+    import datetime as _dt
+
+    # opened_at is a naive-UTC instant on 2026-06-09 (07:00 UTC == 12:30 IST).
+    session = {"session_date": "not-a-date", "opened_at": _dt.datetime(2026, 6, 9, 7, 0, 0)}
+    start, end = till._session_day_window(session)
+    assert start is not None and end is not None, "window must be bounded, never (start, None)"
+    assert end - start == timedelta(days=1)
+    # Also a totally absent session_date is bounded.
+    s2 = {"opened_at": _dt.datetime(2026, 6, 9, 7, 0, 0)}
+    start2, end2 = till._session_day_window(s2)
+    assert start2 is not None and end2 is not None
+    assert end2 - start2 == timedelta(days=1)
+
+
+def test_open_route_rejects_malformed_session_date(db, monkeypatch):
+    """The OPEN route validates session_date with date.fromisoformat -- a junk
+    value is a 400, never a silent open-ended reconciliation window."""
+    import asyncio
+    from fastapi import HTTPException
+    from api.routers import till as tillroute
+
+    monkeypatch.setattr(tillroute, "_get_db", lambda: db)
+    monkeypatch.setattr(tillroute, "validate_store_access", lambda sid, u: sid or u.get("active_store_id"))
+    body = tillroute.OpenSession(store_id="BV-1", session_date="13/06/2026",
+                                 opening_denominations=[], opening_float_paisa=0)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(tillroute.open_till_session(body, current_user=_cashier()))
+    assert exc.value.status_code == 400
+
+
+def test_open_route_rejects_out_of_range_session_date(db, monkeypatch):
+    """A well-formed but far-off session_date (years away) is out of the IST
+    today +/- 1 day band -> 400 (a store closes today, not 2099)."""
+    import asyncio
+    from fastapi import HTTPException
+    from api.routers import till as tillroute
+
+    monkeypatch.setattr(tillroute, "_get_db", lambda: db)
+    monkeypatch.setattr(tillroute, "validate_store_access", lambda sid, u: sid or u.get("active_store_id"))
+    body = tillroute.OpenSession(store_id="BV-1", session_date="2099-01-01",
+                                 opening_denominations=[], opening_float_paisa=0)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(tillroute.open_till_session(body, current_user=_cashier()))
+    assert exc.value.status_code == 400
+
+
+def test_open_route_accepts_today_and_bounds_the_window(db, monkeypatch):
+    """A valid (today) session_date opens fine; the resulting session's window is
+    bounded to that IST day so the blind-submit expected figure is correct."""
+    import asyncio
+    from datetime import timedelta
+    from api.routers import till as tillroute
+    from api.utils.ist import ist_today
+
+    monkeypatch.setattr(tillroute, "_get_db", lambda: db)
+    monkeypatch.setattr(tillroute, "validate_store_access", lambda sid, u: sid or u.get("active_store_id"))
+    today = ist_today().isoformat()
+    body = tillroute.OpenSession(store_id="BV-1", session_date=today,
+                                 opening_denominations=[], opening_float_paisa=10000)
+    out = asyncio.run(tillroute.open_till_session(body, current_user=_cashier()))
+    assert out["ok"] is True
+    sid = out["session"]["session_id"]
+    session = db.get_collection("till_sessions").find_one({"_id": sid})
+    start, end = till._session_day_window(session)
+    assert start is not None and end is not None
+    assert end - start == timedelta(days=1)
+
+
+def test_blind_submit_bounded_window_expected_is_correct(db, monkeypatch):
+    """End-to-end: an order INSIDE the session's IST day feeds the expected cash;
+    an order on a DIFFERENT day does NOT (the window is bounded, not open-ended)."""
+    from api.utils.ist import ist_today, ist_day_start_utc
+    from datetime import timedelta
+    import datetime as _dt
+
+    today = ist_today()
+    # An order created today (inside the IST day window).
+    in_day = ist_day_start_utc(today) + timedelta(hours=3)
+    # An order created on a LATER day (must be EXCLUDED by the bounded window).
+    next_day = ist_day_start_utc(today + timedelta(days=1)) + timedelta(hours=3)
+    _seed_order(db, order_id="OIN", store_id="BV-1", payments=[_pay("CASH", 500.0)], created_at=in_day)
+    _seed_order(db, order_id="OOUT", store_id="BV-1", payments=[_pay("CASH", 999.0)], created_at=next_day)
+
+    opened = till.open_session(db, store_id="BV-1", session_date=today.isoformat(),
+                               opening_float_paisa=0, actor=_cashier())
+    sid = opened["session"]["session_id"]
+    res = till.blind_submit(db, sid, blind_count_paisa=50000,
+                            blind_denominations=[{"face": 500, "pieces": 1}], actor=_cashier())
+    assert res["ok"] is True
+    # Only today's 500.00 CASH counts (the 999.00 next-day order is excluded).
+    assert res["session"]["expected_cash_paisa"] == 50000
+    assert res["session"]["variance_paisa"] == 0
 
 
 # ============================================================================

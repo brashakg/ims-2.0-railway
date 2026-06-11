@@ -96,12 +96,21 @@ interface SessionEnvelope {
   ok: boolean;
   session: TillSession;
   idempotent?: boolean;
+  // ONE SHARED DRAWER PER STORE: true when a second open for the same store/day
+  // returned the EXISTING shared session instead of creating a new drawer.
+  already_open?: boolean;
+}
+
+export interface OpenResult {
+  session: TillSession;
+  already_open: boolean;
 }
 
 export const tillApi = {
-  open: async (payload: OpenPayload): Promise<TillSession> => {
+  open: async (payload: OpenPayload): Promise<OpenResult> => {
     const res = await api.post('/till/sessions', payload);
-    return (res.data as SessionEnvelope).session;
+    const env = res.data as SessionEnvelope;
+    return { session: env.session, already_open: Boolean(env.already_open) };
   },
   blindSubmit: async (sessionId: string, payload: BlindSubmitPayload): Promise<TillSession> => {
     const res = await api.post(`/till/sessions/${sessionId}/blind-submit`, payload);

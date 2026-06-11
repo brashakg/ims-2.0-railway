@@ -1713,12 +1713,14 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     {
-        # One session: reachable by the operate set (cashiers get a redacted
-        # view; manager/finance see the full figures).
+        # One session: reachable by the OPERATE set (cashiers get a redacted
+        # view; manager sees the full figures). The handler fail-closes on
+        # _TILL_OPERATE_ROLES which EXCLUDES ACCOUNTANT -- this row matches that
+        # (ACCOUNTANT reads the Z-Read via /zread + the session list, not here).
         "method": "GET",
         "path": "/api/v1/till/sessions/{session_id}",
         "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
-                    "AREA_MANAGER", "ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
     {
