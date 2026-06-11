@@ -86,12 +86,25 @@ ACTION_TYPES: frozenset = frozenset({
     # applicant approving their own leave) is blocked at the leave-router layer,
     # which knows the leave doc's employee_id (the engine does not).
     "leave_approval",
+    # F27: a refund gated by the configurable refund approval matrix. The request
+    # carries an EXPLICIT required_tier (resolved by required_tier_for_refund from
+    # the amount-band x reason x role matrix) and is single-use + store/refund
+    # bound at consume-time (expected_store_id + expected_context={"refund_id":...})
+    # so a token minted for refund A cannot authorize refund B or a refund in
+    # another store. Self-approval is blocked because this is a MAKER_CHECKER
+    # action (the requester cannot PIN-approve their own refund).
+    "REFUND_APPROVAL_MATRIX",
 })
 
 # Actions that REQUIRE separation of duties (approver != maker).
 # petty_cash: an over-threshold petty-cash payout is real two-person control --
 # the manager who raises the request cannot also PIN-approve it (F17).
-MAKER_CHECKER_ACTIONS: frozenset = frozenset({"journal_entry", "petty_cash"})
+# REFUND_APPROVAL_MATRIX (F27): the cashier/manager who requests a refund cannot
+# PIN-approve their own refund -- SYSTEM_INTENT "Requester CANNOT approve own
+# request" / separation of duties for revenue-out money movement.
+MAKER_CHECKER_ACTIONS: frozenset = frozenset(
+    {"journal_entry", "petty_cash", "REFUND_APPROVAL_MATRIX"}
+)
 
 # Role tiers. A request resolved to a tier may be approved by any role at or
 # above that tier. SUPERADMIN passes everything.
