@@ -239,8 +239,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
             return _bc.checkpw(plain_password.encode(), hashed_password.encode())
         except Exception:
             return False
-    # Fallback to SHA-256 for any legacy hashes
+    # Fallback to SHA-256 for legacy hashes (no salt — vulnerable to rainbow tables).
+    # Returns True so the login succeeds, but the caller must re-hash with bcrypt.
     return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+
+
+def _is_legacy_hash(hashed_password: str) -> bool:
+    """True if the stored hash is the insecure legacy SHA-256 (no salt) format."""
+    return not (hashed_password.startswith("$2b$") or hashed_password.startswith("$2a$"))
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
@@ -337,16 +343,22 @@ def require_roles(*allowed_roles: str):
 def _client_ip(req: "Request") -> str:
     """Best-effort client IP for the audit "where" dimension.
 
-    Prefers the first hop of X-Forwarded-For (the real client behind Railway's
-    proxy), then the direct socket peer. Fail-soft -> 'unknown'.
+    Uses the rightmost untrusted hop from X-Forwarded-For to prevent IP spoofing
+    via a forged leftmost hop. Railway adds one proxy hop; we trust that single
+    hop and read the value just before it (or the socket peer when XFF is absent).
+    Fail-soft -> 'unknown'.
     """
     if req is None:
         return "unknown"
     try:
         xff = req.headers.get("x-forwarded-for", "") or ""
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
+        hops = [h.strip() for h in xff.split(",") if h.strip()]
+        # Railway adds exactly one trusted proxy hop at the end.
+        # The rightmost attacker-uncontrollable IP is hops[-2] when at least
+        # two hops exist, else the socket peer (which Railway set, not the client).
+        trusted_proxy_count = int(os.getenv("TRUSTED_PROXY_COUNT", "1"))
+        if len(hops) > trusted_proxy_count:
+            return hops[-(trusted_proxy_count + 1)]
         if req.client and req.client.host:
             return req.client.host
     except Exception:  # noqa: BLE001
@@ -515,7 +527,8 @@ async def login(request: LoginRequest, req: Request = None):
         )
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    if not verify_password(request.password, user.get("password_hash", "")):
+    stored_hash = user.get("password_hash", "")
+    if not verify_password(request.password, stored_hash):
         _login_limiter.record(client_ip, request.username, success=False)
         _audit_auth_event(
             action="login_failure",
@@ -526,6 +539,16 @@ async def login(request: LoginRequest, req: Request = None):
             detail="bad password",
         )
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Upgrade insecure legacy SHA-256 hash to bcrypt on first successful login.
+    if _is_legacy_hash(stored_hash):
+        try:
+            from ..dependencies import get_user_repository as _get_ur
+            _ur = _get_ur()
+            if _ur is not None:
+                _ur.update(user.get("user_id"), {"password_hash": hash_password(request.password)})
+        except Exception:  # noqa: BLE001
+            pass  # Fail-soft: login still succeeds; next login re-attempts upgrade
 
     if not user.get("is_active", False):
         _audit_auth_event(
@@ -797,6 +820,8 @@ async def refresh_token(request: RefreshTokenRequest):
     """
     Refresh access token
     """
+    if _token_blacklist.is_revoked(request.token):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     payload = decode_token(request.token)
 
     # Create new token (preserve the force-password-change flag + the deny-only

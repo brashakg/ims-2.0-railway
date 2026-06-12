@@ -22,15 +22,17 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
 
-  // Clear any stale auth data when login page mounts
+  // Clear stale auth data once AuthContext has finished its own initialization,
+  // so we don't race with its getProfile() call (which reads the same token).
   useEffect(() => {
+    if (isLoading) return; // AuthContext still initialising — wait
     const token = localStorage.getItem('ims_token');
     if (token) {
       localStorage.removeItem('ims_token');
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_active_module');
     }
-  }, []);
+  }, [isLoading]);
 
   const handleClearCache = () => {
     if (!window.confirm('Are you sure you want to clear all cached data? Your login session and saved preferences will be removed.')) {

@@ -448,7 +448,13 @@ async def _fetch_image_bytes(url: str) -> bytes:
         if resp.status_code != 200:
             raise RuntimeError(f"could not fetch raw image ({resp.status_code})")
         return resp.content
-    with open(u.lstrip("/"), "rb") as fh:  # local path, e.g. /uploads/...
+    # Only allow local paths inside a known uploads directory; reject path traversal.
+    import os as _os
+    uploads_root = _os.path.abspath(_os.getenv("UPLOADS_DIR", "/uploads"))
+    candidate = _os.path.abspath(_os.path.join(uploads_root, u.lstrip("/")))
+    if not candidate.startswith(uploads_root + _os.sep) and candidate != uploads_root:
+        raise RuntimeError("image url references a path outside the uploads directory")
+    with open(candidate, "rb") as fh:
         return fh.read()
 
 

@@ -120,6 +120,7 @@ export function Customer360Dashboard() {
   useEffect(() => {
     if (!customerId) return;
     loadCustomerData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerId]);
 
   const handleSearch = async () => {

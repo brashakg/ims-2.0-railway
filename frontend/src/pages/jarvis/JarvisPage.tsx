@@ -104,7 +104,7 @@ interface LiveAgent {
 }
 
 export function JarvisPage() {
-  const { hasRole, user } = useAuth();
+  const { hasRole } = useAuth();
   const toast = useToast();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -199,9 +199,10 @@ export function JarvisPage() {
   // SUPERADMIN-only surfaces (and their SUPERADMIN-only API fetches) hidden
   // from an ADMIN, who would otherwise 404 on those endpoints.
   const isSuperAdmin = hasRole(['SUPERADMIN']);
-  const userRoles = user?.roles ?? [];
-  const isStrictSuperAdmin =
-    userRoles.includes('SUPERADMIN') && user?.activeRole !== 'ADMIN';
+  // Gate on the roles array, not activeRole — a SUPERADMIN who switched their
+  // active display role to ADMIN still holds SUPERADMIN and must reach those
+  // endpoints. The route itself is already restricted to SUPERADMIN in App.tsx.
+  const isStrictSuperAdmin = isSuperAdmin;
 
   // Auto-scroll to bottom
   useEffect(() => {

@@ -146,6 +146,10 @@ export function POSLayout() {
   // of duplicating), and cleared on success / when a new order starts so a
   // genuinely new order always gets a fresh key.
   const idempotencyKeyRef = useRef<string | null>(null);
+  // Always points to the latest handleCreateOrder so the keydown closure never
+  // captures a stale snapshot (handleCreateOrder reads store state that may
+  // change between renders without triggering the effect's dep array).
+  const handleCreateOrderRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   // POS "+1 walk-in" — attributes footfall to the chosen salesperson.
   // Requires a salesperson to be picked first (the conversion engine
@@ -288,7 +292,8 @@ export function POSLayout() {
       if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); startTransition(() => store.setStep('payment')); }
       if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); startTransition(() => store.prevStep()); }
       if (e.key === 'F4' && (store.cart || []).length > 0) { e.preventDefault(); setHoldConfirm(true); }
-      if (e.key === 'Enter' && e.ctrlKey && store.current_step === 'payment') { e.preventDefault(); handleCreateOrder(); }
+      // Use ref so Ctrl+Enter always calls the LATEST handleCreateOrder (avoids stale closure).
+      if (e.key === 'Enter' && e.ctrlKey && store.current_step === 'payment') { e.preventDefault(); handleCreateOrderRef.current(); }
       if (e.key === 'Enter' && !e.ctrlKey && store.current_step !== 'complete' && store.current_step !== 'payment') {
         e.preventDefault();
         if (canProceed) startTransition(() => store.nextStep());
@@ -297,6 +302,9 @@ export function POSLayout() {
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
   }, [(store.cart || []).length, store.current_step, canProceed]);
+
+  // Keep the ref in sync so the keydown shortcut always calls the latest version.
+  handleCreateOrderRef.current = handleCreateOrder;
 
   async function handleCreateOrder() {
     if (store.is_processing) return;

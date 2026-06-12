@@ -3,7 +3,7 @@
 // ============================================================================
 // Provides toast notifications throughout the application
 
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
 
 // ============================================================================
@@ -45,6 +45,8 @@ interface ToastProviderProps {
 
 export function ToastProvider({ children }: ToastProviderProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Track pending auto-dismiss timers so we can cancel them on manual dismiss.
+  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Safety: convert any input to readable string (prevents [object Object])
   const safeMessage = (msg: unknown): string => {
@@ -67,11 +69,13 @@ export function ToastProvider({ children }: ToastProviderProps) {
 
     setToasts((prev) => [...prev, toast]);
 
-    // Auto-dismiss after duration
+    // Auto-dismiss after duration; cancel any existing timer for the same id.
     if (duration > 0) {
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        timersRef.current.delete(id);
         setToasts((prev) => prev.filter((t) => t.id !== id));
       }, duration);
+      timersRef.current.set(id, timer);
     }
 
     return id;
@@ -94,10 +98,17 @@ export function ToastProvider({ children }: ToastProviderProps) {
   }, [addToast]);
 
   const dismiss = useCallback((id: string) => {
+    const timer = timersRef.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      timersRef.current.delete(id);
+    }
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
   const dismissAll = useCallback(() => {
+    timersRef.current.forEach((timer) => clearTimeout(timer));
+    timersRef.current.clear();
     setToasts([]);
   }, []);
 

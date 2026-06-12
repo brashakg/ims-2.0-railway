@@ -453,7 +453,12 @@ async def create_salary_config(
 async def get_salary_config(
     employee_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get salary configuration for an employee"""
+    """Get salary configuration for an employee (self or admin/accountant only)."""
+    _roles = current_user.get("roles") or []
+    _is_privileged = any(r in _roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"))
+    if not _is_privileged and current_user.get("user_id") != employee_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     db = _get_db()
     if not db:
         return {"config": None}
@@ -1000,13 +1005,12 @@ async def get_payslip(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Generate or retrieve payslip for an employee.
+    """Generate or retrieve payslip for an employee (self or admin/accountant only)."""
+    _roles = current_user.get("roles") or []
+    _is_privileged = any(r in _roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"))
+    if not _is_privileged and current_user.get("user_id") != employee_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    Reads from the ``payroll`` collection (run engine output) first, then falls
-    back to the legacy ``salary_records`` collection so existing data is never
-    lost.  A payslip record is materialised in ``payslips`` collection only
-    once; subsequent calls return the cached version.
-    """
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -1068,11 +1072,12 @@ async def get_payslip(
 async def get_latest_payslip(
     employee_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get the most recent payslip for an employee.
+    """Get the most recent payslip for an employee (self or admin/accountant only)."""
+    _roles = current_user.get("roles") or []
+    _is_privileged = any(r in _roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"))
+    if not _is_privileged and current_user.get("user_id") != employee_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    Searches ``payslips`` cache, then the ``payroll`` run collection, so staff
-    see their slip even before a manager has clicked 'generate payslip'.
-    """
     db = _get_db()
     if not db:
         return {"payslip": None}
@@ -1805,7 +1810,12 @@ async def payslip_print(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Branded, printable HTML payslip from the computed payroll row."""
+    """Branded, printable HTML payslip (self or admin/accountant only)."""
+    _roles = current_user.get("roles") or []
+    _is_privileged = any(r in _roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT"))
+    if not _is_privileged and current_user.get("user_id") != employee_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")

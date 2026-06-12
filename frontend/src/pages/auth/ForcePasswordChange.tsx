@@ -21,6 +21,7 @@ export function ForcePasswordChange() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showCurrent, setShowCurrent] = useState(false);
   const [showNew, setShowNew] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -171,17 +172,28 @@ export function ForcePasswordChange() {
               <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 mb-1">
                 Confirm new password <span className="text-red-600" aria-label="required">*</span>
               </label>
-              <input
-                type={showNew ? 'text' : 'password'}
-                id="confirm-password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="input-field"
-                placeholder="Re-enter the new password"
-                autoComplete="new-password"
-                disabled={submitting}
-                aria-required="true"
-              />
+              <div className="relative">
+                <input
+                  type={showConfirm ? 'text' : 'password'}
+                  id="confirm-password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="input-field pr-10"
+                  placeholder="Re-enter the new password"
+                  autoComplete="new-password"
+                  disabled={submitting}
+                  aria-required="true"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirm(v => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-bv-600 rounded"
+                  aria-label={showConfirm ? 'Hide password' : 'Show password'}
+                  aria-pressed={showConfirm ? "true" : "false"}
+                >
+                  {showConfirm ? <EyeOff className="w-5 h-5" aria-hidden="true" /> : <Eye className="w-5 h-5" aria-hidden="true" />}
+                </button>
+              </div>
             </div>
 
             <button
