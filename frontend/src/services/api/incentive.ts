@@ -12,6 +12,9 @@ import type {
   PointsLog,
   MTDResponse,
   LeaderboardResponse,
+  LeaderboardScope,
+  LeaderboardTitlesResponse,
+  LeaderboardConfig,
   IncentiveSettings,
   EligibilityBand,
   KickerEntry,
@@ -74,13 +77,36 @@ export const incentiveApi = {
     return r.data;
   },
 
-  /** P3 — leaderboard (sorted by avg.total desc, days_logged tiebreak). */
+  /** P3 — leaderboard (sorted by avg.total desc, days_logged tiebreak).
+   *  F33: scope=area|org widens the board (managers only — 403 otherwise). */
   getLeaderboard: async (
-    days = 30, storeId?: string,
+    days = 30, storeId?: string, scope: LeaderboardScope = 'store',
   ): Promise<LeaderboardResponse> => {
     const r = await api.get('/incentive/points/leaderboard', {
-      params: { days, ...(storeId ? { store_id: storeId } : {}) },
+      params: {
+        days, scope,
+        ...(storeId ? { store_id: storeId } : {}),
+      },
     });
+    return r.data;
+  },
+
+  /** F33 — titles + badges catalog (any authenticated user). */
+  getLeaderboardTitles: async (): Promise<LeaderboardTitlesResponse> => {
+    const r = await api.get('/incentive/points/leaderboard/titles');
+    return r.data;
+  },
+
+  /** F33 — upsert the per-store leaderboard display config (ADMIN/SUPERADMIN). */
+  updateLeaderboardSettings: async (
+    payload: Partial<LeaderboardConfig>,
+    storeId?: string,
+  ): Promise<{ store_id: string; leaderboard_config: LeaderboardConfig }> => {
+    const r = await api.post(
+      '/incentive/points/leaderboard/settings',
+      payload,
+      { params: storeId ? { store_id: storeId } : undefined },
+    );
     return r.data;
   },
 
