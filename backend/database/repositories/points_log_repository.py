@@ -162,6 +162,36 @@ class PointsLogRepository(BaseRepository):
         except Exception:
             return []
 
+    def list_for_mtd_scoped(
+        self,
+        store_ids: Optional[List[str]],
+        date_from: str,
+        date_to: str,
+    ) -> List[Dict]:
+        """F33 scope-aware variant of list_for_mtd.
+
+        store_ids semantics:
+          - None      -> org-wide (no store filter)
+          - [one]     -> equality filter (same plan as list_for_mtd)
+          - [many]    -> $in filter (area scope: the caller's stores)
+        """
+        query: Dict[str, Any] = {
+            "deleted_at": None,
+            "date_str": {"$gte": date_from, "$lte": date_to},
+        }
+        if store_ids is not None:
+            ids = [s for s in store_ids if s]
+            if not ids:
+                return []
+            if len(ids) == 1:
+                query["store_id"] = ids[0]
+            else:
+                query["store_id"] = {"$in": ids}
+        try:
+            return list(self.collection.find(query))
+        except Exception:
+            return []
+
     # ------------------------------------------------------------------
     # Soft-delete
     # ------------------------------------------------------------------
