@@ -595,3 +595,45 @@ def test_db_absent_is_503_on_all_three_routes(monkeypatch):
         with pytest.raises(HTTPException) as exc:
             call()
         assert exc.value.status_code == 503
+
+
+# ============================================================================
+# Adversarial-pass fixes -- fail-closed period lock + pinned capture version
+# ============================================================================
+
+
+def test_missing_posting_date_fails_closed_422(db, monkeypatch):
+    """A bill with NO posting date cannot have its period-lock checked, so the
+    landed-cost mutations must 422 (fail loudly), not silently bypass the lock."""
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    _seed_bill(db, bill_date=None, invoice_date=None)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(r.set_invoice_landed_costs("PI-1", _set_body(), current_user=_acct()))
+    assert exc.value.status_code == 422
+    _seed_bill(db, bill_id="PI-2", invoice_id="PI-2", bill_date="", invoice_date="")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(r.allocate_invoice_landed_costs("PI-2", current_user=_acct()))
+    assert exc.value.status_code == 422
+
+
+def test_allocate_409_when_capture_changed_after_read(db, monkeypatch):
+    """The allocate guard pins the components+method it computed from: if an
+    interleaved set-components lands between allocate's read and its write,
+    the guarded filter misses -> 409 -- a persisted allocation can never
+    disagree with the stored capture it claims to derive from."""
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    _seed_bill(db)
+    asyncio.run(r.set_invoice_landed_costs("PI-1", _set_body(), current_user=_acct()))
+    stale = _stored(db)
+    stale = dict(stale)
+    stale["landed_cost_components"] = [
+        {"type": "FREIGHT", "label": "Courier", "amount_paise": 99999}
+    ]  # what allocate THINKS is stored (another writer changed it after this read)
+    monkeypatch.setattr(r, "_load_purchase_invoice_or_404", lambda _db, _id: stale)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(r.allocate_invoice_landed_costs("PI-1", current_user=_acct()))
+    assert exc.value.status_code == 409
+    # the stored bill is untouched -- still unallocated, components intact.
+    kept = _stored(db)
+    assert not kept.get("landed_cost_allocated")
+    assert kept["landed_cost_components"][0]["amount_paise"] == 10000

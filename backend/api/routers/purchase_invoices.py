@@ -1369,11 +1369,22 @@ def _load_purchase_invoice_or_404(db, invoice_id: str) -> dict:
 def _check_bill_period_open(db, doc: dict) -> None:
     """F19 period-lock guard, mirroring the F9 DC-date check: 423 when the
     bill's posting month (invoice_date, else bill_date) is in a locked
-    accounting period. check_period_locked is fail-soft on unparseable dates /
-    DB errors, so this never blocks on infrastructure noise."""
+    accounting period.
+
+    FAIL-CLOSED on a missing/unusable posting date: a landed-cost mutation in
+    an unverifiable period must not proceed (the lock would otherwise be
+    silently bypassed by a bill with no date). check_period_locked itself is
+    fail-soft on DB errors -- infrastructure noise still never blocks."""
     posting_date = doc.get("invoice_date") or doc.get("bill_date")
-    if not posting_date:
-        return
+    if not posting_date or not str(posting_date).strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This bill has no posting date (invoice_date/bill_date), so the "
+                "accounting-period lock cannot be checked. Set the bill's date "
+                "before capturing or allocating landed costs."
+            ),
+        )
     try:
         from .finance import check_period_locked
 
@@ -1596,9 +1607,18 @@ async def allocate_invoice_landed_costs(
     # THE one-way gate: single guarded single-document update (PROTOCOL P0-1:
     # no cross-collection transaction). Exactly one concurrent caller matches
     # the landed_cost_allocated != true filter; everyone else gets None -> 409.
+    # The components + method we COMPUTED FROM are pinned in the filter too:
+    # an interleaved set-components between our read and this write makes the
+    # filter miss (-> 409, caller re-reads), so a persisted allocation can
+    # never disagree with the stored capture it claims to be derived from.
     try:
         won = db.get_collection("vendor_bills").find_one_and_update(
-            {"bill_id": invoice_id, "landed_cost_allocated": {"$ne": True}},
+            {
+                "bill_id": invoice_id,
+                "landed_cost_allocated": {"$ne": True},
+                "landed_cost_components": doc.get("landed_cost_components"),
+                "allocation_method": doc.get("allocation_method"),
+            },
             {
                 "$set": {
                     "lines": merged_lines,
