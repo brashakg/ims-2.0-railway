@@ -52,6 +52,12 @@ class VendorReturnCreate(BaseModel):
 class VendorReturnStatusUpdate(BaseModel):
     status: str
     notes: Optional[str] = None
+    # N9: courier/logistics tracking, captured on the "shipped" transition so
+    # staff can see where an in-transit RMA physically is (mirrors the transfer
+    # ship-stamp in transfers.py). Plain capture fields -- no provider call.
+    courier_name: Optional[str] = Field(default=None, max_length=120)
+    tracking_number: Optional[str] = Field(default=None, max_length=120)
+    tracking_url: Optional[str] = Field(default=None, max_length=500)
 
 
 # ============================================================================
@@ -341,16 +347,29 @@ async def update_return_status(
             "updated_by": current_user.get("user_id"),
         }
 
+        # N9: persist courier/AWB tracking on the "shipped" transition (and allow
+        # a later correction while still in transit). Surfaced on GET so staff
+        # can see where the in-transit RMA physically is.
+        if status_update.status in ("shipped", "received_by_vendor"):
+            for field_name in ("courier_name", "tracking_number", "tracking_url"):
+                value = getattr(status_update, field_name, None)
+                if value is not None and str(value).strip():
+                    update_dict[field_name] = str(value).strip()
+            if status_update.status == "shipped" and not return_doc.get("shipped_at"):
+                update_dict["shipped_at"] = datetime.now().isoformat()
+
         # Add status to history
         status_history = return_doc.get("status_history", [])
-        status_history.append(
-            {
-                "status": status_update.status,
-                "timestamp": datetime.now().isoformat(),
-                "changed_by": current_user.get("user_id"),
-                "notes": status_update.notes or "",
-            }
-        )
+        history_entry = {
+            "status": status_update.status,
+            "timestamp": datetime.now().isoformat(),
+            "changed_by": current_user.get("user_id"),
+            "notes": status_update.notes or "",
+        }
+        if update_dict.get("tracking_number"):
+            history_entry["tracking_number"] = update_dict["tracking_number"]
+            history_entry["courier_name"] = update_dict.get("courier_name", "")
+        status_history.append(history_entry)
         update_dict["status_history"] = status_history
 
         if credit_note_number:
