@@ -19,9 +19,15 @@ Account types (Phase A):
     registered in ACCOUNT_TYPES). The guarded debit (balance >= amount in the
     FILTER) is the float floor -- it can never go negative or be double-spent.
     Owned + opened by feature #17 (petty_cash_service.open_float).
-  FAMILY_WALLET / CONSIGNMENT -> still DEFERRED (greenfield). They return
-    GuardResult(ok=False, reason="unavailable") until #49 / #3 add their own
-    single-doc collection (CORRECTIONS R1) and flip greenfield off here.
+  FAMILY_WALLET -> `family_wallets` (one doc per household, balance_points,
+    key=household_id). Registered live per CORRECTIONS R1 by feature #49: the
+    household loyalty pool stores integer POINTS (not paise/rupees) as its
+    amount unit; the guarded debit floor in the FILTER means two racing pool
+    redemptions can never overdraw. Owned + lazily opened by
+    api.services.family_wallet (pool_earn creates the doc on first credit).
+  CONSIGNMENT -> still DEFERRED (greenfield). Returns
+    GuardResult(ok=False, reason="unavailable") until #3 adds its own
+    single-doc collection (CORRECTIONS R1) and flips greenfield off here.
 
 Contract:
   * Never raises on a business failure -- returns a typed GuardResult with ok=False
@@ -120,9 +126,17 @@ ACCOUNT_TYPES: Dict[str, AccountSpec] = {
         coll="petty_cash_floats", key_field="store_id", balance_field="balance",
         integer=False, round_dp=2, status_field="status", mechanism="find_modify",
     ),
+    # LIVE per CORRECTIONS R1 (feature #49): the family/household loyalty POOL
+    # is a per-household single-doc account in its OWN collection. The unit is
+    # integer POINTS (integer=True) -- NOT paise/rupees; the rupee conversion
+    # happens only at voucher mint time in the family-wallet router. status must
+    # be ACTIVE to spend; the debit floor (balance_points >= amount) lives in
+    # the find_one_and_update filter so concurrent pool redeems can never
+    # overdraw. Lazily opened by family_wallet.pool_earn.
     "FAMILY_WALLET": AccountSpec(
-        coll="money_accounts", key_field="account_key", balance_field="balance",
-        integer=False, round_dp=2, status_field="status", greenfield=True,
+        coll="family_wallets", key_field="household_id",
+        balance_field="balance_points", integer=True, round_dp=None,
+        status_field="status", mechanism="find_modify",
     ),
     "CONSIGNMENT": AccountSpec(
         coll="money_accounts", key_field="account_key", balance_field="balance",
