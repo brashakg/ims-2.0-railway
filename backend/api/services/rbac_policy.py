@@ -1851,6 +1851,54 @@ POLICY: List[Dict[str, object]] = [
                     "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #15 blind stock take (own /api/v1/blind-count prefix). Floor
+    # staff / inventory OPEN + SUBMIT counts BLIND (never see the system on-hand
+    # pre-lock -- enforced at the data layer); only a manager REVEALS variance +
+    # soft-locks + reopens + proposes an adjustment. Every route store-scopes;
+    # propose only ENQUEUES a reversible proposal, never mutates on-hand. ---
+    {
+        "method": "POST",
+        "path": "/api/v1/blind-count/open",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CATALOG_MANAGER",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/blind-count/{session_id}/submit",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CATALOG_MANAGER",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Reveal variance + soft-lock: manager+ only (a counter can NEVER reveal).
+        "method": "POST",
+        "path": "/api/v1/blind-count/{session_id}/lock",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Reopen a locked count (mandatory reason, audited): manager+ only.
+        "method": "POST",
+        "path": "/api/v1/blind-count/{session_id}/reopen",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Enqueue a reversible stock-adjustment PROPOSAL: manager+ only.
+        "method": "POST",
+        "path": "/api/v1/blind-count/{session_id}/propose-adjustment",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Read one session -- counter sees the BLIND-redacted view pre-lock.
+        "method": "GET",
+        "path": "/api/v1/blind-count/{session_id}",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CATALOG_MANAGER",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",
