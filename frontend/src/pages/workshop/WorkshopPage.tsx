@@ -416,13 +416,47 @@ const loadJobs = async () => {
     }
   };
 
-  // Send a QC-failed job back to the bench via the dedicated /rework endpoint
-  // (increments rework_count; QC_FAILED -> IN_PROGRESS).
-  const handleRework = async (jobId: string) => {
+  // F13 — a rework is a REMAKE: the backend requires a remake_reason_code
+  // (422 without one), costs the spoiled lens, and logs the justification.
+  // The button opens a small reason dialog; confirm fires the API call.
+  const REWORK_FALLBACK_CODES = [
+    { code: 'AXIS_ERROR', label: 'Axis error', category: 'LAB_FAULT' },
+    { code: 'POWER_ERROR', label: 'Power error', category: 'LAB_FAULT' },
+    { code: 'FITTING_ERROR', label: 'Fitting error', category: 'LAB_FAULT' },
+    { code: 'SURFACE_DEFECT', label: 'Surface defect', category: 'VENDOR_FAULT' },
+    { code: 'COATING_DEFECT', label: 'Coating defect', category: 'VENDOR_FAULT' },
+    { code: 'BREAKAGE_IN_LAB', label: 'Breakage in lab', category: 'LAB_FAULT' },
+    { code: 'WRONG_LENS_PICKED', label: 'Wrong lens picked', category: 'STORE_FAULT' },
+    { code: 'CUSTOMER_CHANGED_RX', label: 'Customer changed Rx', category: 'CUSTOMER' },
+    { code: 'OTHER', label: 'Other', category: 'LAB_FAULT' },
+  ];
+  const [reworkModalJobId, setReworkModalJobId] = useState<string | null>(null);
+  const [reworkCodes, setReworkCodes] = useState<Array<{ code: string; label: string; category: string }>>(REWORK_FALLBACK_CODES);
+  const [reworkCode, setReworkCode] = useState('');
+  const [reworkNotes, setReworkNotes] = useState('');
+
+  const openReworkModal = async (jobId: string) => {
+    setReworkCode('');
+    setReworkNotes('');
+    setReworkModalJobId(jobId);
+    try {
+      const res = await workshopApi.getRemakeReasonCodes();
+      if (res?.codes?.length) setReworkCodes(res.codes);
+    } catch {
+      /* taxonomy fetch fail-soft -> seeded fallback list */
+    }
+  };
+
+  const handleRework = async (jobId: string, reasonCode: string, notes?: string) => {
+    if (!reasonCode) {
+      toast.error('Select a remake reason first');
+      return;
+    }
     setQcBusy(true);
     try {
-      const res = await workshopApi.reworkJob(jobId);
+      const res = await workshopApi.reworkJob(jobId, reasonCode, notes ? { notes } : undefined);
       toast.success(res?.rework_count ? `Sent for rework (attempt #${res.rework_count})` : 'Job sent for rework');
+      setReworkModalJobId(null);
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
@@ -960,7 +994,7 @@ const loadJobs = async () => {
                         <ClipboardCheck className="w-4 h-4" /> Re-run QC
                       </button>
                       <button
-                        onClick={() => handleRework(selectedJob.id)}
+                        onClick={() => openReworkModal(selectedJob.id)}
                         disabled={qcBusy}
                         className="btn-outline text-sm disabled:opacity-50"
                       >
@@ -1070,6 +1104,80 @@ const loadJobs = async () => {
             handleQcSubmit(qcModalJob.id, passed, notes, checklistItems)
           }
         />
+      )}
+
+      {/* F13 — REWORK JUSTIFICATION MODAL: a remake needs a reason code
+          (backend rejects without one); the spoiled lens cost is logged. */}
+      {reworkModalJobId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Send for rework</h3>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setReworkModalJobId(null)}
+                className="p-1 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-sm text-gray-600">
+                A rework spoils the current lens. Pick the reason — it drives the
+                spoilage cost report.
+              </p>
+              <div>
+                <label htmlFor="rework-reason-code" className="block text-sm font-medium text-gray-700 mb-1">
+                  Remake reason <span className="text-bv-red-600">*</span>
+                </label>
+                <select
+                  id="rework-reason-code"
+                  value={reworkCode}
+                  onChange={(e) => setReworkCode(e.target.value)}
+                  className="w-full px-3 py-2.5 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm"
+                >
+                  <option value="">Select a reason…</option>
+                  {reworkCodes.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.label} ({c.category.replace(/_/g, ' ').toLowerCase()})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="rework-notes" className="block text-sm font-medium text-gray-700 mb-1">
+                  Notes (optional)
+                </label>
+                <textarea
+                  id="rework-notes"
+                  value={reworkNotes}
+                  onChange={(e) => setReworkNotes(e.target.value)}
+                  rows={2}
+                  placeholder="What exactly went wrong?"
+                  className="w-full px-3 py-2.5 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm placeholder-gray-500"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setReworkModalJobId(null)}
+                  className="btn-outline text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRework(reworkModalJobId, reworkCode, reworkNotes || undefined)}
+                  disabled={qcBusy || !reworkCode}
+                  className="btn-primary text-sm disabled:opacity-50"
+                >
+                  Confirm rework
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* CREATE JOB MODAL */}
