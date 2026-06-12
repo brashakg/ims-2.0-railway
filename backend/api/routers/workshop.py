@@ -7,13 +7,14 @@ Workshop job management endpoints
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import uuid
 import logging
 
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
+from ..services import spoilage_analytics
 from ..dependencies import (
     get_db,
     get_workshop_repository,
@@ -654,6 +655,8 @@ async def get_dashboard_kpis(
         "avg_turnaround_days": None,
         "per_station_counts": {},
         "avg_dwell_by_station": {},
+        "spoilage_cost_mtd_paise": 0,
+        "remake_rate_pct": 0.0,
         "store_id": active_store,
         "as_of": datetime.now().isoformat(),
     }
@@ -679,9 +682,28 @@ async def get_dashboard_kpis(
     completed_today = 0
     delivered_today = 0
     turnaround_samples = []
+    # F13 -- remake/spoilage rollup (same single walk; additive keys).
+    month_str = today_str[:7]  # "YYYY-MM"
+    jobs_with_remake = 0
+    spoilage_cost_mtd_paise = 0
 
     for job in all_jobs:
         status = job.get("status", "")
+
+        # F13: month-to-date spoilage cost + remake incidence.
+        remakes = [e for e in (job.get("remake_reasons") or []) if isinstance(e, dict)]
+        if remakes:
+            jobs_with_remake += 1
+            for entry in remakes:
+                at = entry.get("at")
+                at_s = at.isoformat() if isinstance(at, datetime) else str(at or "")
+                if at_s.startswith(month_str):
+                    try:
+                        spoilage_cost_mtd_paise += max(
+                            0, int(entry.get("cost_paise") or 0)
+                        )
+                    except (TypeError, ValueError):
+                        pass
 
         if status == "PENDING":
             pending += 1
@@ -782,6 +804,11 @@ async def get_dashboard_kpis(
     except Exception as e:  # noqa: BLE001
         logger.warning("[WORKSHOP] station KPIs failed: %s", e)
 
+    # F13 -- remake rate over the same job population the other KPIs use.
+    remake_rate_pct = (
+        round(100.0 * jobs_with_remake / len(all_jobs), 1) if all_jobs else 0.0
+    )
+
     return {
         "pending": pending,  # PENDING + IN_PROGRESS
         "in_progress": in_progress,
@@ -793,6 +820,8 @@ async def get_dashboard_kpis(
         "avg_turnaround_days": avg_turnaround,
         "per_station_counts": per_station_counts,
         "avg_dwell_by_station": avg_dwell_by_station,
+        "spoilage_cost_mtd_paise": spoilage_cost_mtd_paise,
+        "remake_rate_pct": remake_rate_pct,
         "store_id": active_store,
         "as_of": now.isoformat(),
     }
@@ -1532,42 +1561,295 @@ async def qc_checklist(
 @router.post("/jobs/{job_id}/rework")
 async def rework_job(
     job_id: str,
+    remake_reason_code: Optional[str] = Query(None),
+    spoilage_category: Optional[str] = Query(None),
     notes: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Send QC-failed job back for rework (QC_FAILED → IN_PROGRESS)."""
+    """Send QC-failed job back for rework (QC_FAILED → IN_PROGRESS).
+
+    F13: a rework is a REMAKE -- a spoiled lens and real margin bleed. The
+    caller MUST justify it with a `remake_reason_code` from the owner-editable
+    taxonomy (422 otherwise -- fail loudly). The spoiled lens is costed in
+    integer paise from the product's weighted-average cost (`cost_price`,
+    maintained by the purchase_match moving-average true-up; fail-soft 0) and
+    the justification entry is appended to `job.remake_reasons[]` in the SAME
+    single guarded find_one_and_update that flips the status -- a concurrent
+    double-rework loses the guard and 409s instead of double-appending.
+    `spoilage_category` optionally overrides the code's default fault category.
+    A SPOILAGE row is also written to lens_stock_audit (fail-soft).
+    """
     repo = get_workshop_repository()
 
-    if repo is not None:
-        job = repo.find_by_id(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Workshop job not found")
-        _assert_job_store_access(job, current_user)
+    if repo is None:
+        return {"message": "Job sent for rework"}
 
-        if job.get("status") != "QC_FAILED":
-            raise HTTPException(
-                status_code=400, detail="Only QC_FAILED jobs can be sent for rework"
+    job = repo.find_by_id(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+    _assert_job_store_access(job, current_user)
+
+    if job.get("status") != "QC_FAILED":
+        raise HTTPException(
+            status_code=400, detail="Only QC_FAILED jobs can be sent for rework"
+        )
+
+    # --- F13: required justification (no reason, no remake) ---
+    db = get_db()
+    code = (remake_reason_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=422, detail="remake_reason_code is required")
+    known_codes = spoilage_analytics.valid_codes(db)
+    code_entry = known_codes.get(code)
+    if code_entry is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown remake_reason_code {code!r}. "
+                f"Allowed: {', '.join(sorted(known_codes))}"
+            ),
+        )
+    category = (spoilage_category or "").strip().upper() or str(
+        code_entry.get("category") or ""
+    )
+    if category not in spoilage_analytics.VALID_CATEGORIES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid spoilage_category {category!r}. "
+                f"Allowed: {', '.join(spoilage_analytics.VALID_CATEGORIES)}"
+            ),
+        )
+
+    # --- F13: WAC spoilage cost (fail-soft 0; a costing gap never blocks) ---
+    def _lens_cost_rupees(j: dict):
+        pid = ((j.get("lens_details") or {}).get("product_id")) or j.get(
+            "lens_product_id"
+        )
+        if not pid or db is None:
+            return None
+        try:
+            prod = db.get_collection("products").find_one({"product_id": pid})
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(prod, dict):
+            return None
+        # cost_price IS the WAC: purchase_match.moving_average_cost true-ups
+        # blend every invoice receipt into it.
+        return prod.get("cost_price")
+
+    cost_paise = spoilage_analytics.spoilage_cost_paise(job, _lens_cost_rupees)
+
+    now = datetime.now()
+    attempt = int(job.get("rework_count") or 0) + 1
+    remake_entry = {
+        "reason_code": code,
+        "category": category,
+        "cost_paise": cost_paise,
+        "by": current_user.get("user_id"),
+        "at": now.isoformat(),
+        "notes": notes,
+    }
+
+    # SINGLE atomic write: status advance + rework_count increment + the
+    # remake_reasons append, guarded on status=QC_FAILED (mirrors the
+    # blind-stock-take soft-lock pattern). Exactly one concurrent rework wins.
+    from pymongo import ReturnDocument
+
+    try:
+        updated = repo.collection.find_one_and_update(
+            {repo.id_field: job_id, "status": "QC_FAILED"},
+            {
+                "$set": {
+                    "status": "IN_PROGRESS",
+                    "status_updated_at": now,
+                    "status_updated_by": current_user.get("user_id"),
+                    "status_notes": notes or f"Rework #{attempt}",
+                    "updated_at": now,
+                },
+                "$inc": {"rework_count": 1},
+                "$push": {"remake_reasons": remake_entry},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WORKSHOP] rework atomic update failed for %s: %s", job_id, exc)
+        updated = None
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Job is no longer QC_FAILED (raced by another update)",
+        )
+
+    rework_count = int(updated.get("rework_count") or attempt)
+
+    # SPOILAGE audit row (fail-soft, mirrors lens_stock's audit convention).
+    try:
+        if db is not None:
+            db.get_collection("lens_stock_audit").insert_one(
+                {
+                    "audit_id": uuid.uuid4().hex,
+                    "source_type": "SPOILAGE",
+                    "job_id": job_id,
+                    "store_id": job.get("store_id"),
+                    "reason_code": code,
+                    "category": category,
+                    "cost_paise": cost_paise,
+                    "by": current_user.get("user_id"),
+                    "at": now,
+                }
             )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.warning(
+            "[WORKSHOP] SPOILAGE audit insert failed for %s: %s", job_id, audit_exc
+        )
 
-        rework_count = job.get("rework_count", 0) + 1
-        repo.update(job_id, {"rework_count": rework_count})
+    return {
+        "job_id": job_id,
+        "status": "IN_PROGRESS",
+        "rework_count": rework_count,
+        "remake_reason_code": code,
+        "spoilage_category": category,
+        "spoilage_cost_paise": cost_paise,
+        "message": f"Job sent for rework (attempt #{rework_count})",
+    }
 
-        if repo.update_status(
-            job_id,
-            "IN_PROGRESS",
-            current_user.get("user_id"),
-            notes or f"Rework #{rework_count}",
-        ):
-            return {
-                "job_id": job_id,
-                "status": "IN_PROGRESS",
-                "rework_count": rework_count,
-                "message": f"Job sent for rework (attempt #{rework_count})",
-            }
 
-        raise HTTPException(status_code=500, detail="Failed to send job for rework")
+# ============================================================================
+# F13 -- REMAKE JUSTIFICATION + SPOILAGE ANALYTICS
+# ============================================================================
+# Every rework carries a reason-code from an owner-editable taxonomy plus a
+# WAC-based spoilage cost in paise (stamped by rework_job above). These
+# endpoints expose the taxonomy (GET anyone authenticated, PUT admin-only)
+# and the margin-bleed rollup for the workshop dashboard (manager+).
 
-    return {"message": "Job sent for rework"}
+_SPOILAGE_MANAGER_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
+
+
+class RemakeReasonCodesBody(BaseModel):
+    """Replacement taxonomy: [{code, label, category}]."""
+
+    codes: List[dict] = Field(default_factory=list)
+
+
+def _job_in_spoilage_window(job: dict, cutoff_iso: str) -> bool:
+    """True when the job belongs in the spoilage window: CREATED in-window OR
+    carrying a remake event stamped in-window (an old job remade yesterday IS
+    current margin bleed). ISO-string compare, same convention as the KPI walk.
+    Pure."""
+    created = job.get("created_at")
+    created_s = created.isoformat() if isinstance(created, datetime) else str(created or "")
+    if created_s >= cutoff_iso:
+        return True
+    for entry in job.get("remake_reasons") or []:
+        if not isinstance(entry, dict):
+            continue
+        at = entry.get("at")
+        at_s = at.isoformat() if isinstance(at, datetime) else str(at or "")
+        if at_s >= cutoff_iso:
+            return True
+    return False
+
+
+@router.get("/remake-reason-codes")
+async def get_remake_reason_codes(
+    current_user: dict = Depends(get_current_user),
+):
+    """The remake reason-code taxonomy (ordered). Seeded default until the
+    owner edits it via PUT. Any authenticated role may read it -- the rework
+    flow needs it at the bench."""
+    return {"codes": spoilage_analytics.list_codes(get_db())}
+
+
+@router.put("/remake-reason-codes")
+async def put_remake_reason_codes(
+    payload: RemakeReasonCodesBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """REPLACE the remake reason-code taxonomy (ADMIN/SUPERADMIN only).
+
+    Validation is strict (fail loudly): non-empty list; every entry needs a
+    non-empty code + label and a category in VALID_CATEGORIES; codes unique.
+    """
+    roles = set(current_user.get("roles") or [])
+    if not roles.intersection({"ADMIN", "SUPERADMIN"}):
+        raise HTTPException(
+            status_code=403,
+            detail="Only ADMIN/SUPERADMIN may edit remake reason codes",
+        )
+    err = spoilage_analytics.validate_codes_payload(payload.codes)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    codes = spoilage_analytics.normalize_codes_payload(payload.codes)
+    try:
+        db.get_collection(spoilage_analytics.REASON_CODES_DOC_ID).update_one(
+            {"_id": spoilage_analytics.REASON_CODES_DOC_ID},
+            {
+                "$set": {
+                    "codes": codes,
+                    "seeded_default": False,
+                    "updated_by": current_user.get("user_id"),
+                    "updated_at": datetime.now(),
+                }
+            },
+            upsert=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WORKSHOP] reason-code save failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Failed to save reason codes")
+    return {
+        "codes": codes,
+        "count": len(codes),
+        "message": "Remake reason codes updated",
+    }
+
+
+@router.get("/spoilage-analytics")
+async def get_spoilage_analytics(
+    days: int = Query(90, ge=1, le=730),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Margin-bleed rollup: remake rate + spoilage cost (paise) by category /
+    reason / technician over the last `days` (default 90). Manager+ only --
+    it exposes cost data.
+
+    Store-scoped like dashboard-kpis (validate_store_access); ADMIN/SUPERADMIN
+    with no store resolved get the chain-wide view. Fail-soft: repo absent ->
+    an empty summary, never a 500.
+    """
+    roles = set(current_user.get("roles") or [])
+    if not roles.intersection(_SPOILAGE_MANAGER_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Manager role required for spoilage analytics"
+        )
+
+    repo = get_workshop_repository()
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id"
+    )
+
+    jobs: List[dict] = []
+    if repo is not None:
+        try:
+            if active_store:
+                jobs = repo.find_by_store(active_store)
+            elif roles.intersection({"ADMIN", "SUPERADMIN"}):
+                # Chain-wide margin bleed for the owner's roles.
+                jobs = repo.find_many({}, limit=0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[WORKSHOP] spoilage job fetch failed: %s", exc)
+            jobs = []
+
+    cutoff_iso = (datetime.now() - timedelta(days=days)).isoformat()
+    windowed = [j for j in jobs if _job_in_spoilage_window(j, cutoff_iso)]
+    summary = spoilage_analytics.build_spoilage_summary(windowed, window_days=days)
+    summary["store_id"] = active_store
+    summary["as_of"] = datetime.now().isoformat()
+    return summary
 
 
 # ============================================================================
