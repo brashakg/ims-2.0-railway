@@ -826,20 +826,33 @@ def verify_pool_redemption_otp(
     except Exception:  # noqa: BLE001
         pass
 
-    # Wrong code: bump attempts; FAIL on the max-th wrong attempt.
+    # Wrong code: ATOMIC attempt bump. The attempts ceiling lives IN the
+    # filter ($lt max-1), so N concurrent wrong guesses can never exceed the
+    # budget (the old read-modify-write let racers reset/blow past it). A
+    # bump that would reach the max instead flips PENDING -> FAILED in one
+    # guarded update -- exactly one flipper wins.
     if _hash_code(code) != doc.get("code_hash"):
-        attempts = int(doc.get("attempts", 0)) + 1
-        new_status = "FAILED" if attempts >= OTP_MAX_ATTEMPTS else "PENDING"
         try:
-            coll.update_one(
-                {"otp_id": otp_id, "status": "PENDING"},
-                {"$set": {"attempts": attempts, "status": new_status}},
+            bumped = coll.find_one_and_update(
+                {"otp_id": otp_id, "status": "PENDING",
+                 "attempts": {"$lt": OTP_MAX_ATTEMPTS - 1}},
+                {"$inc": {"attempts": 1}},
             )
         except Exception:  # noqa: BLE001
-            pass
-        if new_status == "FAILED":
+            bumped = None
+        if bumped is not None:
+            return {"ok": False, "reason": "wrong_code"}
+        try:
+            failed = coll.find_one_and_update(
+                {"otp_id": otp_id, "status": "PENDING"},
+                {"$inc": {"attempts": 1}, "$set": {"status": "FAILED"}},
+            )
+        except Exception:  # noqa: BLE001
+            failed = None
+        if failed is not None:
             return {"ok": False, "reason": "max_attempts"}
-        return {"ok": False, "reason": "wrong_code"}
+        # Already FAILED/consumed by a racer.
+        return {"ok": False, "reason": "max_attempts"}
 
     # Correct code: ATOMIC consume. Only one writer matches PENDING.
     try:

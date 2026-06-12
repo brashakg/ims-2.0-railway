@@ -1904,6 +1904,14 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": False,
     },
     {
+        # Manual/store-driven pool earn (manager+; idempotent per order ref).
+        # The POS auto-earn hook stays OWNER-GATED -- this is the day-1 funder.
+        "method": "POST",
+        "path": "/api/v1/family-wallet/households/{household_id}/earn",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
         # OTP issue to the PRIMARY member's mobile (reminder_rail slice; the
         # cashier-initiated counter flow -- standalone, NOT the POS order path).
         "method": "POST",

@@ -783,3 +783,113 @@ def test_router_request_otp_insufficient_pool_409_no_sms(db, monkeypatch):
                                   current_user=_cashier()))
     assert exc.value.status_code == 409
     assert box["calls"] == 0  # no SMS burnt on an obviously-insufficient pool
+
+
+# ============================================================================
+# Adversarial-pass fixes -- replay never re-mints, checked compensation,
+# earn endpoint funds the pool, atomic OTP attempt ceiling
+# ============================================================================
+
+
+def test_router_duplicate_redeem_returns_same_voucher_never_remints(db, monkeypatch):
+    """One debit -> exactly one voucher. With the OTP policy waived (the leak
+    path), a retried redeem hits the debit dedupe (duplicate=True) -- the
+    router must return the ORIGINAL voucher, never mint a second one."""
+    r = _wire(monkeypatch, db)
+    monkeypatch.setattr(r, "_require_otp", lambda user: False)
+    _seed_customers(db, "C1", "C2")
+    hid = _mk_household(db)
+    assert svc.add_member(db, hid, "C2", actor=_manager())["ok"]
+    svc.pool_earn(db, hid, 500, actor=_manager())
+
+    body = r.RedeemBody(points=200, redeeming_customer_id="C2",
+                        otp_id="OTPX-1", otp_code=None)
+    first = _run(r.redeem(hid, body, current_user=_cashier()))
+    assert first["ok"] and first["voucher"]["voucher_id"]
+    vouchers = db.get_collection("vouchers")
+    assert len(vouchers.docs) == 1
+
+    second = _run(r.redeem(hid, body, current_user=_cashier()))
+    assert second["ok"] and second.get("duplicate") is True
+    assert second["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+    assert len(vouchers.docs) == 1            # NO second voucher minted
+    assert svc.pool_balance(db, hid) == 300   # NO second debit
+
+
+def test_router_compensation_failure_is_loud_and_audited(db, monkeypatch):
+    """If the voucher mint fails AND the reversal credit also fails, the route
+    503s with a manual-credit flag and writes an audit row -- points never
+    vanish silently."""
+    from fastapi import HTTPException
+
+    r = _wire(monkeypatch, db)
+    _seed_customers(db, "C1")
+    hid = _mk_household(db)
+    svc.pool_earn(db, hid, 500, actor=_manager())
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=100)
+
+    import api.routers.vouchers as vouchers_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("mint down")
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _boom)
+
+    class _Fail:
+        ok = False
+        reason = "unavailable"
+    monkeypatch.setattr(mg, "credit", lambda *a, **k: _Fail())
+
+    body = r.RedeemBody(points=100, redeeming_customer_id="C1",
+                        otp_id=otp["otp_id"], otp_code=otp["code"])
+    with pytest.raises(HTTPException) as exc:
+        _run(r.redeem(hid, body, current_user=_cashier()))
+    assert exc.value.status_code == 503
+    assert "manual credit" in str(exc.value.detail)
+    audits = [x for x in db.get_collection("audit_logs").docs
+              if x.get("action") == "family_wallet.compensation_failed"]
+    assert audits and (audits[0].get("after_state") or {}).get("points") == 100
+
+
+def test_earn_endpoint_funds_pool_idempotent_and_role_gated(db, monkeypatch):
+    """The pool is fundable in production: POST /earn credits (manager+), a
+    retried earn for the same order credits exactly once, floor staff 403."""
+    from fastapi import HTTPException
+
+    r = _wire(monkeypatch, db)
+    _seed_customers(db, "C1")
+    hid = _mk_household(db)
+
+    body = r.EarnBody(points=250, source_order_id="ORD-1")
+    out = _run(r.earn(hid, body, current_user=_manager()))
+    assert out["ok"] and out["pool_balance_points"] == 250
+    again = _run(r.earn(hid, body, current_user=_manager()))
+    assert again["duplicate"] is True
+    assert svc.pool_balance(db, hid) == 250  # exactly once per order ref
+
+    with pytest.raises(HTTPException) as exc:
+        _run(r.earn(hid, r.EarnBody(points=10), current_user=_cashier()))
+    assert exc.value.status_code == 403
+
+
+def test_otp_attempt_ceiling_is_atomic_in_filter(db, monkeypatch):
+    """Wrong-guess bumps live IN the guarded filter: attempts can never exceed
+    the budget, the max-th wrong guess flips FAILED exactly once, and the real
+    code is refused after the budget is burned."""
+    _seed_customers(db, "C1")
+    hid = _mk_household(db)
+    svc.pool_earn(db, hid, 500, actor=_manager())
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=100)
+
+    reasons = []
+    for _ in range(rail.OTP_MAX_ATTEMPTS + 3):  # over-shoot on purpose
+        out = rail.verify_pool_redemption_otp(db, otp_id=otp["otp_id"], code="BAD")
+        assert out["ok"] is False
+        reasons.append(out["reason"])
+    assert "max_attempts" in reasons            # the flip happened exactly at budget
+    assert reasons[-1] in ("failed", "max_attempts")  # post-flip calls refuse
+    stored = db.get_collection("pool_otp").find_one({"otp_id": otp["otp_id"]})
+    assert stored["status"] == "FAILED"
+    assert int(stored["attempts"]) <= rail.OTP_MAX_ATTEMPTS
+    # And the REAL code is now refused too (budget burned).
+    final = rail.verify_pool_redemption_otp(db, otp_id=otp["otp_id"], code=otp["code"])
+    assert final["ok"] is False

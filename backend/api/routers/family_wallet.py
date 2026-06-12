@@ -26,6 +26,7 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -33,6 +34,8 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user
 from ..services import family_wallet as svc
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["family-wallet"])
 
@@ -130,6 +133,13 @@ class MemberAddBody(BaseModel):
     customer_id: str = Field(..., min_length=1)
 
 
+class EarnBody(BaseModel):
+    points: int = Field(..., gt=0)
+    source_order_id: Optional[str] = Field(
+        None, description="Order ref for idempotency -- a retried earn for the "
+                          "same order credits exactly once")
+
+
 class RequestOtpBody(BaseModel):
     points: int = Field(..., gt=0, description="Points the OTP authorizes")
 
@@ -221,6 +231,28 @@ async def get_household(household_id: str,
 # ---------------------------------------------------------------------------
 
 
+@router.post("/households/{household_id}/earn")
+async def earn(household_id: str, body: EarnBody,
+               current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Credit POINTS to the household pool (manual / store-driven earn -- the
+    POS auto-earn hook on order finalize stays OWNER-GATED and untouched).
+    Manager+ only; idempotent per source_order_id (a retry credits once)."""
+    _require(current_user, _MANAGE_ROLES, "credit the family pool")
+    out = svc.pool_earn(
+        _get_db(), household_id, body.points, actor=current_user,
+        source_order_id=body.source_order_id,
+    )
+    if not out.get("ok"):
+        _raise(out)
+    return {
+        "ok": True,
+        "household_id": household_id,
+        "points_credited": int(out.get("points") or body.points),
+        "pool_balance_points": int(out["balance"]),
+        "duplicate": bool(out.get("duplicate")),
+    }
+
+
 @router.post("/households/{household_id}/redeem/request-otp")
 async def request_redeem_otp(household_id: str, body: RequestOtpBody,
                              current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -273,6 +305,39 @@ async def redeem(household_id: str, body: RedeemBody,
     if not out.get("ok"):
         _raise(out)
 
+    if out.get("duplicate"):
+        # A retried redeem on an already-consumed OTP: the debit deduped (no
+        # new points moved), so we must NEVER mint a second voucher (one
+        # debit -> N vouchers was the leak). Return the ORIGINAL voucher
+        # idempotently; if it does not exist the original mint failed and the
+        # points were compensated back -- tell the caller to start over.
+        existing = None
+        try:
+            existing = db.get_collection("vouchers").find_one(
+                {"pool_txn_id": out.get("txn_id"), "source": "family_wallet_pool"})
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing is not None:
+            return {
+                "ok": True,
+                "duplicate": True,
+                "household_id": household_id,
+                "points_redeemed": int(out["points"]),
+                "pool_balance_points": int(out["balance"]),
+                "txn_id": out.get("txn_id"),
+                "voucher": {
+                    "voucher_id": existing.get("voucher_id"),
+                    "code": existing.get("code"),
+                    "balance": existing.get("balance"),
+                    "expiry_date": existing.get("expiry_date"),
+                },
+            }
+        raise HTTPException(
+            status_code=409,
+            detail=("This redemption was already attempted and reversed after a "
+                    "failed voucher mint. Request a fresh OTP and redeem again."),
+        )
+
     # Mint the spendable store-credit voucher (rupee conversion happens HERE,
     # not in the pool -- the pool unit is points).
     rate = _redeem_rate()
@@ -303,10 +368,30 @@ async def redeem(household_id: str, body: RedeemBody,
         # loudly. The reversal is idempotent on the debit txn_id.
         from ..services import money_guard as mg
 
-        mg.credit(db, svc.ACCOUNT_TYPE, household_id, int(out["points"]),
-                  reason="pool_redeem_mint_failed_reversal",
-                  actor=current_user.get("user_id"), ref=out.get("txn_id"),
-                  idempotency_key=f"poolredeem-reverse:{out.get('txn_id')}")
+        comp = mg.credit(db, svc.ACCOUNT_TYPE, household_id, int(out["points"]),
+                         reason="pool_redeem_mint_failed_reversal",
+                         actor=current_user.get("user_id"), ref=out.get("txn_id"),
+                         idempotency_key=f"poolredeem-reverse:{out.get('txn_id')}")
+        if not getattr(comp, "ok", False) and getattr(comp, "reason", "") != "duplicate":
+            # The reversal ITSELF failed: points are gone with no voucher.
+            # This must never be silent -- CRITICAL log + audit row carrying
+            # everything needed for a manual credit.
+            logger.critical(
+                "[FAMWALLET] COMPENSATION FAILED after voucher-mint failure: "
+                "household=%s points=%s txn=%s reason=%s -- MANUAL CREDIT REQUIRED",
+                household_id, out.get("points"), out.get("txn_id"),
+                getattr(comp, "reason", "unknown"))
+            svc._audit(db, "family_wallet.compensation_failed", household_id,
+                       actor=current_user.get("user_id"),
+                       detail={"points": int(out["points"]),
+                               "txn_id": out.get("txn_id"),
+                               "comp_reason": getattr(comp, "reason", "unknown"),
+                               "action_required": "manual pool credit"})
+            raise HTTPException(
+                status_code=503,
+                detail=("voucher_mint_failed AND the points reversal failed -- "
+                        f"flagged for manual credit (txn {out.get('txn_id')})"),
+            )
         raise HTTPException(status_code=503, detail="voucher_mint_failed")
 
     return {
