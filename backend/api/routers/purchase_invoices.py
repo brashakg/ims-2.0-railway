@@ -39,6 +39,16 @@ Money math + the inter-state vs intra-state decision live in the pure,
 DB-free services/purchase_invoice_engine.py; AP due-date + duplicate-guard reuse
 services/ap_engine.py. Booking is audited via get_audit_repository().create.
 
+F19 adds the DYNAMIC LANDED-COST PURCHASE MATRIX on top: freight / duty /
+customs / forex / insurance / other components are captured per bill in integer
+paise, previewed, then allocated ONE-WAY across the bill's lines (paise-exact;
+math in services/landed_cost.py). Allocation flips ``landed_cost_allocated``
+under a guarded single-document find_one_and_update (loser 409s) after which
+the components are immutable. The per-line landed unit cost is persisted on the
+bill lines and rolled into the product master as ``landed_cost`` /
+``landed_cost_paise`` -- the moving-average ``cost_price`` writer is NOT
+re-invoked (see allocate_invoice_landed_costs for why).
+
 Roles: create / book is an accounting action -> ADMIN / ACCOUNTANT (+SUPERADMIN
 via require_roles). Reads are AUTHENTICATED.
 """
@@ -49,7 +59,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
@@ -59,6 +69,7 @@ from ..dependencies import (
     get_audit_repository,
 )
 from ..services import ap_engine
+from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 
@@ -1289,6 +1300,398 @@ async def approve_invoice_exception(
         "invoice_id": invoice_id,
         "match_status": pmatch.MATCH_OVERRIDE,
         "exception_override": override["exception_override"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# F19 -- dynamic landed-cost purchase matrix (capture -> preview -> allocate)
+# ---------------------------------------------------------------------------
+# Freight / duty / customs / forex / insurance / other spend on a vendor bill
+# is captured as integer-paise components with an allocation method
+# (BY_VALUE / BY_QTY / BY_WEIGHT), previewed without writes, then allocated
+# ONCE across the bill's lines via the pure services/landed_cost.py engine
+# (paise-exact: the per-line allocations sum EXACTLY to the component total).
+#
+# ONE-WAY GUARD: allocation flips ``landed_cost_allocated: true`` under a
+# guarded single-document find_one_and_update; a concurrent second allocate
+# (or any later component edit) loses the guard and 409s. Costed inventory is
+# never silently re-costed.
+
+
+class LandedCostComponent(BaseModel):
+    type: str  # FREIGHT | DUTY | CUSTOMS | FOREX | INSURANCE | OTHER
+    label: Optional[str] = None
+    amount_paise: int = Field(..., ge=0)
+
+    @field_validator("type")
+    @classmethod
+    def _known_type(cls, v: str) -> str:
+        t = (v or "").strip().upper()
+        if t not in lc.COMPONENT_TYPES:
+            raise ValueError(
+                f"component type must be one of {lc.COMPONENT_TYPES}"
+            )
+        return t
+
+
+class LandedCostsSet(BaseModel):
+    components: List[LandedCostComponent] = Field(default_factory=list)
+    allocation_method: str = "BY_VALUE"
+
+    @field_validator("allocation_method")
+    @classmethod
+    def _known_method(cls, v: str) -> str:
+        m = (v or "").strip().upper()
+        if m not in lc.ALLOCATION_METHODS:
+            raise ValueError(
+                f"allocation_method must be one of {lc.ALLOCATION_METHODS}"
+            )
+        return m
+
+
+def _load_purchase_invoice_or_404(db, invoice_id: str) -> dict:
+    """Fetch the vendor_bills row for an invoice id. 503 when the DB is down
+    (a money-path write/preview must not silently no-op), 404 when missing.
+    Mirrors approve_invoice_exception."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        doc = db.get_collection("vendor_bills").find_one(
+            {"bill_id": invoice_id}, {"_id": 0}
+        )
+    except Exception:
+        doc = None
+    if not doc:
+        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    return doc
+
+
+def _check_bill_period_open(db, doc: dict) -> None:
+    """F19 period-lock guard, mirroring the F9 DC-date check: 423 when the
+    bill's posting month (invoice_date, else bill_date) is in a locked
+    accounting period. check_period_locked is fail-soft on unparseable dates /
+    DB errors, so this never blocks on infrastructure noise."""
+    posting_date = doc.get("invoice_date") or doc.get("bill_date")
+    if not posting_date:
+        return
+    try:
+        from .finance import check_period_locked
+
+        check_period_locked(db, posting_date)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+@router.post("/{invoice_id}/landed-costs")
+async def set_invoice_landed_costs(
+    invoice_id: str,
+    body: LandedCostsSet,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Set / REPLACE the landed-cost components + allocation method on a bill.
+
+    Allowed only while the bill is NOT yet allocated (409 afterwards -- the
+    allocation is one-way and the captured components are part of its audit
+    trail). 423 when the bill's posting period is locked. The component list
+    replaces wholesale (no per-component patching) so what is stored is always
+    exactly what the accountant last reviewed."""
+    db = _get_db()
+    doc = _load_purchase_invoice_or_404(db, invoice_id)
+    if doc.get("landed_cost_allocated"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Landed costs on this invoice are already allocated; "
+                "components are immutable after allocation."
+            ),
+        )
+    _check_bill_period_open(db, doc)
+    if not body.components:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one landed-cost component is required.",
+        )
+
+    components = [c.model_dump() for c in body.components]
+    total = lc.components_total_paise(components)  # ge=0 -> never raises here
+
+    # Guarded write: a concurrent allocation may have landed between our read
+    # and this update -- the landed_cost_allocated filter makes this a no-op
+    # (None) in that case, so allocated components can never be rewritten.
+    try:
+        updated = db.get_collection("vendor_bills").find_one_and_update(
+            {"bill_id": invoice_id, "landed_cost_allocated": {"$ne": True}},
+            {
+                "$set": {
+                    "landed_cost_components": components,
+                    "landed_cost_total_paise": total,
+                    "allocation_method": body.allocation_method,
+                    "landed_cost_allocated": False,
+                    "landed_cost_captured_by": current_user.get("user_id"),
+                    "landed_cost_captured_at": datetime.now().isoformat(),
+                }
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Failed to save landed-cost components"
+        ) from exc
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Landed costs on this invoice were allocated concurrently; "
+                "components are immutable after allocation."
+            ),
+        )
+
+    # Audit the capture (fail-soft -- never blocks the save).
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase_invoice.set_landed_costs",
+                    "entity_type": "vendor_bill",
+                    "entity_id": invoice_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "components": components,
+                        "landed_cost_total_paise": total,
+                        "allocation_method": body.allocation_method,
+                    },
+                }
+            )
+    except Exception:
+        pass
+
+    return {
+        "invoice_id": invoice_id,
+        "landed_cost_components": components,
+        "landed_cost_total_paise": total,
+        "allocation_method": body.allocation_method,
+        "landed_cost_allocated": False,
+    }
+
+
+@router.get("/{invoice_id}/landed-costs/preview")
+async def preview_invoice_landed_costs(
+    invoice_id: str,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Dry-run the landed-cost allocation for review -- NO writes.
+
+    Runs the pure engine over the bill's stored components + method and returns
+    the per-line breakdown (allocation, per-unit landed cost, remainder) plus
+    the per-product landed unit cost the roll-in would write. 400 when nothing
+    is captured yet or the engine rejects the inputs (e.g. BY_WEIGHT with a
+    missing line weight)."""
+    db = _get_db()
+    doc = _load_purchase_invoice_or_404(db, invoice_id)
+    components = doc.get("landed_cost_components") or []
+    if not components:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No landed-cost components captured on this invoice yet; "
+                "POST /landed-costs first."
+            ),
+        )
+    method = doc.get("allocation_method") or "BY_VALUE"
+    lines = doc.get("lines") or []
+    try:
+        rows = lc.allocate_landed_costs(lines, components, method)
+        per_product = lc.landed_unit_cost_by_product(lines, rows)
+        total = lc.components_total_paise(components)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "invoice_id": invoice_id,
+        "allocation_method": method,
+        "landed_cost_components": components,
+        "landed_cost_total_paise": total,
+        "landed_cost_allocated": bool(doc.get("landed_cost_allocated")),
+        "allocation": rows,
+        "landed_unit_cost_by_product_paise": per_product,
+    }
+
+
+@router.post("/{invoice_id}/allocate-landed-costs")
+async def allocate_invoice_landed_costs(
+    invoice_id: str,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Allocate the captured landed costs across the bill's lines -- ONE-WAY.
+
+    The single guarded find_one_and_update (bill_id + landed_cost_allocated !=
+    true) persists the per-line allocation fields and flips
+    ``landed_cost_allocated: true`` atomically; under a concurrent double-fire
+    exactly ONE request wins and the loser 409s. 423 on a locked posting
+    period; 400 when no components are captured (or total is zero) or the
+    engine rejects the inputs.
+
+    COST ROLL-IN CHOICE (documented per F19): the existing moving-average
+    cost_price writer (_apply_valuation_trueup -> pmatch.
+    valuation_trueup_for_invoice) is NOT safely re-invokable -- it blends the
+    invoice's receipt qty into the product's CURRENT on-hand average, and at
+    booking time it already blended this invoice's base cost (the receipt is
+    also now part of on-hand), so calling it again here would double-count the
+    same receipt. Instead we persist the per-line landed unit cost on the bill
+    and write the product-level ``landed_cost`` / ``landed_cost_paise`` fields
+    (fail-soft), which _product_state_for_valuation already reads as a cost
+    fallback. cost_price AVCO stays owned by the existing booking-time flow --
+    no second AVCO writer is introduced."""
+    db = _get_db()
+    doc = _load_purchase_invoice_or_404(db, invoice_id)
+    if doc.get("landed_cost_allocated"):
+        raise HTTPException(
+            status_code=409,
+            detail="Landed costs on this invoice are already allocated.",
+        )
+    _check_bill_period_open(db, doc)
+
+    components = doc.get("landed_cost_components") or []
+    try:
+        total = lc.components_total_paise(components)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not components or total <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No landed-cost components captured (or zero total); "
+                "nothing to allocate. POST /landed-costs first."
+            ),
+        )
+    lines = doc.get("lines") or []
+    if not lines:
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice has no lines to allocate landed costs against.",
+        )
+    method = doc.get("allocation_method") or "BY_VALUE"
+    try:
+        rows = lc.allocate_landed_costs(lines, components, method)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Merge the per-line allocation fields onto the stored lines (additive --
+    # every pre-existing line key is preserved).
+    merged_lines = []
+    for i, ln in enumerate(lines):
+        merged = dict(ln) if isinstance(ln, dict) else {}
+        row = rows[i]
+        for key in (
+            "landed_alloc_paise",
+            "landed_per_unit_paise",
+            "landed_remainder_paise",
+            "landed_unit_cost_paise",
+        ):
+            merged[key] = row[key]
+        merged_lines.append(merged)
+
+    now = datetime.now().isoformat()
+    # THE one-way gate: single guarded single-document update (PROTOCOL P0-1:
+    # no cross-collection transaction). Exactly one concurrent caller matches
+    # the landed_cost_allocated != true filter; everyone else gets None -> 409.
+    try:
+        won = db.get_collection("vendor_bills").find_one_and_update(
+            {"bill_id": invoice_id, "landed_cost_allocated": {"$ne": True}},
+            {
+                "$set": {
+                    "lines": merged_lines,
+                    "landed_cost_allocation": rows,
+                    "landed_cost_total_paise": total,
+                    "landed_cost_allocated": True,
+                    "landed_cost_allocated_by": current_user.get("user_id"),
+                    "landed_cost_allocated_at": now,
+                }
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Failed to record landed-cost allocation"
+        ) from exc
+    if won is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Landed costs on this invoice were allocated concurrently by "
+                "another request; allocation is one-way."
+            ),
+        )
+
+    # Product-master roll-in (STRICTLY fail-soft -- the allocation above is the
+    # source of truth; a product write failure never rolls it back). See the
+    # docstring for why this writes landed_cost and NOT cost_price.
+    rolled_in = []
+    try:
+        per_product = lc.landed_unit_cost_by_product(lines, rows)
+    except Exception:
+        per_product = {}
+    if per_product:
+        try:
+            products = db.get_collection("products")
+            for pid, unit_paise in per_product.items():
+                try:
+                    products.update_one(
+                        {"product_id": pid},
+                        {
+                            "$set": {
+                                "landed_cost": round(unit_paise / 100.0, 2),
+                                "landed_cost_paise": int(unit_paise),
+                                "landed_cost_source": "LANDED_COST_ALLOCATION",
+                                "landed_cost_source_id": invoice_id,
+                                "landed_cost_updated_at": now,
+                            }
+                        },
+                    )
+                    rolled_in.append(
+                        {
+                            "product_id": pid,
+                            "landed_unit_cost_paise": int(unit_paise),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            rolled_in = []
+
+    # Audit the allocation (fail-soft -- never blocks; the guarded write above
+    # is the source of truth).
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase_invoice.allocate_landed_costs",
+                    "entity_type": "vendor_bill",
+                    "entity_id": invoice_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "allocation_method": method,
+                        "landed_cost_total_paise": total,
+                        "components": components,
+                        "allocation": rows,
+                        "product_rollin": rolled_in,
+                    },
+                }
+            )
+    except Exception:
+        pass
+
+    return {
+        "invoice_id": invoice_id,
+        "landed_cost_allocated": True,
+        "allocation_method": method,
+        "landed_cost_total_paise": total,
+        "allocation": rows,
+        "lines": merged_lines,
+        "product_rollin": rolled_in,
+        "landed_cost_allocated_by": current_user.get("user_id"),
+        "landed_cost_allocated_at": now,
     }
 
 
