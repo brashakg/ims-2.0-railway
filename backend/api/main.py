@@ -62,6 +62,7 @@ from .routers import (
     bank_reconciliation_router,
     non_adapt_router,
     serial_tracking_router,
+    family_wallet_router,
     blind_stock_take_router,
     inventory_balancing_router,
     cl_po_router,
@@ -268,6 +269,16 @@ async def lifespan(app: FastAPI):
                 ensure_serial_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Serial-tracking index creation skipped: {e}")
+            # Feature #49 family wallet: unique household_id on households +
+            # family_wallets, plus the partial UNIQUE multikey index on
+            # member_customer_ids (ACTIVE only) -- the one-household-per-
+            # customer race backstop. Idempotent, fail-soft.
+            try:
+                from .services.family_wallet import ensure_indexes as ensure_family_wallet_indexes
+
+                ensure_family_wallet_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Family-wallet index creation skipped: {e}")
             # Feature #15 blind stock take: index on (store_id, status). Fail-soft.
             try:
                 from .services.blind_stock_take import ensure_indexes as ensure_blind_count_indexes
@@ -1178,6 +1189,13 @@ app.include_router(non_adapt_router, prefix="/api/v1/non-adapt", tags=["NonAdapt
 # INVENTORY writes only (stock_units) -- the at-sale transition stamps the unit, it
 # does NOT touch the order total / payment capture.
 app.include_router(serial_tracking_router, prefix="/api/v1/serials", tags=["Serials"])
+# Feature #49 family/household loyalty wallet: own /api/v1/family-wallet prefix,
+# each route gates inline (manager+ enrolment; POS family redeem; staff read).
+# CHAIN-WIDE lookup/redeem BY OWNER DECISION (mirrors chain-wide customer lookup
+# + voucher redeem) -- household records its creating store for provenance only.
+# Redemption is OTP-gated (reminder_rail slice) and mints a store-credit voucher
+# via vouchers.mint_voucher; NOT in the POS order path (orders.py untouched).
+app.include_router(family_wallet_router, prefix="/api/v1/family-wallet", tags=["FamilyWallet"])
 # Feature #15 blind stock take: own /api/v1/blind-count prefix; each route gates
 # inline (counter open/submit; manager reveal/lock/reopen/propose) + store-scopes.
 # Proposes adjustments only -- never auto-mutates on-hand.
