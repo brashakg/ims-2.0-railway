@@ -1597,6 +1597,16 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     {
+        # N8 owner survival cash-flow: org-wide owner figures (AP + projected
+        # income), mirrors the owner-dashboard gate exactly. Note: the legacy
+        # GET /finance/budget?mode=survival hook narrows to this same set
+        # inline in the handler (the plain budget skeleton stays on the wider
+        # finance-role row above).
+        "method": "GET",
+        "path": "/api/v1/finance/survival-cashflow",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/finance/pending-reconciliations",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
