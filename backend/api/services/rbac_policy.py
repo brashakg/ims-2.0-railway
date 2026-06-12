@@ -1907,6 +1907,16 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature N7 CL/lens PO generator (own /api/v1/cl-po prefix). Drafts
+    # vendor-grouped DRAFT purchase orders whose lines carry the power cell
+    # (sph/cyl/add) from Base-Bank replenishment / lens-stock gap-planner data.
+    # dry_run=True default; never SENT; manager-ladder only, store-scoped. ---
+    {
+        "method": "POST",
+        "path": "/api/v1/cl-po/generate",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",

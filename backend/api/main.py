@@ -64,6 +64,7 @@ from .routers import (
     serial_tracking_router,
     blind_stock_take_router,
     inventory_balancing_router,
+    cl_po_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -1175,6 +1176,11 @@ app.include_router(blind_stock_take_router, prefix="/api/v1/blind-count", tags=[
 # Feature #1 cross-store inventory balancing: read-only rebalancing proposals.
 # Management-only + output store-scoped; never mutates stock / executes transfers.
 app.include_router(inventory_balancing_router, prefix="/api/v1/inventory-balancing", tags=["InventoryBalancing"])
+# Feature N7 CL/lens PO generator: own /api/v1/cl-po prefix; manager-ladder gate
+# inline (STORE_MANAGER/AREA_MANAGER/ADMIN/SUPERADMIN) + store-scopes. Reads the
+# Base-Bank replenishment + lens-stock gap-planner data and drafts DRAFT POs whose
+# lines carry the power cell -- never SENT, never touches POS/money.
+app.include_router(cl_po_router, prefix="/api/v1/cl-po", tags=["CLPurchaseOrders"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",
