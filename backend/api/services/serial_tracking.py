@@ -34,10 +34,15 @@ Money, if any, is integer paise. Everything is store-scoped: every read/write
 keyed on (store_id, serial) so one store can never touch another's units.
 
 This module owns the Mongo I/O for the per-unit serial layer. RBAC, audit
-rows, and the HTTP surface live in ``api/routers/serial_tracking.py``; the
-at-sale guarded transition is invoked (fail-soft) from the order finalize path
-in ``orders.py::_mark_units_sold`` -- it is system-driven, never a cashier
-action.
+rows, and the HTTP surface live in ``api/routers/serial_tracking.py``. The
+at-sale guarded transition (``mark_serial_sold``) is currently exposed via the
+manager-gated ``POST /serials/{serial}/mark-sold`` route -- a system/manager
+action, never a cashier one. NOTE: auto-invoking it from the POS order-finalize
+path (so a serialized item flips IN_STOCK->SOLD atomically on every live sale)
+is a deliberate FAST-FOLLOW: it touches the revenue-critical order path and is
+owner-gated, so orders.py is intentionally NOT modified here. Until then the
+guard protects any sale routed through the /serials endpoint; the legacy POS
+stock flip is unchanged (no new double-sell risk -- that path predates this).
 """
 
 from __future__ import annotations
@@ -257,8 +262,9 @@ def mark_serial_sold(
 
     Returns the updated unit doc on success, or None if the unit was not
     IN_STOCK (already sold / recalled / absent). It NEVER raises for a
-    business-rule miss -- the caller (order finalize) is fail-soft and must
-    not have order creation blocked by a stock-side miss.
+    business-rule miss -- the caller is fail-soft (when the eventual POS
+    order-finalize fast-follow calls this, a stock-side miss must not block
+    order creation; the /serials/mark-sold route maps None -> 409).
 
     Crucially this is an INVENTORY write only: it stamps order_id + customer +
     sold_at on the unit. It does NOT touch the order total or any payment --
