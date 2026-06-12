@@ -5227,6 +5227,24 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/approve-exception",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # F19: landed-cost capture / preview / one-way allocation. All three are
+    # accounting actions on the bill's cost basis -> ACCOUNTANT/ADMIN (same
+    # gate as from-grn / dc-match; SUPERADMIN auto-passes via require_roles).
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs/preview",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/allocate-landed-costs",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}",
