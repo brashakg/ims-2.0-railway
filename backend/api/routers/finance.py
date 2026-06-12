@@ -1,5 +1,6 @@
 # Finance & Accounting Router — _get_db() pattern (matches working routers)
 
+import calendar
 import csv
 import io
 import uuid
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
+from ..services import survival_cashflow
 from ..services.cost_mask import can_see_cost
 from ..services.cache import cache
 from ..services import ticker_service, policy_engine
@@ -1604,6 +1606,164 @@ async def cash_flow_forecast(
     return forecast
 
 
+# === N8 owner "survival" cash-flow (essential vs deferrable + min-pay) ======
+# Read-only analytics: NOTHING in this block writes to any collection. The
+# pure math lives in services/survival_cashflow.py; these helpers only fetch
+# rows + resolve the two E2 policy lists, so each piece is fail-soft and
+# independently testable.
+
+
+def _survival_policy_lists() -> tuple:
+    """(essential_heads, critical_vendors) from E2 policy, fail-soft.
+
+    Both keys resolve at GLOBAL scope (the survival view is an org-wide owner
+    figure). Junk values (non-list) fall back to the code defaults; an owner
+    who explicitly saves an EMPTY essential list is honored (everything
+    becomes deferrable -- that is a meaningful policy choice, not junk).
+    """
+    try:
+        essential = policy_engine.get_policy(
+            "finance.survival_essential_heads",
+            default=survival_cashflow.ESSENTIAL_DEFAULT_HEADS,
+        )
+    except Exception:
+        essential = None
+    try:
+        critical = policy_engine.get_policy(
+            "finance.survival_critical_vendors", default=[]
+        )
+    except Exception:
+        critical = None
+    if not isinstance(essential, list):
+        essential = list(survival_cashflow.ESSENTIAL_DEFAULT_HEADS)
+    if not isinstance(critical, list):
+        critical = []
+    return essential, critical
+
+
+def _survival_month_expense_rows(db, now: datetime, store_id: Optional[str] = None):
+    """Current-month committed expenses grouped by head (rupees).
+
+    Same field conventions as the rest of this router: `expense_date` is a
+    date-only 'YYYY-MM-DD' string and committed states are APPROVED / PAID.
+    """
+    start = date(now.year, now.month, 1).isoformat()
+    end = (
+        date(now.year + 1, 1, 1) if now.month == 12 else date(now.year, now.month + 1, 1)
+    ).isoformat()
+    match = {
+        "expense_date": {"$gte": start, "$lt": end},
+        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+    }
+    if store_id:
+        match["store_id"] = store_id
+    try:
+        rows = list(
+            db.get_collection("expenses").aggregate(
+                [
+                    {"$match": match},
+                    {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},
+                ]
+            )
+        )
+    except Exception:
+        rows = []
+    return [
+        {"head": (r.get("_id") or "uncategorized"), "amount": r.get("total") or 0}
+        for r in rows
+    ]
+
+
+def _survival_ap_items(db):
+    """Open AP bills as aging items (rupee `outstanding`, resolved `due_date`)
+    + the raw bill's vendor_critical flag carried through.
+
+    Vendor bills carry no store_id (they are entity-level liabilities), so the
+    AP side of the survival view is always org-wide.
+    """
+    bills, payments, dn = _ap_rows(db)
+    ap = ap_engine.build_aging(bills, payments, dn)
+    crit_by_bill = {}
+    for b in bills:
+        if isinstance(b, dict) and b.get("bill_id") is not None:
+            crit_by_bill[b["bill_id"]] = bool(b.get("vendor_critical"))
+    items = []
+    for it in ap.get("items", []):
+        row = dict(it)
+        row["vendor_critical"] = crit_by_bill.get(it.get("bill_id"), False)
+        items.append(row)
+    return items
+
+
+def _survival_projected_income_paise(
+    db, now: datetime, store_id: Optional[str] = None
+) -> int:
+    """This month's PAID revenue-to-date pro-rated to a full month, in paise.
+
+    Uses the exact same revenue definition as /owner-dashboard (paid orders,
+    DRAFT/CANCELLED excluded, datetime bound on created_at) so the two owner
+    views can never disagree about what 'income' means.
+    """
+    start = ist_day_start_utc(now.replace(day=1).date())
+    match = {
+        "created_at": {"$gte": start},
+        "payment_status": {"$in": PAID_STATUSES},
+        "status": _REAL_ORDER_STATUS_FILTER,
+    }
+    if store_id:
+        match["store_id"] = store_id
+    revenue_to_date = _agg_sum(db, "orders", match, _REVENUE_EXPR)
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    projected = revenue_to_date / max(now.day, 1) * days_in_month
+    return int(round(projected * 100))
+
+
+def _build_survival_payload(db, now: datetime, store_id: Optional[str] = None) -> dict:
+    """Assemble inputs and run the pure builder. db=None -> all-zero view."""
+    essential, critical = _survival_policy_lists()
+    if db is None:
+        expenses, ap_items, income = [], [], 0
+    else:
+        expenses = _survival_month_expense_rows(db, now, store_id=store_id)
+        ap_items = _survival_ap_items(db)
+        income = _survival_projected_income_paise(db, now, store_id=store_id)
+    return survival_cashflow.build_survival_view(
+        expenses,
+        ap_items,
+        income,
+        now=now,
+        essential_heads=essential,
+        critical_vendors=critical,
+    )
+
+
+@router.get("/survival-cashflow")
+async def get_survival_cashflow(
+    store_id: Optional[str] = Query(
+        None,
+        description="Filter expenses + income to one store. AP bills are "
+        "entity-level liabilities and stay org-wide.",
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """Owner "survival" view: ESSENTIAL fixed costs vs MUST-PAY vendor bills
+    vs DEFERRABLE spend, with the min-pay scenario (fixed + must-pay) compared
+    against projected month income (this month's paid revenue pro-rated).
+
+    Read-only analytics; integer paise. ADMIN / ACCOUNTANT only -- mirrors
+    /owner-dashboard's gate exactly.
+    """
+    _require_finance_admin(current_user)
+    db = _get_db()
+    now = now_ist_naive()
+    return {
+        "as_of": now.date().isoformat(),
+        "month": f"{now.year:04d}-{now.month:02d}",
+        "store_id": store_id,
+        "survival": _build_survival_payload(db, now, store_id=store_id),
+    }
+
+
 # === GST input-tax-credit (ITC) reconciliation (ADMIN / ACCOUNTANT) ===
 
 
@@ -1912,6 +2072,22 @@ async def get_budget(
         cat = a["_id"].lower() if a["_id"] else "miscellaneous"
         if cat in budget.get("categories", {}):
             budget["categories"][cat]["actual"] = a["total"]
+
+    if mode == "survival":
+        # N8: this branch used to be DEAD -- the budgets writer never stores a
+        # `mode` field, so the lookup above always missed and mode=survival
+        # returned only the empty no_budget_set skeleton. Wire it to the REAL
+        # survival view (kept on the existing envelope for back-compat; the
+        # dedicated GET /finance/survival-cashflow is the first-class API).
+        # The survival figures are org-wide owner material (AP totals +
+        # projected income), so this mode narrows to the owner-dashboard gate
+        # -- the plain budget skeleton stays visible to the wider finance set.
+        _require_finance_admin(current_user)
+        budget.pop("no_budget_set", None)
+        # Always as-of NOW: survival is a "can I cover this month" question,
+        # not a historical report (month/year params only shape the budget
+        # skeleton above).
+        budget["survival"] = _build_survival_payload(db, now_ist_naive())
 
     return budget
 
