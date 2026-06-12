@@ -5723,6 +5723,18 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {"method": "GET", "path": "/api/v1/workshop/ready", "allowed": "AUTHENTICATED"},
+    # F13 -- remake justification taxonomy: read anywhere (the bench needs it
+    # for the rework dialog), replace is owner/admin-only.
+    {
+        "method": "GET",
+        "path": "/api/v1/workshop/remake-reason-codes",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/workshop/remake-reason-codes",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # F2 -- internal lab routing (disposable barcoded job cards).
     {
         "method": "POST",
@@ -5734,6 +5746,13 @@ POLICY: List[Dict[str, object]] = [
             "STORE_MANAGER",
             "WORKSHOP_STAFF",
         ],
+    },
+    # F13 -- spoilage analytics rollup exposes cost data: manager+ only.
+    # Mirrors the inline role check in workshop.get_spoilage_analytics.
+    {
+        "method": "GET",
+        "path": "/api/v1/workshop/spoilage-analytics",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {
         "method": "GET",

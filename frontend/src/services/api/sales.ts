@@ -506,6 +506,9 @@ export const workshopApi = {
       completed_today: number;
       delivered_today: number;
       avg_turnaround_days: number | null;
+      // F13 — additive spoilage keys (older deploys may omit them).
+      spoilage_cost_mtd_paise?: number;
+      remake_rate_pct?: number;
       store_id: string | null;
       as_of: string;
     };
@@ -596,16 +599,33 @@ export const workshopApi = {
     };
   },
 
+  // F13 — the remake reason-code taxonomy (seeded default, owner-editable).
+  getRemakeReasonCodes: async () => {
+    const response = await api.get('/workshop/remake-reason-codes');
+    return response.data as {
+      codes: Array<{ code: string; label: string; category: string }>;
+    };
+  },
+
   // Send a QC_FAILED job back to the bench (QC_FAILED -> IN_PROGRESS).
-  // Backend reads `notes` as a query param.
-  reworkJob: async (jobId: string, notes?: string) => {
-    const response = await api.post(`/workshop/jobs/${jobId}/rework`, null, {
-      params: notes ? { notes } : {},
-    });
+  // F13: a rework is a remake — the backend REQUIRES remake_reason_code
+  // (422 without one). Backend reads everything as query params.
+  reworkJob: async (
+    jobId: string,
+    remakeReasonCode: string,
+    opts?: { notes?: string; spoilageCategory?: string },
+  ) => {
+    const params: Record<string, string> = { remake_reason_code: remakeReasonCode };
+    if (opts?.notes) params.notes = opts.notes;
+    if (opts?.spoilageCategory) params.spoilage_category = opts.spoilageCategory;
+    const response = await api.post(`/workshop/jobs/${jobId}/rework`, null, { params });
     return response.data as {
       job_id: string;
       status: 'IN_PROGRESS';
       rework_count: number;
+      remake_reason_code: string;
+      spoilage_category: string;
+      spoilage_cost_paise: number;
       message: string;
     };
   },

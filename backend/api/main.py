@@ -275,6 +275,15 @@ async def lifespan(app: FastAPI):
                 ensure_blind_count_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Blind-stock-take index creation skipped: {e}")
+            # Feature #13 spoilage analytics: seed the owner-editable remake
+            # reason-code taxonomy singleton (insert-only-if-absent, so an
+            # edited taxonomy is never clobbered). Idempotent, fail-soft.
+            try:
+                from .services.spoilage_analytics import ensure_reason_codes
+
+                ensure_reason_codes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Remake reason-code seed skipped: {e}")
             # Unification step 1: UNIQUE partial index on orders.shopify_order_id
             # so a Shopify webhook retry / double-delivery can never double-book
             # an online order. The helper existed in shopify_ingest but was
