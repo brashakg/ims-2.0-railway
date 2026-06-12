@@ -2355,6 +2355,19 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/incentive/points/leaderboard",
         "allowed": "AUTHENTICATED",
     },
+    # F33 — leaderboard display layer. POST settings is the only write.
+    # The org/area scope widening on GET /leaderboard + /mtd is a
+    # data-conditional 403 inside the handler (not expressible here).
+    {
+        "method": "POST",
+        "path": "/api/v1/incentive/points/leaderboard/settings",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/incentive/points/leaderboard/titles",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/incentive/points/mtd",

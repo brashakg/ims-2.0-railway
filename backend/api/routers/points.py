@@ -53,6 +53,11 @@ from api.services.points_calculator import (
     leaderboard_sort_key,
 )
 from api.services import scorecard_engine
+from api.services.leaderboard_display import (
+    build_leaderboard_row,
+    leaderboard_config_defaults,
+    titles_catalog,
+)
 from api.utils.ist import ist_today
 
 logger = logging.getLogger(__name__)
@@ -87,6 +92,47 @@ def _resolve_store(current_user: dict, override: Optional[str]) -> str:
     if not store:
         raise HTTPException(status_code=400, detail="No active store on this session")
     return store
+
+
+# F33 -- leaderboard scope widening. org/area visibility is a management
+# privilege; floor roles stay store-scoped.
+_SCOPE_WIDE_ROLES = {"AREA_MANAGER", "ADMIN", "SUPERADMIN"}
+_VALID_SCOPES = ("store", "area", "org")
+
+
+def _resolve_scope_stores(
+    current_user: dict, scope: str, store_id: Optional[str]
+) -> Optional[List[str]]:
+    """Resolve a leaderboard scope into a points_log store filter.
+
+    Returns:
+      - ["<store>"]   for scope=store (existing single-store resolution)
+      - [ids...]      for scope=area  (the caller's assigned stores)
+      - None          for scope=org   (no store filter)
+
+    org/area are allowed ONLY for AREA_MANAGER / ADMIN / SUPERADMIN.
+    """
+    if scope not in _VALID_SCOPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"scope must be one of {', '.join(_VALID_SCOPES)}",
+        )
+    if scope == "store":
+        return [_resolve_store(current_user, store_id)]
+    roles = _user_role_set(current_user)
+    if not (roles & _SCOPE_WIDE_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only area managers / admin can view area or org leaderboards",
+        )
+    if scope == "org":
+        return None
+    stores = [s for s in (current_user.get("store_ids") or []) if s]
+    if not stores:
+        raise HTTPException(
+            status_code=400, detail="No stores assigned to this session"
+        )
+    return stores
 
 
 # ============================================================================
@@ -531,18 +577,71 @@ async def delete_daily(
     return {"log_id": log_id, "deleted": True}
 
 
+def _ranked_items(rows: List[Dict]) -> List[Dict]:
+    """aggregate_mtd + canonical leaderboard sort."""
+    items = list(aggregate_mtd(rows).values())
+    items.sort(key=leaderboard_sort_key)
+    return items
+
+
+def _prev_rank_map(
+    repo: PointsLogRepository,
+    stores: Optional[List[str]],
+    date_from: str,
+    date_to: str,
+) -> Dict[str, int]:
+    """staff_id -> rank in the PREVIOUS period (for rank_delta / top_riser).
+    Fail-soft: any error returns {} (deltas just render as new entries)."""
+    try:
+        rows = repo.list_for_mtd_scoped(stores, date_from, date_to)
+        return {
+            r["staff_id"]: i + 1 for i, r in enumerate(_ranked_items(rows))
+        }
+    except Exception:
+        return {}
+
+
+def _decorate_items(
+    items: List[Dict],
+    current_user: dict,
+    prev_ranks: Dict[str, int],
+    period_days: Optional[int],
+) -> List[Dict]:
+    """F33: pipe every raw aggregate row through the display layer
+    (tier/title/badges/rank_delta + the junior-role rupee strip)."""
+    total = len(items)
+    viewer_roles = _user_role_set(current_user)
+    return [
+        build_leaderboard_row(
+            row,
+            rank=idx + 1,
+            total=total,
+            viewer_roles=viewer_roles,
+            prev_rank=prev_ranks.get(row.get("staff_id") or ""),
+            period_days=period_days,
+        )
+        for idx, row in enumerate(items)
+    ]
+
+
 @router.get("/mtd")
 async def get_mtd(
     current_user: dict = Depends(get_current_user),
     year: Optional[int] = Query(None, ge=2024, le=2100),
     month: Optional[int] = Query(None, ge=1, le=12),
     store_id: Optional[str] = Query(None),
+    scope: str = Query("store"),
 ):
-    """The Module (iii) contract — per-staff MTD aggregation."""
-    store = _resolve_store(current_user, store_id)
+    """The Module (iii) contract — per-staff MTD aggregation.
+
+    F33: rows are decorated with tier/title/badges/rank_delta and the
+    junior-role rupee strip. `scope=area|org` (managers only) widens the
+    board beyond the caller's store."""
+    stores = _resolve_scope_stores(current_user, scope, store_id)
+    store = stores[0] if scope == "store" and stores else None
     repo = _points_repo()
     if repo is None:
-        return {"store_id": store, "items": []}
+        return {"store_id": store, "scope": scope, "items": []}
     now = ist_today()
     yr = year or now.year
     mo = month or now.month
@@ -554,12 +653,23 @@ async def get_mtd(
         next_d = date_type(yr, mo + 1, 1)
     date_to = (next_d - timedelta(days=1)).isoformat()
 
-    rows = repo.list_for_mtd(store, date_from, date_to)
-    by_staff = aggregate_mtd(rows)
-    items = list(by_staff.values())
-    items.sort(key=leaderboard_sort_key)
+    rows = repo.list_for_mtd_scoped(stores, date_from, date_to)
+    items = _ranked_items(rows)
+
+    # Previous month window (for rank_delta / top_riser)
+    prev_last = date_type(yr, mo, 1) - timedelta(days=1)
+    prev_from = prev_last.replace(day=1).isoformat()
+    prev_ranks = _prev_rank_map(repo, stores, prev_from, prev_last.isoformat())
+
+    # Days elapsed in the requested month (for logged_every_day)
+    window_end = min(date_type.fromisoformat(date_to), now)
+    elapsed = (window_end - date_type.fromisoformat(date_from)).days + 1
+    period_days = elapsed if elapsed > 0 else None
+
+    items = _decorate_items(items, current_user, prev_ranks, period_days)
     return {
         "store_id": store,
+        "scope": scope,
         "year": yr,
         "month": mo,
         "date_from": date_from,
@@ -573,26 +683,131 @@ async def get_leaderboard(
     current_user: dict = Depends(get_current_user),
     days: int = Query(30, ge=1, le=365),
     store_id: Optional[str] = Query(None),
+    scope: str = Query("store"),
 ):
-    """Sorted by avg.total DESC, tie-broken by days_logged DESC."""
-    store = _resolve_store(current_user, store_id)
+    """Sorted by avg.total DESC, tie-broken by days_logged DESC.
+
+    F33: rows are decorated with tier/title/badges/rank_delta and the
+    junior-role rupee strip. `scope=area|org` (managers only) widens the
+    board beyond the caller's store."""
+    stores = _resolve_scope_stores(current_user, scope, store_id)
+    store = stores[0] if scope == "store" and stores else None
     repo = _points_repo()
     if repo is None:
-        return {"store_id": store, "items": []}
+        return {"store_id": store, "scope": scope, "items": []}
     today = ist_today()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     date_to = today.isoformat()
-    rows = repo.list_for_mtd(store, date_from, date_to)
-    by_staff = aggregate_mtd(rows)
-    items = list(by_staff.values())
-    items.sort(key=leaderboard_sort_key)
+    rows = repo.list_for_mtd_scoped(stores, date_from, date_to)
+    items = _ranked_items(rows)
+
+    # Previous same-length window (for rank_delta / top_riser)
+    prev_to = (today - timedelta(days=days)).isoformat()
+    prev_from = (today - timedelta(days=2 * days - 1)).isoformat()
+    prev_ranks = _prev_rank_map(repo, stores, prev_from, prev_to)
+
+    items = _decorate_items(items, current_user, prev_ranks, days)
     return {
         "store_id": store,
+        "scope": scope,
         "days": days,
         "date_from": date_from,
         "date_to": date_to,
         "items": items,
     }
+
+
+@router.get("/leaderboard/titles")
+async def get_leaderboard_titles(
+    current_user: dict = Depends(get_current_user),
+):
+    """F33: the titles + badges catalog (FE legend). Any authenticated
+    user — contains no staff or rupee data."""
+    items = titles_catalog()
+    return {
+        "titles": [i for i in items if i["kind"] == "title"],
+        "badges": [i for i in items if i["kind"] == "badge"],
+        "tiers": ["PODIUM", "CONTENDER", "BUILDING"],
+    }
+
+
+class LeaderboardSettingsRequest(BaseModel):
+    """F33 — per-store leaderboard display config (sub-doc on the
+    existing incentive_settings doc; no new collection)."""
+
+    enabled: Optional[bool] = None
+    scope_default: Optional[str] = None
+    show_titles: Optional[bool] = None
+    show_badges: Optional[bool] = None
+
+    @field_validator("scope_default")
+    @classmethod
+    def _scope_default_enum(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip().lower()
+        if v not in _VALID_SCOPES:
+            raise ValueError(
+                f"scope_default must be one of {', '.join(_VALID_SCOPES)}"
+            )
+        return v
+
+
+@router.post("/leaderboard/settings")
+async def update_leaderboard_settings(
+    payload: LeaderboardSettingsRequest,
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """F33: SUPERADMIN/ADMIN — upsert the leaderboard_config sub-doc on
+    the store's incentive_settings doc (defaults merged underneath)."""
+    if not (_user_role_set(current_user) & {"SUPERADMIN", "ADMIN"}):
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin / superadmin can update leaderboard settings",
+        )
+    store = _resolve_store(current_user, store_id)
+    settings_repo = _settings_repo()
+    if settings_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    incoming = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if not incoming:
+        raise HTTPException(
+            status_code=400, detail="At least one field must be provided"
+        )
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll = db.get_collection("incentive_settings")
+    existing = coll.find_one({"store_id": store}) or {}
+    config = {
+        **leaderboard_config_defaults(),
+        **(existing.get("leaderboard_config") or {}),
+        **incoming,
+    }
+    now = datetime.now()
+    update_doc = {
+        "leaderboard_config": config,
+        "updated_at": now,
+        "updated_by": current_user.get("user_id"),
+    }
+    if existing:
+        coll.update_one({"store_id": store}, {"$set": update_doc})
+    else:
+        defaults = settings_repo._defaults(store)
+        defaults.update(update_doc)
+        defaults["_id"] = store
+        coll.insert_one(defaults)
+    _audit(
+        action="incentive.settings.update",
+        log_id=f"settings:{store}",
+        store_id=store,
+        current_user=current_user,
+        detail={"field": "leaderboard_config", "patch": list(incoming.keys())},
+    )
+    return {"store_id": store, "leaderboard_config": config}
 
 
 @router.get("/staff/{staff_id}/history")

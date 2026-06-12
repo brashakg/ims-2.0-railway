@@ -801,6 +801,9 @@ export interface DailyListResponse {
   date_str: string;
 }
 
+export type LeaderboardScope = 'store' | 'area' | 'org';
+export type LeaderboardTier = 'PODIUM' | 'CONTENDER' | 'BUILDING';
+
 export interface MTDStaffEntry {
   staff_id: string;
   staff_name: string | null;
@@ -811,10 +814,17 @@ export interface MTDStaffEntry {
     reviews: number; total: number;
   };
   eligibility_avg: number;
+  // F33 — gamified display layer (server-computed; optional during deploy window)
+  rank?: number;
+  tier_label?: LeaderboardTier;
+  title_earned?: string | null;
+  badge_keys?: string[];
+  rank_delta?: number | null;
 }
 
 export interface MTDResponse {
-  store_id: string;
+  store_id: string | null;
+  scope?: LeaderboardScope;
   year: number;
   month: number;
   date_from: string;
@@ -823,11 +833,32 @@ export interface MTDResponse {
 }
 
 export interface LeaderboardResponse {
-  store_id: string;
+  store_id: string | null;
+  scope?: LeaderboardScope;
   days: number;
   date_from: string;
   date_to: string;
   items: MTDStaffEntry[];
+}
+
+export interface LeaderboardCatalogItem {
+  kind: 'title' | 'badge';
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface LeaderboardTitlesResponse {
+  titles: LeaderboardCatalogItem[];
+  badges: LeaderboardCatalogItem[];
+  tiers: LeaderboardTier[];
+}
+
+export interface LeaderboardConfig {
+  enabled: boolean;
+  scope_default: LeaderboardScope;
+  show_titles: boolean;
+  show_badges: boolean;
 }
 
 export interface SupervisorBonus {
