@@ -133,7 +133,11 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
       <div className="spacer" />
 
       {multiStore && (
-        <div ref={storeRef} style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
+        /* In-flow flex child (like the role pill). It was absolutely centered
+           (left:50%) inside a non-positioned .topbar, so it anchored to the
+           page and DOM-later siblings (search, role pill, bell) painted over
+           it -- invisible on mobile, partially covered on desktop. */
+        <div ref={storeRef} style={{ position: 'relative', flexShrink: 0 }}>
           <button
             type="button"
             className="store-pill"
@@ -156,8 +160,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
               style={{
                 position: 'absolute',
                 top: '100%',
-                left: '50%',
-                transform: 'translateX(-50%)',
+                right: 0,
                 marginTop: 6,
                 width: 240,
                 maxWidth: 'calc(100vw - 16px)',
