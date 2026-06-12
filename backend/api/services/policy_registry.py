@@ -18,6 +18,12 @@ No emoji in this file (Windows cp1252).
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+# N8: the survival-view seed list lives with its pure service (a stdlib-only
+# module, so this import is feather-weight and cycle-proof). Importing the
+# constant -- instead of copying it -- means the registry default and the
+# service fallback can never drift.
+from .survival_cashflow import ESSENTIAL_DEFAULT_HEADS as _SURVIVAL_DEFAULT_HEADS
+
 # Policy value types the FE knows how to render + the engine knows how to validate.
 TYPES = {"money_paisa", "int", "float", "percent", "days", "enum", "bool", "json", "text"}
 
@@ -371,6 +377,29 @@ _REGISTRY_LIST: List[PolicySpec] = [
           group="Cash Register", label="Till reopen roles",
           help="Roles permitted to reopen a soft-locked EOD Z-Read (with a "
                "mandatory reason; the reopen is audited)."),
+
+    # --- N8 Owner "survival" cash-flow (essential vs deferrable + min-pay) ---
+    # The finance router reads BOTH keys at GLOBAL scope (the survival view is
+    # an org-wide owner figure), so they are declared global-only -- declaring
+    # entity/store scopes the router never resolves would be a lie in the
+    # Settings UI. Keyword matching is case/space-normalized contains-match;
+    # keywords of <= 3 chars (pf/esi/gst) match whole words only.
+    _spec(key="finance.survival_essential_heads", type="json",
+          default=list(_SURVIVAL_DEFAULT_HEADS),
+          scopes=("global",),
+          write_roles=("SUPERADMIN", "ADMIN"),
+          group="Finance", label="Survival view: essential expense heads",
+          help="Expense heads counted as ESSENTIAL fixed costs in the owner "
+               "survival cash-flow view (matched case-insensitively against "
+               "the expense category). Everything else is DEFERRABLE."),
+    _spec(key="finance.survival_critical_vendors", type="json",
+          default=[],
+          scopes=("global",),
+          write_roles=("SUPERADMIN", "ADMIN"),
+          group="Finance", label="Survival view: critical vendors",
+          help="Vendor ids or names whose bills become MUST_PAY when due "
+               "within 7 days (overdue bills are MUST_PAY regardless). "
+               "Empty = only the per-bill vendor_critical flag applies."),
 ]
 
 REGISTRY = {s.key: s for s in _REGISTRY_LIST}
