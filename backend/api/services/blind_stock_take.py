@@ -268,7 +268,7 @@ class BlindStockTakeEngine:
         # duplicate adjustments from one locked count), while a genuine re-lock
         # after a reopen+recount mints a fresh proposal (new locked_at -> new id).
         gen = str(sess.get("locked_at") or "")
-        pid = "ADJ-" + hashlib.sha1(f"{session_id}|{gen}".encode("utf-8")).hexdigest()[:12].upper()
+        pid = "ADJ-" + hashlib.sha256(f"{session_id}|{gen}".encode("utf-8")).hexdigest()[:12].upper()
         adj = self.db.get_collection(ADJUSTMENT_COLLECTION)
         existing = adj.find_one({"_id": pid})
         if existing is not None:
