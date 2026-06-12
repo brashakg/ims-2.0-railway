@@ -50,6 +50,7 @@ def verdict(counted: Optional[int], expected: Optional[int], tolerance: int = 0)
 # the #23 (eod_tally) blind-redact + atomic soft-lock PATTERN -- not a fork of
 # the legacy stock_counts flow.
 # ---------------------------------------------------------------------------
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -114,11 +115,13 @@ def build_summary(items, tolerance=0):
 
 def redact_for_counter(session, user, reopen_roles=None):
     """Blind enforcement at the DATA layer: a non-manager NEVER sees the expected
-    on-hand / variance / summary while the session is OPEN (no anchoring). After
-    a manager LOCK the reveal is visible to everyone (the count is done)."""
+    on-hand / variance / summary while the session is OPEN *or REOPENED* (no
+    anchoring -- a reopened session is being RE-counted blind, so the prior
+    lock's revealed figures must stay hidden from the counter). After a manager
+    LOCK the reveal is visible to everyone (the count is done)."""
     if session is None:
         return None
-    if session.get("status") != STATUS_OPEN:
+    if session.get("status") not in (STATUS_OPEN, STATUS_REOPENED):
         return session
     if _is_manager(user, reopen_roles):
         return session
@@ -169,9 +172,13 @@ class BlindStockTakeEngine:
             clean.append({"product_id": pid, "sku": c.get("sku") or pid,
                           "counted_qty": int(c.get("counted_qty") or 0)})
         from pymongo import ReturnDocument
+        # OPEN *or REOPENED*: a reopened session is being re-counted. Clear the
+        # prior lock's stale reveal so a manager never sees old expected/variance
+        # mixed with fresh blind counts; the next lock recomputes from `items`.
         updated = coll.find_one_and_update(
-            {"_id": session_id, "store_id": store_id, "status": STATUS_OPEN},
-            {"$set": {"items": clean, "counted_by": actor.get("user_id"), "updated_at": _now_iso()}},
+            {"_id": session_id, "store_id": store_id, "status": {"$in": [STATUS_OPEN, STATUS_REOPENED]}},
+            {"$set": {"items": clean, "items_revealed": [], "summary": None,
+                      "counted_by": actor.get("user_id"), "updated_at": _now_iso()}},
             return_document=ReturnDocument.AFTER,
         )
         if updated is None:
@@ -179,10 +186,12 @@ class BlindStockTakeEngine:
         return updated
 
     def lock_and_reveal(self, session_id, *, store_id, actor, on_hand_resolver, cost_resolver=None, tolerance=0):
-        """Atomic OPEN -> LOCKED. THE GUARD: a single guarded find_one_and_update
-        keyed on status==OPEN -- two concurrent locks: exactly one wins. On the
-        winning lock, compute per-SKU variance (counted - system on_hand) +
-        summary, and persist the reveal. on_hand_resolver(store_id, [pid]) -> {pid: qty}."""
+        """Atomic (OPEN|REOPENED) -> LOCKED. THE GUARD: a single guarded
+        find_one_and_update keyed on status in (OPEN, REOPENED) -- two concurrent
+        locks: exactly one wins (the first flips to LOCKED, the second no longer
+        matches). On the winning lock, compute per-SKU variance (counted - system
+        on_hand) + summary, and persist the reveal. A REOPENED session can be
+        re-locked after a recount. on_hand_resolver(store_id, [pid]) -> {pid: qty}."""
         coll = self._coll()
         if coll is None:
             raise BlindStockTakeError("inventory store unavailable", status=503, code="no_db")
@@ -199,14 +208,15 @@ class BlindStockTakeEngine:
         now = _now_iso()
         from pymongo import ReturnDocument
         updated = coll.find_one_and_update(
-            {"_id": session_id, "store_id": store_id, "status": STATUS_OPEN},  # GUARD
+            {"_id": session_id, "store_id": store_id,
+             "status": {"$in": [STATUS_OPEN, STATUS_REOPENED]}},  # GUARD
             {"$set": {"status": STATUS_LOCKED, "items": rows, "items_revealed": rows,
                       "summary": summary, "tolerance": int(tolerance),
                       "locked_by": actor.get("user_id"), "locked_at": now, "updated_at": now}},
             return_document=ReturnDocument.AFTER,
         )
         if updated is None:
-            raise BlindStockTakeError("count session not open (already locked / reopened)", status=409, code="not_open")
+            raise BlindStockTakeError("count session not open (already locked)", status=409, code="not_open")
         return updated
 
     def reopen(self, session_id, *, store_id, actor, reason, reopen_roles=None):
@@ -244,17 +254,34 @@ class BlindStockTakeEngine:
         sess = coll.find_one({"_id": session_id, "store_id": store_id})
         if sess is None:
             raise BlindStockTakeError("count session not found", status=404, code="not_found")
-        if sess.get("status") not in (STATUS_LOCKED, STATUS_REOPENED):
+        # Must be LOCKED (revealed + final). A REOPENED session is mid-recount --
+        # it must be re-locked first, so its variances are settled before a
+        # proposal can be raised from them.
+        if sess.get("status") != STATUS_LOCKED:
             raise BlindStockTakeError("count must be locked before proposing an adjustment", status=409, code="not_locked")
         lines = [{"product_id": it.get("product_id"), "delta_units": it.get("variance_units"),
                   "from_qty": it.get("expected"), "to_qty": it.get("counted_qty")}
                  for it in (sess.get("items_revealed") or sess.get("items") or [])
                  if int(it.get("variance_units") or 0) != 0]
-        pid = "ADJ-" + uuid.uuid4().hex[:10].upper()
+        # Idempotent per (session, lock generation): a deterministic _id keyed on
+        # session + locked_at means a double-submit returns the SAME proposal (no
+        # duplicate adjustments from one locked count), while a genuine re-lock
+        # after a reopen+recount mints a fresh proposal (new locked_at -> new id).
+        gen = str(sess.get("locked_at") or "")
+        pid = "ADJ-" + hashlib.sha1(f"{session_id}|{gen}".encode("utf-8")).hexdigest()[:12].upper()
+        adj = self.db.get_collection(ADJUSTMENT_COLLECTION)
+        existing = adj.find_one({"_id": pid})
+        if existing is not None:
+            return existing
         doc = {"_id": pid, "proposal_id": pid, "source": "blind_stock_take",
-               "source_id": session_id, "store_id": store_id, "status": "PROPOSED",
-               "lines": lines, "created_by": actor.get("user_id"), "created_at": _now_iso()}
-        self.db.get_collection(ADJUSTMENT_COLLECTION).insert_one(dict(doc))
+               "source_id": session_id, "source_lock_at": gen, "store_id": store_id,
+               "status": "PROPOSED", "lines": lines,
+               "created_by": actor.get("user_id"), "created_at": _now_iso()}
+        from pymongo.errors import DuplicateKeyError
+        try:
+            adj.insert_one(dict(doc))
+        except DuplicateKeyError:
+            return adj.find_one({"_id": pid}) or doc
         return doc
 
 

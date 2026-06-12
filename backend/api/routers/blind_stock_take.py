@@ -19,10 +19,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from pymongo.errors import PyMongoError
 
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import blind_stock_take as svc
+from ..services.non_adapt import rupees_to_paise
 
 router = APIRouter(tags=["blind-stock-take"])
 
@@ -99,18 +101,23 @@ def _on_hand_resolver(store_id, product_ids):
 
 
 def _cost_resolver(product_ids):
-    """Per-product cost in integer paise for the variance valuation."""
+    """Per-product cost in integer paise for the variance valuation.
+
+    Only a genuine DB fault degrades to an empty (zero-valuation) map -- a
+    programmer error (bad helper, bad shape) must FAIL LOUDLY, never masquerade
+    as 'no costs found' and silently zero out a real shrinkage figure."""
     db = _get_db()
     out: Dict[str, int] = {}
     if db is None:
         return out
     try:
-        cur = db.get_collection("products").find(
-            {"product_id": {"$in": list(product_ids)}}, {"product_id": 1, "cost_price": 1})
-        for p in cur:
-            out[p.get("product_id")] = svc._to_paise(p.get("cost_price"))
-    except Exception:  # noqa: BLE001
+        rows = list(db.get_collection("products").find(
+            {"product_id": {"$in": list(product_ids)}}, {"product_id": 1, "cost_price": 1}))
+    except PyMongoError:
         return {}
+    # cost_price persists in RUPEES -> integer paise once, at the boundary.
+    for p in rows:
+        out[p.get("product_id")] = rupees_to_paise(p.get("cost_price"))
     return out
 
 

@@ -572,3 +572,110 @@ def test_router_lock_then_propose_end_to_end(db, monkeypatch):
     proposal = asyncio.run(r.propose_adjustment(sid, current_user=_manager()))
     assert proposal["status"] == "PROPOSED"
     assert proposal["lines"][0]["delta_units"] == -3
+
+
+# ============================================================================
+# REGRESSION -- adversarial-verify findings (F15 PR #645)
+# ============================================================================
+
+
+def test_router_lock_real_cost_resolver_values_variance_in_paise(db, monkeypatch):
+    """P1 REGRESSION: drive /lock through the REAL _cost_resolver (NOT injected)
+    against a seeded products collection. The revealed variance must be valued in
+    real paise -- not silently zero. (The original bug called a nonexistent
+    svc._to_paise, whose AttributeError was swallowed -> every valuation 0.)"""
+    import asyncio
+    from api.routers import blind_stock_take as r
+
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    monkeypatch.setattr(r, "validate_store_access", lambda sid, u: sid or u.get("active_store_id"))
+    monkeypatch.setattr(r, "_tolerance", lambda store_id: 0)
+    monkeypatch.setattr(r, "_on_hand_resolver", _on_hand({"P-A": 10}))
+    # REAL _cost_resolver reads products.cost_price (RUPEES) -> paise.
+    db.get_collection("products").insert_one({"product_id": "P-A", "cost_price": 250.0})
+    sid = _seed_open(db)
+    svc.BlindStockTakeEngine(db).submit_count(sid, [{"product_id": "P-A", "counted_qty": 7}],
+                                              store_id="BV-1", actor=_counter())
+    locked = asyncio.run(r.lock_count(sid, current_user=_manager()))
+    # short 3 units * Rs.250 (25000 paise) = -75000 paise (shrinkage).
+    assert locked["summary"]["net_variance_value_paise"] == -75000
+    assert locked["items"][0]["variance_value_paise"] == -75000
+
+
+def test_cost_resolver_failsoft_only_on_db_error_not_programmer_error(db, monkeypatch):
+    """The _cost_resolver degrades to {} ONLY on a genuine DB fault; a programmer
+    error must propagate (fail loudly), never masquerade as 'no costs'."""
+    from api.routers import blind_stock_take as r
+    from pymongo.errors import PyMongoError
+
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    # A real DB fault -> empty map (fail-soft).
+    class _Boom:
+        def get_collection(self, name):
+            class _C:
+                def find(self, *a, **k):
+                    raise PyMongoError("db down")
+            return _C()
+    monkeypatch.setattr(r, "_get_db", lambda: _Boom())
+    assert r._cost_resolver(["P-A"]) == {}
+    # A healthy DB values the cost correctly (Rs.12.34 -> 1234 paise).
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    db.get_collection("products").insert_one({"product_id": "P-Z", "cost_price": 12.34})
+    assert r._cost_resolver(["P-Z"]) == {"P-Z": 1234}
+
+
+def test_redact_hides_reveal_for_counter_on_reopened():
+    """P2 REGRESSION: a REOPENED session is being RE-counted blind -- a counter
+    must NOT see the prior lock's expected/variance/summary (anchoring)."""
+    session = {"session_id": "BST-r", "status": svc.STATUS_REOPENED, "store_id": "BV-1",
+               "summary": {"net_variance_units": -2}, "items_revealed": [{"x": 1}],
+               "items": [{"product_id": "P-A", "counted_qty": 8, "expected": 10, "variance_units": -2}]}
+    red = svc.redact_for_counter(session, _counter())
+    assert "summary" not in red and "items_revealed" not in red
+    assert red["_blind_redacted"] is True
+    assert "expected" not in red["items"][0] and "variance_units" not in red["items"][0]
+    # a manager still sees the full reopened figures.
+    full = svc.redact_for_counter(session, _manager())
+    assert full["summary"]["net_variance_units"] == -2
+
+
+def test_reopen_recount_relock_cycle_is_alive(db):
+    """P2/P3 REGRESSION: reopen is NOT a dead-end. A counter can re-submit on a
+    REOPENED session and a manager can re-lock it; the prior stale reveal is
+    cleared so the recount is fresh."""
+    eng = svc.BlindStockTakeEngine(db)
+    sid = eng.open_session(store_id="BV-1", actor=_counter())["session_id"]
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 8}], store_id="BV-1", actor=_counter())
+    eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                        on_hand_resolver=_on_hand({"P-A": 10}), cost_resolver=_costs({"P-A": 1000}))
+    eng.reopen(sid, store_id="BV-1", actor=_manager(), reason="recount after damage")
+    # the counter RE-counts on the reopened session (flow alive, not 409).
+    eng.submit_count(sid, [{"product_id": "P-A", "counted_qty": 10}], store_id="BV-1", actor=_counter())
+    midway = eng.get(sid)
+    assert midway["summary"] is None and midway["items_revealed"] == []  # stale reveal cleared
+    # re-lock recomputes from the fresh count (now matches -> 0 variance).
+    relocked = eng.lock_and_reveal(sid, store_id="BV-1", actor=_manager(),
+                                   on_hand_resolver=_on_hand({"P-A": 10}), cost_resolver=_costs({"P-A": 1000}))
+    assert relocked["status"] == svc.STATUS_LOCKED
+    assert relocked["summary"]["net_variance_units"] == 0 and relocked["summary"]["matched"] == 1
+
+
+def test_propose_adjustment_is_idempotent(db):
+    """P2 REGRESSION: proposing twice from one locked count returns the SAME
+    proposal -- never N duplicate adjustments."""
+    eng, sid = _locked(db, counted=8, on_hand=10)
+    p1 = eng.propose_adjustment(sid, store_id="BV-1", actor=_manager())
+    p2 = eng.propose_adjustment(sid, store_id="BV-1", actor=_manager())
+    assert p1["proposal_id"] == p2["proposal_id"]
+    rows = list(db.get_collection(svc.ADJUSTMENT_COLLECTION).find({"source_id": sid}))
+    assert len(rows) == 1
+
+
+def test_propose_from_reopened_session_is_409(db):
+    """A REOPENED (mid-recount) session must be re-locked before a proposal can
+    be raised -- proposing from it 409s."""
+    eng, sid = _locked(db)
+    eng.reopen(sid, store_id="BV-1", actor=_manager(), reason="recount")
+    with pytest.raises(svc.BlindStockTakeError) as exc:
+        eng.propose_adjustment(sid, store_id="BV-1", actor=_manager())
+    assert exc.value.status == 409
