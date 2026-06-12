@@ -63,6 +63,7 @@ from .routers import (
     non_adapt_router,
     serial_tracking_router,
     blind_stock_take_router,
+    inventory_balancing_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -1171,6 +1172,9 @@ app.include_router(serial_tracking_router, prefix="/api/v1/serials", tags=["Seri
 # inline (counter open/submit; manager reveal/lock/reopen/propose) + store-scopes.
 # Proposes adjustments only -- never auto-mutates on-hand.
 app.include_router(blind_stock_take_router, prefix="/api/v1/blind-count", tags=["BlindStockTake"])
+# Feature #1 cross-store inventory balancing: read-only rebalancing proposals.
+# Management-only + output store-scoped; never mutates stock / executes transfers.
+app.include_router(inventory_balancing_router, prefix="/api/v1/inventory-balancing", tags=["InventoryBalancing"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",

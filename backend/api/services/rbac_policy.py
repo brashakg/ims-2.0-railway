@@ -1899,6 +1899,14 @@ POLICY: List[Dict[str, object]] = [
                     "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # Feature #1 cross-store inventory balancing (read-only proposals). Management
+    # only; the route itself store-scopes the OUTPUT for a single-store manager.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory-balancing/proposals",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",
