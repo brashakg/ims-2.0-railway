@@ -27,6 +27,7 @@ from .reconciliation import router as reconciliation_router
 from .till import router as till_router
 from .bank_reconciliation import router as bank_reconciliation_router
 from .non_adapt import router as non_adapt_router
+from .serial_tracking import router as serial_tracking_router
 from .hr import router as hr_router
 from .workshop import router as workshop_router
 from .reports import router as reports_router
@@ -111,6 +112,7 @@ __all__ = [
     "till_router",
     "bank_reconciliation_router",
     "non_adapt_router",
+    "serial_tracking_router",
     "hr_router",
     "workshop_router",
     "reports_router",

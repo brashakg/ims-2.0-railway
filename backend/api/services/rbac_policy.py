@@ -1806,6 +1806,51 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #6 per-unit serial tracking (own /api/v1/serials prefix; a
+    # cashier can NEVER mint/relabel/recall a serial -- only read a warranty;
+    # every route store-scopes). ---
+    {
+        "method": "POST",
+        "path": "/api/v1/serials/capture",
+        "allowed": ["CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # At-sale IN_STOCK->SOLD: a system/manager action (driven by order finalize).
+        "method": "POST",
+        "path": "/api/v1/serials/{serial}/mark-sold",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/serials/{serial}/recall",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/serials/{serial}/return",
+        "allowed": ["CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        # Warranty lookup -> any store staff (read-only; a cashier CAN check a warranty).
+        "method": "GET",
+        "path": "/api/v1/serials/warranty/{serial}",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/serials/{serial}",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/finance/revenue",

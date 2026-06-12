@@ -61,6 +61,7 @@ from .routers import (
     till_router,
     bank_reconciliation_router,
     non_adapt_router,
+    serial_tracking_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -256,6 +257,14 @@ async def lifespan(app: FastAPI):
                 ensure_bank_recon_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Bank-reconciliation index creation skipped: {e}")
+            # Feature #6 serial tracking: partial UNIQUE index on stock_units.serial
+            # (the race backstop against a duplicate serial). Idempotent, fail-soft.
+            try:
+                from .services.serial_tracking import ensure_indexes as ensure_serial_indexes
+
+                ensure_serial_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Serial-tracking index creation skipped: {e}")
             # Unification step 1: UNIQUE partial index on orders.shopify_order_id
             # so a Shopify webhook retry / double-delivery can never double-book
             # an online order. The helper existed in shopify_ingest but was
@@ -1145,6 +1154,11 @@ app.include_router(bank_reconciliation_router, prefix="/api/v1/bank-recon", tags
 # route gates inline (clinical/manager; cashier 403) + store-scopes. READ-ONLY over
 # orders/workshop; only records the non-adapt + remake link + policy charge decision.
 app.include_router(non_adapt_router, prefix="/api/v1/non-adapt", tags=["NonAdapt"])
+# Feature #6 per-unit serial tracking: own /api/v1/serials prefix, each route gates
+# inline (inventory/manager capture+recall; cashier read-only) + store-scopes.
+# INVENTORY writes only (stock_units) -- the at-sale transition stamps the unit, it
+# does NOT touch the order total / payment capture.
+app.include_router(serial_tracking_router, prefix="/api/v1/serials", tags=["Serials"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",

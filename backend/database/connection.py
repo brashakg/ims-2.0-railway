@@ -262,6 +262,21 @@ class DatabaseConnection:
             [("product_id", 1), ("store_id", 1), ("status", 1)],
             background=True,
         )
+        # F6 per-unit SERIAL tracking: a serialized high-value unit (hearing aid,
+        # luxury frame/watch) carries a UNIQUE serial captured at stock-in. PARTIAL
+        # so the millions of NON-serialized stock_units (no `serial` field) aren't
+        # indexed and can't collide on a missing value -- only documents whose
+        # `serial` is a string are constrained. This index is the real race
+        # backstop behind serial_tracking.capture_serial: two concurrent intakes of
+        # the same serial -> exactly one insert wins, the other DuplicateKeyErrors.
+        _idx(
+            "stock_units",
+            "serial",
+            unique=True,
+            partialFilterExpression={"serial": {"$type": "string"}},
+            name="uniq_stock_unit_serial",
+            background=True,
+        )
 
         # Users
         _idx("users", "user_id", unique=True, background=True)
