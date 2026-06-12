@@ -473,3 +473,21 @@ def _add_months(dt: datetime, months: int) -> datetime:
 
     day = min(dt.day, calendar.monthrange(year, month)[1])
     return dt.replace(year=year, month=month, day=day)
+
+
+def ensure_indexes(db) -> None:
+    """Partial UNIQUE index on stock_units.serial -- the real race backstop
+    against a duplicate serial (the capture pre-check is the friendly 409; this
+    is the concurrency guarantee). Partial so the MANY existing non-serialized
+    stock_units (no serial field) are unaffected. Idempotent + fail-soft."""
+    if db is None:
+        return
+    try:
+        db.get_collection("stock_units").create_index(
+            "serial",
+            unique=True,
+            name="uniq_stock_unit_serial",
+            partialFilterExpression={"serial": {"$type": "string"}},
+        )
+    except Exception:  # noqa: BLE001
+        return
