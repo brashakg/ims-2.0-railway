@@ -1861,6 +1861,74 @@ POLICY: List[Dict[str, object]] = [
                     "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #49 family/household loyalty wallet (own /api/v1/family-wallet
+    # prefix). Manager+ creates households / edits members (enrolment changes who
+    # can spend a shared balance); the POS money family redeems (OTP-gated to the
+    # PRIMARY member's mobile); any store staff reads. store_scoped: False on ALL
+    # rows BY OWNER DECISION -- household lookup + pool redemption are chain-wide
+    # (mirrors chain-wide customer-lookup + voucher-redeem); the household only
+    # records its creating store for provenance. ---
+    {
+        "method": "POST",
+        "path": "/api/v1/family-wallet/households",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/family-wallet/households/{household_id}/members",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/family-wallet/households/{household_id}/members/{customer_id}",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        # Chain-wide household lookup by member customer (owner decision).
+        "method": "GET",
+        "path": "/api/v1/family-wallet/households/by-customer/{customer_id}",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/family-wallet/households/{household_id}",
+        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        # Manual/store-driven pool earn (manager+; idempotent per order ref).
+        # The POS auto-earn hook stays OWNER-GATED -- this is the day-1 funder.
+        "method": "POST",
+        "path": "/api/v1/family-wallet/households/{household_id}/earn",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        # OTP issue to the PRIMARY member's mobile (reminder_rail slice; the
+        # cashier-initiated counter flow -- standalone, NOT the POS order path).
+        "method": "POST",
+        "path": "/api/v1/family-wallet/households/{household_id}/redeem/request-otp",
+        "allowed": ["SALES_CASHIER", "SALES_STAFF", "CASHIER", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
+    {
+        # OTP-verified pool debit -> mints a store-credit voucher. Chain-wide
+        # redeem BY OWNER DECISION (mirrors voucher redeem).
+        "method": "POST",
+        "path": "/api/v1/family-wallet/households/{household_id}/redeem",
+        "allowed": ["SALES_CASHIER", "SALES_STAFF", "CASHIER", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": False,
+    },
     # --- Feature #15 blind stock take (own /api/v1/blind-count prefix). Floor
     # staff / inventory OPEN + SUBMIT counts BLIND (never see the system on-hand
     # pre-lock -- enforced at the data layer); only a manager REVEALS variance +

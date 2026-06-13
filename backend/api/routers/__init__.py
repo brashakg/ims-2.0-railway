@@ -28,6 +28,7 @@ from .till import router as till_router
 from .bank_reconciliation import router as bank_reconciliation_router
 from .non_adapt import router as non_adapt_router
 from .serial_tracking import router as serial_tracking_router
+from .family_wallet import router as family_wallet_router
 from .blind_stock_take import router as blind_stock_take_router
 from .inventory_balancing import router as inventory_balancing_router
 from .cl_po import router as cl_po_router
@@ -116,6 +117,7 @@ __all__ = [
     "bank_reconciliation_router",
     "non_adapt_router",
     "serial_tracking_router",
+    "family_wallet_router",
     "blind_stock_take_router",
     "inventory_balancing_router",
     "cl_po_router",
