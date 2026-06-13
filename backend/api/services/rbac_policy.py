@@ -124,9 +124,19 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/approvals/requests/inbox",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "ACCOUNTANT",
+        ],
     },
-    {"method": "GET", "path": "/api/v1/approvals/requests/mine", "allowed": AUTHENTICATED},
+    {
+        "method": "GET",
+        "path": "/api/v1/approvals/requests/mine",
+        "allowed": AUTHENTICATED,
+    },
     {
         "method": "GET",
         "path": "/api/v1/approvals/requests/{request_id}",
@@ -1087,26 +1097,102 @@ POLICY: List[Dict[str, object]] = [
     {"method": "GET", "path": "/api/v1/crm", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/crm/", "allowed": "PUBLIC"},
     # F40 VIP-churn watchlist (#40): SUPERADMIN/ADMIN; ADMIN store-scoped server-side.
-    {"method": "GET", "path": "/api/v1/crm/vip-churn", "allowed": ["SUPERADMIN", "ADMIN"]},
-    {"method": "POST", "path": "/api/v1/crm/vip-churn/{customer_id}/intervene", "allowed": ["SUPERADMIN", "ADMIN"]},
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/vip-churn",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/vip-churn/{customer_id}/intervene",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
+    # F43 VIP personal-triggers (#43): STAFF_ALERT slice, comms-DARK. Writes are
+    # CRM management roles; reads add CATALOG_MANAGER/OPTOMETRIST (they see the
+    # 360 view). Store-guarded server-side (non-SUPERADMIN scoped to owned store).
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/customers/{customer_id}/vip",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/customers/{customer_id}/vip",
+        "allowed": [
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+            "CATALOG_MANAGER",
+            "OPTOMETRIST",
+        ],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/personal-triggers",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/personal-triggers",
+        "allowed": [
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+            "CATALOG_MANAGER",
+            "OPTOMETRIST",
+        ],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/crm/personal-triggers/{trigger_id}",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/crm/personal-triggers/{trigger_id}",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
     # F39 NBA daily call list (#39): store-facing call work-list (store-scoped via
     # validate_store_access). NOT ACCOUNTANT/OPTOMETRIST/CATALOG/WORKSHOP/CASHIER.
     {
         "method": "GET",
         "path": "/api/v1/crm/nba/{store_id}",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/crm/nba/{store_id}/dismiss",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/crm/nba/{store_id}/complete",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
         "store_scoped": True,
     },
     # F41 lapsed-patient reactivation (#41): in-app reactivation work-list +
@@ -1117,19 +1203,40 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/crm/reactivation/{store_id}",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/crm/reactivation/{store_id}/log",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/crm/reactivation/{store_id}/analytics",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
         "store_scoped": True,
     },
     {
@@ -1215,7 +1322,14 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/customers/{customer_id}/tags/suggest",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "SALES_CASHIER"],
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+        ],
     },
     {
         "method": "GET",
@@ -1688,15 +1802,29 @@ POLICY: List[Dict[str, object]] = [
         # redacted response (no expected figure) -- blind enforcement.
         "method": "POST",
         "path": "/api/v1/till/sessions",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
-                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/till/sessions/{session_id}/blind-submit",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
-                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
@@ -1718,8 +1846,13 @@ POLICY: List[Dict[str, object]] = [
         # Session list reveals expected/variance -> manager/finance read roles.
         "method": "GET",
         "path": "/api/v1/till/sessions",
-        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT",
-                    "SUPERADMIN"],
+        "allowed": [
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "ACCOUNTANT",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
@@ -1729,16 +1862,28 @@ POLICY: List[Dict[str, object]] = [
         # (ACCOUNTANT reads the Z-Read via /zread + the session list, not here).
         "method": "GET",
         "path": "/api/v1/till/sessions/{session_id}",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "STORE_MANAGER",
-                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         # Full Z-Read (reveals expected) -> manager/finance read roles only.
         "method": "GET",
         "path": "/api/v1/till/sessions/{session_id}/zread",
-        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT",
-                    "SUPERADMIN"],
+        "allowed": [
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "ACCOUNTANT",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     # --- Feature #16 Bank / Cash / POS reconciliation (own /api/v1/bank-recon
@@ -1747,38 +1892,74 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/bank-recon/reconciliations",
-        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/bank-recon/reconciliations",
-        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/bank-recon/reconciliations/{run_id}",
-        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/bank-recon/reconciliations/{run_id}/lock",
-        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         # Sign-off is a management attestation: managers + finance, NOT a cashier.
         "method": "POST",
         "path": "/api/v1/bank-recon/reconciliations/{run_id}/sign-off",
-        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/bank-recon/bank-lines",
-        "allowed": ["ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     # --- Feature #14 Non-adaptation / remake tracking (own /api/v1/non-adapt
@@ -1788,32 +1969,62 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/non-adapt/record",
-        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "OPTOMETRIST",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/non-adapt/{record_id}/remake",
-        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "OPTOMETRIST",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/non-adapt/order/{order_id}",
-        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "OPTOMETRIST",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/non-adapt/{record_id}",
-        "allowed": ["OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "OPTOMETRIST",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         # Quality report (counts by reason/optometrist/brand) -> management + finance.
         "method": "GET",
         "path": "/api/v1/non-adapt",
-        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+        "allowed": [
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "ACCOUNTANT",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     # --- Feature #6 per-unit serial tracking (own /api/v1/serials prefix; a
@@ -1822,7 +2033,13 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/serials/capture",
-        "allowed": ["CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
@@ -1841,24 +2058,48 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/serials/{serial}/return",
-        "allowed": ["CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         # Warranty lookup -> any store staff (read-only; a cashier CAN check a warranty).
         "method": "GET",
         "path": "/api/v1/serials/warranty/{serial}",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
-                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
-                    "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "OPTOMETRIST",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/serials/{serial}",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
-                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
-                    "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "OPTOMETRIST",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     # --- Feature #49 family/household loyalty wallet (own /api/v1/family-wallet
@@ -1890,17 +2131,35 @@ POLICY: List[Dict[str, object]] = [
         # Chain-wide household lookup by member customer (owner decision).
         "method": "GET",
         "path": "/api/v1/family-wallet/households/by-customer/{customer_id}",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
-                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
-                    "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "OPTOMETRIST",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": False,
     },
     {
         "method": "GET",
         "path": "/api/v1/family-wallet/households/{household_id}",
-        "allowed": ["SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
-                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
-                    "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "CASHIER",
+            "SALES_STAFF",
+            "OPTOMETRIST",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": False,
     },
     {
@@ -1916,8 +2175,15 @@ POLICY: List[Dict[str, object]] = [
         # cashier-initiated counter flow -- standalone, NOT the POS order path).
         "method": "POST",
         "path": "/api/v1/family-wallet/households/{household_id}/redeem/request-otp",
-        "allowed": ["SALES_CASHIER", "SALES_STAFF", "CASHIER", "STORE_MANAGER",
-                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "CASHIER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": False,
     },
     {
@@ -1925,8 +2191,15 @@ POLICY: List[Dict[str, object]] = [
         # redeem BY OWNER DECISION (mirrors voucher redeem).
         "method": "POST",
         "path": "/api/v1/family-wallet/households/{household_id}/redeem",
-        "allowed": ["SALES_CASHIER", "SALES_STAFF", "CASHIER", "STORE_MANAGER",
-                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "CASHIER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": False,
     },
     # --- Feature #15 blind stock take (own /api/v1/blind-count prefix). Floor
@@ -1937,15 +2210,29 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/blind-count/open",
-        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CATALOG_MANAGER",
-                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_STAFF",
+            "SALES_CASHIER",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
         "method": "POST",
         "path": "/api/v1/blind-count/{session_id}/submit",
-        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CATALOG_MANAGER",
-                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_STAFF",
+            "SALES_CASHIER",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     {
@@ -1973,8 +2260,15 @@ POLICY: List[Dict[str, object]] = [
         # Read one session -- counter sees the BLIND-redacted view pre-lock.
         "method": "GET",
         "path": "/api/v1/blind-count/{session_id}",
-        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CATALOG_MANAGER",
-                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "allowed": [
+            "SALES_STAFF",
+            "SALES_CASHIER",
+            "CATALOG_MANAGER",
+            "STORE_MANAGER",
+            "AREA_MANAGER",
+            "ADMIN",
+            "SUPERADMIN",
+        ],
         "store_scoped": True,
     },
     # --- Feature #48 multi-category servicing & repair portal (own /api/v1/repairs
@@ -3037,8 +3331,11 @@ POLICY: List[Dict[str, object]] = [
     # below, so a DENIED role (AREA_MANAGER and down) keeps the route's 404
     # existence-hiding response - the middleware defers, the route's
     # require_superadmin_or_admin guard returns 404.
-    {"method": "GET", "path": "/api/v1/jarvis/proposals",
-     "allowed": ["SUPERADMIN", "ADMIN"]},
+    {
+        "method": "GET",
+        "path": "/api/v1/jarvis/proposals",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/jarvis/proposals/{proposal_id}",
@@ -3258,7 +3555,11 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/loyalty/rewards",
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
-    {"method": "GET", "path": "/api/v1/loyalty/rewards/{reward_id}", "allowed": "AUTHENTICATED"},
+    {
+        "method": "GET",
+        "path": "/api/v1/loyalty/rewards/{reward_id}",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "PUT",
         "path": "/api/v1/loyalty/rewards/{reward_id}",
@@ -4529,11 +4830,49 @@ POLICY: List[Dict[str, object]] = [
     # should not enumerate another store's discount caps / refund thresholds);
     # PUT/DELETE = union of write roles (the fine-grained per-key write_roles gate is
     # enforced in set_policy/clear_override -- the table row is defense-in-depth).
-    {"method": "GET", "path": "/api/v1/settings/policies/registry", "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER"]},
-    {"method": "GET", "path": "/api/v1/settings/policies", "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER"]},
-    {"method": "GET", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER"]},
-    {"method": "PUT", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"]},
-    {"method": "DELETE", "path": "/api/v1/settings/policies/{key}", "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"]},
+    {
+        "method": "GET",
+        "path": "/api/v1/settings/policies/registry",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+        ],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/settings/policies",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+        ],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/settings/policies/{key}",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "ACCOUNTANT",
+            "STORE_MANAGER",
+        ],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/settings/policies/{key}",
+        "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/settings/policies/{key}",
+        "allowed": ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "ACCOUNTANT"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/settings/admin-controls",

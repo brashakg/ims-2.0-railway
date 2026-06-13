@@ -257,15 +257,21 @@ async def lifespan(app: FastAPI):
             # Feature #16 bank reconciliation: indexes on the two new collections
             # (bank_reconciliations + bank_statement_lines). Idempotent, fail-soft.
             try:
-                from .services.bank_reconciliation import ensure_indexes as ensure_bank_recon_indexes
+                from .services.bank_reconciliation import (
+                    ensure_indexes as ensure_bank_recon_indexes,
+                )
 
                 ensure_bank_recon_indexes(get_db().db)
             except Exception as e:
-                logger.warning(f"[WARN] Bank-reconciliation index creation skipped: {e}")
+                logger.warning(
+                    f"[WARN] Bank-reconciliation index creation skipped: {e}"
+                )
             # Feature #6 serial tracking: partial UNIQUE index on stock_units.serial
             # (the race backstop against a duplicate serial). Idempotent, fail-soft.
             try:
-                from .services.serial_tracking import ensure_indexes as ensure_serial_indexes
+                from .services.serial_tracking import (
+                    ensure_indexes as ensure_serial_indexes,
+                )
 
                 ensure_serial_indexes(get_db().db)
             except Exception as e:
@@ -275,14 +281,18 @@ async def lifespan(app: FastAPI):
             # member_customer_ids (ACTIVE only) -- the one-household-per-
             # customer race backstop. Idempotent, fail-soft.
             try:
-                from .services.family_wallet import ensure_indexes as ensure_family_wallet_indexes
+                from .services.family_wallet import (
+                    ensure_indexes as ensure_family_wallet_indexes,
+                )
 
                 ensure_family_wallet_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Family-wallet index creation skipped: {e}")
             # Feature #15 blind stock take: index on (store_id, status). Fail-soft.
             try:
-                from .services.blind_stock_take import ensure_indexes as ensure_blind_count_indexes
+                from .services.blind_stock_take import (
+                    ensure_indexes as ensure_blind_count_indexes,
+                )
 
                 ensure_blind_count_indexes(get_db().db)
             except Exception as e:
@@ -294,6 +304,18 @@ async def lifespan(app: FastAPI):
                 ensure_repair_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Repair-portal index creation skipped: {e}")
+            # Feature #43 VIP personal-triggers: indexes on personal_triggers
+            # ((store_id, active) + customer_id + unique trigger_id). Fail-soft.
+            try:
+                from .services.vip_triggers import (
+                    ensure_indexes as ensure_vip_trigger_indexes,
+                )
+
+                ensure_vip_trigger_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(
+                    f"[WARN] VIP personal-triggers index creation skipped: {e}"
+                )
             # Feature #13 spoilage analytics: seed the owner-editable remake
             # reason-code taxonomy singleton (insert-only-if-absent, so an
             # edited taxonomy is never clobbered). Idempotent, fail-soft.
@@ -482,9 +504,8 @@ def _should_disable_docs() -> bool:
     with a patched environment."""
     if os.getenv("EXPOSE_API_DOCS", "").lower() in ("1", "true", "yes"):
         return False
-    return (
-        os.getenv("ENVIRONMENT", "").lower() in ("production", "prod")
-        or bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_DEPLOYMENT_ID"))
+    return os.getenv("ENVIRONMENT", "").lower() in ("production", "prod") or bool(
+        os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_DEPLOYMENT_ID")
     )
 
 
@@ -652,10 +673,10 @@ _request_log: dict = defaultdict(list)
 def _extract_client_ip(request: Request) -> str:
     """
     Extract the real client IP from the request, respecting trusted proxies.
-    
+
     If TRUSTED_PROXY_COUNT is 0 (default), uses request.client.host only.
     Otherwise, extracts the rightmost untrusted hop from X-Forwarded-For.
-    
+
     Attack scenario: attacker sends X-Forwarded-For: attacker_ip, real_ip
     With TRUSTED_PROXY_COUNT=0, we ignore XFF entirely and use real_ip from socket.
     With TRUSTED_PROXY_COUNT=1 (1 trusted proxy), we take the rightmost XFF hop
@@ -664,12 +685,12 @@ def _extract_client_ip(request: Request) -> str:
     if _TRUSTED_PROXY_COUNT <= 0:
         # No trusted proxies configured; use the socket's IP (always real).
         return request.client.host if request.client else "unknown"
-    
+
     # Parse X-Forwarded-For: extract the rightmost untrusted hop.
     xff = request.headers.get("x-forwarded-for", "").strip()
     if not xff:
         return request.client.host if request.client else "unknown"
-    
+
     # X-Forwarded-For: client, proxy1, proxy2, ..., proxyN
     # If TRUSTED_PROXY_COUNT=N, the rightmost N hops are trusted proxies.
     # We want the hop at index -(N+1) (the first untrusted hop from the right).
@@ -677,7 +698,7 @@ def _extract_client_ip(request: Request) -> str:
     if len(hops) > _TRUSTED_PROXY_COUNT:
         # Take the rightmost untrusted hop (at index -(TRUSTED_PROXY_COUNT+1)).
         return hops[-(1 + _TRUSTED_PROXY_COUNT)]
-    
+
     # Fallback if XFF is shorter than expected (misconfigured or spoofed).
     return request.client.host if request.client else "unknown"
 
@@ -1138,9 +1159,7 @@ app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
 app.include_router(
     vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
 )
-app.include_router(
-    vendor_rma_router, prefix="/api/v1/vendor-rma", tags=["Vendor RMA"]
-)
+app.include_router(vendor_rma_router, prefix="/api/v1/vendor-rma", tags=["Vendor RMA"])
 app.include_router(
     rtv_debit_notes_router, prefix="/api/v1/rtv-debit-notes", tags=["RTV Debit Note"]
 )
@@ -1187,7 +1206,9 @@ app.include_router(till_router, prefix="/api/v1/till", tags=["Till"])
 # Feature #16 Bank / Cash / POS reconciliation: own /api/v1/bank-recon prefix, no
 # router-level gate (each route gates inline to finance/manager + store-scopes).
 # READ-ONLY over orders/till; reuses E5 reconcile_window + the #23 till close.
-app.include_router(bank_reconciliation_router, prefix="/api/v1/bank-recon", tags=["BankReconciliation"])
+app.include_router(
+    bank_reconciliation_router, prefix="/api/v1/bank-recon", tags=["BankReconciliation"]
+)
 # Feature #14 Non-adaptation / remake tracking: own /api/v1/non-adapt prefix, each
 # route gates inline (clinical/manager; cashier 403) + store-scopes. READ-ONLY over
 # orders/workshop; only records the non-adapt + remake link + policy charge decision.
@@ -1203,14 +1224,22 @@ app.include_router(serial_tracking_router, prefix="/api/v1/serials", tags=["Seri
 # + voucher redeem) -- household records its creating store for provenance only.
 # Redemption is OTP-gated (reminder_rail slice) and mints a store-credit voucher
 # via vouchers.mint_voucher; NOT in the POS order path (orders.py untouched).
-app.include_router(family_wallet_router, prefix="/api/v1/family-wallet", tags=["FamilyWallet"])
+app.include_router(
+    family_wallet_router, prefix="/api/v1/family-wallet", tags=["FamilyWallet"]
+)
 # Feature #15 blind stock take: own /api/v1/blind-count prefix; each route gates
 # inline (counter open/submit; manager reveal/lock/reopen/propose) + store-scopes.
 # Proposes adjustments only -- never auto-mutates on-hand.
-app.include_router(blind_stock_take_router, prefix="/api/v1/blind-count", tags=["BlindStockTake"])
+app.include_router(
+    blind_stock_take_router, prefix="/api/v1/blind-count", tags=["BlindStockTake"]
+)
 # Feature #1 cross-store inventory balancing: read-only rebalancing proposals.
 # Management-only + output store-scoped; never mutates stock / executes transfers.
-app.include_router(inventory_balancing_router, prefix="/api/v1/inventory-balancing", tags=["InventoryBalancing"])
+app.include_router(
+    inventory_balancing_router,
+    prefix="/api/v1/inventory-balancing",
+    tags=["InventoryBalancing"],
+)
 # Feature N7 CL/lens PO generator: own /api/v1/cl-po prefix; manager-ladder gate
 # inline (STORE_MANAGER/AREA_MANAGER/ADMIN/SUPERADMIN) + store-scopes. Reads the
 # Base-Bank replenishment + lens-stock gap-planner data and drafts DRAFT POs whose

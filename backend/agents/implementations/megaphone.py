@@ -58,7 +58,9 @@ class MegaphoneAgent(JarvisAgent):
     agent_id = "megaphone"
     agent_name = "MEGAPHONE"
     agent_type = AgentType.EXECUTOR
-    description = "Marketing engagement — Rx expiry, birthday, walkout, NPS, scheduled campaigns"
+    description = (
+        "Marketing engagement — Rx expiry, birthday, walkout, NPS, scheduled campaigns"
+    )
     version = "1.0.0"
     toggleable = True
 
@@ -127,7 +129,9 @@ class MegaphoneAgent(JarvisAgent):
             if nba_stats.get("stores_scored", 0) > 0:
                 logger.info(
                     "[MEGAPHONE] NBA: stores_scored=%d cards=%d follow_ups=%d",
-                    nba_stats["stores_scored"], nba_stats["cards"], nba_stats["follow_ups"],
+                    nba_stats["stores_scored"],
+                    nba_stats["cards"],
+                    nba_stats["follow_ups"],
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[MEGAPHONE] NBA daily scoring failed: %s", exc)
@@ -144,10 +148,33 @@ class MegaphoneAgent(JarvisAgent):
             if react_stats.get("stores_built", 0) > 0:
                 logger.info(
                     "[MEGAPHONE] Reactivation: stores_built=%d entries=%d follow_ups=%d",
-                    react_stats["stores_built"], react_stats["entries"], react_stats["follow_ups"],
+                    react_stats["stores_built"],
+                    react_stats["entries"],
+                    react_stats["follow_ups"],
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[MEGAPHONE] reactivation cohort build failed: %s", exc)
+
+        # 0c. F43: centralized VIP personal-triggers (#43). For every ACTIVE
+        #     trigger DUE today (IST) -- anniversary / birthday+N / recurring /
+        #     custom one-shot, fired lead_time_days BEFORE the event -- create an
+        #     in-app STAFF notification + a vip_trigger_alert follow_up work-list
+        #     row, stamping last_fired_for via a single guarded find_one_and_update
+        #     so a re-scan in the SAME cycle does NOT double-fire. STAFF_ALERT slice
+        #     only: it NEVER live-sends a customer message (the #43 customer channel
+        #     is DEFERRED under the WhatsApp ban). Fail-soft.
+        try:
+            vtr_stats = self._scan_personal_triggers()
+            if vtr_stats.get("fired", 0) > 0:
+                logger.info(
+                    "[MEGAPHONE] VIP triggers: due=%d fired=%d follow_ups=%d notifications=%d",
+                    vtr_stats["due"],
+                    vtr_stats["fired"],
+                    vtr_stats["follow_ups"],
+                    vtr_stats["notifications"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MEGAPHONE] VIP personal-triggers scan failed: %s", exc)
 
         # 1+2. Rx-expiry + birthday reminders are NO LONGER hard-coded scans here.
         #      E6 (the reminder rail) is now the SINGLE config-driven path for every
@@ -166,7 +193,9 @@ class MegaphoneAgent(JarvisAgent):
         #    rather than being left waiting forever.
         scheduled_sent = await self._dispatch_scheduled_campaigns()
         if scheduled_sent > 0:
-            logger.info("[MEGAPHONE] Dispatched %d scheduled campaign(s)", scheduled_sent)
+            logger.info(
+                "[MEGAPHONE] Dispatched %d scheduled campaign(s)", scheduled_sent
+            )
 
         # 3b. E6 reminder rail: evaluate every ACTIVE CRON-trigger reminder rule
         #     through the gate stack (consent + quiet-hours + 30-day cap). With no
@@ -203,7 +232,9 @@ class MegaphoneAgent(JarvisAgent):
             return []
         ids: List[str] = []
         try:
-            for s in coll.find({}, {"_id": 0, "store_id": 1, "status": 1, "is_active": 1}):
+            for s in coll.find(
+                {}, {"_id": 0, "store_id": 1, "status": 1, "is_active": 1}
+            ):
                 sid = s.get("store_id")
                 if not sid:
                     continue
@@ -258,29 +289,35 @@ class MegaphoneAgent(JarvisAgent):
                         cid = card.get("customer_id")
                         if not cid:
                             continue
-                        existing = fu_coll.find_one({
-                            "customer_id": cid, "store_id": store_id,
-                            "type": "nba_call", "scheduled_date": today,
-                        })
+                        existing = fu_coll.find_one(
+                            {
+                                "customer_id": cid,
+                                "store_id": store_id,
+                                "type": "nba_call",
+                                "scheduled_date": today,
+                            }
+                        )
                         if existing:
                             card["follow_up_id"] = existing.get("follow_up_id")
                             continue
                         fu_id = f"FU-{today.replace('-', '')}-{_uuid.uuid4().hex[:8].upper()}"
-                        fu_coll.insert_one({
-                            "follow_up_id": fu_id,
-                            "customer_id": cid,
-                            "customer_name": card.get("customer_name", ""),
-                            "customer_phone": card.get("customer_mobile", ""),
-                            "store_id": store_id,
-                            "type": "nba_call",
-                            "scheduled_date": today,
-                            "status": "pending",
-                            "outcome": None,
-                            "notes": card.get("headline", ""),
-                            "created_at": datetime.now().isoformat(),
-                            "completed_at": None,
-                            "completed_by": None,
-                        })
+                        fu_coll.insert_one(
+                            {
+                                "follow_up_id": fu_id,
+                                "customer_id": cid,
+                                "customer_name": card.get("customer_name", ""),
+                                "customer_phone": card.get("customer_mobile", ""),
+                                "store_id": store_id,
+                                "type": "nba_call",
+                                "scheduled_date": today,
+                                "status": "pending",
+                                "outcome": None,
+                                "notes": card.get("headline", ""),
+                                "created_at": datetime.now().isoformat(),
+                                "completed_at": None,
+                                "completed_by": None,
+                            }
+                        )
                         card["follow_up_id"] = fu_id
                         total_fu += 1
                 doc = nba.build_nba_doc(store_id, cards, date_str=today)
@@ -292,9 +329,15 @@ class MegaphoneAgent(JarvisAgent):
                 stores_scored += 1
                 total_cards += len(cards)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[MEGAPHONE] NBA score failed store %s: %s", store_id, exc)
+                logger.warning(
+                    "[MEGAPHONE] NBA score failed store %s: %s", store_id, exc
+                )
                 continue
-        return {"stores_scored": stores_scored, "cards": total_cards, "follow_ups": total_fu}
+        return {
+            "stores_scored": stores_scored,
+            "cards": total_cards,
+            "follow_ups": total_fu,
+        }
 
     # -------------------------------------------------------------------------
     # F41: lapsed-patient reactivation work-list (#41)
@@ -328,7 +371,9 @@ class MegaphoneAgent(JarvisAgent):
             return {"stores_built": 0, "entries": 0, "follow_ups": 0}
 
         today = react._today_ist()
-        lapse_months = react._get_cap(react.POLICY_LAPSE_MONTHS, react.DEFAULT_LAPSE_MONTHS)
+        lapse_months = react._get_cap(
+            react.POLICY_LAPSE_MONTHS, react.DEFAULT_LAPSE_MONTHS
+        )
         stores_built = 0
         total_entries = 0
         total_fu = 0
@@ -342,33 +387,40 @@ class MegaphoneAgent(JarvisAgent):
                         cid = entry.get("customer_id")
                         if not cid:
                             continue
-                        existing = fu_coll.find_one({
-                            "customer_id": cid, "store_id": store_id,
-                            "type": "reactivation_call", "scheduled_date": today,
-                        })
+                        existing = fu_coll.find_one(
+                            {
+                                "customer_id": cid,
+                                "store_id": store_id,
+                                "type": "reactivation_call",
+                                "scheduled_date": today,
+                            }
+                        )
                         if existing:
                             entry["follow_up_id"] = existing.get("follow_up_id")
                             continue
                         fu_id = f"FU-{today.replace('-', '')}-{_uuid.uuid4().hex[:8].upper()}"
-                        fu_coll.insert_one({
-                            "follow_up_id": fu_id,
-                            "customer_id": cid,
-                            "customer_name": entry.get("customer_name", ""),
-                            "customer_phone": entry.get("customer_mobile", ""),
-                            "store_id": store_id,
-                            "type": "reactivation_call",
-                            "scheduled_date": today,
-                            "status": "pending",
-                            "outcome": None,
-                            "notes": entry.get("headline", ""),
-                            "created_at": datetime.now().isoformat(),
-                            "completed_at": None,
-                            "completed_by": None,
-                        })
+                        fu_coll.insert_one(
+                            {
+                                "follow_up_id": fu_id,
+                                "customer_id": cid,
+                                "customer_name": entry.get("customer_name", ""),
+                                "customer_phone": entry.get("customer_mobile", ""),
+                                "store_id": store_id,
+                                "type": "reactivation_call",
+                                "scheduled_date": today,
+                                "status": "pending",
+                                "outcome": None,
+                                "notes": entry.get("headline", ""),
+                                "created_at": datetime.now().isoformat(),
+                                "completed_at": None,
+                                "completed_by": None,
+                            }
+                        )
                         entry["follow_up_id"] = fu_id
                         total_fu += 1
-                doc = react.build_cohort_doc(store_id, entries, date_str=today,
-                                             lapse_months=lapse_months)
+                doc = react.build_cohort_doc(
+                    store_id, entries, date_str=today, lapse_months=lapse_months
+                )
                 cohort_coll.find_one_and_update(
                     {"store_id": store_id, "date": today},
                     {"$set": doc},
@@ -377,9 +429,143 @@ class MegaphoneAgent(JarvisAgent):
                 stores_built += 1
                 total_entries += len(entries)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[MEGAPHONE] reactivation build failed store %s: %s", store_id, exc)
+                logger.warning(
+                    "[MEGAPHONE] reactivation build failed store %s: %s", store_id, exc
+                )
                 continue
-        return {"stores_built": stores_built, "entries": total_entries, "follow_ups": total_fu}
+        return {
+            "stores_built": stores_built,
+            "entries": total_entries,
+            "follow_ups": total_fu,
+        }
+
+    # -------------------------------------------------------------------------
+    # F43: centralized VIP personal-triggers (#43) -- STAFF_ALERT slice, DARK
+    # -------------------------------------------------------------------------
+
+    def _scan_personal_triggers(self) -> Dict[str, int]:
+        """Fire every ACTIVE VIP personal trigger DUE today (IST).
+
+        For each due trigger:
+          * claim_fire() stamps last_fired_for via a SINGLE guarded
+            find_one_and_update -- a re-scan in the same firing cycle finds the
+            stamp already set and skips, so the alert fires EXACTLY once.
+          * On a successful claim, create a vip_trigger_alert follow_up (the
+            durable staff work-list, store-scoped -- mirrors NBA/reactivation)
+            and an in-app STAFF notification (the bell alert).
+
+        This is the STAFF_ALERT slice ONLY: NO customer message is queued or
+        sent (the #43 customer channel is DEFERRED under the WhatsApp ban). The
+        date math lives in the pure api.services.vip_triggers core; ``today`` is
+        IST so the fire window matches the human business day. Fail-soft."""
+        import uuid as _uuid
+
+        from api.services import vip_triggers as vtr
+
+        stats = {"due": 0, "fired": 0, "follow_ups": 0, "notifications": 0}
+        db = self.db
+        if db is None:
+            return stats
+        coll = self.get_collection(vtr.COLLECTION)
+        if coll is None:
+            return stats
+
+        # IST business day -- the fire window is an IST-calendar concept.
+        today = _now_ist().date()
+        today_str = today.isoformat()
+        fu_coll = self.get_collection("follow_ups")
+        notif_coll = self.get_collection("notifications")
+
+        try:
+            triggers = list(coll.find({"active": True}))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[MEGAPHONE] VIP trigger scan read failed: %s", exc)
+            return stats
+
+        for trig in triggers:
+            try:
+                if not vtr.is_due(trig, today):
+                    continue
+                stats["due"] += 1
+                key = vtr.cycle_key(trig, today)
+                if not key:
+                    continue
+                # Single guarded claim: only the winner of THIS cycle proceeds.
+                if not vtr.claim_fire(db, trig.get("trigger_id"), key):
+                    continue
+                stats["fired"] += 1
+
+                cid = trig.get("customer_id")
+                store_id = trig.get("store_id")
+                label = trig.get("label") or trig.get("type") or "VIP event"
+                event_iso = key  # cycle_key is the event ISO date
+                headline = f"VIP: {label} ({event_iso})"
+
+                # 1. Durable staff work-list row (store-scoped; not a message).
+                if fu_coll is not None and cid:
+                    try:
+                        fu_id = f"FU-{today_str.replace('-', '')}-{_uuid.uuid4().hex[:8].upper()}"
+                        fu_coll.insert_one(
+                            {
+                                "follow_up_id": fu_id,
+                                "customer_id": cid,
+                                "customer_name": "",
+                                "customer_phone": "",
+                                "store_id": store_id,
+                                "type": "vip_trigger_alert",
+                                "scheduled_date": today_str,
+                                "status": "pending",
+                                "outcome": None,
+                                "notes": headline,
+                                "trigger_id": trig.get("trigger_id"),
+                                "event_date": event_iso,
+                                "created_at": datetime.now().isoformat(),
+                                "completed_at": None,
+                                "completed_by": None,
+                            }
+                        )
+                        stats["follow_ups"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[MEGAPHONE] VIP follow_up write failed: %s", exc)
+
+                # 2. In-app STAFF bell notification (store-scoped, NOT a customer
+                #    send). user_id=None + recipient_role lets a store-wide bell
+                #    query surface it; channels is IN_APP only -- never WhatsApp/SMS.
+                if notif_coll is not None:
+                    try:
+                        notif_coll.insert_one(
+                            {
+                                "notification_id": f"NTF-{today_str.replace('-', '')}-{_uuid.uuid4().hex[:8].upper()}",
+                                "notification_type": "vip_personal_trigger",
+                                "user_id": None,
+                                "recipient_role": "STORE_MANAGER",
+                                "store_id": store_id,
+                                "customer_id": cid,
+                                "title": f"VIP reminder: {label}",
+                                "message": f"Reach out to your VIP -- {label} on {event_iso}.",
+                                "entity_type": "customer",
+                                "entity_id": cid,
+                                "action_url": "/customers",
+                                "channels": ["IN_APP"],
+                                "priority": "MEDIUM",
+                                "status": "SENT",
+                                "is_read": False,
+                                "created_at": datetime.now(),
+                            }
+                        )
+                        stats["notifications"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "[MEGAPHONE] VIP notification write failed: %s", exc
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[MEGAPHONE] VIP trigger fire failed %s: %s",
+                    trig.get("trigger_id"),
+                    exc,
+                )
+                continue
+        return stats
 
     # -------------------------------------------------------------------------
     # E6: reminder rail tick + event handler
@@ -428,7 +614,8 @@ class MegaphoneAgent(JarvisAgent):
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[MEGAPHONE] reminder rule %s failed: %s",
-                    rule.get("rule_id"), exc,
+                    rule.get("rule_id"),
+                    exc,
                 )
                 continue
             stats["rules_run"] += 1
@@ -536,11 +723,15 @@ class MegaphoneAgent(JarvisAgent):
 
         # Find SCHEDULED, ONE_TIME campaigns whose send_at is in the past.
         try:
-            due = list(coll.find({
-                "status": "SCHEDULED",
-                "schedule.kind": "ONE_TIME",
-                "schedule.send_at": {"$lte": now_iso},
-            }).limit(20))  # cap per tick to avoid a burst
+            due = list(
+                coll.find(
+                    {
+                        "status": "SCHEDULED",
+                        "schedule.kind": "ONE_TIME",
+                        "schedule.send_at": {"$lte": now_iso},
+                    }
+                ).limit(20)
+            )  # cap per tick to avoid a burst
         except Exception as exc:
             logger.warning("[MEGAPHONE] scheduled-campaign scan failed: %s", exc)
             return 0
@@ -551,7 +742,12 @@ class MegaphoneAgent(JarvisAgent):
                 # Atomic claim: flip SCHEDULED -> ACTIVE so only one worker sends.
                 result = coll.update_one(
                     {"campaign_id": campaign_id, "status": "SCHEDULED"},
-                    {"$set": {"status": "ACTIVE", "updated_at": datetime.now(timezone.utc).isoformat()}},
+                    {
+                        "$set": {
+                            "status": "ACTIVE",
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    },
                 )
                 if result.modified_count == 0:
                     # Another worker already claimed this campaign.
@@ -561,7 +757,9 @@ class MegaphoneAgent(JarvisAgent):
                 dispatched += 1
 
             except Exception as exc:
-                logger.warning("[MEGAPHONE] Campaign %s dispatch failed: %s", campaign_id, exc)
+                logger.warning(
+                    "[MEGAPHONE] Campaign %s dispatch failed: %s", campaign_id, exc
+                )
                 # Revert to SCHEDULED so it retries on the next tick.
                 try:
                     coll.update_one(
@@ -573,9 +771,7 @@ class MegaphoneAgent(JarvisAgent):
 
         return dispatched
 
-    async def _execute_campaign_send(
-        self, camp: Dict[str, Any], coll
-    ) -> None:
+    async def _execute_campaign_send(self, camp: Dict[str, Any], coll) -> None:
         """Fan-out a single campaign to its resolved audience using the shared
         notification_service path.  Mirrors campaigns.send_campaign but runs
         agent-side (no HTTP, no rate-limit check -- MEGAPHONE is a trusted actor).
@@ -595,9 +791,7 @@ class MegaphoneAgent(JarvisAgent):
 
         # Promo quiet-hours gate: if we're in DND, defer this campaign.
         if template_id and self._in_dnd_window():
-            logger.info(
-                "[MEGAPHONE] Campaign %s deferred (DND window)", campaign_id
-            )
+            logger.info("[MEGAPHONE] Campaign %s deferred (DND window)", campaign_id)
             # Revert to SCHEDULED so it fires after DND ends.
             coll.update_one(
                 {"campaign_id": campaign_id},
@@ -636,7 +830,10 @@ class MegaphoneAgent(JarvisAgent):
                     customer_name=r.get("name", "Customer"),
                     template_id=template_id,
                     channel=primary_channel,
-                    variables={**(r.get("variables") or {}), "campaign_id": campaign_id},
+                    variables={
+                        **(r.get("variables") or {}),
+                        "campaign_id": campaign_id,
+                    },
                     category="MARKETING",
                     triggered_by="MEGAPHONE",
                     related_entity_type="campaign",
@@ -657,7 +854,9 @@ class MegaphoneAgent(JarvisAgent):
                 sent += 1
             except Exception as exc:
                 failed += 1
-                logger.debug("[MEGAPHONE] Campaign %s recipient failed: %s", campaign_id, exc)
+                logger.debug(
+                    "[MEGAPHONE] Campaign %s recipient failed: %s", campaign_id, exc
+                )
 
         # ONE_TIME -> COMPLETED after send; update counters.
         coll.update_one(
@@ -678,7 +877,10 @@ class MegaphoneAgent(JarvisAgent):
         )
         logger.info(
             "[MEGAPHONE] Campaign %s completed: sent=%d skipped=%d failed=%d",
-            campaign_id, sent, skipped, failed,
+            campaign_id,
+            sent,
+            skipped,
+            failed,
         )
 
     async def _scan_rx_expiring(self) -> List[Dict[str, Any]]:
@@ -689,10 +891,12 @@ class MegaphoneAgent(JarvisAgent):
         try:
             now = datetime.now(timezone.utc)
             cutoff = (now + timedelta(days=90)).isoformat()
-            expiring = list(coll.find(
-                {"expiry_date": {"$lte": cutoff, "$gt": now.isoformat()}},
-                {"_id": 0, "customer_id": 1, "patient_name": 1, "expiry_date": 1},
-            ).limit(50))
+            expiring = list(
+                coll.find(
+                    {"expiry_date": {"$lte": cutoff, "$gt": now.isoformat()}},
+                    {"_id": 0, "customer_id": 1, "patient_name": 1, "expiry_date": 1},
+                ).limit(50)
+            )
             # Consent gate (TCCCPR): prescriptions carry no consent flag, so
             # drop rows whose customer has opted out of marketing. A missing
             # flag defaults to consented (matches the customer-create default).
@@ -706,7 +910,9 @@ class MegaphoneAgent(JarvisAgent):
                         {"_id": 0, "customer_id": 1},
                     )
                 }
-                expiring = [e for e in expiring if e.get("customer_id") not in opted_out]
+                expiring = [
+                    e for e in expiring if e.get("customer_id") not in opted_out
+                ]
             return expiring
         except Exception as e:
             logger.debug(f"[MEGAPHONE] Rx scan error (non-fatal): {e}")
@@ -724,15 +930,17 @@ class MegaphoneAgent(JarvisAgent):
             today = _now_ist().strftime("%m-%d")
             # Customers store birthday as "YYYY-MM-DD" or "DD-MM-YYYY"; we
             # match on the suffix that ends with -MM-DD.
-            matches = list(coll.find(
-                # Consent gate (TCCCPR): never queue a promotional birthday
-                # message to a customer who has opted out of marketing.
-                {
-                    "date_of_birth": {"$regex": today + "$"},
-                    "marketing_consent": {"$ne": False},
-                },
-                {"_id": 0, "customer_id": 1, "name": 1},
-            ).limit(50))
+            matches = list(
+                coll.find(
+                    # Consent gate (TCCCPR): never queue a promotional birthday
+                    # message to a customer who has opted out of marketing.
+                    {
+                        "date_of_birth": {"$regex": today + "$"},
+                        "marketing_consent": {"$ne": False},
+                    },
+                    {"_id": 0, "customer_id": 1, "name": 1},
+                ).limit(50)
+            )
             return matches
         except Exception as e:
             logger.debug(f"[MEGAPHONE] Birthday scan error (non-fatal): {e}")
@@ -762,13 +970,15 @@ class MegaphoneAgent(JarvisAgent):
 
         try:
             candidates = list(
-                notif_coll.find({
-                    "status": "PENDING",
-                    "$or": [
-                        {"scheduled_for": None},
-                        {"scheduled_for": {"$lte": now_iso}},
-                    ],
-                }).limit(DRAIN_BATCH_SIZE)
+                notif_coll.find(
+                    {
+                        "status": "PENDING",
+                        "$or": [
+                            {"scheduled_for": None},
+                            {"scheduled_for": {"$lte": now_iso}},
+                        ],
+                    }
+                ).limit(DRAIN_BATCH_SIZE)
             )
         except Exception as e:
             logger.warning(f"[MEGAPHONE] Drain candidate fetch failed: {e}")
@@ -786,7 +996,8 @@ class MegaphoneAgent(JarvisAgent):
             # job — MEGAPHONE only drains pre-populated messages.
             if not phone or not message:
                 self._update_status(
-                    notif_coll, row,
+                    notif_coll,
+                    row,
                     status="FAILED",
                     error="missing phone or message",
                 )
@@ -798,18 +1009,23 @@ class MegaphoneAgent(JarvisAgent):
                 if channel == "sms":
                     result = await send_sms(phone, message)
                 else:
-                    result = await send_whatsapp(phone, message, template_id=template_id)
+                    result = await send_whatsapp(
+                        phone, message, template_id=template_id
+                    )
             except Exception as e:
                 # Defense-in-depth — provider clients already fail soft, but
                 # if something slips through we don't want to kill the drain.
                 logger.warning(f"[MEGAPHONE] Unexpected provider raise: {e}")
-                self._update_status(notif_coll, row, status="FAILED", error=f"unexpected: {e}")
+                self._update_status(
+                    notif_coll, row, status="FAILED", error=f"unexpected: {e}"
+                )
                 stats["failed"] += 1
                 continue
 
             # Record result
             self._update_status(
-                notif_coll, row,
+                notif_coll,
+                row,
                 status=result.status,
                 provider_id=result.provider_id,
                 error=result.error,
@@ -825,8 +1041,15 @@ class MegaphoneAgent(JarvisAgent):
 
         return stats
 
-    def _update_status(self, coll, row: Dict[str, Any], *, status: str,
-                       provider_id: str = None, error: str = None):
+    def _update_status(
+        self,
+        coll,
+        row: Dict[str, Any],
+        *,
+        status: str,
+        provider_id: str = None,
+        error: str = None,
+    ):
         """Persist a status transition on a notification_logs row."""
         updates = {
             "status": status,
@@ -855,27 +1078,46 @@ class MegaphoneAgent(JarvisAgent):
         """On-demand: report queued/sent notifications + dispatch mode."""
         coll = self.get_collection("notification_logs")
         if coll is None:
-            return AgentResponse(success=False, agent_id=self.agent_id, message="notification_logs unavailable")
+            return AgentResponse(
+                success=False,
+                agent_id=self.agent_id,
+                message="notification_logs unavailable",
+            )
         try:
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            today_start = (
+                datetime.now(timezone.utc)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
             counts = {
-                "queued_today": coll.count_documents({
-                    "agent_id": self.agent_id,
-                    "queued_at": {"$gte": today_start},
-                }),
-                "sent_today": coll.count_documents({
-                    "agent_id": self.agent_id,
-                    "sent_at": {"$gte": today_start},
-                }),
+                "queued_today": coll.count_documents(
+                    {
+                        "agent_id": self.agent_id,
+                        "queued_at": {"$gte": today_start},
+                    }
+                ),
+                "sent_today": coll.count_documents(
+                    {
+                        "agent_id": self.agent_id,
+                        "sent_at": {"$gte": today_start},
+                    }
+                ),
                 "pending_now": coll.count_documents({"status": "PENDING"}),
-                "failed_today": coll.count_documents({
-                    "agent_id": self.agent_id,
-                    "status": "FAILED",
-                    "dispatched_at": {"$gte": today_start},
-                }),
+                "failed_today": coll.count_documents(
+                    {
+                        "agent_id": self.agent_id,
+                        "status": "FAILED",
+                        "dispatched_at": {"$gte": today_start},
+                    }
+                ),
             }
         except Exception:
-            counts = {"queued_today": 0, "sent_today": 0, "pending_now": 0, "failed_today": 0}
+            counts = {
+                "queued_today": 0,
+                "sent_today": 0,
+                "pending_now": 0,
+                "failed_today": 0,
+            }
 
         return AgentResponse(
             success=True,
