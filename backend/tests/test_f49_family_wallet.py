@@ -118,9 +118,13 @@ def _eval_expr(doc: Dict[str, Any], expr: Any) -> Any:
         if "$size" in expr:
             arr = _eval_expr(doc, expr["$size"])
             return len(arr) if isinstance(arr, list) else 0
-        for op, fn in (("$lt", lambda a, b: a < b), ("$lte", lambda a, b: a <= b),
-                       ("$gt", lambda a, b: a > b), ("$gte", lambda a, b: a >= b),
-                       ("$eq", lambda a, b: a == b)):
+        for op, fn in (
+            ("$lt", lambda a, b: a < b),
+            ("$lte", lambda a, b: a <= b),
+            ("$gt", lambda a, b: a > b),
+            ("$gte", lambda a, b: a >= b),
+            ("$eq", lambda a, b: a == b),
+        ):
             if op in expr:
                 a, b = (_eval_expr(doc, x) for x in expr[op])
                 try:
@@ -212,8 +216,9 @@ class FakeCollection:
     def find(self, query=None, projection=None):
         return FakeCursor([dict(d) for d in self.docs if _matches(d, query or {})])
 
-    def find_one_and_update(self, query, update, return_document=None,
-                            upsert=False, **_kw):
+    def find_one_and_update(
+        self, query, update, return_document=None, upsert=False, **_kw
+    ):
         with self._lock:
             for d in self.docs:
                 if _matches(d, query):
@@ -258,30 +263,47 @@ def db() -> FakeDB:
 
 
 def _manager(uid="M1", store="BV-1"):
-    return {"user_id": uid, "full_name": "Manager One", "roles": ["STORE_MANAGER"],
-            "store_ids": [store], "active_store_id": store}
+    return {
+        "user_id": uid,
+        "full_name": "Manager One",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": [store],
+        "active_store_id": store,
+    }
 
 
 def _cashier(uid="K1", store="BV-1"):
-    return {"user_id": uid, "full_name": "Cashier", "roles": ["SALES_CASHIER"],
-            "store_ids": [store], "active_store_id": store}
+    return {
+        "user_id": uid,
+        "full_name": "Cashier",
+        "roles": ["SALES_CASHIER"],
+        "store_ids": [store],
+        "active_store_id": store,
+    }
 
 
 def _staff_bv2(uid="S2"):
-    return {"user_id": uid, "full_name": "Staff Two", "roles": ["SALES_STAFF"],
-            "store_ids": ["BV-2"], "active_store_id": "BV-2"}
+    return {
+        "user_id": uid,
+        "full_name": "Staff Two",
+        "roles": ["SALES_STAFF"],
+        "store_ids": ["BV-2"],
+        "active_store_id": "BV-2",
+    }
 
 
 def _seed_customers(db: FakeDB, *ids: str):
     coll = db.get_collection("customers")
     for cid in ids:
-        coll.insert_one({"customer_id": cid, "name": f"Cust {cid}",
-                         "mobile": "9000000001"})
+        coll.insert_one(
+            {"customer_id": cid, "name": f"Cust {cid}", "mobile": "9000000001"}
+        )
 
 
 def _mk_household(db: FakeDB, primary="C1", store="BV-1") -> str:
-    out = svc.create_household(db, primary_customer_id=primary,
-                               actor=_manager(), store_id=store)
+    out = svc.create_household(
+        db, primary_customer_id=primary, actor=_manager(), store_id=store
+    )
     assert out["ok"], out
     return out["household"]["household_id"]
 
@@ -304,12 +326,19 @@ def _capture_otp(monkeypatch) -> Dict[str, Any]:
     return box
 
 
-def _issue_otp(db, monkeypatch, *, household_id: str, primary="C1",
-               points=200) -> Dict[str, Any]:
+def _issue_otp(
+    db, monkeypatch, *, household_id: str, primary="C1", points=200
+) -> Dict[str, Any]:
     box = _capture_otp(monkeypatch)
-    out = _run(rail.send_pool_redemption_otp(
-        db, primary_customer_id=primary, household_id=household_id,
-        amount=points, requested_by="U1"))
+    out = _run(
+        rail.send_pool_redemption_otp(
+            db,
+            primary_customer_id=primary,
+            household_id=household_id,
+            amount=points,
+            requested_by="U1",
+        )
+    )
     assert out["ok"], out
     return {"otp_id": out["otp_id"], "code": box["code"], "box": box}
 
@@ -321,8 +350,9 @@ def _issue_otp(db, monkeypatch, *, household_id: str, primary="C1",
 
 def test_create_household_primary_is_member_zero(db):
     _seed_customers(db, "C1")
-    out = svc.create_household(db, primary_customer_id="C1",
-                               actor=_manager(), store_id="BV-1")
+    out = svc.create_household(
+        db, primary_customer_id="C1", actor=_manager(), store_id="BV-1"
+    )
     assert out["ok"]
     hh = out["household"]
     assert hh["household_id"].startswith("HH-")
@@ -362,8 +392,12 @@ def test_add_member_to_seven_ok_eighth_409(db):
         assert out["ok"], out
     assert len(svc.get_household(db, hid)["member_customer_ids"]) == 7
     eighth = svc.add_member(db, hid, "C8", actor=_manager(), max_members=7)
-    assert eighth == {"ok": False, "http": 409, "error": "household_full",
-                      "max_members": 7}
+    assert eighth == {
+        "ok": False,
+        "http": 409,
+        "error": "household_full",
+        "max_members": 7,
+    }
     assert len(svc.get_household(db, hid)["member_customer_ids"]) == 7
 
 
@@ -392,7 +426,10 @@ def test_concurrent_adds_at_capacity_one_winner(db):
 
     t1 = threading.Thread(target=_add, args=("C7",))
     t2 = threading.Thread(target=_add, args=("C8",))
-    t1.start(); t2.start(); t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     winners = [r for r in results if r.get("ok")]
     losers = [r for r in results if not r.get("ok")]
@@ -467,8 +504,9 @@ def test_redeem_without_otp_rejected_balance_untouched(db):
     _seed_customers(db, "C1")
     hid = _mk_household(db)
     svc.pool_earn(db, hid, 500, actor=_manager())
-    out = svc.pool_redeem(db, hid, 200, redeeming_customer_id="C1",
-                          actor=_manager(), require_otp=True)
+    out = svc.pool_redeem(
+        db, hid, 200, redeeming_customer_id="C1", actor=_manager(), require_otp=True
+    )
     assert out == {"ok": False, "http": 400, "error": "otp_required"}
     assert svc.pool_balance(db, hid) == 500
 
@@ -486,18 +524,32 @@ def test_redeem_with_verified_otp_debits_pool(db, monkeypatch):
     stored = db.get_collection("pool_otp").find_one({"otp_id": otp["otp_id"]})
     assert stored["code_hash"] != otp["code"]
 
-    out = svc.pool_redeem(db, hid, 200, redeeming_customer_id="C2",
-                          actor=_cashier(), otp_id=otp["otp_id"],
-                          otp_code=otp["code"], require_otp=True)
+    out = svc.pool_redeem(
+        db,
+        hid,
+        200,
+        redeeming_customer_id="C2",
+        actor=_cashier(),
+        otp_id=otp["otp_id"],
+        otp_code=otp["code"],
+        require_otp=True,
+    )
     assert out["ok"] and out["balance"] == 300 and out["points"] == 200
     assert svc.pool_balance(db, hid) == 300
     txn = db.get_collection("loyalty_transactions").find_one({"type": "POOL_REDEEM"})
     assert txn["household_id"] == hid and txn["customer_id"] == "C2"
     assert txn["points"] == 200
     # The consumed OTP cannot be replayed (atomic consume-once + idempotent debit).
-    again = svc.pool_redeem(db, hid, 200, redeeming_customer_id="C2",
-                            actor=_cashier(), otp_id=otp["otp_id"],
-                            otp_code=otp["code"], require_otp=True)
+    again = svc.pool_redeem(
+        db,
+        hid,
+        200,
+        redeeming_customer_id="C2",
+        actor=_cashier(),
+        otp_id=otp["otp_id"],
+        otp_code=otp["code"],
+        require_otp=True,
+    )
     assert again["ok"] is False or again.get("duplicate") is True
     assert svc.pool_balance(db, hid) == 300  # never double-debited
 
@@ -507,9 +559,16 @@ def test_redeem_wrong_otp_code_rejected(db, monkeypatch):
     hid = _mk_household(db)
     svc.pool_earn(db, hid, 500, actor=_manager())
     otp = _issue_otp(db, monkeypatch, household_id=hid, points=200)
-    out = svc.pool_redeem(db, hid, 200, redeeming_customer_id="C1",
-                          actor=_cashier(), otp_id=otp["otp_id"],
-                          otp_code="000000-WRONG", require_otp=True)
+    out = svc.pool_redeem(
+        db,
+        hid,
+        200,
+        redeeming_customer_id="C1",
+        actor=_cashier(),
+        otp_id=otp["otp_id"],
+        otp_code="000000-WRONG",
+        require_otp=True,
+    )
     assert out["http"] == 403 and out["error"] == "otp_wrong_code"
     assert svc.pool_balance(db, hid) == 500
 
@@ -521,11 +580,18 @@ def test_redeem_expired_otp_rejected(db, monkeypatch):
     otp = _issue_otp(db, monkeypatch, household_id=hid, points=200)
     # Force expiry (the rail's REAL expiry check flips the doc to EXPIRED).
     db.get_collection("pool_otp").update_one(
-        {"otp_id": otp["otp_id"]},
-        {"$set": {"expires_at": "2000-01-01T00:00:00+00:00"}})
-    out = svc.pool_redeem(db, hid, 200, redeeming_customer_id="C1",
-                          actor=_cashier(), otp_id=otp["otp_id"],
-                          otp_code=otp["code"], require_otp=True)
+        {"otp_id": otp["otp_id"]}, {"$set": {"expires_at": "2000-01-01T00:00:00+00:00"}}
+    )
+    out = svc.pool_redeem(
+        db,
+        hid,
+        200,
+        redeeming_customer_id="C1",
+        actor=_cashier(),
+        otp_id=otp["otp_id"],
+        otp_code=otp["code"],
+        require_otp=True,
+    )
     assert out["http"] == 403 and out["error"] == "otp_expired"
     assert svc.pool_balance(db, hid) == 500
 
@@ -537,9 +603,16 @@ def test_redeem_otp_household_mismatch_403(db, monkeypatch):
     svc.pool_earn(db, h2, 500, actor=_manager())
     # OTP issued for H1, replayed against H2 -> rejected.
     otp = _issue_otp(db, monkeypatch, household_id=h1, points=200)
-    out = svc.pool_redeem(db, h2, 200, redeeming_customer_id="C9",
-                          actor=_cashier(), otp_id=otp["otp_id"],
-                          otp_code=otp["code"], require_otp=True)
+    out = svc.pool_redeem(
+        db,
+        h2,
+        200,
+        redeeming_customer_id="C9",
+        actor=_cashier(),
+        otp_id=otp["otp_id"],
+        otp_code=otp["code"],
+        require_otp=True,
+    )
     assert out["http"] == 403 and out["error"] == "otp_household_mismatch"
     assert svc.pool_balance(db, h2) == 500
 
@@ -549,9 +622,16 @@ def test_redeem_otp_amount_mismatch_403(db, monkeypatch):
     hid = _mk_household(db)
     svc.pool_earn(db, hid, 500, actor=_manager())
     otp = _issue_otp(db, monkeypatch, household_id=hid, points=100)  # authorizes 100
-    out = svc.pool_redeem(db, hid, 400, redeeming_customer_id="C1",
-                          actor=_cashier(), otp_id=otp["otp_id"],
-                          otp_code=otp["code"], require_otp=True)
+    out = svc.pool_redeem(
+        db,
+        hid,
+        400,
+        redeeming_customer_id="C1",
+        actor=_cashier(),
+        otp_id=otp["otp_id"],
+        otp_code=otp["code"],
+        require_otp=True,
+    )
     assert out["http"] == 403 and out["error"] == "otp_amount_mismatch"
     assert svc.pool_balance(db, hid) == 500
 
@@ -561,8 +641,9 @@ def test_cross_household_redeem_403_not_a_member(db):
     h1 = _mk_household(db, primary="C1")
     _mk_household(db, primary="C9")
     svc.pool_earn(db, h1, 500, actor=_manager())
-    out = svc.pool_redeem(db, h1, 100, redeeming_customer_id="C9",
-                          actor=_cashier(), require_otp=False)
+    out = svc.pool_redeem(
+        db, h1, 100, redeeming_customer_id="C9", actor=_cashier(), require_otp=False
+    )
     assert out == {"ok": False, "http": 403, "error": "not_a_member"}
     assert svc.pool_balance(db, h1) == 500
 
@@ -571,15 +652,17 @@ def test_redeem_insufficient_balance_409(db):
     _seed_customers(db, "C1")
     hid = _mk_household(db)
     svc.pool_earn(db, hid, 50, actor=_manager())
-    out = svc.pool_redeem(db, hid, 100, redeeming_customer_id="C1",
-                          actor=_cashier(), require_otp=False)
+    out = svc.pool_redeem(
+        db, hid, 100, redeeming_customer_id="C1", actor=_cashier(), require_otp=False
+    )
     assert out["http"] == 409 and out["error"] == "insufficient_balance"
     assert svc.pool_balance(db, hid) == 50
     # A never-funded pool reads as insufficient too (not a crash).
     _seed_customers(db, "C9")
     h2 = _mk_household(db, primary="C9")
-    out2 = svc.pool_redeem(db, h2, 10, redeeming_customer_id="C9",
-                           actor=_cashier(), require_otp=False)
+    out2 = svc.pool_redeem(
+        db, h2, 10, redeeming_customer_id="C9", actor=_cashier(), require_otp=False
+    )
     assert out2["http"] == 409 and out2["error"] == "insufficient_balance"
 
 
@@ -594,12 +677,23 @@ def test_concurrent_redeems_near_floor_one_winner(db):
     results: List[Dict[str, Any]] = []
 
     def _redeem():
-        results.append(svc.pool_redeem(db, hid, 80, redeeming_customer_id="C1",
-                                       actor=_cashier(), require_otp=False))
+        results.append(
+            svc.pool_redeem(
+                db,
+                hid,
+                80,
+                redeeming_customer_id="C1",
+                actor=_cashier(),
+                require_otp=False,
+            )
+        )
 
     t1 = threading.Thread(target=_redeem)
     t2 = threading.Thread(target=_redeem)
-    t1.start(); t2.start(); t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     winners = [r for r in results if r.get("ok")]
     losers = [r for r in results if not r.get("ok")]
@@ -615,12 +709,16 @@ def test_concurrent_redeems_near_floor_one_winner(db):
 
 def test_db_absent_failsoft():
     actor = _manager()
-    assert svc.create_household(None, primary_customer_id="C1", actor=actor)["http"] == 503
+    assert (
+        svc.create_household(None, primary_customer_id="C1", actor=actor)["http"] == 503
+    )
     assert svc.add_member(None, "H", "C", actor=actor)["http"] == 503
     assert svc.remove_member(None, "H", "C", actor=actor)["http"] == 503
     assert svc.pool_earn(None, "H", 10, actor=actor)["http"] == 503
-    assert svc.pool_redeem(None, "H", 10, redeeming_customer_id="C",
-                           actor=actor)["http"] == 503
+    assert (
+        svc.pool_redeem(None, "H", 10, redeeming_customer_id="C", actor=actor)["http"]
+        == 503
+    )
     assert svc.get_household(None, "H") is None
     assert svc.get_household_by_customer(None, "C") is None
     assert svc.pool_balance(None, "H") == 0
@@ -685,21 +783,28 @@ def test_router_chain_wide_lookup_no_store_403(db, monkeypatch):
 def test_router_max_members_honors_e2_policy(db, monkeypatch):
     r = _wire(monkeypatch, db)
     monkeypatch.setattr(
-        r, "_get_policy",
-        lambda key, scope=None, *, default=None:
-            3 if key == "loyalty.pool_max_members" else default)
+        r,
+        "_get_policy",
+        lambda key, scope=None, *, default=None: (
+            3 if key == "loyalty.pool_max_members" else default
+        ),
+    )
     ids = ["C1", "C2", "C3", "C4"]
     _seed_customers(db, *ids)
     hid = _mk_household(db, primary="C1")
     for cid in ("C2", "C3"):
-        out = _run(r.add_member(hid, r.MemberAddBody(customer_id=cid),
-                                current_user=_manager()))
+        out = _run(
+            r.add_member(hid, r.MemberAddBody(customer_id=cid), current_user=_manager())
+        )
         assert cid in out["member_customer_ids"]
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        _run(r.add_member(hid, r.MemberAddBody(customer_id="C4"),
-                          current_user=_manager()))
+        _run(
+            r.add_member(
+                hid, r.MemberAddBody(customer_id="C4"), current_user=_manager()
+            )
+        )
     assert exc.value.status_code == 409
     assert exc.value.detail == "household_full"
 
@@ -715,23 +820,32 @@ def test_router_redeem_full_flow_mints_store_credit_voucher(db, monkeypatch):
     svc.pool_earn(db, hid, 500, actor=_manager())
 
     box = _capture_otp(monkeypatch)
-    req = _run(r.request_redeem_otp(hid, r.RequestOtpBody(points=200),
-                                    current_user=_cashier()))
+    req = _run(
+        r.request_redeem_otp(hid, r.RequestOtpBody(points=200), current_user=_cashier())
+    )
     assert req["otp_id"].startswith("OTP-") and "code" not in req
     assert box["calls"] == 1 and box["category"] == "OTP"  # captured, never live
 
-    out = _run(r.redeem(
-        hid,
-        r.RedeemBody(points=200, redeeming_customer_id="C2",
-                     otp_id=req["otp_id"], otp_code=box["code"]),
-        current_user=_cashier()))
+    out = _run(
+        r.redeem(
+            hid,
+            r.RedeemBody(
+                points=200,
+                redeeming_customer_id="C2",
+                otp_id=req["otp_id"],
+                otp_code=box["code"],
+            ),
+            current_user=_cashier(),
+        )
+    )
     assert out["ok"] is True
     assert out["points_redeemed"] == 200
     assert out["pool_balance_points"] == 300
     assert out["rupee_value"] == 200.0  # default redeem_rupee_per_point = 1.0
     assert out["voucher"]["code"].startswith("GC-")
     voucher = db.get_collection("vouchers").find_one(
-        {"voucher_id": out["voucher"]["voucher_id"]})
+        {"voucher_id": out["voucher"]["voucher_id"]}
+    )
     assert voucher["status"] == "ACTIVE" and voucher["balance"] == 200.0
     assert voucher["source"] == "family_wallet_pool"
     assert voucher["household_id"] == hid
@@ -747,8 +861,13 @@ def test_router_redeem_without_otp_400_when_policy_requires(db, monkeypatch):
     hid = _mk_household(db)
     svc.pool_earn(db, hid, 500, actor=_manager())
     with pytest.raises(HTTPException) as exc:
-        _run(r.redeem(hid, r.RedeemBody(points=100, redeeming_customer_id="C1"),
-                      current_user=_cashier()))
+        _run(
+            r.redeem(
+                hid,
+                r.RedeemBody(points=100, redeeming_customer_id="C1"),
+                current_user=_cashier(),
+            )
+        )
     assert exc.value.status_code == 400 and exc.value.detail == "otp_required"
     assert svc.pool_balance(db, hid) == 500
 
@@ -758,14 +877,22 @@ def test_router_redeem_policy_can_waive_otp(db, monkeypatch):
     policy); the guarded debit + voucher mint still run."""
     r = _wire(monkeypatch, db)
     monkeypatch.setattr(
-        r, "_get_policy",
-        lambda key, scope=None, *, default=None:
-            False if key == "loyalty.pool_redeem_requires_otp" else default)
+        r,
+        "_get_policy",
+        lambda key, scope=None, *, default=None: (
+            False if key == "loyalty.pool_redeem_requires_otp" else default
+        ),
+    )
     _seed_customers(db, "C1")
     hid = _mk_household(db)
     svc.pool_earn(db, hid, 500, actor=_manager())
-    out = _run(r.redeem(hid, r.RedeemBody(points=150, redeeming_customer_id="C1"),
-                        current_user=_cashier()))
+    out = _run(
+        r.redeem(
+            hid,
+            r.RedeemBody(points=150, redeeming_customer_id="C1"),
+            current_user=_cashier(),
+        )
+    )
     assert out["ok"] and out["pool_balance_points"] == 350
     assert out["voucher"]["code"].startswith("GC-")
 
@@ -779,8 +906,11 @@ def test_router_request_otp_insufficient_pool_409_no_sms(db, monkeypatch):
     svc.pool_earn(db, hid, 50, actor=_manager())
     box = _capture_otp(monkeypatch)
     with pytest.raises(HTTPException) as exc:
-        _run(r.request_redeem_otp(hid, r.RequestOtpBody(points=100),
-                                  current_user=_cashier()))
+        _run(
+            r.request_redeem_otp(
+                hid, r.RequestOtpBody(points=100), current_user=_cashier()
+            )
+        )
     assert exc.value.status_code == 409
     assert box["calls"] == 0  # no SMS burnt on an obviously-insufficient pool
 
@@ -802,8 +932,9 @@ def test_router_duplicate_redeem_returns_same_voucher_never_remints(db, monkeypa
     assert svc.add_member(db, hid, "C2", actor=_manager())["ok"]
     svc.pool_earn(db, hid, 500, actor=_manager())
 
-    body = r.RedeemBody(points=200, redeeming_customer_id="C2",
-                        otp_id="OTPX-1", otp_code=None)
+    body = r.RedeemBody(
+        points=200, redeeming_customer_id="C2", otp_id="OTPX-1", otp_code=None
+    )
     first = _run(r.redeem(hid, body, current_user=_cashier()))
     assert first["ok"] and first["voucher"]["voucher_id"]
     vouchers = db.get_collection("vouchers")
@@ -812,8 +943,8 @@ def test_router_duplicate_redeem_returns_same_voucher_never_remints(db, monkeypa
     second = _run(r.redeem(hid, body, current_user=_cashier()))
     assert second["ok"] and second.get("duplicate") is True
     assert second["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
-    assert len(vouchers.docs) == 1            # NO second voucher minted
-    assert svc.pool_balance(db, hid) == 300   # NO second debit
+    assert len(vouchers.docs) == 1  # NO second voucher minted
+    assert svc.pool_balance(db, hid) == 300  # NO second debit
 
 
 def test_router_compensation_failure_is_loud_and_audited(db, monkeypatch):
@@ -832,21 +963,30 @@ def test_router_compensation_failure_is_loud_and_audited(db, monkeypatch):
 
     def _boom(*a, **k):
         raise RuntimeError("mint down")
+
     monkeypatch.setattr(vouchers_mod, "mint_voucher", _boom)
 
     class _Fail:
         ok = False
         reason = "unavailable"
+
     monkeypatch.setattr(mg, "credit", lambda *a, **k: _Fail())
 
-    body = r.RedeemBody(points=100, redeeming_customer_id="C1",
-                        otp_id=otp["otp_id"], otp_code=otp["code"])
+    body = r.RedeemBody(
+        points=100,
+        redeeming_customer_id="C1",
+        otp_id=otp["otp_id"],
+        otp_code=otp["code"],
+    )
     with pytest.raises(HTTPException) as exc:
         _run(r.redeem(hid, body, current_user=_cashier()))
     assert exc.value.status_code == 503
     assert "manual credit" in str(exc.value.detail)
-    audits = [x for x in db.get_collection("audit_logs").docs
-              if x.get("action") == "family_wallet.compensation_failed"]
+    audits = [
+        x
+        for x in db.get_collection("audit_logs").docs
+        if x.get("action") == "family_wallet.compensation_failed"
+    ]
     assert audits and (audits[0].get("after_state") or {}).get("points") == 100
 
 
@@ -885,7 +1025,7 @@ def test_otp_attempt_ceiling_is_atomic_in_filter(db, monkeypatch):
         out = rail.verify_pool_redemption_otp(db, otp_id=otp["otp_id"], code="BAD")
         assert out["ok"] is False
         reasons.append(out["reason"])
-    assert "max_attempts" in reasons            # the flip happened exactly at budget
+    assert "max_attempts" in reasons  # the flip happened exactly at budget
     assert reasons[-1] in ("failed", "max_attempts")  # post-flip calls refuse
     stored = db.get_collection("pool_otp").find_one({"otp_id": otp["otp_id"]})
     assert stored["status"] == "FAILED"

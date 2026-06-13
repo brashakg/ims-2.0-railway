@@ -147,8 +147,14 @@ def ensure_indexes(db) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _audit(db, action: str, household_id: str, *, actor: Optional[str],
-           detail: Optional[Dict[str, Any]] = None) -> None:
+def _audit(
+    db,
+    action: str,
+    household_id: str,
+    *,
+    actor: Optional[str],
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
     if db is None:
         return
     try:
@@ -157,19 +163,21 @@ def _audit(db, action: str, household_id: str, *, actor: Optional[str],
             return
         from database.repositories.audit_repository import AuditRepository
 
-        AuditRepository(coll).create({
-            "log_id": f"AUD-{uuid.uuid4().hex[:12]}",
-            "action": action,
-            "entity_type": "household",
-            "entity_id": household_id,
-            "user_id": actor,
-            "actor": actor,
-            "source": "FAMWALLET",
-            "before_state": None,
-            "after_state": detail or {},
-            "severity": "INFO",
-            "timestamp": _now_iso(),
-        })
+        AuditRepository(coll).create(
+            {
+                "log_id": f"AUD-{uuid.uuid4().hex[:12]}",
+                "action": action,
+                "entity_type": "household",
+                "entity_id": household_id,
+                "user_id": actor,
+                "actor": actor,
+                "source": "FAMWALLET",
+                "before_state": None,
+                "after_state": detail or {},
+                "severity": "INFO",
+                "timestamp": _now_iso(),
+            }
+        )
     except Exception:  # noqa: BLE001
         logger.debug("[FAMWALLET] audit write skipped", exc_info=True)
 
@@ -190,8 +198,13 @@ def _is_dup_key(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def create_household(db, *, primary_customer_id: str, actor: Dict[str, Any],
-                     store_id: Optional[str] = None) -> Dict[str, Any]:
+def create_household(
+    db,
+    *,
+    primary_customer_id: str,
+    actor: Dict[str, Any],
+    store_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Create a household with the primary customer as member[0].
 
     Validates the primary exists and is not already in an ACTIVE household
@@ -206,20 +219,29 @@ def create_household(db, *, primary_customer_id: str, actor: Dict[str, Any],
 
     customers = _coll(db, "customers")
     try:
-        cust = customers.find_one({"customer_id": primary_customer_id}) if customers is not None else None
+        cust = (
+            customers.find_one({"customer_id": primary_customer_id})
+            if customers is not None
+            else None
+        )
     except Exception:  # noqa: BLE001
         cust = None
     if not cust:
         return {"ok": False, "http": 404, "error": "customer_not_found"}
 
     try:
-        existing = hh.find_one({"member_customer_ids": primary_customer_id,
-                                "status": STATUS_ACTIVE})
+        existing = hh.find_one(
+            {"member_customer_ids": primary_customer_id, "status": STATUS_ACTIVE}
+        )
     except Exception:  # noqa: BLE001
         existing = None
     if existing:
-        return {"ok": False, "http": 409, "error": "already_in_household",
-                "household_id": existing.get("household_id")}
+        return {
+            "ok": False,
+            "http": 409,
+            "error": "already_in_household",
+            "household_id": existing.get("household_id"),
+        }
 
     hid = f"HH-{uuid.uuid4().hex[:12].upper()}"
     now = _now_iso()
@@ -243,14 +265,24 @@ def create_household(db, *, primary_customer_id: str, actor: Dict[str, Any],
         logger.warning("[FAMWALLET] create_household failed: %s", exc)
         return {"ok": False, "http": 503, "error": "write_failed"}
 
-    _audit(db, "family_wallet.household_create", hid, actor=_actor_id(actor),
-           detail={"primary_customer_id": primary_customer_id, "store_id": store_id})
+    _audit(
+        db,
+        "family_wallet.household_create",
+        hid,
+        actor=_actor_id(actor),
+        detail={"primary_customer_id": primary_customer_id, "store_id": store_id},
+    )
     return {"ok": True, "household": _public(doc)}
 
 
-def add_member(db, household_id: str, customer_id: str, *,
-               actor: Dict[str, Any],
-               max_members: int = DEFAULT_MAX_MEMBERS) -> Dict[str, Any]:
+def add_member(
+    db,
+    household_id: str,
+    customer_id: str,
+    *,
+    actor: Dict[str, Any],
+    max_members: int = DEFAULT_MAX_MEMBERS,
+) -> Dict[str, Any]:
     """Add a member via a SINGLE guarded find_one_and_update.
 
     The max-member cap is IN the filter ($expr $size < max_members), so two
@@ -274,7 +306,11 @@ def add_member(db, household_id: str, customer_id: str, *,
 
     customers = _coll(db, "customers")
     try:
-        cust = customers.find_one({"customer_id": customer_id}) if customers is not None else None
+        cust = (
+            customers.find_one({"customer_id": customer_id})
+            if customers is not None
+            else None
+        )
     except Exception:  # noqa: BLE001
         cust = None
     if not cust:
@@ -282,15 +318,19 @@ def add_member(db, household_id: str, customer_id: str, *,
 
     # Unique membership across ALL households (pre-check + index backstop).
     try:
-        elsewhere = hh.find_one({"member_customer_ids": customer_id,
-                                 "status": STATUS_ACTIVE})
+        elsewhere = hh.find_one(
+            {"member_customer_ids": customer_id, "status": STATUS_ACTIVE}
+        )
     except Exception:  # noqa: BLE001
         elsewhere = None
     if elsewhere:
         already_here = elsewhere.get("household_id") == household_id
-        return {"ok": False, "http": 409,
-                "error": "already_member" if already_here else "already_in_household",
-                "household_id": elsewhere.get("household_id")}
+        return {
+            "ok": False,
+            "http": 409,
+            "error": "already_member" if already_here else "already_in_household",
+            "household_id": elsewhere.get("household_id"),
+        }
 
     filt = {
         "household_id": household_id,
@@ -306,8 +346,9 @@ def add_member(db, household_id: str, customer_id: str, *,
     try:
         from pymongo import ReturnDocument
 
-        after = hh.find_one_and_update(filt, update,
-                                       return_document=ReturnDocument.AFTER)
+        after = hh.find_one_and_update(
+            filt, update, return_document=ReturnDocument.AFTER
+        )
     except Exception as exc:  # noqa: BLE001
         if _is_dup_key(exc):
             return {"ok": False, "http": 409, "error": "already_in_household"}
@@ -326,17 +367,29 @@ def add_member(db, household_id: str, customer_id: str, *,
             return {"ok": False, "http": 409, "error": "household_inactive"}
         if customer_id in (cur.get("member_customer_ids") or []):
             return {"ok": False, "http": 409, "error": "already_member"}
-        return {"ok": False, "http": 409, "error": "household_full",
-                "max_members": max_members}
+        return {
+            "ok": False,
+            "http": 409,
+            "error": "household_full",
+            "max_members": max_members,
+        }
 
-    _audit(db, "family_wallet.member_add", household_id, actor=_actor_id(actor),
-           detail={"customer_id": customer_id,
-                   "member_count": len(after.get("member_customer_ids") or [])})
+    _audit(
+        db,
+        "family_wallet.member_add",
+        household_id,
+        actor=_actor_id(actor),
+        detail={
+            "customer_id": customer_id,
+            "member_count": len(after.get("member_customer_ids") or []),
+        },
+    )
     return {"ok": True, "household": _public(after)}
 
 
-def remove_member(db, household_id: str, customer_id: str, *,
-                  actor: Dict[str, Any]) -> Dict[str, Any]:
+def remove_member(
+    db, household_id: str, customer_id: str, *, actor: Dict[str, Any]
+) -> Dict[str, Any]:
     """Remove a NON-PRIMARY member via a single guarded $pull (the filter
     excludes the primary, so the primary is structurally irremovable)."""
     hh = _households(db)
@@ -356,8 +409,9 @@ def remove_member(db, household_id: str, customer_id: str, *,
     try:
         from pymongo import ReturnDocument
 
-        after = hh.find_one_and_update(filt, update,
-                                       return_document=ReturnDocument.AFTER)
+        after = hh.find_one_and_update(
+            filt, update, return_document=ReturnDocument.AFTER
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[FAMWALLET] remove_member failed: %s", exc)
         return {"ok": False, "http": 503, "error": "write_failed"}
@@ -375,8 +429,13 @@ def remove_member(db, household_id: str, customer_id: str, *,
             return {"ok": False, "http": 409, "error": "household_inactive"}
         return {"ok": False, "http": 404, "error": "not_a_member"}
 
-    _audit(db, "family_wallet.member_remove", household_id, actor=_actor_id(actor),
-           detail={"customer_id": customer_id})
+    _audit(
+        db,
+        "family_wallet.member_remove",
+        household_id,
+        actor=_actor_id(actor),
+        detail={"customer_id": customer_id},
+    )
     return {"ok": True, "household": _public(after)}
 
 
@@ -401,8 +460,9 @@ def get_household_by_customer(db, customer_id: str) -> Optional[Dict[str, Any]]:
     if hh is None:
         return None
     try:
-        return _public(hh.find_one({"member_customer_ids": customer_id,
-                                    "status": STATUS_ACTIVE}))
+        return _public(
+            hh.find_one({"member_customer_ids": customer_id, "status": STATUS_ACTIVE})
+        )
     except Exception:  # noqa: BLE001
         return None
 
@@ -434,15 +494,17 @@ def _ensure_wallet(db, household_id: str) -> bool:
         return False
     now = _now_iso()
     try:
-        fw.insert_one({
-            "_id": household_id,
-            "household_id": household_id,
-            "balance_points": 0,
-            "status": STATUS_ACTIVE,
-            "money_ledger": [],
-            "created_at": now,
-            "updated_at": now,
-        })
+        fw.insert_one(
+            {
+                "_id": household_id,
+                "household_id": household_id,
+                "balance_points": 0,
+                "status": STATUS_ACTIVE,
+                "money_ledger": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
     except Exception as exc:  # noqa: BLE001
         if not _is_dup_key(exc):
             logger.warning("[FAMWALLET] wallet create failed: %s", exc)
@@ -450,9 +512,18 @@ def _ensure_wallet(db, household_id: str) -> bool:
     return True
 
 
-def _loyalty_txn(db, *, txn_id: str, household_id: str, customer_id: Optional[str],
-                 ttype: str, points: int, order_id: Optional[str], reason: str,
-                 actor: Optional[str]) -> None:
+def _loyalty_txn(
+    db,
+    *,
+    txn_id: str,
+    household_id: str,
+    customer_id: Optional[str],
+    ttype: str,
+    points: int,
+    order_id: Optional[str],
+    reason: str,
+    actor: Optional[str],
+) -> None:
     """Append one loyalty-txn audit row mirroring loyalty.py's ledger shape
     (txn_id/customer_id/type/points/order_id/reason/created_by/created_at)
     plus household_id. Fail-soft -- the money already moved via money_guard."""
@@ -460,25 +531,33 @@ def _loyalty_txn(db, *, txn_id: str, household_id: str, customer_id: Optional[st
     if coll is None:
         return
     try:
-        coll.insert_one({
-            "txn_id": txn_id,
-            "household_id": household_id,
-            "customer_id": customer_id,
-            "type": ttype,
-            "points": int(points),
-            "rupee_value": None,  # points-unit pool; rupee conversion at voucher mint
-            "order_id": order_id,
-            "reason": reason,
-            "expires_at": None,
-            "created_by": actor,
-            "created_at": _now_iso(),
-        })
+        coll.insert_one(
+            {
+                "txn_id": txn_id,
+                "household_id": household_id,
+                "customer_id": customer_id,
+                "type": ttype,
+                "points": int(points),
+                "rupee_value": None,  # points-unit pool; rupee conversion at voucher mint
+                "order_id": order_id,
+                "reason": reason,
+                "expires_at": None,
+                "created_by": actor,
+                "created_at": _now_iso(),
+            }
+        )
     except Exception:  # noqa: BLE001
         logger.debug("[FAMWALLET] loyalty txn row skipped", exc_info=True)
 
 
-def pool_earn(db, household_id: str, points: Any, *, actor: Dict[str, Any],
-              source_order_id: Optional[str] = None) -> Dict[str, Any]:
+def pool_earn(
+    db,
+    household_id: str,
+    points: Any,
+    *,
+    actor: Dict[str, Any],
+    source_order_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Credit whole POINTS to the household pool: a single guarded
     money_guard.credit on the FAMILY_WALLET account (created lazily, floor 0).
     Idempotent per source_order_id (a retried earn for the same order returns
@@ -502,36 +581,72 @@ def pool_earn(db, household_id: str, points: Any, *, actor: Dict[str, Any],
         return {"ok": False, "http": 503, "error": "wallet_unavailable"}
 
     res = mg.credit(
-        db, ACCOUNT_TYPE, household_id, pts,
-        reason="pool_earn", actor=_actor_id(actor), ref=source_order_id,
+        db,
+        ACCOUNT_TYPE,
+        household_id,
+        pts,
+        reason="pool_earn",
+        actor=_actor_id(actor),
+        ref=source_order_id,
         store_id=household.get("store_id"),
         idempotency_key=f"poolearn:{source_order_id}" if source_order_id else None,
     )
     if not res.ok:
         code = {"unavailable": 503, "no_atomic": 503, "not_found": 404}.get(
-            res.reason or "", 409)
+            res.reason or "", 409
+        )
         return {"ok": False, "http": code, "error": res.reason or "credit_failed"}
     if res.reason == "duplicate":
-        return {"ok": True, "balance": int(res.balance), "txn_id": res.txn_id,
-                "duplicate": True}
+        return {
+            "ok": True,
+            "balance": int(res.balance),
+            "txn_id": res.txn_id,
+            "duplicate": True,
+        }
 
-    _loyalty_txn(db, txn_id=res.txn_id, household_id=household_id,
-                 customer_id=None, ttype="POOL_EARN", points=pts,
-                 order_id=source_order_id,
-                 reason=(f"Pool earn on order {source_order_id}"
-                         if source_order_id else "Pool earn"),
-                 actor=_actor_id(actor))
-    _audit(db, "family_wallet.pool_earn", household_id, actor=_actor_id(actor),
-           detail={"points": pts, "order_id": source_order_id,
-                   "balance_after": int(res.balance)})
-    return {"ok": True, "balance": int(res.balance), "txn_id": res.txn_id,
-            "duplicate": False}
+    _loyalty_txn(
+        db,
+        txn_id=res.txn_id,
+        household_id=household_id,
+        customer_id=None,
+        ttype="POOL_EARN",
+        points=pts,
+        order_id=source_order_id,
+        reason=(
+            f"Pool earn on order {source_order_id}" if source_order_id else "Pool earn"
+        ),
+        actor=_actor_id(actor),
+    )
+    _audit(
+        db,
+        "family_wallet.pool_earn",
+        household_id,
+        actor=_actor_id(actor),
+        detail={
+            "points": pts,
+            "order_id": source_order_id,
+            "balance_after": int(res.balance),
+        },
+    )
+    return {
+        "ok": True,
+        "balance": int(res.balance),
+        "txn_id": res.txn_id,
+        "duplicate": False,
+    }
 
 
-def pool_redeem(db, household_id: str, points: Any, *, redeeming_customer_id: str,
-                actor: Dict[str, Any], otp_id: Optional[str] = None,
-                otp_code: Optional[str] = None,
-                require_otp: bool = True) -> Dict[str, Any]:
+def pool_redeem(
+    db,
+    household_id: str,
+    points: Any,
+    *,
+    redeeming_customer_id: str,
+    actor: Dict[str, Any],
+    otp_id: Optional[str] = None,
+    otp_code: Optional[str] = None,
+    require_otp: bool = True,
+) -> Dict[str, Any]:
     """OTP-gated pool debit.
 
     Order of operations:
@@ -578,8 +693,11 @@ def pool_redeem(db, household_id: str, points: Any, *, redeeming_customer_id: st
             logger.warning("[FAMWALLET] OTP verify errored", exc_info=True)
             return {"ok": False, "http": 503, "error": "otp_unavailable"}
         if not ver.get("ok"):
-            return {"ok": False, "http": 403,
-                    "error": f"otp_{ver.get('reason') or 'rejected'}"}
+            return {
+                "ok": False,
+                "http": 403,
+                "error": f"otp_{ver.get('reason') or 'rejected'}",
+            }
         if ver.get("household_id") != household_id:
             return {"ok": False, "http": 403, "error": "otp_household_mismatch"}
         try:
@@ -590,29 +708,68 @@ def pool_redeem(db, household_id: str, points: Any, *, redeeming_customer_id: st
             return {"ok": False, "http": 403, "error": "otp_amount_mismatch"}
 
     res = mg.debit(
-        db, ACCOUNT_TYPE, household_id, pts,
-        reason="pool_redeem", actor=_actor_id(actor), ref=otp_id,
+        db,
+        ACCOUNT_TYPE,
+        household_id,
+        pts,
+        reason="pool_redeem",
+        actor=_actor_id(actor),
+        ref=otp_id,
         store_id=household.get("store_id"),
         # One consumed OTP -> at most one debit, even on a network retry.
         idempotency_key=f"poolredeem:{otp_id}" if otp_id else None,
     )
     if not res.ok:
-        code = {"insufficient": 409, "not_found": 409, "inactive": 409,
-                "unavailable": 503, "no_atomic": 503,
-                "invalid_amount": 422}.get(res.reason or "", 409)
-        err = "insufficient_balance" if res.reason in ("insufficient", "not_found") \
+        code = {
+            "insufficient": 409,
+            "not_found": 409,
+            "inactive": 409,
+            "unavailable": 503,
+            "no_atomic": 503,
+            "invalid_amount": 422,
+        }.get(res.reason or "", 409)
+        err = (
+            "insufficient_balance"
+            if res.reason in ("insufficient", "not_found")
             else (res.reason or "debit_failed")
+        )
         return {"ok": False, "http": code, "error": err}
     if res.reason == "duplicate":
-        return {"ok": True, "balance": int(res.balance), "txn_id": res.txn_id,
-                "points": pts, "duplicate": True}
+        return {
+            "ok": True,
+            "balance": int(res.balance),
+            "txn_id": res.txn_id,
+            "points": pts,
+            "duplicate": True,
+        }
 
-    _loyalty_txn(db, txn_id=res.txn_id, household_id=household_id,
-                 customer_id=redeeming_customer_id, ttype="POOL_REDEEM",
-                 points=pts, order_id=None,
-                 reason="Family pool redemption", actor=_actor_id(actor))
-    _audit(db, "family_wallet.pool_redeem", household_id, actor=_actor_id(actor),
-           detail={"points": pts, "redeeming_customer_id": redeeming_customer_id,
-                   "otp_id": otp_id, "balance_after": int(res.balance)})
-    return {"ok": True, "balance": int(res.balance), "txn_id": res.txn_id,
-            "points": pts, "duplicate": False}
+    _loyalty_txn(
+        db,
+        txn_id=res.txn_id,
+        household_id=household_id,
+        customer_id=redeeming_customer_id,
+        ttype="POOL_REDEEM",
+        points=pts,
+        order_id=None,
+        reason="Family pool redemption",
+        actor=_actor_id(actor),
+    )
+    _audit(
+        db,
+        "family_wallet.pool_redeem",
+        household_id,
+        actor=_actor_id(actor),
+        detail={
+            "points": pts,
+            "redeeming_customer_id": redeeming_customer_id,
+            "otp_id": otp_id,
+            "balance_after": int(res.balance),
+        },
+    )
+    return {
+        "ok": True,
+        "balance": int(res.balance),
+        "txn_id": res.txn_id,
+        "points": pts,
+        "duplicate": False,
+    }

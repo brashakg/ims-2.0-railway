@@ -24,6 +24,7 @@ balance); redemption + reads are open to the POS/staff role families below.
 
 No emoji (Windows cp1252).
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,12 +45,28 @@ router = APIRouter(tags=["family-wallet"])
 _MANAGE_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
 # Redemption is a POS-counter money action -> the POS money family (mirrors
 # loyalty._POS_ROLES) + SUPERADMIN.
-_REDEEM_ROLES = {"SALES_CASHIER", "SALES_STAFF", "CASHIER", "STORE_MANAGER",
-                 "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
+_REDEEM_ROLES = {
+    "SALES_CASHIER",
+    "SALES_STAFF",
+    "CASHIER",
+    "STORE_MANAGER",
+    "AREA_MANAGER",
+    "ADMIN",
+    "SUPERADMIN",
+}
 # Read-only household/balance lookup: any authenticated store staff.
-_READ_ROLES = {"SALES_CASHIER", "CASHIER", "SALES_STAFF", "OPTOMETRIST",
-               "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
-               "ADMIN", "SUPERADMIN"}
+_READ_ROLES = {
+    "SALES_CASHIER",
+    "CASHIER",
+    "SALES_STAFF",
+    "OPTOMETRIST",
+    "CATALOG_MANAGER",
+    "STORE_MANAGER",
+    "AREA_MANAGER",
+    "ACCOUNTANT",
+    "ADMIN",
+    "SUPERADMIN",
+}
 
 
 def _get_db():
@@ -83,9 +100,14 @@ def _scope(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _max_members(user: Dict[str, Any]) -> int:
     try:
-        return int(_get_policy("loyalty.pool_max_members", _scope(user),
-                               default=svc.DEFAULT_MAX_MEMBERS)
-                   or svc.DEFAULT_MAX_MEMBERS)
+        return int(
+            _get_policy(
+                "loyalty.pool_max_members",
+                _scope(user),
+                default=svc.DEFAULT_MAX_MEMBERS,
+            )
+            or svc.DEFAULT_MAX_MEMBERS
+        )
     except (TypeError, ValueError):
         return svc.DEFAULT_MAX_MEMBERS
 
@@ -114,8 +136,10 @@ def _redeem_rate() -> float:
 
 def _raise(result: Dict[str, Any]):
     """Translate a service {ok: False, http, error} envelope to HTTPException."""
-    raise HTTPException(status_code=int(result.get("http") or 400),
-                        detail=result.get("error") or "request_failed")
+    raise HTTPException(
+        status_code=int(result.get("http") or 400),
+        detail=result.get("error") or "request_failed",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +150,8 @@ def _raise(result: Dict[str, Any]):
 class HouseholdCreateBody(BaseModel):
     primary_customer_id: str = Field(..., min_length=1)
     store_id: Optional[str] = Field(
-        None, description="Creating store (provenance only; lookup is chain-wide)")
+        None, description="Creating store (provenance only; lookup is chain-wide)"
+    )
 
 
 class MemberAddBody(BaseModel):
@@ -136,8 +161,10 @@ class MemberAddBody(BaseModel):
 class EarnBody(BaseModel):
     points: int = Field(..., gt=0)
     source_order_id: Optional[str] = Field(
-        None, description="Order ref for idempotency -- a retried earn for the "
-                          "same order credits exactly once")
+        None,
+        description="Order ref for idempotency -- a retried earn for the "
+        "same order credits exactly once",
+    )
 
 
 class RequestOtpBody(BaseModel):
@@ -157,12 +184,14 @@ class RedeemBody(BaseModel):
 
 
 @router.post("/households")
-async def create_household(body: HouseholdCreateBody,
-                           current_user: Dict[str, Any] = Depends(get_current_user)):
+async def create_household(
+    body: HouseholdCreateBody, current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Create a household with the primary customer as member[0]. Manager+."""
     _require(current_user, _MANAGE_ROLES, "create a household")
     out = svc.create_household(
-        _get_db(), primary_customer_id=body.primary_customer_id,
+        _get_db(),
+        primary_customer_id=body.primary_customer_id,
         actor=current_user,
         store_id=body.store_id or current_user.get("active_store_id"),
     )
@@ -172,21 +201,32 @@ async def create_household(body: HouseholdCreateBody,
 
 
 @router.post("/households/{household_id}/members")
-async def add_member(household_id: str, body: MemberAddBody,
-                     current_user: Dict[str, Any] = Depends(get_current_user)):
+async def add_member(
+    household_id: str,
+    body: MemberAddBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Add a member (manager+). The E2 max-member cap is enforced IN the
     guarded write's filter -- a full household 409s, a duplicate add 409s."""
     _require(current_user, _MANAGE_ROLES, "add a household member")
-    out = svc.add_member(_get_db(), household_id, body.customer_id,
-                         actor=current_user, max_members=_max_members(current_user))
+    out = svc.add_member(
+        _get_db(),
+        household_id,
+        body.customer_id,
+        actor=current_user,
+        max_members=_max_members(current_user),
+    )
     if not out.get("ok"):
         _raise(out)
     return out["household"]
 
 
 @router.delete("/households/{household_id}/members/{customer_id}")
-async def remove_member(household_id: str, customer_id: str,
-                        current_user: Dict[str, Any] = Depends(get_current_user)):
+async def remove_member(
+    household_id: str,
+    customer_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Remove a NON-PRIMARY member (manager+). The primary is irremovable."""
     _require(current_user, _MANAGE_ROLES, "remove a household member")
     out = svc.remove_member(_get_db(), household_id, customer_id, actor=current_user)
@@ -201,8 +241,9 @@ async def remove_member(household_id: str, customer_id: str,
 
 
 @router.get("/households/by-customer/{customer_id}")
-async def get_by_customer(customer_id: str,
-                          current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_by_customer(
+    customer_id: str, current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """The ACTIVE household containing this customer. CHAIN-WIDE lookup (owner
     decision: customer lookup is never store-fenced)."""
     _require(current_user, _READ_ROLES, "look up a household")
@@ -210,13 +251,15 @@ async def get_by_customer(customer_id: str,
     if household is None:
         raise HTTPException(status_code=404, detail="household not found")
     household["pool_balance_points"] = svc.pool_balance(
-        _get_db(), household.get("household_id"))
+        _get_db(), household.get("household_id")
+    )
     return household
 
 
 @router.get("/households/{household_id}")
-async def get_household(household_id: str,
-                        current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_household(
+    household_id: str, current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """One household + its live pool balance (points). CHAIN-WIDE."""
     _require(current_user, _READ_ROLES, "look up a household")
     household = svc.get_household(_get_db(), household_id)
@@ -232,14 +275,20 @@ async def get_household(household_id: str,
 
 
 @router.post("/households/{household_id}/earn")
-async def earn(household_id: str, body: EarnBody,
-               current_user: Dict[str, Any] = Depends(get_current_user)):
+async def earn(
+    household_id: str,
+    body: EarnBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Credit POINTS to the household pool (manual / store-driven earn -- the
     POS auto-earn hook on order finalize stays OWNER-GATED and untouched).
     Manager+ only; idempotent per source_order_id (a retry credits once)."""
     _require(current_user, _MANAGE_ROLES, "credit the family pool")
     out = svc.pool_earn(
-        _get_db(), household_id, body.points, actor=current_user,
+        _get_db(),
+        household_id,
+        body.points,
+        actor=current_user,
         source_order_id=body.source_order_id,
     )
     if not out.get("ok"):
@@ -254,8 +303,11 @@ async def earn(household_id: str, body: EarnBody,
 
 
 @router.post("/households/{household_id}/redeem/request-otp")
-async def request_redeem_otp(household_id: str, body: RequestOtpBody,
-                             current_user: Dict[str, Any] = Depends(get_current_user)):
+async def request_redeem_otp(
+    household_id: str,
+    body: RequestOtpBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Issue a redemption OTP to the PRIMARY member's mobile (reminder_rail
     slice: sha256-hashed code, 5-min expiry, max 5 attempts, DISPATCH_MODE-
     gated SMS). Returns otp_id + expiry -- NEVER the code."""
@@ -280,15 +332,22 @@ async def request_redeem_otp(household_id: str, body: RequestOtpBody,
         requested_by=current_user.get("user_id"),
     )
     if not out.get("ok"):
-        raise HTTPException(status_code=503,
-                            detail=out.get("reason") or "otp_unavailable")
-    return {"otp_id": out["otp_id"], "expires_at": out["expires_at"],
-            "sent_to": "primary_member_mobile"}
+        raise HTTPException(
+            status_code=503, detail=out.get("reason") or "otp_unavailable"
+        )
+    return {
+        "otp_id": out["otp_id"],
+        "expires_at": out["expires_at"],
+        "sent_to": "primary_member_mobile",
+    }
 
 
 @router.post("/households/{household_id}/redeem")
-async def redeem(household_id: str, body: RedeemBody,
-                 current_user: Dict[str, Any] = Depends(get_current_user)):
+async def redeem(
+    household_id: str,
+    body: RedeemBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Verify the OTP (atomic consume-once) + debit the pool (guarded floor in
     the filter) + mint the redeemed value as a store-credit voucher via the
     canonical vouchers.mint_voucher. CHAIN-WIDE by owner decision."""
@@ -297,9 +356,13 @@ async def redeem(household_id: str, body: RedeemBody,
     require_otp = _require_otp(current_user)
 
     out = svc.pool_redeem(
-        db, household_id, body.points,
+        db,
+        household_id,
+        body.points,
         redeeming_customer_id=body.redeeming_customer_id,
-        actor=current_user, otp_id=body.otp_id, otp_code=body.otp_code,
+        actor=current_user,
+        otp_id=body.otp_id,
+        otp_code=body.otp_code,
         require_otp=require_otp,
     )
     if not out.get("ok"):
@@ -314,7 +377,8 @@ async def redeem(household_id: str, body: RedeemBody,
         existing = None
         try:
             existing = db.get_collection("vouchers").find_one(
-                {"pool_txn_id": out.get("txn_id"), "source": "family_wallet_pool"})
+                {"pool_txn_id": out.get("txn_id"), "source": "family_wallet_pool"}
+            )
         except Exception:  # noqa: BLE001
             existing = None
         if existing is not None:
@@ -334,8 +398,10 @@ async def redeem(household_id: str, body: RedeemBody,
             }
         raise HTTPException(
             status_code=409,
-            detail=("This redemption was already attempted and reversed after a "
-                    "failed voucher mint. Request a fresh OTP and redeem again."),
+            detail=(
+                "This redemption was already attempted and reversed after a "
+                "failed voucher mint. Request a fresh OTP and redeem again."
+            ),
         )
 
     # Mint the spendable store-credit voucher (rupee conversion happens HERE,
@@ -368,29 +434,49 @@ async def redeem(household_id: str, body: RedeemBody,
         # loudly. The reversal is idempotent on the debit txn_id.
         from ..services import money_guard as mg
 
-        comp = mg.credit(db, svc.ACCOUNT_TYPE, household_id, int(out["points"]),
-                         reason="pool_redeem_mint_failed_reversal",
-                         actor=current_user.get("user_id"), ref=out.get("txn_id"),
-                         idempotency_key=f"poolredeem-reverse:{out.get('txn_id')}")
-        if not getattr(comp, "ok", False) and getattr(comp, "reason", "") != "duplicate":
+        comp = mg.credit(
+            db,
+            svc.ACCOUNT_TYPE,
+            household_id,
+            int(out["points"]),
+            reason="pool_redeem_mint_failed_reversal",
+            actor=current_user.get("user_id"),
+            ref=out.get("txn_id"),
+            idempotency_key=f"poolredeem-reverse:{out.get('txn_id')}",
+        )
+        if (
+            not getattr(comp, "ok", False)
+            and getattr(comp, "reason", "") != "duplicate"
+        ):
             # The reversal ITSELF failed: points are gone with no voucher.
             # This must never be silent -- CRITICAL log + audit row carrying
             # everything needed for a manual credit.
             logger.critical(
                 "[FAMWALLET] COMPENSATION FAILED after voucher-mint failure: "
                 "household=%s points=%s txn=%s reason=%s -- MANUAL CREDIT REQUIRED",
-                household_id, out.get("points"), out.get("txn_id"),
-                getattr(comp, "reason", "unknown"))
-            svc._audit(db, "family_wallet.compensation_failed", household_id,
-                       actor=current_user.get("user_id"),
-                       detail={"points": int(out["points"]),
-                               "txn_id": out.get("txn_id"),
-                               "comp_reason": getattr(comp, "reason", "unknown"),
-                               "action_required": "manual pool credit"})
+                household_id,
+                out.get("points"),
+                out.get("txn_id"),
+                getattr(comp, "reason", "unknown"),
+            )
+            svc._audit(
+                db,
+                "family_wallet.compensation_failed",
+                household_id,
+                actor=current_user.get("user_id"),
+                detail={
+                    "points": int(out["points"]),
+                    "txn_id": out.get("txn_id"),
+                    "comp_reason": getattr(comp, "reason", "unknown"),
+                    "action_required": "manual pool credit",
+                },
+            )
             raise HTTPException(
                 status_code=503,
-                detail=("voucher_mint_failed AND the points reversal failed -- "
-                        f"flagged for manual credit (txn {out.get('txn_id')})"),
+                detail=(
+                    "voucher_mint_failed AND the points reversal failed -- "
+                    f"flagged for manual credit (txn {out.get('txn_id')})"
+                ),
             )
         raise HTTPException(status_code=503, detail="voucher_mint_failed")
 

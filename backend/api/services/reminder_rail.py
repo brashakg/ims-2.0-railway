@@ -635,8 +635,12 @@ def ensure_reminder_indexes(db) -> None:
         return
     try:
         db.get_collection("reminder_rules").create_index("rule_id", unique=True)
-        db.get_collection("reminder_rules").create_index([("active", 1), ("rule_type", 1)])
-        db.get_collection("comms_ledger").create_index([("customer_id", 1), ("sent_at", 1)])
+        db.get_collection("reminder_rules").create_index(
+            [("active", 1), ("rule_type", 1)]
+        )
+        db.get_collection("comms_ledger").create_index(
+            [("customer_id", 1), ("sent_at", 1)]
+        )
         db.get_collection("pool_otp").create_index("otp_id", unique=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("reminder index creation skipped: %s", exc)
@@ -826,33 +830,36 @@ def verify_pool_redemption_otp(
     except Exception:  # noqa: BLE001
         pass
 
-    # Wrong code: ATOMIC attempt bump. The attempts ceiling lives IN the
-    # filter ($lt max-1), so N concurrent wrong guesses can never exceed the
-    # budget (the old read-modify-write let racers reset/blow past it). A
-    # bump that would reach the max instead flips PENDING -> FAILED in one
-    # guarded update -- exactly one flipper wins.
+    # Wrong code: ATOMIC attempt bump via $inc (NOT a read-modify-write of an
+    # absolute value -- that lost-update was the audit P2: two racers both read
+    # 3 and both write 4, bypassing the budget). $inc is atomic server-side, so
+    # N concurrent wrong guesses increment exactly N times, never losing one.
+    # When the post-increment count reaches the ceiling we flip PENDING->FAILED
+    # in a guarded update (exactly one flipper wins; the rest no-op).
     if _hash_code(code) != doc.get("code_hash"):
+        from pymongo import ReturnDocument
+
         try:
             bumped = coll.find_one_and_update(
-                {"otp_id": otp_id, "status": "PENDING",
-                 "attempts": {"$lt": OTP_MAX_ATTEMPTS - 1}},
+                {"otp_id": otp_id, "status": "PENDING"},
                 {"$inc": {"attempts": 1}},
+                return_document=ReturnDocument.AFTER,
             )
         except Exception:  # noqa: BLE001
             bumped = None
-        if bumped is not None:
-            return {"ok": False, "reason": "wrong_code"}
-        try:
-            failed = coll.find_one_and_update(
-                {"otp_id": otp_id, "status": "PENDING"},
-                {"$inc": {"attempts": 1}, "$set": {"status": "FAILED"}},
-            )
-        except Exception:  # noqa: BLE001
-            failed = None
-        if failed is not None:
+        if not bumped:
+            # A racer consumed or failed it first.
+            return {"ok": False, "reason": "already_consumed"}
+        if int(bumped.get("attempts", 0) or 0) >= OTP_MAX_ATTEMPTS:
+            try:
+                coll.update_one(
+                    {"otp_id": otp_id, "status": "PENDING"},
+                    {"$set": {"status": "FAILED"}},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return {"ok": False, "reason": "max_attempts"}
-        # Already FAILED/consumed by a racer.
-        return {"ok": False, "reason": "max_attempts"}
+        return {"ok": False, "reason": "wrong_code"}
 
     # Correct code: ATOMIC consume. Only one writer matches PENDING.
     try:
