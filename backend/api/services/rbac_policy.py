@@ -1977,6 +1977,57 @@ POLICY: List[Dict[str, object]] = [
                     "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #48 multi-category servicing & repair portal (own /api/v1/repairs
+    # prefix). Catalog edits = CATALOG_MANAGER+; intake + lifecycle transitions =
+    # store staff family; reads = any store staff. Every route store-scopes. ---
+    {
+        "method": "GET",
+        "path": "/api/v1/repairs/catalog",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CASHIER", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/repairs/catalog",
+        "allowed": ["CATALOG_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/repairs/catalog/{service_id}",
+        "allowed": ["CATALOG_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/repairs/jobs",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/repairs/jobs/{job_id}/transition",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER",
+                    "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/repairs/jobs",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CASHIER", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/repairs/jobs/{job_id}",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "CASHIER", "OPTOMETRIST",
+                    "CATALOG_MANAGER", "STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT",
+                    "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     # Feature #1 cross-store inventory balancing (read-only proposals). Management
     # only; the route itself store-scopes the OUTPUT for a single-store manager.
     {

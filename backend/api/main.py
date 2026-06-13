@@ -65,6 +65,7 @@ from .routers import (
     family_wallet_router,
     blind_stock_take_router,
     inventory_balancing_router,
+    repair_portal_router,
     cl_po_router,
     hr_router,
     workshop_router,
@@ -286,6 +287,13 @@ async def lifespan(app: FastAPI):
                 ensure_blind_count_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Blind-stock-take index creation skipped: {e}")
+            # Feature #48 repair portal: jobs (store_id,status) + unique service_id. Fail-soft.
+            try:
+                from .services.repair_portal import ensure_indexes as ensure_repair_indexes
+
+                ensure_repair_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Repair-portal index creation skipped: {e}")
             # Feature #13 spoilage analytics: seed the owner-editable remake
             # reason-code taxonomy singleton (insert-only-if-absent, so an
             # edited taxonomy is never clobbered). Idempotent, fail-soft.
@@ -1208,6 +1216,10 @@ app.include_router(inventory_balancing_router, prefix="/api/v1/inventory-balanci
 # Base-Bank replenishment + lens-stock gap-planner data and drafts DRAFT POs whose
 # lines carry the power cell -- never SENT, never touches POS/money.
 app.include_router(cl_po_router, prefix="/api/v1/cl-po", tags=["CLPurchaseOrders"])
+# Feature #48 multi-category servicing & repair portal: own /api/v1/repairs prefix;
+# per-store service catalog + INTAKE->DELIVERED job lifecycle (guarded transitions),
+# DARK status SMS on READY, store-scoped. POS-billing on DELIVERED is DEFERRED.
+app.include_router(repair_portal_router, prefix="/api/v1/repairs", tags=["Repairs"])
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",
