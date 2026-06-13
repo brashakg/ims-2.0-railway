@@ -126,14 +126,20 @@ def next_event_date(trigger: Dict[str, Any], today: date) -> Optional[date]:
     if ttype == BIRTHDAY_PLUS_N:
         plus_n = _safe_int(trigger.get("plus_n_days"), 0)
         # The celebrated day is the birthday's month-day shifted by +N days.
-        # Compute against the next birthday anniversary, then add N. If that
-        # already passed this year, roll to next year's birthday + N.
-        bday = _next_annual_occurrence(base, today)
-        celebrated = bday + timedelta(days=plus_n)
-        if celebrated < today:
-            next_bday = _next_annual_occurrence(base, bday + timedelta(days=1))
-            celebrated = next_bday + timedelta(days=plus_n)
-        return celebrated
+        # The +N shift can push the celebrated date past the birthday's
+        # anniversary, so we cannot anchor on the NEXT birthday alone: if the
+        # birthday already passed this year but birthday+N has not, the current
+        # year's celebrated date is still the upcoming one. Pick the earliest
+        # celebrated date (last year / this year / next year) that is >= today.
+        candidates = []
+        for yr in (today.year - 1, today.year, today.year + 1):
+            try:
+                bday = date(yr, base.month, base.day)
+            except ValueError:
+                bday = date(yr, base.month, 28)  # Feb-29 -> Feb-28
+            candidates.append(bday + timedelta(days=plus_n))
+        upcoming = [c for c in candidates if c >= today]
+        return min(upcoming) if upcoming else None
 
     if ttype == RECURRING:
         every = _safe_int(trigger.get("recur_every_days"), 0)
