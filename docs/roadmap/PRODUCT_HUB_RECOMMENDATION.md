@@ -110,14 +110,37 @@ no auto-SENT PO, no emoji in Python, single-doc atomic writes).
 
 ---
 
-## 5. Open items needing OWNER sign-off (carried from both councils)
+## 5. Owner round-1 answers (2026-06-12) — AMENDMENTS now binding on the build
 
-1. **Approve this plan overall** (the §1 experience + §4 sequence).
-2. **Dup-SKU merge list (5 rows, e.g. 'ASPIRE PRO' ×2)** — merge vs re-SKU; list will be produced for review before any write.
-3. **ACCOUNTANT loses PO-raise** (locked answer 7 honored literally; keeps bills/AP). Confirm.
-4. **Legacy `/catalog/products` write-door 410** — the known owner-gated step-10 flip. Confirm inside this plan.
-5. **`pm.pos_exclude_drafts`** — POS query filter excluding DRAFT rows (the one POS-touching line; migration guarantees nothing with stock/sales is DRAFT). Explicit sign-off per the POS house rule.
-6. **XLSX direct-parse** (adds SheetJS dependency) vs CSV-only v1 for price-list import.
+The owner reviewed the §6 sign-off list and chose **"Hold — questions first"** on the overall
+go/no-go (build does NOT start until he gives an explicit "approved"), but locked four spec
+amendments. These OVERRIDE the council drafts wherever they conflict:
+
+1. **Import formats = Excel + CSV + PDF.** PDFs are the *common* case ("we mostly get pdfs"), not an
+   edge. Phase 3 ingestion: text-PDF table extraction (pdfplumber-class) + an AI-extraction fallback
+   (Claude, the existing Jarvis key) for scanned/messy sheets; every extracted row lands in the grid as
+   an editable DRAFT for human review — never direct-commit. One review UI for all three formats.
+2. **Fuzzy vendor-SKU matching is core, not optional.** Owner example: IMS `RB 3025 001/21` vs vendor
+   `0RB3025001/21`. Import classifies each row into **MATCHED** (exact / known alias), **SUGGESTED**
+   (normalized fuzzy: case + whitespace + slash strip, leading-zero-prefix strip, similarity threshold —
+   staff one-click confirm), or **NEW** (draft). Every confirmation writes to `vendor_sku_aliases` (the
+   flywheel: the next import + GRN receiving auto-resolve from it).
+3. **ACCOUNTANT KEEPS PO-raise.** Reverses the catalog-council's literal reading of answer 7 — `_PO_RAISE_ROLES`
+   INCLUDES ACCOUNTANT alongside SM (own store) / AM / CM / ADMIN / SUPERADMIN.
+4. **Duplicate SKUs → RE-SKU (suffix the newer), not merge.** The 5 prod dup rows are treated as genuinely
+   distinct products; the unique index is unblocked by re-SKUing, zero merge risk.
+
+**Confirmed (ticked) from the §6 list:** legacy `/catalog/products` write-door → 410 (step-10 flip) ✓;
+hide DRAFT rows from POS search (`pm.pos_exclude_drafts`) ✓.
+
+## 6. Open items still needing OWNER sign-off
+
+1. **Approve this plan overall to START THE BUILD** (the §1 experience + §4 sequence). **← currently HELD.**
+2. ~~Dup-SKU merge vs re-SKU~~ — DECIDED: **re-SKU** (§5.4).
+3. ~~ACCOUNTANT loses PO-raise~~ — DECIDED: **ACCOUNTANT keeps it** (§5.3).
+4. ~~Legacy `/catalog/products` 410~~ — CONFIRMED ✓.
+5. ~~`pm.pos_exclude_drafts`~~ — CONFIRMED ✓.
+6. ~~XLSX vs CSV-only~~ — DECIDED: **Excel + CSV + PDF + fuzzy matching** (§5.1–5.2).
 7. Push-locks prevent NEW pushes; they do not retro-unpublish already-pushed items — future decision.
 
 ## 6. Source transcripts
