@@ -538,11 +538,16 @@ async def login(request: LoginRequest, req: Request = None):
         )
         raise HTTPException(status_code=403, detail="User account is disabled")
 
-    # Geo-fence validation: a geo_restricted user must log in within range of an
-    # allowed coordinate. Allowed coordinates are the union of the user's
-    # explicit allowed_coordinates AND the geo-coordinates of the store(s) they
-    # are assigned to -- so seeding a store's location auto-fences its staff.
-    if user.get("geo_restricted"):
+    # Geo-fence validation: roles 4-7 are always geo-restricted per SYSTEM_INTENT,
+    # regardless of the per-user flag. The union of explicit allowed_coordinates AND
+    # store geo-coordinates determines the permitted radius (default 500 m).
+    _GEO_RESTRICTED_ROLES = {
+        "STORE_MANAGER", "ACCOUNTANT", "CATALOG_MANAGER",
+        "OPTOMETRIST", "SALES_STAFF", "CASHIER", "WORKSHOP_STAFF", "DESIGN_MANAGER",
+    }
+    user_roles = set(user.get("roles") or [])
+    is_geo_restricted = user.get("geo_restricted") or bool(user_roles & _GEO_RESTRICTED_ROLES)
+    if is_geo_restricted:
         fence_coords = list(user.get("allowed_coordinates") or [])
         fence_coords.extend(_store_fence_coords(user))
     else:
@@ -797,6 +802,8 @@ async def refresh_token(request: RefreshTokenRequest):
     """
     Refresh access token
     """
+    if _token_blacklist.is_revoked(request.token):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     payload = decode_token(request.token)
 
     # Create new token (preserve the force-password-change flag + the deny-only

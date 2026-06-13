@@ -21,6 +21,7 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import attendance_engine
+from ..services.payroll_engine import compute_payroll
 
 # Roles allowed to view HR reporting screens. Mirrors the router-level gate in
 # main.py (_FINANCE_ROLES) and how payroll.py gates its read endpoints.
@@ -1696,8 +1697,8 @@ async def generate_payroll(
     if not payroll_repo or not user_repo:
         return {"message": "Payroll generation initiated", "count": 0}
 
-    # Get all employees for the store
-    employees = user_repo.find_many({"store_ids": active_store})
+    # Get all employees for the store (limit=0 fetches all, avoiding the 100-row default cap)
+    employees = user_repo.find_many({"store_ids": active_store}, limit=0)
 
     generated_count = 0
     for employee in employees or []:
@@ -1731,17 +1732,48 @@ async def generate_payroll(
                 [a for a in (attendance or []) if a.get("status") == "PRESENT"]
             )
 
-        # Basic payroll calculation
-        base_salary = employee.get("salary", 0) or 25000
-        daily_rate = base_salary / 26
-        gross = daily_rate * present_days
-        deductions = gross * 0.1  # 10% deductions
-        net = gross - deductions
+        # Try to get structured salary config; compute statutory payroll if available.
+        employee_id = employee.get("user_id") or ""
+        db = _get_db()
+        salary_config = None
+        if db and employee_id:
+            try:
+                salary_config = db.get_collection("salary_config").find_one(
+                    {"employee_id": employee_id}
+                )
+            except Exception:
+                salary_config = None
+
+        lwp_days = max(0, (working_days or 26) - (present_days or 0))
+        if salary_config:
+            result = compute_payroll(
+                salary_config,
+                month=month,
+                year=year,
+                lwp_days=float(lwp_days),
+            )
+            gross = result["earned_gross"]
+            total_deductions = (
+                result["pf"]["employee"]
+                + result["esi_employee"]
+                + result["pt"]
+                + result.get("tds", 0.0)
+            )
+            net = result["net_pay"]
+            base_salary = salary_config.get("basic", salary_config.get("basic_salary", 0))
+        else:
+            # No salary config on file: estimate from the employee's legacy salary field.
+            base_salary = employee.get("salary", 0) or 25000
+            daily_rate = base_salary / 26
+            gross = round(daily_rate * (present_days or 0), 2)
+            # Statutory minimums (EPF 12% + PT ₹200); real deductions computed when config exists.
+            total_deductions = round(gross * 0.12 + 200, 2)
+            net = round(gross - total_deductions, 2)
 
         payroll_repo.create(
             {
                 "payroll_id": str(uuid.uuid4()),
-                "employee_id": employee.get("user_id"),
+                "employee_id": employee_id,
                 "employee_name": employee.get("full_name"),
                 "store_id": active_store,
                 "year": year,
@@ -1750,11 +1782,12 @@ async def generate_payroll(
                 "present_days": present_days,
                 "base_salary": base_salary,
                 "gross_salary": round(gross, 2),
-                "deductions": round(deductions, 2),
+                "deductions": round(total_deductions, 2),
                 "net_salary": round(net, 2),
                 "status": "DRAFT",
                 "generated_by": current_user.get("user_id"),
                 "generated_at": datetime.now().isoformat(),
+                "has_salary_config": bool(salary_config),
             }
         )
         generated_count += 1

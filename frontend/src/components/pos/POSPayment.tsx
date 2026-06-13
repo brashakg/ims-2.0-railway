@@ -27,16 +27,16 @@ function fc(amount: number | undefined | null): string {
 // ============================================================================
 // Cash Change Calculator
 // ============================================================================
-function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: number }) {
+function CashChangeCalculator({ balance }: { balance: number }) {
   const [cashTendered, setCashTendered] = useState('');
   const tendered = parseFloat(cashTendered) || 0;
-  const change = tendered - grandTotal;
+  const change = tendered - balance;
   const quickAmounts = [
-    Math.ceil(grandTotal / 100) * 100,
-    Math.ceil(grandTotal / 500) * 500,
-    Math.ceil(grandTotal / 1000) * 1000,
-    Math.ceil(grandTotal / 2000) * 2000,
-  ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
+    Math.ceil(balance / 100) * 100,
+    Math.ceil(balance / 500) * 500,
+    Math.ceil(balance / 1000) * 1000,
+    Math.ceil(balance / 2000) * 2000,
+  ].filter((v, i, a) => v >= balance && a.indexOf(v) === i).slice(0, 3);
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
@@ -44,7 +44,7 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
       <div className="flex gap-2 items-center">
         <span className="text-gray-500 text-lg">{'₹'}</span>
         <input type="number" value={cashTendered} onChange={(e) => setCashTendered(e.target.value)}
-          onFocus={(e) => e.target.select()} placeholder={String(Math.round(grandTotal))}
+          onFocus={(e) => e.target.select()} placeholder={String(Math.round(balance))}
           className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-lg font-semibold text-center text-gray-900" />
       </div>
       <div className="flex gap-2">
@@ -89,7 +89,7 @@ export function StepPayment() {
 
   const handleEMISubmit = () => {
     const downPayment = parseFloat(emiDownPayment) || 0;
-    if (downPayment < 0 || downPayment >= balance) return;
+    if (downPayment <= 0 || downPayment >= balance) return;
     // POS-2: emiBalance is the financed amount (loan principal).
     // `amount` on the payment entry is the down-payment collected NOW
     // (which reduces balance_due); emiBalance is forwarded to the backend
@@ -216,7 +216,7 @@ export function StepPayment() {
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
                 <div className="flex justify-between"><span className="text-gray-700">Loan Amount:</span><span className="font-semibold text-gray-900">{'₹'}{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
                 <div className="flex justify-between"><span className="text-gray-700">Processing Fee (2%):</span><span className="font-semibold text-gray-900">{'₹'}{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), ((store as any).emiAnnualRate ?? 0.12) / 12, emiTenure) * 100) / 100}</span></div>
               </div>
             )}
             <div className="flex gap-2">
@@ -224,7 +224,7 @@ export function StepPayment() {
                 setShowEMIForm(false);
                 setEmiDownPayment('');
               }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-100 text-gray-700 hover:bg-gray-200">Cancel</button>
-              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-white hover:bg-bv-red-700'}`}>Add EMI</button>
+              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) <= 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) <= 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-white hover:bg-bv-red-700'}`}>Add EMI</button>
             </div>
           </div>
         </div>
@@ -232,7 +232,7 @@ export function StepPayment() {
 
       {(store.payments || []).length > 0 && <div className="space-y-2">
         {(store.payments || []).map((p, i) => (
-          <div key={i} className="bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
+          <div key={p.timestamp ?? i} className="bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-green-600" />
@@ -259,7 +259,7 @@ export function StepPayment() {
 
       {/* Cash change calculator — only if cash payment was added */}
       {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
-        <CashChangeCalculator grandTotal={total} totalPaid={paid} />
+        <CashChangeCalculator balance={balance} />
       )}
 
       {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
