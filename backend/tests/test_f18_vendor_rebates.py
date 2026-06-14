@@ -285,12 +285,44 @@ def test_post_writes_ledger_credit_note_and_reduces_ap(db):
     assert vendor_leg["credit_paise"] == 375_000 and "V-1" in vendor_leg["ledger"]
     assert rebate_leg["debit_paise"] == 375_000
     assert out["tally_voucher"]["dispatched"] is False
-    # AP REDUCTION: a credit note with NO bill_id (build_aging nets it off net_payable)
-    cn = db.get_collection("vendor_credit_notes").find_one(
+    # AP REDUCTION: the credit note lands in the collection AP readers consume
+    # (vendor_debit_notes), with NO bill_id so build_aging nets it off net_payable.
+    cn = db.get_collection(svc.CREDIT_NOTES_COLLECTION).find_one(
         {"rebate_id": out["rebate_id"]}
     )
+    assert svc.CREDIT_NOTES_COLLECTION == "vendor_debit_notes"
     assert cn is not None and cn["bill_id"] is None and cn["vendor_id"] == "V-1"
     assert cn["amount"] == 3750.0  # rupees, reduces what we owe the vendor
+
+
+def test_post_actually_reduces_net_payable_via_build_aging(db):
+    """The whole point: after posting, the vendor's AP net_payable drops by the
+    rebate. Feed the SAME vendor_debit_notes the credit note lands in to
+    ap_engine.build_aging and assert net_payable fell by the rupee rebate."""
+    from api.services import ap_engine
+
+    _seed_bills(db)  # 3 x Rs 50,000 = Rs 1,50,000 owed to V-1
+    ag = _agreement(db)
+    bills = [
+        {
+            "vendor_id": "V-1",
+            "bill_id": "PI-0",
+            "bill_date": "2026-05-10",
+            "total_amount": 150000.0,
+            "due_date": "2026-05-30",
+        },
+    ]
+    before = ap_engine.build_aging(bills, [], [], as_of_iso="2026-06-15")
+    out = svc.post(db, ag["agreement_id"], "2026-05-01", "2026-06-01", actor=_acct())
+    debit_notes = db.get_collection(svc.CREDIT_NOTES_COLLECTION).find(
+        {"vendor_id": "V-1"}
+    )
+    after = ap_engine.build_aging(bills, [], list(debit_notes), as_of_iso="2026-06-15")
+    # rebate = Rs 3,750 -> net_payable drops by exactly that
+    assert round(before["net_payable"] - after["net_payable"], 2) == round(
+        out["rebate_paise"] / 100.0, 2
+    )
+    assert after["unallocated_credits"] == 3750.0
 
 
 def test_double_post_same_period_blocked(db):
@@ -349,7 +381,10 @@ def test_no_tier_clears_posts_zero_rebate_no_credit_note(db):
     out = svc.post(db, ag["agreement_id"], "2026-05-01", "2026-06-01", actor=_acct())
     assert out["rebate_paise"] == 0 and out["status"] == "POSTED"
     # zero rebate -> no AP-reducing credit note written
-    assert db.get_collection("vendor_credit_notes").docs == []
+    assert (
+        db.get_collection(svc.CREDIT_NOTES_COLLECTION).find({"source": "VOLUME_REBATE"})
+        == []
+    )
 
 
 def test_engine_db_absent_failsoft():

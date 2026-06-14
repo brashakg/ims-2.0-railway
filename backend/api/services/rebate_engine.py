@@ -279,7 +279,13 @@ from datetime import datetime, timezone
 
 COLLECTION_AGREEMENTS = "vendor_rebate_agreements"
 COLLECTION_LEDGER = "vendor_rebate_ledger"
-CREDIT_NOTES_COLLECTION = "vendor_credit_notes"
+# The AP-reducing credit note MUST land in the collection every AP/aging reader
+# consumes -- ap_engine.build_aging is fed `vendor_debit_notes` (finance._ap_rows,
+# vendors aging endpoints). A volume rebate is, in AP terms, a debit-note-direction
+# reduction of what we owe the vendor: a row with bill_id=None nets off net_payable.
+# (Writing to a separate `vendor_credit_notes` collection would be invisible to AP
+# and the rebate reduction would silently never happen -- adversarial P1.)
+CREDIT_NOTES_COLLECTION = "vendor_debit_notes"
 BILLS_COLLECTION = "vendor_bills"
 PERIODS = ("MONTHLY", "QUARTERLY", "ANNUAL")
 
