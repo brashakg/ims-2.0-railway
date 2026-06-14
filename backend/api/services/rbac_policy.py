@@ -2370,6 +2370,27 @@ POLICY: List[Dict[str, object]] = [
                     "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #38 endless aisle (own /api/v1/endless-aisle prefix). All
+    # STORE_MANAGER+; behind endless_aisle.enabled (off -> 403). Source-accept
+    # 2-step; company-borne shipping; store-scoped per route. ---
+    {"method": "GET", "path": "/api/v1/endless-aisle/availability",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "POST", "path": "/api/v1/endless-aisle/requests",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "POST", "path": "/api/v1/endless-aisle/requests/{request_id}/accept",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "POST", "path": "/api/v1/endless-aisle/requests/{request_id}/reject",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "POST", "path": "/api/v1/endless-aisle/requests/{request_id}/create-transfer",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "POST", "path": "/api/v1/endless-aisle/requests/{request_id}/ship",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "POST", "path": "/api/v1/endless-aisle/requests/{request_id}/deliver",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "GET", "path": "/api/v1/endless-aisle/requests",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    {"method": "GET", "path": "/api/v1/endless-aisle/requests/{request_id}",
+     "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
     # Feature #1 cross-store inventory balancing (read-only proposals). Management
     # only; the route itself store-scopes the OUTPUT for a single-store manager.
     {
