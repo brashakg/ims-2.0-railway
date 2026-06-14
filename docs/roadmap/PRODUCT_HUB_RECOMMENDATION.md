@@ -1,8 +1,29 @@
-# Product Hub + Catalog Consolidation — Council Recommendation (AWAITING OWNER APPROVAL)
+# Product Hub + Catalog Consolidation — Council Recommendation (APPROVED — BUILD)
 
-> **Status: AWAITING OWNER APPROVAL — nothing below is built yet.**
+> **Status: APPROVED 2026-06-12 — build starts at Phase 0 (after the in-flight Phase-3 PRs merge).**
+> Owner gave the go ("Approved — Phase 0 first") and locked 4 build decisions (see §5b). Build the
+> sequence below; each phase ships independently. Phase 0 = the catalog-done chokepoint.
 > Owner directive (2026-06-12, verbatim): *"inventory catalog shopify and ims stock needs to have one
 > single screen from where once catalog is done, product purchase can be done"* — council authorized.
+
+## 5b. Round-2 build decisions (2026-06-12, BINDING — override the council drafts where they differ)
+
+1. **Migration = DRAFT NOTHING.** The one-time catalog-status migration marks EVERY existing
+   (~10,800) product `catalog_status=ACTIVE` regardless of completeness. ONLY newly created/edited
+   products must pass the catalog-done rule. No dry-run gate, no existing row demoted to DRAFT — the
+   completeness gate is forward-only. (Supersedes Phase-0's migration sub-step: drop the DRAFT-classify
+   of stockless-incomplete rows; just backfill `catalog_status=ACTIVE` everywhere + stamp `done_gaps`
+   for visibility without gating.)
+2. **PDF import = AI for EVERY PDF.** Phase-3 ingestion always routes PDFs through Claude (the Jarvis
+   key) for extraction (most consistent across formats); Excel/CSV parse directly. Every extracted row
+   lands as an editable DRAFT for human review (never direct-commit). Accept the per-import AI cost +
+   sending the price-list page to the AI.
+3. **Shopify push-lock = LOCK + FLAG, manual unpublish.** A lock blocks NEW pushes/updates AND surfaces
+   a "these N already-live items violate a lock" list with one-click MANUAL unpublish. It does NOT
+   auto-take-down live storefront listings. (Supersedes §6 item 7 "future decision".)
+4. (Round-1, still binding) re-SKU dup SKUs; ACCOUNTANT keeps PO-raise; fuzzy vendor-SKU matching
+   (MATCHED/SUGGESTED/NEW + alias flywheel); legacy `/catalog/products` → 410; `pm.pos_exclude_drafts`
+   POS draft-hide.
 >
 > Two design councils ran (2026-06-12), each = recon → 3 independent designs → 3 adversarial judges →
 > chair synthesis, every claim grounded in file:line against the live repo:
