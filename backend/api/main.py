@@ -66,6 +66,7 @@ from .routers import (
     blind_stock_take_router,
     inventory_balancing_router,
     repair_portal_router,
+    roster_router,
     cl_po_router,
     hr_router,
     workshop_router,
@@ -316,6 +317,13 @@ async def lifespan(app: FastAPI):
                 logger.warning(
                     f"[WARN] VIP personal-triggers index creation skipped: {e}"
                 )
+            # Feature #29 rostering: rosters (store_id,week_start) + unique staff_skills. Fail-soft.
+            try:
+                from .services.roster_engine import ensure_indexes as ensure_roster_indexes
+
+                ensure_roster_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Roster index creation skipped: {e}")
             # Feature #13 spoilage analytics: seed the owner-editable remake
             # reason-code taxonomy singleton (insert-only-if-absent, so an
             # edited taxonomy is never clobbered). Idempotent, fail-soft.
@@ -1255,6 +1263,11 @@ app.include_router(
     tags=["HR"],
     dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
 )
+# Feature #29 rostering: shares the /api/v1/hr prefix but mounted SEPARATELY without
+# the HR finance-role gate -- roster/staff-skills carry their own management+staff
+# role checks inline (store managers roster, not just finance). All-stores-clinical
+# optometrist coverage; NO licence-expiry machinery; store-scoped; no money/POS.
+app.include_router(roster_router, prefix="/api/v1/hr", tags=["Roster"])
 app.include_router(workshop_router, prefix="/api/v1/workshop", tags=["Workshop"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(budgets_router, prefix="/api/v1/budgets", tags=["Budgets"])

@@ -32,6 +32,7 @@ from .family_wallet import router as family_wallet_router
 from .blind_stock_take import router as blind_stock_take_router
 from .inventory_balancing import router as inventory_balancing_router
 from .repair_portal import router as repair_portal_router
+from .roster import router as roster_router
 from .cl_po import router as cl_po_router
 from .hr import router as hr_router
 from .workshop import router as workshop_router
@@ -122,6 +123,7 @@ __all__ = [
     "blind_stock_take_router",
     "inventory_balancing_router",
     "repair_portal_router",
+    "roster_router",
     "cl_po_router",
     "hr_router",
     "workshop_router",
