@@ -2391,6 +2391,22 @@ POLICY: List[Dict[str, object]] = [
      "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
     {"method": "GET", "path": "/api/v1/endless-aisle/requests/{request_id}",
      "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"], "store_scoped": True},
+    # --- Feature #18 vendor volume-rebate tracker (own /api/v1/vendor-rebates).
+    # Finance roles only (mirrors vendor bills/AP). Manual-post; reduces vendor AP. ---
+    {"method": "POST", "path": "/api/v1/vendor-rebates/agreements",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
+    {"method": "GET", "path": "/api/v1/vendor-rebates/agreements",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
+    {"method": "PUT", "path": "/api/v1/vendor-rebates/agreements/{agreement_id}",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
+    {"method": "GET", "path": "/api/v1/vendor-rebates/agreements/{agreement_id}/preview",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
+    {"method": "POST", "path": "/api/v1/vendor-rebates/post",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
+    {"method": "GET", "path": "/api/v1/vendor-rebates/ledger",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
+    {"method": "GET", "path": "/api/v1/vendor-rebates/ledger/{rebate_id}",
+     "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"]},
     # Feature #1 cross-store inventory balancing (read-only proposals). Management
     # only; the route itself store-scopes the OUTPUT for a single-store manager.
     {

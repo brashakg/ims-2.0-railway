@@ -69,6 +69,7 @@ from .routers import (
     roster_router,
     cl_po_router,
     endless_aisle_router,
+    vendor_rebates_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -306,6 +307,14 @@ async def lifespan(app: FastAPI):
                 ensure_repair_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Repair-portal index creation skipped: {e}")
+            # Feature #18 vendor rebates: agreements (vendor_id,active) + UNIQUE
+            # ledger (agreement_id,period_start) double-post backstop. Fail-soft.
+            try:
+                from .services.rebate_engine import ensure_indexes as ensure_rebate_indexes
+
+                ensure_rebate_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Vendor-rebate index creation skipped: {e}")
             # Feature #43 VIP personal-triggers: indexes on personal_triggers
             # ((store_id, active) + customer_id + unique trigger_id). Fail-soft.
             try:
@@ -1266,6 +1275,11 @@ app.include_router(cl_po_router, prefix="/api/v1/cl-po", tags=["CLPurchaseOrders
 # ACCEPT 2-step + ghost-stock re-validation; company bears shipping (booked to
 # the selling store, NOT the customer); POS pricing/tender UNTOUCHED.
 app.include_router(endless_aisle_router, prefix="/api/v1/endless-aisle", tags=["EndlessAisle"])
+# Feature #18 vendor volume-rebate tracker: own /api/v1/vendor-rebates prefix;
+# ACCOUNTANT/ADMIN/SUPERADMIN. Manual-post only; the earned rebate REDUCES vendor
+# AP via a credit note + records a Tally JV intent. (agreement_id,period_start)
+# unique index makes a double-post impossible. No POS touch.
+app.include_router(vendor_rebates_router, prefix="/api/v1/vendor-rebates", tags=["VendorRebates"])
 # Feature #48 multi-category servicing & repair portal: own /api/v1/repairs prefix;
 # per-store service catalog + INTAKE->DELIVERED job lifecycle (guarded transitions),
 # DARK status SMS on READY, store-scoped. POS-billing on DELIVERED is DEFERRED.
