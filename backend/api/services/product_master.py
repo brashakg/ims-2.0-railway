@@ -548,9 +548,14 @@ def normalise_payload(
         # required -- the row persists as catalog_status=DRAFT + done_gaps.
         assert_draft_floor({"category": canonical, "attributes": attributes or {}})
     else:
-        # STRICT (default): the FULL catalog-done gate. Collect-all-missing
-        # required attributes (not raise-on-first) so the 422 names EVERY gap at
-        # once, including the NEW cost_price requirement + the derived tax fields.
+        # STRICT (default): the per-category required-attribute gate + the pricing
+        # invariant (mrp/offer > 0). This is BEHAVIOUR-PRESERVING -- it is the
+        # pre-Phase-0 step-9 gate, unchanged. cost_price is deliberately NOT a
+        # create-blocker: the owner-locked rule gates PURCHASE, not creation (a
+        # product may be created without a known cost and land catalog_status=
+        # DRAFT, then be completed later -- e.g. cost auto-filled from the PO at
+        # GRN receiving). compute_catalog_status below stamps DRAFT + names
+        # cost_price in done_gaps; it is never silently treated as complete.
         if mrp is None or offer_price is None:
             raise ProductMasterError("mrp and offer_price are required.", status=422)
         missing = missing_required_fields(canonical, attributes or {})
@@ -558,8 +563,6 @@ def normalise_payload(
             missing.append("mrp")
         if not _positive_number(offer_price):
             missing.append("offer_price")
-        if not _positive_number(cost_price):
-            missing.append("cost_price")
         if missing:
             # De-dupe preserving order; name them all in the message + point
             # `field` at the first one for the FE highlight.
@@ -650,7 +653,8 @@ def normalise_payload(
     # --- Phase 0: stamp the catalog-done chokepoint on the spine ---
     # compute_catalog_status reads the doc we just built (cost_price + the
     # derived hsn/gst are now present), so the stamp is consistent with what was
-    # validated. In STRICT mode it is ACTIVE (we already 422'd otherwise); in
+    # validated. In STRICT mode it is ACTIVE when complete, or DRAFT naming
+    # cost_price when the only missing piece is the not-yet-known cost; in
     # as_draft mode it reflects the real gaps so the Buy Desk + completion UI can
     # name them.
     status, gaps = compute_catalog_status(doc)
@@ -1535,31 +1539,26 @@ def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
     route-level restamp hook (products.py update_product).
 
     Returns a dict of fields to fold into the update payload:
-      * completing a DRAFT  -> {catalog_status: ACTIVE, done_gaps: []}
-      * an edit that keeps/makes a row complete on an already-ACTIVE row -> {} (no-op)
-      * an edit that would BREAK the done-rule on a row READ as ACTIVE -> raises
-        ProductMasterError(status=422, code=WOULD_DEMOTE) carrying done_gaps.
-      * a still-incomplete DRAFT -> {catalog_status: DRAFT, done_gaps: [...]}
+      * a DRAFT that the edit completes  -> {catalog_status: ACTIVE, done_gaps: []}
+      * a DRAFT that stays incomplete     -> {catalog_status: DRAFT, done_gaps: [...]}
+      * a row that READS as ACTIVE (explicit ACTIVE *or* a missing/blank status)
+        -> {} (no-op).
 
-    Never-demote: a row that reads ACTIVE (incl. a MISSING status) can only be
-    SAVED when it stays complete; otherwise the edit is refused.
+    NEVER-DEMOTE is the owner-locked rule (DECISION A: the catalog-done gate is
+    FORWARD-ONLY -- it only ever PROMOTES a draft, it never demotes or blocks an
+    edit to a live row). This is load-bearing: the ~10,800 backfilled/legacy rows
+    are all ACTIVE yet most are incomplete-by-done-rule (no cost_price), so
+    touching an effective-ACTIVE row here would 422/flip the entire existing
+    catalog on any routine edit. An effective-ACTIVE row is therefore left
+    EXACTLY as-is -- the status field is never written, never recomputed.
     """
+    prior = effective_catalog_status(current or {})
+    if prior == CATALOG_STATUS_ACTIVE:
+        return {}  # forward-only: live rows are never demoted or re-judged.
+
+    # prior is an explicit DRAFT: complete -> ACTIVE (auto-flip), else refresh gaps.
     merged = {**(current or {}), **(patch or {})}
     status, gaps = compute_catalog_status(merged)
-    prior = effective_catalog_status(current or {})
-
-    if prior == CATALOG_STATUS_ACTIVE:
-        if status == CATALOG_STATUS_ACTIVE:
-            return {}  # stays complete -> leave status as-is (no churn)
-        # Would demote a live row -> refuse loudly.
-        err = ProductMasterError(
-            "This edit would make a live product incomplete.", status=422
-        )
-        err.code = "WOULD_DEMOTE"
-        err.done_gaps = gaps
-        raise err
-
-    # prior is DRAFT: complete -> ACTIVE (auto-flip), else refresh the gap list.
     if status == CATALOG_STATUS_ACTIVE:
         return {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
     return {"catalog_status": CATALOG_STATUS_DRAFT, "done_gaps": gaps}

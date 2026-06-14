@@ -265,15 +265,23 @@ def _refresh_collections_after_product(created_or_updated) -> None:
         pass
 
 
-def _canonical_door_payload(product: "ProductCreate") -> dict:
+def _canonical_door_payload(
+    product: "ProductCreate", *, as_draft: bool = False
+) -> dict:
     """Map a validated flat ProductCreate into the canonical create payload the
-    product_master door expects (category + attributes + pricing + identity)."""
+    product_master door expects (category + attributes + pricing + identity).
+
+    `as_draft` (Hub Phase 0) flows through to the canonical door so an incomplete
+    row persists as catalog_status=DRAFT instead of 422'ing -- still gated by the
+    brand+model+category draft floor inside product_master."""
     return {
         "category": product.category,
         "attributes": dict(product.attributes or {}),
         "mrp": product.mrp,
         "offer_price": product.offer_price,
         "sku": product.sku,
+        "cost_price": product.cost_price,
+        "as_draft": bool(as_draft),
         "discount_category": product.discount_category,
         "hsn_code": product.hsn_code,
         "gst_rate": product.gst_rate,
@@ -301,13 +309,15 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
 
 
 def _create_via_canonical_door(
-    product: "ProductCreate", current_user: dict, *, source: str
+    product: "ProductCreate", current_user: dict, *, source: str, as_draft: bool = False
 ) -> dict:
     """Delegate a FORM/BULK create to the ONE canonical product_master door.
 
     Maps ProductMasterError -> the same HTTP codes this router already used
     (422 validation / 400 MRP-or-SKU). Returns the created canonical spine doc
-    (with product_id + sku). Assumes the repo is available (caller checked)."""
+    (with product_id + sku). Assumes the repo is available (caller checked).
+
+    `as_draft` (Hub Phase 0) lets an incomplete product persist as a DRAFT."""
     from ..dependencies import (
         get_audit_repository as _get_audit_repository,
         get_db as _get_db_dep,
@@ -321,13 +331,15 @@ def _create_via_canonical_door(
                 CatalogVariantRepository,
             )
 
-            variant_repo = CatalogVariantRepository(db.get_collection("catalog_variants"))
+            variant_repo = CatalogVariantRepository(
+                db.get_collection("catalog_variants")
+            )
     except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
         variant_repo = None
 
     try:
         return _pm.create_via_door(
-            _canonical_door_payload(product),
+            _canonical_door_payload(product, as_draft=as_draft),
             source=source,
             actor=current_user.get("user_id"),
             extra_fields=_form_extra_fields(product),
@@ -394,6 +406,11 @@ class ProductCreate(BaseModel):
     size: Optional[str] = None
     mrp: float = Field(..., gt=0)
     offer_price: float = Field(..., gt=0)
+    # Hub Phase 0: the per-unit COST that purchase needs. Required for a product
+    # to reach catalog "done" (catalog_status ACTIVE) and be purchasable; it is
+    # NOT a create-blocker -- a create without it succeeds and lands DRAFT with
+    # cost_price named in done_gaps (cost is often only known later, at GRN).
+    cost_price: Optional[float] = Field(default=None, ge=0)
     hsn_code: Optional[str] = None
     # Persisted as `gst_rate` — the key seed data, reports and billing all
     # read. Was previously `tax_rate`, which no reader looked at.
@@ -447,6 +464,9 @@ class ProductUpdate(BaseModel):
     color: Optional[str] = None
     mrp: Optional[float] = Field(None, gt=0)
     offer_price: Optional[float] = Field(None, gt=0)
+    # Hub Phase 0: editing cost_price can complete a DRAFT (auto-flip ACTIVE) or,
+    # if cleared on a live row, trip the never-demote guard.
+    cost_price: Optional[float] = Field(None, ge=0)
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     is_active: Optional[bool] = None
@@ -515,6 +535,12 @@ class BulkCreateRequest(BaseModel):
     """
 
     products: List[ProductCreate] = Field(..., min_length=1, max_length=500)
+    # Hub Phase 0: a batch flag. as_draft=true persists incomplete rows as
+    # catalog_status=DRAFT (above the brand+model+category floor) instead of
+    # failing them; default (strict) keeps today's loud per-row rejection on
+    # missing required attributes. A row without cost_price is NOT failed in
+    # either mode -- it persists DRAFT with cost_price named in done_gaps.
+    as_draft: bool = False
 
 
 # ----------------------------------------------------------------------------
@@ -585,7 +611,9 @@ async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
-    tag: Optional[str] = Query(None, description="Filter to products carrying this normalised tag"),
+    tag: Optional[str] = Query(
+        None, description="Filter to products carrying this normalised tag"
+    ),
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
@@ -604,7 +632,9 @@ async def list_products(
     # any store the user can access), so it is intentionally NOT store-scoped and
     # must not call validate_store_access here.
     active_store = store_id or current_user.get("active_store_id", "")
-    cache_key = f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
+    cache_key = (
+        f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
+    )
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -658,6 +688,7 @@ async def list_products(
 @router.post("", status_code=201)
 async def create_product(
     product: ProductCreate,
+    as_draft: bool = False,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Create a new product.
@@ -669,6 +700,13 @@ async def create_product(
     enforced; STRICT now adds the registry's category-conditional required-field
     gate (e.g. a FRAME without colour_code is rejected at entry). Auth/RBAC and
     the {product_id, sku} response shape are unchanged.
+
+    Hub Phase 0: `?as_draft=true` lets an incomplete product persist as
+    catalog_status=DRAFT (still above the brand+model+category floor) instead of
+    422'ing on a missing required attribute. cost_price is part of the catalog-
+    done rule but NOT a create-blocker: a STRICT create without it succeeds and
+    lands DRAFT (not purchasable until cost is filled). The persisted row always
+    carries catalog_status + done_gaps so the Buy Desk can name what is missing.
     """
     # Block save when category is blank/null/missing (server-side guard for the
     # GST-default bug: an uncategorized product would otherwise fall back to a
@@ -688,9 +726,10 @@ async def create_product(
     # an incomplete product (e.g. FRAME w/o colour_code) is rejected the same way
     # in stub mode as it is with a live repo. The create path below re-validates
     # via the same core; this is the early loud 422 with the offending field.
+    # With as_draft the gate relaxes to the DRAFT floor (brand+model+category).
     try:
         _pm.build_canonical_product(
-            _canonical_door_payload(product), source="FORM"
+            _canonical_door_payload(product, as_draft=as_draft), source="FORM"
         )
     except _pm.ProductMasterError as err:
         raise HTTPException(status_code=err.status, detail=err.message) from err
@@ -698,7 +737,9 @@ async def create_product(
     repo = get_product_repository()
 
     if repo is not None:
-        created = _create_via_canonical_door(product, current_user, source="FORM")
+        created = _create_via_canonical_door(
+            product, current_user, source="FORM", as_draft=as_draft
+        )
         if created:
             # Invalidate product cache for this store
             from ..services.cache import cache
@@ -727,7 +768,9 @@ async def create_product(
 # Grid is the only caller.
 
 
-def _validate_bulk_row(product: ProductCreate, seen_skus: set) -> List[str]:
+def _validate_bulk_row(
+    product: ProductCreate, seen_skus: set, *, as_draft: bool = False
+) -> List[str]:
     """Validate one bulk-create row WITHOUT raising. Returns a list of human
     error strings (empty == valid). Mirrors the single-create checks:
       - category present + recognized (_validate_category_or_422)
@@ -739,6 +782,10 @@ def _validate_bulk_row(product: ProductCreate, seen_skus: set) -> List[str]:
     Normalizes product.category in place on success so the persist step uses
     the canonical value. (pydantic already enforced mrp/offer_price > 0 and the
     cl_axis/axis 0-180 + pack_size >= 1 ranges before this is reached.)
+
+    Hub Phase 0: with `as_draft` the registry gate relaxes to the DRAFT floor
+    (brand+model+category) so an incomplete row is accepted (persisted DRAFT)
+    rather than reported as a failure -- mirroring the FORM door.
     """
     errors: List[str] = []
 
@@ -748,13 +795,13 @@ def _validate_bulk_row(product: ProductCreate, seen_skus: set) -> List[str]:
     except HTTPException as exc:
         errors.append(str(exc.detail))
 
-    # Registry strict required-field gate (step-9). Build the canonical payload
-    # the same way the FORM door does so a missing colour_code / power / expiry
-    # is reported here exactly as the FORM door would 422 on it. Captures the
-    # ProductMasterError message instead of raising (bulk reports per row).
+    # Registry required-field gate (step-9). Build the canonical payload the same
+    # way the FORM door does so a missing colour_code / power / expiry / cost is
+    # reported here exactly as the FORM door would 422 on it (or, with as_draft,
+    # relaxed to the floor). Captures the message instead of raising.
     try:
         _pm.build_canonical_product(
-            _canonical_door_payload(product), source="BULK"
+            _canonical_door_payload(product, as_draft=as_draft), source="BULK"
         )
     except _pm.ProductMasterError as exc:
         errors.append(exc.message)
@@ -802,7 +849,7 @@ async def bulk_create_products(
 
     for index, product in enumerate(body.products):
         sku_norm = str(product.sku or "").strip()
-        errors = _validate_bulk_row(product, seen_skus)
+        errors = _validate_bulk_row(product, seen_skus, as_draft=body.as_draft)
 
         # Cross-batch dedupe: reject a SKU that already exists in the catalog.
         # Only checked once the SKU is otherwise valid (avoids a pointless DB
@@ -850,10 +897,12 @@ async def bulk_create_products(
             # validated above, so this should not raise; a stray
             # ProductMasterError is treated as a row-level create failure.
             created = _create_via_canonical_door(
-                product, current_user, source="BULK"
+                product, current_user, source="BULK", as_draft=body.as_draft
             )
         except HTTPException as exc:
-            logger.warning("[BULK-CREATE] create rejected for %s: %s", sku_norm, exc.detail)
+            logger.warning(
+                "[BULK-CREATE] create rejected for %s: %s", sku_norm, exc.detail
+            )
             created = None
         except Exception as exc:  # noqa: BLE001
             logger.warning("[BULK-CREATE] create failed for %s: %s", sku_norm, exc)
@@ -1340,7 +1389,9 @@ async def list_categories(current_user: dict = Depends(get_current_user)):
 
 @router.get("/tags/list")
 async def list_tags(
-    prefix: Optional[str] = Query(None, description="Typeahead prefix (case-insensitive)"),
+    prefix: Optional[str] = Query(
+        None, description="Typeahead prefix (case-insensitive)"
+    ),
     limit: int = Query(200, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1442,6 +1493,13 @@ async def update_product(
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
         update_data["updated_by"] = current_user.get("user_id")
+
+        # Hub Phase 0: restamp the catalog-done chokepoint on the merged doc.
+        # Auto-promotes a DRAFT the edit just completed (e.g. cost_price filled
+        # in -> catalog_status ACTIVE, done_gaps cleared). Forward-only: a row
+        # that reads ACTIVE (incl. a legacy row with no catalog_status) is left
+        # untouched -- never demoted, never re-judged (DECISION A).
+        update_data.update(_pm.restamp_on_update(existing, update_data))
 
         if repo.update(product_id, update_data):
             # Step-13: recompute SMART collections (fail-soft). Use the merged doc
