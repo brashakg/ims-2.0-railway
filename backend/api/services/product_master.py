@@ -1154,3 +1154,17 @@ def list_products(
         flt["brand"] = brand
     rows = product_repo.find_many(flt, skip=skip, limit=limit)
     return {"products": rows, "total": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# Hub Phase 0 -- catalog-done chokepoint (SKELETON; filled in below)
+# ---------------------------------------------------------------------------
+
+def missing_required_fields(category, attributes):
+    """Placeholder -- replaced by Hub Phase 0 implementation."""
+    return []
+
+
+def catalog_readiness(product_doc):
+    """Placeholder -- replaced by Hub Phase 0 implementation."""
+    return {"complete": False, "missing": [], "blockers": [], "purchasable": False}
