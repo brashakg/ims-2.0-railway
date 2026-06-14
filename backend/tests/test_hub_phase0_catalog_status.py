@@ -702,3 +702,91 @@ def test_http_put_null_price_does_not_corrupt_active(client):
     body = client.get(f"/api/v1/products/{pid}", headers=h).json()
     assert body["mrp"] == 5000.0, f"mrp corrupted: {body.get('mrp')}"
     assert body.get("color") == "RED"
+
+
+# ===========================================================================
+# 7. Re-verify-pass fixes (2nd adversarial round on the fixed code)
+# ===========================================================================
+
+
+def test_draft_floor_is_category_aware_services_needs_no_brand_or_model():
+    # SERVICES requires only `name` -- the as_draft floor must NOT demand a brand
+    # or model it never has (else the looser draft mode rejects what strict
+    # accepts). Previously raised "needs a brand".
+    doc = pm.normalise_payload(
+        category="SERVICES",
+        attributes={"name": "Lens fitting"},
+        mrp=500.0,
+        offer_price=450.0,
+        sku="SVC-DRAFT-1",
+        cost_price=None,
+        as_draft=True,
+    )
+    assert doc["catalog_status"] == pm.CATALOG_STATUS_DRAFT
+
+
+def test_draft_floor_optical_lens_needs_no_model():
+    # OPTICAL_LENS requires brand+index+coating, NO model -- an as_draft create
+    # with brand + index (no model, no coating) must persist DRAFT, not 422.
+    # Previously raised "needs a model".
+    doc = pm.normalise_payload(
+        category="OPTICAL_LENS",
+        attributes={"brand_name": "Zeiss", "index": "1.60"},
+        mrp=3000.0,
+        offer_price=2700.0,
+        sku="LS-DRAFT-1",
+        cost_price=None,
+        as_draft=True,
+    )
+    assert doc["catalog_status"] == pm.CATALOG_STATUS_DRAFT
+    assert "coating" in doc["done_gaps"]
+
+
+def test_draft_floor_still_requires_category():
+    # The floor never relaxes the category requirement.
+    with pytest.raises(pm.ProductMasterError):
+        pm.normalise_payload(
+            category="NOPE",
+            attributes={"name": "x"},
+            mrp=500.0,
+            offer_price=450.0,
+            sku="BAD-CAT",
+            as_draft=True,
+        )
+
+
+def test_flat_model_folds_into_both_model_no_and_model_name():
+    # The door must fill BOTH model identity keys from a flat top-level `model`
+    # (read-side overlay already does). Categories keying on model_name (CL,
+    # SMARTWATCH, ...) would otherwise 422 on a flat create.
+    out = pm.normalise_door_payload(
+        {
+            "category": "CONTACT_LENS",
+            "brand": "Acuvue",
+            "model": "Oasys",
+            "attributes": {},
+        },
+        source="FORM",
+    )
+    assert out["attributes"]["model_no"] == "Oasys"
+    assert out["attributes"]["model_name"] == "Oasys"
+
+
+def test_flat_model_create_of_model_name_category_not_falsely_422():
+    # A strict CONTACT_LENS create via the flat FORM contract (top-level model)
+    # with power + expiry in attributes must validate -- model_name is folded.
+    doc = pm.build_canonical_product(
+        {
+            "category": "CONTACT_LENS",
+            "brand": "Acuvue",
+            "model": "Oasys",
+            "attributes": {"power": "-2.00", "expiry_date": "2027-01-01"},
+            "mrp": 1200.0,
+            "offer_price": 1000.0,
+            "cost_price": 500.0,
+            "sku": "CL-FLAT-1",
+        },
+        source="FORM",
+    )
+    assert doc["attributes"]["model_name"] == "Oasys"
+    assert doc["catalog_status"] == pm.CATALOG_STATUS_ACTIVE

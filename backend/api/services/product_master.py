@@ -880,6 +880,14 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
         val = p.get(top_key)
         if val is not None and not (isinstance(val, str) and not val.strip()):
             attrs.setdefault(attr_key, val)
+    # A flat top-level `model` fills BOTH model_no AND model_name (mirrors the
+    # read-side _overlay_attributes). Several categories key identity on
+    # model_name (CONTACT_LENS, COLORED_CONTACT_LENS, SMARTWATCH, ...), so without
+    # this a flat FORM/BULK create supplying only `model` would be 422'd for a
+    # "missing model_name" the status stamp would otherwise have read fine.
+    _model = p.get("model")
+    if _model is not None and not (isinstance(_model, str) and not _model.strip()):
+        attrs.setdefault("model_name", _model)
     p["attributes"] = attrs
     p["_source"] = source if source in VALID_DOOR_SOURCES else "FORM"
     return p
@@ -1486,21 +1494,34 @@ def effective_catalog_status(doc: Dict[str, Any]) -> str:
 
 def assert_draft_floor(doc: Dict[str, Any]) -> None:
     """Reject (422) a payload below the as_draft FLOOR: even a draft must carry a
-    resolvable category + brand + model. Raises ProductMasterError naming the
-    first floor field that is missing.
+    resolvable category PLUS the identity its category actually keys on.
+
+    The floor is DERIVED from the category's own required set so the looser draft
+    mode can never reject a payload the stricter (as_draft=False) mode would
+    accept. A category that does not require a brand (SERVICES requires only
+    `name`) or a model (OPTICAL_LENS requires brand+index+coating; SERVICES has
+    neither) is not asked for one. Raises naming the first missing floor field.
     """
-    attrs = _overlay_attributes(doc or {})
-    if resolve_category((doc or {}).get("category")) is None:
+    canonical = resolve_category((doc or {}).get("category"))
+    if canonical is None:
         raise ProductMasterError(
             "A draft product still needs a valid category.",
             status=422,
             field="category",
         )
-    if _is_blank(attrs.get("brand_name")):
+    spec = category_spec(canonical)
+    required = set(spec.required if spec else ())
+    attrs = _overlay_attributes(doc or {})
+    # Brand floor ONLY when the category requires a brand.
+    if "brand_name" in required and _is_blank(attrs.get("brand_name")):
         raise ProductMasterError(
             "A draft product still needs a brand.", status=422, field="brand_name"
         )
-    if all(_is_blank(attrs.get(k)) for k in _MODEL_FLOOR_KEYS):
+    # Model floor ONLY when the category keys identity on a model (model_no or
+    # model_name appears in its required set); then at least one must be present.
+    if any(k in required for k in _MODEL_FLOOR_KEYS) and all(
+        _is_blank(attrs.get(k)) for k in _MODEL_FLOOR_KEYS
+    ):
         raise ProductMasterError(
             "A draft product still needs a model.", status=422, field="model_no"
         )
