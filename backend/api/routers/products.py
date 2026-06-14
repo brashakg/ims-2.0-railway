@@ -462,6 +462,14 @@ class ProductUpdate(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
+    # Hub Phase 0: a partial attributes patch. This is the ONLY spine-restamp
+    # door, and several categories carry their catalog-done required fields IN
+    # attributes, not in the flat brand/model/color columns the overlay covers --
+    # CONTACT_LENS/COLORED_CONTACT_LENS need power + expiry_date, OPTICAL_LENS
+    # needs index + coating. Without an attributes channel a DRAFT missing only
+    # one of those could NEVER be completed/promoted here. Deep-merged onto the
+    # existing attributes before the restamp so the done-rule sees the filled gap.
+    attributes: Optional[dict] = None
     mrp: Optional[float] = Field(None, gt=0)
     offer_price: Optional[float] = Field(None, gt=0)
     # Hub Phase 0: editing cost_price can complete a DRAFT (auto-flip ACTIVE) or,
@@ -1459,6 +1467,26 @@ async def update_product(
 
         update_data = product.model_dump(exclude_unset=True)
 
+        # Hub Phase 0 hardening: drop explicit-null values before any persist.
+        # ProductUpdate fields are Optional, so a client can send mrp:null /
+        # offer_price:null -- which slips past Field(gt=0) (it only constrains a
+        # PRESENT float) AND past _assert_mrp_ge_offer (it early-returns on None)
+        # AND past the never-demote restamp, then $sets null onto a live
+        # purchasable product's price. Mirrors the service-layer update_product
+        # None-strip. A field is CLEARED with its empty value ("" / []), never null.
+        update_data = {k: v for k, v in update_data.items() if v is not None}
+
+        # Hub Phase 0: deep-merge a partial attributes patch onto the existing
+        # attributes so a DRAFT's in-attributes gap (CL power/expiry_date,
+        # OPTICAL_LENS index/coating) can be filled and auto-promoted by the
+        # restamp below. An explicit value in the patch wins; existing keys are
+        # preserved. Persisted as the full merged attributes dict.
+        if "attributes" in update_data:
+            update_data["attributes"] = {
+                **(existing.get("attributes") or {}),
+                **(update_data["attributes"] or {}),
+            }
+
         # Validate modality enum if a CL modality is being set.
         if update_data.get("modality") and update_data["modality"] not in CL_MODALITIES:
             raise HTTPException(
@@ -1494,17 +1522,21 @@ async def update_product(
 
         update_data["updated_by"] = current_user.get("user_id")
 
-        # Hub Phase 0: restamp the catalog-done chokepoint on the merged doc.
-        # Auto-promotes a DRAFT the edit just completed (e.g. cost_price filled
-        # in -> catalog_status ACTIVE, done_gaps cleared). Forward-only: a row
-        # that reads ACTIVE (incl. a legacy row with no catalog_status) is left
-        # untouched -- never demoted, never re-judged (DECISION A).
-        update_data.update(_pm.restamp_on_update(existing, update_data))
-
         if repo.update(product_id, update_data):
+            # Hub Phase 0: apply the catalog-done restamp as a GUARDED single-doc
+            # write -- NOT folded into the blind $set above. Auto-promotes a DRAFT
+            # the edit just completed (e.g. cost_price / CL power filled in ->
+            # catalog_status ACTIVE). The guard (find_one_and_update keyed on
+            # catalog_status=DRAFT) means a concurrent edit that already promoted
+            # the row is not clobbered, and a row that reads ACTIVE (incl. a
+            # legacy row with no catalog_status) is left untouched -- never
+            # demoted, never re-judged (forward-only, DECISION A).
+            status_fields = _pm.apply_restamp_atomic(
+                product_id, existing, update_data, product_repo=repo
+            )
             # Step-13: recompute SMART collections (fail-soft). Use the merged doc
-            # so the resolver sees the post-update tags/category/brand.
-            merged = {**existing, **update_data}
+            # so the resolver sees the post-update tags/category/brand + status.
+            merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
             return {"message": "Product updated", "product_id": product_id}
 

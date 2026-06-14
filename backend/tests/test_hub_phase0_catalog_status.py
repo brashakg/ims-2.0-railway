@@ -475,3 +475,230 @@ def test_migration_real_filter_stamps_only_legacy(mongo_products):
     assert got["active"] == "ACTIVE"
     # idempotent on the real filter too
     assert mig._backfill(mongo_products, apply=True)["matched"] == 0
+
+
+# ===========================================================================
+# 6. Adversarial-pass fixes (PR #664 chair: FIX_THEN_SHIP)
+# ===========================================================================
+
+
+def test_restamp_promotes_cl_draft_when_attributes_completed():
+    # P1: a CONTACT_LENS DRAFT whose only gap is the in-attributes power must be
+    # promotable. The route deep-merges the attributes patch; restamp then sees a
+    # complete attributes dict and flips ACTIVE.
+    current = {
+        "category": "CONTACT_LENS",
+        "attributes": {
+            "brand_name": "Acuvue",
+            "model_name": "Oasys",
+            "expiry_date": "2027-01-01",
+        },
+        "mrp": 1200.0,
+        "offer_price": 1000.0,
+        "cost_price": 500.0,
+        "hsn_code": "90013000",
+        "gst_rate": 5.0,
+        "catalog_status": "DRAFT",
+        "done_gaps": ["power"],
+    }
+    # route-shaped patch: the FULL merged attributes (existing + the new power).
+    patch = {"attributes": {**current["attributes"], "power": "-2.00"}}
+    out = pm.restamp_on_update(current, patch)
+    assert out == {"catalog_status": pm.CATALOG_STATUS_ACTIVE, "done_gaps": []}
+
+
+class _FakeColl:
+    """A products collection exposing find_one_and_update with the real
+    catalog_status=DRAFT guard semantics."""
+
+    def __init__(self, rows):
+        self.rows = {r["product_id"]: dict(r) for r in rows}
+
+    def find_one_and_update(self, filt, update):
+        pid = filt.get("product_id")
+        row = self.rows.get(pid)
+        if row is None:
+            return None
+        # honour every equality term in the guard (incl. catalog_status=DRAFT)
+        for k, v in filt.items():
+            if row.get(k) != v:
+                return None  # guard miss -> no write
+        row.update(update.get("$set", {}))
+        return row
+
+
+class _FakeRepo:
+    def __init__(self, coll=None):
+        self.collection = coll
+        self.updates = []
+
+    def update(self, pid, fields):
+        self.updates.append((pid, dict(fields)))
+        return True
+
+
+def _draft_missing_cost():
+    return {
+        "product_id": "P-DRAFT-1",
+        "category": "FRAME",
+        "attributes": {"brand_name": "RB", "model_no": "M", "colour_code": "BLK"},
+        "mrp": 5000.0,
+        "offer_price": 4500.0,
+        "hsn_code": "9003",
+        "gst_rate": 5.0,
+        "catalog_status": "DRAFT",
+        "done_gaps": ["cost_price"],
+    }
+
+
+def test_apply_restamp_atomic_promotes_via_guard():
+    row = _draft_missing_cost()
+    repo = _FakeRepo(_FakeColl([row]))
+    out = pm.apply_restamp_atomic(
+        "P-DRAFT-1", row, {"cost_price": 1800.0}, product_repo=repo
+    )
+    assert out == {"catalog_status": "ACTIVE", "done_gaps": []}
+    assert repo.collection.rows["P-DRAFT-1"]["catalog_status"] == "ACTIVE"
+
+
+def test_apply_restamp_atomic_guard_misses_when_already_active():
+    # P2 race: the row was concurrently promoted to ACTIVE already; the guard
+    # (catalog_status=DRAFT) must MISS so we do not clobber it.
+    row = _draft_missing_cost()
+    coll = _FakeColl([row])
+    coll.rows["P-DRAFT-1"]["catalog_status"] = "ACTIVE"  # concurrent promote landed
+    repo = _FakeRepo(coll)
+    stale_current = _draft_missing_cost()  # this edit still sees the stale DRAFT
+    pm.apply_restamp_atomic(
+        "P-DRAFT-1", stale_current, {"offer_price": 4400.0}, product_repo=repo
+    )
+    assert coll.rows["P-DRAFT-1"]["catalog_status"] == "ACTIVE"  # never demoted
+
+
+def test_apply_restamp_atomic_fallback_without_atomic_primitive():
+    # No find_one_and_update on the collection (test stub) -> plain update path.
+    row = _draft_missing_cost()
+    repo = _FakeRepo(coll=None)
+    out = pm.apply_restamp_atomic(
+        "P-DRAFT-1", row, {"cost_price": 1800.0}, product_repo=repo
+    )
+    assert out == {"catalog_status": "ACTIVE", "done_gaps": []}
+    assert repo.updates == [
+        ("P-DRAFT-1", {"catalog_status": "ACTIVE", "done_gaps": []})
+    ]
+
+
+def test_apply_restamp_atomic_noop_for_active_row():
+    legacy = {
+        "product_id": "P-LEG",
+        "category": "FRAME",
+        "brand": "RB",
+        "model": "M",
+        "color": "BLK",
+        "mrp": 5000.0,
+        "offer_price": 4500.0,
+        "hsn_code": "9003",
+        "gst_rate": 5.0,
+        "attributes": {},
+    }
+    repo = _FakeRepo(_FakeColl([legacy]))
+    out = pm.apply_restamp_atomic(
+        "P-LEG", legacy, {"offer_price": 4400.0}, product_repo=repo
+    )
+    assert out == {}
+    assert "catalog_status" not in repo.collection.rows["P-LEG"]
+
+
+def test_effective_status_unknown_is_failclosed_draft():
+    # P3: any non-blank value that is not ACTIVE reads DRAFT (fail-closed).
+    assert (
+        pm.effective_catalog_status({"catalog_status": "ARCHIVED"})
+        == pm.CATALOG_STATUS_DRAFT
+    )
+    assert (
+        pm.effective_catalog_status({"catalog_status": "active"})
+        == pm.CATALOG_STATUS_ACTIVE
+    )
+
+
+# ---- HTTP integration of the route-level fixes (needs app DB; skips if absent) ----
+
+
+def _su_headers():
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": "hubp0",
+            "username": "hubp0",
+            "roles": ["SUPERADMIN"],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_http_put_attributes_promotes_cl_draft(client):
+    h = _su_headers()
+    create = client.post(
+        "/api/v1/products?as_draft=true",
+        headers=h,
+        json={
+            "sku": "HUBP0-CL-1",
+            "category": "CONTACT_LENS",
+            "brand": "Acuvue",
+            "model": "Oasys",
+            "attributes": {"expiry_date": "2027-01-01"},
+            "mrp": 1200.0,
+            "offer_price": 1000.0,
+            "cost_price": 500.0,
+        },
+    )
+    assert create.status_code == 201, create.text
+    pid = create.json()["product_id"]
+    before = client.get(f"/api/v1/products/{pid}", headers=h)
+    assert before.json().get("catalog_status") == "DRAFT", before.text
+
+    # Fill the only gap (power, an in-attributes field) THROUGH the new
+    # attributes channel -> deep-merged onto existing attrs -> auto-promote.
+    put = client.put(
+        f"/api/v1/products/{pid}",
+        headers=h,
+        json={"attributes": {"power": "-2.00"}},
+    )
+    assert put.status_code == 200, put.text
+    body = client.get(f"/api/v1/products/{pid}", headers=h).json()
+    assert body.get("catalog_status") == "ACTIVE", body
+    # deep-merge preserved the existing attribute (expiry_date) + added power
+    assert body["attributes"].get("power") == "-2.00"
+    assert body["attributes"].get("expiry_date") == "2027-01-01"
+
+
+def test_http_put_null_price_does_not_corrupt_active(client):
+    h = _su_headers()
+    create = client.post(
+        "/api/v1/products",
+        headers=h,
+        json={
+            "sku": "HUBP0-NULL-1",
+            "category": "FRAME",
+            "brand": "Ray-Ban",
+            "model": "RB-NULL",
+            "color": "BLK",
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+            "cost_price": 2000.0,
+        },
+    )
+    assert create.status_code == 201, create.text
+    pid = create.json()["product_id"]
+    put = client.put(
+        f"/api/v1/products/{pid}",
+        headers=h,
+        json={"mrp": None, "color": "RED"},
+    )
+    assert put.status_code == 200, put.text
+    body = client.get(f"/api/v1/products/{pid}", headers=h).json()
+    assert body["mrp"] == 5000.0, f"mrp corrupted: {body.get('mrp')}"
+    assert body.get("color") == "RED"

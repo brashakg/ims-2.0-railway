@@ -1471,12 +1471,17 @@ def effective_catalog_status(doc: Dict[str, Any]) -> str:
 
     A MISSING / blank catalog_status reads as ACTIVE (deploy-order-independent:
     rows written before this code, and the migration backfill, are ACTIVE). An
-    explicit DRAFT stays DRAFT.
+    explicit DRAFT stays DRAFT. Any OTHER non-blank value is read fail-CLOSED as
+    DRAFT (not-purchasable) -- nothing in this codebase writes a status other than
+    ACTIVE/DRAFT, so this only ever guards against a future/foreign value being
+    mistaken for purchasable. The returned value is always exactly one of
+    {ACTIVE, DRAFT}.
     """
     raw = (doc or {}).get("catalog_status")
     if _is_blank(raw):
         return CATALOG_STATUS_ACTIVE
-    return str(raw).strip().upper()
+    normalised = str(raw).strip().upper()
+    return normalised if normalised == CATALOG_STATUS_ACTIVE else CATALOG_STATUS_DRAFT
 
 
 def assert_draft_floor(doc: Dict[str, Any]) -> None:
@@ -1501,37 +1506,51 @@ def assert_draft_floor(doc: Dict[str, Any]) -> None:
         )
 
 
-def promote_if_ready_atomic(
-    product_id: str, merged_doc: Dict[str, Any], *, product_repo=None
-) -> Optional[str]:
-    """Atomically flip a DRAFT -> ACTIVE the moment the done-rule passes.
+def apply_restamp_atomic(
+    product_id: str,
+    current: Dict[str, Any],
+    patch: Dict[str, Any],
+    *,
+    product_repo=None,
+) -> Dict[str, Any]:
+    """Apply the Phase-0 catalog_status restamp as a GUARDED single-doc write.
 
-    Uses a SINGLE guarded find_one_and_update on {catalog_status: DRAFT} so two
-    concurrent promotions resolve to exactly ONE winner (mirrors the
-    vouchers.redeem_voucher_atomic concurrency pattern). NEVER demotes here --
-    an ACTIVE row is left untouched (demotion is a loud 422 at the route, not a
-    silent flip). Returns the new status, or None when no DB / no change.
+    Computes restamp_on_update(current, patch) -- which yields status fields ONLY
+    for a row whose CURRENT status is an explicit DRAFT (an effective-ACTIVE row,
+    incl. a legacy row with no catalog_status, returns {} and is never touched) --
+    then applies them via find_one_and_update keyed on {catalog_status: DRAFT}.
+    The guard makes the write a no-op when a concurrent edit already promoted the
+    row to ACTIVE, so two near-simultaneous PUTs cannot clobber each other's
+    promotion (mirrors the vouchers.redeem_voucher_atomic concurrency pattern).
 
-    `merged_doc` is the post-edit doc to evaluate (current doc merged with the
-    patch). Fail-soft: any error leaves the row as-is and returns None.
+    Falls back to a plain product_repo.update when no atomic primitive is
+    available (test stub / no live collection). Returns the status fields written
+    (or {}). Fail-soft: any write error leaves the row as-is and returns {}.
     """
-    if product_repo is None:
-        return None
-    status, gaps = compute_catalog_status(merged_doc or {})
-    if status != CATALOG_STATUS_ACTIVE:
-        return None  # still incomplete -> nothing to promote
+    fields = restamp_on_update(current, patch)
+    if not fields or product_repo is None:
+        return {}
     coll = getattr(product_repo, "collection", None)
-    if coll is None or not hasattr(coll, "find_one_and_update"):
-        return None
+    if coll is not None and hasattr(coll, "find_one_and_update"):
+        try:
+            coll.find_one_and_update(
+                {"product_id": product_id, "catalog_status": CATALOG_STATUS_DRAFT},
+                {"$set": fields},
+            )
+            return fields
+        except Exception as exc:  # noqa: BLE001 - a restamp must never break an edit
+            logger.warning("[PM] atomic restamp failed for %s: %s", product_id, exc)
+            return {}
+    # Fallback: no atomic primitive (test stub / no live collection). The guard
+    # is unnecessary single-threaded; a plain update preserves correctness.
     try:
-        coll.find_one_and_update(
-            {"product_id": product_id, "catalog_status": CATALOG_STATUS_DRAFT},
-            {"$set": {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}},
+        product_repo.update(product_id, fields)
+        return fields
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PM] restamp fallback update failed for %s: %s", product_id, exc
         )
-    except Exception as exc:  # noqa: BLE001 - promotion must never break an edit
-        logger.warning("[PM] atomic promote failed for %s: %s", product_id, exc)
-        return None
-    return CATALOG_STATUS_ACTIVE
+        return {}
 
 
 def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
