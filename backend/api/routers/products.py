@@ -696,8 +696,8 @@ async def list_products(
 @router.post("", status_code=201)
 async def create_product(
     product: ProductCreate,
-    as_draft: bool = False,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+    as_draft: bool = False,
 ):
     """Create a new product.
 
