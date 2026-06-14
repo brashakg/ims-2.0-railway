@@ -2322,6 +2322,54 @@ POLICY: List[Dict[str, object]] = [
                     "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # --- Feature #29 skills-based rostering (shares /api/v1/hr; mounted without
+    # the HR finance gate). All stores clinical -> every shift needs optometrist
+    # coverage; NO licence-expiry machinery. Roster/skills edits = management;
+    # reads = management + staff family. Store-scoped where a store_id is given. ---
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/staff-skills",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "OPTOMETRIST",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/staff-skills/{employee_id}",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "OPTOMETRIST",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/hr/staff-skills/{employee_id}",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/hr/roster",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/roster",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "OPTOMETRIST",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/hr/roster/{roster_id}",
+        "allowed": ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/roster/{roster_id}/coverage",
+        "allowed": ["SALES_STAFF", "SALES_CASHIER", "OPTOMETRIST",
+                    "STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     # Feature #1 cross-store inventory balancing (read-only proposals). Management
     # only; the route itself store-scopes the OUTPUT for a single-store manager.
     {
