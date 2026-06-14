@@ -359,3 +359,111 @@ def coverage_for_roster(
     shifts = [{**e, "store_id": roster.get("store_id")} for e in entries]
     skills = _skills_map(db, [e.get("employee_id") for e in entries])
     return compute_coverage(shifts, skills, required_optoms)
+
+
+# --- coverage breach sweep (consumed by the TASKMASTER agent tick, #29) -------
+
+
+def _today_iso() -> str:
+    """Today's date as an ISO yyyy-mm-dd string (UTC), for the >= comparison
+    against a roster entry's `date`. Wrapped so callers can inject a fixed
+    `today` in tests."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def published_coverage_breaches(
+    db,
+    *,
+    today: Optional[str] = None,
+    required_optoms_for=None,
+) -> List[Dict[str, Any]]:
+    """Optometrist-coverage BREACH slots across every PUBLISHED roster, limited
+    to slots whose date is today or later (a past day's coverage can no longer
+    be fixed, so it is not alerted). Each returned slot carries store_id, date,
+    shift, required, optoms_rostered PLUS week_start + roster_id for the alert
+    dedupe key.
+
+    `today` defaults to _today_iso(); inject a fixed value in tests.
+    `required_optoms_for(store_id) -> int` resolves the per-store requirement
+    (defaults to DEFAULT_REQUIRED_OPTOMETRISTS). Pure DB-READ + deterministic
+    coverage math; fail-soft -> [] on no db / any error (never breaks a tick).
+    """
+    if db is None:
+        return []
+    today = today or _today_iso()
+    resolver = required_optoms_for or (lambda _sid: DEFAULT_REQUIRED_OPTOMETRISTS)
+    try:
+        rosters = list(
+            db.get_collection(COLLECTION_ROSTERS).find({"status": STATUS_PUBLISHED})
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    out: List[Dict[str, Any]] = []
+    for roster in rosters:
+        try:
+            req = int(resolver(roster.get("store_id")))
+        except Exception:  # noqa: BLE001
+            req = DEFAULT_REQUIRED_OPTOMETRISTS
+        try:
+            slots = coverage_breaches(coverage_for_roster(db, roster, req))
+        except Exception:  # noqa: BLE001
+            continue
+        for slot in slots:
+            # ISO yyyy-mm-dd strings compare correctly with >=.
+            if str(slot.get("date") or "") >= today:
+                out.append(
+                    {
+                        **slot,
+                        "week_start": roster.get("week_start"),
+                        "roster_id": roster.get("roster_id"),
+                    }
+                )
+    return out
+
+
+def coverage_breach_dedupe_key(breach: Mapping[str, Any], user_id: str) -> str:
+    """Stable key so a repeated agent tick does not re-alert the SAME breach to
+    the SAME recipient. One key per (store, week, date, shift, recipient)."""
+    return ":".join(
+        [
+            "roster_coverage_breach",
+            str(breach.get("store_id")),
+            str(breach.get("week_start")),
+            str(breach.get("date")),
+            str(breach.get("shift")),
+            str(user_id),
+        ]
+    )
+
+
+def build_coverage_breach_notification(
+    breach: Mapping[str, Any], user_id: str, dedupe_key: str
+) -> Dict[str, Any]:
+    """An in-app (NOTIFICATION_SCHEMA-shaped) coverage-breach bell. channels is
+    IN_APP ONLY -- comms are dark (no WhatsApp/SMS); this is purely the in-app
+    notification the bell UI reads. Pure."""
+    store = breach.get("store_id")
+    date = breach.get("date")
+    shift = breach.get("shift")
+    return {
+        "notification_id": "NTF-"
+        + datetime.now().strftime("%Y%m%d")
+        + "-"
+        + uuid.uuid4().hex[:8].upper(),
+        "notification_type": "roster_coverage_breach",
+        "user_id": user_id,
+        "title": "Optometrist coverage gap",
+        "message": (
+            f"No optometrist rostered at store {store} on {date} ({shift}). "
+            "Assign cover."
+        ),
+        "entity_type": "roster",
+        "entity_id": breach.get("roster_id"),
+        "action_url": "/hr/roster",
+        "channels": ["IN_APP"],
+        "priority": "HIGH",
+        "status": "SENT",
+        "dedupe_key": dedupe_key,
+        "store_id": store,
+        "created_at": datetime.now(),
+    }
