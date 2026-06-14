@@ -477,11 +477,18 @@ async def get_churn_risk_customers(
 # ADMIN is store-scoped. Never touches orders / prices / balances.
 # ============================================================================
 
-_VIP_INTERVENTIONS = ("PERSONAL_CALL", "EXCLUSIVE_OFFER", "LOYALTY_BONUS", "WINBACK_WHATSAPP")
+_VIP_INTERVENTIONS = (
+    "PERSONAL_CALL",
+    "EXCLUSIVE_OFFER",
+    "LOYALTY_BONUS",
+    "WINBACK_WHATSAPP",
+)
 
 
 class VipInterveneBody(BaseModel):
-    intervention_type: Literal["PERSONAL_CALL", "EXCLUSIVE_OFFER", "LOYALTY_BONUS", "WINBACK_WHATSAPP"]
+    intervention_type: Literal[
+        "PERSONAL_CALL", "EXCLUSIVE_OFFER", "LOYALTY_BONUS", "WINBACK_WHATSAPP"
+    ]
     notes: str = Field(default="", max_length=500)
 
 
@@ -506,7 +513,9 @@ def _vip_store_guard(current_user: dict, store_id: Optional[str]) -> Optional[st
 async def get_vip_churn_watchlist(
     store_id: Optional[str] = Query(None),
     risk_label: Optional[Literal["WATCH", "HIGH"]] = Query(None),
-    sort_by: Literal["overdue_by_days", "ltv", "last_purchase_days_ago"] = Query("overdue_by_days"),
+    sort_by: Literal["overdue_by_days", "ltv", "last_purchase_days_ago"] = Query(
+        "overdue_by_days"
+    ),
     limit: int = Query(50, ge=1, le=500),
     current_user: dict = Depends(require_roles("SUPERADMIN", "ADMIN")),
 ):
@@ -519,7 +528,11 @@ async def get_vip_churn_watchlist(
     labels = [risk_label] if risk_label else ["WATCH", "HIGH"]
     query: dict = {"vip_churn_risk.risk_label": {"$in": labels}}
     if store_id:
-        query["$or"] = [{"store_ids": store_id}, {"primary_store_id": store_id}, {"store_id": store_id}]
+        query["$or"] = [
+            {"store_ids": store_id},
+            {"primary_store_id": store_id},
+            {"store_id": store_id},
+        ]
     try:
         rows = list(db.get_collection("customers").find(query, {"_id": 0}))
     except Exception:  # noqa: BLE001
@@ -537,24 +550,43 @@ async def get_vip_churn_watchlist(
     customers = []
     for c in rows[:limit]:
         vr = c.get("vip_churn_risk") or {}
-        customers.append({
-            "customer_id": c.get("customer_id"),
-            "name": c.get("name") or c.get("full_name") or "",
-            "store_id": c.get("primary_store_id") or (c.get("store_ids") or [None])[0],
-            "ltv": round(_ltv(c), 2),
-            "vip_churn_risk": {k: vr.get(k) for k in (
-                "usual_interval_days", "last_purchase_days_ago", "overdue_by_days",
-                "risk_score", "risk_label", "narrative")},
-        })
+        customers.append(
+            {
+                "customer_id": c.get("customer_id"),
+                "name": c.get("name") or c.get("full_name") or "",
+                "store_id": c.get("primary_store_id")
+                or (c.get("store_ids") or [None])[0],
+                "ltv": round(_ltv(c), 2),
+                "vip_churn_risk": {
+                    k: vr.get(k)
+                    for k in (
+                        "usual_interval_days",
+                        "last_purchase_days_ago",
+                        "overdue_by_days",
+                        "risk_score",
+                        "risk_label",
+                        "narrative",
+                    )
+                },
+            }
+        )
     trend = None
     try:
         snap_q = {"store_id": store_id} if store_id else {}
-        snap = list(db.get_collection("vip_churn_snapshots").find(snap_q, {"_id": 0})
-                    .sort("scanned_at", -1).limit(1))
+        snap = list(
+            db.get_collection("vip_churn_snapshots")
+            .find(snap_q, {"_id": 0})
+            .sort("scanned_at", -1)
+            .limit(1)
+        )
         if snap:
             s = snap[0]
-            trend = {"scanned_at": s.get("scanned_at"), "vip_count": s.get("vip_count"),
-                     "watch_count": s.get("watch_count"), "high_risk_count": s.get("high_risk_count")}
+            trend = {
+                "scanned_at": s.get("scanned_at"),
+                "vip_count": s.get("vip_count"),
+                "watch_count": s.get("watch_count"),
+                "high_risk_count": s.get("high_risk_count"),
+            }
     except Exception:  # noqa: BLE001
         trend = None
     return {"customers": customers, "trend": trend, "total": len(customers)}
@@ -583,9 +615,13 @@ async def intervene_vip_churn(
     # legacy=primary_store_id/store_ids/store_id). Do NOT backfill to the caller's
     # store -- a non-SUPERADMIN who doesn't own the customer's store is DENIED
     # (was a cross-store write IDOR: P1-grade task/audit/notification on any store).
-    store_id = (cust.get("preferred_store_id") or cust.get("home_store_id")
-                or cust.get("primary_store_id") or (cust.get("store_ids") or [None])[0]
-                or cust.get("store_id"))
+    store_id = (
+        cust.get("preferred_store_id")
+        or cust.get("home_store_id")
+        or cust.get("primary_store_id")
+        or (cust.get("store_ids") or [None])[0]
+        or cust.get("store_id")
+    )
     roles = current_user.get("roles", []) or []
     if "SUPERADMIN" not in roles:
         owned = list(current_user.get("store_ids", []) or [])
@@ -593,7 +629,10 @@ async def intervene_vip_churn(
         if active and active not in owned:
             owned.append(active)
         if not store_id or store_id not in owned:
-            raise HTTPException(status_code=403, detail="Not permitted to intervene for this customer's store")
+            raise HTTPException(
+                status_code=403,
+                detail="Not permitted to intervene for this customer's store",
+            )
 
     # 30-day rolling window so a fresh window allows a new task; same window dedupes.
     window = (datetime.now() - datetime(2020, 1, 1)).days // 30
@@ -601,7 +640,8 @@ async def intervene_vip_churn(
     task = create_system_task(
         repo=get_task_repository(),
         title=f"VIP win-back ({body.intervention_type})",
-        description=(body.notes or "")[:500] or f"VIP churn intervention for {customer_id}",
+        description=(body.notes or "")[:500]
+        or f"VIP churn intervention for {customer_id}",
         priority="P1",
         category="CRM",
         store_id=store_id,
@@ -612,19 +652,25 @@ async def intervene_vip_churn(
     try:
         arepo = get_audit_repository()
         if arepo is not None:
-            arepo.create({
-                "action": "VIP_CHURN_INTERVENTION",
-                "entity_type": "customer",
-                "entity_id": customer_id,
-                "user_id": current_user.get("user_id"),
-                "user_name": current_user.get("full_name") or current_user.get("username"),
-                "store_id": store_id,
-                "severity": "INFO",
-                "source": "crm",
-                "before_state": {},
-                "after_state": {"intervention_type": body.intervention_type,
-                                "notes": body.notes, "deduped": already_intervened},
-            })
+            arepo.create(
+                {
+                    "action": "VIP_CHURN_INTERVENTION",
+                    "entity_type": "customer",
+                    "entity_id": customer_id,
+                    "user_id": current_user.get("user_id"),
+                    "user_name": current_user.get("full_name")
+                    or current_user.get("username"),
+                    "store_id": store_id,
+                    "severity": "INFO",
+                    "source": "crm",
+                    "before_state": {},
+                    "after_state": {
+                        "intervention_type": body.intervention_type,
+                        "notes": body.notes,
+                        "deduped": already_intervened,
+                    },
+                }
+            )
     except Exception:  # noqa: BLE001
         pass
 
@@ -633,20 +679,26 @@ async def intervene_vip_churn(
         if db is not None:
             try:
                 phone = (cust or {}).get("mobile") or (cust or {}).get("phone")
-                db.get_collection("notification_logs").insert_one({
-                    "notification_id": f"NTF-VIP-{uuid.uuid4().hex[:10]}",
-                    "kind": "vip_winback",
-                    "channel": "whatsapp",
-                    "customer_id": customer_id,
-                    "customer_phone": phone,
-                    "status": "PENDING",
-                    "created_at": datetime.now(),
-                })
+                db.get_collection("notification_logs").insert_one(
+                    {
+                        "notification_id": f"NTF-VIP-{uuid.uuid4().hex[:10]}",
+                        "kind": "vip_winback",
+                        "channel": "whatsapp",
+                        "customer_id": customer_id,
+                        "customer_phone": phone,
+                        "status": "PENDING",
+                        "created_at": datetime.now(),
+                    }
+                )
             except Exception:  # noqa: BLE001
                 pass
 
-    return {"ok": True, "task_id": (task or {}).get("task_id"),
-            "intervention_type": body.intervention_type, "already_intervened": already_intervened}
+    return {
+        "ok": True,
+        "task_id": (task or {}).get("task_id"),
+        "intervention_type": body.intervention_type,
+        "already_intervened": already_intervened,
+    }
 
 
 # ============================================================================
@@ -682,24 +734,29 @@ def _nba_card_for(doc: dict, customer_id: str) -> Optional[dict]:
     return None
 
 
-def _nba_audit(action: str, customer_id: str, store_id: str, current_user: dict, detail: dict) -> None:
+def _nba_audit(
+    action: str, customer_id: str, store_id: str, current_user: dict, detail: dict
+) -> None:
     """Best-effort audit row. Fail-soft -- never undoes the NBA write."""
     try:
         arepo = get_audit_repository()
         if arepo is None:
             return
-        arepo.create({
-            "action": action,
-            "entity_type": "customer",
-            "entity_id": customer_id,
-            "user_id": current_user.get("user_id") or current_user.get("id"),
-            "user_name": current_user.get("full_name") or current_user.get("username"),
-            "store_id": store_id,
-            "severity": "INFO",
-            "source": "crm.nba",
-            "before_state": {},
-            "after_state": detail,
-        })
+        arepo.create(
+            {
+                "action": action,
+                "entity_type": "customer",
+                "entity_id": customer_id,
+                "user_id": current_user.get("user_id") or current_user.get("id"),
+                "user_name": current_user.get("full_name")
+                or current_user.get("username"),
+                "store_id": store_id,
+                "severity": "INFO",
+                "source": "crm.nba",
+                "before_state": {},
+                "after_state": detail,
+            }
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -707,7 +764,9 @@ def _nba_audit(action: str, customer_id: str, store_id: str, current_user: dict,
 @router.get("/nba/{store_id}")
 async def get_nba_call_list(
     store_id: str = Path(..., description="Store ID"),
-    date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today (IST)"),
+    date: Optional[str] = Query(
+        None, description="YYYY-MM-DD; defaults to today (IST)"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """Today's ranked NBA call list for a store (max cards/day, 2 reserved VIP
@@ -726,7 +785,12 @@ async def get_nba_call_list(
     db = _crm_get_db()
     target_date = date or nba._today_ist()
     if db is None:
-        return {"store_id": store_id, "date": target_date, "generated_at": None, "cards": []}
+        return {
+            "store_id": store_id,
+            "date": target_date,
+            "generated_at": None,
+            "cards": [],
+        }
 
     doc = None
     try:
@@ -775,7 +839,11 @@ async def dismiss_nba_card(
     target_date = nba._today_ist()
     # Single-document update on nba_scores: flip the matching card's dismissed flag.
     updated = db.get_collection("nba_scores").find_one_and_update(
-        {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id},
+        {
+            "store_id": store_id,
+            "date": target_date,
+            "cards.customer_id": body.customer_id,
+        },
         {"$set": {"cards.$.dismissed": True}},
         return_document=True,
     )
@@ -787,18 +855,26 @@ async def dismiss_nba_card(
         try:
             db.get_collection("follow_ups").find_one_and_update(
                 {"follow_up_id": follow_up_id, "store_id": store_id},
-                {"$set": {
-                    "status": "skipped",
-                    "outcome": body.reason,
-                    "completed_at": datetime.now().isoformat(),
-                    "completed_by": current_user.get("user_id") or current_user.get("id"),
-                }},
+                {
+                    "$set": {
+                        "status": "skipped",
+                        "outcome": body.reason,
+                        "completed_at": datetime.now().isoformat(),
+                        "completed_by": current_user.get("user_id")
+                        or current_user.get("id"),
+                    }
+                },
             )
         except Exception:  # noqa: BLE001
             pass
 
-    _nba_audit("nba.dismissed", body.customer_id, store_id, current_user,
-               {"reason": body.reason, "follow_up_id": follow_up_id})
+    _nba_audit(
+        "nba.dismissed",
+        body.customer_id,
+        store_id,
+        current_user,
+        {"reason": body.reason, "follow_up_id": follow_up_id},
+    )
     return {"ok": True}
 
 
@@ -823,7 +899,11 @@ async def complete_nba_card(
 
     target_date = nba._today_ist()
     updated = db.get_collection("nba_scores").find_one_and_update(
-        {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id},
+        {
+            "store_id": store_id,
+            "date": target_date,
+            "cards.customer_id": body.customer_id,
+        },
         {"$set": {"cards.$.dismissed": True}},
         return_document=True,
     )
@@ -836,41 +916,52 @@ async def complete_nba_card(
         try:
             db.get_collection("follow_ups").find_one_and_update(
                 {"follow_up_id": follow_up_id, "store_id": store_id},
-                {"$set": {
-                    "status": "completed",
-                    "outcome": "completed",
-                    "notes": body.outcome_notes,
-                    "completed_at": now_iso,
-                    "completed_by": user_id,
-                }},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "outcome": "completed",
+                        "notes": body.outcome_notes,
+                        "completed_at": now_iso,
+                        "completed_by": user_id,
+                    }
+                },
             )
         except Exception:  # noqa: BLE001
             pass
 
     next_follow_up_id = None
     if body.follow_up_scheduled_date:
-        next_follow_up_id = f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        next_follow_up_id = (
+            f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        )
         try:
-            db.get_collection("follow_ups").insert_one({
-                "follow_up_id": next_follow_up_id,
-                "customer_id": body.customer_id,
-                "customer_name": (card or {}).get("customer_name", ""),
-                "customer_phone": (card or {}).get("customer_mobile", ""),
-                "store_id": store_id,
-                "type": "general",
-                "scheduled_date": body.follow_up_scheduled_date,
-                "status": "pending",
-                "outcome": None,
-                "notes": "Scheduled from NBA call list",
-                "created_at": now_iso,
-                "completed_at": None,
-                "completed_by": None,
-            })
+            db.get_collection("follow_ups").insert_one(
+                {
+                    "follow_up_id": next_follow_up_id,
+                    "customer_id": body.customer_id,
+                    "customer_name": (card or {}).get("customer_name", ""),
+                    "customer_phone": (card or {}).get("customer_mobile", ""),
+                    "store_id": store_id,
+                    "type": "general",
+                    "scheduled_date": body.follow_up_scheduled_date,
+                    "status": "pending",
+                    "outcome": None,
+                    "notes": "Scheduled from NBA call list",
+                    "created_at": now_iso,
+                    "completed_at": None,
+                    "completed_by": None,
+                }
+            )
         except Exception:  # noqa: BLE001
             next_follow_up_id = None
 
-    _nba_audit("nba.completed", body.customer_id, store_id, current_user,
-               {"follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id})
+    _nba_audit(
+        "nba.completed",
+        body.customer_id,
+        store_id,
+        current_user,
+        {"follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id},
+    )
     return {"ok": True, "next_follow_up_id": next_follow_up_id}
 
 
@@ -892,10 +983,13 @@ async def complete_nba_card(
 
 class ReactivationLogBody(BaseModel):
     customer_id: str = Field(..., description="Lapsed patient being actioned")
-    outcome: Literal["reached", "no_answer", "not_interested", "wrong_number", "scheduled_visit"]
+    outcome: Literal[
+        "reached", "no_answer", "not_interested", "wrong_number", "scheduled_visit"
+    ]
     notes: str = Field(default="", max_length=2000)
     follow_up_scheduled_date: Optional[str] = Field(
-        default=None, description="Optional YYYY-MM-DD to schedule a next reactivation touch"
+        default=None,
+        description="Optional YYYY-MM-DD to schedule a next reactivation touch",
     )
 
 
@@ -909,7 +1003,9 @@ def _reactivation_entry_for(doc: dict, customer_id: str) -> Optional[dict]:
 @router.get("/reactivation/{store_id}")
 async def get_reactivation_worklist(
     store_id: str = Path(..., description="Store ID"),
-    date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today (IST)"),
+    date: Optional[str] = Query(
+        None, description="YYYY-MM-DD; defaults to today (IST)"
+    ),
     preview: bool = Query(False, description="Read-only: never persists a cohort doc"),
     current_user: dict = Depends(get_current_user),
 ):
@@ -929,7 +1025,12 @@ async def get_reactivation_worklist(
     db = _crm_get_db()
     target_date = date or react._today_ist()
     if db is None:
-        return {"store_id": store_id, "date": target_date, "generated_at": None, "entries": []}
+        return {
+            "store_id": store_id,
+            "date": target_date,
+            "generated_at": None,
+            "entries": [],
+        }
 
     if not preview:
         doc = None
@@ -986,7 +1087,11 @@ async def log_reactivation_outcome(
 
     target_date = react._today_ist()
     updated = db.get_collection("reactivation_cohorts").find_one_and_update(
-        {"store_id": store_id, "date": target_date, "entries.customer_id": body.customer_id},
+        {
+            "store_id": store_id,
+            "date": target_date,
+            "entries.customer_id": body.customer_id,
+        },
         {"$set": {"entries.$.dismissed": True}},
         return_document=True,
     )
@@ -1006,65 +1111,87 @@ async def log_reactivation_outcome(
         try:
             db.get_collection("follow_ups").find_one_and_update(
                 {"follow_up_id": follow_up_id, "store_id": store_id},
-                {"$set": {
-                    "status": "completed" if reached else "skipped",
-                    "outcome": body.outcome,
-                    "notes": body.notes,
-                    "completed_at": now_iso,
-                    "completed_by": user_id,
-                }},
+                {
+                    "$set": {
+                        "status": "completed" if reached else "skipped",
+                        "outcome": body.outcome,
+                        "notes": body.notes,
+                        "completed_at": now_iso,
+                        "completed_by": user_id,
+                    }
+                },
             )
         except Exception:  # noqa: BLE001
             pass
     else:
         # MEGAPHONE had not pre-created one (e.g. synchronous fallback work-list):
         # write the in-app reactivation_call follow_up RECORD now (NOT a message).
-        follow_up_id = f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        follow_up_id = (
+            f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        )
         try:
-            db.get_collection("follow_ups").insert_one({
-                "follow_up_id": follow_up_id,
-                "customer_id": body.customer_id,
-                "customer_name": (entry or {}).get("customer_name", ""),
-                "customer_phone": (entry or {}).get("customer_mobile", ""),
-                "store_id": store_id,
-                "type": "reactivation_call",
-                "scheduled_date": target_date,
-                "status": "completed" if reached else "skipped",
-                "outcome": body.outcome,
-                "notes": body.notes,
-                "created_at": now_iso,
-                "completed_at": now_iso,
-                "completed_by": user_id,
-            })
+            db.get_collection("follow_ups").insert_one(
+                {
+                    "follow_up_id": follow_up_id,
+                    "customer_id": body.customer_id,
+                    "customer_name": (entry or {}).get("customer_name", ""),
+                    "customer_phone": (entry or {}).get("customer_mobile", ""),
+                    "store_id": store_id,
+                    "type": "reactivation_call",
+                    "scheduled_date": target_date,
+                    "status": "completed" if reached else "skipped",
+                    "outcome": body.outcome,
+                    "notes": body.notes,
+                    "created_at": now_iso,
+                    "completed_at": now_iso,
+                    "completed_by": user_id,
+                }
+            )
         except Exception:  # noqa: BLE001
             follow_up_id = None
 
     next_follow_up_id = None
     if body.follow_up_scheduled_date:
-        next_follow_up_id = f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        next_follow_up_id = (
+            f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        )
         try:
-            db.get_collection("follow_ups").insert_one({
-                "follow_up_id": next_follow_up_id,
-                "customer_id": body.customer_id,
-                "customer_name": (entry or {}).get("customer_name", ""),
-                "customer_phone": (entry or {}).get("customer_mobile", ""),
-                "store_id": store_id,
-                "type": "reactivation_call",
-                "scheduled_date": body.follow_up_scheduled_date,
-                "status": "pending",
-                "outcome": None,
-                "notes": "Scheduled from reactivation work-list",
-                "created_at": now_iso,
-                "completed_at": None,
-                "completed_by": None,
-            })
+            db.get_collection("follow_ups").insert_one(
+                {
+                    "follow_up_id": next_follow_up_id,
+                    "customer_id": body.customer_id,
+                    "customer_name": (entry or {}).get("customer_name", ""),
+                    "customer_phone": (entry or {}).get("customer_mobile", ""),
+                    "store_id": store_id,
+                    "type": "reactivation_call",
+                    "scheduled_date": body.follow_up_scheduled_date,
+                    "status": "pending",
+                    "outcome": None,
+                    "notes": "Scheduled from reactivation work-list",
+                    "created_at": now_iso,
+                    "completed_at": None,
+                    "completed_by": None,
+                }
+            )
         except Exception:  # noqa: BLE001
             next_follow_up_id = None
 
-    _nba_audit("reactivation.logged", body.customer_id, store_id, current_user,
-               {"outcome": body.outcome, "follow_up_id": follow_up_id,
-                "next_follow_up_id": next_follow_up_id})
-    return {"ok": True, "follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id}
+    _nba_audit(
+        "reactivation.logged",
+        body.customer_id,
+        store_id,
+        current_user,
+        {
+            "outcome": body.outcome,
+            "follow_up_id": follow_up_id,
+            "next_follow_up_id": next_follow_up_id,
+        },
+    )
+    return {
+        "ok": True,
+        "follow_up_id": follow_up_id,
+        "next_follow_up_id": next_follow_up_id,
+    }
 
 
 @router.get("/reactivation/{store_id}/analytics")
@@ -1085,23 +1212,41 @@ async def get_reactivation_analytics(
     store_id = validate_store_access(store_id, current_user)
     db = _crm_get_db()
     empty = {
-        "store_id": store_id, "window_days": days,
-        "logged": 0, "reached": 0, "no_answer": 0, "not_interested": 0,
-        "scheduled_visit": 0, "wrong_number": 0, "currently_lapsed": 0,
+        "store_id": store_id,
+        "window_days": days,
+        "logged": 0,
+        "reached": 0,
+        "no_answer": 0,
+        "not_interested": 0,
+        "scheduled_visit": 0,
+        "wrong_number": 0,
+        "currently_lapsed": 0,
     }
     if db is None:
         return empty
 
     since_iso = (datetime.now() - timedelta(days=days)).isoformat()
-    counts = {"reached": 0, "no_answer": 0, "not_interested": 0,
-              "scheduled_visit": 0, "wrong_number": 0}
+    counts = {
+        "reached": 0,
+        "no_answer": 0,
+        "not_interested": 0,
+        "scheduled_visit": 0,
+        "wrong_number": 0,
+    }
     logged = 0
     try:
-        for fu in db.get_collection("follow_ups").find(
-            {"store_id": store_id, "type": "reactivation_call",
-             "completed_at": {"$gte": since_iso}},
-            {"_id": 0, "outcome": 1},
-        ).limit(50000):
+        for fu in (
+            db.get_collection("follow_ups")
+            .find(
+                {
+                    "store_id": store_id,
+                    "type": "reactivation_call",
+                    "completed_at": {"$gte": since_iso},
+                },
+                {"_id": 0, "outcome": 1},
+            )
+            .limit(50000)
+        ):
             logged += 1
             oc = str(fu.get("outcome") or "")
             if oc in counts:
@@ -1116,8 +1261,11 @@ async def get_reactivation_analytics(
         currently_lapsed = 0
 
     return {
-        "store_id": store_id, "window_days": days, "logged": logged,
-        **counts, "currently_lapsed": currently_lapsed,
+        "store_id": store_id,
+        "window_days": days,
+        "logged": logged,
+        **counts,
+        "currently_lapsed": currently_lapsed,
     }
 
 
@@ -1370,7 +1518,9 @@ async def add_loyalty_points(
 
         updated_customer = repo.increment_loyalty_points(customer_id, request.points)
         if updated_customer is None:
-            raise HTTPException(status_code=500, detail="Failed to update loyalty points")
+            raise HTTPException(
+                status_code=500, detail="Failed to update loyalty points"
+            )
 
         return _calculate_loyalty_tier(
             updated_customer.get("loyalty_points", 0),
@@ -1793,3 +1943,266 @@ def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
                 }
             )
     return at_risk
+
+
+# ============================================================================
+# F43 - Centralized VIP personal-triggers engine (STAFF_ALERT slice, DARK)
+# ============================================================================
+# A VIP customer's personal events (wedding anniversary, birthday + N days, a
+# recurring cadence, a one-shot custom date) drive an IN-APP STAFF ALERT a few
+# days BEFORE the event so the store can reach out personally. This is the
+# STAFF_ALERT slice: it creates a follow_up work-list row + an in-app
+# notification (mirroring the VIP-churn intervene + MEGAPHONE _scan_rx_expiring
+# patterns). The customer-MESSAGE channel for #43 is DEFERRED under the
+# WhatsApp ban -- nothing is sent here; any future customer send would ride
+# notification_service as a PENDING row gated by DISPATCH_MODE.
+#
+# Pure date math + persistence live in api/services/vip_triggers.py.
+# ============================================================================
+
+from ..services import vip_triggers as _vtr  # noqa: E402
+
+# Write/manage: CRM management roles. Read also adds CATALOG_MANAGER/OPTOMETRIST
+# per the crm.py read-norms (they see the 360 view).
+_VIP_WRITE_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
+_VIP_READ_ROLES = (
+    "STORE_MANAGER",
+    "AREA_MANAGER",
+    "ADMIN",
+    "SUPERADMIN",
+    "CATALOG_MANAGER",
+    "OPTOMETRIST",
+)
+
+
+class VipProfileBody(BaseModel):
+    vip_tags: Optional[List[str]] = Field(default=None, max_length=20)
+    vip_override: Optional[bool] = None
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class PersonalTriggerCreate(BaseModel):
+    customer_id: str = Field(..., min_length=1)
+    type: Literal["ANNIVERSARY", "BIRTHDAY_PLUS_N", "RECURRING", "CUSTOM_DATE"]
+    base_date: str = Field(..., description="YYYY-MM-DD anchor event date")
+    label: str = Field(default="", max_length=120)
+    lead_time_days: int = Field(default=7, ge=0, le=365)
+    recur_every_days: Optional[int] = Field(default=None, ge=1)
+    plus_n_days: Optional[int] = Field(default=None, ge=0)
+    store_id: Optional[str] = None
+
+
+class PersonalTriggerUpdate(BaseModel):
+    type: Optional[
+        Literal["ANNIVERSARY", "BIRTHDAY_PLUS_N", "RECURRING", "CUSTOM_DATE"]
+    ] = None
+    base_date: Optional[str] = None
+    label: Optional[str] = Field(default=None, max_length=120)
+    lead_time_days: Optional[int] = Field(default=None, ge=0, le=365)
+    recur_every_days: Optional[int] = Field(default=None, ge=1)
+    plus_n_days: Optional[int] = Field(default=None, ge=0)
+    active: Optional[bool] = None
+
+
+def _vip_audit(action: str, customer_id: str, current_user: dict, detail: dict) -> None:
+    """Best-effort audit row. Fail-soft -- never undoes the VIP write."""
+    try:
+        arepo = get_audit_repository()
+        if arepo is None:
+            return
+        arepo.create(
+            {
+                "action": action,
+                "entity_type": "customer",
+                "entity_id": customer_id,
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("full_name")
+                or current_user.get("username"),
+                "severity": "INFO",
+                "source": "crm",
+                "before_state": {},
+                "after_state": detail,
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.post("/customers/{customer_id}/vip")
+async def set_vip_profile(
+    customer_id: str,
+    body: VipProfileBody,
+    current_user: dict = Depends(require_roles(*_VIP_WRITE_ROLES)),
+):
+    """Set a customer's VIP profile (vip_tags / vip_override) and/or append a
+    personal note. Tags are de-duped + capped; the note is appended, never
+    replacing prior notes. Single-doc update + audit. 404 if no such customer."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    customer = repo.find_by_id(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    updates = _vtr.build_vip_update(
+        customer,
+        vip_tags=body.vip_tags,
+        vip_override=body.vip_override,
+        note_text=body.note,
+        note_by=current_user.get("user_id") or current_user.get("username"),
+    )
+    if not updates:
+        return _vtr.read_vip_profile(customer)
+    try:
+        repo.update(customer_id, updates)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Failed to persist VIP profile")
+
+    refreshed = repo.find_by_id(customer_id) or {**customer, **updates}
+    _vip_audit(
+        "VIP_PROFILE_SET",
+        customer_id,
+        current_user,
+        {k: updates[k] for k in updates if k != "personal_notes"},
+    )
+    return _vtr.read_vip_profile(refreshed)
+
+
+@router.get("/customers/{customer_id}/vip")
+async def get_vip_profile(
+    customer_id: str,
+    current_user: dict = Depends(require_roles(*_VIP_READ_ROLES)),
+):
+    """Read a customer's VIP profile (tags / override / notes). 404 if absent."""
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    customer = repo.find_by_id(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return _vtr.read_vip_profile(customer)
+
+
+@router.post("/personal-triggers")
+async def create_personal_trigger(
+    body: PersonalTriggerCreate,
+    current_user: dict = Depends(require_roles(*_VIP_WRITE_ROLES)),
+):
+    """Create a personal trigger for a customer. The store is guarded: a
+    non-SUPERADMIN must own the store the trigger is scoped to. 422 on a bad
+    type/date combination (validation lives in the pure service)."""
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    repo = get_customer_repository()
+    if repo is not None and not repo.find_by_id(body.customer_id):
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    store_id = _vip_store_guard(current_user, body.store_id)
+    payload = body.model_dump()
+    try:
+        doc = _vtr.create_trigger(
+            db_conn,
+            customer_id=body.customer_id,
+            payload=payload,
+            created_by=current_user.get("user_id") or current_user.get("username"),
+            store_id=store_id,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    _vip_audit(
+        "VIP_TRIGGER_CREATE",
+        body.customer_id,
+        current_user,
+        {"trigger_id": doc.get("trigger_id"), "type": doc.get("type")},
+    )
+    return doc
+
+
+@router.get("/personal-triggers")
+async def list_personal_triggers(
+    customer_id: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    active_only: bool = Query(False),
+    current_user: dict = Depends(require_roles(*_VIP_READ_ROLES)),
+):
+    """List personal triggers (optionally filtered by customer / store).
+    Store-scoped for non-SUPERADMIN: an explicit store_id is guarded; with no
+    store_id a non-SUPERADMIN is scoped to their own store. Fail-soft -> []."""
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        return {"triggers": [], "total": 0}
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" not in roles:
+        # Non-SUPERADMIN is always store-scoped (guard raises 403 on a foreign store).
+        store_id = _vip_store_guard(current_user, store_id)
+    rows = _vtr.list_triggers(
+        db_conn, customer_id=customer_id, store_id=store_id, active_only=active_only
+    )
+    return {"triggers": rows, "total": len(rows)}
+
+
+@router.put("/personal-triggers/{trigger_id}")
+async def update_personal_trigger(
+    trigger_id: str,
+    body: PersonalTriggerUpdate,
+    current_user: dict = Depends(require_roles(*_VIP_WRITE_ROLES)),
+):
+    """Edit or deactivate a personal trigger. A non-SUPERADMIN may only touch a
+    trigger scoped to a store they own. 404 if not found, 422 on bad shape."""
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    existing = _vtr.get_trigger(db_conn, trigger_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" not in roles:
+        # Owning-store guard: raises 403 if the caller does not own its store.
+        _vip_store_guard(current_user, existing.get("store_id"))
+
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        doc = _vtr.update_trigger(db_conn, trigger_id, payload)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    _vip_audit(
+        "VIP_TRIGGER_UPDATE",
+        existing.get("customer_id"),
+        current_user,
+        {"trigger_id": trigger_id, "changes": list(payload.keys())},
+    )
+    return doc
+
+
+@router.delete("/personal-triggers/{trigger_id}")
+async def delete_personal_trigger(
+    trigger_id: str,
+    current_user: dict = Depends(require_roles(*_VIP_WRITE_ROLES)),
+):
+    """Delete a personal trigger. Store-guarded for non-SUPERADMIN. 404 if absent."""
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    existing = _vtr.get_trigger(db_conn, trigger_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    roles = current_user.get("roles", []) or []
+    if "SUPERADMIN" not in roles:
+        _vip_store_guard(current_user, existing.get("store_id"))
+    ok = _vtr.delete_trigger(db_conn, trigger_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    _vip_audit(
+        "VIP_TRIGGER_DELETE",
+        existing.get("customer_id"),
+        current_user,
+        {"trigger_id": trigger_id},
+    )
+    return {"ok": True, "trigger_id": trigger_id}
