@@ -44,7 +44,6 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api.services import survival_cashflow as svc  # noqa: E402
 import api.routers.finance as fin  # noqa: E402
 
-
 # A fixed mid-month IST "now": June 2026 has 30 days, day 15 -> the income
 # pro-ration factor is exactly 2.0 (no float dust in expectations).
 FIXED_NOW = datetime(2026, 6, 15, 12, 0, 0)
@@ -143,7 +142,9 @@ class FakeCollection:
                 groups: Dict[Any, Dict[str, Any]] = {}
                 order: List[Any] = []
                 for d in docs:
-                    key = _eval_expr(d, spec["_id"]) if spec["_id"] is not None else None
+                    key = (
+                        _eval_expr(d, spec["_id"]) if spec["_id"] is not None else None
+                    )
                     if key not in groups:
                         groups[key] = {"_id": key}
                         order.append(key)
@@ -211,50 +212,84 @@ def routed(db, monkeypatch):
 
 
 def _accountant(uid="ACC1"):
-    return {"user_id": uid, "full_name": "Books", "roles": ["ACCOUNTANT"],
-            "store_ids": [], "active_store_id": None}
+    return {
+        "user_id": uid,
+        "full_name": "Books",
+        "roles": ["ACCOUNTANT"],
+        "store_ids": [],
+        "active_store_id": None,
+    }
 
 
 def _store_manager(uid="M1", store="BV-1"):
-    return {"user_id": uid, "full_name": "Manager", "roles": ["STORE_MANAGER"],
-            "store_ids": [store], "active_store_id": store}
+    return {
+        "user_id": uid,
+        "full_name": "Manager",
+        "roles": ["STORE_MANAGER"],
+        "store_ids": [store],
+        "active_store_id": store,
+    }
 
 
 def _sales(uid="S1", store="BV-1"):
-    return {"user_id": uid, "full_name": "Sales", "roles": ["SALES_STAFF"],
-            "store_ids": [store], "active_store_id": store}
+    return {
+        "user_id": uid,
+        "full_name": "Sales",
+        "roles": ["SALES_STAFF"],
+        "store_ids": [store],
+        "active_store_id": store,
+    }
 
 
 def _expense(category, amount, store="BV-1", day="2026-06-05", status="APPROVED"):
-    return {"category": category, "amount": amount, "expense_date": day,
-            "status": status, "store_id": store}
+    return {
+        "category": category,
+        "amount": amount,
+        "expense_date": day,
+        "status": status,
+        "store_id": store,
+    }
 
 
-def _bill(bill_id, total, due, vendor_id="V-1", vendor_name="Lens Co",
-          critical=False):
-    return {"bill_id": bill_id, "bill_number": f"INV-{bill_id}",
-            "vendor_id": vendor_id, "vendor_name": vendor_name,
-            "bill_date": "2026-05-01", "due_date": due,
-            "total_amount": total, "status": "OUTSTANDING",
-            "vendor_critical": critical}
+def _bill(bill_id, total, due, vendor_id="V-1", vendor_name="Lens Co", critical=False):
+    return {
+        "bill_id": bill_id,
+        "bill_number": f"INV-{bill_id}",
+        "vendor_id": vendor_id,
+        "vendor_name": vendor_name,
+        "bill_date": "2026-05-01",
+        "due_date": due,
+        "total_amount": total,
+        "status": "OUTSTANDING",
+        "vendor_critical": critical,
+    }
 
 
 def _order(grand_total, store="BV-1", created=datetime(2026, 6, 10, 11, 0)):
-    return {"grand_total": grand_total, "payment_status": "PAID",
-            "status": "DELIVERED", "created_at": created, "store_id": store}
+    return {
+        "grand_total": grand_total,
+        "payment_status": "PAID",
+        "status": "DELIVERED",
+        "created_at": created,
+        "store_id": store,
+    }
 
 
 def _seed_standard(db):
     """Rent 50k (essential) + Marketing 20k (deferrable); overdue 10k bill +
     far-future 5k bill; 60k paid revenue by day 15 (-> 120k projected)."""
-    db["expenses"].docs.extend([
-        _expense("Rent", 50000.0),
-        _expense("Marketing", 20000.0),
-    ])
-    db["vendor_bills"].docs.extend([
-        _bill("B-OVD", 10000.0, "2026-06-10"),   # overdue vs 2026-06-15
-        _bill("B-FUT", 5000.0, "2026-07-15"),    # due in 30d, non-critical
-    ])
+    db["expenses"].docs.extend(
+        [
+            _expense("Rent", 50000.0),
+            _expense("Marketing", 20000.0),
+        ]
+    )
+    db["vendor_bills"].docs.extend(
+        [
+            _bill("B-OVD", 10000.0, "2026-06-10"),  # overdue vs 2026-06-15
+            _bill("B-FUT", 5000.0, "2026-07-15"),  # due in 30d, non-critical
+        ]
+    )
     db["orders"].docs.append(_order(60000.0))
 
 
@@ -334,8 +369,8 @@ def test_far_future_bill_is_deferrable_even_for_critical_vendor():
 def test_min_pay_math_is_paise_exact():
     out = svc.build_survival_view(
         expenses=[
-            {"head": "Rent", "amount": 12345.67},        # rupees -> 1234567 paise
-            {"head": "Marketing", "amount": 99.99},      # deferrable
+            {"head": "Rent", "amount": 12345.67},  # rupees -> 1234567 paise
+            {"head": "Marketing", "amount": 99.99},  # deferrable
         ],
         ap_bills=[
             {"bill_id": "B1", "due_date": "2026-06-01", "outstanding": 250.5},
@@ -346,11 +381,20 @@ def test_min_pay_math_is_paise_exact():
     assert out["fixed_costs_paise"] == 1234567
     assert out["must_pay_ap_paise"] == 25050
     assert out["min_pay_total_paise"] == 1234567 + 25050
-    assert all(isinstance(out[k], int) for k in (
-        "fixed_costs_paise", "deferrable_expenses_paise", "must_pay_ap_paise",
-        "deferrable_ap_paise", "min_pay_total_paise", "survival_gap_paise",
-        "surplus_paise", "total_outflows_paise", "projected_income_paise",
-    ))
+    assert all(
+        isinstance(out[k], int)
+        for k in (
+            "fixed_costs_paise",
+            "deferrable_expenses_paise",
+            "must_pay_ap_paise",
+            "deferrable_ap_paise",
+            "min_pay_total_paise",
+            "survival_gap_paise",
+            "surplus_paise",
+            "total_outflows_paise",
+            "projected_income_paise",
+        )
+    )
 
 
 def test_survival_gap_clamps_at_zero_with_surplus_mirror():
@@ -360,10 +404,10 @@ def test_survival_gap_clamps_at_zero_with_surplus_mirror():
         now=FIXED_NOW,
     )
     short = svc.build_survival_view(projected_income_paise=400000, **base)
-    assert short["survival_gap_paise"] == 200000      # shortfall is positive
+    assert short["survival_gap_paise"] == 200000  # shortfall is positive
     assert short["surplus_paise"] == 0
     ok = svc.build_survival_view(projected_income_paise=900000, **base)
-    assert ok["survival_gap_paise"] == 0              # never negative
+    assert ok["survival_gap_paise"] == 0  # never negative
     assert ok["surplus_paise"] == 300000
     exact = svc.build_survival_view(projected_income_paise=600000, **base)
     assert exact["survival_gap_paise"] == 0 and exact["surplus_paise"] == 0
@@ -379,8 +423,12 @@ def test_totals_reconcile_every_paisa_in_exactly_one_bucket():
         ],
         ap_bills=[
             {"bill_id": "B1", "due_date": "2026-06-01", "outstanding": 10000},
-            {"bill_id": "B2", "due_date": "2026-06-18", "outstanding": 3000,
-             "vendor_critical": True},
+            {
+                "bill_id": "B2",
+                "due_date": "2026-06-18",
+                "outstanding": 3000,
+                "vendor_critical": True,
+            },
             {"bill_id": "B3", "due_date": "2026-08-01", "outstanding": 4000},
         ],
         projected_income_paise=1,
@@ -394,9 +442,7 @@ def test_totals_reconcile_every_paisa_in_exactly_one_bucket():
         == out["total_outflows_paise"]
     )
     # And the grand total equals the paise sum of every input row.
-    expected_total = (
-        5000000 + 8000000 + 2000000 + 750025 + 1000000 + 300000 + 400000
-    )
+    expected_total = 5000000 + 8000000 + 2000000 + 750025 + 1000000 + 300000 + 400000
     assert out["total_outflows_paise"] == expected_total
     # Detail rows partition the same way (no row lost, none double-counted).
     assert (
@@ -434,13 +480,15 @@ def test_essential_heads_override_replaces_seed_list():
 
 def test_dedicated_route_end_to_end_numbers(routed):
     _seed_standard(routed)
-    out = asyncio.run(fin.get_survival_cashflow(store_id=None, current_user=_accountant()))
+    out = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+    )
     sv = out["survival"]
     assert out["month"] == "2026-06"
-    assert sv["fixed_costs_paise"] == 5000000           # Rent 50k
-    assert sv["deferrable_expenses_paise"] == 2000000   # Marketing 20k
-    assert sv["must_pay_ap_paise"] == 1000000           # overdue 10k bill
-    assert sv["deferrable_ap_paise"] == 500000          # far-future 5k bill
+    assert sv["fixed_costs_paise"] == 5000000  # Rent 50k
+    assert sv["deferrable_expenses_paise"] == 2000000  # Marketing 20k
+    assert sv["must_pay_ap_paise"] == 1000000  # overdue 10k bill
+    assert sv["deferrable_ap_paise"] == 500000  # far-future 5k bill
     assert sv["min_pay_total_paise"] == 6000000
     # 60k paid by day 15 of a 30-day month -> 120k projected.
     assert sv["projected_income_paise"] == 12000000
@@ -454,7 +502,9 @@ def test_dedicated_route_end_to_end_numbers(routed):
 def test_dedicated_route_shows_shortfall_when_income_collapses(routed):
     _seed_standard(routed)
     routed["orders"].docs.clear()  # zero revenue month
-    out = asyncio.run(fin.get_survival_cashflow(store_id=None, current_user=_accountant()))
+    out = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+    )
     sv = out["survival"]
     assert sv["projected_income_paise"] == 0
     assert sv["survival_gap_paise"] == sv["min_pay_total_paise"] == 6000000
@@ -471,8 +521,8 @@ def test_store_id_filters_expenses_and_income_but_not_org_wide_ap(routed):
     sv_bv1 = asyncio.run(
         fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant())
     )["survival"]
-    assert sv_all["fixed_costs_paise"] == 8000000       # both stores' rent
-    assert sv_bv1["fixed_costs_paise"] == 5000000       # BV-1 only
+    assert sv_all["fixed_costs_paise"] == 8000000  # both stores' rent
+    assert sv_bv1["fixed_costs_paise"] == 5000000  # BV-1 only
     assert sv_all["projected_income_paise"] == 20000000  # (60k+40k) doubled
     assert sv_bv1["projected_income_paise"] == 12000000
     # Vendor bills carry no store_id -- AP stays org-wide under the filter.
@@ -491,21 +541,37 @@ def test_e2_policy_override_flows_through_the_route(routed, monkeypatch):
         "get_policy",
         lambda key, scope=None, default=None: policy.get(key, default),
     )
-    routed["expenses"].docs.extend([
-        _expense("Software Subscription", 1000.0),
-        _expense("Rent", 2000.0),
-    ])
-    routed["vendor_bills"].docs.extend([
-        _bill("B-CRIT", 500.0, "2026-06-18", vendor_id="V-A", vendor_name="ACME Optical"),
-        _bill("B-PLAIN", 700.0, "2026-06-18", vendor_id="V-B", vendor_name="Other Vendor"),
-    ])
+    routed["expenses"].docs.extend(
+        [
+            _expense("Software Subscription", 1000.0),
+            _expense("Rent", 2000.0),
+        ]
+    )
+    routed["vendor_bills"].docs.extend(
+        [
+            _bill(
+                "B-CRIT",
+                500.0,
+                "2026-06-18",
+                vendor_id="V-A",
+                vendor_name="ACME Optical",
+            ),
+            _bill(
+                "B-PLAIN",
+                700.0,
+                "2026-06-18",
+                vendor_id="V-B",
+                vendor_name="Other Vendor",
+            ),
+        ]
+    )
     sv = asyncio.run(
         fin.get_survival_cashflow(store_id=None, current_user=_accountant())
     )["survival"]
-    assert sv["fixed_costs_paise"] == 100000            # software now essential
-    assert sv["deferrable_expenses_paise"] == 200000    # rent now deferrable
-    assert sv["must_pay_ap_paise"] == 50000             # ACME due-soon -> must pay
-    assert sv["deferrable_ap_paise"] == 70000           # same due date, not critical
+    assert sv["fixed_costs_paise"] == 100000  # software now essential
+    assert sv["deferrable_expenses_paise"] == 200000  # rent now deferrable
+    assert sv["must_pay_ap_paise"] == 50000  # ACME due-soon -> must pay
+    assert sv["deferrable_ap_paise"] == 70000  # same due date, not critical
 
 
 def test_dedicated_route_403_for_store_manager_and_sales(routed):
@@ -519,10 +585,13 @@ def test_dedicated_route_db_absent_fail_soft(monkeypatch):
     monkeypatch.setattr(fin, "_get_db", lambda: None)
     monkeypatch.setattr(fin, "now_ist_naive", lambda: FIXED_NOW)
     monkeypatch.setattr(
-        fin.policy_engine, "get_policy",
+        fin.policy_engine,
+        "get_policy",
         lambda key, scope=None, default=None: default,
     )
-    out = asyncio.run(fin.get_survival_cashflow(store_id=None, current_user=_accountant()))
+    out = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+    )
     sv = out["survival"]
     assert sv["min_pay_total_paise"] == 0
     assert sv["survival_gap_paise"] == 0
@@ -541,7 +610,9 @@ def test_budget_mode_survival_returns_real_data_not_dead_skeleton(routed):
     It must now carry the real survival view."""
     _seed_standard(routed)
     out = asyncio.run(
-        fin.get_budget(mode="survival", month=None, year=None, current_user=_accountant())
+        fin.get_budget(
+            mode="survival", month=None, year=None, current_user=_accountant()
+        )
     )
     assert "no_budget_set" not in out
     sv = out["survival"]
@@ -559,7 +630,7 @@ def test_budget_mode_full_keeps_legacy_envelope_untouched(routed):
         fin.get_budget(mode="full", month=None, year=None, current_user=_accountant())
     )
     assert "survival" not in out
-    assert out.get("no_budget_set") is True   # honest empty skeleton, as before
+    assert out.get("no_budget_set") is True  # honest empty skeleton, as before
 
 
 def test_budget_mode_survival_narrows_to_owner_gate(routed):
@@ -575,6 +646,177 @@ def test_budget_mode_survival_narrows_to_owner_gate(routed):
     assert exc.value.status_code == 403
     # mode=full for the same manager is unaffected.
     out = asyncio.run(
-        fin.get_budget(mode="full", month=None, year=None, current_user=_store_manager())
+        fin.get_budget(
+            mode="full", month=None, year=None, current_user=_store_manager()
+        )
     )
     assert "survival" not in out
+
+
+# ============================================================================
+# P3-1: scope labels self-document the org-wide-AP / store-income mix
+# ============================================================================
+
+
+def test_scope_labels_org_wide_when_no_store_filter():
+    """No store filter -> everything is org-wide and the view says so."""
+    out = svc.build_survival_view(
+        expenses=[{"head": "Rent", "amount_paise": 100000}],
+        ap_bills=[
+            {"bill_id": "B1", "due_date": "2026-06-01", "outstanding_paise": 50000}
+        ],
+        projected_income_paise=0,
+        now=FIXED_NOW,
+    )
+    assert out["ap_scope"] == "ORG_WIDE"
+    assert out["income_expense_scope"] == "ORG_WIDE"
+    assert "org-wide" in out["scope_note"].lower()
+
+
+def test_scope_labels_flag_store_income_vs_org_wide_ap_mix():
+    """store_scoped -> income/expenses are STORE while AP stays ORG_WIDE; the
+    scope_note spells out that the gap mixes the two (the P3-1 confusion)."""
+    out = svc.build_survival_view(
+        expenses=[{"head": "Rent", "amount_paise": 100000}],
+        ap_bills=[
+            {"bill_id": "B1", "due_date": "2026-06-01", "outstanding_paise": 50000}
+        ],
+        projected_income_paise=0,
+        now=FIXED_NOW,
+        store_scoped=True,
+    )
+    assert out["ap_scope"] == "ORG_WIDE"
+    assert out["income_expense_scope"] == "STORE"
+    assert "org-wide" in out["scope_note"].lower()
+    assert "store" in out["scope_note"].lower()
+
+
+def test_dedicated_route_stamps_scope_labels(routed):
+    """End-to-end: the route passes store_scoped through from its store_id."""
+    _seed_standard(routed)
+    sv_all = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+    )["survival"]
+    sv_bv1 = asyncio.run(
+        fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant())
+    )["survival"]
+    assert sv_all["income_expense_scope"] == "ORG_WIDE"
+    assert sv_bv1["income_expense_scope"] == "STORE"
+    # AP never narrows, regardless of the filter.
+    assert sv_all["ap_scope"] == sv_bv1["ap_scope"] == "ORG_WIDE"
+
+
+# ============================================================================
+# P3-2: pro-ration consistency -- labelled bases match a consistent view
+# ============================================================================
+
+
+def test_income_and_expense_bases_are_labelled():
+    out = svc.build_survival_view(
+        expenses=[{"head": "Rent", "amount_paise": 600000}],
+        ap_bills=[],
+        projected_income_paise=400000,
+        now=FIXED_NOW,
+    )
+    assert out["income_basis"] == "FULL_MONTH_PROJECTED"
+    assert out["expense_basis"] == "MTD_BOOKED"
+
+
+def test_pro_rated_consistent_scales_income_to_mtd_window():
+    """With a 0.5 month-to-date fraction the consistent view halves the
+    full-month projected income so it lines up with MTD-booked expenses.
+
+    Headline (full-month income 700000 vs min_pay 600000) shows a surplus;
+    the consistent MTD view (income 350000 vs 600000) reveals the real
+    early-month gap that the asymmetric basis was hiding (the P3-2 bug)."""
+    out = svc.build_survival_view(
+        expenses=[{"head": "Rent", "amount_paise": 600000}],
+        ap_bills=[],
+        projected_income_paise=700000,
+        now=FIXED_NOW,
+        month_to_date_fraction=0.5,
+    )
+    # Headline keeps full-month income -> looks like a surplus.
+    assert out["survival_gap_paise"] == 0
+    assert out["surplus_paise"] == 100000
+    pc = out["pro_rated_consistent"]
+    assert pc["basis"] == "MTD_BOOKED"
+    assert pc["month_to_date_fraction"] == 0.5
+    assert pc["projected_income_mtd_paise"] == 350000  # 700000 * 0.5
+    assert pc["survival_gap_paise"] == 250000  # 600000 - 350000
+    assert pc["surplus_paise"] == 0
+
+
+def test_pro_rated_consistent_absent_without_fraction_and_clamps_bad_input():
+    """No fraction -> no consistent block (back-compat). A junk/out-of-range
+    fraction clamps to 1.0 (full-month income -- the safe, non-understating
+    fallback) rather than corrupting the figure."""
+    no_block = svc.build_survival_view(
+        expenses=[{"head": "Rent", "amount_paise": 600000}],
+        ap_bills=[],
+        projected_income_paise=700000,
+        now=FIXED_NOW,
+    )
+    assert no_block["pro_rated_consistent"] is None
+    clamped = svc.build_survival_view(
+        expenses=[{"head": "Rent", "amount_paise": 600000}],
+        ap_bills=[],
+        projected_income_paise=700000,
+        now=FIXED_NOW,
+        month_to_date_fraction=5.0,  # nonsense -> clamp to 1.0
+    )
+    pc = clamped["pro_rated_consistent"]
+    assert pc["month_to_date_fraction"] == 1.0
+    assert pc["projected_income_mtd_paise"] == 700000
+
+
+def test_route_pro_rated_consistent_inverts_income_projection(routed):
+    """End-to-end at FIXED_NOW (day 15 / 30): the route projects 60k paid to
+    120k full-month, and the consistent MTD view scales it back to exactly the
+    60k that was actually booked -- a true like-for-like vs MTD expenses."""
+    _seed_standard(routed)
+    sv = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+    )["survival"]
+    assert sv["projected_income_paise"] == 12000000  # full-month
+    pc = sv["pro_rated_consistent"]
+    assert pc["month_to_date_fraction"] == 0.5  # 15 / 30
+    assert pc["projected_income_mtd_paise"] == 6000000  # back to booked 60k
+
+
+# ============================================================================
+# P3-3: budget?mode=survival stamps the real as-of date / flags stale period
+# ============================================================================
+
+
+def test_budget_mode_survival_stamps_as_of_for_current_period(routed):
+    """Current month requested -> survival reflects it; as-of is stamped and
+    no misleading-period note is added."""
+    _seed_standard(routed)
+    out = asyncio.run(
+        fin.get_budget(mode="survival", month=6, year=2026, current_user=_accountant())
+    )
+    assert out["survival_as_of"] == FIXED_NOW.date().isoformat()
+    assert out["survival_month"] == "2026-06"
+    assert out["survival_reflects_requested_period"] is True
+    assert "survival_note" not in out
+
+
+def test_budget_mode_survival_flags_historical_period_mismatch(routed):
+    """Requesting a PAST month must not silently embed an as-of-NOW survival
+    view in an envelope stamped with that past month (the P3-3 bug). The
+    survival block is stamped with its real as-of date + an explicit note."""
+    _seed_standard(routed)
+    out = asyncio.run(
+        fin.get_budget(mode="survival", month=3, year=2026, current_user=_accountant())
+    )
+    # Envelope still carries the requested historical period for the skeleton.
+    assert out["month"] == 3 and out["year"] == 2026
+    # ...but the survival block is honestly stamped as a CURRENT-month view.
+    assert out["survival_as_of"] == FIXED_NOW.date().isoformat()
+    assert out["survival_month"] == "2026-06"
+    assert out["survival_reflects_requested_period"] is False
+    assert "survival_note" in out
+    assert "2026-03" in out["survival_note"]
+    # And the survival numbers are still the real current-month figures.
+    assert out["survival"]["min_pay_total_paise"] == 6000000
