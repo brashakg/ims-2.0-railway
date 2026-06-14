@@ -93,7 +93,10 @@ def find_fulfillment_sources(
 # ---------------------------------------------------------------------------
 
 COLLECTION = "endless_aisle_requests"
-TRANSFERS_COLLECTION = "transfers"
+# The transfers module persists to `stock_transfers` (keyed on `id`); write the
+# linked transfer THERE so it is discoverable + actionable in the existing
+# transfers lifecycle (ship/receive moves the physical stock), not orphaned.
+TRANSFERS_COLLECTION = "stock_transfers"
 POLICY_ENABLED = "endless_aisle.enabled"
 POLICY_ELIGIBLE_STORES = "endless_aisle.eligible_store_ids"
 

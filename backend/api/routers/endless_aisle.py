@@ -336,9 +336,11 @@ async def get_request(
     req = svc.get_request(_get_db(), request_id)
     if not req:
         raise HTTPException(status_code=404, detail="request not found")
-    # either side of the transfer may view it
+    # Org-wide roles see any request; everyone else (incl. AREA_MANAGER, whose
+    # store_ids list bounds their region) may only read a request touching a
+    # store they can access -- no cross-region object read.
     roles = _roles(current_user)
-    if not ({"ADMIN", "SUPERADMIN", "AREA_MANAGER"} & roles):
+    if not ({"ADMIN", "SUPERADMIN"} & roles):
         allowed = set(current_user.get("store_ids") or [])
         if (
             req.get("selling_store_id") not in allowed

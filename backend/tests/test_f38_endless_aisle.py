@@ -410,3 +410,55 @@ def test_router_full_flow_no_order_mutation(db, monkeypatch):
     assert out["status"] == "TRANSFER_CREATED"
     # POS / orders never touched by the whole flow
     assert db.get_collection("orders").docs == []
+
+
+# ============================================================================
+# Adversarial-pass fixes -- flag registered, transfer-not-orphaned, AM scope
+# ============================================================================
+
+
+def test_flag_keys_are_registered():
+    """endless_aisle.enabled must be a REGISTERED policy key, else set_policy
+    rejects it and the feature can never be turned on (audit P2)."""
+    from api.services import policy_registry as pr
+
+    assert "endless_aisle.enabled" in pr.REGISTRY
+    assert "endless_aisle.eligible_store_ids" in pr.REGISTRY
+
+
+def test_transfer_written_to_stock_transfers_collection(db):
+    """The linked transfer lands in the collection the transfers module reads
+    (stock_transfers, keyed on id) -- not an orphaned 'transfers' collection."""
+    assert svc.TRANSFERS_COLLECTION == "stock_transfers"
+    r = _pending(db, {("P", "BV-2"): 5})
+    svc.accept_request(
+        db, r["request_id"], actor=_mgr2(), on_hand_resolver=_oh({("P", "BV-2"): 5})
+    )
+    out = svc.create_transfer(
+        db, r["request_id"], actor=_mgr(), on_hand_resolver=_oh({("P", "BV-2"): 5})
+    )
+    found = db.get_collection("stock_transfers").find_one({"id": out["transfer_id"]})
+    assert found is not None and found["to_location_id"] == "BV-1"
+
+
+def test_router_area_manager_cannot_read_cross_region(db, monkeypatch):
+    """An AREA_MANAGER whose region is [BV-3,BV-4] cannot read a BV-1<-BV-2
+    request (no cross-region object read); one whose region includes a touched
+    store CAN."""
+    from fastapi import HTTPException
+
+    r = _wire(monkeypatch, db)
+    monkeypatch.setattr(r, "validate_store_access", lambda sid, u: True)
+    body = r.RequestBody(
+        product_id="P", qty=2, selling_store_id="BV-1", source_store_id="BV-2"
+    )
+    req = _run(r.open_request(body, current_user=_mgr2()))
+    am = {"user_id": "AM1", "roles": ["AREA_MANAGER"], "store_ids": ["BV-3", "BV-4"]}
+    with pytest.raises(HTTPException) as exc:
+        _run(r.get_request(req["request_id"], current_user=am))
+    assert exc.value.status_code == 403
+    am_ok = {"user_id": "AM2", "roles": ["AREA_MANAGER"], "store_ids": ["BV-1", "BV-9"]}
+    assert (
+        _run(r.get_request(req["request_id"], current_user=am_ok))["request_id"]
+        == req["request_id"]
+    )
