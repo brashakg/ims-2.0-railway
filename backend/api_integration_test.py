@@ -50,7 +50,7 @@ class APIIntegrationTester:
                 raise ValueError(f"Unsupported method: {method}")
 
             success = response.status_code == expect_status
-            status = "✅ PASS" if success else "❌ FAIL"
+            status = "[PASS]" if success else "[FAIL]"
 
             result = {
                 "name": name or f"{method} {endpoint}",
@@ -72,7 +72,7 @@ class APIIntegrationTester:
                 return response.text
 
         except httpx.ConnectError:
-            print(f"❌ CONNECTION ERROR | {method:6} {endpoint:40} | Cannot connect to {self.base_url}")
+            print(f"[ERROR] CONNECTION ERROR | {method:6} {endpoint:40} | Cannot connect to {self.base_url}")
             self.test_results.append({
                 "name": name,
                 "status": "CONNECTION_ERROR",
@@ -80,7 +80,7 @@ class APIIntegrationTester:
             })
             return None
         except Exception as e:
-            print(f"❌ ERROR | {method:6} {endpoint:40} | {str(e)}")
+            print(f"[ERROR] | {method:6} {endpoint:40} | {str(e)}")
             self.test_results.append({
                 "name": name,
                 "status": "ERROR",
@@ -98,7 +98,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 1. HEALTH CHECK
         # ====================================================================
-        print("\n📋 1. HEALTH CHECKS")
+        print("\n[SECTION] 1. HEALTH CHECKS")
         print("-" * 90)
 
         await self.test_api_endpoint("GET", "/health", expect_status=200, name="Health Check")
@@ -107,7 +107,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 2. AUTHENTICATION
         # ====================================================================
-        print("\n📋 2. AUTHENTICATION FLOW")
+        print("\n[SECTION] 2. AUTHENTICATION FLOW")
         print("-" * 90)
 
         login_response = await self.test_api_endpoint(
@@ -121,12 +121,12 @@ class APIIntegrationTester:
             self.auth_token = login_response["access_token"]
             print(f"   → Token obtained: {self.auth_token[:20]}...")
         else:
-            print("   ⚠️  Failed to obtain auth token. Continuing with public endpoints...")
+            print("   [WARN]  Failed to obtain auth token. Continuing with public endpoints...")
 
         # ====================================================================
         # 3. STORE OPERATIONS
         # ====================================================================
-        print("\n📋 3. STORE MANAGEMENT")
+        print("\n[SECTION] 3. STORE MANAGEMENT")
         print("-" * 90)
 
         stores = await self.test_api_endpoint(
@@ -142,7 +142,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 4. CUSTOMER OPERATIONS
         # ====================================================================
-        print("\n📋 4. CUSTOMER MANAGEMENT")
+        print("\n[SECTION] 4. CUSTOMER MANAGEMENT")
         print("-" * 90)
 
         customers = await self.test_api_endpoint(
@@ -172,7 +172,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 5. PRODUCT OPERATIONS
         # ====================================================================
-        print("\n📋 5. PRODUCT MANAGEMENT")
+        print("\n[SECTION] 5. PRODUCT MANAGEMENT")
         print("-" * 90)
 
         products = await self.test_api_endpoint(
@@ -187,7 +187,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 6. INVENTORY OPERATIONS
         # ====================================================================
-        print("\n📋 6. INVENTORY MANAGEMENT")
+        print("\n[SECTION] 6. INVENTORY MANAGEMENT")
         print("-" * 90)
 
         inventory = await self.test_api_endpoint(
@@ -202,7 +202,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 7. ORDER OPERATIONS
         # ====================================================================
-        print("\n📋 7. ORDER MANAGEMENT")
+        print("\n[SECTION] 7. ORDER MANAGEMENT")
         print("-" * 90)
 
         orders = await self.test_api_endpoint(
@@ -237,7 +237,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 8. PRESCRIPTION OPERATIONS
         # ====================================================================
-        print("\n📋 8. PRESCRIPTION MANAGEMENT")
+        print("\n[SECTION] 8. PRESCRIPTION MANAGEMENT")
         print("-" * 90)
 
         prescriptions = await self.test_api_endpoint(
@@ -252,7 +252,7 @@ class APIIntegrationTester:
         # ====================================================================
         # 9. REPORTS & ANALYTICS
         # ====================================================================
-        print("\n📋 9. REPORTS & ANALYTICS")
+        print("\n[SECTION] 9. REPORTS & ANALYTICS")
         print("-" * 90)
 
         dashboard = await self.test_api_endpoint(
@@ -293,9 +293,9 @@ class APIIntegrationTester:
         total = len([r for r in self.test_results if "success" in r])
 
         print(f"\nTotal Tests: {total}")
-        print(f"Passed: {passed} ✅")
-        print(f"Failed: {failed} ❌")
-        print(f"Errors: {errors} ⚠️")
+        print(f"Passed: {passed} [OK]")
+        print(f"Failed: {failed} [FAIL]")
+        print(f"Errors: {errors} [WARN]")
 
         if total > 0:
             pass_rate = (passed / total * 100)
@@ -318,15 +318,15 @@ class APIIntegrationTester:
 
         for cat, stats in sorted(categories.items()):
             total_cat = stats["passed"] + stats["failed"]
-            status = "✅" if stats["failed"] == 0 else "⚠️"
+            status = "[OK]" if stats["failed"] == 0 else "[WARN]"
             print(f"{status} {cat.upper():20} | Passed: {stats['passed']:2}/{total_cat}")
 
         print("\n" + "=" * 90)
 
         if passed == total:
-            print("🎉 ALL TESTS PASSED! API is fully functional!")
+            print("[OK] ALL TESTS PASSED! API is fully functional!")
         else:
-            print(f"⚠️  {failed} test(s) failed. Review logs above.")
+            print(f"[WARN]  {failed} test(s) failed. Review logs above.")
 
         print("=" * 90 + "\n")
 

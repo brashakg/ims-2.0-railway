@@ -348,14 +348,14 @@ class E2ETestRunner:
         }
         self.test_results.append(result)
 
-        status_symbol = "✅" if status == "PASS" else "❌"
+        status_symbol = "[OK]" if status == "PASS" else "[FAIL]"
         print(f"{status_symbol} {test_name}: {status}")
         if details:
             print(f"   └─ {details}")
 
     async def test_workflow_1_customer_registration(self):
         """Test: New customer registration flow"""
-        print("\n🔄 TEST WORKFLOW 1: Customer Registration")
+        print("\n[WORKFLOW] TEST WORKFLOW 1: Customer Registration")
         print("=" * 60)
 
         try:
@@ -379,7 +379,7 @@ class E2ETestRunner:
 
     async def test_workflow_2_order_creation_and_payment(self):
         """Test: Complete order creation and payment flow"""
-        print("\n🔄 TEST WORKFLOW 2: Order Creation & Payment")
+        print("\n[WORKFLOW] TEST WORKFLOW 2: Order Creation & Payment")
         print("=" * 60)
 
         try:
@@ -430,7 +430,7 @@ class E2ETestRunner:
 
     async def test_workflow_3_prescription_management(self):
         """Test: Eye prescription creation and management"""
-        print("\n🔄 TEST WORKFLOW 3: Prescription Management")
+        print("\n[WORKFLOW] TEST WORKFLOW 3: Prescription Management")
         print("=" * 60)
 
         try:
@@ -463,7 +463,7 @@ class E2ETestRunner:
 
     async def test_workflow_4_multi_store_inventory_sync(self):
         """Test: Multi-store inventory synchronization"""
-        print("\n🔄 TEST WORKFLOW 4: Multi-Store Inventory Sync")
+        print("\n[WORKFLOW] TEST WORKFLOW 4: Multi-Store Inventory Sync")
         print("=" * 60)
 
         try:
@@ -496,7 +496,7 @@ class E2ETestRunner:
 
     async def test_workflow_5_reporting_and_analytics(self):
         """Test: Dashboard reporting and analytics"""
-        print("\n🔄 TEST WORKFLOW 5: Reporting & Analytics")
+        print("\n[WORKFLOW] TEST WORKFLOW 5: Reporting & Analytics")
         print("=" * 60)
 
         try:
@@ -569,18 +569,18 @@ class E2ETestRunner:
         print("╠" + "=" * 58 + "╣")
 
         print("║ SAMPLE DATA GENERATED:                                   ║")
-        print(f"║  ✅ Stores: {len(generate_sample_stores()):<48} ║")
-        print(f"║  ✅ Users: {len(generate_sample_users()):<49} ║")
-        print(f"║  ✅ Customers: {len(generate_sample_customers()):<44} ║")
-        print(f"║  ✅ Products: {len(generate_sample_products()):<44} ║")
-        print(f"║  ✅ Prescriptions: {len(generate_sample_prescriptions(generate_sample_customers())):<39} ║")
-        print(f"║  ✅ Orders: {len(generate_sample_orders(generate_sample_customers(), generate_sample_products())):<47} ║")
-        print(f"║  ✅ Transfers: {len(generate_sample_inventory_transfers(generate_sample_stores())):<41} ║")
+        print(f"║  [OK] Stores: {len(generate_sample_stores()):<46} ║")
+        print(f"║  [OK] Users: {len(generate_sample_users()):<47} ║")
+        print(f"║  [OK] Customers: {len(generate_sample_customers()):<42} ║")
+        print(f"║  [OK] Products: {len(generate_sample_products()):<42} ║")
+        print(f"║  [OK] Prescriptions: {len(generate_sample_prescriptions(generate_sample_customers())):<37} ║")
+        print(f"║  [OK] Orders: {len(generate_sample_orders(generate_sample_customers(), generate_sample_products())):<45} ║")
+        print(f"║  [OK] Transfers: {len(generate_sample_inventory_transfers(generate_sample_stores())):<39} ║")
 
         print("╠" + "=" * 58 + "╣")
         print("║ TEST WORKFLOWS:                                          ║")
         for result in self.test_results:
-            status = "✅ PASS" if result["status"] == "PASS" else "❌ FAIL"
+            status = "[PASS]" if result["status"] == "PASS" else "[FAIL]"
             print(f"║  {status} {result['test_name']:<48} ║")
 
         print("╚" + "=" * 58 + "╝")
@@ -601,7 +601,7 @@ async def main():
     action = sys.argv[1]
 
     if action == "--seed" or action == "--full":
-        print("\n📊 GENERATING SAMPLE DATA...")
+        print("\n[REPORT] GENERATING SAMPLE DATA...")
         print("=" * 70)
 
         stores = generate_sample_stores()
@@ -612,13 +612,13 @@ async def main():
         orders = generate_sample_orders(customers, products)
         transfers = generate_sample_inventory_transfers(stores)
 
-        print(f"✅ {len(stores)} stores")
-        print(f"✅ {len(users)} users with different roles")
-        print(f"✅ {len(customers)} customers")
-        print(f"✅ {len(products)} frame products")
-        print(f"✅ {len(prescriptions)} prescriptions")
-        print(f"✅ {len(orders)} orders with payment data")
-        print(f"✅ {len(transfers)} inventory transfers")
+        print(f"[OK] {len(stores)} stores")
+        print(f"[OK] {len(users)} users with different roles")
+        print(f"[OK] {len(customers)} customers")
+        print(f"[OK] {len(products)} frame products")
+        print(f"[OK] {len(prescriptions)} prescriptions")
+        print(f"[OK] {len(orders)} orders with payment data")
+        print(f"[OK] {len(transfers)} inventory transfers")
 
         # Save to JSON for reference
         seed_data = {
@@ -634,7 +634,7 @@ async def main():
 
         with open("/tmp/ims_seed_data.json", "w") as f:
             json.dump(seed_data, f, indent=2)
-        print(f"\n💾 Sample data saved to: /tmp/ims_seed_data.json")
+        print(f"\n[SAVE] Sample data saved to: /tmp/ims_seed_data.json")
 
     if action == "--test" or action == "--full":
         runner = E2ETestRunner()

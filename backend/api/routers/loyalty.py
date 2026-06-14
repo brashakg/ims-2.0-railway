@@ -863,6 +863,12 @@ async def create_reward(
     """Create a new loyalty reward (ADMIN/AREA_MANAGER/STORE_MANAGER)."""
     if not any(role in (current_user.get("roles") or []) for role in ("SUPERADMIN", *_REWARD_CATALOG_ROLES)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    # Store-scope IDOR guard: a STORE_MANAGER may only create rewards for their
+    # own store. ADMIN/SUPERADMIN may create global (no store_id) or any store.
+    if req.store_id and not _is_admin(current_user):
+        user_store_ids = current_user.get("store_ids") or []
+        if req.store_id not in user_store_ids:
+            raise HTTPException(status_code=403, detail="Cannot create reward for a store you do not manage")
     db = _reward_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -923,6 +929,14 @@ async def update_reward(
     doc = db.get_collection("loyalty_rewards").find_one({"reward_id": reward_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Reward not found")
+    # Store-scope IDOR guard: non-admins may only update rewards belonging to
+    # their own store (or global rewards with no store_id).
+    if not _is_admin(current_user):
+        reward_store = doc.get("store_id")
+        if reward_store:
+            user_store_ids = current_user.get("store_ids") or []
+            if reward_store not in user_store_ids:
+                raise HTTPException(status_code=403, detail="Cannot update reward for a store you do not manage")
     updates = req.model_dump(exclude_unset=True, exclude_none=True)
     if not updates:
         doc.pop("_id", None)

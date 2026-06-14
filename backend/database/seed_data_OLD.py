@@ -1201,6 +1201,6 @@ def seed_database(db):
         collection = db[collection_name]
         count = seed_collection(collection, data)
         results[collection_name] = count
-        print(f"  ✓ {collection_name}: {count} documents")
+        print(f"  [OK] {collection_name}: {count} documents")
 
     return results

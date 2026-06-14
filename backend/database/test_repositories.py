@@ -28,7 +28,7 @@ def test_repositories():
     # =========================================================================
     # Test User Repository
     # =========================================================================
-    print("\n👤 Testing User Repository")
+    print("\n[TEST] Testing User Repository")
     user_repo = UserRepository(mock_db["users"])
     
     # Create user
@@ -53,7 +53,7 @@ def test_repositories():
     # =========================================================================
     # Test Store Repository
     # =========================================================================
-    print("\n🏪 Testing Store Repository")
+    print("\n[TEST] Testing Store Repository")
     store_repo = StoreRepository(mock_db["stores"])
     
     store = store_repo.create({
@@ -76,7 +76,7 @@ def test_repositories():
     # =========================================================================
     # Test Product Repository
     # =========================================================================
-    print("\n📦 Testing Product Repository")
+    print("\n[TEST] Testing Product Repository")
     product_repo = ProductRepository(mock_db["products"])
     
     product = product_repo.create({
@@ -100,7 +100,7 @@ def test_repositories():
     # =========================================================================
     # Test Customer Repository
     # =========================================================================
-    print("\n👥 Testing Customer Repository")
+    print("\n[TEST] Testing Customer Repository")
     customer_repo = CustomerRepository(mock_db["customers"])
     
     customer = customer_repo.create({
@@ -128,7 +128,7 @@ def test_repositories():
     # =========================================================================
     # Test Order Repository
     # =========================================================================
-    print("\n🛒 Testing Order Repository")
+    print("\n[TEST] Testing Order Repository")
     order_repo = OrderRepository(mock_db["orders"])
     
     order = order_repo.create({
@@ -168,7 +168,7 @@ def test_repositories():
     # =========================================================================
     # Test Vendor Repository
     # =========================================================================
-    print("\n🏭 Testing Vendor Repository")
+    print("\n[TEST] Testing Vendor Repository")
     vendor_repo = VendorRepository(mock_db["vendors"])
     
     vendor = vendor_repo.create({
@@ -185,7 +185,7 @@ def test_repositories():
     # =========================================================================
     # Test Task Repository
     # =========================================================================
-    print("\n📋 Testing Task Repository")
+    print("\n[TEST] Testing Task Repository")
     task_repo = TaskRepository(mock_db["tasks"])
     
     task = task_repo.create({
@@ -213,10 +213,10 @@ def test_repositories():
     # Summary
     # =========================================================================
     print("\n" + "=" * 60)
-    print("✅ ALL REPOSITORY TESTS PASSED")
+    print("[OK] ALL REPOSITORY TESTS PASSED")
     print("=" * 60)
     
-    print(f"\n📊 Summary:")
+    print(f"\n[REPORT] Summary:")
     print(f"  Users: {user_repo.count()}")
     print(f"  Stores: {store_repo.count()}")
     print(f"  Products: {product_repo.count()}")

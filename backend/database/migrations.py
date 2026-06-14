@@ -28,7 +28,7 @@ class MigrationResult:
         self.timestamp = datetime.now()
     
     def __str__(self):
-        status = "✅" if self.success else "❌"
+        status = "[OK]" if self.success else "[ERROR]"
         return f"{status} {self.message}"
 
 
@@ -48,20 +48,20 @@ class DatabaseMigration:
         print("=" * 60)
         
         if not MONGO_AVAILABLE or not self.db:
-            print("⚠️ MongoDB not available. Running in mock mode.")
+            print("[WARN] MongoDB not available. Running in mock mode.")
             return self._run_mock_migrations()
         
         results = []
         
         # 1. Create collections with schema validation
-        print("\n📦 Creating Collections...")
+        print("\n[STEP] Creating Collections...")
         for name, config in COLLECTIONS.items():
             result = self._create_collection(name, config["schema"])
             results.append(result)
             print(f"  {result}")
         
         # 2. Create indexes
-        print("\n📊 Creating Indexes...")
+        print("\n[STEP] Creating Indexes...")
         for name, indexes in get_all_indexes().items():
             for index_config in indexes:
                 result = self._create_index(name, index_config)
@@ -82,7 +82,7 @@ class DatabaseMigration:
             print(f"  {result}")
 
         # 3. Create default data
-        print("\n📝 Creating Default Data...")
+        print("\n[STEP] Creating Default Data...")
         result = self._create_default_data()
         results.append(result)
         print(f"  {result}")
@@ -97,7 +97,7 @@ class DatabaseMigration:
         
         # Summary
         success_count = len([r for r in results if r.success])
-        print(f"\n✅ Completed: {success_count}/{len(results)} operations successful")
+        print(f"\n[OK] Completed: {success_count}/{len(results)} operations successful")
         
         self.results = results
         return results
@@ -109,7 +109,7 @@ class DatabaseMigration:
         for name in COLLECTIONS.keys():
             results.append(MigrationResult(True, f"Collection '{name}' (mock)"))
         
-        print(f"✅ Mock migration complete: {len(results)} collections")
+        print(f"[OK] Mock migration complete: {len(results)} collections")
         return results
     
     def _create_collection(self, name: str, schema: Dict) -> MigrationResult:

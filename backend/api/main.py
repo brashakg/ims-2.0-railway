@@ -495,7 +495,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    logger.info("🛑 Shutting down IMS 2.0 API Server...")
+    logger.info("[STOP] Shutting down IMS 2.0 API Server...")
 
     # Shutdown Agent Scheduler
     if _scheduler:
@@ -515,7 +515,7 @@ async def lifespan(app: FastAPI):
 
     if DATABASE_AVAILABLE:
         close_db()
-        logger.info("🔌 Database connection closed")
+        logger.info("[DB] Database connection closed")
 
 
 # Create FastAPI application

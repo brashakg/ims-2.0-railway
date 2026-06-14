@@ -337,16 +337,38 @@ def require_roles(*allowed_roles: str):
 def _client_ip(req: "Request") -> str:
     """Best-effort client IP for the audit "where" dimension.
 
-    Prefers the first hop of X-Forwarded-For (the real client behind Railway's
-    proxy), then the direct socket peer. Fail-soft -> 'unknown'.
+    On Railway the edge proxy is the direct socket peer (req.client.host).
+    X-Forwarded-For is fully attacker-controlled and must NOT be used for
+    rate-limiting — an attacker can rotate arbitrary spoofed values to bypass
+    IP lockouts.  We still read XFF for audit logging (informational only), but
+    the rate-limiter always uses the socket peer via get_rate_limit_ip().
+    Fail-soft -> 'unknown'.
     """
     if req is None:
         return "unknown"
     try:
+        # Prefer the rightmost (Railway-injected) hop of XFF for audit display;
+        # this is more human-readable than the edge-proxy address.
         xff = req.headers.get("x-forwarded-for", "") or ""
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
+        hops = [h.strip() for h in xff.split(",") if h.strip()]
+        if hops:
+            return hops[-1]  # rightmost hop is Railway-injected, unforgeable
+        if req.client and req.client.host:
+            return req.client.host
+    except Exception:  # noqa: BLE001
+        pass
+    return "unknown"
+
+
+def _rate_limit_ip(req: "Request") -> str:
+    """IP used exclusively for rate-limiting decisions.
+
+    Must be attacker-unforgeable: use the direct socket peer (Railway's edge
+    proxy address when behind a proxy). Never trust X-Forwarded-For here.
+    """
+    if req is None:
+        return "unknown"
+    try:
         if req.client and req.client.host:
             return req.client.host
     except Exception:  # noqa: BLE001
@@ -445,11 +467,13 @@ async def login(request: LoginRequest, req: Request = None):
     Accepts either username or email in the username field.
     Rate-limited: 5 failed attempts per IP (15 min), 10 per username (30 min).
     """
-    # Rate limiting check
-    client_ip = _client_ip(req)
-    rate_err = _login_limiter.check(client_ip, request.username)
+    # Rate limiting: socket peer IP only (attacker-unforgeable via XFF spoofing).
+    rate_ip = _rate_limit_ip(req)
+    rate_err = _login_limiter.check(rate_ip, request.username)
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
+    # Audit log: use best-effort display IP (rightmost XFF hop, more human-readable).
+    client_ip = _client_ip(req)
 
     # Look up user from MongoDB (real database)
     from ..dependencies import get_user_repository
@@ -504,7 +528,7 @@ async def login(request: LoginRequest, req: Request = None):
         # Always run bcrypt verify against dummy hash to prevent timing side-channel
         # username enumeration. Unknown users will have constant-time response.
         verify_password(request.password, _DUMMY_BCRYPT_HASH)
-        _login_limiter.record(client_ip, request.username, success=False)
+        _login_limiter.record(rate_ip, request.username, success=False)
         _audit_auth_event(
             action="login_failure",
             user_id=None,
@@ -516,7 +540,7 @@ async def login(request: LoginRequest, req: Request = None):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if not verify_password(request.password, user.get("password_hash", "")):
-        _login_limiter.record(client_ip, request.username, success=False)
+        _login_limiter.record(rate_ip, request.username, success=False)
         _audit_auth_event(
             action="login_failure",
             user_id=user.get("user_id"),
@@ -614,7 +638,7 @@ async def login(request: LoginRequest, req: Request = None):
     access_token = create_access_token(token_data)
 
     # Record successful login (clears lockouts)
-    _login_limiter.record(client_ip, request.username, success=True)
+    _login_limiter.record(rate_ip, request.username, success=True)
     _audit_auth_event(
         action="login_success",
         user_id=token_data["user_id"],
@@ -797,7 +821,25 @@ async def refresh_token(request: RefreshTokenRequest):
     """
     Refresh access token
     """
+    # Reject tokens that were explicitly revoked (logout, forced-out, etc.)
+    if _token_blacklist.is_revoked(request.token):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+
     payload = decode_token(request.token)
+
+    # Re-verify the user is still active in the database before issuing a new token.
+    # This prevents a disabled/deleted user from perpetually refreshing access.
+    try:
+        from ..dependencies import get_user_repository
+        user_repo = get_user_repository()
+        user = user_repo.find_by_username(payload["username"])
+        if not user or not user.get("is_active", True):
+            raise HTTPException(status_code=401, detail="Account is inactive")
+    except HTTPException:
+        raise
+    except Exception:
+        # DB unavailable: fail closed on the security check rather than silently pass
+        raise HTTPException(status_code=503, detail="Unable to verify account status")
 
     # Create new token (preserve the force-password-change flag + the deny-only
     # module override across refresh so the restriction survives a re-issue).
