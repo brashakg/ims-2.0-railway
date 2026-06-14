@@ -74,7 +74,14 @@ def _parse_date(s: Any):
 
 
 # A bill counts toward rebate spend unless it is voided/cancelled/reversed.
-_EXCLUDED_BILL_STATUSES = {"VOID", "VOIDED", "CANCELLED", "CANCELED", "REVERSED", "DELETED"}
+_EXCLUDED_BILL_STATUSES = {
+    "VOID",
+    "VOIDED",
+    "CANCELLED",
+    "CANCELED",
+    "REVERSED",
+    "DELETED",
+}
 
 
 def compute_period_spend(invoices, vendor_id, period_start, period_end) -> int:
@@ -208,10 +215,10 @@ def _round_half_up(numerator: int, denominator: int) -> int:
 def compute_rebate_paise(spend_paise, tier) -> int:
     """Paise-exact rebate for the resolved tier.
 
-      * percentage:  round-half-up(spend_paise * pct / 100)  (integer paise)
-      * flat:        the flat paise amount
-      * optional cap_paise clamps the result: min(rebate, cap)
-      * returns 0 if tier is None / falsy
+    * percentage:  round-half-up(spend_paise * pct / 100)  (integer paise)
+    * flat:        the flat paise amount
+    * optional cap_paise clamps the result: min(rebate, cap)
+    * returns 0 if tier is None / falsy
     """
     if not tier or not isinstance(tier, dict):
         return 0
@@ -229,7 +236,9 @@ def compute_rebate_paise(spend_paise, tier) -> int:
             # avoid binary-float drift: numerator = spend * pct_scaled.
             # pct may carry up to 2 dp (e.g. 1.25%); scale by 100.
             pct_scaled = int(round(pct * 100))  # 1.25% -> 125
-            rebate = _round_half_up(spend * pct_scaled, 10000)  # /100 (pct) /100 (scale)
+            rebate = _round_half_up(
+                spend * pct_scaled, 10000
+            )  # /100 (pct) /100 (scale)
     else:
         rebate = _int_paise(tier.get("rebate_flat_paise"))
 
@@ -254,3 +263,302 @@ def compute_earn(invoices, vendor_id, period_start, period_end, tiers) -> dict:
     tier = resolve_tier(spend, tiers)
     rebate = compute_rebate_paise(spend, tier)
     return {"spend_paise": spend, "tier": tier, "rebate_paise": rebate}
+
+
+# ---------------------------------------------------------------------------
+# DB engine -- agreement CRUD + manual period post (reduce vendor AP).
+# Standalone Mongo: the double-post guard is a UNIQUE index on
+# (agreement_id, period_start) backed by a guarded insert. Owner decision:
+# the earned rebate REDUCES VENDOR AP via a credit-note doc (no bill_id) that
+# ap_engine.build_aging nets off the vendor's payable; a Tally JV intent
+# (credit vendor / debit Rebates-Receivable) is recorded, never live-dispatched.
+# ---------------------------------------------------------------------------
+
+import uuid
+from datetime import datetime, timezone
+
+COLLECTION_AGREEMENTS = "vendor_rebate_agreements"
+COLLECTION_LEDGER = "vendor_rebate_ledger"
+CREDIT_NOTES_COLLECTION = "vendor_credit_notes"
+BILLS_COLLECTION = "vendor_bills"
+PERIODS = ("MONTHLY", "QUARTERLY", "ANNUAL")
+
+
+class RebateError(Exception):
+    def __init__(self, message, status=400, code="rebate_error"):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _require_db(db) -> None:
+    if db is None:
+        raise RebateError("rebate store unavailable", status=503, code="no_db")
+
+
+def ensure_indexes(db) -> None:
+    """Idempotent indexes. The ledger UNIQUE (agreement_id, period_start) is the
+    double-post backstop. Fail-soft."""
+    if db is None:
+        return
+    try:
+        db.get_collection(COLLECTION_AGREEMENTS).create_index(
+            [("vendor_id", 1), ("active", 1)]
+        )
+        db.get_collection(COLLECTION_LEDGER).create_index(
+            [("agreement_id", 1), ("period_start", 1)], unique=True
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
+def create_agreement(db, payload, *, actor) -> dict:
+    """Create a rebate agreement. Validates the tier ladder up front (loud) so a
+    malformed ladder can never be saved and silently mis-pay later."""
+    _require_db(db)
+    payload = payload or {}
+    vendor_id = str(payload.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise RebateError("vendor_id is required", status=422)
+    period = str(payload.get("period") or "MONTHLY").strip().upper()
+    if period not in PERIODS:
+        raise RebateError("period must be MONTHLY, QUARTERLY or ANNUAL", status=422)
+    try:
+        tiers = _validate_tiers(payload.get("tiers"))
+    except RebateConfigError as exc:
+        raise RebateError(
+            "invalid tier ladder: " + str(exc), status=422, code="bad_tiers"
+        )
+    aid = "VRA-" + uuid.uuid4().hex[:10].upper()
+    now = _now_iso()
+    doc = {
+        "_id": aid,
+        "agreement_id": aid,
+        "vendor_id": vendor_id,
+        "name": str(payload.get("name") or "").strip() or f"Rebate {vendor_id}",
+        "period": period,
+        "basis": "PURCHASE_INVOICE",
+        "tiers": tiers,
+        "active": bool(payload.get("active", True)),
+        "auto_post": False,  # manual-post only in this phase (owner decision)
+        "created_by": actor.get("user_id"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    db.get_collection(COLLECTION_AGREEMENTS).insert_one(dict(doc))
+    return doc
+
+
+def list_agreements(db, vendor_id=None) -> list:
+    if db is None:
+        return []
+    q = {}
+    if vendor_id:
+        q["vendor_id"] = vendor_id
+    try:
+        return list(db.get_collection(COLLECTION_AGREEMENTS).find(q))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def get_agreement(db, agreement_id) -> Optional[dict]:
+    if db is None:
+        return None
+    return db.get_collection(COLLECTION_AGREEMENTS).find_one(
+        {"agreement_id": agreement_id}
+    )
+
+
+def update_agreement(db, agreement_id, payload, *, actor) -> dict:
+    _require_db(db)
+    coll = db.get_collection(COLLECTION_AGREEMENTS)
+    existing = coll.find_one({"agreement_id": agreement_id})
+    if existing is None:
+        raise RebateError("agreement not found", status=404, code="not_found")
+    set_fields = {"updated_by": actor.get("user_id"), "updated_at": _now_iso()}
+    if payload.get("tiers") is not None:
+        try:
+            set_fields["tiers"] = _validate_tiers(payload.get("tiers"))
+        except RebateConfigError as exc:
+            raise RebateError(
+                "invalid tier ladder: " + str(exc), status=422, code="bad_tiers"
+            )
+    for k in ("name", "period", "active"):
+        if k in (payload or {}):
+            set_fields[k] = payload[k]
+    if "period" in set_fields and str(set_fields["period"]).upper() not in PERIODS:
+        raise RebateError("period must be MONTHLY, QUARTERLY or ANNUAL", status=422)
+    from pymongo import ReturnDocument
+
+    return coll.find_one_and_update(
+        {"agreement_id": agreement_id},
+        {"$set": set_fields},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+def _accepted_invoices_for(db, vendor_id) -> list:
+    """Vendor's accepted purchase invoices, shaped for compute_period_spend
+    (taxable_amount_paise injected from the rupee taxable_amount field)."""
+    if db is None:
+        return []
+    from .non_adapt import rupees_to_paise
+
+    out = []
+    try:
+        cur = db.get_collection(BILLS_COLLECTION).find({"vendor_id": vendor_id})
+    except Exception:  # noqa: BLE001
+        return []
+    for b in cur:
+        taxable = b.get("taxable_amount")
+        if taxable is None:
+            taxable = b.get("taxable")
+        if taxable is None:
+            taxable = b.get("total_amount")
+        out.append(
+            {
+                "vendor_id": b.get("vendor_id"),
+                "doc_type": b.get("doc_type"),
+                "status": b.get("status"),
+                "bill_date": b.get("bill_date"),
+                "invoice_date": b.get("invoice_date"),
+                "taxable_amount_paise": rupees_to_paise(taxable),
+            }
+        )
+    return out
+
+
+def preview(db, agreement_id, period_start, period_end) -> dict:
+    """Compute {spend_paise, tier, rebate_paise} for a period. NO write."""
+    _require_db(db)
+    ag = get_agreement(db, agreement_id)
+    if ag is None:
+        raise RebateError("agreement not found", status=404, code="not_found")
+    invoices = _accepted_invoices_for(db, ag.get("vendor_id"))
+    try:
+        earn = compute_earn(
+            invoices, ag.get("vendor_id"), period_start, period_end, ag.get("tiers")
+        )
+    except RebateConfigError as exc:
+        raise RebateError(
+            "invalid tier ladder: " + str(exc), status=422, code="bad_tiers"
+        )
+    return {
+        **earn,
+        "vendor_id": ag.get("vendor_id"),
+        "agreement_id": agreement_id,
+        "period_start": period_start,
+        "period_end": period_end,
+    }
+
+
+def post(
+    db, agreement_id, period_start, period_end, *, actor, period_lock_check=None
+) -> dict:
+    """Post a period's earned rebate ONCE. The (agreement_id, period_start)
+    unique index + a guarded insert make a double-post impossible (the 2nd
+    insert raises DuplicateKey -> 409). On the winning post: write the POSTED
+    ledger row, a credit_note_number, a vendor CREDIT-NOTE doc (no bill_id, so
+    ap_engine nets it off the vendor's payable -> AP goes DOWN), and the Tally
+    JV intent (credit vendor / debit Rebates-Receivable; not live-dispatched)."""
+    _require_db(db)
+    ag = get_agreement(db, agreement_id)
+    if ag is None:
+        raise RebateError("agreement not found", status=404, code="not_found")
+    if not ag.get("active", True):
+        raise RebateError("agreement is inactive", status=409, code="inactive")
+    if period_lock_check is not None:
+        # Raises HTTPException-like on a locked period; the router passes finance.check_period_locked.
+        period_lock_check(period_start)
+    earn = preview(db, agreement_id, period_start, period_end)
+    rebate_paise = int(earn.get("rebate_paise") or 0)
+    rid = "VRB-" + uuid.uuid4().hex[:10].upper()
+    cnn = "RCN-" + uuid.uuid4().hex[:8].upper()
+    now = _now_iso()
+    vendor_id = ag.get("vendor_id")
+    ledger = {
+        "_id": rid,
+        "rebate_id": rid,
+        "agreement_id": agreement_id,
+        "vendor_id": vendor_id,
+        "period_start": period_start,
+        "period_end": period_end,
+        "spend_paise": int(earn.get("spend_paise") or 0),
+        "tier": earn.get("tier"),
+        "rebate_paise": rebate_paise,
+        "status": "POSTED",
+        "credit_note_number": cnn,
+        "ap_reduction_paise": rebate_paise,  # reduces what we owe the vendor
+        "tally_voucher": {
+            "type": "JOURNAL",
+            "narration": f"Volume rebate {cnn} for {vendor_id}",
+            "entries": [
+                {
+                    "ledger": "Sundry Creditors / " + str(vendor_id),
+                    "credit_paise": rebate_paise,
+                },
+                {"ledger": "Rebates Receivable", "debit_paise": rebate_paise},
+            ],
+            "dispatched": False,  # recorded intent; NEXUS Tally export is not live here
+        },
+        "posted_by": actor.get("user_id"),
+        "posted_at": now,
+        "created_at": now,
+    }
+    from pymongo.errors import DuplicateKeyError
+
+    try:
+        db.get_collection(COLLECTION_LEDGER).insert_one(dict(ledger))
+    except DuplicateKeyError:
+        existing = db.get_collection(COLLECTION_LEDGER).find_one(
+            {"agreement_id": agreement_id, "period_start": period_start}
+        )
+        raise RebateError(
+            "this period is already posted for this agreement",
+            status=409,
+            code="already_posted",
+        ) from None
+    # The AP-reducing credit note: no bill_id -> build_aging treats it as an
+    # on-account credit that lowers net_payable for the vendor. Amount in RUPEES
+    # to match the aging inputs (bills/payments are rupee floats there).
+    if rebate_paise > 0:
+        try:
+            db.get_collection(CREDIT_NOTES_COLLECTION).insert_one(
+                {
+                    "_id": cnn,
+                    "credit_note_number": cnn,
+                    "vendor_id": vendor_id,
+                    "amount": round(rebate_paise / 100.0, 2),
+                    "amount_paise": rebate_paise,
+                    "bill_id": None,
+                    "source": "VOLUME_REBATE",
+                    "rebate_id": rid,
+                    "created_by": actor.get("user_id"),
+                    "created_at": now,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            pass  # ledger is the system-of-record; credit-note mirror is best-effort
+    return ledger
+
+
+def list_ledger(db, vendor_id=None) -> list:
+    if db is None:
+        return []
+    q = {}
+    if vendor_id:
+        q["vendor_id"] = vendor_id
+    try:
+        return list(db.get_collection(COLLECTION_LEDGER).find(q))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def get_ledger(db, rebate_id) -> Optional[dict]:
+    if db is None:
+        return None
+    return db.get_collection(COLLECTION_LEDGER).find_one({"rebate_id": rebate_id})
