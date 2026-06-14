@@ -94,12 +94,14 @@ class ProductMasterError(Exception):
 
 @dataclass(frozen=True)
 class CategorySpec:
-    canonical: str          # long-form products.category value (e.g. "FRAME")
-    prefix: str             # short SKU prefix (e.g. "FR")
-    display: str            # human label (e.g. "Frame")
-    required: tuple         # required attribute keys for this category
-    optional: tuple = ()    # optional attribute keys
-    forced_discount_category: Optional[str] = None  # e.g. HEARING_AID -> NON_DISCOUNTABLE
+    canonical: str  # long-form products.category value (e.g. "FRAME")
+    prefix: str  # short SKU prefix (e.g. "FR")
+    display: str  # human label (e.g. "Frame")
+    required: tuple  # required attribute keys for this category
+    optional: tuple = ()  # optional attribute keys
+    forced_discount_category: Optional[str] = (
+        None  # e.g. HEARING_AID -> NON_DISCOUNTABLE
+    )
 
 
 # canonical -> CategorySpec. `required` folds the Excel/CATEGORY_FIELDS rules.
@@ -107,27 +109,37 @@ class CategorySpec:
 # optional) per the PM packet, and is forced NON_DISCOUNTABLE.
 _CATEGORY_SPECS: Dict[str, CategorySpec] = {
     "FRAME": CategorySpec(
-        "FRAME", "FR", "Frame",
+        "FRAME",
+        "FR",
+        "Frame",
         required=("brand_name", "model_no", "colour_code"),
         optional=("subbrand", "size", "frame_material", "frame_type"),
     ),
     "SUNGLASS": CategorySpec(
-        "SUNGLASS", "SG", "Sunglass",
+        "SUNGLASS",
+        "SG",
+        "Sunglass",
         required=("brand_name", "model_no", "colour_code"),
         optional=("subbrand", "lens_size", "polarization", "uv_protection", "tint"),
     ),
     "OPTICAL_LENS": CategorySpec(
-        "OPTICAL_LENS", "LS", "Optical Lens",
+        "OPTICAL_LENS",
+        "LS",
+        "Optical Lens",
         required=("brand_name", "index", "coating"),
         optional=("subbrand", "lens_type", "material"),
     ),
     "READING_GLASSES": CategorySpec(
-        "READING_GLASSES", "RG", "Reading Glasses",
+        "READING_GLASSES",
+        "RG",
+        "Reading Glasses",
         required=("brand_name", "model_no", "colour_code"),
         optional=("subbrand", "power"),
     ),
     "CONTACT_LENS": CategorySpec(
-        "CONTACT_LENS", "CL", "Contact Lens",
+        "CONTACT_LENS",
+        "CL",
+        "Contact Lens",
         # Owner-decided reconcile (step-9): a contact lens catalogue entry needs
         # BOTH power AND expiry_date -- power so the SKU/stock grid is unambiguous
         # and expiry_date so a medical-device shelf-life is always recorded.
@@ -135,43 +147,59 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         optional=("subbrand", "colour_name", "pack", "modality"),
     ),
     "COLORED_CONTACT_LENS": CategorySpec(
-        "COLORED_CONTACT_LENS", "CL", "Colored Contact Lens",
+        "COLORED_CONTACT_LENS",
+        "CL",
+        "Colored Contact Lens",
         required=("brand_name", "model_name", "power", "expiry_date"),
         optional=("subbrand", "colour_name", "pack"),
     ),
     "WATCH": CategorySpec(
-        "WATCH", "WT", "Wrist Watch",
+        "WATCH",
+        "WT",
+        "Wrist Watch",
         required=("brand_name", "model_no", "colour_code"),
         optional=("subbrand", "dial_color", "strap_material"),
     ),
     "SMARTWATCH": CategorySpec(
-        "SMARTWATCH", "SMTWT", "Smart Watch",
+        "SMARTWATCH",
+        "SMTWT",
+        "Smart Watch",
         required=("brand_name", "model_name", "colour_code"),
         optional=("subbrand",),
     ),
     "SMARTGLASSES": CategorySpec(
-        "SMARTGLASSES", "SMTFR", "Smart Glasses",
+        "SMARTGLASSES",
+        "SMTFR",
+        "Smart Glasses",
         required=("brand_name", "model_name", "colour_code"),
         optional=("subbrand",),
     ),
     "WALL_CLOCK": CategorySpec(
-        "WALL_CLOCK", "CK", "Wall Clock",
+        "WALL_CLOCK",
+        "CK",
+        "Wall Clock",
         required=("brand_name", "model_no", "colour_code"),
         optional=("subbrand",),
     ),
     "ACCESSORIES": CategorySpec(
-        "ACCESSORIES", "ACC", "Accessories",
+        "ACCESSORIES",
+        "ACC",
+        "Accessories",
         required=("brand_name", "model_name"),
         optional=("subbrand", "size", "pack"),
     ),
     "SERVICES": CategorySpec(
-        "SERVICES", "SVC", "Services",
+        "SERVICES",
+        "SVC",
+        "Services",
         required=("name",),
         optional=("description",),
         forced_discount_category="SERVICE",
     ),
     "HEARING_AID": CategorySpec(
-        "HEARING_AID", "HA", "Hearing Aid",
+        "HEARING_AID",
+        "HA",
+        "Hearing Aid",
         # Owner-decided reconcile (step-9): a hearing-aid CATALOGUE entry needs
         # only {brand_name, model_no}. serial_no is per-UNIT (recorded at
         # stock-in, not at catalogue), so it is NOT required here.
@@ -317,7 +345,9 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
 
     brand = _sku_segment(attributes.get("brand_name") or attributes.get("brand"))
     model = _sku_segment(
-        attributes.get("model_no") or attributes.get("model_name") or attributes.get("model")
+        attributes.get("model_no")
+        or attributes.get("model_name")
+        or attributes.get("model")
     )
     # Colour code keeps separators (1109/71 -> 1109/71). Fall back to colour name.
     colour = _sku_segment(
@@ -326,7 +356,8 @@ def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
     )
     if not colour:
         colour = _sku_segment(
-            attributes.get("colour_name") or attributes.get("color"), keep_separators=False
+            attributes.get("colour_name") or attributes.get("color"),
+            keep_separators=False,
         )
     size = _sku_segment(attributes.get("size"), keep_separators=True)
 
@@ -346,7 +377,9 @@ def _next_collision_suffix(prefix: str, db=None) -> int:
         return int(uuid.uuid4().int % 100000)
 
 
-def mint_unique_sku(category: Any, attributes: Dict[str, Any], product_repo=None, db=None) -> str:
+def mint_unique_sku(
+    category: Any, attributes: Dict[str, Any], product_repo=None, db=None
+) -> str:
     """Mint a SKU and resolve any collision by appending an atomic counter.
 
     The canonical SKU is tried first (deterministic per the Excel rule). If a
@@ -445,13 +478,17 @@ def normalise_tags(tags: Any) -> List[str]:
     return list(seen.keys())
 
 
-def _derive_brand_model_color_size(attributes: Dict[str, Any]) -> Dict[str, Optional[str]]:
+def _derive_brand_model_color_size(
+    attributes: Dict[str, Any],
+) -> Dict[str, Optional[str]]:
     """Map category attribute keys onto the spine identity columns."""
     attrs = attributes or {}
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
         "model": attrs.get("model_no") or attrs.get("model_name") or attrs.get("model"),
-        "color": attrs.get("colour_code") or attrs.get("colour_name") or attrs.get("color"),
+        "color": attrs.get("colour_code")
+        or attrs.get("colour_name")
+        or attrs.get("color"),
         "size": attrs.get("size"),
     }
 
@@ -463,6 +500,7 @@ def normalise_payload(
     mrp: float,
     offer_price: float,
     sku: Optional[str] = None,
+    cost_price: Optional[float] = None,
     discount_category: Optional[str] = None,
     hsn_code: Optional[str] = None,
     gst_rate: Optional[float] = None,
@@ -471,6 +509,7 @@ def normalise_payload(
     weight_grams: Optional[float] = None,
     tags: Any = None,
     created_by: Optional[str] = None,
+    as_draft: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     db=None,
@@ -493,14 +532,47 @@ def normalise_payload(
         )
     spec = _CATEGORY_SPECS[canonical]
 
-    validate_attributes(canonical, attributes)
-
-    # offer <= MRP (shared validator -- the one source of truth, float tolerant).
-    if mrp is None or offer_price is None:
-        raise ProductMasterError("mrp and offer_price are required.", status=422)
+    # --- Always-enforced hard invariants (apply to STRICT and as_draft alike) ---
+    # offer <= MRP is a BLOCKER the done-rule treats as MRP_BELOW_OFFER: even a
+    # draft may never persist an offer above MRP (the pricing invariant), so it
+    # raises here in BOTH modes (MRP>=offer regression, both doors).
     verdict = evaluate_offer_price(mrp, offer_price)
     if verdict.get("reason") == "MRP_BELOW_OFFER":
-        raise ProductMasterError("Offer price cannot exceed MRP", status=400, field="offer_price")
+        raise ProductMasterError(
+            "Offer price cannot exceed MRP", status=400, field="offer_price"
+        )
+
+    if as_draft:
+        # DRAFT FLOOR: a draft must still carry a resolvable category + brand +
+        # model (assert_draft_floor 422s below this floor). Completeness is NOT
+        # required -- the row persists as catalog_status=DRAFT + done_gaps.
+        assert_draft_floor({"category": canonical, "attributes": attributes or {}})
+    else:
+        # STRICT (default): the FULL catalog-done gate. Collect-all-missing
+        # required attributes (not raise-on-first) so the 422 names EVERY gap at
+        # once, including the NEW cost_price requirement + the derived tax fields.
+        if mrp is None or offer_price is None:
+            raise ProductMasterError("mrp and offer_price are required.", status=422)
+        missing = missing_required_fields(canonical, attributes or {})
+        if not _positive_number(mrp):
+            missing.append("mrp")
+        if not _positive_number(offer_price):
+            missing.append("offer_price")
+        if not _positive_number(cost_price):
+            missing.append("cost_price")
+        if missing:
+            # De-dupe preserving order; name them all in the message + point
+            # `field` at the first one for the FE highlight.
+            seen: Dict[str, None] = {}
+            for g in missing:
+                if g not in seen:
+                    seen[g] = None
+            names = list(seen.keys())
+            raise ProductMasterError(
+                "Cannot save product -- missing required: " + ", ".join(names),
+                status=422,
+                field=names[0],
+            )
 
     # discount_category: forced for HA/SERVICES, else validate the supplied tier.
     if spec.forced_discount_category:
@@ -520,18 +592,20 @@ def normalise_payload(
     # GST / HSN: explicit value wins; else derive from the canonical table so
     # the master rate always equals what POS bills (gst_rates.py).
     resolved_hsn = hsn_code or hsn_for_category(canonical)
-    resolved_gst = gst_rate if gst_rate is not None else gst_rate_for_category(canonical)
+    resolved_gst = (
+        gst_rate if gst_rate is not None else gst_rate_for_category(canonical)
+    )
 
     # SKU: accept a supplied (possibly legacy) SKU as-is if it passes the
     # permissive guard; otherwise mint the canonical one.
     if sku:
         if not is_acceptable_sku(sku):
-            raise ProductMasterError(
-                f"Invalid SKU '{sku}'.", status=422, field="sku"
-            )
+            raise ProductMasterError(f"Invalid SKU '{sku}'.", status=422, field="sku")
         resolved_sku = str(sku).strip()
     else:
-        resolved_sku = mint_unique_sku(canonical, attributes, product_repo=product_repo, db=db)
+        resolved_sku = mint_unique_sku(
+            canonical, attributes, product_repo=product_repo, db=db
+        )
 
     ids = _derive_brand_model_color_size(attributes)
 
@@ -556,6 +630,9 @@ def normalise_payload(
         doc["size"] = ids["size"]
     if dc is not None:
         doc["discount_category"] = dc
+    # cost_price (Phase 0): persisted whenever supplied -- the done-rule reads it.
+    if cost_price is not None:
+        doc["cost_price"] = float(cost_price)
     if country_of_origin is not None:
         doc["country_of_origin"] = country_of_origin
     if warranty_months is not None:
@@ -570,6 +647,15 @@ def normalise_payload(
     for _k, _v in (extra_fields or {}).items():
         if _v is not None and _k not in doc:
             doc[_k] = _v
+    # --- Phase 0: stamp the catalog-done chokepoint on the spine ---
+    # compute_catalog_status reads the doc we just built (cost_price + the
+    # derived hsn/gst are now present), so the stamp is consistent with what was
+    # validated. In STRICT mode it is ACTIVE (we already 422'd otherwise); in
+    # as_draft mode it reflects the real gaps so the Buy Desk + completion UI can
+    # name them.
+    status, gaps = compute_catalog_status(doc)
+    doc["catalog_status"] = status
+    doc["done_gaps"] = gaps
     return doc
 
 
@@ -593,7 +679,12 @@ def mirror_enabled() -> bool:
         return bool(get_policy(_MIRROR_FLAG_KEY, default=False))
     except Exception:  # noqa: BLE001
         # Last-resort env fallback so ops can still gate without the registry.
-        return os.getenv("PM_MIRROR_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
+        return os.getenv("PM_MIRROR_ENABLED", "").strip().lower() in (
+            "1",
+            "true",
+            "on",
+            "yes",
+        )
 
 
 def external_mirror_enabled() -> bool:
@@ -687,9 +778,13 @@ def _write_mirror(
             targets.append(_SyncTarget("catalog_products", "OK"))
         else:
             # No catalog target wired -> record SKIPPED, never a false OK.
-            targets.append(_SyncTarget("catalog_products", "SKIPPED", "no catalog target"))
+            targets.append(
+                _SyncTarget("catalog_products", "SKIPPED", "no catalog target")
+            )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[PM] catalog_products mirror failed for %s: %s", spine.get("sku"), exc)
+        logger.warning(
+            "[PM] catalog_products mirror failed for %s: %s", spine.get("sku"), exc
+        )
         targets.append(_SyncTarget("catalog_products", "FAILED", str(exc)[:200]))
 
     # --- catalog_variants (per-SKU identity) -- internal, flag-gated only ---
@@ -704,9 +799,13 @@ def _write_mirror(
             )
             targets.append(_SyncTarget("catalog_variants", "OK"))
         else:
-            targets.append(_SyncTarget("catalog_variants", "SKIPPED", "no variant repo"))
+            targets.append(
+                _SyncTarget("catalog_variants", "SKIPPED", "no variant repo")
+            )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[PM] catalog_variants mirror failed for %s: %s", spine.get("sku"), exc)
+        logger.warning(
+            "[PM] catalog_variants mirror failed for %s: %s", spine.get("sku"), exc
+        )
         targets.append(_SyncTarget("catalog_variants", "FAILED", str(exc)[:200]))
 
     # --- external (Postgres/BVI + Shopify) -- DISPATCH_MODE-gated ---
@@ -808,6 +907,7 @@ def build_canonical_product(
         mrp=p.get("mrp"),
         offer_price=p.get("offer_price"),
         sku=p.get("sku"),
+        cost_price=p.get("cost_price"),
         discount_category=p.get("discount_category"),
         hsn_code=p.get("hsn_code"),
         gst_rate=p.get("gst_rate"),
@@ -816,6 +916,7 @@ def build_canonical_product(
         weight_grams=p.get("weight_grams"),
         tags=p.get("tags"),
         created_by=p.get("created_by") or p.get("actor"),
+        as_draft=bool(p.get("as_draft", False)),
         extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
@@ -855,6 +956,7 @@ def create_via_door(
         offer_price=p.get("offer_price"),
         actor=actor,
         sku=p.get("sku"),
+        cost_price=p.get("cost_price"),
         discount_category=p.get("discount_category"),
         hsn_code=p.get("hsn_code"),
         gst_rate=p.get("gst_rate"),
@@ -862,6 +964,7 @@ def create_via_door(
         warranty_months=p.get("warranty_months"),
         weight_grams=p.get("weight_grams"),
         tags=p.get("tags"),
+        as_draft=bool(p.get("as_draft", False)),
         extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
@@ -886,6 +989,7 @@ def create_product(
     offer_price: float,
     actor: str,
     sku: Optional[str] = None,
+    cost_price: Optional[float] = None,
     discount_category: Optional[str] = None,
     hsn_code: Optional[str] = None,
     gst_rate: Optional[float] = None,
@@ -893,6 +997,7 @@ def create_product(
     warranty_months: Optional[int] = None,
     weight_grams: Optional[float] = None,
     tags: Any = None,
+    as_draft: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -922,6 +1027,7 @@ def create_product(
         mrp=mrp,
         offer_price=offer_price,
         sku=sku,
+        cost_price=cost_price,
         discount_category=discount_category,
         hsn_code=hsn_code,
         gst_rate=gst_rate,
@@ -930,6 +1036,7 @@ def create_product(
         weight_grams=weight_grams,
         tags=tags,
         created_by=actor,
+        as_draft=as_draft,
         extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
@@ -949,7 +1056,9 @@ def create_product(
     existing = product_repo.find_by_sku(spine["sku"])
     if existing is not None:
         raise ProductMasterError(
-            f"Product with SKU '{spine['sku']}' already exists.", status=400, field="sku"
+            f"Product with SKU '{spine['sku']}' already exists.",
+            status=400,
+            field="sku",
         )
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
@@ -959,7 +1068,9 @@ def create_product(
     product_id = created.get("product_id")
 
     # --- STEP 2: gated, best-effort mirror (never corrupts the spine) ---
-    targets = _write_mirror(created, catalog_repo=catalog_repo, variant_repo=variant_repo, db=db)
+    targets = _write_mirror(
+        created, catalog_repo=catalog_repo, variant_repo=variant_repo, db=db
+    )
 
     # --- STEP 3: record compensation/sync status back on the spine ---
     sync_status = _sync_status_dict(targets)
@@ -1067,7 +1178,11 @@ def update_product(
     # Mirror to the PIM doc (flag-gated, best-effort).
     if mirror_enabled() and updated.get("pim_product_id"):
         try:
-            pim_patch = {k: clean[k] for k in ("mrp", "offer_price", "hsn_code", "gst_rate") if k in clean}
+            pim_patch = {
+                k: clean[k]
+                for k in ("mrp", "offer_price", "hsn_code", "gst_rate")
+                if k in clean
+            }
             if pim_patch:
                 if catalog_repo is not None:
                     catalog_repo.upsert({"id": updated["pim_product_id"], **pim_patch})
@@ -1094,7 +1209,9 @@ def update_product(
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[PM] audit (update) write failed for %s: %s", product_id, exc)
+            logger.warning(
+                "[PM] audit (update) write failed for %s: %s", product_id, exc
+            )
 
     return updated
 
@@ -1125,11 +1242,15 @@ def soft_delete_product(
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[PM] audit (delete) write failed for %s: %s", product_id, exc)
+            logger.warning(
+                "[PM] audit (delete) write failed for %s: %s", product_id, exc
+            )
     return ok
 
 
-def get_product(product_id_or_sku: str, *, product_repo=None) -> Optional[Dict[str, Any]]:
+def get_product(
+    product_id_or_sku: str, *, product_repo=None
+) -> Optional[Dict[str, Any]]:
     """Resolve a product by product_id first, then by SKU. None if absent."""
     if product_repo is None:
         return None
@@ -1140,8 +1261,12 @@ def get_product(product_id_or_sku: str, *, product_repo=None) -> Optional[Dict[s
 
 
 def list_products(
-    *, product_repo=None, category: Optional[str] = None, brand: Optional[str] = None,
-    skip: int = 0, limit: int = 50,
+    *,
+    product_repo=None,
+    category: Optional[str] = None,
+    brand: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
 ) -> Dict[str, Any]:
     """List active products with optional category/brand filters."""
     if product_repo is None:
@@ -1156,15 +1281,285 @@ def list_products(
     return {"products": rows, "total": len(rows)}
 
 
-# ---------------------------------------------------------------------------
-# Hub Phase 0 -- catalog-done chokepoint (SKELETON; filled in below)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Hub Phase 0 -- the catalog-done chokepoint (ONE rule, ONE module)
+# ===========================================================================
+# The foundation every later hub phase depends on. "Catalog done" is the single
+# server-side predicate that unlocks purchase. There is NO frontend copy of this
+# rule -- the FE reads catalog_readiness() / the persisted catalog_status.
+#
+# Done-rule (owner-locked, PRODUCT_HUB_RECOMMENDATION sec 3/5b):
+#   * category resolves to a canonical key, AND
+#   * every per-category REQUIRED attribute is present (collect-all-missing,
+#     not raise-on-first -- the owner wants the full gap list named at once), AND
+#   * mrp > 0  AND  offer_price > 0  AND  offer_price <= mrp
+#     (reuse evaluate_offer_price; MRP_BELOW_OFFER surfaces as a BLOCKER), AND
+#   * cost_price > 0   (NEW in Phase 0 -- purchase needs a known cost), AND
+#   * hsn_code present  AND  gst_rate is not None  (both still server-derived).
+# Images are NOT required. Shopify is NOT required. purchasable = complete AND
+# is_active.
+#
+# Status values: "ACTIVE" (done) | "DRAFT" (incomplete, persisted via as_draft).
+# A MISSING catalog_status reads as ACTIVE so the gate is deploy-order-
+# independent (legacy rows + rows written before this code shipped are ACTIVE).
 
-def missing_required_fields(category, attributes):
-    """Placeholder -- replaced by Hub Phase 0 implementation."""
-    return []
+CATALOG_STATUS_ACTIVE = "ACTIVE"
+CATALOG_STATUS_DRAFT = "DRAFT"
+
+# The as_draft FLOOR: below these three identity fields a payload is rejected
+# (422) even when as_draft=true -- a draft must at least name what it is.
+_DRAFT_FLOOR_ATTRS = ("brand_name", "model_no")
+# brand_name + (model_no OR model_name) + a resolvable category. Several
+# categories use model_name (CL, SMARTWATCH, ...) instead of model_no, so the
+# floor accepts either as the "model" identity.
+_MODEL_FLOOR_KEYS = ("model_no", "model_name")
 
 
-def catalog_readiness(product_doc):
-    """Placeholder -- replaced by Hub Phase 0 implementation."""
-    return {"complete": False, "missing": [], "blockers": [], "purchasable": False}
+def _is_blank(val: Any) -> bool:
+    """A field is 'missing' when absent, None, or an empty/whitespace string."""
+    return val is None or (isinstance(val, str) and not val.strip())
+
+
+def _overlay_attributes(product_doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the attribute view the done-rule checks, applying the INVERSE flat-
+    field overlay so a legacy row (identity stored top-level as brand/model/
+    color/size/name, no canonical attribute keys) does NOT read falsely
+    incomplete.
+
+    Precedence: an explicit value already in `attributes` wins; otherwise the
+    top-level flat column fills the canonical key. Mirrors normalise_door_payload
+    in reverse (brand->brand_name, model->model_no, color->colour_code, size,
+    name) without mutating the input doc.
+    """
+    doc = product_doc or {}
+    attrs: Dict[str, Any] = dict(doc.get("attributes") or {})
+    # Flat top-level identity -> canonical attribute keys (fill-only).
+    overlay = {
+        "brand_name": doc.get("brand"),
+        "model_no": doc.get("model"),
+        "model_name": doc.get("model"),
+        "colour_code": doc.get("color") or doc.get("colour"),
+        "size": doc.get("size"),
+        "name": doc.get("name"),
+    }
+    for key, val in overlay.items():
+        if not _is_blank(val) and _is_blank(attrs.get(key)):
+            attrs[key] = val
+    return attrs
+
+
+def missing_required_fields(category: Any, attributes: Dict[str, Any]) -> List[str]:
+    """Collect ALL missing per-category required attributes (not raise-on-first).
+
+    Returns the ordered list of required attribute keys that are absent/blank
+    for `category`. An unknown/blank category yields ["category"] (the category
+    itself is the first thing missing). Pure -- never raises, never mutates.
+    """
+    spec = category_spec(category)
+    if spec is None:
+        return ["category"]
+    attrs = attributes or {}
+    return [fld for fld in spec.required if _is_blank(attrs.get(fld))]
+
+
+def compute_catalog_status(doc: Dict[str, Any]) -> tuple:
+    """THE catalog-done chokepoint (write-side stamp).
+
+    Returns (catalog_status, done_gaps) where catalog_status is "ACTIVE" when
+    the done-rule passes and "DRAFT" otherwise, and done_gaps is the ordered,
+    de-duplicated list of what is missing/blocking (machine field keys + the
+    sentinel reasons "mrp", "offer_price", "cost_price", "hsn_code", "gst_rate",
+    and the blocker "MRP_BELOW_OFFER").
+
+    Pure + deterministic. Reads the INVERSE flat-field overlay so legacy rows are
+    judged on their real (possibly top-level) identity. Never raises.
+    """
+    doc = doc or {}
+    gaps: List[str] = []
+
+    # 1) category resolves + per-category required attributes (collect-all).
+    canonical = resolve_category(doc.get("category"))
+    if canonical is None:
+        gaps.append("category")
+        # Without a category we cannot know the required attrs; still report the
+        # money/derived gaps below so the FE shows the full picture.
+    else:
+        attrs = _overlay_attributes(doc)
+        gaps.extend(missing_required_fields(canonical, attrs))
+
+    # 2) pricing: mrp > 0, offer_price > 0, offer <= mrp.
+    mrp = doc.get("mrp")
+    offer = doc.get("offer_price")
+    if not _positive_number(mrp):
+        gaps.append("mrp")
+    if not _positive_number(offer):
+        gaps.append("offer_price")
+    # offer<=mrp invariant via the shared validator (only when both are usable).
+    if _positive_number(mrp) and _positive_number(offer):
+        verdict = evaluate_offer_price(mrp, offer)
+        if verdict.get("reason") == "MRP_BELOW_OFFER":
+            gaps.append("MRP_BELOW_OFFER")
+
+    # 3) cost_price > 0  (NEW in Phase 0).
+    if not _positive_number(doc.get("cost_price")):
+        gaps.append("cost_price")
+
+    # 4) server-derived tax fields must be stamped on the doc.
+    if _is_blank(doc.get("hsn_code")):
+        gaps.append("hsn_code")
+    if doc.get("gst_rate") is None:
+        gaps.append("gst_rate")
+
+    # De-dupe preserving first-seen order.
+    seen: Dict[str, None] = {}
+    for g in gaps:
+        if g not in seen:
+            seen[g] = None
+    ordered_gaps = list(seen.keys())
+
+    status = CATALOG_STATUS_ACTIVE if not ordered_gaps else CATALOG_STATUS_DRAFT
+    return status, ordered_gaps
+
+
+def _positive_number(val: Any) -> bool:
+    """True when val is a number strictly > 0. Tolerant of numeric strings;
+    None / blank / non-numeric -> False."""
+    if val is None:
+        return False
+    try:
+        return float(val) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def catalog_readiness(product_doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-side view of the SAME chokepoint (no second rule).
+
+    Returns {complete, missing, blockers, purchasable}:
+      * complete   -- the done-rule passes (catalog_status would be ACTIVE),
+      * missing    -- the missing required FIELD keys (gaps that are field names),
+      * blockers   -- the hard blockers (currently just "MRP_BELOW_OFFER"),
+      * purchasable -- complete AND is_active (a MISSING is_active reads True so
+                       legacy rows without the flag stay purchasable).
+
+    Built directly on compute_catalog_status so the read view can never drift
+    from the write stamp.
+    """
+    status, gaps = compute_catalog_status(product_doc or {})
+    blockers = [g for g in gaps if g in _CATALOG_BLOCKERS]
+    missing = [g for g in gaps if g not in _CATALOG_BLOCKERS]
+    complete = status == CATALOG_STATUS_ACTIVE
+    is_active = (product_doc or {}).get("is_active", True)
+    return {
+        "complete": complete,
+        "missing": missing,
+        "blockers": blockers,
+        "purchasable": bool(complete and is_active),
+    }
+
+
+# Gaps that are HARD blockers (a rule violation), not merely "a field to fill".
+_CATALOG_BLOCKERS = frozenset({"MRP_BELOW_OFFER"})
+
+
+def effective_catalog_status(doc: Dict[str, Any]) -> str:
+    """The status a READER should treat the doc as having.
+
+    A MISSING / blank catalog_status reads as ACTIVE (deploy-order-independent:
+    rows written before this code, and the migration backfill, are ACTIVE). An
+    explicit DRAFT stays DRAFT.
+    """
+    raw = (doc or {}).get("catalog_status")
+    if _is_blank(raw):
+        return CATALOG_STATUS_ACTIVE
+    return str(raw).strip().upper()
+
+
+def assert_draft_floor(doc: Dict[str, Any]) -> None:
+    """Reject (422) a payload below the as_draft FLOOR: even a draft must carry a
+    resolvable category + brand + model. Raises ProductMasterError naming the
+    first floor field that is missing.
+    """
+    attrs = _overlay_attributes(doc or {})
+    if resolve_category((doc or {}).get("category")) is None:
+        raise ProductMasterError(
+            "A draft product still needs a valid category.",
+            status=422,
+            field="category",
+        )
+    if _is_blank(attrs.get("brand_name")):
+        raise ProductMasterError(
+            "A draft product still needs a brand.", status=422, field="brand_name"
+        )
+    if all(_is_blank(attrs.get(k)) for k in _MODEL_FLOOR_KEYS):
+        raise ProductMasterError(
+            "A draft product still needs a model.", status=422, field="model_no"
+        )
+
+
+def promote_if_ready_atomic(
+    product_id: str, merged_doc: Dict[str, Any], *, product_repo=None
+) -> Optional[str]:
+    """Atomically flip a DRAFT -> ACTIVE the moment the done-rule passes.
+
+    Uses a SINGLE guarded find_one_and_update on {catalog_status: DRAFT} so two
+    concurrent promotions resolve to exactly ONE winner (mirrors the
+    vouchers.redeem_voucher_atomic concurrency pattern). NEVER demotes here --
+    an ACTIVE row is left untouched (demotion is a loud 422 at the route, not a
+    silent flip). Returns the new status, or None when no DB / no change.
+
+    `merged_doc` is the post-edit doc to evaluate (current doc merged with the
+    patch). Fail-soft: any error leaves the row as-is and returns None.
+    """
+    if product_repo is None:
+        return None
+    status, gaps = compute_catalog_status(merged_doc or {})
+    if status != CATALOG_STATUS_ACTIVE:
+        return None  # still incomplete -> nothing to promote
+    coll = getattr(product_repo, "collection", None)
+    if coll is None or not hasattr(coll, "find_one_and_update"):
+        return None
+    try:
+        coll.find_one_and_update(
+            {"product_id": product_id, "catalog_status": CATALOG_STATUS_DRAFT},
+            {"$set": {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}},
+        )
+    except Exception as exc:  # noqa: BLE001 - promotion must never break an edit
+        logger.warning("[PM] atomic promote failed for %s: %s", product_id, exc)
+        return None
+    return CATALOG_STATUS_ACTIVE
+
+
+def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute catalog_status on the MERGED (current + patch) doc for the
+    route-level restamp hook (products.py update_product).
+
+    Returns a dict of fields to fold into the update payload:
+      * completing a DRAFT  -> {catalog_status: ACTIVE, done_gaps: []}
+      * an edit that keeps/makes a row complete on an already-ACTIVE row -> {} (no-op)
+      * an edit that would BREAK the done-rule on a row READ as ACTIVE -> raises
+        ProductMasterError(status=422, code=WOULD_DEMOTE) carrying done_gaps.
+      * a still-incomplete DRAFT -> {catalog_status: DRAFT, done_gaps: [...]}
+
+    Never-demote: a row that reads ACTIVE (incl. a MISSING status) can only be
+    SAVED when it stays complete; otherwise the edit is refused.
+    """
+    merged = {**(current or {}), **(patch or {})}
+    status, gaps = compute_catalog_status(merged)
+    prior = effective_catalog_status(current or {})
+
+    if prior == CATALOG_STATUS_ACTIVE:
+        if status == CATALOG_STATUS_ACTIVE:
+            return {}  # stays complete -> leave status as-is (no churn)
+        # Would demote a live row -> refuse loudly.
+        err = ProductMasterError(
+            "This edit would make a live product incomplete.", status=422
+        )
+        err.code = "WOULD_DEMOTE"
+        err.done_gaps = gaps
+        raise err
+
+    # prior is DRAFT: complete -> ACTIVE (auto-flip), else refresh the gap list.
+    if status == CATALOG_STATUS_ACTIVE:
+        return {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
+    return {"catalog_status": CATALOG_STATUS_DRAFT, "done_gaps": gaps}
