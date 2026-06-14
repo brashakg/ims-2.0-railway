@@ -47,7 +47,7 @@ class TaskmasterAgent(JarvisAgent):
 
     # Anything in this list requires explicit human confirmation, NOT auto-act.
     requires_confirmation = [
-        "po_send",       # Drafting is fine; sending to vendor needs approval
+        "po_send",  # Drafting is fine; sending to vendor needs approval
         "staff_transfer",
         "refund_issue",
         "price_ceiling_change",
@@ -89,13 +89,132 @@ class TaskmasterAgent(JarvisAgent):
 
             expired = ApprovalEngine(db=self.db).expire_stale()
             if expired:
-                logger.info("[TASKMASTER] expired %d stale approval request(s)", expired)
+                logger.info(
+                    "[TASKMASTER] expired %d stale approval request(s)", expired
+                )
         except Exception as e:  # noqa: BLE001
             logger.debug("[TASKMASTER] approval expire_stale skipped: %s", e)
 
+        # 4. F29: optometrist-coverage breach sweep. Every PUBLISHED roster slot
+        # (today or later) with no optometrist rostered raises ONE deduped in-app
+        # bell to the store + area managers. Tier 1 (a notification is fully
+        # reversible). Comms are DARK -- in-app only, no WhatsApp/SMS. Fail-soft.
+        actions.extend(await self._sweep_coverage_breaches())
+
         if actions:
-            logger.info(f"[TASKMASTER] tick complete — {len(actions)} action(s) executed")
+            logger.info(
+                f"[TASKMASTER] tick complete — {len(actions)} action(s) executed"
+            )
         self._actions_taken += len(actions)
+
+    # ----- F29: optometrist-coverage breach sweep (in-app bell, deduped) -----
+
+    async def _sweep_coverage_breaches(self) -> List[Dict[str, Any]]:
+        """Raise a deduped in-app bell for every PUBLISHED-roster coverage breach
+        (today or later) to the store + area managers. Fail-soft: any error
+        (no DB, no roster module, no roster data) is a silent no-op -- it must
+        NEVER break the tick. Comms are dark; in-app notifications only."""
+        actions: List[Dict[str, Any]] = []
+        if self.db is None:
+            return actions
+        try:
+            from api.services import roster_engine as _roster
+            from api.services.policy_engine import get_policy
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] coverage sweep imports failed: %s", e)
+            return actions
+
+        def _required(store_id):
+            try:
+                return int(
+                    get_policy(
+                        _roster.POLICY_REQUIRED_OPTOMS,
+                        {"store_id": store_id} if store_id else None,
+                        default=_roster.DEFAULT_REQUIRED_OPTOMETRISTS,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                return _roster.DEFAULT_REQUIRED_OPTOMETRISTS
+
+        try:
+            breaches = _roster.published_coverage_breaches(
+                self.db, required_optoms_for=_required
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] coverage sweep skipped: %s", e)
+            return actions
+        if not breaches:
+            return actions
+
+        notif_coll = self.get_collection("notifications")
+        users_coll = self.get_collection("users")
+        for breach in breaches:
+            for user_id in self._coverage_recipients(
+                users_coll, breach.get("store_id")
+            ):
+                if self._raise_coverage_bell(notif_coll, _roster, breach, user_id):
+                    actions.append(
+                        {
+                            "action": "coverage_breach_alert",
+                            "store_id": breach.get("store_id"),
+                            "date": breach.get("date"),
+                            "shift": breach.get("shift"),
+                            "user_id": user_id,
+                        }
+                    )
+        if actions:
+            logger.info(
+                "[TASKMASTER] raised %d optometrist-coverage bell(s)", len(actions)
+            )
+        return actions
+
+    def _coverage_recipients(self, users_coll, store_id) -> List[str]:
+        """Store managers OF THAT STORE + all area managers. Deduped, order-stable."""
+        if users_coll is None:
+            return []
+        ids: List[str] = []
+        try:
+            sm_q = {"roles": "STORE_MANAGER", "is_active": True}
+            if store_id:
+                sm_q["store_ids"] = store_id
+            for u in users_coll.find(sm_q):
+                uid = u.get("user_id") or u.get("_id")
+                if uid:
+                    ids.append(str(uid))
+            for u in users_coll.find({"roles": "AREA_MANAGER", "is_active": True}):
+                uid = u.get("user_id") or u.get("_id")
+                if uid:
+                    ids.append(str(uid))
+        except Exception:  # noqa: BLE001
+            return []
+        seen = set()
+        out = []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+
+    def _raise_coverage_bell(self, notif_coll, roster_mod, breach, user_id) -> bool:
+        """Insert ONE in-app coverage-breach bell, deduped on the stable key so a
+        repeated tick never re-alerts the same breach to the same person. Returns
+        True only when a NEW bell was written. Fail-soft."""
+        if notif_coll is None:
+            return False
+        key = roster_mod.coverage_breach_dedupe_key(breach, user_id)
+        try:
+            if notif_coll.find_one({"dedupe_key": key}) is not None:
+                return False  # already alerted -> no duplicate
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            notif_coll.insert_one(
+                roster_mod.build_coverage_breach_notification(breach, user_id, key)
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[TASKMASTER] coverage bell write failed: %s", e)
+            return False
 
     async def _escalate_overdue_tasks(self) -> List[Dict[str, Any]]:
         """Escalate SLA-breached tasks UP the role ladder. Tier 1 auto-act.
@@ -140,16 +259,25 @@ class TaskmasterAgent(JarvisAgent):
                 doc = cfg_coll.find_one({"config_id": "global"}, {"_id": 0})
                 overrides = (doc or {}).get("matrix") or {}
                 if overrides:
-                    sla_cfg = {p: {**DEFAULT_SLA[p], **(overrides.get(p) or {})} for p in DEFAULT_SLA}
+                    sla_cfg = {
+                        p: {**DEFAULT_SLA[p], **(overrides.get(p) or {})}
+                        for p in DEFAULT_SLA
+                    }
             except Exception:
                 sla_cfg = None
 
         actions = []
         try:
             now = datetime.now()
-            candidates = list(coll.find({
-                "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
-            }).limit(200))
+            candidates = list(
+                coll.find(
+                    {
+                        "status": {
+                            "$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]
+                        },
+                    }
+                ).limit(200)
+            )
             for task in candidates:
                 flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
                 if not flag:
@@ -163,11 +291,14 @@ class TaskmasterAgent(JarvisAgent):
                 assignee = None
                 if task.get("assigned_to") and users_coll is not None:
                     try:
-                        assignee = users_coll.find_one({"user_id": task.get("assigned_to")})
+                        assignee = users_coll.find_one(
+                            {"user_id": task.get("assigned_to")}
+                        )
                     except Exception:
                         assignee = None
                 target = resolve_escalation_target(
-                    _find_by_role, task.get("store_id"),
+                    _find_by_role,
+                    task.get("store_id"),
                     assignee or {"user_id": task.get("assigned_to")},
                 )
                 set_fields = {
@@ -179,8 +310,12 @@ class TaskmasterAgent(JarvisAgent):
                     "escalated_by": self.agent_id,
                 }
                 history_entry = {
-                    "action": "escalated", "level": new_level, "reason": reason,
-                    "from": task.get("assigned_to"), "by": self.agent_id, "at": now,
+                    "action": "escalated",
+                    "level": new_level,
+                    "reason": reason,
+                    "from": task.get("assigned_to"),
+                    "by": self.agent_id,
+                    "at": now,
                 }
                 if target and target.get("user_id"):
                     set_fields["assigned_to"] = target["user_id"]
@@ -189,7 +324,9 @@ class TaskmasterAgent(JarvisAgent):
                 after = {
                     "status": "ESCALATED",
                     "escalation_level": new_level,
-                    "assigned_to": set_fields.get("assigned_to", task.get("assigned_to")),
+                    "assigned_to": set_fields.get(
+                        "assigned_to", task.get("assigned_to")
+                    ),
                 }
                 try:
                     coll.update_one(
@@ -208,16 +345,24 @@ class TaskmasterAgent(JarvisAgent):
                     )
                     # Alert the new owner (in-app + WhatsApp), fail-soft.
                     await notify_escalation(
-                        self.get_collection("notifications"), target, task, reason, now=now
+                        self.get_collection("notifications"),
+                        target,
+                        task,
+                        reason,
+                        now=now,
                     )
-                    actions.append({
-                        "action": "task_escalated",
-                        "task_id": task.get("task_id"),
-                        "reason": reason,
-                        "to": set_fields.get("assigned_to"),
-                    })
+                    actions.append(
+                        {
+                            "action": "task_escalated",
+                            "task_id": task.get("task_id"),
+                            "reason": reason,
+                            "to": set_fields.get("assigned_to"),
+                        }
+                    )
                 except Exception as e:
-                    logger.warning(f"[TASKMASTER] Failed to escalate task {task.get('_id')}: {e}")
+                    logger.warning(
+                        f"[TASKMASTER] Failed to escalate task {task.get('_id')}: {e}"
+                    )
         except Exception as e:
             logger.debug(f"[TASKMASTER] Overdue scan error: {e}")
         return actions
@@ -231,26 +376,38 @@ class TaskmasterAgent(JarvisAgent):
             return []
         actions = []
         try:
-            low_stock = list(stock_coll.find({
-                "$expr": {"$lt": ["$quantity", "$reorder_point"]},
-            }).limit(20))
+            low_stock = list(
+                stock_coll.find(
+                    {
+                        "$expr": {"$lt": ["$quantity", "$reorder_point"]},
+                    }
+                ).limit(20)
+            )
             for item in low_stock:
                 sku = item.get("sku")
                 # Skip if a draft PO already exists for this SKU today
-                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-                existing_draft = po_coll.find_one({
-                    "auto_drafted_by": self.agent_id,
-                    "sku": sku,
-                    "status": "DRAFT",
-                    "created_at": {"$gte": today_start},
-                })
+                today_start = (
+                    datetime.now(timezone.utc)
+                    .replace(hour=0, minute=0, second=0, microsecond=0)
+                    .isoformat()
+                )
+                existing_draft = po_coll.find_one(
+                    {
+                        "auto_drafted_by": self.agent_id,
+                        "sku": sku,
+                        "status": "DRAFT",
+                        "created_at": {"$gte": today_start},
+                    }
+                )
                 if existing_draft:
                     continue
                 draft_po = {
                     "po_number": f"PO-AUTO-{datetime.now(timezone.utc).strftime('%y%m%d-%H%M%S')}-{sku[:6]}",
                     "sku": sku,
                     "vendor_id": item.get("default_vendor_id"),
-                    "quantity": max(item.get("reorder_point", 0) * 2 - item.get("quantity", 0), 1),
+                    "quantity": max(
+                        item.get("reorder_point", 0) * 2 - item.get("quantity", 0), 1
+                    ),
                     "status": "DRAFT",
                     "auto_drafted_by": self.agent_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
@@ -265,7 +422,13 @@ class TaskmasterAgent(JarvisAgent):
                         after={"po_status": "DRAFT", "po_qty": draft_po["quantity"]},
                         tier=2,
                     )
-                    actions.append({"action": "po_drafted", "sku": sku, "qty": draft_po["quantity"]})
+                    actions.append(
+                        {
+                            "action": "po_drafted",
+                            "sku": sku,
+                            "qty": draft_po["quantity"],
+                        }
+                    )
                 except Exception as e:
                     logger.warning(f"[TASKMASTER] Failed to draft PO for {sku}: {e}")
         except Exception as e:
@@ -308,11 +471,7 @@ class TaskmasterAgent(JarvisAgent):
         try:
             pos = list(
                 po_coll.find(
-                    {
-                        "status": {
-                            "$in": ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"]
-                        }
-                    }
+                    {"status": {"$in": ["SENT", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"]}}
                 ).limit(200)
             )
         except Exception as e:  # noqa: BLE001
@@ -347,7 +506,8 @@ class TaskmasterAgent(JarvisAgent):
             active = [
                 t
                 for t in existing
-                if str(t.get("status", "")).upper() in {"OPEN", "IN_PROGRESS", "ESCALATED"}
+                if str(t.get("status", "")).upper()
+                in {"OPEN", "IN_PROGRESS", "ESCALATED"}
             ]
 
             po_label = spec.get("po_number") or spec.get("po_id")
@@ -434,21 +594,25 @@ class TaskmasterAgent(JarvisAgent):
                     )
         return actions
 
-    async def _audit_log(self, action: str, target: str, before: Dict, after: Dict, tier: int):
+    async def _audit_log(
+        self, action: str, target: str, before: Dict, after: Dict, tier: int
+    ):
         """Every TASKMASTER action records a before/after audit row."""
         coll = self.get_collection("agent_audit_log")
         if coll is None:
             return
         try:
-            coll.insert_one({
-                "agent_id": self.agent_id,
-                "action": action,
-                "target": target,
-                "before_state": before,
-                "after_state": after,
-                "safety_tier": tier,
-                "executed_at": datetime.now(timezone.utc).isoformat(),
-            })
+            coll.insert_one(
+                {
+                    "agent_id": self.agent_id,
+                    "action": action,
+                    "target": target,
+                    "before_state": before,
+                    "after_state": after,
+                    "safety_tier": tier,
+                    "executed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         except Exception as e:
             logger.warning(f"[TASKMASTER] Audit log write failed: {e}")
 
@@ -469,22 +633,24 @@ class TaskmasterAgent(JarvisAgent):
             return
         try:
             now = datetime.now()
-            coll.insert_one({
-                "task_id": f"TSK-AUTO-{now.strftime('%y%m%d-%H%M%S')}",
-                "title": f"Review: {anomaly.get('summary', 'anomaly')}",
-                "description": "Auto-created from a detected anomaly (advisory, Tier 3).",
-                "category": "Review",
-                "priority": "P1",
-                "status": "OPEN",
-                "source": "SYSTEM",
-                "assigned_to": "store_manager",
-                "auto_created_by": self.agent_id,
-                "linked_anomaly": anomaly,
-                "due_at": now + timedelta(hours=24),
-                "created_at": now,
-                "updated_at": now,
-                "escalation_level": 0,
-            })
+            coll.insert_one(
+                {
+                    "task_id": f"TSK-AUTO-{now.strftime('%y%m%d-%H%M%S')}",
+                    "title": f"Review: {anomaly.get('summary', 'anomaly')}",
+                    "description": "Auto-created from a detected anomaly (advisory, Tier 3).",
+                    "category": "Review",
+                    "priority": "P1",
+                    "status": "OPEN",
+                    "source": "SYSTEM",
+                    "assigned_to": "store_manager",
+                    "auto_created_by": self.agent_id,
+                    "linked_anomaly": anomaly,
+                    "due_at": now + timedelta(hours=24),
+                    "created_at": now,
+                    "updated_at": now,
+                    "escalation_level": 0,
+                }
+            )
         except Exception as e:
             logger.warning(f"[TASKMASTER] Failed to create advisory task: {e}")
 
@@ -492,17 +658,28 @@ class TaskmasterAgent(JarvisAgent):
         """On-demand: report recent actions taken."""
         coll = self.get_collection("agent_audit_log")
         if coll is None:
-            return AgentResponse(success=False, agent_id=self.agent_id, message="agent_audit_log unavailable")
+            return AgentResponse(
+                success=False,
+                agent_id=self.agent_id,
+                message="agent_audit_log unavailable",
+            )
         try:
-            recent = list(coll.find(
-                {"agent_id": self.agent_id},
-                {"_id": 0},
-            ).sort("executed_at", -1).limit(20))
+            recent = list(
+                coll.find(
+                    {"agent_id": self.agent_id},
+                    {"_id": 0},
+                )
+                .sort("executed_at", -1)
+                .limit(20)
+            )
         except Exception as e:
             return AgentResponse(success=False, agent_id=self.agent_id, message=str(e))
         return AgentResponse(
             success=True,
             agent_id=self.agent_id,
-            data={"recent_actions": recent, "total_actions_session": self._actions_taken},
+            data={
+                "recent_actions": recent,
+                "total_actions_session": self._actions_taken,
+            },
             message=f"TASKMASTER: {len(recent)} recent action(s); {self._actions_taken} this session",
         )
