@@ -147,16 +147,16 @@ def classify_expense_head(head: str, essential_list: Sequence[str]) -> str:
     return DEFERRABLE
 
 
-def _vendor_is_critical(
-    bill: Dict[str, Any], critical_vendors: Sequence[str]
-) -> bool:
+def _vendor_is_critical(bill: Dict[str, Any], critical_vendors: Sequence[str]) -> bool:
     """Bill-level flag wins; else vendor_id / vendor_name in the policy list."""
     if bill.get("vendor_critical"):
         return True
     crit = {_norm(v) for v in (critical_vendors or []) if _norm(v)}
     if not crit:
         return False
-    return _norm(bill.get("vendor_id")) in crit or _norm(bill.get("vendor_name")) in crit
+    return (
+        _norm(bill.get("vendor_id")) in crit or _norm(bill.get("vendor_name")) in crit
+    )
 
 
 def classify_ap_bill(
@@ -196,6 +196,8 @@ def build_survival_view(
     now: datetime,
     essential_heads: Optional[Sequence[str]] = None,
     critical_vendors: Optional[Sequence[str]] = None,
+    store_scoped: bool = False,
+    month_to_date_fraction: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Pure survival-view dict from pre-fetched rows. Integer paise.
 
@@ -203,6 +205,23 @@ def build_survival_view(
     or ``amount_paise`` (integer). ``ap_bills``: rows with ``outstanding``
     (rupees) or ``outstanding_paise``, plus ``due_date`` / vendor identity /
     optional ``vendor_critical``.
+
+    Scope (P3-1) -- ``store_scoped`` records whether the caller filtered the
+    income + expense rows to a single store. AP bills carry no store_id (they
+    are entity-level liabilities) so they are ALWAYS org-wide. When a store
+    filter is on, the min-pay gap mixes ONE store's income/fixed-costs against
+    ORG-WIDE must-pay AP -- a real, intentional mix that is easy to misread.
+    The view self-documents it via ``ap_scope`` (always ``ORG_WIDE``) and
+    ``income_expense_scope`` (``STORE`` when filtered, else ``ORG_WIDE``), plus
+    a ``scope_note`` spelling out the mix when the two scopes disagree.
+
+    Pro-ration basis (P3-2) -- ``projected_income_paise`` is a FULL-MONTH
+    projection while booked expenses are MONTH-TO-DATE, so the raw gap is
+    systematically understated early in the month. The view labels each side
+    (``income_basis`` / ``expense_basis``) and, when ``month_to_date_fraction``
+    is supplied (elapsed-days / days-in-month, in (0, 1]), adds a
+    ``pro_rated_consistent`` block that scales income DOWN to the same
+    month-to-date window so the two sides are comparable on one basis.
 
     Invariant: fixed_costs + deferrable_expenses + must_pay_ap +
     deferrable_ap == total_outflows (every input paisa lands in exactly one
@@ -267,6 +286,44 @@ def build_survival_view(
 
     income = int(projected_income_paise or 0)
     min_pay_total_paise = fixed_costs_paise + must_pay_ap_paise
+
+    # --- P3-1: self-documenting scope mix -----------------------------------
+    income_expense_scope = "STORE" if store_scoped else "ORG_WIDE"
+    ap_scope = "ORG_WIDE"  # vendor bills carry no store_id, ever.
+    if store_scoped:
+        scope_note = (
+            "Income and fixed costs are scoped to ONE store; must-pay vendor "
+            "bills (AP) are org-wide entity liabilities and are NOT store-"
+            "filterable. The min-pay gap therefore compares one store's income "
+            "against org-wide AP -- read the gap as that mix, not a clean "
+            "per-store number."
+        )
+    else:
+        scope_note = "Income, fixed costs and must-pay AP are all org-wide."
+
+    # --- P3-2: month-to-date pro-ration consistency -------------------------
+    # The headline numbers keep their original bases (full-month projected
+    # income vs month-to-date booked expenses); the labels make that explicit,
+    # and pro_rated_consistent re-states income on the SAME mtd window so a
+    # reader who wants a like-for-like comparison has one.
+    pro_rated_consistent: Optional[Dict[str, Any]] = None
+    if month_to_date_fraction is not None:
+        # Clamp into (0, 1]; a 0 or negative fraction is meaningless here and
+        # full-month income is the safe (non-understating) fallback.
+        frac = month_to_date_fraction
+        if not isinstance(frac, (int, float)) or frac <= 0 or frac > 1:
+            frac = 1.0
+        income_mtd = int(round(income * frac))
+        pro_rated_consistent = {
+            "basis": "MTD_BOOKED",
+            "month_to_date_fraction": frac,
+            # Income scaled DOWN to the same month-to-date window as expenses.
+            "projected_income_mtd_paise": income_mtd,
+            "min_pay_total_paise": min_pay_total_paise,
+            "survival_gap_paise": max(0, min_pay_total_paise - income_mtd),
+            "surplus_paise": max(0, income_mtd - min_pay_total_paise),
+        }
+
     return {
         "as_of": now.date().isoformat(),
         "fixed_costs_paise": fixed_costs_paise,
@@ -288,4 +345,12 @@ def build_survival_view(
         "deferrable_detail": deferrable_detail,
         # Transparency: which keyword list produced this classification.
         "essential_heads_used": heads,
+        # P3-1: scope of each side of the gap (AP is always org-wide).
+        "ap_scope": ap_scope,
+        "income_expense_scope": income_expense_scope,
+        "scope_note": scope_note,
+        # P3-2: the bases the headline gap is computed on, + a consistent view.
+        "income_basis": "FULL_MONTH_PROJECTED",
+        "expense_basis": "MTD_BOOKED",
+        "pro_rated_consistent": pro_rated_consistent,
     }

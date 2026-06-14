@@ -5,7 +5,13 @@ import csv
 import io
 import uuid
 from datetime import datetime, timedelta, date
-from ..utils.ist import now_ist, now_ist_naive, ist_today, ist_day_start_utc, fy_start_year_ist
+from ..utils.ist import (
+    now_ist,
+    now_ist_naive,
+    ist_today,
+    ist_day_start_utc,
+    fy_start_year_ist,
+)
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import Response
@@ -79,7 +85,7 @@ def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
     `end` date-only bound expands to 23:59:59.999999 so the whole final day is
     inclusive. Returns None when the input is empty / unparseable (caller then
     omits that bound).
-    
+
     For date-only inputs (YYYY-MM-DD), treats them as IST business days
     (matching the other IST-swept paths in this router). Converts IST midnight
     to the equivalent naive-UTC instant for comparison with created_at.
@@ -474,7 +480,7 @@ def is_period_locked(db, month, year) -> bool:
 
 def check_period_locked(db, posting_date) -> None:
     """Raise HTTPException(423) if the posting_date's month/year is locked.
-    
+
     Fail-soft: if db is None or period_locks lookup fails, does not raise.
     Used by orders/returns/vendor-bills/payments to guard financial-period closure.
     """
@@ -482,13 +488,14 @@ def check_period_locked(db, posting_date) -> None:
         return
     try:
         from datetime import date
+
         if isinstance(posting_date, str):
             posting_date = date.fromisoformat(posting_date)
         month, year = posting_date.month, posting_date.year
         if is_period_locked(db, month, year):
             raise HTTPException(
                 status_code=423,
-                detail=f"Accounting period {month:02d}/{year} is locked; cannot post to a closed month."
+                detail=f"Accounting period {month:02d}/{year} is locked; cannot post to a closed month.",
             )
     except HTTPException:
         raise
@@ -729,7 +736,9 @@ async def get_pnl(
     # the window isn't mis-bucketed (the two frames must agree).
     je_from_dt = _je_cal_day(from_date)
     je_to_dt = _je_cal_day(to_date, end=True)
-    je_adj = je_service.pnl_adjustments(db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt)
+    je_adj = je_service.pnl_adjustments(
+        db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
+    )
     je_rev = je_adj.get("je_revenue_adjustment", 0.0)
     je_exp = je_adj.get("je_expense_adjustment", 0.0)
     # JE EXPENSE debits are genuine period expenses (depreciation, bank charges)
@@ -766,8 +775,17 @@ async def get_pnl(
     # COST_VISIBLE_ROLES (excludes AREA_MANAGER per DECISIONS sec 9). Revenue + tax
     # (top line) stay visible. Without this, gross_margin/cogs reach every role.
     if not can_see_cost(current_user):
-        for _f in ("cogs", "cogs_is_estimated", "cogs_estimated_lines", "cogs_total_lines",
-                   "gross_profit", "gross_margin", "net_profit", "net_margin", "payroll_cost"):
+        for _f in (
+            "cogs",
+            "cogs_is_estimated",
+            "cogs_estimated_lines",
+            "cogs_total_lines",
+            "gross_profit",
+            "gross_margin",
+            "net_profit",
+            "net_margin",
+            "payroll_cost",
+        ):
             pnl.pop(_f, None)
     return pnl
 
@@ -1173,7 +1191,9 @@ async def get_cash_flow(
     today = ist_today()
     start = ist_day_start_utc(today.replace(day=1))
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id"
+    )
 
     # Inflows (from orders) -- scoped to the active store. created_at is a BSON
     # datetime; an .isoformat() string bound never matched, so inflow always
@@ -1649,7 +1669,9 @@ def _survival_month_expense_rows(db, now: datetime, store_id: Optional[str] = No
     """
     start = date(now.year, now.month, 1).isoformat()
     end = (
-        date(now.year + 1, 1, 1) if now.month == 12 else date(now.year, now.month + 1, 1)
+        date(now.year + 1, 1, 1)
+        if now.month == 12
+        else date(now.year, now.month + 1, 1)
     ).isoformat()
     match = {
         "expense_date": {"$gte": start, "$lt": end},
@@ -1727,6 +1749,12 @@ def _build_survival_payload(db, now: datetime, store_id: Optional[str] = None) -
         expenses = _survival_month_expense_rows(db, now, store_id=store_id)
         ap_items = _survival_ap_items(db)
         income = _survival_projected_income_paise(db, now, store_id=store_id)
+    # P3-2: month-to-date fraction = elapsed days / days in month. The income
+    # helper projects full-month from revenue-to-date by dividing by now.day,
+    # so scaling that projection back by exactly this fraction recovers the
+    # month-to-date booked revenue -- a true like-for-like vs MTD expenses.
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    mtd_fraction = min(now.day, days_in_month) / days_in_month
     return survival_cashflow.build_survival_view(
         expenses,
         ap_items,
@@ -1734,6 +1762,10 @@ def _build_survival_payload(db, now: datetime, store_id: Optional[str] = None) -
         now=now,
         essential_heads=essential,
         critical_vendors=critical,
+        # P3-1: AP is always org-wide; income/expenses are store-scoped only
+        # when a store filter is supplied.
+        store_scoped=bool(store_id),
+        month_to_date_fraction=mtd_fraction,
     )
 
 
@@ -2084,10 +2116,27 @@ async def get_budget(
         # -- the plain budget skeleton stays visible to the wider finance set.
         _require_finance_admin(current_user)
         budget.pop("no_budget_set", None)
-        # Always as-of NOW: survival is a "can I cover this month" question,
-        # not a historical report (month/year params only shape the budget
-        # skeleton above).
-        budget["survival"] = _build_survival_payload(db, now_ist_naive())
+        # Survival is inherently an as-of-NOW "can I cover THIS month" question
+        # (it weighs live overdue AP + month-to-date revenue), so it cannot be
+        # rendered for an arbitrary historical month/year. P3-3: rather than
+        # silently embed a NOW view inside an envelope stamped with a requested
+        # past month, stamp the survival block with the real as-of date and
+        # flag when the requested period is not the current month, so the
+        # envelope can never mislead.
+        survival_now = now_ist_naive()
+        survival = _build_survival_payload(db, survival_now)
+        budget["survival"] = survival
+        budget["survival_as_of"] = survival["as_of"]
+        budget["survival_month"] = f"{survival_now.year:04d}-{survival_now.month:02d}"
+        requested_is_current = m == survival_now.month and y == survival_now.year
+        budget["survival_reflects_requested_period"] = requested_is_current
+        if not requested_is_current:
+            budget["survival_note"] = (
+                f"The budget skeleton is for {y:04d}-{m:02d}, but the survival "
+                f"block is an as-of-{survival['as_of']} view of the CURRENT "
+                "month -- it always reflects today's overdue AP and "
+                "month-to-date revenue, not the requested historical period."
+            )
 
     return budget
 
@@ -2901,10 +2950,33 @@ async def trigger_einvoice(
 
 
 # Supported CSV column aliases (case-insensitive) for each canonical field.
-_BS_DATE_COLS = {"date", "txn date", "transaction date", "value date", "posting date", "value dt"}
+_BS_DATE_COLS = {
+    "date",
+    "txn date",
+    "transaction date",
+    "value date",
+    "posting date",
+    "value dt",
+}
 _BS_DESC_COLS = {"description", "narration", "particulars", "details", "remarks"}
-_BS_DEBIT_COLS = {"debit", "withdrawal", "dr", "amount (dr)", "withdrawal amt.", "withdrawal amt", "debit amount"}
-_BS_CREDIT_COLS = {"credit", "deposit", "cr", "amount (cr)", "deposit amt.", "deposit amt", "credit amount"}
+_BS_DEBIT_COLS = {
+    "debit",
+    "withdrawal",
+    "dr",
+    "amount (dr)",
+    "withdrawal amt.",
+    "withdrawal amt",
+    "debit amount",
+}
+_BS_CREDIT_COLS = {
+    "credit",
+    "deposit",
+    "cr",
+    "amount (cr)",
+    "deposit amt.",
+    "deposit amt",
+    "credit amount",
+}
 _BS_AMOUNT_COLS = {"amount"}  # single column with sign or +/- indicator
 _BS_BALANCE_COLS = {"balance", "closing balance", "running balance", "closing balance"}
 
@@ -2930,7 +3002,15 @@ def _parse_bank_csv(content: str) -> List[dict]:
         s = s.replace(",", "").strip()
         # Handle Dr/Cr suffix or prefix
         neg = s.endswith("(Dr)") or s.endswith("Dr") or s.endswith("DR")
-        s = s.replace("(Dr)", "").replace("(Cr)", "").replace("Dr", "").replace("Cr", "").replace("DR", "").replace("CR", "").strip()
+        s = (
+            s.replace("(Dr)", "")
+            .replace("(Cr)", "")
+            .replace("Dr", "")
+            .replace("Cr", "")
+            .replace("DR", "")
+            .replace("CR", "")
+            .strip()
+        )
         try:
             val = float(s)
         except ValueError:
@@ -2939,7 +3019,15 @@ def _parse_bank_csv(content: str) -> List[dict]:
 
     def _parse_date(s: str) -> Optional[str]:
         s = s.strip()
-        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%b-%Y", "%d %b %Y", "%Y/%m/%d"):
+        for fmt in (
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+            "%Y-%m-%d",
+            "%d/%m/%y",
+            "%d-%b-%Y",
+            "%d %b %Y",
+            "%Y/%m/%d",
+        ):
             try:
                 return datetime.strptime(s, fmt).date().isoformat()
             except ValueError:
@@ -2976,13 +3064,15 @@ def _parse_bank_csv(content: str) -> List[dict]:
 
         balance_raw = _parse_amount(row.get(balance_col, "")) if balance_col else None
 
-        rows.append({
-            "date": date_str,
-            "description": desc,
-            "debit": round(debit, 2),
-            "credit": round(credit, 2),
-            "balance": round(balance_raw, 2) if balance_raw is not None else None,
-        })
+        rows.append(
+            {
+                "date": date_str,
+                "description": desc,
+                "debit": round(debit, 2),
+                "credit": round(credit, 2),
+                "balance": round(balance_raw, 2) if balance_raw is not None else None,
+            }
+        )
 
     return rows
 
@@ -3048,9 +3138,14 @@ def _auto_match_statement(
                     or rec.get("total_amount")
                 )
                 rec_date = (
-                    (rec.get("receipt_date") or rec.get("payment_date") or rec.get("created_at") or "")[:10]
-                )
-                if _amt_close(row["credit"], rec_amt) and _dt_close(row["date"], rec_date):
+                    rec.get("receipt_date")
+                    or rec.get("payment_date")
+                    or rec.get("created_at")
+                    or ""
+                )[:10]
+                if _amt_close(row["credit"], rec_amt) and _dt_close(
+                    row["date"], rec_date
+                ):
                     matched = {
                         "id": str(rid),
                         "type": "receipt",
@@ -3069,10 +3164,10 @@ def _auto_match_statement(
                 if pid in used_payment_ids:
                     continue
                 pmt_amt = _f(pmt.get("amount") or pmt.get("total_amount"))
-                pmt_date = (
-                    (pmt.get("payment_date") or pmt.get("created_at") or "")[:10]
-                )
-                if _amt_close(row["debit"], pmt_amt) and _dt_close(row["date"], pmt_date):
+                pmt_date = (pmt.get("payment_date") or pmt.get("created_at") or "")[:10]
+                if _amt_close(row["debit"], pmt_amt) and _dt_close(
+                    row["date"], pmt_date
+                ):
                     matched = {
                         "id": str(pid),
                         "type": "payment",
@@ -3116,11 +3211,17 @@ async def import_bank_statement(
         try:
             content = content_bytes.decode("latin-1")
         except UnicodeDecodeError:
-            raise HTTPException(status_code=422, detail="Could not decode CSV file. Use UTF-8 or Latin-1 encoding.")
+            raise HTTPException(
+                status_code=422,
+                detail="Could not decode CSV file. Use UTF-8 or Latin-1 encoding.",
+            )
 
     rows = _parse_bank_csv(content)
     if not rows:
-        raise HTTPException(status_code=422, detail="No parseable transactions found in the CSV. Check column names: Date, Description, Debit/Credit (or Amount), Balance.")
+        raise HTTPException(
+            status_code=422,
+            detail="No parseable transactions found in the CSV. Check column names: Date, Description, Debit/Credit (or Amount), Balance.",
+        )
 
     db = _get_db()
     effective_store = store_id or current_user.get("active_store_id") or ""
@@ -3139,24 +3240,45 @@ async def import_bank_statement(
         try:
             # Order receipts (payments against orders): look in orders where
             # payment_status is PAID, using created_at within the statement window.
-            receipts = list(db.get_collection("orders").find(
-                {
-                    "payment_status": {"$in": ["PAID", "paid", "PARTIAL", "partial"]},
-                    "created_at": {"$gte": min_date, "$lte": max_date + "T23:59:59"},
-                    **({"store_id": effective_store} if effective_store else {}),
-                },
-                {"order_id": 1, "grand_total": 1, "total_amount": 1, "created_at": 1, "_id": 0},
-            ))
+            receipts = list(
+                db.get_collection("orders").find(
+                    {
+                        "payment_status": {
+                            "$in": ["PAID", "paid", "PARTIAL", "partial"]
+                        },
+                        "created_at": {
+                            "$gte": min_date,
+                            "$lte": max_date + "T23:59:59",
+                        },
+                        **({"store_id": effective_store} if effective_store else {}),
+                    },
+                    {
+                        "order_id": 1,
+                        "grand_total": 1,
+                        "total_amount": 1,
+                        "created_at": 1,
+                        "_id": 0,
+                    },
+                )
+            )
         except Exception:
             pass
         try:
-            payments = list(db.get_collection("vendor_payments").find(
-                {
-                    "payment_date": {"$gte": min_date, "$lte": max_date},
-                    **({"store_id": effective_store} if effective_store else {}),
-                },
-                {"payment_id": 1, "amount": 1, "payment_date": 1, "vendor_id": 1, "_id": 0},
-            ))
+            payments = list(
+                db.get_collection("vendor_payments").find(
+                    {
+                        "payment_date": {"$gte": min_date, "$lte": max_date},
+                        **({"store_id": effective_store} if effective_store else {}),
+                    },
+                    {
+                        "payment_id": 1,
+                        "amount": 1,
+                        "payment_date": 1,
+                        "vendor_id": 1,
+                        "_id": 0,
+                    },
+                )
+            )
         except Exception:
             pass
 
@@ -3164,8 +3286,12 @@ async def import_bank_statement(
 
     summary = {
         "total": len(matched_rows),
-        "matched_receipts": sum(1 for r in matched_rows if r["match_type"] == "RECEIPT"),
-        "matched_payments": sum(1 for r in matched_rows if r["match_type"] == "PAYMENT"),
+        "matched_receipts": sum(
+            1 for r in matched_rows if r["match_type"] == "RECEIPT"
+        ),
+        "matched_payments": sum(
+            1 for r in matched_rows if r["match_type"] == "PAYMENT"
+        ),
         "unmatched": sum(1 for r in matched_rows if r["match_type"] == "UNMATCHED"),
         "total_credits": round(sum(r["credit"] for r in matched_rows), 2),
         "total_debits": round(sum(r["debit"] for r in matched_rows), 2),
@@ -3175,18 +3301,22 @@ async def import_bank_statement(
     statement_id = str(uuid.uuid4())
     if db is not None:
         try:
-            db.get_collection("bank_statements").insert_one({
-                "statement_id": statement_id,
-                "store_id": effective_store,
-                "account_name": account_name or "",
-                "filename": file.filename,
-                "uploaded_by": current_user.get("id") or current_user.get("user_id") or "",
-                "uploaded_at": datetime.utcnow().isoformat(),
-                "row_count": len(matched_rows),
-                "summary": summary,
-                "rows": matched_rows,
-                "status": "PENDING_REVIEW",
-            })
+            db.get_collection("bank_statements").insert_one(
+                {
+                    "statement_id": statement_id,
+                    "store_id": effective_store,
+                    "account_name": account_name or "",
+                    "filename": file.filename,
+                    "uploaded_by": current_user.get("id")
+                    or current_user.get("user_id")
+                    or "",
+                    "uploaded_at": datetime.utcnow().isoformat(),
+                    "row_count": len(matched_rows),
+                    "summary": summary,
+                    "rows": matched_rows,
+                    "status": "PENDING_REVIEW",
+                }
+            )
         except Exception:
             pass  # non-fatal; data returned in response regardless
 
@@ -3210,12 +3340,23 @@ async def list_bank_statements(
     effective_store = store_id or current_user.get("active_store_id") or ""
     flt = {"store_id": effective_store} if effective_store else {}
     try:
-        docs = list(db.get_collection("bank_statements").find(
-            flt,
-            {"statement_id": 1, "account_name": 1, "filename": 1, "uploaded_at": 1, "row_count": 1, "summary": 1, "status": 1, "_id": 0},
-            sort=[("uploaded_at", -1)],
-            limit=limit,
-        ))
+        docs = list(
+            db.get_collection("bank_statements").find(
+                flt,
+                {
+                    "statement_id": 1,
+                    "account_name": 1,
+                    "filename": 1,
+                    "uploaded_at": 1,
+                    "row_count": 1,
+                    "summary": 1,
+                    "status": 1,
+                    "_id": 0,
+                },
+                sort=[("uploaded_at", -1)],
+                limit=limit,
+            )
+        )
     except Exception:
         docs = []
     return {"statements": docs}
@@ -3250,7 +3391,9 @@ async def get_bank_statement(
 _TICKER_CACHE_PREFIX = "ticker:"
 
 
-def _ticker_stores_for(db, store_id: Optional[str], current_user: dict) -> List[Dict[str, str]]:
+def _ticker_stores_for(
+    db, store_id: Optional[str], current_user: dict
+) -> List[Dict[str, str]]:
     """The list of {store_id, store_name} this caller may see on the ticker.
 
     - explicit store_id -> validate_store_access (403 on cross-store request).
@@ -3260,7 +3403,9 @@ def _ticker_stores_for(db, store_id: Optional[str], current_user: dict) -> List[
     """
     name_by_id: Dict[str, str] = {}
     try:
-        for s in db.get_collection("stores").find({}, {"_id": 0, "store_id": 1, "name": 1, "is_active": 1}):
+        for s in db.get_collection("stores").find(
+            {}, {"_id": 0, "store_id": 1, "name": 1, "is_active": 1}
+        ):
             sid = s.get("store_id")
             if sid:
                 name_by_id[sid] = s.get("name") or sid
@@ -3308,18 +3453,30 @@ async def get_target_ticker(
     never null). Fail-soft: DB down -> a single no_target store, HTTP 200."""
     raw_visible = ticker_service.raw_visible_for(current_user)
     refresh_seconds = int(
-        policy_engine.get_policy("ticker.refresh_seconds", scope={},
-                                 default=ticker_service.DEFAULT_REFRESH_SECONDS)
+        policy_engine.get_policy(
+            "ticker.refresh_seconds",
+            scope={},
+            default=ticker_service.DEFAULT_REFRESH_SECONDS,
+        )
     )
 
     db = _get_db()
     if db is None:
         entry = ticker_service.compute_store_entry(
-            store_id="", store_name="", monthly_target=None, mtd=0.0,
-            days_elapsed=0, days_in_month=0, milestones_fired=[])
+            store_id="",
+            store_name="",
+            monthly_target=None,
+            mtd=0.0,
+            days_elapsed=0,
+            days_in_month=0,
+            milestones_fired=[],
+        )
         entry = entry if raw_visible else ticker_service.mask_entry(entry)
-        return {"raw_visible": raw_visible, "stores": [entry],
-                "ticker_refresh_seconds": refresh_seconds}
+        return {
+            "raw_visible": raw_visible,
+            "stores": [entry],
+            "ticker_refresh_seconds": refresh_seconds,
+        }
 
     stores = _ticker_stores_for(db, store_id, current_user)
     period = ticker_service.current_period()
@@ -3343,32 +3500,57 @@ async def get_target_ticker(
             target = None
             milestones_fired = []
             try:
-                bdoc = budgets_coll.find_one(
-                    {"store_id": sid, "period": period, "head": "REVENUE"}
-                ) if budgets_coll is not None else None
+                bdoc = (
+                    budgets_coll.find_one(
+                        {"store_id": sid, "period": period, "head": "REVENUE"}
+                    )
+                    if budgets_coll is not None
+                    else None
+                )
             except Exception:  # noqa: BLE001
                 bdoc = None
             if bdoc:
                 target = bdoc.get("planned_amount")
                 milestones_fired = bdoc.get("milestones_fired") or []
-            cache.set(ck, {"mtd_revenue": mtd, "monthly_target": target,
-                           "milestones_fired": milestones_fired}, ttl=cache.TTL_SHORT)
+            cache.set(
+                ck,
+                {
+                    "mtd_revenue": mtd,
+                    "monthly_target": target,
+                    "milestones_fired": milestones_fired,
+                },
+                ttl=cache.TTL_SHORT,
+            )
 
         entry = ticker_service.compute_store_entry(
-            store_id=sid, store_name=st["store_name"], monthly_target=target,
-            mtd=mtd, days_elapsed=days_elapsed, days_in_month=days_in_month,
-            milestones_fired=milestones_fired)
+            store_id=sid,
+            store_name=st["store_name"],
+            monthly_target=target,
+            mtd=mtd,
+            days_elapsed=days_elapsed,
+            days_in_month=days_in_month,
+            milestones_fired=milestones_fired,
+        )
         out_stores.append(entry if raw_visible else ticker_service.mask_entry(entry))
 
     if not out_stores:
         # No store resolved (e.g. a role with no active store) -- greyed card.
         entry = ticker_service.compute_store_entry(
-            store_id="", store_name="", monthly_target=None, mtd=0.0,
-            days_elapsed=days_elapsed, days_in_month=days_in_month, milestones_fired=[])
+            store_id="",
+            store_name="",
+            monthly_target=None,
+            mtd=0.0,
+            days_elapsed=days_elapsed,
+            days_in_month=days_in_month,
+            milestones_fired=[],
+        )
         out_stores = [entry if raw_visible else ticker_service.mask_entry(entry)]
 
-    return {"raw_visible": raw_visible, "stores": out_stores,
-            "ticker_refresh_seconds": refresh_seconds}
+    return {
+        "raw_visible": raw_visible,
+        "stores": out_stores,
+        "ticker_refresh_seconds": refresh_seconds,
+    }
 
 
 class TickerSettingsBody(BaseModel):
@@ -3385,18 +3567,28 @@ async def update_target_ticker_settings(
     Invalidates the per-store ticker cache so the next GET reflects the change."""
     roles = set(current_user.get("roles") or [])
     if not (roles & {"SUPERADMIN", "ADMIN"}):
-        raise HTTPException(status_code=403, detail="Only SUPERADMIN/ADMIN may change ticker settings")
+        raise HTTPException(
+            status_code=403, detail="Only SUPERADMIN/ADMIN may change ticker settings"
+        )
 
     pcts = body.milestone_pcts or []
     if not pcts or any((not isinstance(p, int)) or p < 1 or p > 100 for p in pcts):
-        raise HTTPException(status_code=400, detail="milestone_pcts must be integers in 1..100")
+        raise HTTPException(
+            status_code=400, detail="milestone_pcts must be integers in 1..100"
+        )
     # de-dup + sort for a stable stored list
     pcts = sorted(set(int(p) for p in pcts))
 
     try:
-        policy_engine.set_policy("ticker.milestone_pcts", pcts, scope={}, actor=current_user)
-        policy_engine.set_policy("ticker.refresh_seconds", int(body.refresh_seconds),
-                                 scope={}, actor=current_user)
+        policy_engine.set_policy(
+            "ticker.milestone_pcts", pcts, scope={}, actor=current_user
+        )
+        policy_engine.set_policy(
+            "ticker.refresh_seconds",
+            int(body.refresh_seconds),
+            scope={},
+            actor=current_user,
+        )
     except policy_engine.PolicyError as exc:
         raise HTTPException(status_code=getattr(exc, "status", 400), detail=str(exc))
 
@@ -3489,8 +3681,10 @@ def _je_parse_entry_date(s, current_user: dict) -> datetime:
         fy_year = fy_start_year_ist(now_ist())
         fy_start = datetime(fy_year, 4, 1)
         if dt < fy_start:
-            raise HTTPException(status_code=400,
-                                detail="entry_date before current financial year (SUPERADMIN only)")
+            raise HTTPException(
+                status_code=400,
+                detail="entry_date before current financial year (SUPERADMIN only)",
+            )
     return dt
 
 
@@ -3548,7 +3742,9 @@ async def create_journal_entry(
     debit=credit voucher against the chart of accounts, checks the period lock
     on entry_date, mints an FY-scoped JE number."""
     _je_require_enabled()
-    _require_roles_for(current_user, _JE_MAKER_ROLES, "Journal entries require ACCOUNTANT / ADMIN")
+    _require_roles_for(
+        current_user, _JE_MAKER_ROLES, "Journal entries require ACCOUNTANT / ADMIN"
+    )
     db = _get_db()
     store_id = _scope_store(body.store_id, current_user)
     entry_date = _je_parse_entry_date(body.entry_date, current_user)
@@ -3578,7 +3774,9 @@ async def list_journal_entries(
     """List journal vouchers, store-scoped for store-level roles."""
     db = _get_db()
     store_id = _scope_store(store_id, current_user)
-    rows = je_service.list_jes(db, store_id=store_id, status=status, maker_id=maker_id, limit=200)
+    rows = je_service.list_jes(
+        db, store_id=store_id, status=status, maker_id=maker_id, limit=200
+    )
     return {"journal_entries": rows, "total": len(rows)}
 
 
@@ -3601,8 +3799,9 @@ async def get_journal_entry(
         # HQ vouchers are HQ-readable only.
         roles = set(current_user.get("roles") or [])
         if not (roles & {"SUPERADMIN", "ADMIN"}):
-            raise HTTPException(status_code=403,
-                                detail="HQ journal entries are not store-readable")
+            raise HTTPException(
+                status_code=403, detail="HQ journal entries are not store-readable"
+            )
     je.pop("_id", None)
     return je_service._jsonable(je)
 
@@ -3614,7 +3813,9 @@ async def submit_journal_entry(
 ):
     """DRAFT -> SUBMITTED (maker only). Opens the E4 maker-checker approval."""
     _je_require_enabled()
-    _require_roles_for(current_user, _JE_MAKER_ROLES, "Journal entries require ACCOUNTANT / ADMIN")
+    _require_roles_for(
+        current_user, _JE_MAKER_ROLES, "Journal entries require ACCOUNTANT / ADMIN"
+    )
     db = _get_db()
     res = je_service.submit_je(
         db,
@@ -3635,7 +3836,11 @@ async def approve_journal_entry(
     """SUBMITTED -> APPROVED (checker, PIN-gated, via E4). The maker cannot
     approve their own entry -- E4 enforces approver != maker."""
     _je_require_enabled()
-    _require_roles_for(current_user, _JE_CHECKER_ROLES, "Only ADMIN / SUPERADMIN may approve a journal entry")
+    _require_roles_for(
+        current_user,
+        _JE_CHECKER_ROLES,
+        "Only ADMIN / SUPERADMIN may approve a journal entry",
+    )
     db = _get_db()
     res = je_service.approve_je(
         db,
@@ -3656,7 +3861,11 @@ async def reject_journal_entry(
 ):
     """SUBMITTED -> REJECTED with a mandatory note (checker, PIN-gated, via E4)."""
     _je_require_enabled()
-    _require_roles_for(current_user, _JE_CHECKER_ROLES, "Only ADMIN / SUPERADMIN may reject a journal entry")
+    _require_roles_for(
+        current_user,
+        _JE_CHECKER_ROLES,
+        "Only ADMIN / SUPERADMIN may reject a journal entry",
+    )
     db = _get_db()
     res = je_service.reject_je(
         db,
@@ -3678,7 +3887,11 @@ async def post_journal_entry(
     """APPROVED -> POSTED (checker). Consumes the E4 approval EXACTLY once, then
     re-checks the period lock (double gate) before the JE hits the ledger."""
     _je_require_enabled()
-    _require_roles_for(current_user, _JE_CHECKER_ROLES, "Only ADMIN / SUPERADMIN may post a journal entry")
+    _require_roles_for(
+        current_user,
+        _JE_CHECKER_ROLES,
+        "Only ADMIN / SUPERADMIN may post a journal entry",
+    )
     db = _get_db()
     je = je_service.get_je(db, je_id)
     if not je:
@@ -3699,7 +3912,11 @@ async def reverse_journal_entry(
     """Reverse a POSTED JE (ADMIN/SUPERADMIN). Mints a mirror voucher dated
     today (today's period must be open); both vouchers are linked."""
     _je_require_enabled()
-    _require_roles_for(current_user, _JE_CHECKER_ROLES, "Only ADMIN / SUPERADMIN may reverse a journal entry")
+    _require_roles_for(
+        current_user,
+        _JE_CHECKER_ROLES,
+        "Only ADMIN / SUPERADMIN may reverse a journal entry",
+    )
     db = _get_db()
     # The reversal posts on today's date -- today's period must be open.
     check_period_locked(db, now_ist_naive().date())
@@ -3731,7 +3948,9 @@ async def upsert_chart_of_account(
     """Upsert a chart-of-accounts entry (SUPERADMIN only)."""
     roles = set(current_user.get("roles") or [])
     if "SUPERADMIN" not in roles:
-        raise HTTPException(status_code=403, detail="Only SUPERADMIN may edit the chart of accounts")
+        raise HTTPException(
+            status_code=403, detail="Only SUPERADMIN may edit the chart of accounts"
+        )
     db = _get_db()
     res = je_service.upsert_account(
         db,
@@ -3761,7 +3980,9 @@ async def get_tally_journal_jv(
     store_id = _scope_store(store_id, current_user)
     from_dt = _parse_range_dt(from_date)
     to_dt = _parse_range_dt(to_date, end=True)
-    rows = je_service.list_jes(db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000)
+    rows = je_service.list_jes(
+        db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000
+    )
     # Date-filter in Python (entry_date is a datetime); keeps the service query simple.
     filtered = []
     for je in rows:
