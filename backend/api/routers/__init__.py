@@ -34,6 +34,7 @@ from .inventory_balancing import router as inventory_balancing_router
 from .repair_portal import router as repair_portal_router
 from .roster import router as roster_router
 from .cl_po import router as cl_po_router
+from .endless_aisle import router as endless_aisle_router
 from .hr import router as hr_router
 from .workshop import router as workshop_router
 from .reports import router as reports_router
@@ -125,6 +126,7 @@ __all__ = [
     "repair_portal_router",
     "roster_router",
     "cl_po_router",
+    "endless_aisle_router",
     "hr_router",
     "workshop_router",
     "reports_router",

@@ -68,6 +68,7 @@ from .routers import (
     repair_portal_router,
     roster_router,
     cl_po_router,
+    endless_aisle_router,
     hr_router,
     workshop_router,
     reports_router,
@@ -324,6 +325,13 @@ async def lifespan(app: FastAPI):
                 ensure_roster_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Roster index creation skipped: {e}")
+            # Feature #38 endless aisle: requests by (selling_store,status) + (source_store,status). Fail-soft.
+            try:
+                from .services.endless_aisle import ensure_indexes as ensure_endless_aisle_indexes
+
+                ensure_endless_aisle_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Endless-aisle index creation skipped: {e}")
             # Feature #13 spoilage analytics: seed the owner-editable remake
             # reason-code taxonomy singleton (insert-only-if-absent, so an
             # edited taxonomy is never clobbered). Idempotent, fail-soft.
@@ -1253,6 +1261,11 @@ app.include_router(
 # Base-Bank replenishment + lens-stock gap-planner data and drafts DRAFT POs whose
 # lines carry the power cell -- never SENT, never touches POS/money.
 app.include_router(cl_po_router, prefix="/api/v1/cl-po", tags=["CLPurchaseOrders"])
+# Feature #38 endless aisle: own /api/v1/endless-aisle prefix; STORE_MANAGER+;
+# behind endless_aisle.enabled (E2, default OFF -> 403 when disabled). Source-
+# ACCEPT 2-step + ghost-stock re-validation; company bears shipping (booked to
+# the selling store, NOT the customer); POS pricing/tender UNTOUCHED.
+app.include_router(endless_aisle_router, prefix="/api/v1/endless-aisle", tags=["EndlessAisle"])
 # Feature #48 multi-category servicing & repair portal: own /api/v1/repairs prefix;
 # per-store service catalog + INTAKE->DELIVERED job lifecycle (guarded transitions),
 # DARK status SMS on READY, store-scoped. POS-billing on DELIVERED is DEFERRED.
