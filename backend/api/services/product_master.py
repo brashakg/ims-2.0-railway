@@ -912,7 +912,7 @@ def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
 # The known source labels. FORM = POST /products; BULK = /products/bulk-create;
 # CATALOG = POST /catalog/products; MASTER = the engine door (POST /products/master);
 # IMPORT = Hub Phase 3 vendor price-list import (rows land as_draft for review).
-VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT"})
+VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT", "CLONE"})
 
 # Top-level identity fields some doors (FORM/BULK) carry OUTSIDE `attributes`.
 # Mapped INTO the canonical attribute keys the registry validates, so a frame
@@ -1054,6 +1054,118 @@ def create_via_door(
     except Exception:  # noqa: BLE001
         pass
     return created
+
+
+# Catalog fields copied when cloning a product into a variant. Identity (sku,
+# product_id, _id), stock, and ecom/sync state are NEVER cloned -- each variant
+# is a brand-new spine row with its own minted SKU.
+_CLONE_CATALOG_FIELDS = (
+    "category",
+    "mrp",
+    "offer_price",
+    "cost_price",
+    "discount_category",
+    "hsn_code",
+    "gst_rate",
+    "country_of_origin",
+    "warranty_months",
+    "weight_grams",
+)
+
+
+def clone_and_vary(
+    *,
+    source_id: str,
+    variations: List[Dict[str, Any]],
+    actor: str,
+    product_repo=None,
+    catalog_repo=None,
+    variant_repo=None,
+    audit_repo=None,
+    db=None,
+) -> Dict[str, Any]:
+    """Hub Phase 4: clone one product across N attribute variations (e.g. the
+    same frame in 20 colours, or a lens in 3 indices) into N new catalog_status=
+    DRAFT products for review. Each variant inherits the source's catalog fields
+    + attributes, overlays the per-variation attribute overrides (colour_code /
+    size / power / ...), mints its OWN unique SKU, and lands DRAFT (as_draft) via
+    the canonical create door -- so the Phase-1 duplicate guard + the done-rule
+    apply to every variant. A variation that collides with an existing product
+    (409) is collected as an error, never aborts the batch.
+
+    Returns {source_id, created: [{product_id, sku, attributes}], errors:
+    [{index, error, ...}]}. Raises ProductMasterError(404) if the source is gone.
+    """
+    if product_repo is None:
+        raise ProductMasterError("No product repository.", status=500)
+    src = get_product(source_id, product_repo=product_repo)
+    if src is None:
+        raise ProductMasterError("Source product not found.", status=404)
+
+    base_attrs = _overlay_attributes(src)  # canonical attrs incl. legacy overlay
+    base_payload: Dict[str, Any] = {}
+    for f in _CLONE_CATALOG_FIELDS:
+        if src.get(f) is not None:
+            base_payload[f] = src.get(f)
+
+    created: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for idx, variation in enumerate(variations or []):
+        if not isinstance(variation, dict):
+            errors.append({"index": idx, "error": "variation must be an object"})
+            continue
+        # overlay the variation's attribute overrides onto the cloned base attrs
+        merged_attrs = dict(base_attrs)
+        for k, v in variation.items():
+            if v is not None and not (isinstance(v, str) and not v.strip()):
+                merged_attrs[k] = v
+        payload = dict(base_payload)
+        payload["attributes"] = merged_attrs
+        payload["sku"] = None  # auto-mint a unique SKU per variant
+        payload["as_draft"] = (
+            True  # variants land DRAFT for review (never auto-publish)
+        )
+        try:
+            doc = create_via_door(
+                payload,
+                source="CLONE",
+                actor=actor,
+                product_repo=product_repo,
+                catalog_repo=catalog_repo,
+                variant_repo=variant_repo,
+                audit_repo=audit_repo,
+                db=db,
+            )
+        except ProductMasterError as err:
+            errors.append(
+                {
+                    "index": idx,
+                    "error": err.message,
+                    "code": getattr(err, "code", None),
+                    "existing": getattr(err, "conflict", None),
+                }
+            )
+            continue
+        new_pid = (doc or {}).get("product_id")
+        # DRAFT FLOOR: as_draft only relaxes the strict 422 -- a COMPLETE cloned
+        # payload would otherwise stamp ACTIVE and be immediately sellable,
+        # never reviewed. Force every clone variant to DRAFT so a person opens +
+        # activates it (an edit re-stamps it ACTIVE). Fail-soft.
+        if new_pid and (doc or {}).get("catalog_status") != CATALOG_STATUS_DRAFT:
+            try:
+                product_repo.update(new_pid, {"catalog_status": CATALOG_STATUS_DRAFT})
+                if isinstance(doc, dict):
+                    doc["catalog_status"] = CATALOG_STATUS_DRAFT
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CLONE] DRAFT re-stamp failed for %s: %s", new_pid, exc)
+        created.append(
+            {
+                "product_id": new_pid,
+                "sku": (doc or {}).get("sku"),
+                "attributes": merged_attrs,
+            }
+        )
+    return {"source_id": source_id, "created": created, "errors": errors}
 
 
 def create_product(
