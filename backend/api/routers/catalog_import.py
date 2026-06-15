@@ -91,12 +91,14 @@ def _load_alias_index(db, vendor_id: str) -> Dict[str, str]:
 
 
 def _load_candidate_products(db) -> List[Dict[str, Any]]:
-    """Catalogued spine products (product_id + sku only) for fuzzy matching."""
+    """Active catalogued spine products (product_id + sku only) for fuzzy
+    matching. Filters is_active so a vendor SKU never MATCHES a soft-deleted
+    product (soft_delete leaves the doc + its sku)."""
     if db is None:
         return []
     try:
         cur = db.get_collection("products").find(
-            {}, {"product_id": 1, "sku": 1, "_id": 0}
+            {"is_active": {"$ne": False}}, {"product_id": 1, "sku": 1, "_id": 0}
         )
         return [d for d in cur if d.get("product_id") and d.get("sku")]
     except Exception as exc:  # noqa: BLE001
@@ -104,18 +106,22 @@ def _load_candidate_products(db) -> List[Dict[str, Any]]:
         return []
 
 
-def _write_alias(db, vendor_id: str, vendor_sku: str, product_id: str) -> None:
-    """Teach the flywheel a vendor_sku -> product_id mapping (idempotent upsert)."""
+def _write_alias(db, vendor_id: str, vendor_sku: str, product_id: str) -> bool:
+    """Teach the flywheel a vendor_sku -> product_id mapping (idempotent upsert).
+    Returns True on a successful write so the caller can report a failed LINK as
+    an error rather than miscounting it as linked."""
     if db is None or not vendor_sku or not product_id:
-        return
+        return False
     try:
         db.get_collection(_ALIAS_COLLECTION).update_one(
             {"vendor_id": vendor_id, "vendor_sku": vendor_sku},
             {"$set": {"product_id": product_id, "source": "IMPORT"}},
             upsert=True,
         )
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[IMPORT] alias write failed for %s: %s", vendor_sku, exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +137,10 @@ async def preview_import(
     """Parse + classify + map a vendor price list. No writes."""
     # 1) parse rows by format
     if body.format == "csv":
-        rows = _ci.parse_csv(body.content)
+        try:
+            rows = _ci.parse_csv(body.content)
+        except Exception as exc:  # noqa: BLE001 - fail-soft: never 500 on bad input
+            raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
     elif body.format == "xlsx":
         try:
             raw = base64.b64decode(body.content)
@@ -223,8 +232,23 @@ async def commit_import(
                     {"index": idx, "error": "LINK needs product_id + vendor_sku"}
                 )
                 continue
-            _write_alias(db, body.vendor_id, row.vendor_sku, row.product_id)
-            linked += 1
+            # Validate the target product EXISTS on the spine before teaching the
+            # flywheel -- a typo'd/stale/fabricated product_id would otherwise be
+            # written as a max-confidence alias and auto-MATCH (score 1.0) on every
+            # future import, flowing wrong stock/cost into PO/GRN. Fail-soft: if no
+            # repo to verify, fall through (the alias is still corrigible).
+            if repo is not None and repo.find_by_id(row.product_id) is None:
+                errors.append(
+                    {
+                        "index": idx,
+                        "error": "LINK product_id not found on the catalog spine",
+                    }
+                )
+                continue
+            if _write_alias(db, body.vendor_id, row.vendor_sku, row.product_id):
+                linked += 1
+            else:
+                errors.append({"index": idx, "error": "alias write failed"})
             continue
         # CREATE -> a new DRAFT product via the spine door, then teach the alias.
         payload = dict(row.payload or {})
@@ -240,6 +264,24 @@ async def commit_import(
             errors.append({"index": idx, "error": str(exc)})
             continue
         new_pid = (doc or {}).get("product_id")
+        # Hub Phase 3 DRAFT FLOOR: as_draft only relaxes the strict 422 -- a
+        # COMPLETE imported payload would otherwise stamp catalog_status=ACTIVE and
+        # be immediately sellable, never reviewed. Force DRAFT for every IMPORT so
+        # a person must open + activate it (an edit re-stamps it ACTIVE). Honours
+        # the router contract: imports never auto-publish.
+        if (
+            new_pid
+            and repo is not None
+            and (doc or {}).get("catalog_status") != _pm.CATALOG_STATUS_DRAFT
+        ):
+            try:
+                repo.update(new_pid, {"catalog_status": _pm.CATALOG_STATUS_DRAFT})
+                if isinstance(doc, dict):
+                    doc["catalog_status"] = _pm.CATALOG_STATUS_DRAFT
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[IMPORT] DRAFT re-stamp failed for %s: %s", new_pid, exc
+                )
         created.append({"index": str(idx), "product_id": new_pid or ""})
         if new_pid and row.vendor_sku:
             _write_alias(db, body.vendor_id, row.vendor_sku, new_pid)

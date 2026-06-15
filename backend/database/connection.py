@@ -259,6 +259,17 @@ class DatabaseConnection:
             [("category", 1), ("brand", 1), ("model", 1), ("color", 1), ("size", 1)],
             background=True,
         )
+        # Hub Phase 3: the vendor SKU-alias flywheel. One alias per
+        # (vendor_id, vendor_sku) -- a unique index makes the import LINK / GRN
+        # upserts idempotent under concurrency (no dup aliases that would make a
+        # vendor SKU resolve ambiguously). Fail-soft via _idx if pre-existing dup
+        # rows block the build.
+        _idx(
+            "vendor_sku_aliases",
+            [("vendor_id", 1), ("vendor_sku", 1)],
+            unique=True,
+            background=True,
+        )
 
         # Stock units: composite indexes for inventory ledger queries.
         # (store_id, status) supports the $match stage in _build_store_ledger.

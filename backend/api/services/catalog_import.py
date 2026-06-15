@@ -57,7 +57,12 @@ def normalize_sku(value: Any) -> str:
     if value is None:
         return ""
     s = re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
-    s = s.lstrip("0")
+    # Strip leading zeros ONLY for an alpha-prefixed code (the owner's case:
+    # "0RB3025..." -> "RB3025..."). A purely-numeric code keeps its leading zeros
+    # so "001" and "1" stay DISTINCT (they are different items, not a dialect of
+    # the same one).
+    if any(c.isalpha() for c in s):
+        s = s.lstrip("0")
     return s
 
 
@@ -209,17 +214,26 @@ def guess_column_map(headers: List[str]) -> Dict[str, str]:
 
 
 def _to_float(value: Any) -> Optional[float]:
-    """Parse a price cell tolerant of currency symbols / commas / surrounding
-    text (e.g. "Rs. 7,990.00" -> 7990.0). Extracts the first numeric token after
-    stripping thousands separators. None on junk."""
+    """Parse a price cell tolerant of a leading currency symbol + thousands
+    commas (e.g. "Rs. 7,990.00" -> 7990.0). Strips commas + a leading currency
+    prefix, then requires the REMAINDER to be a single clean number (optionally
+    scientific). A multi-dot / embedded-junk cell (e.g. "12.34.56") returns None
+    -> the field becomes a gap (DRAFT), never a silently-wrong positive price."""
     if value is None:
         return None
+    if isinstance(value, (int, float)):
+        return float(value)
     s = str(value).replace(",", "")
-    match = re.search(r"-?\d+(?:\.\d+)?", s)
-    if not match:
+    # Find every well-formed number token (optional sign, decimal, scientific).
+    # A clean price cell has EXACTLY ONE -- "Rs. 7990.00" -> ["7990.00"], "1.5e3"
+    # -> ["1.5e3"]. A multi-dot / multi-number junk cell ("12.34.56", "2 @ 500")
+    # yields zero or >1 tokens -> None, so the field becomes a gap (DRAFT) rather
+    # than a silently-wrong positive price.
+    tokens = re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", s)
+    if len(tokens) != 1:
         return None
     try:
-        return float(match.group(0))
+        return float(tokens[0])
     except ValueError:
         return None
 
@@ -329,7 +343,10 @@ async def parse_pdf_via_ai(text: str) -> List[Dict[str, Any]]:
 
         if not is_claude_available():
             return []
-        data = await call_claude_json(_PDF_EXTRACT_SYSTEM, text)
+        # A price list of 100-500 rows blows past the agent's 1024-token default
+        # and would silently truncate the JSON (importing only a subset). Ask for
+        # a large budget so a normal list extracts whole.
+        data = await call_claude_json(_PDF_EXTRACT_SYSTEM, text, max_tokens=8000)
     except Exception as exc:  # noqa: BLE001 - import must never crash
         logger.warning("[IMPORT] PDF AI extract failed: %s", exc)
         return []

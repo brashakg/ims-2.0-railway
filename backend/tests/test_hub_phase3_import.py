@@ -36,7 +36,9 @@ def test_normalize_folds_punctuation_and_leading_zeros():
 def test_normalize_blank_and_none():
     assert ci.normalize_sku(None) == ""
     assert ci.normalize_sku("   ") == ""
-    assert ci.normalize_sku("000") == ""  # all-zeros -> empty after lstrip
+    # all-numeric codes are NOT zero-stripped (the alpha-guard) so "000" stays
+    # "000" -- distinct from "" and from "0RB..." which IS stripped.
+    assert ci.normalize_sku("000") == "000"
 
 
 def test_similarity_identical_normalized_is_one():
@@ -189,7 +191,18 @@ class _FakeColl:
 
     def find(self, flt=None, proj=None):
         flt = flt or {}
-        return [d for d in self.docs if all(d.get(k) == v for k, v in flt.items())]
+
+        def _match(d):
+            for k, v in flt.items():
+                dv = d.get(k)
+                if isinstance(v, dict):
+                    if "$ne" in v and dv == v["$ne"]:
+                        return False  # mirrors Mongo $ne (the is_active filter)
+                elif dv != v:
+                    return False
+            return True
+
+        return [d for d in self.docs if _match(d)]
 
     def update_one(self, flt, update, upsert=False):
         self.upserts.append((dict(flt), dict(update), upsert))
@@ -205,6 +218,19 @@ class _FakeDB:
 
     def get_collection(self, name):
         return self.cols.setdefault(name, _FakeColl())
+
+
+class _FakeProductRepo:
+    def __init__(self, known=None):
+        self.known = set(known or [])
+        self.updates = []
+
+    def find_by_id(self, pid):
+        return {"product_id": pid} if pid in self.known else None
+
+    def update(self, pid, fields):
+        self.updates.append((pid, dict(fields)))
+        return True
 
 
 def test_preview_classifies_and_maps(monkeypatch):
@@ -242,18 +268,17 @@ def test_preview_pdf_ai_unavailable_400(monkeypatch):
     assert getattr(ei.value, "status_code", None) == 400
 
 
-def test_commit_create_lands_draft_and_teaches_alias(monkeypatch):
+def test_commit_create_forces_draft_and_teaches_alias(monkeypatch):
     db = _FakeDB()
+    repo = _FakeProductRepo()
     monkeypatch.setattr(cir, "_get_db", lambda: db)
-    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
-
-    created_payloads = []
+    monkeypatch.setattr(cir, "get_product_repository", lambda: repo)
 
     def _fake_create(payload, **kw):
-        created_payloads.append(payload)
         assert payload.get("as_draft") is True  # imports ALWAYS land DRAFT
         assert kw.get("source") == "IMPORT"
-        return {"product_id": "NEW-1"}
+        # simulate a COMPLETE payload that the spine stamped ACTIVE
+        return {"product_id": "NEW-1", "catalog_status": "ACTIVE"}
 
     monkeypatch.setattr(cir._pm, "create_via_door", _fake_create)
     body = cir.ImportCommitRequest(
@@ -269,6 +294,8 @@ def test_commit_create_lands_draft_and_teaches_alias(monkeypatch):
     out = _run(cir.commit_import(body, _CM))
     assert out["created"] == 1
     assert out["created_products"][0]["product_id"] == "NEW-1"
+    # DRAFT FLOOR: the route force-re-stamped the ACTIVE spine doc back to DRAFT
+    assert ("NEW-1", {"catalog_status": "DRAFT"}) in repo.updates
     # the flywheel learned ZZZ-1 -> NEW-1
     upserts = db.cols["vendor_sku_aliases"].upserts
     assert any(
@@ -277,10 +304,11 @@ def test_commit_create_lands_draft_and_teaches_alias(monkeypatch):
     )
 
 
-def test_commit_link_writes_alias_only(monkeypatch):
+def test_commit_link_validates_product_exists(monkeypatch):
     db = _FakeDB()
+    repo = _FakeProductRepo(known={"P-9"})
     monkeypatch.setattr(cir, "_get_db", lambda: db)
-    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+    monkeypatch.setattr(cir, "get_product_repository", lambda: repo)
 
     def _boom(*a, **k):
         raise AssertionError("create must not be called for LINK")
@@ -295,10 +323,27 @@ def test_commit_link_writes_alias_only(monkeypatch):
     assert db.cols["vendor_sku_aliases"].upserts[0][1]["$set"]["product_id"] == "P-9"
 
 
+def test_commit_link_unknown_product_errors_no_alias(monkeypatch):
+    # the flywheel-poison guard: LINK to a non-existent product is refused.
+    db = _FakeDB()
+    repo = _FakeProductRepo(known=set())  # P-X not on the spine
+    monkeypatch.setattr(cir, "_get_db", lambda: db)
+    monkeypatch.setattr(cir, "get_product_repository", lambda: repo)
+    body = cir.ImportCommitRequest(
+        vendor_id="V1",
+        rows=[cir.ImportCommitRow(action="LINK", vendor_sku="VS-X", product_id="P-X")],
+    )
+    out = _run(cir.commit_import(body, _CM))
+    assert out["linked"] == 0
+    assert out["errors"] and "not found" in out["errors"][0]["error"]
+    assert db.cols["vendor_sku_aliases"].upserts == []  # NO poison written
+
+
 def test_commit_create_validation_error_collected(monkeypatch):
     db = _FakeDB()
+    repo = _FakeProductRepo()
     monkeypatch.setattr(cir, "_get_db", lambda: db)
-    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+    monkeypatch.setattr(cir, "get_product_repository", lambda: repo)
 
     def _raise(payload, **kw):
         raise cir._pm.ProductMasterError("bad", status=422, field="category")
@@ -315,10 +360,31 @@ def test_commit_create_validation_error_collected(monkeypatch):
 
 def test_commit_skip_does_nothing(monkeypatch):
     db = _FakeDB()
+    repo = _FakeProductRepo()
     monkeypatch.setattr(cir, "_get_db", lambda: db)
-    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+    monkeypatch.setattr(cir, "get_product_repository", lambda: repo)
     body = cir.ImportCommitRequest(
         vendor_id="V1", rows=[cir.ImportCommitRow(action="SKIP", vendor_sku="Z")]
     )
     out = _run(cir.commit_import(body, _CM))
     assert out["skipped"] == 1 and out["created"] == 0 and out["linked"] == 0
+
+
+# ---- adversarial-fix pure tests (to_float hardening + numeric leading-zero) ----
+
+
+def test_to_float_rejects_scientific_and_multidot():
+    assert ci._to_float("Rs. 7,990.00") == 7990.0
+    assert ci._to_float("4,500") == 4500.0
+    assert ci._to_float("12.34.56") is None  # multi-dot junk -> gap, not 12.34
+    assert ci._to_float("1.5e3") == 1500.0  # explicit scientific honoured
+    assert ci._to_float("abc") is None
+    assert ci._to_float(7990) == 7990.0
+
+
+def test_normalize_numeric_keeps_leading_zeros():
+    # purely-numeric codes are NOT zero-stripped -> "001" != "1" (distinct items)
+    assert ci.normalize_sku("001") != ci.normalize_sku("1")
+    assert ci.normalize_sku("00123") == "00123"
+    # but an alpha-prefixed code still strips the leading zero (owner case)
+    assert ci.normalize_sku("0RB3025") == ci.normalize_sku("RB3025") == "RB3025"
