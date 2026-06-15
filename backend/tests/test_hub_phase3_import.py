@@ -164,3 +164,161 @@ def test_parse_csv_rows():
 
 def test_parse_csv_empty():
     assert ci.parse_csv("") == []
+
+
+# ===========================================================================
+# Router: /catalog-import/preview + /commit (driven directly with fakes)
+# ===========================================================================
+
+import asyncio  # noqa: E402
+
+import pytest  # noqa: E402
+from api.routers import catalog_import as cir  # noqa: E402
+
+_CM = {"user_id": "u-cat", "roles": ["CATALOG_MANAGER"]}
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+class _FakeColl:
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+        self.upserts = []
+
+    def find(self, flt=None, proj=None):
+        flt = flt or {}
+        return [d for d in self.docs if all(d.get(k) == v for k, v in flt.items())]
+
+    def update_one(self, flt, update, upsert=False):
+        self.upserts.append((dict(flt), dict(update), upsert))
+        return True
+
+
+class _FakeDB:
+    def __init__(self, products=None, aliases=None):
+        self.cols = {
+            "products": _FakeColl(products),
+            "vendor_sku_aliases": _FakeColl(aliases),
+        }
+
+    def get_collection(self, name):
+        return self.cols.setdefault(name, _FakeColl())
+
+
+def test_preview_classifies_and_maps(monkeypatch):
+    db = _FakeDB(
+        products=[{"product_id": "P-RB", "sku": "RB 3025 001/21"}],
+        aliases=[],
+    )
+    monkeypatch.setattr(cir, "_get_db", lambda: db)
+    csv_text = (
+        "sku,brand,model,mrp,cost\n"
+        "0RB3025001/21,Ray-Ban,3025,7990,4500\n"  # MATCHED (normalized-exact)
+        "ZZZ-NEW-1,Acme,X,1000,600\n"  # NEW
+    )
+    body = cir.ImportPreviewRequest(vendor_id="V1", format="csv", content=csv_text)
+    out = _run(cir.preview_import(body, _CM))
+    assert out["total"] == 2
+    statuses = {r["vendor_sku"]: r["match"]["status"] for r in out["rows"]}
+    assert statuses["0RB3025001/21"] == ci.MATCH_MATCHED
+    assert statuses["ZZZ-NEW-1"] == ci.MATCH_NEW
+    # the matched row points at the spine product; both rows carry as_draft payloads
+    matched = next(r for r in out["rows"] if r["vendor_sku"] == "0RB3025001/21")
+    assert matched["match"]["product_id"] == "P-RB"
+    assert all(r["payload"]["as_draft"] is True for r in out["rows"])
+
+
+def test_preview_pdf_ai_unavailable_400(monkeypatch):
+    async def _no_rows(_text):
+        return []
+
+    monkeypatch.setattr(cir._ci, "parse_pdf_via_ai", _no_rows)
+    monkeypatch.setattr(cir, "_get_db", lambda: _FakeDB())
+    body = cir.ImportPreviewRequest(vendor_id="V1", format="pdf", content="garbage")
+    with pytest.raises(Exception) as ei:
+        _run(cir.preview_import(body, _CM))
+    assert getattr(ei.value, "status_code", None) == 400
+
+
+def test_commit_create_lands_draft_and_teaches_alias(monkeypatch):
+    db = _FakeDB()
+    monkeypatch.setattr(cir, "_get_db", lambda: db)
+    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+
+    created_payloads = []
+
+    def _fake_create(payload, **kw):
+        created_payloads.append(payload)
+        assert payload.get("as_draft") is True  # imports ALWAYS land DRAFT
+        assert kw.get("source") == "IMPORT"
+        return {"product_id": "NEW-1"}
+
+    monkeypatch.setattr(cir._pm, "create_via_door", _fake_create)
+    body = cir.ImportCommitRequest(
+        vendor_id="V1",
+        rows=[
+            cir.ImportCommitRow(
+                action="CREATE",
+                vendor_sku="ZZZ-1",
+                payload={"category": "FRAME", "attributes": {"brand_name": "Acme"}},
+            )
+        ],
+    )
+    out = _run(cir.commit_import(body, _CM))
+    assert out["created"] == 1
+    assert out["created_products"][0]["product_id"] == "NEW-1"
+    # the flywheel learned ZZZ-1 -> NEW-1
+    upserts = db.cols["vendor_sku_aliases"].upserts
+    assert any(
+        u[0]["vendor_sku"] == "ZZZ-1" and u[1]["$set"]["product_id"] == "NEW-1"
+        for u in upserts
+    )
+
+
+def test_commit_link_writes_alias_only(monkeypatch):
+    db = _FakeDB()
+    monkeypatch.setattr(cir, "_get_db", lambda: db)
+    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+
+    def _boom(*a, **k):
+        raise AssertionError("create must not be called for LINK")
+
+    monkeypatch.setattr(cir._pm, "create_via_door", _boom)
+    body = cir.ImportCommitRequest(
+        vendor_id="V1",
+        rows=[cir.ImportCommitRow(action="LINK", vendor_sku="VS-9", product_id="P-9")],
+    )
+    out = _run(cir.commit_import(body, _CM))
+    assert out["linked"] == 1 and out["created"] == 0
+    assert db.cols["vendor_sku_aliases"].upserts[0][1]["$set"]["product_id"] == "P-9"
+
+
+def test_commit_create_validation_error_collected(monkeypatch):
+    db = _FakeDB()
+    monkeypatch.setattr(cir, "_get_db", lambda: db)
+    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+
+    def _raise(payload, **kw):
+        raise cir._pm.ProductMasterError("bad", status=422, field="category")
+
+    monkeypatch.setattr(cir._pm, "create_via_door", _raise)
+    body = cir.ImportCommitRequest(
+        vendor_id="V1",
+        rows=[cir.ImportCommitRow(action="CREATE", vendor_sku="Z", payload={})],
+    )
+    out = _run(cir.commit_import(body, _CM))
+    assert out["created"] == 0
+    assert out["errors"][0]["field"] == "category"
+
+
+def test_commit_skip_does_nothing(monkeypatch):
+    db = _FakeDB()
+    monkeypatch.setattr(cir, "_get_db", lambda: db)
+    monkeypatch.setattr(cir, "get_product_repository", lambda: object())
+    body = cir.ImportCommitRequest(
+        vendor_id="V1", rows=[cir.ImportCommitRow(action="SKIP", vendor_sku="Z")]
+    )
+    out = _run(cir.commit_import(body, _CM))
+    assert out["skipped"] == 1 and out["created"] == 0 and out["linked"] == 0

@@ -40,6 +40,9 @@ redis==5.3.1
 # Utilities
 email-validator==2.3.0
 python-dateutil==2.9.0.post0
+# Hub Phase 3: Excel (.xlsx) vendor price-list import (lazy-imported; CSV + AI-PDF
+# paths work without it, the xlsx path 400s cleanly when absent).
+openpyxl==3.1.5
 
 # Production Server (optional, uvicorn is primary)
 gunicorn==23.0.0

@@ -910,8 +910,9 @@ def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
 # category->GST/HSN, category->discount-cap) -- it never changes those values.
 
 # The known source labels. FORM = POST /products; BULK = /products/bulk-create;
-# CATALOG = POST /catalog/products; MASTER = the engine door (POST /products/master).
-VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER"})
+# CATALOG = POST /catalog/products; MASTER = the engine door (POST /products/master);
+# IMPORT = Hub Phase 3 vendor price-list import (rows land as_draft for review).
+VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT"})
 
 # Top-level identity fields some doors (FORM/BULK) carry OUTSIDE `attributes`.
 # Mapped INTO the canonical attribute keys the registry validates, so a frame

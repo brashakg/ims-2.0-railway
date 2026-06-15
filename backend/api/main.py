@@ -84,6 +84,7 @@ from .routers import (
     item_events_router,
     catalog_router,
     catalog_autopilot_router,
+    catalog_import_router,
     jarvis_router,
     analytics_router,
     follow_ups_router,
@@ -302,7 +303,9 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"[WARN] Blind-stock-take index creation skipped: {e}")
             # Feature #48 repair portal: jobs (store_id,status) + unique service_id. Fail-soft.
             try:
-                from .services.repair_portal import ensure_indexes as ensure_repair_indexes
+                from .services.repair_portal import (
+                    ensure_indexes as ensure_repair_indexes,
+                )
 
                 ensure_repair_indexes(get_db().db)
             except Exception as e:
@@ -310,7 +313,9 @@ async def lifespan(app: FastAPI):
             # Feature #18 vendor rebates: agreements (vendor_id,active) + UNIQUE
             # ledger (agreement_id,period_start) double-post backstop. Fail-soft.
             try:
-                from .services.rebate_engine import ensure_indexes as ensure_rebate_indexes
+                from .services.rebate_engine import (
+                    ensure_indexes as ensure_rebate_indexes,
+                )
 
                 ensure_rebate_indexes(get_db().db)
             except Exception as e:
@@ -329,14 +334,18 @@ async def lifespan(app: FastAPI):
                 )
             # Feature #29 rostering: rosters (store_id,week_start) + unique staff_skills. Fail-soft.
             try:
-                from .services.roster_engine import ensure_indexes as ensure_roster_indexes
+                from .services.roster_engine import (
+                    ensure_indexes as ensure_roster_indexes,
+                )
 
                 ensure_roster_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Roster index creation skipped: {e}")
             # Feature #38 endless aisle: requests by (selling_store,status) + (source_store,status). Fail-soft.
             try:
-                from .services.endless_aisle import ensure_indexes as ensure_endless_aisle_indexes
+                from .services.endless_aisle import (
+                    ensure_indexes as ensure_endless_aisle_indexes,
+                )
 
                 ensure_endless_aisle_indexes(get_db().db)
             except Exception as e:
@@ -1274,12 +1283,16 @@ app.include_router(cl_po_router, prefix="/api/v1/cl-po", tags=["CLPurchaseOrders
 # behind endless_aisle.enabled (E2, default OFF -> 403 when disabled). Source-
 # ACCEPT 2-step + ghost-stock re-validation; company bears shipping (booked to
 # the selling store, NOT the customer); POS pricing/tender UNTOUCHED.
-app.include_router(endless_aisle_router, prefix="/api/v1/endless-aisle", tags=["EndlessAisle"])
+app.include_router(
+    endless_aisle_router, prefix="/api/v1/endless-aisle", tags=["EndlessAisle"]
+)
 # Feature #18 vendor volume-rebate tracker: own /api/v1/vendor-rebates prefix;
 # ACCOUNTANT/ADMIN/SUPERADMIN. Manual-post only; the earned rebate REDUCES vendor
 # AP via a credit note + records a Tally JV intent. (agreement_id,period_start)
 # unique index makes a double-post impossible. No POS touch.
-app.include_router(vendor_rebates_router, prefix="/api/v1/vendor-rebates", tags=["VendorRebates"])
+app.include_router(
+    vendor_rebates_router, prefix="/api/v1/vendor-rebates", tags=["VendorRebates"]
+)
 # Feature #48 multi-category servicing & repair portal: own /api/v1/repairs prefix;
 # per-store service catalog + INTAKE->DELIVERED job lifecycle (guarded transitions),
 # DARK status SMS on READY, store-scoped. POS-billing on DELIVERED is DEFERRED.
@@ -1356,6 +1369,11 @@ app.include_router(
     item_events_router, prefix="/api/v1/items", tags=["Item-event Ledger"]
 )
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
+app.include_router(
+    catalog_import_router,
+    prefix="/api/v1/catalog-import",
+    tags=["Catalog · Import"],
+)
 app.include_router(
     catalog_autopilot_router,
     prefix="/api/v1/catalog-autopilot",
