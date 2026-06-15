@@ -1089,6 +1089,45 @@ def _audit_bulk(
         logger.warning("[BULK-PRICING] audit log skipped: %s", exc)
 
 
+class CloneVaryRequest(BaseModel):
+    """Hub Phase 4 clone-and-vary: clone `source_id` across N attribute
+    variations into N DRAFT variants. Each variation is a dict of attribute
+    overrides, e.g. {"colour_code": "BLK", "size": "52"}."""
+
+    source_id: str
+    variations: List[dict] = Field(..., min_length=1, max_length=100)
+
+
+@router.post("/clone-vary", status_code=201)
+async def clone_vary_products(
+    body: CloneVaryRequest,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Clone a product across colour/size/... variations into catalog_status=
+    DRAFT variants (Hub Phase 4). Each variant inherits the source's catalog
+    fields + attributes, applies the per-variation overrides, mints a unique SKU,
+    and lands DRAFT for review -- never auto-published. The Phase-1 duplicate
+    guard applies, so a variation matching an existing product is returned in
+    `errors`, not created. Returns {source_id, created:[...], errors:[...]}.
+    """
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Product repository unavailable")
+    from ..dependencies import get_db as _get_db_dep, get_audit_repository
+
+    try:
+        return _pm.clone_and_vary(
+            source_id=body.source_id,
+            variations=body.variations,
+            actor=current_user.get("user_id"),
+            product_repo=repo,
+            audit_repo=get_audit_repository(),
+            db=_get_db_dep(),
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+
+
 def _apply_delta(original: float, mode: str, amount: float) -> float:
     """Compute a new price from an original given a PERCENT or FLAT delta."""
     if mode == "PERCENT":

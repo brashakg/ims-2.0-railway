@@ -498,8 +498,11 @@ def _derive_brand_model_color_size(
     }
 
 
-def compute_identity_key(brand: Any, model: Any, colour: Any = None) -> Optional[str]:
-    """The brand+model+colour identity used by the Hub Phase 1 duplicate guard.
+def compute_identity_key(
+    brand: Any, model: Any, colour: Any = None, size: Any = None
+) -> Optional[str]:
+    """The brand+model+colour(+size) identity used by the Hub Phase 1 duplicate
+    guard.
 
     Normalised so casing/spacing/PUNCTUATION variants of the same product collide:
     lowercased, and every run of [-/_. whitespace] folded to a single space (the
@@ -509,7 +512,10 @@ def compute_identity_key(brand: Any, model: Any, colour: Any = None) -> Optional
     missed. Returns None unless BOTH brand and model are present -- an identity
     needs at least those two; a category without them (e.g. SERVICES) gets no
     identity_key and is not identity-deduped. Colour is folded in (empty when
-    absent) so two colours of the same model are distinct products.
+    absent) so two colours of the same model are distinct products. SIZE is folded
+    in ONLY when present (build_sku already varies on size) so the same frame in
+    two sizes is two distinct products -- a sizeless product keeps the 3-part key
+    (backward-compatible).
     """
 
     def _norm(v: Any) -> str:
@@ -518,7 +524,11 @@ def compute_identity_key(brand: Any, model: Any, colour: Any = None) -> Optional
     b, m = _norm(brand), _norm(model)
     if not b or not m:
         return None
-    return "|".join([b, m, _norm(colour)])
+    parts = [b, m, _norm(colour)]
+    s = _norm(size)
+    if s:
+        parts.append(s)
+    return "|".join(parts)
 
 
 def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
@@ -559,6 +569,7 @@ def normalise_payload(
     tags: Any = None,
     created_by: Optional[str] = None,
     as_draft: bool = False,
+    force_draft: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     db=None,
@@ -684,7 +695,7 @@ def normalise_payload(
     # Stamped only when brand+model are both present (the minimum that makes an
     # identity meaningful); categories without a brand/model -- e.g. SERVICES --
     # carry no identity_key and are not identity-deduped.
-    _ident = compute_identity_key(ids["brand"], ids["model"], ids["color"])
+    _ident = compute_identity_key(ids["brand"], ids["model"], ids["color"], ids["size"])
     if _ident:
         doc["identity_key"] = _ident
     if dc is not None:
@@ -714,6 +725,12 @@ def normalise_payload(
     # as_draft mode it reflects the real gaps so the Buy Desk + completion UI can
     # name them.
     status, gaps = compute_catalog_status(doc)
+    # force_draft (IMPORT / CLONE doors): a COMPLETE payload would otherwise be
+    # born ACTIVE (as_draft only relaxes the strict 422). These doors must land
+    # DRAFT for review, so stamp DRAFT AT WRITE TIME -- no ACTIVE window, no
+    # fail-soft post-insert demote that could leave a variant sellable.
+    if force_draft:
+        status = CATALOG_STATUS_DRAFT
     doc["catalog_status"] = status
     doc["done_gaps"] = gaps
     return doc
@@ -912,7 +929,7 @@ def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
 # The known source labels. FORM = POST /products; BULK = /products/bulk-create;
 # CATALOG = POST /catalog/products; MASTER = the engine door (POST /products/master);
 # IMPORT = Hub Phase 3 vendor price-list import (rows land as_draft for review).
-VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT"})
+VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT", "CLONE"})
 
 # Top-level identity fields some doors (FORM/BULK) carry OUTSIDE `attributes`.
 # Mapped INTO the canonical attribute keys the registry validates, so a frame
@@ -1008,9 +1025,15 @@ def create_via_door(
     catalog_repo=None,
     variant_repo=None,
     audit_repo=None,
+    force_draft: bool = False,
     db=None,
 ) -> Dict[str, Any]:
     """THE single create path every product-entry door delegates to (step-9).
+
+    `force_draft` (IMPORT / CLONE doors) stamps the spine catalog_status=DRAFT AT
+    WRITE TIME even for a complete payload, so an imported/cloned product is born
+    DRAFT (reviewable, not sellable) -- no ACTIVE window, no fail-soft post-insert
+    demote.
 
     Validates through the registry (STRICT), enforces the existing invariants,
     writes the canonical `products` spine, and (mirror ON by default) writes the
@@ -1040,6 +1063,7 @@ def create_via_door(
         weight_grams=p.get("weight_grams"),
         tags=p.get("tags"),
         as_draft=bool(p.get("as_draft", False)),
+        force_draft=force_draft,
         extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
@@ -1054,6 +1078,114 @@ def create_via_door(
     except Exception:  # noqa: BLE001
         pass
     return created
+
+
+# Catalog fields copied when cloning a product into a variant. Identity (sku,
+# product_id, _id), stock, and ecom/sync state are NEVER cloned -- each variant
+# is a brand-new spine row with its own minted SKU.
+_CLONE_CATALOG_FIELDS = (
+    "category",
+    "mrp",
+    "offer_price",
+    "cost_price",
+    "discount_category",
+    "hsn_code",
+    "gst_rate",
+    "country_of_origin",
+    "warranty_months",
+    "weight_grams",
+)
+
+
+def clone_and_vary(
+    *,
+    source_id: str,
+    variations: List[Dict[str, Any]],
+    actor: str,
+    product_repo=None,
+    catalog_repo=None,
+    variant_repo=None,
+    audit_repo=None,
+    db=None,
+) -> Dict[str, Any]:
+    """Hub Phase 4: clone one product across N attribute variations (e.g. the
+    same frame in 20 colours, or a lens in 3 indices) into N new catalog_status=
+    DRAFT products for review. Each variant inherits the source's catalog fields
+    + attributes, overlays the per-variation attribute overrides (colour_code /
+    size / power / ...), mints its OWN unique SKU, and lands DRAFT (as_draft) via
+    the canonical create door -- so the Phase-1 duplicate guard + the done-rule
+    apply to every variant. A variation that collides with an existing product
+    (409) is collected as an error, never aborts the batch.
+
+    Returns {source_id, created: [{product_id, sku, attributes}], errors:
+    [{index, error, ...}]}. Raises ProductMasterError(404) if the source is gone.
+    """
+    if product_repo is None:
+        raise ProductMasterError("No product repository.", status=500)
+    src = get_product(source_id, product_repo=product_repo)
+    if src is None:
+        raise ProductMasterError("Source product not found.", status=404)
+
+    base_attrs = _overlay_attributes(src)  # canonical attrs incl. legacy overlay
+    base_payload: Dict[str, Any] = {}
+    for f in _CLONE_CATALOG_FIELDS:
+        if src.get(f) is not None:
+            base_payload[f] = src.get(f)
+
+    created: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for idx, variation in enumerate(variations or []):
+        if not isinstance(variation, dict):
+            errors.append({"index": idx, "error": "variation must be an object"})
+            continue
+        # overlay the variation's attribute overrides onto the cloned base attrs
+        merged_attrs = dict(base_attrs)
+        for k, v in variation.items():
+            if v is not None and not (isinstance(v, str) and not v.strip()):
+                merged_attrs[k] = v
+        payload = dict(base_payload)
+        payload["attributes"] = merged_attrs
+        payload["sku"] = None  # auto-mint a unique SKU per variant
+        # force_draft below stamps DRAFT at write time -- a complete variant is
+        # born DRAFT (reviewable, not sellable), no ACTIVE window.
+        payload["as_draft"] = True
+        try:
+            doc = create_via_door(
+                payload,
+                source="CLONE",
+                actor=actor,
+                product_repo=product_repo,
+                catalog_repo=catalog_repo,
+                variant_repo=variant_repo,
+                audit_repo=audit_repo,
+                force_draft=True,
+                db=db,
+            )
+        except ProductMasterError as err:
+            errors.append(
+                {
+                    "index": idx,
+                    "error": err.message,
+                    "code": getattr(err, "code", None),
+                    "existing": getattr(err, "conflict", None),
+                }
+            )
+            continue
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - one infra blip must not abort the batch
+            logger.warning("[CLONE] variant %d failed unexpectedly: %s", idx, exc)
+            errors.append({"index": idx, "error": "unexpected error creating variant"})
+            continue
+        created.append(
+            {
+                "product_id": (doc or {}).get("product_id"),
+                "sku": (doc or {}).get("sku"),
+                "catalog_status": (doc or {}).get("catalog_status"),
+                "attributes": merged_attrs,
+            }
+        )
+    return {"source_id": source_id, "created": created, "errors": errors}
 
 
 def create_product(
@@ -1073,6 +1205,7 @@ def create_product(
     weight_grams: Optional[float] = None,
     tags: Any = None,
     as_draft: bool = False,
+    force_draft: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -1112,6 +1245,7 @@ def create_product(
         tags=tags,
         created_by=actor,
         as_draft=as_draft,
+        force_draft=force_draft,
         extra_fields=extra_fields,
         product_repo=product_repo,
         db=db,
