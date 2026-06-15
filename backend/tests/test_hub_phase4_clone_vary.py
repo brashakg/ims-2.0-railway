@@ -147,6 +147,32 @@ def test_clone_duplicate_variation_collected_not_created():
     assert out["errors"][0]["index"] == 0
 
 
+def test_clone_by_size_makes_distinct_variants():
+    # size is folded into identity_key -> the SAME frame in N sizes is N distinct
+    # products (no false DUPLICATE_PRODUCT). Was the lens-flagged drop bug.
+    repo = _FakeRepo(existing=[_source_frame()])
+    out = pm.clone_and_vary(
+        source_id="SRC-1",
+        variations=[{"size": "52"}, {"size": "54"}, {"size": "56"}],
+        actor="u",
+        product_repo=repo,
+        db=None,
+    )
+    assert len(out["created"]) == 3 and not out["errors"]
+    # all DRAFT (born-DRAFT), distinct SKUs
+    assert {c["catalog_status"] for c in out["created"]} == {"DRAFT"}
+    assert len({c["sku"] for c in out["created"]}) == 3
+
+
+def test_identity_key_folds_size_when_present():
+    # backward-compatible: sizeless keeps the 3-part key; sized appends size
+    assert pm.compute_identity_key("RB", "2140", "BLK") == "rb|2140|blk"
+    assert pm.compute_identity_key("RB", "2140", "BLK", "52") == "rb|2140|blk|52"
+    assert pm.compute_identity_key(
+        "RB", "2140", "BLK", "52"
+    ) != pm.compute_identity_key("RB", "2140", "BLK", "54")
+
+
 def test_clone_empty_variation_overrides_nothing():
     # an empty/None override just clones the source colour -> identity dup -> error
     repo = _FakeRepo(existing=[_source_frame()])

@@ -277,8 +277,10 @@ def test_commit_create_forces_draft_and_teaches_alias(monkeypatch):
     def _fake_create(payload, **kw):
         assert payload.get("as_draft") is True  # imports ALWAYS land DRAFT
         assert kw.get("source") == "IMPORT"
-        # simulate a COMPLETE payload that the spine stamped ACTIVE
-        return {"product_id": "NEW-1", "catalog_status": "ACTIVE"}
+        # DRAFT FLOOR is now BORN-DRAFT: the route must pass force_draft=True so
+        # the spine stamps DRAFT at write time (no ACTIVE window / fail-soft demote)
+        assert kw.get("force_draft") is True
+        return {"product_id": "NEW-1", "catalog_status": "DRAFT"}
 
     monkeypatch.setattr(cir._pm, "create_via_door", _fake_create)
     body = cir.ImportCommitRequest(
@@ -294,8 +296,6 @@ def test_commit_create_forces_draft_and_teaches_alias(monkeypatch):
     out = _run(cir.commit_import(body, _CM))
     assert out["created"] == 1
     assert out["created_products"][0]["product_id"] == "NEW-1"
-    # DRAFT FLOOR: the route force-re-stamped the ACTIVE spine doc back to DRAFT
-    assert ("NEW-1", {"catalog_status": "DRAFT"}) in repo.updates
     # the flywheel learned ZZZ-1 -> NEW-1
     upserts = db.cols["vendor_sku_aliases"].upserts
     assert any(

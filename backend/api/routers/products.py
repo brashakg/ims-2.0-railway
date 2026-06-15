@@ -1113,7 +1113,7 @@ async def clone_vary_products(
     repo = get_product_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Product repository unavailable")
-    from ..dependencies import get_db as _get_db_dep
+    from ..dependencies import get_db as _get_db_dep, get_audit_repository
 
     try:
         return _pm.clone_and_vary(
@@ -1121,6 +1121,7 @@ async def clone_vary_products(
             variations=body.variations,
             actor=current_user.get("user_id"),
             product_repo=repo,
+            audit_repo=get_audit_repository(),
             db=_get_db_dep(),
         )
     except _pm.ProductMasterError as err:

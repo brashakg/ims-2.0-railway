@@ -251,11 +251,20 @@ async def commit_import(
                 errors.append({"index": idx, "error": "alias write failed"})
             continue
         # CREATE -> a new DRAFT product via the spine door, then teach the alias.
+        # DRAFT FLOOR: force_draft stamps catalog_status=DRAFT AT WRITE TIME (a
+        # COMPLETE imported payload would otherwise be born ACTIVE -- as_draft only
+        # relaxes the 422). No ACTIVE window, no fail-soft post-insert demote -- an
+        # imported product is never auto-published; a person opens + activates it.
         payload = dict(row.payload or {})
-        payload["as_draft"] = True  # imports ALWAYS land DRAFT (never direct-commit)
+        payload["as_draft"] = True
         try:
             doc = _pm.create_via_door(
-                payload, source="IMPORT", actor=actor, product_repo=repo, db=db
+                payload,
+                source="IMPORT",
+                actor=actor,
+                product_repo=repo,
+                force_draft=True,
+                db=db,
             )
         except _pm.ProductMasterError as err:
             errors.append({"index": idx, "error": err.message, "field": err.field})
@@ -264,24 +273,6 @@ async def commit_import(
             errors.append({"index": idx, "error": str(exc)})
             continue
         new_pid = (doc or {}).get("product_id")
-        # Hub Phase 3 DRAFT FLOOR: as_draft only relaxes the strict 422 -- a
-        # COMPLETE imported payload would otherwise stamp catalog_status=ACTIVE and
-        # be immediately sellable, never reviewed. Force DRAFT for every IMPORT so
-        # a person must open + activate it (an edit re-stamps it ACTIVE). Honours
-        # the router contract: imports never auto-publish.
-        if (
-            new_pid
-            and repo is not None
-            and (doc or {}).get("catalog_status") != _pm.CATALOG_STATUS_DRAFT
-        ):
-            try:
-                repo.update(new_pid, {"catalog_status": _pm.CATALOG_STATUS_DRAFT})
-                if isinstance(doc, dict):
-                    doc["catalog_status"] = _pm.CATALOG_STATUS_DRAFT
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[IMPORT] DRAFT re-stamp failed for %s: %s", new_pid, exc
-                )
         created.append({"index": str(idx), "product_id": new_pid or ""})
         if new_pid and row.vendor_sku:
             _write_alias(db, body.vendor_id, row.vendor_sku, new_pid)
