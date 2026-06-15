@@ -317,6 +317,10 @@ def grn_env(monkeypatch):
     monkeypatch.setattr(vd, "get_grn_repository", lambda: grn_repo)
     monkeypatch.setattr(vd, "get_stock_repository", lambda: stock_repo)
     monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: None)
+    # Hub Phase 2 added a ghost-stock gate keyed on get_product_repository(); with
+    # no product repo the gate is OFF and minting is exactly the pre-Phase-2
+    # behaviour this test asserts. Patch to None so it stays deterministic.
+    monkeypatch.setattr(vd, "get_product_repository", lambda: None)
     monkeypatch.setattr(vd, "_get_db", lambda: db)
     # _cumulative_received_by_product reads the grn repo; keep it simple.
     monkeypatch.setattr(vd, "_cumulative_received_by_product",

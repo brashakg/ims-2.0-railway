@@ -551,6 +551,28 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "always written regardless.",
         env="PM_MIRROR_ENABLED",
     ),
+    # Hub Phase 2 PO catalog gates. DARK by default so a fresh deploy keeps the
+    # current manual Create-PO flow (free-text product rows) working byte-for-
+    # byte. When ON, create_po refuses a PO line whose product_id is not on the
+    # `products` spine (422 UNKNOWN_PRODUCT) and send_po refuses to SEND until
+    # every line is catalog-complete except cost (400 PO_LINES_INCOMPLETE). Flip
+    # this ON once the Buy Desk spine-product picker ships, so POs reference real
+    # catalogued products. The GRN ghost-stock gate is ALWAYS on (independent of
+    # this flag) -- an uncatalogued received line is held, never minted as ghost.
+    _spec(
+        key="pm.po_catalog_gate",
+        type="bool",
+        default=False,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Product Master",
+        label="PO catalog gate (require catalogued products on POs)",
+        help="When on, a purchase order can only be raised/sent against products "
+        "already on the catalog spine (needs the Buy Desk product picker). Off by "
+        "default so the existing free-text Create-PO form keeps working; receiving "
+        "still holds uncatalogued lines for Catalog-now regardless.",
+        env="PM_PO_CATALOG_GATE",
+    ),
     # --- NBA (next best action) ---
     _spec(
         key="nba.cards_per_day",
