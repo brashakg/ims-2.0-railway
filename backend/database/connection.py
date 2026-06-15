@@ -182,9 +182,7 @@ class DatabaseConnection:
             try:
                 self._db[coll_name].create_index(keys, **kw)
             except Exception as e:  # noqa: BLE001
-                label = kw.get("name") or (
-                    keys if isinstance(keys, str) else str(keys)
-                )
+                label = kw.get("name") or (keys if isinstance(keys, str) else str(keys))
                 failures.append("%s/%s: %s" % (coll_name, label, str(e)[:160]))
 
         # Orders -- most queried collection.
@@ -198,7 +196,11 @@ class DatabaseConnection:
         # month_start}, status: {$nin:[...]}, store_id}. The existing
         # {store_id, created_at:-1} is DESC and store-first; this ASC
         # created_at-leading compound serves the open-ended >= month bound.
-        _idx("orders", [("created_at", 1), ("status", 1), ("store_id", 1)], background=True)
+        _idx(
+            "orders",
+            [("created_at", 1), ("status", 1), ("store_id", 1)],
+            background=True,
+        )
         _idx("orders", [("salesperson_id", 1), ("created_at", -1)], background=True)
         _idx("orders", "order_number", unique=True, sparse=True, background=True)
         _idx("orders", [("store_id", 1), ("balance_due", 1)], background=True)
@@ -231,6 +233,12 @@ class DatabaseConnection:
         _idx("products", "product_id", unique=True, background=True)
         _idx("products", "sku", unique=True, sparse=True, background=True)
         _idx("products", "barcode", unique=True, sparse=True, background=True)
+        # Hub Phase 1: brand+model+colour identity. REPORT-ONLY (non-unique) for
+        # now -- it backs the duplicate-guard pre-check + lets us count residual
+        # identity dups before the unique flip (deferred to Phase 6, after the
+        # data-hygiene backfill re-SKUs the known dup rows). sparse: legacy rows
+        # without an identity_key (e.g. SERVICES) are exempt.
+        _idx("products", "identity_key", sparse=True, background=True)
         _idx("products", "is_active", background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
         # Prefix-search indexes for the searchable fields (brand, model, sku, variant).

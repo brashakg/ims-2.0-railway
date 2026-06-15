@@ -76,12 +76,18 @@ class BaseRepository(ABC, Generic[T]):
     # CRUD Operations
     # =========================================================================
 
-    def create(self, data: Dict) -> Optional[Dict]:
+    def create(self, data: Dict, *, raise_on_duplicate: bool = False) -> Optional[Dict]:
         """
         Create new document
 
         Args:
             data: Document data
+            raise_on_duplicate: when True, a unique-index DuplicateKeyError is
+                RE-RAISED instead of swallowed, so a caller can map a race-lost
+                insert to a clean 409 (instead of a silent None -> 500). Default
+                False preserves the historical fail-soft behaviour for every other
+                caller. Matched by class name so no hard pymongo import is needed
+                (and MockCollection, which never raises it, is unaffected).
 
         Returns:
             Created document with ID
@@ -100,6 +106,8 @@ class BaseRepository(ABC, Generic[T]):
             result = self.collection.insert_one(data)
             return data
         except Exception as e:
+            if raise_on_duplicate and e.__class__.__name__ == "DuplicateKeyError":
+                raise
             print(f"Error creating {self.entity_name}: {e}")
             return None
 

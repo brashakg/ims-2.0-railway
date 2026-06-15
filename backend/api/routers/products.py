@@ -107,6 +107,21 @@ _VALID_CATEGORY_KEYS = frozenset(GST_CATEGORY_TABLE.keys())
 _VALID_CATEGORY_DISPLAY = tuple(_pm_canonical_categories())
 
 
+def _pm_error_detail(err):
+    """Map a ProductMasterError to the HTTPException `detail`. A duplicate 409
+    carries a `conflict` payload, which we surface as a structured body so the FE
+    can link to the existing row ('add stock / a variant'); everything else keeps
+    the plain string message it always returned (behaviour-preserving)."""
+    conflict = getattr(err, "conflict", None)
+    if conflict:
+        return {
+            "message": err.message,
+            "code": getattr(err, "code", None) or "DUPLICATE_PRODUCT",
+            "existing": conflict,
+        }
+    return err.message
+
+
 def _validate_category_or_422(category) -> str:
     """Reject a blank / null / missing / unrecognized product category.
 
@@ -349,7 +364,9 @@ def _create_via_canonical_door(
             db=db,
         )
     except _pm.ProductMasterError as err:
-        raise HTTPException(status_code=err.status, detail=err.message) from err
+        raise HTTPException(
+            status_code=err.status, detail=_pm_error_detail(err)
+        ) from err
 
 
 def _build_product_data(product: "ProductCreate", created_by) -> dict:
@@ -740,7 +757,9 @@ async def create_product(
             _canonical_door_payload(product, as_draft=as_draft), source="FORM"
         )
     except _pm.ProductMasterError as err:
-        raise HTTPException(status_code=err.status, detail=err.message) from err
+        raise HTTPException(
+            status_code=err.status, detail=_pm_error_detail(err)
+        ) from err
 
     repo = get_product_repository()
 
