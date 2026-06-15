@@ -501,16 +501,19 @@ def _derive_brand_model_color_size(
 def compute_identity_key(brand: Any, model: Any, colour: Any = None) -> Optional[str]:
     """The brand+model+colour identity used by the Hub Phase 1 duplicate guard.
 
-    Normalised (lower/trim/collapsed-whitespace) so casing/spacing variants of
-    the same product collide. Returns None unless BOTH brand and model are
-    present -- an identity needs at least those two; a category without them
-    (e.g. SERVICES) gets no identity_key and is not identity-deduped. Colour is
-    folded in (empty when absent) so two colours of the same model are distinct
-    products, not duplicates.
+    Normalised so casing/spacing/PUNCTUATION variants of the same product collide:
+    lowercased, and every run of [-/_. whitespace] folded to a single space (the
+    same separators the SKU builder strips). Without this, "RB-2140" and "RB 2140"
+    would be distinct identities yet mint the SAME SKU base -- the SKU
+    collision-suffix would then create a real duplicate that the identity arm
+    missed. Returns None unless BOTH brand and model are present -- an identity
+    needs at least those two; a category without them (e.g. SERVICES) gets no
+    identity_key and is not identity-deduped. Colour is folded in (empty when
+    absent) so two colours of the same model are distinct products.
     """
 
     def _norm(v: Any) -> str:
-        return re.sub(r"\s+", " ", str(v or "").strip().lower())
+        return re.sub(r"[-/_.\s]+", " ", str(v or "").strip().lower()).strip()
 
     b, m = _norm(brand), _norm(model)
     if not b or not m:
@@ -888,12 +891,18 @@ def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
 
 
 # ===========================================================================
-# Unification step-9: ONE canonical product-create door every entry path uses
+# Unification step-9: ONE canonical product-create door the spine entry paths use
 # ===========================================================================
-# Every product-entry door (the FORM POST /products, the BULK /products/bulk-
-# create, and the CATALOG POST /catalog/products) calls create_via_door() so the
-# registry is the rulebook at EVERY door (owner ask #1). The door keeps its own
-# auth/RBAC + response shape; only the validate+create CORE unifies here.
+# The SPINE-WRITING doors -- FORM (POST /products), BULK (/products/bulk-create),
+# and MASTER (POST /products/master) -- call create_via_door() so the registry is
+# the rulebook AND the Phase-1 duplicate hard-block applies at every spine write.
+# The CATALOG door (POST /catalog/products) currently runs the SAME validate-and-
+# build core (build_canonical_product) for parity, but persists to the SEPARATE
+# catalog_products collection with its own minted SKU -- it does NOT yet write the
+# `products` spine or run the spine dup-block. Routing it through create_via_door
+# is the owner-gated step-10 spine-unification (tracked; not in Phase 1). Each
+# door keeps its own auth/RBAC + response shape; only the validate+build CORE
+# unifies here.
 #
 # STRICT (owner decision #7): an incomplete product is REJECTED at entry. The
 # core validates through the registry (resolve_category -> validate_attributes ->

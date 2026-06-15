@@ -96,7 +96,18 @@ class ProductMasterUpdate(BaseModel):
 
 
 def _raise(err: "pm.ProductMasterError"):
-    raise HTTPException(status_code=err.status, detail=err.message)
+    # A duplicate 409 carries the existing row in `conflict`; surface it as a
+    # structured detail (mirrors products._pm_error_detail) so the FE can render
+    # the "add stock / a variant" link. Plain string for every other error.
+    conflict = getattr(err, "conflict", None)
+    detail = err.message
+    if conflict:
+        detail = {
+            "message": err.message,
+            "code": getattr(err, "code", None) or "DUPLICATE_PRODUCT",
+            "existing": conflict,
+        }
+    raise HTTPException(status_code=err.status, detail=detail)
 
 
 # ---------------------------------------------------------------------------

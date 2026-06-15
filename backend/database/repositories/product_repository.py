@@ -31,6 +31,14 @@ class ProductRepository(BaseRepository):
             return None
         return self.find_one({"identity_key": identity_key})
 
+    def find_by_barcode(self, barcode: str) -> Optional[Dict]:
+        """Find a product by scan-to-sell barcode (Hub Phase 1 duplicate guard).
+        Makes the create-path barcode arm functional whenever a barcode rides
+        along (e.g. a bulk/import row); returns None for a blank value."""
+        if not barcode:
+            return None
+        return self.find_one({"barcode": barcode})
+
     def find_by_category(self, category: str, active_only: bool = True) -> List[Dict]:
         filter = {"category": category}
         if active_only:

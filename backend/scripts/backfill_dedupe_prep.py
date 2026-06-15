@@ -75,19 +75,48 @@ def _pid(doc: Dict[str, Any]) -> str:
     return str(doc.get("product_id") or doc.get("_id") or "")
 
 
-def run_dedupe(products, *, apply: bool) -> Dict[str, int]:
-    """Pure-ish core (takes the products collection). Returns counts. Reads every
-    product once, computes the four fixes, and (when apply) writes them with
-    per-row update_one calls keyed on product_id/_id."""
-    rows = list(products.find({}))
-    stats = {
+def _sort_key(doc: Dict[str, Any]):
+    """Deterministic order so the SAME row keeps the bare SKU on every run/env:
+    oldest created_at first, then product_id. Unordered find({}) is storage-order
+    dependent, which would make 'which dup keeps the legacy SKU' non-deterministic."""
+    return (
+        str(doc.get("created_at") or ""),
+        str(doc.get("product_id") or doc.get("_id") or ""),
+    )
+
+
+def run_dedupe(
+    products, *, apply: bool, catalog_products=None, catalog_variants=None
+) -> Dict[str, Any]:
+    """Pure-ish core (takes the products collection). Returns counts + the
+    old->new SKU rename map. Reads every product once (DETERMINISTICALLY ordered),
+    computes the four fixes, and (when apply) writes them per-row keyed on
+    product_id/_id. A re-SKU also renames the matching catalog_products /
+    catalog_variants mirror rows (when those collections are supplied) so the
+    SKU-string join is not orphaned; the suffix is collision-checked against all
+    existing + freshly-minted SKUs."""
+    rows = sorted(list(products.find({})), key=_sort_key)
+    stats: Dict[str, Any] = {
         "scanned": len(rows),
         "identity_backfilled": 0,
         "barcode_unset": 0,
         "resku": 0,
         "pid_assigned": 0,
+        "resku_map": {},
     }
+    # All SKUs that already exist -- the re-SKU suffix must avoid every one of them
+    # (plus any it mints this run) so it never re-creates the exact dup we are clearing.
+    all_skus = {doc.get("sku") for doc in rows if doc.get("sku")}
     seen_skus: Dict[str, int] = {}
+
+    def _mint_unique(base: str) -> str:
+        n = 2
+        candidate = f"{base}-DUP{n}"
+        while candidate in all_skus:
+            n += 1
+            candidate = f"{base}-DUP{n}"
+        all_skus.add(candidate)
+        return candidate
 
     for doc in rows:
         match = (
@@ -120,14 +149,26 @@ def run_dedupe(products, *, apply: bool) -> Dict[str, int]:
             if apply:
                 unset_fields["barcode"] = ""
 
-        # (3) duplicate SKU -> re-SKU the SECOND+ occurrence (suffix).
+        # (3) duplicate SKU -> re-SKU the SECOND+ occurrence (collision-checked
+        # suffix), and rename the mirror rows so the SKU join is not orphaned.
         sku = doc.get("sku")
         if sku:
             seen_skus[sku] = seen_skus.get(sku, 0) + 1
             if seen_skus[sku] > 1:
+                new_sku = _mint_unique(sku)
                 stats["resku"] += 1
+                stats["resku_map"][f"{sku}#{seen_skus[sku]}"] = new_sku
                 if apply:
-                    set_fields["sku"] = f"{sku}-DUP{seen_skus[sku]}"
+                    set_fields["sku"] = new_sku
+                    for mirror in (catalog_products, catalog_variants):
+                        if mirror is not None:
+                            try:
+                                mirror.update_one(
+                                    {"sku": sku, "product_id": doc.get("product_id")},
+                                    {"$set": {"sku": new_sku}},
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
 
         if apply and (set_fields or unset_fields):
             update: Dict[str, Any] = {}
@@ -169,7 +210,12 @@ def run(apply: bool) -> int:
     print("=" * 70)
     print(f"Hub Phase 1 dedupe-prep  [{mode}]")
     print("=" * 70)
-    stats = run_dedupe(products, apply=apply)
+    stats = run_dedupe(
+        products,
+        apply=apply,
+        catalog_products=db.get_collection("catalog_products"),
+        catalog_variants=db.get_collection("catalog_variants"),
+    )
     for k in (
         "scanned",
         "identity_backfilled",
@@ -178,6 +224,10 @@ def run(apply: bool) -> int:
         "pid_assigned",
     ):
         print(f"  {k}: {stats[k]}")
+    if stats.get("resku_map"):
+        print("  re-SKU rename map (occurrence -> new sku):")
+        for old, new in stats["resku_map"].items():
+            print(f"    {old} -> {new}")
     if not apply:
         print("\n[DRY-RUN] No changes written. Re-run with --apply to commit.")
         return 0

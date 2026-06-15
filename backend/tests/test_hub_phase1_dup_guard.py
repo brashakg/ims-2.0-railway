@@ -103,10 +103,18 @@ def _create(repo, *, sku="FR-1", attrs=None, extra_fields=None):
 # ===========================================================================
 
 
-def test_identity_key_normalises_case_and_space():
-    a = pm.compute_identity_key("Ray-Ban", "RB 2140", "BLK")
+def test_identity_key_normalises_case_space_and_punctuation():
+    # case + whitespace + PUNCTUATION (- / _ .) all fold, matching the SKU builder,
+    # so "RB-2140" and "RB 2140" are the SAME identity (they mint the same SKU).
+    a = pm.compute_identity_key("Ray Ban", "RB-2140", "BLK")
     b = pm.compute_identity_key("  ray-ban ", "rb  2140", "blk")
-    assert a == b == "ray-ban|rb 2140|blk"
+    assert a == b == "ray ban|rb 2140|blk"
+
+
+def test_identity_key_punctuation_variants_collide():
+    assert pm.compute_identity_key("RB", "RB-2140", "BLK") == pm.compute_identity_key(
+        "RB", "RB 2140", "BLK"
+    )
 
 
 def test_identity_key_none_without_brand_or_model():
@@ -129,7 +137,7 @@ def test_normalise_payload_stamps_identity_key():
         sku="FR-ID-1",
         cost_price=2000.0,
     )
-    assert doc["identity_key"] == "ray-ban|rb-2140|blk"
+    assert doc["identity_key"] == "ray ban|rb 2140|blk"
 
 
 def test_normalise_payload_no_identity_for_services():
@@ -205,7 +213,7 @@ def test_race_lost_insert_surfaces_409():
     winner = {
         "product_id": "P-WINNER",
         "sku": "FR-RACE",
-        "identity_key": "ray-ban|rb-2140|blk",
+        "identity_key": "ray ban|rb 2140|blk",
     }
     repo = _FakeRepo(race_winner=winner)
     with pytest.raises(pm.ProductMasterError) as ei:
@@ -219,7 +227,7 @@ def test_create_succeeds_when_no_duplicate():
     repo = _FakeRepo()
     created = _create(repo, sku="FR-OK")
     assert created["sku"] == "FR-OK"
-    assert created["identity_key"] == "ray-ban|rb-2140|blk"
+    assert created["identity_key"] == "ray ban|rb 2140|blk"
     assert created["catalog_status"] == pm.CATALOG_STATUS_ACTIVE
 
 
@@ -258,7 +266,7 @@ def test_dedupe_backfills_identity_key():
     )
     stats = dd.run_dedupe(coll, apply=True)
     assert stats["identity_backfilled"] == 1
-    assert coll.docs[0]["identity_key"] == "ray-ban|rb-1|blk"
+    assert coll.docs[0]["identity_key"] == "ray ban|rb 1|blk"
     # idempotent
     assert dd.run_dedupe(coll, apply=True)["identity_backfilled"] == 0
 
