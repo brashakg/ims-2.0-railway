@@ -69,6 +69,7 @@ PROVIDER_TIMEOUT = float(os.getenv("NEXUS_PROVIDER_TIMEOUT", "30.0"))
 # Push modes returned in every PushResult.mode.
 MODE_SIMULATED = "SIMULATED"
 MODE_LIVE = "LIVE"
+MODE_BLOCKED = "BLOCKED"  # Hub Phase 5: push refused -- brand/collection push-locked
 
 
 @dataclass
@@ -158,6 +159,51 @@ def _live_or_reason(db) -> Tuple[bool, Optional[str]]:
     if not _has_shopify_creds(db):
         return False, "shopify creds not configured (shop_url/access_token)"
     return True, None
+
+
+def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
+    """Hub Phase 5 (owner DECISION C): return a reason if this entity is push-
+    LOCKED, else None. A locked brand (product) or collection handle in the
+    `ecom.shopify_push_locks` E2 config may NEVER be pushed -- this is checked as
+    the FIRST statement inside every push fn, BEFORE the dark/live gate, so a lock
+    is absolute (fail-closed). Matching is case-insensitive. Fail-SOFT on a config-
+    read error -> None (a read blip must not block every push; the normal gate
+    still applies)."""
+    try:
+        from .policy_engine import get_policy
+
+        locks = get_policy("ecom.shopify_push_locks", default={}) or {}
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(locks, dict):
+        return None
+
+    def _norm(v: Any) -> str:
+        return str(v or "").strip().lower()
+
+    if entity == "product":
+        attrs = doc.get("attributes") or {}
+        brand = _norm(doc.get("brand") or doc.get("vendor") or attrs.get("brand_name"))
+        if brand and brand in {_norm(b) for b in (locks.get("brands") or [])}:
+            return "brand '%s' is push-locked" % brand
+    elif entity == "collection":
+        handle = _norm(doc.get("handle") or doc.get("title"))
+        if handle and handle in {_norm(c) for c in (locks.get("collections") or [])}:
+            return "collection '%s' is push-locked" % handle
+    return None
+
+
+def _blocked_result(entity: str, target_id: Optional[str], reason: str) -> "PushResult":
+    """A fail-closed push refusal (brand/collection push-locked)."""
+    return PushResult(
+        mode=MODE_BLOCKED,
+        entity=entity,
+        action="skip",
+        target_id=target_id,
+        ok=False,
+        error="push-locked: " + reason,
+        reason=reason,
+    )
 
 
 # ===========================================================================
@@ -545,8 +591,13 @@ async def push_product(
     and NO network call. LIVE only when all three gates pass: then productCreate
     (no stored gid) or productUpdate (gid present), with the new gid written back
     for idempotency. Never raises."""
-    variants = variants or []
     pid = product.get("id") or product.get("product_id")
+    # Hub Phase 5: push-lock is the FIRST gate -- a locked brand is NEVER pushed,
+    # before the dark/live gate (fail-closed).
+    _lock = push_lock_reason(db, "product", product)
+    if _lock:
+        return _blocked_result("product", pid, _lock)
+    variants = variants or []
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)
@@ -610,6 +661,10 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     + smart ruleSet when SMART). DARK by default; LIVE behind the gates with gid
     write-back. Never raises."""
     cid = collection.get("collection_id")
+    # Hub Phase 5: push-lock first -- a locked collection handle is NEVER pushed.
+    _lock = push_lock_reason(db, "collection", collection)
+    if _lock:
+        return _blocked_result("collection", cid, _lock)
     existing_gid = collection.get("shopify_collection_id")
     payload = build_collection_input(collection)
     action = "update" if existing_gid else "create"

@@ -573,6 +573,25 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "still holds uncatalogued lines for Catalog-now regardless.",
         env="PM_PO_CATALOG_GATE",
     ),
+    # Hub Phase 5: Shopify push-locks (owner DECISION C). A JSON allow-block list
+    # of brands / collection handles that may NEVER be pushed to the storefront --
+    # enforced fail-CLOSED as the FIRST statement inside every push fn, BEFORE the
+    # dark/live gate. Default {} = nothing locked (no behaviour change). Shape:
+    # {"brands": ["cartier", ...], "collections": ["clearance", ...]} (matched
+    # case-insensitively). SUPERADMIN/ADMIN edit only.
+    _spec(
+        key="ecom.shopify_push_locks",
+        type="json",
+        default={},
+        scopes=("global", "entity"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="E-commerce",
+        label="Shopify push-locks (brands/collections never pushed)",
+        help="Brands and collection handles listed here can NEVER be pushed to "
+        "Shopify -- blocked inside the push function before any other gate "
+        "(fail-closed). Default empty. Locking a brand does NOT auto-unpublish "
+        "already-live items; it surfaces them for one-click manual unpublish.",
+    ),
     # --- NBA (next best action) ---
     _spec(
         key="nba.cards_per_day",
