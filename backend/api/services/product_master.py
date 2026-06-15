@@ -80,6 +80,11 @@ class ProductMasterError(Exception):
         self.message = message
         self.status = status
         self.field = field
+        # Optional machine code + conflict payload (Hub Phase 1 duplicate guard):
+        # a 409 carries `conflict = {product_id, sku, identity_key}` of the
+        # existing row so the caller/FE can link to it ("add stock / a variant").
+        self.code: Optional[str] = None
+        self.conflict: Optional[Dict[str, Any]] = None
 
 
 # ===========================================================================
@@ -493,6 +498,47 @@ def _derive_brand_model_color_size(
     }
 
 
+def compute_identity_key(brand: Any, model: Any, colour: Any = None) -> Optional[str]:
+    """The brand+model+colour identity used by the Hub Phase 1 duplicate guard.
+
+    Normalised (lower/trim/collapsed-whitespace) so casing/spacing variants of
+    the same product collide. Returns None unless BOTH brand and model are
+    present -- an identity needs at least those two; a category without them
+    (e.g. SERVICES) gets no identity_key and is not identity-deduped. Colour is
+    folded in (empty when absent) so two colours of the same model are distinct
+    products, not duplicates.
+    """
+
+    def _norm(v: Any) -> str:
+        return re.sub(r"\s+", " ", str(v or "").strip().lower())
+
+    b, m = _norm(brand), _norm(model)
+    if not b or not m:
+        return None
+    return "|".join([b, m, _norm(colour)])
+
+
+def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
+    """Build the 409 duplicate-product error carrying the EXISTING row so the
+    caller/FE can link to it ('add stock or a variant instead'). Hub Phase 1."""
+    existing = existing or {}
+    err = ProductMasterError(
+        "A product with this identity already exists "
+        f"(SKU {existing.get('sku')}). Add stock or a variant instead of a "
+        "duplicate.",
+        status=409,
+        field="sku",
+    )
+    err.code = "DUPLICATE_PRODUCT"
+    err.conflict = {
+        "product_id": existing.get("product_id"),
+        "sku": existing.get("sku"),
+        "identity_key": existing.get("identity_key"),
+        "barcode": existing.get("barcode"),
+    }
+    return err
+
+
 def normalise_payload(
     *,
     category: Any,
@@ -631,6 +677,13 @@ def normalise_payload(
         doc["color"] = ids["color"]
     if ids["size"] is not None:
         doc["size"] = ids["size"]
+    # Hub Phase 1: the brand+model+colour identity key for the duplicate guard.
+    # Stamped only when brand+model are both present (the minimum that makes an
+    # identity meaningful); categories without a brand/model -- e.g. SERVICES --
+    # carry no identity_key and are not identity-deduped.
+    _ident = compute_identity_key(ids["brand"], ids["model"], ids["color"])
+    if _ident:
+        doc["identity_key"] = _ident
     if dc is not None:
         doc["discount_category"] = dc
     # cost_price (Phase 0): persisted whenever supplied -- the done-rule reads it.
@@ -1064,17 +1117,46 @@ def create_product(
         )
         return spine
 
-    # SKU uniqueness guard on the spine (the canonical index enforces it too).
+    # --- Hub Phase 1: duplicate HARD-BLOCK (409 + show-existing) ---
+    # Refuse a product that already exists by SKU, by brand+model+colour identity,
+    # or by barcode (when one rides along). The DB unique indexes are the
+    # race-safe backstop (handled at the create below). Pre-check first so the
+    # common case returns the existing row for the FE to link to.
     existing = product_repo.find_by_sku(spine["sku"])
+    if (
+        existing is None
+        and spine.get("identity_key")
+        and hasattr(product_repo, "find_by_identity_key")
+    ):
+        existing = product_repo.find_by_identity_key(spine["identity_key"])
+    if (
+        existing is None
+        and spine.get("barcode")
+        and hasattr(product_repo, "find_by_barcode")
+    ):
+        try:
+            existing = product_repo.find_by_barcode(spine["barcode"])
+        except Exception:  # noqa: BLE001
+            existing = None
     if existing is not None:
-        raise ProductMasterError(
-            f"Product with SKU '{spine['sku']}' already exists.",
-            status=400,
-            field="sku",
-        )
+        raise _duplicate_error(existing)
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
-    created = product_repo.create(spine)
+    # raise_on_duplicate=True so a race lost to the unique index surfaces as a
+    # clean 409 (re-querying the winner) instead of a swallowed None -> 500.
+    try:
+        created = product_repo.create(spine, raise_on_duplicate=True)
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ == "DuplicateKeyError":
+            winner = product_repo.find_by_sku(spine["sku"])
+            if (
+                winner is None
+                and spine.get("identity_key")
+                and hasattr(product_repo, "find_by_identity_key")
+            ):
+                winner = product_repo.find_by_identity_key(spine["identity_key"])
+            raise _duplicate_error(winner or {"sku": spine.get("sku")}) from exc
+        raise
     if not created:
         raise ProductMasterError("Failed to create product.", status=500)
     product_id = created.get("product_id")
