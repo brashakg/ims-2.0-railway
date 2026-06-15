@@ -28,8 +28,8 @@ import pytest
 from fastapi import HTTPException
 
 # Valid in-store EAN-13s minted by services/barcode.format_ean13 (prefix 20).
-_VALID_A = "2000000000015"   # seq 1
-_VALID_B = "2000000000022"   # seq 2
+_VALID_A = "2000000000015"  # seq 1
+_VALID_B = "2000000000022"  # seq 2
 # Same 12-digit payload as _VALID_A but a deliberately WRONG check digit.
 _BAD_CHECK = "2000000000016"
 _TOO_SHORT = "200000000001"  # only 12 digits
@@ -192,7 +192,12 @@ def _create(sku: str):
         sku=sku,
         category="FRAME",
         brand="B",
-        model="M",
+        # Distinct model per SKU so each product has a UNIQUE brand+model+colour
+        # identity. The Hub Phase-1 duplicate guard 409s two products that share an
+        # identity, so a fixed model would block the second create in the
+        # barcode-dup test before it could exercise the barcode path. These tests
+        # isolate barcode behaviour, so they use distinct identities by design.
+        model=f"M-{sku}",
         color="Black",  # FRAME requires colour_code under the step-9 strict gate
         mrp=1000.0,
         offer_price=900.0,
