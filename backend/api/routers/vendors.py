@@ -20,9 +20,11 @@ from ..dependencies import (
     get_stock_repository,
     get_vendor_portal_token_repository,
     get_audit_repository,
+    get_product_repository,
     validate_store_access,
 )
 from ..services import ap_engine
+from ..services import product_master as _pm
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -232,9 +234,7 @@ class GRNCreate(BaseModel):
             if not (self.po_id and str(self.po_id).strip()):
                 raise ValueError("po_id is required for a standard GRN")
             if not (self.vendor_invoice_no and str(self.vendor_invoice_no).strip()):
-                raise ValueError(
-                    "vendor_invoice_no is required for a standard GRN"
-                )
+                raise ValueError("vendor_invoice_no is required for a standard GRN")
         return self
 
 
@@ -792,7 +792,9 @@ async def list_pos(
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id"
+    )
 
     if po_repo is None:
         return {"purchase_orders": [], "total": 0}
@@ -1057,6 +1059,30 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
+    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
+    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
+    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
+    # that GRN would later mint as ghost stock. Fail-soft when no product repo.
+    product_repo = get_product_repository()
+    if product_repo is not None:
+        unknown = [
+            it.product_id
+            for it in po.items
+            if product_repo.find_by_id(it.product_id) is None
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "One or more PO lines reference an unknown product. "
+                        "Catalog the product first, then add it to the PO."
+                    ),
+                    "code": "UNKNOWN_PRODUCT",
+                    "product_ids": unknown,
+                },
+            )
+
     # Calculate totals
     subtotal = sum(item.quantity * item.unit_price for item in po.items)
     tax = subtotal * 0.18  # Assuming 18% GST
@@ -1123,6 +1149,40 @@ async def send_po(
 
         if po.get("status") != "DRAFT":
             raise HTTPException(status_code=400, detail="Only draft POs can be sent")
+
+        # Hub Phase 2 SENT gate: a PO may be DRAFTED against an incomplete product,
+        # but cannot be SENT to the vendor until every line is catalog-complete.
+        # cost_price is the ONE allowed gap -- it legitimately arrives at GRN (the
+        # receiving flow backfills it from this PO), so a product that is DRAFT
+        # ONLY because cost is unknown is still sendable. Any OTHER gap (missing
+        # category attribute, mrp/offer, hsn/gst) blocks the send. Fail-soft when
+        # no product repo.
+        product_repo = get_product_repository()
+        if product_repo is not None:
+            blocked = []
+            for it in po.get("items", []) or []:
+                pid = it.get("product_id")
+                prod = product_repo.find_by_id(pid) if pid else None
+                if prod is None:
+                    blocked.append(
+                        {"product_id": pid, "missing": ["product_not_found"]}
+                    )
+                    continue
+                gaps = set(_pm.compute_catalog_status(prod)[1]) - {"cost_price"}
+                if gaps:
+                    blocked.append({"product_id": pid, "missing": sorted(gaps)})
+            if blocked:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "Cannot send this PO: some lines are not catalog-"
+                            "complete. Finish cataloguing them, then send."
+                        ),
+                        "code": "PO_LINES_INCOMPLETE",
+                        "lines": blocked,
+                    },
+                )
 
         po_repo.update(
             po_id,
@@ -1206,7 +1266,9 @@ async def list_grns(
 ):
     """List GRNs with filters (incl. F9 Delivery-Challan filters)."""
     grn_repo = get_grn_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id"
+    )
 
     if grn_repo is None:
         return {"grns": [], "total": 0}
@@ -1541,7 +1603,11 @@ async def accept_grn(
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
 
-    if grn.get("status") != "PENDING":
+    # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
+    # "Catalog now" -- some lines were held last time because their product was
+    # not yet catalogued; the per-(grn,product) idempotency guard below skips the
+    # already-minted lines and mints only the newly-resolved ones.
+    if grn.get("status") not in ("PENDING", "PARTIALLY_ACCEPTED"):
         raise HTTPException(status_code=400, detail="GRN is not pending")
 
     store_id = grn.get("store_id")
@@ -1575,6 +1641,11 @@ async def accept_grn(
 
     minted_stock_ids: List[str] = []
     units_added = 0
+    # Hub Phase 2: lines whose product is not yet on the spine are HELD (not
+    # minted as ghost stock) -> the GRN stays PARTIALLY_ACCEPTED and the FE shows
+    # a "Catalog now" affordance; re-accepting after cataloguing mints them.
+    unresolved_lines: List[dict] = []
+    product_repo = get_product_repository()
 
     if stock_repo is not None:
         for item in grn.get("items", []) or []:
@@ -1584,6 +1655,17 @@ async def accept_grn(
                 accepted_qty = 0
             product_id = item.get("product_id")
             if accepted_qty <= 0 or not product_id:
+                continue
+
+            # Hub Phase 2 ghost-stock gate: only mint against a product that
+            # exists on the `products` spine. An uncatalogued line is HELD (no
+            # ghost stock) for "Catalog now". Fail-soft: when no product repo is
+            # available we cannot verify, so we mint exactly as before.
+            prod = product_repo.find_by_id(product_id) if product_repo else None
+            if product_repo is not None and prod is None:
+                unresolved_lines.append(
+                    {"product_id": product_id, "accepted_qty": accepted_qty}
+                )
                 continue
 
             # Idempotency guard: if this GRN already minted units for this
@@ -1620,6 +1702,36 @@ async def accept_grn(
                     "cost_price": round(line_cost, 2),
                     "cost_source": "GRN_PO",
                 }
+                # Hub Phase 2 hero: receiving the goods is where the cost becomes
+                # known. Backfill it onto the PRODUCT spine when the product had
+                # no cost, then atomically restamp -- a DRAFT whose only gap was
+                # cost_price auto-promotes to ACTIVE (purchasable) right here.
+                # Never-demote + fail-soft: a promote failure never blocks minting.
+                if (
+                    product_repo is not None
+                    and prod is not None
+                    and not prod.get("cost_price")
+                ):
+                    try:
+                        product_repo.update(
+                            product_id,
+                            {
+                                "cost_price": round(line_cost, 2),
+                                "cost_source": "GRN_PO",
+                            },
+                        )
+                        _pm.apply_restamp_atomic(
+                            product_id,
+                            prod,
+                            {"cost_price": round(line_cost, 2)},
+                            product_repo=product_repo,
+                        )
+                    except Exception as _cp_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[VENDOR] GRN cost-promote skipped for %s: %s",
+                            product_id,
+                            _cp_exc,
+                        )
             for _ in range(to_mint):
                 created = stock_repo.create(
                     {
@@ -1674,8 +1786,7 @@ async def accept_grn(
                                     product_id=product_id,
                                     source_type="GRN",
                                     source_id=grn_id,
-                                    payload={"grn_number": grn_number,
-                                             "po_id": po_id},
+                                    payload={"grn_number": grn_number, "po_id": po_id},
                                 )
                         except Exception as _le_exc:  # noqa: BLE001
                             logger.warning(
@@ -1683,14 +1794,18 @@ async def accept_grn(
                                 _le_exc,
                             )
 
-    # Mark the GRN accepted.
+    # Mark the GRN accepted -- or PARTIALLY_ACCEPTED when one or more lines were
+    # HELD because their product is not yet catalogued (Hub Phase 2). A held GRN
+    # is re-acceptable after "Catalog now" to mint the now-resolved lines.
+    grn_status = "PARTIALLY_ACCEPTED" if unresolved_lines else "ACCEPTED"
     grn_repo.update(
         grn_id,
         {
-            "status": "ACCEPTED",
+            "status": grn_status,
             "accepted_at": datetime.now().isoformat(),
             "accepted_by": user_id,
             "units_added": units_added,
+            "unresolved_lines": unresolved_lines,
         },
     )
 
@@ -1724,11 +1839,21 @@ async def accept_grn(
                 pass
 
     return {
-        "message": "GRN accepted, stock added",
+        "message": (
+            "GRN accepted, stock added"
+            if not unresolved_lines
+            else "GRN partially accepted -- some lines need cataloguing"
+        ),
         "grn_id": grn_id,
+        "grn_status": grn_status,
         "units_added": units_added,
         "stock_ids": minted_stock_ids,
         "po_status": po_status,
+        # Hub Phase 2: lines held because their product is not yet on the spine.
+        # The FE renders a "Catalog now" affordance; cataloguing + re-accepting
+        # mints them.
+        "unresolved_lines": unresolved_lines,
+        "needs_cataloguing": bool(unresolved_lines),
         "items_added": len(
             [
                 i
@@ -2075,6 +2200,7 @@ async def create_vendor_bill(
     db_early = _get_db()
     if db_early is not None:
         from .finance import check_period_locked
+
         check_period_locked(db_early, bill.bill_date)
 
     # Duplicate bill guard: the same vendor invoice number must not be recorded
@@ -2179,6 +2305,7 @@ async def create_vendor_payment(
     db = _get_db()
     if db is not None:
         from .finance import check_period_locked
+
         check_period_locked(db, payment.payment_date)
 
     payment_id = str(uuid.uuid4())
@@ -2381,7 +2508,9 @@ async def vendor_performance(
 
     empty = {
         "vendor_id": vendor_id,
-        "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+        "vendor_name": (
+            (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None
+        ),
         "window_months": months,
         "grns_evaluated": 0,
         "acceptance_rate": None,
@@ -2406,9 +2535,16 @@ async def vendor_performance(
                     "status": "ACCEPTED",
                     "created_at": {"$gte": cutoff.isoformat()},
                 },
-                {"_id": 0, "grn_id": 1, "po_id": 1, "created_at": 1,
-                 "total_received": 1, "total_accepted": 1, "total_rejected": 1,
-                 "accepted_at": 1},
+                {
+                    "_id": 0,
+                    "grn_id": 1,
+                    "po_id": 1,
+                    "created_at": 1,
+                    "total_received": 1,
+                    "total_accepted": 1,
+                    "total_rejected": 1,
+                    "accepted_at": 1,
+                },
             ).limit(500)
         )
 
@@ -2432,10 +2568,14 @@ async def vendor_performance(
             po_id = grn.get("po_id")
             if po_id:
                 try:
-                    po = po_coll.find_one({"po_id": po_id}, {"_id": 0, "expected_date": 1})
+                    po = po_coll.find_one(
+                        {"po_id": po_id}, {"_id": 0, "expected_date": 1}
+                    )
                     if po and po.get("expected_date"):
                         expected = str(po["expected_date"])[:10]
-                        accepted_at = str(grn.get("accepted_at") or grn.get("created_at") or "")[:10]
+                        accepted_at = str(
+                            grn.get("accepted_at") or grn.get("created_at") or ""
+                        )[:10]
                         if accepted_at and accepted_at <= expected:
                             on_time_count += 1
                         grns_with_po_date += 1
@@ -2443,8 +2583,14 @@ async def vendor_performance(
                     pass
 
         n = len(grns)
-        acceptance_rate = round(total_accepted / total_received, 4) if total_received > 0 else None
-        on_time_rate = round(on_time_count / grns_with_po_date, 4) if grns_with_po_date > 0 else None
+        acceptance_rate = (
+            round(total_accepted / total_received, 4) if total_received > 0 else None
+        )
+        on_time_rate = (
+            round(on_time_count / grns_with_po_date, 4)
+            if grns_with_po_date > 0
+            else None
+        )
 
         if acceptance_rate is not None and on_time_rate is not None:
             overall_score = round((acceptance_rate * 0.6 + on_time_rate * 0.4) * 100, 1)
@@ -2455,7 +2601,11 @@ async def vendor_performance(
 
         return {
             "vendor_id": vendor_id,
-            "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+            "vendor_name": (
+                (vendor.get("trade_name") or vendor.get("legal_name"))
+                if vendor
+                else None
+            ),
             "window_months": months,
             "grns_evaluated": n,
             "total_received": total_received,
@@ -2467,11 +2617,18 @@ async def vendor_performance(
             "grns_with_po_date": grns_with_po_date,
             "overall_score": overall_score,
             "score_label": (
-                "Excellent" if (overall_score or 0) >= 90
-                else "Good" if (overall_score or 0) >= 75
-                else "Average" if (overall_score or 0) >= 50
-                else "Poor"
-            ) if overall_score is not None else None,
+                (
+                    "Excellent"
+                    if (overall_score or 0) >= 90
+                    else (
+                        "Good"
+                        if (overall_score or 0) >= 75
+                        else "Average" if (overall_score or 0) >= 50 else "Poor"
+                    )
+                )
+                if overall_score is not None
+                else None
+            ),
             "insufficient_data": n < 3,
         }
 
@@ -2507,7 +2664,9 @@ async def vendor_purchase_history(
 
     empty = {
         "vendor_id": vendor_id,
-        "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+        "vendor_name": (
+            (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None
+        ),
         "window_months": months,
         "total_pos": 0,
         "total_spend": 0.0,
@@ -2533,9 +2692,18 @@ async def vendor_purchase_history(
                     "status": {"$nin": ["CANCELLED", "DRAFT"]},
                     "created_at": {"$gte": cutoff.isoformat()},
                 },
-                {"_id": 0, "po_id": 1, "po_number": 1, "created_at": 1,
-                 "total_amount": 1, "items": 1, "status": 1},
-            ).sort("created_at", 1).limit(500)
+                {
+                    "_id": 0,
+                    "po_id": 1,
+                    "po_number": 1,
+                    "created_at": 1,
+                    "total_amount": 1,
+                    "items": 1,
+                    "status": 1,
+                },
+            )
+            .sort("created_at", 1)
+            .limit(500)
         )
 
         grns = list(
@@ -2545,8 +2713,13 @@ async def vendor_purchase_history(
                     "status": "ACCEPTED",
                     "created_at": {"$gte": cutoff.isoformat()},
                 },
-                {"_id": 0, "created_at": 1, "total_received": 1, "total_accepted": 1,
-                 "po_id": 1},
+                {
+                    "_id": 0,
+                    "created_at": 1,
+                    "total_received": 1,
+                    "total_accepted": 1,
+                    "po_id": 1,
+                },
             ).limit(1000)
         )
 
@@ -2558,26 +2731,42 @@ async def vendor_purchase_history(
             month = str(po.get("created_at") or "")[:7]
             if not month:
                 continue
-            bucket = monthly.setdefault(month, {"month": month, "pos": 0, "spend": 0.0, "units_received": 0})
+            bucket = monthly.setdefault(
+                month, {"month": month, "pos": 0, "spend": 0.0, "units_received": 0}
+            )
             bucket["pos"] += 1
-            bucket["spend"] = round(bucket["spend"] + float(po.get("total_amount") or 0), 2)
+            bucket["spend"] = round(
+                bucket["spend"] + float(po.get("total_amount") or 0), 2
+            )
             # Accumulate per-product spend
             for item in po.get("items") or []:
                 pid = item.get("product_id", "")
                 name = item.get("product_name", "") or item.get("name", "")
                 sku = item.get("sku", "")
-                spend = float(item.get("unit_price") or 0) * int(item.get("quantity") or 0)
+                spend = float(item.get("unit_price") or 0) * int(
+                    item.get("quantity") or 0
+                )
                 if pid:
                     if pid not in product_spend:
-                        product_spend[pid] = {"product_id": pid, "name": name, "sku": sku, "spend": 0.0, "units": 0}
-                    product_spend[pid]["spend"] = round(product_spend[pid]["spend"] + spend, 2)
+                        product_spend[pid] = {
+                            "product_id": pid,
+                            "name": name,
+                            "sku": sku,
+                            "spend": 0.0,
+                            "units": 0,
+                        }
+                    product_spend[pid]["spend"] = round(
+                        product_spend[pid]["spend"] + spend, 2
+                    )
                     product_spend[pid]["units"] += int(item.get("quantity") or 0)
 
         for grn in grns:
             month = str(grn.get("created_at") or "")[:7]
             if not month:
                 continue
-            bucket = monthly.setdefault(month, {"month": month, "pos": 0, "spend": 0.0, "units_received": 0})
+            bucket = monthly.setdefault(
+                month, {"month": month, "pos": 0, "spend": 0.0, "units_received": 0}
+            )
             bucket["units_received"] += int(grn.get("total_received") or 0)
 
         monthly_list = sorted(monthly.values(), key=lambda x: x["month"])
@@ -2588,7 +2777,11 @@ async def vendor_purchase_history(
 
         return {
             "vendor_id": vendor_id,
-            "vendor_name": (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None,
+            "vendor_name": (
+                (vendor.get("trade_name") or vendor.get("legal_name"))
+                if vendor
+                else None
+            ),
             "window_months": months,
             "total_pos": len(pos),
             "total_spend": round(total_spend, 2),
@@ -2598,7 +2791,9 @@ async def vendor_purchase_history(
         }
 
     except Exception as exc:
-        logger.warning("[INV-13] vendor_purchase_history failed for %s: %s", vendor_id, exc)
+        logger.warning(
+            "[INV-13] vendor_purchase_history failed for %s: %s", vendor_id, exc
+        )
         return empty
 
 
@@ -2611,8 +2806,13 @@ async def vendor_purchase_history(
 async def get_tds_threshold_status(
     vendor_id: str = Query(..., description="Vendor ID to check TDS threshold for"),
     section: str = Query(..., description="TDS section code e.g. 194C_OTHER"),
-    current_payment: float = Query(..., ge=0, description="Current payment amount (before TDS)"),
-    fy_start: Optional[str] = Query(None, description="Financial year start date (YYYY-MM-DD); defaults to current FY 1-Apr"),
+    current_payment: float = Query(
+        ..., ge=0, description="Current payment amount (before TDS)"
+    ),
+    fy_start: Optional[str] = Query(
+        None,
+        description="Financial year start date (YYYY-MM-DD); defaults to current FY 1-Apr",
+    ),
     current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
 ):
     """FIN-11: Check whether TDS applies on a vendor payment given cumulative
@@ -2629,19 +2829,24 @@ async def get_tds_threshold_status(
     now = datetime.utcnow()
     if fy_start:
         from ..services.ap_engine import parse_date as _pd
-        fy_start_dt = _pd(fy_start) or datetime(now.year if now.month >= 4 else now.year - 1, 4, 1)
+
+        fy_start_dt = _pd(fy_start) or datetime(
+            now.year if now.month >= 4 else now.year - 1, 4, 1
+        )
     else:
         fy_start_dt = datetime(now.year if now.month >= 4 else now.year - 1, 4, 1)
 
     # Sum all payments to this vendor in the current FY
     try:
-        past_payments = list(db.get_collection("vendor_payments").find(
-            {
-                "vendor_id": vendor_id,
-                "payment_date": {"$gte": fy_start_dt.isoformat()},
-            },
-            {"amount": 1, "tds_amount": 1, "_id": 0},
-        ))
+        past_payments = list(
+            db.get_collection("vendor_payments").find(
+                {
+                    "vendor_id": vendor_id,
+                    "payment_date": {"$gte": fy_start_dt.isoformat()},
+                },
+                {"amount": 1, "tds_amount": 1, "_id": 0},
+            )
+        )
     except Exception:
         past_payments = []
 
@@ -2673,8 +2878,16 @@ async def get_tds_threshold_status(
 
 @router.get("/tds/26q-export")
 async def export_26q(
-    fy: Optional[int] = Query(None, description="Financial year start (e.g. 2025 for FY 2025-26). Defaults to current FY."),
-    quarter: Optional[int] = Query(None, ge=1, le=4, description="Quarter (1-4). If omitted, returns all quarters of the FY."),
+    fy: Optional[int] = Query(
+        None,
+        description="Financial year start (e.g. 2025 for FY 2025-26). Defaults to current FY.",
+    ),
+    quarter: Optional[int] = Query(
+        None,
+        ge=1,
+        le=4,
+        description="Quarter (1-4). If omitted, returns all quarters of the FY.",
+    ),
     current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
 ):
     """FIN-11: Export TDS deduction data for quarterly 26Q (TDS on payments)
@@ -2693,26 +2906,30 @@ async def export_26q(
     fy_end = datetime(target_fy + 1, 3, 31, 23, 59, 59)
 
     try:
-        payments = list(db.get_collection("vendor_payments").find(
-            {
-                "payment_date": {
-                    "$gte": fy_start.isoformat(),
-                    "$lte": fy_end.isoformat(),
+        payments = list(
+            db.get_collection("vendor_payments").find(
+                {
+                    "payment_date": {
+                        "$gte": fy_start.isoformat(),
+                        "$lte": fy_end.isoformat(),
+                    },
+                    "tds_amount": {"$gt": 0},
                 },
-                "tds_amount": {"$gt": 0},
-            },
-            {"_id": 0},
-        ))
+                {"_id": 0},
+            )
+        )
     except Exception:
         payments = []
 
     # Enrich with vendor name/PAN from the vendors collection (best-effort).
     try:
         vendor_ids = list({p.get("vendor_id") for p in payments if p.get("vendor_id")})
-        vendor_docs = list(db.get_collection("vendors").find(
-            {"vendor_id": {"$in": vendor_ids}},
-            {"vendor_id": 1, "name": 1, "pan": 1, "_id": 0},
-        ))
+        vendor_docs = list(
+            db.get_collection("vendors").find(
+                {"vendor_id": {"$in": vendor_ids}},
+                {"vendor_id": 1, "name": 1, "pan": 1, "_id": 0},
+            )
+        )
         vendor_map = {v["vendor_id"]: v for v in vendor_docs}
         for p in payments:
             vdoc = vendor_map.get(p.get("vendor_id"), {})
