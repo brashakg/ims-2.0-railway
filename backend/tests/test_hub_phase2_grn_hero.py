@@ -156,6 +156,7 @@ def _mirror_off(monkeypatch):
 
 
 def test_create_po_rejects_unknown_product(monkeypatch):
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: True)  # gate ON
     monkeypatch.setattr(vd, "get_vendor_repository", lambda: _VendorRepo())
     monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: _PORepo())
     monkeypatch.setattr(
@@ -221,6 +222,7 @@ def _po_repo_with_line(pid):
 
 def test_send_po_blocks_incomplete_line(monkeypatch):
     # product missing colour_code -> real catalogue gap -> cannot send.
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: True)  # gate ON
     prod = _complete_frame(
         "P1", colour=None, catalog_status="DRAFT", gaps=["colour_code", "cost_price"]
     )
@@ -325,3 +327,154 @@ def test_accept_grn_reaccept_after_cataloguing_mints_resolved(monkeypatch):
     assert second["grn_status"] == "ACCEPTED"
     assert second["units_added"] == 1
     assert len(stock.rows) == 1
+
+
+def test_accept_grn_two_lines_same_product_both_mint(monkeypatch):
+    # Adversarial P1: a GRN with TWO lines for the SAME product must mint BOTH
+    # lines' qty. A product-keyed idempotency count dropped the second line; the
+    # grn_line_index key fixes it.
+    product_repo = _ProductRepo([_complete_frame("P1", cost=10.0)])
+    grn = _grn(
+        [
+            {"product_id": "P1", "accepted_qty": 3, "unit_price": 10.0},
+            {"product_id": "P1", "accepted_qty": 2, "unit_price": 10.0},
+        ]
+    )
+    stock = _StockRepo()
+    _wire_grn(monkeypatch, grn=grn, product_repo=product_repo, stock_repo=stock)
+    out = _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert out["grn_status"] == "ACCEPTED"
+    assert out["units_added"] == 5  # 3 + 2, not 3 (line-keyed idempotency)
+    assert len(stock.rows) == 5
+    # each line minted its own qty under its own grn_line_index
+    assert sum(1 for r in stock.rows if r.get("grn_line_index") == 0) == 3
+    assert sum(1 for r in stock.rows if r.get("grn_line_index") == 1) == 2
+
+
+def test_accept_grn_holds_incomplete_draft_beyond_cost(monkeypatch):
+    # Adversarial P2: a DRAFT whose gaps go BEYOND cost (missing colour_code) must
+    # NOT mint sellable stock even though its product exists -- it is HELD like an
+    # uncatalogued line (no sellable stock for a non-purchasable DRAFT).
+    prod = _complete_frame(
+        "P1",
+        colour=None,
+        cost=None,
+        catalog_status="DRAFT",
+        gaps=["colour_code", "cost_price"],
+    )
+    product_repo = _ProductRepo([prod])
+    grn = _grn([{"product_id": "P1", "accepted_qty": 2, "unit_price": 100.0}])
+    stock = _StockRepo()
+    _wire_grn(monkeypatch, grn=grn, product_repo=product_repo, stock_repo=stock)
+    out = _run(vd.accept_grn("GRN-1", _ADMIN))
+    assert out["grn_status"] == "PARTIALLY_ACCEPTED"
+    assert out["units_added"] == 0
+    assert len(stock.rows) == 0
+    assert out["unresolved_lines"][0]["reason"] == "incomplete_catalog"
+
+
+def test_create_po_rejects_multiple_unknown_products(monkeypatch):
+    # Adversarial test-debt: the gate accumulates ALL unknown ids (not raise-on-first).
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: True)  # gate ON
+    monkeypatch.setattr(vd, "get_vendor_repository", lambda: _VendorRepo())
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: _PORepo())
+    monkeypatch.setattr(
+        vd, "get_product_repository", lambda: _ProductRepo([_complete_frame("P1")])
+    )
+    body = POCreate(
+        vendor_id="V1",
+        delivery_store_id="S1",
+        items=[
+            POItemCreate(
+                product_id="P1",
+                product_name="ok",
+                sku="S1",
+                quantity=1,
+                unit_price=10.0,
+            ),
+            POItemCreate(
+                product_id="new-A",
+                product_name="x",
+                sku="SX",
+                quantity=1,
+                unit_price=10.0,
+            ),
+            POItemCreate(
+                product_id="new-B",
+                product_name="y",
+                sku="SY",
+                quantity=1,
+                unit_price=10.0,
+            ),
+        ],
+    )
+    with pytest.raises(HTTPException) as ei:
+        _run(vd.create_po(body, _ADMIN))
+    assert ei.value.status_code == 422
+    assert set(ei.value.detail["product_ids"]) == {"new-A", "new-B"}
+
+
+def test_create_po_failsoft_when_no_product_repo(monkeypatch):
+    # Adversarial test-debt: gate skipped (fail-soft) when product_repo is None.
+    monkeypatch.setattr(vd, "get_vendor_repository", lambda: _VendorRepo())
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: _PORepo())
+    monkeypatch.setattr(vd, "get_product_repository", lambda: None)
+    body = POCreate(
+        vendor_id="V1",
+        delivery_store_id="S1",
+        items=[
+            POItemCreate(
+                product_id="new-anything",
+                product_name="x",
+                sku="SX",
+                quantity=1,
+                unit_price=10.0,
+            )
+        ],
+    )
+    out = _run(vd.create_po(body, _ADMIN))
+    assert out["po_id"]  # no 422
+
+
+def test_send_po_failsoft_when_no_product_repo(monkeypatch):
+    po_repo = _po_repo_with_line("P-whatever")
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: po_repo)
+    monkeypatch.setattr(vd, "get_product_repository", lambda: None)
+    out = _run(vd.send_po("PO-1", _ADMIN))
+    assert out["po_id"] == "PO-1"
+    assert po_repo.pos["PO-1"]["status"] == "SENT"
+
+
+def test_create_po_gate_dark_by_default_allows_unknown(monkeypatch):
+    # pm.po_catalog_gate is DARK by default -> the manual free-text Create-PO
+    # flow (fabricated new-<ts> ids) keeps working until the Buy Desk picker ships.
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: False)  # explicit dark
+    monkeypatch.setattr(vd, "get_vendor_repository", lambda: _VendorRepo())
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: _PORepo())
+    monkeypatch.setattr(
+        vd, "get_product_repository", lambda: _ProductRepo([_complete_frame("P1")])
+    )
+    body = POCreate(
+        vendor_id="V1",
+        delivery_store_id="S1",
+        items=[
+            POItemCreate(
+                product_id="new-99999",
+                product_name="freetext",
+                sku="N/A",
+                quantity=1,
+                unit_price=10.0,
+            )
+        ],
+    )
+    out = _run(vd.create_po(body, _ADMIN))
+    assert out["po_id"]  # gate dark -> no 422
+
+
+def test_send_po_gate_dark_by_default_allows_uncatalogued(monkeypatch):
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: False)
+    po_repo = _po_repo_with_line("new-77777")
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: po_repo)
+    monkeypatch.setattr(vd, "get_product_repository", lambda: _ProductRepo([]))
+    out = _run(vd.send_po("PO-1", _ADMIN))
+    assert po_repo.pos["PO-1"]["status"] == "SENT"  # gate dark -> sends

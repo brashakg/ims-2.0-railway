@@ -26,6 +26,19 @@ from ..dependencies import (
 from ..services import ap_engine
 from ..services import product_master as _pm
 
+
+def _po_catalog_gate_on() -> bool:
+    """Hub Phase 2: is the PO catalog gate enabled? DARK by default so the manual
+    free-text Create-PO flow keeps working until the Buy Desk product picker ships.
+    The GRN ghost-stock gate is independent and ALWAYS on. Fail-soft: OFF on error."""
+    try:
+        from ..services.policy_engine import get_policy
+
+        return bool(get_policy("pm.po_catalog_gate", default=False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -1062,9 +1075,11 @@ async def create_po(
     # Hub Phase 2: every PO line must reference a REAL catalogued product on the
     # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
     # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
-    # that GRN would later mint as ghost stock. Fail-soft when no product repo.
+    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
+    # (DARK by default) so the existing free-text Create-PO form keeps working
+    # until the Buy Desk picker ships. Fail-soft when no product repo.
     product_repo = get_product_repository()
-    if product_repo is not None:
+    if product_repo is not None and _po_catalog_gate_on():
         unknown = [
             it.product_id
             for it in po.items
@@ -1156,9 +1171,11 @@ async def send_po(
         # receiving flow backfills it from this PO), so a product that is DRAFT
         # ONLY because cost is unknown is still sendable. Any OTHER gap (missing
         # category attribute, mrp/offer, hsn/gst) blocks the send. Fail-soft when
-        # no product repo.
+        # no product repo. Gated behind pm.po_catalog_gate (DARK by default) so
+        # the existing free-text Create-PO/send flow keeps working until the Buy
+        # Desk picker ships.
         product_repo = get_product_repository()
-        if product_repo is not None:
+        if product_repo is not None and _po_catalog_gate_on():
             blocked = []
             for it in po.get("items", []) or []:
                 pid = it.get("product_id")
@@ -1648,7 +1665,7 @@ async def accept_grn(
     product_repo = get_product_repository()
 
     if stock_repo is not None:
-        for item in grn.get("items", []) or []:
+        for line_index, item in enumerate(grn.get("items", []) or []):
             try:
                 accepted_qty = int(item.get("accepted_qty", 0) or 0)
             except (TypeError, ValueError):
@@ -1664,18 +1681,27 @@ async def accept_grn(
             prod = product_repo.find_by_id(product_id) if product_repo else None
             if product_repo is not None and prod is None:
                 unresolved_lines.append(
-                    {"product_id": product_id, "accepted_qty": accepted_qty}
+                    {
+                        "product_id": product_id,
+                        "accepted_qty": accepted_qty,
+                        "reason": "not_catalogued",
+                    }
                 )
                 continue
 
-            # Idempotency guard: if this GRN already minted units for this
-            # product (a previous accept that failed mid-way), don't mint again.
+            # Idempotency guard keyed on the GRN LINE (grn_line_index), not just
+            # the product: a GRN may legitimately carry two lines for the SAME
+            # product (e.g. different location_code). A product-only key let line
+            # B see line A's units and skip minting -> silent first-accept stock
+            # loss. Keying on the line index makes each line mint its own qty and
+            # still makes a re-accept idempotent.
             try:
                 already = stock_repo.count(
                     {
                         "source_type": "GRN",
                         "source_id": grn_id,
                         "product_id": product_id,
+                        "grn_line_index": line_index,
                     }
                 )
             except Exception:  # noqa: BLE001
@@ -1732,6 +1758,27 @@ async def accept_grn(
                             product_id,
                             _cp_exc,
                         )
+
+            # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
+            # COMPLETE product. After the cost backfill above, a product still
+            # missing catalogue fields beyond cost remains a non-purchasable
+            # DRAFT -- HOLD its line (like an uncatalogued line) instead of
+            # minting sellable stock POS could not lawfully price/sell. Fail-soft:
+            # only when a product repo is available to verify completeness.
+            if product_repo is not None and prod is not None:
+                merged_for_status = dict(prod)
+                if cost_fields:
+                    merged_for_status["cost_price"] = cost_fields["cost_price"]
+                if _pm.compute_catalog_status(merged_for_status)[1]:
+                    unresolved_lines.append(
+                        {
+                            "product_id": product_id,
+                            "accepted_qty": accepted_qty,
+                            "reason": "incomplete_catalog",
+                        }
+                    )
+                    continue
+
             for _ in range(to_mint):
                 created = stock_repo.create(
                     {
@@ -1745,6 +1792,7 @@ async def accept_grn(
                         "barcode_printed": False,
                         "source_type": "GRN",
                         "source_id": grn_id,
+                        "grn_line_index": line_index,
                         "grn_number": grn_number,
                         "po_id": po_id,
                         "created_by": user_id,
