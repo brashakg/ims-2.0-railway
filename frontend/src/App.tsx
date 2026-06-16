@@ -87,6 +87,7 @@ const GoLiveChecklistPage = lazy(() => import('./pages/settings/GoLiveChecklistP
 // stubs with no working actions). Retired — /purchase/orders and /purchase/vendors
 // now redirect to the real PurchaseManagementPage tabs below.
 const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
+const GoodsReceiptCockpit = lazy(() => import('./pages/purchase/GoodsReceiptCockpit').then(m => ({ default: m.GoodsReceiptCockpit })));
 const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 const VendorRMA = lazy(() => import('./pages/purchase/VendorRMA').then(m => ({ default: m.VendorRMA })));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
@@ -792,6 +793,17 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <GoodsReceiptNote />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Purchase P1/S4: Goods-Receipt Cockpit — vendor-first receiving
+                      with mandatory attachment gate (SUPERADMIN/ADMIN/STORE_MANAGER) */}
+                  <Route
+                    path="purchase/receive"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']}>
+                        <GoodsReceiptCockpit />
                       </ProtectedRoute>
                     }
                   />
