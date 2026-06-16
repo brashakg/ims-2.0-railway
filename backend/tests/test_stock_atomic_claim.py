@@ -83,3 +83,38 @@ def test_exclude_ids_skips_claimed_in_same_order():
     repo = _repo(docs)
     sid = repo.claim_one_available("P", "S", "ORD1", exclude_ids={"U1"})
     assert sid == "U2"
+
+
+def test_claims_work_over_real_mock_collection_no_mongo():
+    """Regression: in local no-Mongo mode the bound collection is the real
+    MockCollection, which lacked find_one_and_update -> the atomic claims
+    silently no-opped (POS FIFO never flipped SOLD, transfer ship moved 0).
+    MockCollection now implements it, so both claims work in mock mode too."""
+    from database.connection import MockCollection
+    from database.repositories.product_repository import StockRepository
+
+    coll = MockCollection("stock")
+    coll.insert_one(
+        {"_id": "U1", "stock_id": "U1", "product_id": "P", "store_id": "S", "status": "AVAILABLE"}
+    )
+    coll.insert_one(
+        {"_id": "U2", "stock_id": "U2", "product_id": "P", "store_id": "S", "status": "AVAILABLE"}
+    )
+    repo = StockRepository(coll)
+
+    # FIFO sale claim flips exactly one AVAILABLE unit SOLD.
+    sid = repo.claim_one_available("P", "S", "ORD1")
+    assert sid in {"U1", "U2"}
+    assert coll.find_one({"stock_id": sid})["status"] == "SOLD"
+
+    # exclude_ids ($nin) now honored by the mock matcher.
+    other = repo.claim_one_available("P", "S", "ORD2", exclude_ids={sid})
+    assert other == ("U2" if sid == "U1" else "U1")
+
+    # transfer claim flips AVAILABLE -> TRANSFERRED; a non-AVAILABLE unit fails.
+    coll.insert_one(
+        {"_id": "U3", "stock_id": "U3", "product_id": "P", "store_id": "S", "status": "AVAILABLE"}
+    )
+    assert repo.claim_for_transfer("U3", "T1", "S2") is True
+    assert coll.find_one({"stock_id": "U3"})["status"] == "TRANSFERRED"
+    assert repo.claim_for_transfer("U3", "T1", "S2") is False  # already claimed
