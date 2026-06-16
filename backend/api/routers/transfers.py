@@ -463,14 +463,13 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
             sid = unit.get("stock_id") or unit.get("stock_unit_id") or unit.get("_id")
             if not sid:
                 continue
-            ok = stock_repo.update(
-                sid,
-                {
-                    "status": STOCK_STATUS_TRANSFERRED,
-                    "transfer_id": transfer.get("id"),
-                    "transferred_at": datetime.now().isoformat(),
-                    "transfer_to_store_id": transfer.get("to_location_id"),
-                },
+            # Atomic per-unit claim: flip AVAILABLE -> TRANSFERRED only if the
+            # unit is STILL available, so two concurrent ships of the same product
+            # can never double-claim one physical unit (was find_many + update =
+            # check-then-act). A lost race returns False -> the unit is skipped
+            # (not counted, not double-moved).
+            ok = stock_repo.claim_for_transfer(
+                str(sid), transfer.get("id"), transfer.get("to_location_id")
             )
             if ok:
                 moved_ids.append(str(sid))

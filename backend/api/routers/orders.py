@@ -1073,37 +1073,38 @@ def _mark_units_sold(
                 # remaining qty falls through to FIFO.
                 explicit_sid = None
             else:
-                # Path 2: FIFO-allocate from product+store.
+                # Path 2: FIFO-allocate from product+store via an ATOMIC claim
+                # (find_one_and_update on status=AVAILABLE). Closes the prior
+                # check-then-act race where two concurrent last-unit sales both
+                # picked AND marked the SAME unit SOLD. `used` excludes units
+                # already claimed earlier in THIS order (two lines, same product).
                 if not store_id:
                     continue
                 try:
-                    available = stock_repo.find_by_product_store(pid, store_id) or []
+                    claimed = stock_repo.claim_one_available(
+                        pid, store_id, order_id, used
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[STOCK] find_by_product_store(%s,%s) failed: %s",
+                        "[STOCK] claim_one_available(%s,%s) failed: %s",
                         pid,
                         store_id,
                         exc,
                     )
-                    available = []
-                pick: Optional[Dict] = None
-                for unit in available:
-                    uid = unit.get("stock_id") or unit.get("_id")
-                    if uid and uid not in used:
-                        pick = unit
-                        break
-                if not pick:
-                    continue
-                pick_sid = pick.get("stock_id") or pick.get("_id")
-                try:
-                    ok = stock_repo.mark_sold(str(pick_sid), order_id)
-                except Exception as exc:  # noqa: BLE001
+                    claimed = None
+                if claimed:
+                    sid = str(claimed)
+                else:
+                    # No AVAILABLE unit to claim: genuinely out of stock (the
+                    # pre-persist assert normally catches this) or we lost a
+                    # concurrent race for the last unit. Log for ops visibility.
                     logger.warning(
-                        "[STOCK] mark_sold(fifo=%s) failed: %s", pick_sid, exc
+                        "[STOCK] no AVAILABLE unit to claim for %s @ %s (order %s) "
+                        "-- possible concurrent sale of the last unit",
+                        pid,
+                        store_id,
+                        order_id,
                     )
-                    ok = False
-                if ok:
-                    sid = str(pick_sid)
 
             if sid:
                 used.add(sid)

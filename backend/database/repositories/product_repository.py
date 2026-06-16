@@ -199,7 +199,71 @@ class StockRepository(BaseRepository):
             {"status": "SOLD", "sold_at": datetime.now(), "order_id": order_id},
         )
 
+    def claim_one_available(
+        self,
+        product_id: str,
+        store_id: str,
+        order_id: str,
+        exclude_ids=None,
+    ) -> Optional[str]:
+        """Atomically claim the first AVAILABLE unit for product+store and flip it
+        SOLD; return its stock_id, or None when none is available.
+
+        Concurrency-safe: a single find_one_and_update with a status="AVAILABLE"
+        filter means two racing sales can NEVER claim the same physical unit (the
+        loser gets the next unit or None). Replaces the old find_by_product_store
+        + mark_sold check-then-act FIFO path, which let two concurrent last-unit
+        sales both mark the SAME unit SOLD.
+        """
+        flt = {
+            "product_id": product_id,
+            "store_id": store_id,
+            "status": "AVAILABLE",
+        }
+        if exclude_ids:
+            flt["stock_id"] = {"$nin": list(exclude_ids)}
+        try:
+            doc = self.collection.find_one_and_update(
+                flt,
+                {
+                    "$set": {
+                        "status": "SOLD",
+                        "sold_at": datetime.now(),
+                        "order_id": order_id,
+                    }
+                },
+            )
+        except Exception:
+            return None
+        if not doc:
+            return None
+        return doc.get("stock_id") or doc.get("_id")
+
     def mark_barcode_printed(self, stock_id: str) -> bool:
         return self.update(
             stock_id, {"barcode_printed": True, "barcode_printed_at": datetime.now()}
         )
+
+    def claim_for_transfer(
+        self, stock_id: str, transfer_id, to_store_id
+    ) -> bool:
+        """Atomically flip a SPECIFIC unit AVAILABLE -> TRANSFERRED, only if it is
+        still AVAILABLE. Returns False when another concurrent ship already
+        claimed it. Concurrency-safe replacement for update() in the transfer-ship
+        loop, which previously let two concurrent ships of the same product double-
+        claim the same physical unit (find_many + update = check-then-act)."""
+        try:
+            doc = self.collection.find_one_and_update(
+                {"stock_id": stock_id, "status": "AVAILABLE"},
+                {
+                    "$set": {
+                        "status": "TRANSFERRED",
+                        "transfer_id": transfer_id,
+                        "transferred_at": datetime.now().isoformat(),
+                        "transfer_to_store_id": to_store_id,
+                    }
+                },
+            )
+        except Exception:
+            return False
+        return doc is not None
