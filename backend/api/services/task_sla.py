@@ -38,6 +38,14 @@ DEFAULT_SLA: Dict[str, Dict[str, int]] = {
 # Statuses past which escalation never applies.
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
 
+# Storm guard: cap on how many times one task may climb the ladder. The role
+# ladder in task_escalation has 4 rungs (STORE_MANAGER -> AREA_MANAGER -> ADMIN
+# -> SUPERADMIN), so a worker task reaches the top in at most 4 hops. Once a
+# task has escalated this many times it sits at (or above) the top rung and
+# resolve_escalation_target returns None -- no one left to climb to -- so we
+# stop re-escalating to avoid an unbounded history/notification storm.
+MAX_ESCALATION_LEVEL = 4
+
 
 def canon_status(value: Any) -> str:
     """Normalize any task status to the canonical UPPERCASE_SNAKE form.
@@ -110,10 +118,11 @@ def should_escalate(
     """Decide whether a task has breached SLA and must escalate.
 
     Returns ``(should_escalate, reason)``. Pure -- pass ``now`` for tests.
-    A task that is COMPLETED/CANCELLED/ESCALATED never escalates here
-    (re-escalation up further levels is Phase 2's concern)."""
+    A COMPLETED/CANCELLED task never escalates. An already-ESCALATED task
+    keeps climbing the ladder (multi-hop) on each fresh breach, but no faster
+    than once per grace window and no further than ``MAX_ESCALATION_LEVEL``."""
     status = canon_status(task.get("status"))
-    if status in TERMINAL_STATUSES or status == "ESCALATED":
+    if status in TERMINAL_STATUSES:
         return False, ""
 
     now = now or datetime.now()
@@ -121,6 +130,25 @@ def should_escalate(
         now = now.replace(tzinfo=None)
 
     sla = sla_for(task.get("priority", "P3"), sla_config)
+
+    # Re-escalation: an already-ESCALATED task that is STILL unresolved climbs
+    # one more rung -- but only after another full grace window has passed
+    # since its last escalation (cadence guard), and only while it is below the
+    # top of the ladder (level guard). Together with resolve_escalation_target
+    # returning None at the top rung, this bounds an ignored task's climb.
+    if status == "ESCALATED":
+        if int(task.get("escalation_level", 0) or 0) >= MAX_ESCALATION_LEVEL:
+            return False, ""
+        last = _as_dt(task.get("escalated_at"))
+        if last is None:
+            # No timestamp to clock from -- don't re-fire blindly.
+            return False, ""
+        if now >= last + timedelta(minutes=sla["grace_minutes"]):
+            return True, (
+                f"Still unresolved {sla['grace_minutes']}m after escalation "
+                f"-- climbing the ladder"
+            )
+        return False, ""
 
     # Overdue clock -- due_at (canonical) or due_date (legacy fallback).
     due = _as_dt(task.get("due_at")) or _as_dt(task.get("due_date"))

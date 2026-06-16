@@ -13,6 +13,7 @@ os.environ.setdefault("MONGODB_URI", "")
 
 from api.services.task_sla import (  # noqa: E402
     DEFAULT_SLA,
+    MAX_ESCALATION_LEVEL,
     canon_source,
     canon_status,
     should_escalate,
@@ -67,7 +68,7 @@ def test_sla_config_override_with_partial_row():
     assert row["grace_minutes"] == DEFAULT_SLA["P3"]["grace_minutes"]
 
 
-# --- should_escalate: terminal/escalated never fire -------------------------
+# --- should_escalate: terminal never fires ----------------------------------
 
 
 def test_completed_never_escalates():
@@ -80,8 +81,49 @@ def test_cancelled_never_escalates():
     assert should_escalate(task, now=NOW)[0] is False
 
 
-def test_already_escalated_does_not_re_escalate_in_phase1():
+# --- should_escalate: multi-hop re-escalation of an ESCALATED task -----------
+
+
+def test_escalated_without_timestamp_does_not_re_escalate():
+    # No escalated_at to clock the next hop from -> never re-fire blindly.
     task = {"status": "ESCALATED", "priority": "P0", "due_at": NOW - timedelta(days=30)}
+    assert should_escalate(task, now=NOW)[0] is False
+
+
+def test_escalated_re_escalates_after_another_grace_window():
+    # P0 grace = 30m. Escalated 31m ago, still unresolved, below the level cap
+    # -> climb one more rung.
+    task = {
+        "status": "ESCALATED",
+        "priority": "P0",
+        "escalation_level": 1,
+        "escalated_at": NOW - timedelta(minutes=31),
+    }
+    flag, reason = should_escalate(task, now=NOW)
+    assert flag is True
+    assert "climbing the ladder" in reason
+
+
+def test_escalated_within_grace_window_does_not_re_escalate():
+    # Cadence guard: only one hop per grace window. 29m < 30m grace -> wait.
+    task = {
+        "status": "ESCALATED",
+        "priority": "P0",
+        "escalation_level": 1,
+        "escalated_at": NOW - timedelta(minutes=29),
+    }
+    assert should_escalate(task, now=NOW)[0] is False
+
+
+def test_escalated_at_max_level_does_not_re_escalate():
+    # Storm guard: once it has climbed to the top of the ladder, stop -- there
+    # is no one higher to escalate to.
+    task = {
+        "status": "ESCALATED",
+        "priority": "P0",
+        "escalation_level": MAX_ESCALATION_LEVEL,
+        "escalated_at": NOW - timedelta(days=30),
+    }
     assert should_escalate(task, now=NOW)[0] is False
 
 

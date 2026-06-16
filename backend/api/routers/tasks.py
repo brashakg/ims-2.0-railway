@@ -942,12 +942,22 @@ async def auto_escalate_overdue_tasks(
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
 
-    # Candidate set: non-terminal, not-yet-escalated tasks. The precise
-    # decision (ack clock + overdue grace, per priority) is made by the pure
-    # should_escalate() below -- a task can breach its ack SLA before it is
-    # even past due, so we can't pre-filter on due date alone.
+    # Candidate set: every non-terminal task (incl. already-ESCALATED, which
+    # may climb the ladder again on a fresh breach). The precise decision (ack
+    # clock + overdue grace + re-escalation cadence, per priority) is made by
+    # the pure should_escalate() below -- a task can breach its ack SLA before
+    # it is even past due, so we can't pre-filter on due date alone.
     filters: dict = {
-        "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
+        "status": {
+            "$in": [
+                "OPEN",
+                "IN_PROGRESS",
+                "ESCALATED",
+                "open",
+                "in_progress",
+                "escalated",
+            ]
+        },
     }
     if active_store:
         filters["store_id"] = active_store
