@@ -5995,6 +5995,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/recon/worklists",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # P4: tick a scheme/rebate credit note as physically received (clears it from
+    # the pending-scheme-CN worklist). ACCOUNTANT/ADMIN.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/recon/credit-notes/{credit_note_number}/mark-received",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders",
