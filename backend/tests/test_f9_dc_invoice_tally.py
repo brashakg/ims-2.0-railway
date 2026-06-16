@@ -524,8 +524,10 @@ class TestDcLogging:
         assert _log_dc(c, "DC-OTHER", [_grn_item("L1", 5)]).status_code == 201
 
     def test_legacy_grn_without_subtype_reads_as_standard(self):
-        # Acceptance #12: an existing GRN with no grn_subtype + a PO + invoice
-        # books as a STANDARD GRN (backward-compatible).
+        # Acceptance #12: a GRN with no grn_subtype + a PO + invoice books as a
+        # STANDARD GRN (backward-compatible). P1/S3: a STANDARD GRN now also
+        # requires the receipt document (attachment_file_id) -- the ops user
+        # attaches the vendor invoice/challan before creating it.
         db = _FakeDB()
         po = {
             "po_id": "PO1",
@@ -543,6 +545,7 @@ class TestDcLogging:
                 "vendor_invoice_no": "INV-1",
                 "vendor_invoice_date": "2026-05-01",
                 "items": [_grn_item("L1", 5)],
+                "attachment_file_id": "file-test-1",
             },
         )
         assert r.status_code == 201, r.text
