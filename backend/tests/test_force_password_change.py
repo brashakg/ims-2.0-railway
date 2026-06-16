@@ -246,3 +246,43 @@ def test_refresh_preserves_flag(client, patched_repo):
     assert refreshed.status_code == 200, refreshed.text
     new_token = refreshed.json()["access_token"]
     assert decode_token(new_token).get("must_change_password") is True
+
+
+# ============================================================================
+# BUG-027: default-password (admin123) force-change defense
+# ============================================================================
+
+
+def test_default_password_forces_change_in_prod(client, patched_repo, monkeypatch):
+    """A user still on the SHIPPED DEFAULT password (admin123) is forced to
+    change it on login in a non-test env, even with no stored flag, and the flag
+    is persisted so the gate survives a refresh."""
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    user = _make_user(password_hash=hash_password("admin123"))
+    assert "must_change_password" not in user
+    repo = patched_repo([user])
+
+    r = client.post(
+        "/api/v1/auth/login",
+        json={"username": "newstaff", "password": "admin123"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["must_change_password"] is True
+    assert decode_token(r.json()["access_token"]).get("must_change_password") is True
+    # Persisted on the doc (gate survives refresh / new worker).
+    assert repo.collection.docs[0].get("must_change_password") is True
+
+
+def test_default_password_not_forced_in_test_env(client, patched_repo, monkeypatch):
+    """The deterministic CI/e2e suite (ENVIRONMENT=test) logs in with the default
+    and must NOT be bounced to the change-password screen."""
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    user = _make_user(password_hash=hash_password("admin123"))
+    patched_repo([user])
+
+    r = client.post(
+        "/api/v1/auth/login",
+        json={"username": "newstaff", "password": "admin123"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["must_change_password"] is False
