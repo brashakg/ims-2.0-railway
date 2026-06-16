@@ -96,6 +96,21 @@ class _FakeStockRepo:
             return True
         return False
 
+    def claim_for_transfer(self, sid, transfer_id, to_store_id):
+        """Mirror the real atomic claim: flip AVAILABLE -> TRANSFERRED only if
+        the unit is still AVAILABLE. Returns False on a lost race."""
+        u = self.units.get(sid)
+        if not u or u.get("status") != "AVAILABLE":
+            return False
+        u.update(
+            {
+                "status": "TRANSFERRED",
+                "transfer_id": transfer_id,
+                "transfer_to_store_id": to_store_id,
+            }
+        )
+        return True
+
 
 # ===========================================================================
 # Fixtures + seed helpers (every doc the handlers read is seeded here)
