@@ -8,7 +8,7 @@
 // draft -- it legitimately arrives at receiving (GRN backfills it). Buyers who
 // want lines from different vendors just create one draft per vendor.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, Loader2, X as XIcon } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -56,6 +56,9 @@ export default function BuyDeskDraftPOModal({
   const [expectedDelivery, setExpectedDelivery] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  // Synchronous re-entry guard: `disabled={saving}` only takes effect on the next
+  // render, so a same-tick double-click could otherwise fire two POSTs.
+  const submittingRef = useRef(false);
   const [lines, setLines] = useState<DraftLine[]>(
     rows.map((r) => ({
       product_id: r.product_id,
@@ -106,6 +109,8 @@ export default function BuyDeskDraftPOModal({
       toast.error('Every line needs a quantity of at least 1');
       return;
     }
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     const storeId = user?.activeStoreId ?? 'default';
     setSaving(true);
     try {
@@ -128,6 +133,7 @@ export default function BuyDeskDraftPOModal({
       const msg = error instanceof Error ? error.message : 'Failed to create draft PO';
       toast.error(msg);
     } finally {
+      submittingRef.current = false;
       setSaving(false);
     }
   };

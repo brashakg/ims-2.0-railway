@@ -80,7 +80,17 @@ export default function BuyDeskPage() {
     setError(null);
     try {
       const resp = await buyDeskApi.getRows({ limit: 500 });
-      setRows(resp.rows || []);
+      const next = resp.rows || [];
+      setRows(next);
+      // Prune the selection to rows that still exist AND are still purchasable,
+      // so a refresh can't carry a vanished / catalog-regressed product into a
+      // draft PO (the gate would 422) or inflate the action-bar count.
+      setSelected((prev) => {
+        if (prev.size === 0) return prev;
+        return new Set(
+          next.filter((r) => r.purchasable && prev.has(r.product_id)).map((r) => r.product_id),
+        );
+      });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load the Buy Desk');
     } finally {
@@ -108,7 +118,11 @@ export default function BuyDeskPage() {
     [filtered],
   );
   const allSelected = selectablePids.length > 0 && selectablePids.every((p) => selected.has(p));
-  const selectedRows = useMemo(() => rows.filter((r) => selected.has(r.product_id)), [rows, selected]);
+  // Defense-in-depth: only ever hand still-purchasable rows to the draft-PO modal.
+  const selectedRows = useMemo(
+    () => rows.filter((r) => r.purchasable && selected.has(r.product_id)),
+    [rows, selected],
+  );
 
   const toggleRow = useCallback((pid: string) => {
     setSelected((prev) => {
