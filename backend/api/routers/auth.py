@@ -58,6 +58,12 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 
+# BUG-027: the password every seed account ships with (also public in the repo).
+# Used ONLY to force a change-on-login for any account still using it -- never to
+# authenticate. This is a backend-only constant (it is NOT sent to the client;
+# the frontend bundle must not contain it -- see BUG-132).
+_SEED_DEFAULT_PASSWORD = "admin123"
+
 
 # ============================================================================
 # RATE LIMITER — Brute-force protection for login
@@ -590,6 +596,29 @@ async def login(request: LoginRequest, req: Request = None):
     # Threaded through the token AND the login response so the frontend can gate
     # the app and it survives a browser refresh (via /auth/me + /refresh).
     must_change_password = bool(user.get("must_change_password", False))
+
+    # BUG-027 defense-in-depth: any account that authenticated with the SHIPPED
+    # DEFAULT password (seed accounts: admin/admin123 etc.) is forced to change
+    # it, regardless of the stored flag. This catches pre-existing prod seed docs
+    # created before must_change_password was seeded. Persist so the gate (the
+    # frontend ForcePasswordChange screen) survives refresh; never blocks the
+    # token issue itself. Cleared automatically once the user picks a new password.
+    # (Skipped under ENVIRONMENT=test so the deterministic CI/e2e suite, which
+    # logs in with the default, isn't bounced to the change-password screen.
+    # Prod does not set ENVIRONMENT=test, so the control is live in production.)
+    if (
+        request.password == _SEED_DEFAULT_PASSWORD
+        and os.getenv("ENVIRONMENT", "").lower() != "test"
+    ):
+        must_change_password = True
+        if user_repo and not user.get("must_change_password"):
+            try:
+                user_repo.collection.update_one(
+                    {"username": user.get("username")},
+                    {"$set": {"must_change_password": True}},
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not persist must_change_password: %s", e)
 
     # Per-user module access -- a DENY-ONLY override carried in the token so
     # every store-scoped worker resolves the same restrictions from the JWT

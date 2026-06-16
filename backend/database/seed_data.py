@@ -316,7 +316,13 @@ def get_all_seed_data():
     accounts only. Demo products and customers are intentionally NOT
     seeded: operators enter real catalog + customer data via the app, so
     a fresh install never shows fake/sample records."""
+    # BUG-027: every seed account ships with the SAME default password
+    # (admin123, also public in the repo). Force a password change on first
+    # login so a fresh install is never left with publicly-known credentials.
+    # (Pre-existing prod docs that predate this flag are caught by the
+    # login-time default-password defense in auth.py.)
+    users = [{**u, "must_change_password": True} for u in USERS]
     return {
         "stores": STORES,
-        "users": USERS,
+        "users": users,
     }

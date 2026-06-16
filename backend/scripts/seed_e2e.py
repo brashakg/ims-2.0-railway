@@ -130,6 +130,10 @@ def seed(db) -> dict:
             # Force re-seed users so password_hash matches admin123 deterministically.
             collection.delete_many({})
             if documents:
+                # The E2E suite logs in with the default password; clear the
+                # BUG-027 force-change flag (seeded True for real installs) so the
+                # deterministic suite isn't bounced to the change-password screen.
+                documents = [{**d, "must_change_password": False} for d in documents]
                 collection.insert_many(documents)
             results[coll_name] = "RESEEDED (%d)" % len(documents)
             continue
