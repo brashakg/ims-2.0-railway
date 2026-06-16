@@ -135,6 +135,12 @@ class POItemCreate(BaseModel):
     # poison the subtotal/GST math (subtotal = sum(quantity * unit_price)).
     quantity: int = Field(..., ge=1)
     unit_price: float = Field(..., ge=0)
+    # Per-line GST identity. All optional: when gst_rate is None the server
+    # resolves it from hsn/category (falling back to the product's own
+    # hsn/category), so a PO never silently bills the old flat 18%.
+    hsn: Optional[str] = None
+    gst_rate: Optional[float] = Field(default=None, ge=0, le=100)
+    category: Optional[str] = None
 
 
 class POCreate(BaseModel):
@@ -1098,10 +1104,48 @@ async def create_po(
                 },
             )
 
-    # Calculate totals
-    subtotal = sum(item.quantity * item.unit_price for item in po.items)
-    tax = subtotal * 0.18  # Assuming 18% GST
-    total = subtotal + tax
+    # Calculate totals with PER-LINE, server-resolved GST (was a flat 18% that
+    # both over-taxed the PO and -- because lines stored no tax_rate -- made the
+    # downstream invoice draft compute 0% tax). Each stored line carries its
+    # resolved tax_rate + hsn + ordered/received residual fields the receiving
+    # cockpit and reconciliation console read.
+    from ..services.gst_rates import resolve_gst_rate
+
+    subtotal = 0.0
+    tax = 0.0
+    stored_items = []
+    for item in po.items:
+        line_total = item.quantity * item.unit_price
+        prod = (
+            product_repo.find_by_id(item.product_id)
+            if (product_repo is not None and item.gst_rate is None)
+            else None
+        ) or {}
+        rate = (
+            item.gst_rate
+            if item.gst_rate is not None
+            else resolve_gst_rate(
+                hsn_code=item.hsn or prod.get("hsn_code"),
+                category=item.category or prod.get("category"),
+            )
+        )
+        line_tax = round(line_total * (rate / 100.0), 2)
+        subtotal += line_total
+        tax += line_tax
+        stored_items.append(
+            {
+                **item.model_dump(),
+                "tax_rate": rate,
+                "hsn": item.hsn or prod.get("hsn_code"),
+                "line_tax": line_tax,
+                "ordered_qty": item.quantity,
+                "received_qty": 0,
+                "line_status": "OPEN",
+            }
+        )
+    subtotal = round(subtotal, 2)
+    tax = round(tax, 2)
+    total = round(subtotal + tax, 2)
 
     if po_repo is not None:
         po_repo.create(
@@ -1115,7 +1159,7 @@ async def create_po(
                     else None
                 ),
                 "delivery_store_id": po.delivery_store_id,
-                "items": [item.model_dump() for item in po.items],
+                "items": stored_items,
                 "subtotal": subtotal,
                 "tax_amount": tax,
                 "total_amount": total,
@@ -1873,13 +1917,31 @@ async def accept_grn(
         try:
             po = po_repo.find_by_id(po_id)
             received_by_product = _cumulative_received_by_product(grn_repo, po_id)
-            po_status = compute_po_receipt_state(
-                po.get("items") if po else [], received_by_product
-            )
+            po_items = (po.get("items") if po else []) or []
+            po_status = compute_po_receipt_state(po_items, received_by_product)
+            # Map the cumulative per-product received qty down onto each PO line
+            # + derive the line residual status (drives the receiving cockpit's
+            # "open POs" / "pending not-received" panels).
+            updated_items = []
+            for it in po_items:
+                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
+                recv = received_by_product.get(it.get("product_id"), 0)
+                updated_items.append(
+                    {
+                        **it,
+                        "received_qty": recv,
+                        "line_status": (
+                            "RECEIVED"
+                            if ordered and recv >= ordered
+                            else ("PARTIAL" if recv > 0 else "OPEN")
+                        ),
+                    }
+                )
             po_repo.update(
                 po_id,
                 {
                     "status": po_status,
+                    "items": updated_items,
                     "received_qty_by_product": received_by_product,
                     "total_received_qty": sum(received_by_product.values()),
                     "last_received_at": datetime.now().isoformat(),
