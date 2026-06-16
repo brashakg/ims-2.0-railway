@@ -551,26 +551,28 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "always written regardless.",
         env="PM_MIRROR_ENABLED",
     ),
-    # Hub Phase 2 PO catalog gates. DARK by default so a fresh deploy keeps the
-    # current manual Create-PO flow (free-text product rows) working byte-for-
-    # byte. When ON, create_po refuses a PO line whose product_id is not on the
-    # `products` spine (422 UNKNOWN_PRODUCT) and send_po refuses to SEND until
-    # every line is catalog-complete except cost (400 PO_LINES_INCOMPLETE). Flip
-    # this ON once the Buy Desk spine-product picker ships, so POs reference real
-    # catalogued products. The GRN ghost-stock gate is ALWAYS on (independent of
-    # this flag) -- an uncatalogued received line is held, never minted as ghost.
+    # Hub Phase 2 PO catalog gates. NOW ON by default: the Create-PO form ships a
+    # spine-product picker (every line carries a real catalogued product_id), so
+    # POs can no longer carry a fabricated/placeholder line. When ON, create_po
+    # refuses a PO line whose product_id is not on the `products` spine (422
+    # UNKNOWN_PRODUCT) and send_po refuses to SEND until every line is catalog-
+    # complete except cost (400 PO_LINES_INCOMPLETE). Set to False (global/entity/
+    # store scope, or PM_PO_CATALOG_GATE=) to fall back to the legacy free-text
+    # flow. The GRN ghost-stock gate is ALWAYS on (independent of this flag) -- an
+    # uncatalogued received line is held, never minted as ghost.
     _spec(
         key="pm.po_catalog_gate",
         type="bool",
-        default=False,
+        default=True,
         scopes=("global", "entity", "store"),
         write_roles=("SUPERADMIN", "ADMIN"),
         group="Product Master",
         label="PO catalog gate (require catalogued products on POs)",
-        help="When on, a purchase order can only be raised/sent against products "
-        "already on the catalog spine (needs the Buy Desk product picker). Off by "
-        "default so the existing free-text Create-PO form keeps working; receiving "
-        "still holds uncatalogued lines for Catalog-now regardless.",
+        help="When on (default), a purchase order can only be raised/sent against "
+        "products already on the catalog spine -- the Create-PO form's product "
+        "picker enforces this. Turn off only to fall back to the legacy free-text "
+        "Create-PO form; receiving still holds uncatalogued lines for Catalog-now "
+        "regardless.",
         env="PM_PO_CATALOG_GATE",
     ),
     # Hub Phase 5: Shopify push-locks (owner DECISION C). A JSON allow-block list
