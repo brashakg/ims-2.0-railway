@@ -226,9 +226,9 @@ def _seed_customers():
     today = datetime.now().date()
     return _FakeColl(
         [
-            {"customer_id": "C1", "name": "Alpha", "mobile": "9000000001", "store_id": "BV-PUN-01", "customer_type": "B2C", "dob": today.replace(year=1990).isoformat()},
-            {"customer_id": "C2", "name": "Beta", "mobile": "9000000002", "store_id": "BV-PUN-01", "customer_type": "B2B", "dob": "1985-01-01", "marketing_consent": False},
-            {"customer_id": "C3", "name": "Gamma", "mobile": "9000000003", "store_id": "BV-PUN-01", "customer_type": "B2C"},
+            {"customer_id": "C1", "name": "Alpha", "mobile": "9000000001", "home_store_id": "BV-PUN-01", "customer_type": "B2C", "dob": today.replace(year=1990).isoformat()},
+            {"customer_id": "C2", "name": "Beta", "mobile": "9000000002", "home_store_id": "BV-PUN-01", "customer_type": "B2B", "dob": "1985-01-01", "marketing_consent": False},
+            {"customer_id": "C3", "name": "Gamma", "mobile": "9000000003", "home_store_id": "BV-PUN-01", "customer_type": "B2C"},
         ]
     )
 
@@ -256,7 +256,7 @@ def test_segment_birthday_matches_today(monkeypatch):
     customers = _FakeColl(
         [
             {"customer_id": "C1", "name": "Alpha", "mobile": "9000000001",
-             "store_id": "BV-PUN-01", "customer_type": "B2C",
+             "home_store_id": "BV-PUN-01", "customer_type": "B2C",
              "dob": frozen.date().replace(year=1990).isoformat()},
         ]
     )
