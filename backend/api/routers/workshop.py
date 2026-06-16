@@ -34,6 +34,20 @@ WORKSHOP_ROLES = (
     "ADMIN",
 )
 
+# BUG-092: the sales-confirmation gate (fitting_details.confirmed_by_sales) and
+# fitting-detail edits are a SALES act -- WORKSHOP_STAFF must not self-confirm the
+# very gate that authorises their own work. POS captures these at sale time, so
+# the allowed set is the sales-facing + manager roles (NOT workshop staff).
+# SUPERADMIN passes automatically via require_roles.
+_FITTING_ROLES = (
+    "SALES_STAFF",
+    "SALES_CASHIER",
+    "CASHIER",
+    "STORE_MANAGER",
+    "AREA_MANAGER",
+    "ADMIN",
+)
+
 # Forward-only lens-order lifecycle for a workshop job. The lens is ordered
 # from the lab, received into the store, then mounted into the frame. Each
 # transition stamps a timestamp field (see LENS_STATUS_TIMESTAMP_FIELD).
@@ -1013,7 +1027,7 @@ async def create_job(
 async def update_fitting_details(
     job_id: str,
     payload: FittingDetailsUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_FITTING_ROLES)),
 ):
     """
     Phase 6.8 — attach / update the lens-fitting measurements the sales
@@ -1110,7 +1124,7 @@ async def update_job_status(
     body: Optional[StatusBody] = Body(None),
     status_q: Optional[str] = Query(None, alias="status"),
     notes_q: Optional[str] = Query(None, alias="notes"),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*WORKSHOP_ROLES)),
 ):
     """Update job status (generic endpoint) with state machine validation.
 
@@ -1319,7 +1333,7 @@ async def assign_job(
 
 
 @router.post("/jobs/{job_id}/start")
-async def start_job(job_id: str, current_user: dict = Depends(get_current_user)):
+async def start_job(job_id: str, current_user: dict = Depends(require_roles(*WORKSHOP_ROLES))):
     """Start working on a job. Requires sales confirmation (fitting_details.confirmed_by_sales=True)."""
     repo = get_workshop_repository()
 
@@ -1349,7 +1363,7 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
 
 
 @router.post("/jobs/{job_id}/complete")
-async def complete_job(job_id: str, current_user: dict = Depends(get_current_user)):
+async def complete_job(job_id: str, current_user: dict = Depends(require_roles(*WORKSHOP_ROLES))):
     """Mark job as completed (pending QC). Requires sales confirmation (fitting_details.confirmed_by_sales=True)."""
     repo = get_workshop_repository()
 
@@ -1564,7 +1578,7 @@ async def rework_job(
     remake_reason_code: Optional[str] = Query(None),
     spoilage_category: Optional[str] = Query(None),
     notes: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*WORKSHOP_ROLES)),
 ):
     """Send QC-failed job back for rework (QC_FAILED → IN_PROGRESS).
 
@@ -2441,7 +2455,7 @@ async def patch_job_vendor(
 async def post_admin_vendor_status(
     job_id: str,
     payload: WorkshopVendorStatusBody,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*WORKSHOP_ROLES)),
 ):
     """IMS user logs a vendor status update (e.g. "lab called, says
     DISPATCHED today"). Logged with source='ims_user' so the audit trail
