@@ -233,12 +233,15 @@ class DatabaseConnection:
         _idx("products", "product_id", unique=True, background=True)
         _idx("products", "sku", unique=True, sparse=True, background=True)
         _idx("products", "barcode", unique=True, sparse=True, background=True)
-        # Hub Phase 1: brand+model+colour identity. REPORT-ONLY (non-unique) for
-        # now -- it backs the duplicate-guard pre-check + lets us count residual
-        # identity dups before the unique flip (deferred to Phase 6, after the
-        # data-hygiene backfill re-SKUs the known dup rows). sparse: legacy rows
-        # without an identity_key (e.g. SERVICES) are exempt.
-        _idx("products", "identity_key", sparse=True, background=True)
+        # Hub Phase 6: brand+model+colour(+size) identity is now a UNIQUE backstop
+        # for the Phase-1 duplicate guard -- the race-safe arm behind the
+        # check-then-write pre-check (a concurrent create that slips the pre-check
+        # hits this index -> DuplicateKeyError -> create_product re-queries -> 409).
+        # Flipped to unique now that born-DRAFT + size-in-identity + the dedupe-prep
+        # data hygiene shipped (a clean/fresh slate has no residual identity dups).
+        # sparse: products without an identity_key (e.g. SERVICES) are exempt; _idx
+        # is fail-soft so any residual dup can't abort startup.
+        _idx("products", "identity_key", unique=True, sparse=True, background=True)
         _idx("products", "is_active", background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
         # Prefix-search indexes for the searchable fields (brand, model, sku, variant).
