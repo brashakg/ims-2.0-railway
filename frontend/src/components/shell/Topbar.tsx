@@ -145,7 +145,9 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
           <button
             type="button"
             className="store-pill"
-            style={{ height: 42, padding: '0 20px', borderRadius: 12, minWidth: 260, justifyContent: 'center' }}
+            /* width is responsive via .store-pill in index.css (wider on
+               tablet/desktop); keep only the non-width tweaks inline */
+            style={{ height: 42, padding: '0 20px', borderRadius: 12, justifyContent: 'center' }}
             onClick={() => setStoreOpen((o) => !o)}
             aria-haspopup="listbox"
             aria-expanded={storeOpen}
