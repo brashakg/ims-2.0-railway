@@ -1171,11 +1171,19 @@ async def send_po(
         # receiving flow backfills it from this PO), so a product that is DRAFT
         # ONLY because cost is unknown is still sendable. Any OTHER gap (missing
         # category attribute, mrp/offer, hsn/gst) blocks the send. Fail-soft when
-        # no product repo. Gated behind pm.po_catalog_gate (DARK by default) so
-        # the existing free-text Create-PO/send flow keeps working until the Buy
-        # Desk picker ships.
+        # no product repo.
+        #
+        # This gate governs ONLY manually-entered PO lines (the Create-PO form's
+        # spine-product picker). Auto-generated POs carry a `source`:
+        # cl_po lens replenishment ("cl_po_generator") and demand-forecast
+        # ("demand_forecast") source their lines from system data (lens_catalog
+        # needs / sales history) whose ids are NOT on the products spine, and were
+        # never gated before pm.po_catalog_gate defaulted ON. We therefore skip
+        # the gate for any PO bearing a `source`, mirroring the create-side gate
+        # which only fires inside the manual create_po endpoint those flows bypass.
+        # Without this, every cl_po/forecast DRAFT would 400 PO_LINES_INCOMPLETE.
         product_repo = get_product_repository()
-        if product_repo is not None and _po_catalog_gate_on():
+        if product_repo is not None and _po_catalog_gate_on() and not po.get("source"):
             blocked = []
             for it in po.get("items", []) or []:
                 pid = it.get("product_id")

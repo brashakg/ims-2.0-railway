@@ -44,6 +44,7 @@ interface ProductHit {
   name?: string;
   brand?: string;
   cost_price?: number;
+  catalog_status?: string;
 }
 
 function hitToPicked(hit: ProductHit): PickedProduct {
@@ -181,6 +182,14 @@ function ProductSearchSelect({
                   <div className="text-xs text-gray-500 flex items-center gap-2">
                     <span>{p.sku}</span>
                     {p.costPrice > 0 && <span>{'₹'}{p.costPrice.toLocaleString()} cost</span>}
+                    {hit.catalog_status && hit.catalog_status !== 'ACTIVE' && (
+                      <span
+                        className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium"
+                        title="Draft product -- can be added to a PO, but the PO can't be sent until cataloguing is complete"
+                      >
+                        Draft
+                      </span>
+                    )}
                   </div>
                 </button>
               );

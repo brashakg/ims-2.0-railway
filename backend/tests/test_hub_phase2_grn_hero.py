@@ -248,6 +248,30 @@ def test_send_po_allows_complete_except_cost(monkeypatch):
     assert po_repo.pos["PO-1"]["status"] == "SENT"
 
 
+def test_send_po_skips_gate_for_auto_generated_source(monkeypatch):
+    # Regression (PR #675): cl_po lens-replenishment + demand-forecast POs are
+    # written directly via po_repo.create() with a `source`, bypassing the
+    # create-side gate. Their lines carry lens_catalog / forecast ids that are NOT
+    # on the products spine. With pm.po_catalog_gate ON (now the default), the
+    # SEND gate must SKIP any source-bearing PO -- else the entire auto-
+    # replenishment send path 400s PO_LINES_INCOMPLETE on a product the gate can
+    # never find. Only manually-picked POs (no source) are gated.
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: True)  # gate ON
+    repo = _PORepo()
+    repo.pos["PO-CL"] = {
+        "po_id": "PO-CL",
+        "status": "DRAFT",
+        "source": "cl_po_generator",
+        "items": [{"product_id": "LENS-LINE-1", "quantity": 1, "unit_price": 50.0}],
+    }
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: repo)
+    # product repo is PRESENT but has no matching product -> would 400 if gated.
+    monkeypatch.setattr(vd, "get_product_repository", lambda: _ProductRepo([]))
+    out = _run(vd.send_po("PO-CL", _ADMIN))
+    assert out["po_id"] == "PO-CL"
+    assert repo.pos["PO-CL"]["status"] == "SENT"
+
+
 # ===========================================================================
 # 3. accept_grn: ghost-stock gate + cost-at-receiving promote
 # ===========================================================================
