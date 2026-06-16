@@ -186,6 +186,10 @@ export function JarvisPage() {
   } | null>(null);
   const [sentinelLoading, setSentinelLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll only when the user is already at the bottom of the chat, so
+  // reading older messages (scrolled up) is never yanked down on a new message.
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const autoFollowRef = useRef(true);
 
   // STRICT ACCESS CONTROL — SUPERADMIN ONLY. The guard (`if (!isSuperAdmin) return null`)
   // is intentionally NOT here — it lives below, AFTER every hook is declared. React
@@ -203,9 +207,13 @@ export function JarvisPage() {
   const isStrictSuperAdmin =
     userRoles.includes('SUPERADMIN') && user?.activeRole !== 'ADMIN';
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom -- ONLY when the user is already near the bottom
+  // (autoFollowRef), and with block:'nearest' so the scroll stays inside the
+  // chat panel and never yanks the whole page down.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (autoFollowRef.current) {
+      messagesEndRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
   }, [messages]);
 
   // Load the available LLM models for the chat selector (SUPERADMIN-only
@@ -539,9 +547,11 @@ export function JarvisPage() {
     ).trim();
     // Stuff the chat input and immediately send by invoking handleSend's path
     setInputValue(prompt);
-    // Scroll the chat into view if it's offscreen
+    // User-initiated (clicked a quick query): re-engage follow + scroll within
+    // the chat panel.
     setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      autoFollowRef.current = true;
+      messagesEndRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }, 100);
     // Trigger send on next tick so React has applied the input update
     setTimeout(() => {
@@ -1099,7 +1109,14 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
         {/* Chat pane */}
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {/* Messages */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div
+            ref={chatScrollRef}
+            onScroll={() => {
+              const el = chatScrollRef.current;
+              if (el) autoFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            }}
+            style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}
+          >
             {messages.map((message) => (
               <div
                 key={message.id}
