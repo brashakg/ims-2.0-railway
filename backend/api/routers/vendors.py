@@ -6,8 +6,11 @@ Real database queries for vendor and purchase order management
 
 import logging
 import re
+import io
+import hashlib
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional
 from datetime import datetime
@@ -22,9 +25,15 @@ from ..dependencies import (
     get_audit_repository,
     get_product_repository,
     validate_store_access,
+    can_access_store_scoped,
 )
 from ..services import ap_engine
 from ..services import product_master as _pm
+from ..services.file_store import (
+    get_file_store,
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_SIZE_BYTES,
+)
 
 
 def _po_catalog_gate_on() -> bool:
@@ -228,6 +237,17 @@ class GRNCreate(BaseModel):
     dc_date: Optional[str] = None
     # F9: the vendor a no-PO DC is for (a STANDARD GRN derives this from the PO).
     vendor_id: Optional[str] = None
+    # F-S3: mandatory goods-receipt document. The ops user (Superadmin/Admin/
+    # Store Manager) physically receiving the stock MUST attach the vendor
+    # invoice/challan image or PDF BEFORE the GRN can be created -- so the
+    # accountant always has the source document to reconcile against. The file
+    # is uploaded first via POST /vendors/grn/upload-doc, which returns a
+    # file_id that is then passed here. STANDARD GRNs require it; a
+    # DELIVERY_CHALLAN is exempt at receipt time (its tax invoice arrives later
+    # and is attached at reconciliation -- see P3). Gate enforced in create_grn.
+    attachment_file_id: Optional[str] = None
+    attachment_filename: Optional[str] = None
+    attachment_mime: Optional[str] = None
 
     @field_validator("grn_subtype", mode="before")
     @classmethod
@@ -1490,6 +1510,119 @@ async def list_grns(
     return {"grns": grns or [], "total": len(grns) if grns else 0}
 
 
+@router.post("/grn/upload-doc")
+async def upload_grn_doc(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """F-S3: upload the goods-receipt document (vendor invoice/challan image or
+    PDF) and get back a file_id to attach to the GRN.
+
+    The ops user (Superadmin/Admin/Store Manager) uploads the receipt FIRST,
+    then submits the GRN with the returned file_id. create_grn rejects a
+    STANDARD GRN that has no attachment_file_id (ATTACHMENT_REQUIRED), so this
+    is the only way to clear the gate. Persists the bytes durably in the
+    GridFS-backed file store (Railway disk is ephemeral) -- mirrors the
+    expenses upload-bill pattern: size + MIME validation, then store.put(...).
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Read + validate before persisting anything.
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
+        )
+    mime = (file.content_type or "").lower()
+    if mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File type '{mime}' not allowed. Accepted: "
+                f"{sorted(ALLOWED_MIME_TYPES)}"
+            ),
+        )
+
+    store = get_file_store()
+    if store is None:
+        # Storage unavailable: fail LOUD with 503 so the UI keeps the user on
+        # the upload step rather than letting them proceed paperwork-less.
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    sha256 = hashlib.sha256(content).hexdigest()
+    file_id = store.put(
+        content=content,
+        filename=file.filename,
+        mime_type=mime,
+        metadata={
+            "kind": "grn_document",
+            "store_id": current_user.get("active_store_id"),
+            "uploaded_by": current_user.get("user_id"),
+            "sha256": sha256,
+        },
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "mime": mime,
+        "size": len(content),
+        "sha256": sha256,
+        "persisted": True,
+    }
+
+
+@router.get("/grn/{grn_id}/document")
+async def download_grn_doc(
+    grn_id: str,
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """F-S3: stream the goods-receipt document attached to a GRN.
+
+    The accountant reconciliation console links here to view the source invoice/
+    challan the ops user uploaded at receipt. Store-scoped: a GRN outside the
+    caller's store scope reads as 404 (no cross-store document leak)."""
+    grn_repo = get_grn_repository()
+    if grn_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    grn = grn_repo.find_one({"grn_id": grn_id})
+    if grn is None:
+        raise HTTPException(status_code=404, detail="GRN not found")
+
+    # Store-scope (SEC #2 object-level pattern): cross-store roles
+    # (SUPERADMIN/ADMIN) may read any GRN's document; a store-level caller can
+    # only read GRNs stamped with one of their stores. A mismatch reads as 404
+    # (not 403) so a document's existence in another store isn't disclosed.
+    if not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+
+    file_id = grn.get("attachment_file_id")
+    if not file_id:
+        raise HTTPException(status_code=404, detail="No document attached to this GRN")
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    rec = store.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Document file no longer available")
+
+    file_content, filename, file_mime = rec
+    return StreamingResponse(
+        io.BytesIO(file_content),
+        media_type=file_mime,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 @router.post("/grn", status_code=201)
 async def create_grn(
     grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
@@ -1502,6 +1635,27 @@ async def create_grn(
     store_id = current_user.get("active_store_id")
     grn_number = generate_grn_number(store_id)
     is_dc = grn.grn_subtype == GRN_SUBTYPE_DC
+
+    # F-S3: mandatory goods-receipt document. The ops user physically receiving a
+    # STANDARD shipment MUST attach the vendor invoice/challan (image or PDF)
+    # before the GRN is created -- so the accountant always has the source doc to
+    # reconcile against and there is no "received with no paperwork" hole. The
+    # file is uploaded first via POST /vendors/grn/upload-doc (returns file_id),
+    # which already validated size + MIME, so here we only assert it is present.
+    # A DELIVERY_CHALLAN is exempt at receipt (its tax invoice arrives later and
+    # is attached at reconciliation). Fail LOUD: a 400 with a stable code the UI
+    # keys on to keep the user on the upload step.
+    if not is_dc and not (grn.attachment_file_id and str(grn.attachment_file_id).strip()):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ATTACHMENT_REQUIRED",
+                "message": (
+                    "Attach the vendor invoice or challan (image or PDF) before "
+                    "creating the goods receipt."
+                ),
+            },
+        )
 
     # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
     # no pre-logged PO) -- only validate when one was supplied.
@@ -1616,6 +1770,12 @@ async def create_grn(
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
         "vendor_invoice_date": grn.vendor_invoice_date,
+        # F-S3: the receipt document the ops user attached (file_store id +
+        # metadata). The accountant reconciliation console reads these to render
+        # the "view document" link. None for a DC (attached later).
+        "attachment_file_id": grn.attachment_file_id,
+        "attachment_filename": grn.attachment_filename,
+        "attachment_mime": grn.attachment_mime,
         "items": item_docs,
         "total_received": total_received,
         "total_accepted": total_accepted,

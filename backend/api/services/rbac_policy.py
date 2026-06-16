@@ -5873,6 +5873,22 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/goods-receipt/cockpit",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # P1/S3: the ops user uploads the mandatory goods-receipt document (vendor
+    # invoice/challan) here BEFORE creating the GRN. Same gate as creating the
+    # GRN itself -- the receiving roles.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/grn/upload-doc",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    # P1/S3: stream the attached goods-receipt document (accountant recon links
+    # here). Store-scoped object access inside the handler; the role gate is the
+    # receiving + accounting roles.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/grn/{grn_id}/document",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book is an accounting action -> ACCOUNTANT/ADMIN; reads
     # are AUTHENTICATED. (SUPERADMIN auto-passes via require_roles.)
