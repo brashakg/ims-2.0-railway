@@ -2185,6 +2185,10 @@ async def get_gst_reconciliation(
 ):
     """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
     You file the actual returns through Tally; this is the cross-check."""
+    # Org-wide, entity-grouped GST reconciliation is a filing/accounting view --
+    # finance-admin only (owner decision 2026-06-16), so a single-store
+    # STORE_MANAGER/AREA_MANAGER cannot read every entity's GST position.
+    _require_finance_admin(current_user)
     db = _get_db()
     now = now_ist()
     m = month or now.month
@@ -2275,6 +2279,10 @@ async def get_tally_sales_jv(
     current_user: dict = Depends(get_current_user),
 ):
     """Tally sales-voucher XML for a period + scope, ready to import into Tally."""
+    # Org-wide sales-voucher export is an accounting function -- finance-admin
+    # only (owner decision 2026-06-16); a store-level role can't export all
+    # stores' sales JV. Mirror of the tender-receipt-jv sibling gate.
+    _require_finance_admin(current_user)
     db = _get_db()
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes

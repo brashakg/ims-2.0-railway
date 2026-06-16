@@ -1704,7 +1704,9 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/gst/reconciliation",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Org-wide, entity-grouped GST recon = finance-admin only (owner decision
+        # 2026-06-16; handler enforces _require_finance_admin).
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     {
         "method": "GET",
@@ -2602,15 +2604,17 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/tally/sales-jv",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Org-wide sales-voucher export = finance-admin only (owner decision
+        # 2026-06-16; handler enforces _require_finance_admin).
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     # E5 wiring: tender-routed Receipt voucher, sibling of the sales-JV export
-    # (same finance role set). DARK by default -- the handler additionally 403s
-    # until policy tally.tender_receipt_voucher is enabled.
+    # (same finance role set -- finance-admin only). DARK by default -- the
+    # handler additionally 403s until policy tally.tender_receipt_voucher is on.
     {
         "method": "GET",
         "path": "/api/v1/finance/tally/tender-receipt-jv",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     # --- F17/#25 maker-checker journal entries (mounted on /finance behind the
     # finance role gate; each handler narrows further inline -- create/submit to
