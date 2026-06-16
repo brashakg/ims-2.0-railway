@@ -133,15 +133,19 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
       <div className="spacer" />
 
       {multiStore && (
-        /* In-flow flex child (like the role pill). It was absolutely centered
-           (left:50%) inside a non-positioned .topbar, so it anchored to the
-           page and DOM-later siblings (search, role pill, bell) painted over
-           it -- invisible on mobile, partially covered on desktop. */
+        /* Centered store pill. A leading .spacer (before this block) + a
+           trailing .spacer (after it) flank the pill so it sits in the centre
+           of the bar IN FLOW -- not absolutely positioned. The old approach
+           (position:absolute; left:50%) anchored to the page and was painted
+           over by DOM-later siblings (search, role pill, bell) -- invisible on
+           mobile, partially covered on desktop. Flow + flanking spacers can't
+           be overpainted and reserve their own space. */
+        <>
         <div ref={storeRef} style={{ position: 'relative', flexShrink: 0 }}>
           <button
             type="button"
             className="store-pill"
-            style={{ height: 42, padding: '0 16px', borderRadius: 12 }}
+            style={{ height: 42, padding: '0 20px', borderRadius: 12, minWidth: 260, justifyContent: 'center' }}
             onClick={() => setStoreOpen((o) => !o)}
             aria-haspopup="listbox"
             aria-expanded={storeOpen}
@@ -206,6 +210,10 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             </div>
           )}
         </div>
+        {/* Trailing flex spacer -> the leading + trailing spacers centre the
+            pill in the bar while the right-side controls stay flush right. */}
+        <div className="spacer" />
+        </>
       )}
 
       <button
