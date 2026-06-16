@@ -440,7 +440,10 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     mrp: str(product.mrp),
     offerPrice: str(product.offer_price),
     costPrice: str(product.cost_price),
-    discountCategory: str(product.discount_category) || 'MASS',
+    // Clone inherits the source tier when it has one; a tier-less (legacy)
+    // source maps to '' so the operator must consciously pick a tier (matches
+    // the require-explicit-tier rule on the create forms).
+    discountCategory: str(product.discount_category) || '',
     // Online flags are NOT cloned: a new SKU shouldn't inherit Shopify sync.
     syncToShopify: false,
     shopifyTags: [],
@@ -560,11 +563,13 @@ export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFo
     hsnCode,
     gstRate: gstRate || '18',
     weight: '',
-    // No price signal from Autopilot -- operator fills these in.
+    // No price signal from Autopilot -- operator fills these in. Likewise the
+    // discount tier is left blank so the operator must consciously pick it
+    // (Autopilot has no tier signal; a silent MASS could under-cap a luxury SKU).
     mrp: '',
     offerPrice: '',
     costPrice: '',
-    discountCategory: 'MASS',
+    discountCategory: '',
     // A new SKU shouldn't auto-sync online.
     syncToShopify: false,
     shopifyTags: [],

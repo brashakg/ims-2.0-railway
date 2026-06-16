@@ -112,7 +112,8 @@ describe('autopilotCandidateToFormValues', () => {
     expect(v.offerPrice).toBe('');
     expect(v.costPrice).toBe('');
     expect(v.syncToShopify).toBe(false);
-    expect(v.discountCategory).toBe('MASS');
+    // Tier left blank so the operator must consciously pick it (no silent MASS).
+    expect(v.discountCategory).toBe('');
   });
 
   it('defaults gstRate to 18 when category is unknown and no suggestion', () => {

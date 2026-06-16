@@ -217,11 +217,14 @@ export function QuickAddPage() {
       const newErrors = validateProductForm(values);
       setErrors(newErrors);
       if (Object.keys(newErrors).length > 0) {
-        // Make sure the section holding the first error is open.
-        if (newErrors.mrp || newErrors.offer_price) {
+        // Make sure the section holding the first error is open. The discount
+        // tier lives in the Pricing section, so a discount_category error must
+        // open Pricing (not Identity) or the inline error would stay hidden.
+        const pricingKeys = new Set(['mrp', 'offer_price', 'discount_category']);
+        if (Object.keys(newErrors).some((k) => pricingKeys.has(k))) {
           setOpenSections((s) => ({ ...s, pricing: true }));
         }
-        if (newErrors.category || Object.keys(newErrors).some((k) => k !== 'mrp' && k !== 'offer_price')) {
+        if (newErrors.category || Object.keys(newErrors).some((k) => !pricingKeys.has(k))) {
           setOpenSections((s) => ({ ...s, identity: true }));
         }
         toast.error('Please fix the highlighted fields.');
@@ -1097,7 +1100,7 @@ export function QuickAddPage() {
                 value={offerPrice ? `₹${offerPrice}` : mrp ? `₹${mrp} (= MRP)` : '—'}
               />
               <ReviewRow label="HSN / GST" value={selectedCategory ? `${hsnCode || '—'} · ${gstRate}%` : '—'} />
-              <ReviewRow label="Discount band" value={discountCategory} />
+              <ReviewRow label="Discount band" value={discountCategory || '—'} />
               {syncToShopify && <ReviewRow label="Shopify" value="Will sync" />}
             </dl>
 
