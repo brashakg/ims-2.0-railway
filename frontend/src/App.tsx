@@ -98,6 +98,7 @@ const ActivityLogPage = lazy(() => import('./pages/admin/ActivityLogPage'));
 // ?mode=guided renders the step-by-step wizard (Guided Add).
 const ProductAddShell = lazy(() => import('./pages/catalog/ProductAddShell'));
 const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
+const BuyDeskPage = lazy(() => import('./pages/catalog/BuyDeskPage'));
 const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
@@ -1068,6 +1069,25 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
                         <ProductAddShell />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Buy Desk — the one-screen catalog -> purchase landing */}
+                  <Route
+                    path="catalog/buy-desk"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={[
+                          'SUPERADMIN',
+                          'ADMIN',
+                          'CATALOG_MANAGER',
+                          'AREA_MANAGER',
+                          'STORE_MANAGER',
+                          'ACCOUNTANT',
+                        ]}
+                      >
+                        <BuyDeskPage />
                       </ProtectedRoute>
                     }
                   />
