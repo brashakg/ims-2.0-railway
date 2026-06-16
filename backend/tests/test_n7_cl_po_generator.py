@@ -196,6 +196,22 @@ def env(db, monkeypatch):
     monkeypatch.setattr(cl_po, "get_purchase_order_repository", lambda: po_repo)
     monkeypatch.setattr(cl_po, "get_vendor_repository", lambda: vendor_repo)
     monkeypatch.setattr(cl_po, "get_audit_repository", lambda: audit_repo)
+    # S5: generate_po_number now allocates an ATOMIC per-store/FY serial via the
+    # shared counters collection. Patch it to a deterministic in-memory atomic
+    # counter so the generator yields DISTINCT serials without a live Mongo
+    # (the FakeDB has no find_one_and_update; otherwise it fail-softs to a
+    # second-grained timestamp that collides within one call).
+    from api.routers import vendors as _vendors
+
+    _seqs: Dict[str, int] = {}
+
+    class _AtomicCounters:
+        def find_one_and_update(self, q, u, upsert=False, return_document=None):
+            k = q.get("_id")
+            _seqs[k] = _seqs.get(k, 0) + int(u.get("$inc", {}).get("seq", 1))
+            return {"_id": k, "seq": _seqs[k]}
+
+    monkeypatch.setattr(_vendors, "_counters_collection", lambda: _AtomicCounters())
     return db, po_repo, vendor_repo, audit_repo
 
 
@@ -451,7 +467,7 @@ def test_non_dry_run_creates_one_draft_po_per_vendor_group(env):
     assert jj["vendor_name"] == "J&J Vision"
     assert jj["delivery_store_id"] == "BV-1"
     assert jj["created_by"] == "M1"
-    assert jj["po_number"].startswith("PO-BV-")
+    assert jj["po_number"].startswith("PO/BV-1/")  # S5 per-store/FY serial
     line = jj["items"][0]
     assert line["power"] == {"sph": -2.0, "cyl": -0.75, "add": None}
     assert line["quantity"] == 4
