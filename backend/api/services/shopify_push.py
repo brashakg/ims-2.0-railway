@@ -821,6 +821,17 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     iid = image.get("image_id")
     existing_gid = image.get("shopify_image_id")
 
+    # Hub Phase 5 push-lock (defense-in-depth, FIRST gate): an image attaches to
+    # its parent product, so a push-locked brand's image must NEVER reach Shopify
+    # either. push_product is already blocked for a locked brand (so the parent is
+    # normally never on Shopify), but this closes the legacy "product was on
+    # Shopify before its brand got locked" gap. Fail-CLOSED on a real lock match.
+    _parent = _resolve_product_doc(db, image.get("product_id"))
+    if _parent is not None:
+        _img_lock = push_lock_reason(db, "product", _parent)
+        if _img_lock:
+            return _blocked_result("image", iid, _img_lock)
+
     if str(image.get("status") or "").upper() != "APPROVED":
         return PushResult(
             mode=MODE_SIMULATED,
@@ -924,6 +935,17 @@ def _user_errors_media(body: Dict[str, Any]) -> Optional[str]:
     if ue:
         return f"mediaUserErrors: {str(ue)[:300]}"
     return None
+
+
+def _resolve_product_doc(db, product_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Load the parent catalog_products doc (for the push-lock brand check on an
+    image). Fail-soft -> None."""
+    if not product_id or db is None:
+        return None
+    try:
+        return db["catalog_products"].find_one({"id": product_id})
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _resolve_product_gid(db, product_id: Optional[str]) -> Optional[str]:

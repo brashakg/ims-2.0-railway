@@ -117,3 +117,49 @@ def test_push_collection_unlocked_proceeds(monkeypatch):
         )
     )
     assert res.mode != sp.MODE_BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# push_image honours the parent product's brand-lock (defense-in-depth: an image
+# of a locked brand must NEVER reach Shopify, even via the media path)
+# ---------------------------------------------------------------------------
+
+
+class _FakeColl:
+    def __init__(self, doc):
+        self._doc = doc
+
+    def find_one(self, _flt):
+        return self._doc
+
+
+class _FakeDB:
+    def __init__(self, product_doc):
+        self._p = product_doc
+
+    def __getitem__(self, name):
+        return _FakeColl(self._p if name == "catalog_products" else None)
+
+
+def test_push_image_blocked_when_parent_brand_locked(monkeypatch):
+    _locks(monkeypatch, {"brands": ["cartier"]})
+    db = _FakeDB({"id": "P1", "brand": "Cartier", "ecom": {"shopify_product_id": "g"}})
+    res = _run(
+        sp.push_image(
+            db, {"image_id": "IMG1", "product_id": "P1", "status": "APPROVED"}
+        )
+    )
+    assert res.mode == sp.MODE_BLOCKED
+    assert res.ok is False
+    assert res.target_id == "IMG1"
+
+
+def test_push_image_unlocked_parent_proceeds(monkeypatch):
+    _locks(monkeypatch, {"brands": ["cartier"]})
+    db = _FakeDB({"id": "P2", "brand": "Ray-Ban", "ecom": {}})
+    res = _run(
+        sp.push_image(
+            db, {"image_id": "IMG2", "product_id": "P2", "status": "APPROVED"}
+        )
+    )
+    assert res.mode != sp.MODE_BLOCKED
