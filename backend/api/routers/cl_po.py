@@ -413,11 +413,11 @@ async def generate_cl_po(
     now_iso = datetime.now().isoformat()
     for idx, grp in enumerate(group_summaries):
         po_id = str(uuid.uuid4())
-        # generate_po_number is minute-grained; suffix keeps numbers distinct
-        # when one call drafts POs for several vendors.
+        # generate_po_number now allocates an ATOMIC per-store/FY serial (S5), so
+        # each call in this loop already returns a distinct number -- no manual
+        # suffix needed (the old minute-grained format could collide within one
+        # call, which the -{idx} suffix used to guard).
         po_number = generate_po_number(store_id)
-        if len(group_summaries) > 1:
-            po_number = f"{po_number}-{idx + 1}"
         subtotal = grp["subtotal"]
         tax = round(subtotal * 0.18, 2)
         po_doc = {
