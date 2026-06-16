@@ -85,6 +85,7 @@ from .routers import (
     catalog_router,
     catalog_autopilot_router,
     catalog_import_router,
+    buy_desk_router,
     jarvis_router,
     analytics_router,
     follow_ups_router,
@@ -1374,6 +1375,7 @@ app.include_router(
     prefix="/api/v1/catalog-import",
     tags=["Catalog · Import"],
 )
+app.include_router(buy_desk_router, prefix="/api/v1/buy-desk", tags=["Buy Desk"])
 app.include_router(
     catalog_autopilot_router,
     prefix="/api/v1/catalog-autopilot",
