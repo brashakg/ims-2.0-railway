@@ -282,18 +282,46 @@ class GRNCreate(BaseModel):
 # ============================================================================
 
 
-def generate_po_number(store_id: str) -> str:
-    """Generate unique PO number"""
-    prefix = store_id[:3].upper() if store_id else "HQ"
-    timestamp = datetime.now().strftime("%y%m%d%H%M")
-    return f"PO-{prefix}-{timestamp}"
+def _counters_collection():
+    """Shared ``counters`` collection for atomic purchase numbering. Fail-soft:
+    returns None (DB-less / mock) so the numberers fall back to a timestamp."""
+    try:
+        db = _get_db()
+        return db.get_collection("counters") if db is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
-def generate_grn_number(store_id: str) -> str:
-    """Generate unique GRN number"""
-    prefix = store_id[:3].upper() if store_id else "HQ"
-    timestamp = datetime.now().strftime("%y%m%d%H%M")
-    return f"GRN-{prefix}-{timestamp}"
+def generate_po_number(store_id: str, store_code: Optional[str] = None) -> str:
+    """Allocate the next PO number for a store in its financial year.
+
+    Format ``PO/{store}/{FY}/{serial}`` (e.g. ``PO/BV-BOK-01/26-27/0001``) --
+    a consecutive, per-store, per-FY serial via the shared counters collection
+    (S5), the same discipline as the GST invoice number. Fail-soft: with no DB
+    the service returns a time-derived suffix in the same format."""
+    from ..services.purchase_numbering import next_purchase_number
+
+    return next_purchase_number(
+        _counters_collection(),
+        doc_type="PO",
+        store_id=store_id,
+        store_code=store_code or store_id,
+    )
+
+
+def generate_grn_number(store_id: str, store_code: Optional[str] = None) -> str:
+    """Allocate the next goods-receipt (GRN) number for a store in its FY.
+
+    Format ``RCPT/{store}/{FY}/{serial}``. Atomic per (store, FY) via the shared
+    counters collection (S5); fail-soft to a time-derived suffix when DB-less."""
+    from ..services.purchase_numbering import next_purchase_number
+
+    return next_purchase_number(
+        _counters_collection(),
+        doc_type="GRN",
+        store_id=store_id,
+        store_code=store_code or store_id,
+    )
 
 
 def classify_grn_line_variance(received_qty, ordered_qty, tolerance: int = 0) -> str:

@@ -80,3 +80,39 @@ def test_fail_soft_without_counters():
     assert r.startswith("RCPT/BOK-01/26-27/")
     # Suffix is the mmddHHMMSS of WHEN.
     assert r.endswith(WHEN.strftime("%m%d%H%M%S"))
+
+
+# ---------------------------------------------------------------------------
+# Wiring: vendors.generate_po_number / generate_grn_number use the counter
+# ---------------------------------------------------------------------------
+
+
+def test_generate_po_number_uses_atomic_counter(monkeypatch):
+    from api.routers import vendors as v
+
+    c = _FakeCounters()
+    monkeypatch.setattr(v, "_counters_collection", lambda: c)
+    n1 = v.generate_po_number("BV-BOK-01")
+    n2 = v.generate_po_number("BV-BOK-01")
+    assert n1.startswith("PO/BV-BOK-01/")
+    assert n1.endswith("/0001")
+    assert n2.endswith("/0002")  # consecutive per store+FY
+
+
+def test_generate_grn_number_uses_rcpt_prefix(monkeypatch):
+    from api.routers import vendors as v
+
+    c = _FakeCounters()
+    monkeypatch.setattr(v, "_counters_collection", lambda: c)
+    g = v.generate_grn_number("BV-BOK-01")
+    assert g.startswith("RCPT/BV-BOK-01/")
+    assert g.endswith("/0001")
+
+
+def test_generate_po_number_failsoft_without_db(monkeypatch):
+    from api.routers import vendors as v
+
+    monkeypatch.setattr(v, "_counters_collection", lambda: None)
+    n = v.generate_po_number("BV-BOK-01")
+    # Still the new format, time-derived serial (no 500, no DB).
+    assert n.startswith("PO/BV-BOK-01/")
