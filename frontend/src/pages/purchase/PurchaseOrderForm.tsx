@@ -2,25 +2,203 @@
 // IMS 2.0 - Create Purchase Order Modal
 // ============================================================================
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   FileText,
   Plus,
   X as XIcon,
   Trash2,
   Loader2,
+  Search,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
-import { vendorsApi } from '../../services/api';
+import { vendorsApi, productApi } from '../../services/api';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 
+// A PO line now carries a REAL catalogued product_id (set by the picker), never
+// a fabricated `new-<timestamp>` id. With the Hub Phase-2 PO catalog gate ON,
+// the backend rejects any line whose product_id is not on the products spine
+// (422 UNKNOWN_PRODUCT) -- so the form must hand it a genuine product.
 interface POFormItem {
+  productId: string;
   productName: string;
   sku: string;
   quantity: number;
   unitCost: number;
   taxRate: number;
+}
+
+interface PickedProduct {
+  productId: string;
+  productName: string;
+  sku: string;
+  costPrice: number;
+}
+
+// Minimal shape we read off a /products row -- the endpoint returns full docs.
+interface ProductHit {
+  product_id?: string;
+  productId?: string;
+  sku?: string;
+  name?: string;
+  brand?: string;
+  cost_price?: number;
+  catalog_status?: string;
+}
+
+function hitToPicked(hit: ProductHit): PickedProduct {
+  const brand = (hit.brand || '').trim();
+  const name = (hit.name || '').trim();
+  const display = [brand, name].filter(Boolean).join(' ') || name || (hit.sku || '');
+  return {
+    productId: String(hit.product_id || hit.productId || ''),
+    productName: display,
+    sku: hit.sku || '',
+    costPrice: Number(hit.cost_price) > 0 ? Number(hit.cost_price) : 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Product search-select. Debounced typeahead against GET /products?search=.
+// Once a product is picked it shows as a locked chip (real product_id behind
+// it); "change" clears the pick and re-opens the search. This is what lets the
+// PO catalog gate be turned ON without breaking the manual Create-PO flow.
+// ---------------------------------------------------------------------------
+function ProductSearchSelect({
+  picked,
+  onPick,
+  onClear,
+}: {
+  picked: { productId: string; productName: string; sku: string };
+  onPick: (p: PickedProduct) => void;
+  onClear: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<ProductHit[]>([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  // Debounced search; skip while a product is already picked.
+  useEffect(() => {
+    if (picked.productId) return;
+    const q = query.trim();
+    if (q.length < 2) {
+      setResults([]);
+      setOpen(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const data = await productApi.getProducts({ search: q });
+        if (cancelled) return;
+        const rows: ProductHit[] = (data?.products || []).slice(0, 20);
+        setResults(rows);
+        setOpen(true);
+      } catch {
+        if (!cancelled) setResults([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [query, picked.productId]);
+
+  // Close dropdown on outside click.
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  if (picked.productId) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm">
+        <span className="font-medium text-gray-900 truncate">{picked.productName}</span>
+        <span className="text-xs text-gray-500 shrink-0">{picked.sku}</span>
+        <button
+          type="button"
+          onClick={() => {
+            onClear();
+            setQuery('');
+            setResults([]);
+          }}
+          className="ml-auto p-1 text-gray-400 hover:text-red-500 shrink-0"
+          title="Change product"
+        >
+          <XIcon className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <div className="relative">
+        <Search className="w-4 h-4 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+        <input
+          type="text"
+          placeholder="Search catalogued product..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onFocus={() => results.length > 0 && setOpen(true)}
+          className="input-field text-sm pl-8"
+        />
+        {loading && (
+          <Loader2 className="w-4 h-4 text-gray-400 animate-spin absolute right-2.5 top-1/2 -translate-y-1/2" />
+        )}
+      </div>
+      {open && (
+        <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg">
+          {results.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-gray-500">
+              {query.trim().length < 2 ? 'Type to search...' : 'No catalogued products match.'}
+            </div>
+          ) : (
+            results.map((hit, i) => {
+              const p = hitToPicked(hit);
+              if (!p.productId) return null;
+              return (
+                <button
+                  type="button"
+                  key={`${p.productId}-${i}`}
+                  onClick={() => {
+                    onPick(p);
+                    setOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                >
+                  <div className="text-sm font-medium text-gray-900 truncate">{p.productName}</div>
+                  <div className="text-xs text-gray-500 flex items-center gap-2">
+                    <span>{p.sku}</span>
+                    {p.costPrice > 0 && <span>{'₹'}{p.costPrice.toLocaleString()} cost</span>}
+                    {hit.catalog_status && hit.catalog_status !== 'ACTIVE' && (
+                      <span
+                        className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium"
+                        title="Draft product -- can be added to a PO, but the PO can't be sent until cataloguing is complete"
+                      >
+                        Draft
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface PurchaseOrderFormProps {
@@ -39,11 +217,11 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
   const [expectedDelivery, setExpectedDelivery] = useState('');
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POFormItem[]>([
-    { productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 },
+    { productId: '', productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 },
   ]);
 
   const addItem = () => {
-    setItems(prev => [...prev, { productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 }]);
+    setItems(prev => [...prev, { productId: '', productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 }]);
   };
 
   const removeItem = (index: number) => {
@@ -52,6 +230,26 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
 
   const updateItem = (index: number, field: string, value: string | number) => {
     setItems(prev => prev.map((item, i) => i === index ? { ...item, [field]: value } : item));
+  };
+
+  const pickProduct = (index: number, p: PickedProduct) => {
+    setItems(prev => prev.map((item, i) => i === index
+      ? {
+          ...item,
+          productId: p.productId,
+          productName: p.productName,
+          sku: p.sku,
+          // Prefill cost from the catalog only when the line still has none; the
+          // buyer can always override the negotiated PO price.
+          unitCost: item.unitCost > 0 ? item.unitCost : p.costPrice,
+        }
+      : item));
+  };
+
+  const clearProduct = (index: number) => {
+    setItems(prev => prev.map((item, i) => i === index
+      ? { ...item, productId: '', productName: '', sku: '' }
+      : item));
   };
 
   const calcLineTotal = (item: POFormItem) => {
@@ -71,9 +269,17 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
       toast.error('Please set an expected delivery date');
       return;
     }
-    const validItems = items.filter(item => item.productName.trim() && item.quantity > 0 && item.unitCost > 0);
+    // A valid line must reference a REAL catalogued product (product_id set by
+    // the picker) plus a positive qty + cost. Lines without a picked product are
+    // dropped -- they would be rejected by the PO catalog gate anyway.
+    const validItems = items.filter(item => item.productId && item.quantity > 0 && item.unitCost > 0);
     if (validItems.length === 0) {
-      toast.error('Please add at least one valid line item');
+      toast.error('Add at least one catalogued product with a quantity and unit cost');
+      return;
+    }
+    const unpicked = items.filter(item => !item.productId && (item.quantity > 0 || item.unitCost > 0));
+    if (unpicked.length > 0) {
+      toast.error('Pick a catalogued product for every line (or remove the empty line)');
       return;
     }
 
@@ -87,8 +293,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
         delivery_store_id: storeId,
         expected_date: expectedDelivery,
         notes: notes || undefined,
-        items: validItems.map((item, idx) => ({
-          product_id: `new-${Date.now()}-${idx}`,
+        items: validItems.map((item) => ({
+          product_id: item.productId,
           product_name: item.productName,
           sku: item.sku || 'N/A',
           quantity: item.quantity,
@@ -96,8 +302,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
         })),
       });
 
-      const poItems: POItem[] = validItems.map((item, idx) => ({
-        productId: `new-${Date.now()}-${idx}`,
+      const poItems: POItem[] = validItems.map((item) => ({
+        productId: item.productId,
         productName: item.productName,
         sku: item.sku || 'N/A',
         quantity: item.quantity,
@@ -196,24 +402,12 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
               {items.map((item, index) => (
                 <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
                   <div className="grid grid-cols-12 gap-2 items-end">
-                    <div className="col-span-12 tablet:col-span-4">
-                      <label className="block text-xs text-gray-600 mb-1">Product Name</label>
-                      <input
-                        type="text"
-                        placeholder="Product name"
-                        value={item.productName}
-                        onChange={(e) => updateItem(index, 'productName', e.target.value)}
-                        className="input-field text-sm"
-                      />
-                    </div>
-                    <div className="col-span-6 tablet:col-span-2">
-                      <label className="block text-xs text-gray-600 mb-1">SKU</label>
-                      <input
-                        type="text"
-                        placeholder="SKU"
-                        value={item.sku}
-                        onChange={(e) => updateItem(index, 'sku', e.target.value)}
-                        className="input-field text-sm"
+                    <div className="col-span-12 tablet:col-span-5">
+                      <label className="block text-xs text-gray-600 mb-1">Product</label>
+                      <ProductSearchSelect
+                        picked={{ productId: item.productId, productName: item.productName, sku: item.sku }}
+                        onPick={(p) => pickProduct(index, p)}
+                        onClear={() => clearProduct(index)}
                       />
                     </div>
                     <div className="col-span-6 tablet:col-span-1">
@@ -227,7 +421,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                       />
                     </div>
                     <div className="col-span-6 tablet:col-span-2">
-                      <label className="block text-xs text-gray-600 mb-1">Unit Cost ({'\u20B9'})</label>
+                      <label className="block text-xs text-gray-600 mb-1">Unit Cost ({'₹'})</label>
                       <input
                         type="number"
                         min="0"
@@ -248,9 +442,9 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                         className="input-field text-sm"
                       />
                     </div>
-                    <div className="col-span-6 tablet:col-span-1 text-right">
+                    <div className="col-span-6 tablet:col-span-2 text-right">
                       <label className="block text-xs text-gray-600 mb-1">Total</label>
-                      <p className="text-sm font-semibold text-gray-900 py-2">{'\u20B9'}{calcLineTotal(item).toLocaleString()}</p>
+                      <p className="text-sm font-semibold text-gray-900 py-2">{'₹'}{calcLineTotal(item).toLocaleString()}</p>
                     </div>
                     <div className="col-span-2 tablet:col-span-1 flex justify-end">
                       <button
@@ -272,15 +466,15 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
             <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Subtotal</span>
-                <span className="font-medium text-gray-900">{'\u20B9'}{calcSubtotal().toLocaleString()}</span>
+                <span className="font-medium text-gray-900">{'₹'}{calcSubtotal().toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Tax</span>
-                <span className="font-medium text-gray-900">{'\u20B9'}{calcTax().toLocaleString()}</span>
+                <span className="font-medium text-gray-900">{'₹'}{calcTax().toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-sm font-bold border-t border-gray-300 pt-2">
                 <span className="text-gray-900">Grand Total</span>
-                <span className="text-gray-900">{'\u20B9'}{calcGrandTotal().toLocaleString()}</span>
+                <span className="text-gray-900">{'₹'}{calcGrandTotal().toLocaleString()}</span>
               </div>
             </div>
           </div>
