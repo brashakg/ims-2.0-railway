@@ -302,12 +302,8 @@ def gst_reconciliation(
     for o in orders:
         eid = _ent(o.get("store_id"))
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
-        seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = (
-            str(customer_state_by_id.get(o.get("customer_id"), "") or "")
-            .strip()
-            .lower()
-        )
+        seller = _norm_state(store_state_by_id.get(o.get("store_id")))
+        buyer = _norm_state(customer_state_by_id.get(o.get("customer_id")))
         is_inter_state = bool(seller and buyer and seller != buyer)
         bucket = acc.setdefault(eid, _blank())
         if is_inter_state:
@@ -349,6 +345,17 @@ def gst_reconciliation(
     }
 
 
+def _norm_state(value) -> str:
+    """Canonicalize a state (full name / 2-letter abbr / 2-digit GST code) to the
+    GST numeric code so 'Jharkhand', 'JH' and '20' all compare equal. Without
+    this, an order whose store.state and customer.state are stored in DIFFERENT
+    formats is misclassified inter-state (wrong IGST vs CGST/SGST). Unresolvable
+    values pass through unchanged; empty -> '' (treated as unknown/intra)."""
+    from ..services import org_validation as _ov
+
+    return _ov.normalize_state_code(str(value or "").strip()) or ""
+
+
 def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dict):
     """Split output tax into (cgst, sgst, igst), paise-balanced.
 
@@ -367,12 +374,8 @@ def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dic
             t = o.get("tax_total")
         tax = float(t or 0)
         total += tax
-        seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = (
-            str(customer_state_by_id.get(o.get("customer_id"), "") or "")
-            .strip()
-            .lower()
-        )
+        seller = _norm_state(store_state_by_id.get(o.get("store_id")))
+        buyer = _norm_state(customer_state_by_id.get(o.get("customer_id")))
         if seller and buyer and seller != buyer:
             igst += tax
     igst = round(igst, 2)
@@ -2295,10 +2298,8 @@ async def get_tally_sales_jv(
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
-        seller = str(_store_states.get(o.get("store_id"), "") or "").strip().lower()
-        buyer = (
-            str(_customer_states.get(o.get("customer_id"), "") or "").strip().lower()
-        )
+        seller = _norm_state(_store_states.get(o.get("store_id")))
+        buyer = _norm_state(_customer_states.get(o.get("customer_id")))
         is_inter_state = bool(seller and buyer and seller != buyer)
         if is_inter_state:
             o["igst_amount"] = round(tax, 2)

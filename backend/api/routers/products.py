@@ -607,6 +607,19 @@ class BulkPriceRequest(BulkScopeFilter):
     apply: bool = False
     reason: Optional[str] = None
 
+    @field_validator("amount")
+    @classmethod
+    def _amount_finite(cls, v: float) -> float:
+        # BUG-108 residual: amount was unbounded, so NaN/Infinity slipped through
+        # (the handler's `new_offer <= 0` guard can't catch NaN -> mrp/offer_price
+        # written as NaN). Reject non-finite up front. Left otherwise unbounded so
+        # a legitimate large flat delta still applies.
+        import math
+
+        if v is None or not math.isfinite(v):
+            raise ValueError("amount must be a finite number")
+        return v
+
 
 class BulkOfferRequest(BulkScopeFilter):
     """Create or clear an offer across the filtered set.
