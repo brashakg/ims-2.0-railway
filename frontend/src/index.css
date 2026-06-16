@@ -941,7 +941,15 @@
   background: var(--surface); color: var(--ink);
   cursor: pointer;
   transition: all 0.12s ease;
+  /* Responsive width: modest on phones, noticeably wider on tablet/desktop
+     (owner request). Centred content (justify-content set inline) sits in the
+     wider pill. */
+  min-width: 240px;
 }
+/* iPad / tablet */
+@media (min-width: 768px)  { .store-pill { min-width: 360px; } }
+/* desktop */
+@media (min-width: 1024px) { .store-pill { min-width: 480px; } }
 .store-pill:hover {
   border-color: var(--ink);
   box-shadow: var(--sh-xs);
