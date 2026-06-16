@@ -240,9 +240,18 @@ def _audience_row(
 def _customers_query(store_id: Optional[str]) -> Dict[str, Any]:
     q: Dict[str, Any] = {}
     if store_id:
-        # Customers may be attached either by their home store_id or via a
-        # store list; match the common single-field case used elsewhere.
-        q["store_id"] = store_id
+        # Customers are written with home_store_id / preferred_store_id /
+        # primary_store_id / store_ids -- NEVER a bare `store_id`. Filtering on
+        # store_id matched zero customers, so every store-scoped segment
+        # (by_store / birthday / winback / by_customer_type / lapsed_patient)
+        # resolved to an empty audience. Match the canonical keys (mirrors
+        # customer_repository.search_customers / customers.list_customers).
+        q["$or"] = [
+            {"home_store_id": store_id},
+            {"preferred_store_id": store_id},
+            {"primary_store_id": store_id},
+            {"store_ids": store_id},
+        ]
     return q
 
 
