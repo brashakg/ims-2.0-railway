@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react';
 import {
   Building2, Plus, Pencil, ChevronDown, ChevronRight, MapPin, X, Loader2,
-  Store as StoreIcon, Landmark, FileText,
+  Store as StoreIcon, Landmark, FileText, AlertTriangle,
 } from 'lucide-react';
 import { entitiesApi, type Entity, type BankAccount, type OrgMeta } from '../../services/api/entities';
 import { orgStoreApi, type Store, type StorePayload } from '../../services/api/stores';
@@ -54,6 +54,8 @@ export default function OrganizationPage() {
 
   const [entityModal, setEntityModal] = useState<Entity | 'new' | null>(null);
   const [storeModal, setStoreModal] = useState<{ entity: Entity; store: Store | 'new' } | null>(null);
+  // Target entity for assigning an orphan store (defaults to the first entity).
+  const [assignEntityId, setAssignEntityId] = useState<string>('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -200,6 +202,79 @@ export default function OrganizationPage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Unassigned stores: stores that exist but carry no entity_id. Previously
+          these were grouped into a '_unassigned' bucket that was built but never
+          rendered, so the orphan stores silently vanished from this screen --
+          which is exactly why the store count here disagreed with Setup. Render
+          them LOUDLY (fail-loud, no pretend data) so the gap is visible and
+          fixable, instead of hiding it. */}
+      {(storesByEntity['_unassigned']?.length || 0) > 0 && (
+        <div className="mt-4 border border-amber-300 bg-amber-50 rounded-lg">
+          <div className="flex items-start gap-2 p-3 border-b border-amber-200">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <div className="font-medium text-amber-900">
+                Unassigned stores ({storesByEntity['_unassigned'].length})
+              </div>
+              <p className="text-xs text-amber-700 mt-0.5">
+                These stores exist but are not linked to any legal entity, so they
+                are missing from GST, invoicing and entity-level reports. Assign
+                each to an entity below.
+              </p>
+            </div>
+          </div>
+          <div className="p-3 space-y-2">
+            {entities.length > 1 && (
+              <label className="flex items-center gap-2 text-xs text-amber-800">
+                Assign to:
+                <select
+                  value={assignEntityId || entities[0].entity_id}
+                  onChange={(e) => setAssignEntityId(e.target.value)}
+                  className="border border-amber-300 rounded px-2 py-1 text-sm bg-white"
+                >
+                  {entities.map((e) => (
+                    <option key={e.entity_id} value={e.entity_id}>{e.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <ul className="divide-y divide-amber-100 border border-amber-100 rounded-lg bg-white">
+              {storesByEntity['_unassigned'].map((s) => (
+                <li key={s.store_id} className="flex items-center justify-between p-2.5 text-sm">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <StoreIcon className="w-4 h-4 text-gray-400 shrink-0" />
+                    <span className="font-medium text-gray-800">{s.store_name}</span>
+                    <span className="text-xs text-gray-400">{s.store_code}</span>
+                    {s.city && (
+                      <span className="text-xs text-gray-400 flex items-center gap-0.5">
+                        <MapPin className="w-3 h-3" />{s.city}
+                      </span>
+                    )}
+                    {s.is_active === false && <span className="text-xs text-red-600">inactive</span>}
+                  </div>
+                  {entities.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const ent =
+                          entities.find((e) => e.entity_id === (assignEntityId || entities[0].entity_id)) ||
+                          entities[0];
+                        setStoreModal({ entity: ent, store: s });
+                      }}
+                      className="inline-flex items-center gap-1 text-xs text-white bg-amber-600 hover:bg-amber-700 rounded px-2 py-1 shrink-0"
+                    >
+                      <Pencil className="w-3 h-3" /> Assign
+                    </button>
+                  ) : (
+                    <span className="text-xs text-amber-700 shrink-0">Add an entity first</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
       )}
 
