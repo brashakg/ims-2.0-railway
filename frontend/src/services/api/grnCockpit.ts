@@ -59,6 +59,10 @@ export interface GRNItemInput {
   accepted_qty: number;
   rejected_qty: number;
   rejection_reason?: string;
+  // P2: supplier batch + expiry (contact lenses) -> dates the minted units for
+  // FEFO. Optional; omitted for frames / undated spectacle lenses.
+  batch_code?: string;
+  expiry_date?: string;
 }
 
 // ---- Upload-doc response ---------------------------------------------------

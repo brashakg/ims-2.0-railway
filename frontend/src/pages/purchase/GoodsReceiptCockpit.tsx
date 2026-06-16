@@ -48,6 +48,10 @@ interface ReceiveLine {
   accepted_qty: number;
   rejected_qty: number;
   rejection_reason: string;
+  // P2: supplier batch + expiry for contact lenses (optional; dates the minted
+  // units for FEFO). Left blank for frames / undated spectacle lenses.
+  batch_code: string;
+  expiry_date: string;
 }
 
 // ---- Helpers ---------------------------------------------------------------
@@ -369,6 +373,8 @@ export function GoodsReceiptCockpit() {
       accepted_qty: l.pending_qty,
       rejected_qty: 0,
       rejection_reason: '',
+      batch_code: '',
+      expiry_date: '',
     }));
     setReceiveLines(lines);
   };
@@ -464,6 +470,8 @@ export function GoodsReceiptCockpit() {
         accepted_qty: l.accepted_qty,
         rejected_qty: l.rejected_qty,
         rejection_reason: l.rejection_reason || undefined,
+        batch_code: l.batch_code.trim() || undefined,
+        expiry_date: l.expiry_date.trim() || undefined,
       }));
 
     if (items.length === 0) {
@@ -728,6 +736,46 @@ export function GoodsReceiptCockpit() {
                                 {line.sku}
                               </div>
                             )}
+                            {/* P2: optional batch + expiry -- fill for contact
+                                lenses so the received units are dated for FEFO.
+                                Leave blank for frames / undated lenses. */}
+                            <div
+                              className="flex items-center gap-1.5"
+                              style={{ marginTop: 4 }}
+                            >
+                              <input
+                                type="text"
+                                placeholder="Batch / lot"
+                                value={line.batch_code}
+                                onChange={(e) =>
+                                  setLineField(idx, 'batch_code', e.target.value)
+                                }
+                                className="input"
+                                style={{
+                                  width: 96,
+                                  height: 26,
+                                  padding: '0 6px',
+                                  fontSize: 11.5,
+                                }}
+                                aria-label={`Batch / lot for ${line.product_name}`}
+                              />
+                              <input
+                                type="date"
+                                value={line.expiry_date}
+                                onChange={(e) =>
+                                  setLineField(idx, 'expiry_date', e.target.value)
+                                }
+                                className="input"
+                                style={{
+                                  width: 130,
+                                  height: 26,
+                                  padding: '0 6px',
+                                  fontSize: 11.5,
+                                }}
+                                aria-label={`Expiry date for ${line.product_name}`}
+                                title="Expiry (contact lenses)"
+                              />
+                            </div>
                           </td>
                           <td className="right mono">{line.ordered_qty}</td>
                           <td className="right">
