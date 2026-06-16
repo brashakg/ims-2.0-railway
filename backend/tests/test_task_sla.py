@@ -127,6 +127,36 @@ def test_escalated_at_max_level_does_not_re_escalate():
     assert should_escalate(task, now=NOW)[0] is False
 
 
+def test_engaged_escalated_overdue_task_does_not_storm_within_grace():
+    # Regression: a task that escalated (level 1) then got ENGAGED
+    # (ESCALATED -> IN_PROGRESS) but is STILL overdue must NOT re-escalate on
+    # every tick via the overdue clock. The cadence guard applies because
+    # escalation_level > 0, even though the status is no longer ESCALATED.
+    task = {
+        "status": "IN_PROGRESS",
+        "priority": "P0",
+        "escalation_level": 1,
+        "due_at": NOW - timedelta(days=10),  # long overdue
+        "escalated_at": NOW - timedelta(minutes=10),  # < 30m P0 grace
+    }
+    assert should_escalate(task, now=NOW)[0] is False
+
+
+def test_engaged_escalated_overdue_task_re_escalates_after_grace():
+    # Same engaged task, but a full grace window has now passed since its last
+    # escalation -> it climbs one more rung (it is being ignored, not worked).
+    task = {
+        "status": "IN_PROGRESS",
+        "priority": "P0",
+        "escalation_level": 1,
+        "due_at": NOW - timedelta(days=10),
+        "escalated_at": NOW - timedelta(minutes=31),  # > 30m P0 grace
+    }
+    flag, reason = should_escalate(task, now=NOW)
+    assert flag is True
+    assert "climbing the ladder" in reason
+
+
 # --- ack clock --------------------------------------------------------------
 
 

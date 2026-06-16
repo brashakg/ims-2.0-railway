@@ -118,9 +118,10 @@ def should_escalate(
     """Decide whether a task has breached SLA and must escalate.
 
     Returns ``(should_escalate, reason)``. Pure -- pass ``now`` for tests.
-    A COMPLETED/CANCELLED task never escalates. An already-ESCALATED task
-    keeps climbing the ladder (multi-hop) on each fresh breach, but no faster
-    than once per grace window and no further than ``MAX_ESCALATION_LEVEL``."""
+    A COMPLETED/CANCELLED task never escalates. A task that has already
+    escalated at least once keeps climbing the ladder (multi-hop) on each fresh
+    breach, but no faster than once per grace window and no further than
+    ``MAX_ESCALATION_LEVEL``."""
     status = canon_status(task.get("status"))
     if status in TERMINAL_STATUSES:
         return False, ""
@@ -131,13 +132,21 @@ def should_escalate(
 
     sla = sla_for(task.get("priority", "P3"), sla_config)
 
-    # Re-escalation: an already-ESCALATED task that is STILL unresolved climbs
-    # one more rung -- but only after another full grace window has passed
-    # since its last escalation (cadence guard), and only while it is below the
-    # top of the ladder (level guard). Together with resolve_escalation_target
-    # returning None at the top rung, this bounds an ignored task's climb.
-    if status == "ESCALATED":
-        if int(task.get("escalation_level", 0) or 0) >= MAX_ESCALATION_LEVEL:
+    # Re-escalation cadence + storm guard. Gated on escalation_level, NOT on the
+    # current status: once a task has escalated at least once it may have been
+    # ENGAGED (ESCALATED -> IN_PROGRESS) and still be overdue. If we fell through
+    # to the overdue clock below it would re-escalate on EVERY scan tick. So any
+    # already-escalated task (whatever its status) re-climbs only after another
+    # full grace window since its last escalation (cadence guard), and only
+    # while below the top of the ladder (level guard). Together with
+    # resolve_escalation_target returning None at the top rung, this bounds an
+    # ignored task's climb to one hop per grace window, max MAX_ESCALATION_LEVEL.
+    # Trigger on EITHER an ESCALATED status (covers a legacy/level-0 escalated
+    # row) OR escalation_level > 0 (covers an engaged ESCALATED -> IN_PROGRESS
+    # task that is still overdue) so neither can fall through to the clocks.
+    level = int(task.get("escalation_level", 0) or 0)
+    if status == "ESCALATED" or level > 0:
+        if level >= MAX_ESCALATION_LEVEL:
             return False, ""
         last = _as_dt(task.get("escalated_at"))
         if last is None:
