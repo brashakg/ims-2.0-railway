@@ -818,6 +818,9 @@ class MockCollection:
                     elif op == "$in":
                         if doc_value not in op_value:
                             return False
+                    elif op == "$nin":
+                        if doc_value in op_value:
+                            return False
                     elif op == "$ne":
                         if doc_value == op_value:
                             return False
@@ -867,6 +870,44 @@ class MockCollection:
                     doc[field].append(value)
             return type("obj", (object,), {"modified_count": 1})()
         return type("obj", (object,), {"modified_count": 0})()
+
+    def find_one_and_update(
+        self, filter: Dict, update: Dict, upsert: bool = False,
+        return_document: Any = False, **kwargs
+    ) -> Optional[Dict]:
+        """Atomic find-and-update for no-Mongo mode.
+
+        Mirrors the $set/$inc/$push handling of update_one and returns the
+        matched document, so the serialized-stock atomic claims
+        (claim_one_available / claim_for_transfer) and the per-FY invoice
+        counter actually work in local mock mode instead of silently no-opping.
+        Single-threaded, so the real concurrency guarantee is moot here -- this
+        just preserves FUNCTIONAL behaviour. return_document follows pymongo's
+        ReturnDocument (AFTER == True -> post-update doc; default -> pre-image).
+        """
+        doc = self.find_one(filter)
+        if doc is None:
+            if not upsert:
+                return None
+            # Minimal upsert: seed the new doc from the filter's equality keys.
+            doc = {
+                k: v
+                for k, v in filter.items()
+                if not k.startswith("$") and not isinstance(v, dict)
+            }
+            _id = doc.get("_id") or doc.get("id") or str(len(self._data) + 1)
+            doc["_id"] = _id
+            self._data[_id] = doc
+        before = dict(doc)
+        if "$set" in update:
+            doc.update(update["$set"])
+        if "$inc" in update:
+            for field, amount in update["$inc"].items():
+                doc[field] = doc.get(field, 0) + amount
+        if "$push" in update:
+            for field, value in update["$push"].items():
+                doc.setdefault(field, []).append(value)
+        return dict(doc) if return_document else before
 
     def update_many(self, filter: Dict, update: Dict) -> Any:
         count = 0
