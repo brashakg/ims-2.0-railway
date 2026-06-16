@@ -113,7 +113,12 @@ export const orgStoreApi = {
 
 export const adminStoreApi = {
   getStores: async () => {
-    const response = await api.get('/stores');
+    // active_only:false so the Setup screen enumerates the SAME store set as
+    // Organization (orgStoreApi also sends active_only:false). Without this,
+    // Setup hit the backend default (active-only) while Organization showed all,
+    // so the two screens' store counts could silently disagree. Inactive stores
+    // are badged in the UI -- they still belong to the org.
+    const response = await api.get('/stores', { params: { active_only: false } });
     return response.data;
   },
 

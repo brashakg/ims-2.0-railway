@@ -471,6 +471,37 @@ def _store_fence_coords(user: dict) -> list:
     return out
 
 
+def _default_active_store(user: dict) -> Optional[str]:
+    """Pick a sensible active store for an all-stores role (SUPERADMIN/ADMIN/
+    AREA_MANAGER) whose account has NO explicit store assignment, so the topbar
+    never shows a 'No store' pill and POS isn't dead-ended on first login.
+
+    Prefers an active HQ store, else any active store, else any store. Returns
+    None (the prior behaviour) when the user is not an all-stores role, there is
+    no DB, or no stores exist. Fail-soft -- never blocks token issue."""
+    roles = user.get("roles", []) or []
+    if not any(r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER") for r in roles):
+        return None
+    try:
+        from database.connection import get_db
+
+        db = get_db().db
+    except Exception:
+        return None
+    if db is None:
+        return None
+    try:
+        coll = db.get_collection("stores")
+        s = (
+            coll.find_one({"is_active": True, "store_type": "HQ"}, {"_id": 0, "store_id": 1})
+            or coll.find_one({"is_active": True}, {"_id": 0, "store_id": 1})
+            or coll.find_one({}, {"_id": 0, "store_id": 1})
+        )
+        return (s or {}).get("store_id")
+    except Exception:
+        return None
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest, req: Request = None):
     """
@@ -661,7 +692,9 @@ async def login(request: LoginRequest, req: Request = None):
         "roles": user.get("roles", []),
         "store_ids": user_store_ids,
         "active_store_id": (
-            active_store or (user_store_ids[0] if user_store_ids else None)
+            active_store
+            or (user_store_ids[0] if user_store_ids else None)
+            or _default_active_store(user)
         ),
         "must_change_password": must_change_password,
         "module_access": module_access,
