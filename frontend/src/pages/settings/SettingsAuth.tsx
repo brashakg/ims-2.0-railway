@@ -51,7 +51,12 @@ const transformUser = (u: any): UserData => ({
   email: u.email || '',
   fullName: u.full_name || u.fullName || u.name || '',
   phone: u.phone || u.contact_phone || '',
-  roles: u.roles || u.role ? [u.role] : [],
+  // Precedence fix: was `u.roles || u.role ? [u.role] : []`, which parses as
+  // `(u.roles || u.role) ? [u.role] : []` -> for the array the API actually
+  // returns (`roles`, no singular `role`), this yielded `[undefined]`, and the
+  // badge render below then crashed on `undefined.replace(...)`, blanking the
+  // whole app. Use the real roles array when present.
+  roles: u.roles ?? (u.role ? [u.role] : []),
   accessibleStores: u.accessible_stores || u.accessibleStores || u.store_ids || [],
   discountCap: u.discount_cap || u.discountCap || 10,
   isActive: u.is_active !== false,
@@ -244,7 +249,7 @@ export function UserManagementSection() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">
-                          {u.roles.map(role => (
+                          {(u.roles || []).filter(Boolean).map(role => (
                             <span key={role} className={clsx(
                               'text-xs px-2 py-0.5 rounded',
                               role === 'SUPERADMIN' ? 'bg-purple-100 text-purple-700' :
@@ -253,7 +258,7 @@ export function UserManagementSection() {
                               role === 'STORE_MANAGER' ? 'bg-blue-100 text-blue-700' :
                               'bg-gray-100 text-gray-600'
                             )}>
-                              {role.replace('_', ' ')}
+                              {String(role).replace(/_/g, ' ')}
                             </span>
                           ))}
                         </div>
