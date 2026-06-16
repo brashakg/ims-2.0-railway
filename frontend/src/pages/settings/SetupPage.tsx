@@ -77,8 +77,19 @@ const DEFAULT_EMPLOYEE: NewEmployee = {
   name: '', email: '', phone: '', roles: [], assignedStores: [], primaryStore: '',
   discountCap: 0, shiftStart: '10:00', shiftEnd: '20:00', weekOff: 'SUNDAY',
   employeeCode: '', joiningDate: new Date().toISOString().split('T')[0],
-  username: '', tempPassword: 'admin123',
+  username: '', tempPassword: '',
 };
+
+// BUG-132: never ship a default credential ('admin123') in the frontend bundle.
+// Generate a strong random temp password per new-employee form -- a usable
+// default that is NOT a known constant; the new user is forced to change it on
+// first login (must_change_password).
+function randomTempPassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const arr = new Uint32Array(12);
+  (window.crypto || (window as unknown as { msCrypto: Crypto }).msCrypto).getRandomValues(arr);
+  return Array.from(arr, (n) => chars[n % chars.length]).join('');
+}
 
 export default function SetupPage() {
   const { user } = useAuth();
@@ -356,7 +367,10 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
 // EMPLOYEE FORM MODAL
 // ---------------------------------------------------------------------------
 function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[]; onSave: (emp: NewEmployee) => void | Promise<void>; onClose: () => void }) {
-  const [form, setForm] = useState<NewEmployee>(DEFAULT_EMPLOYEE);
+  const [form, setForm] = useState<NewEmployee>(() => ({
+    ...DEFAULT_EMPLOYEE,
+    tempPassword: randomTempPassword(),
+  }));
   const [step, setStep] = useState(1);
 
   const toggleRole = (roleId: string) => {
