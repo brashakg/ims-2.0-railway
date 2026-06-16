@@ -1135,6 +1135,124 @@ async def create_po(
     }
 
 
+@router.get("/goods-receipt/cockpit")
+async def goods_receipt_cockpit(
+    vendor_id: str = Query(..., description="Vendor to receive against"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """Vendor-first goods-receipt cockpit (Purchase P1 / S2).
+
+    One read-only payload with the three worklists the receiving screen needs:
+      * open_pos -- this vendor's receivable POs that still have unreceived lines
+      * pending_not_received -- per-product residual (ordered - received) summed
+        across those open POs
+      * pending_cataloged -- ACTIVE cataloged products not already on an open PO
+        (products carry no vendor link today, so this list is vendor-agnostic --
+        cataloged items ready to be put on a PO / received; capped at 200).
+
+    Residuals read the per-line ordered_qty/received_qty (S1) and fall back to
+    the PO header received_qty_by_product for POs created before S1.
+    """
+    po_repo = get_purchase_order_repository()
+    product_repo = get_product_repository()
+
+    open_pos: list = []
+    pending: dict = {}
+    ordered_product_ids: set = set()
+
+    if po_repo is not None:
+        flt: dict = {
+            "vendor_id": vendor_id,
+            "status": {"$in": list(_RECEIVABLE_PO_STATUSES)},
+        }
+        if store_id:
+            flt["delivery_store_id"] = store_id
+        for po in (po_repo.find_many(flt, limit=500) or []):
+            header_recv = po.get("received_qty_by_product") or {}
+            open_lines: list = []
+            for it in (po.get("items") or []):
+                pid = it.get("product_id")
+                ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
+                recv = it.get("received_qty")
+                if recv is None:
+                    recv = header_recv.get(pid, 0)
+                recv = recv or 0
+                if pid:
+                    ordered_product_ids.add(pid)
+                if ordered and recv < ordered:
+                    residual = ordered - recv
+                    open_lines.append(
+                        {
+                            "product_id": pid,
+                            "product_name": it.get("product_name"),
+                            "sku": it.get("sku"),
+                            "ordered_qty": ordered,
+                            "received_qty": recv,
+                            "pending_qty": residual,
+                            "unit_price": it.get("unit_price"),
+                            "tax_rate": it.get("tax_rate"),
+                        }
+                    )
+                    roll = pending.setdefault(
+                        pid,
+                        {
+                            "product_id": pid,
+                            "product_name": it.get("product_name"),
+                            "sku": it.get("sku"),
+                            "ordered_qty": 0,
+                            "received_qty": 0,
+                            "pending_qty": 0,
+                        },
+                    )
+                    roll["ordered_qty"] += ordered
+                    roll["received_qty"] += recv
+                    roll["pending_qty"] += residual
+            if open_lines:
+                open_pos.append(
+                    {
+                        "po_id": po.get("po_id"),
+                        "po_number": po.get("po_number"),
+                        "status": po.get("status"),
+                        "expected_date": po.get("expected_date"),
+                        "lines": open_lines,
+                    }
+                )
+
+    pending_cataloged: list = []
+    if product_repo is not None:
+        try:
+            actives = product_repo.find_many({"is_active": True}, limit=500) or []
+        except Exception:  # noqa: BLE001
+            actives = []
+        for p in actives:
+            pid = p.get("product_id")
+            if pid in ordered_product_ids:
+                continue
+            try:
+                status, _gaps = _pm.compute_catalog_status(p)
+            except Exception:  # noqa: BLE001
+                continue
+            if status == "ACTIVE":
+                pending_cataloged.append(
+                    {
+                        "product_id": pid,
+                        "product_name": p.get("product_name") or p.get("name"),
+                        "sku": p.get("sku"),
+                        "category": p.get("category"),
+                    }
+                )
+            if len(pending_cataloged) >= 200:
+                break
+
+    return {
+        "vendor_id": vendor_id,
+        "open_pos": open_pos,
+        "pending_not_received": list(pending.values()),
+        "pending_cataloged": pending_cataloged,
+    }
+
+
 @router.get("/purchase-orders/{po_id}")
 async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Get purchase order details"""
