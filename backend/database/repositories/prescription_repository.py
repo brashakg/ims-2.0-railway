@@ -72,15 +72,21 @@ class PrescriptionRepository(BaseRepository):
         clock is UTC, so between 00:00-05:30 IST a plain datetime.now() is
         still on YESTERDAY and would mis-judge expiry by a day.
         """
+        # expiry_date is stored as an ISO STRING (prescriptions.py / clinical.py
+        # write .isoformat()). A datetime $gte bound never matches a string field
+        # in BSON (type bracketing) -> this silently returned []. Compare as ISO
+        # strings (lexicographic == chronological for fixed-format ISO), mirroring
+        # product_repository.find_expiring and megaphone.py which already do this.
         return self.find_many({
             "patient_id": patient_id,
-            "expiry_date": {"$gte": now_ist_naive()}
+            "expiry_date": {"$gte": now_ist_naive().isoformat()}
         }, sort=[("prescription_date", -1)])
 
     def find_expiring_soon(self, days: int = 30) -> List[Dict]:
         """Find prescriptions expiring soon (IST business clock, see find_valid)"""
-        now = now_ist_naive()
-        cutoff = now + timedelta(days=days)
+        # ISO-string comparison: expiry_date is stored as a string (see find_valid).
+        now = now_ist_naive().isoformat()
+        cutoff = (now_ist_naive() + timedelta(days=days)).isoformat()
         return self.find_many({
             "expiry_date": {"$gte": now, "$lte": cutoff}
         })
