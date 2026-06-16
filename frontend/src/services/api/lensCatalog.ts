@@ -86,6 +86,34 @@ export interface LensCatalogListParams {
   limit?: number;
 }
 
+/** Body for POST /lens-catalog. Identity tuple (brand/series/index/material/
+ *  lens_type/coating) + mrp are required; ranges, cost, per-power mrp_table,
+ *  gst/hsn/notes are optional. Mirrors backend LensLineCreate. */
+export interface LensLineCreatePayload {
+  brand: string;
+  series: string;
+  index: number;
+  material: string;
+  lens_type: string;
+  coating: string;
+  sph_range?: LensRange | null;
+  cyl_range?: LensRange | null;
+  has_add?: boolean | null;
+  add_range?: LensRange | null;
+  mrp: number;
+  cost_price?: number | null;
+  mrp_table?: LensMrpBand[] | null;
+  gst_rate?: number | null;
+  hsn_code?: string | null;
+  notes?: string | null;
+}
+
+/** Body for PATCH /lens-catalog/{id}. Identity fields are immutable (changing
+ *  them would re-slug the id and orphan stock); only the editable attributes. */
+export type LensLineUpdatePayload = Partial<
+  Omit<LensLineCreatePayload, 'brand' | 'series' | 'index' | 'material' | 'lens_type' | 'coating'>
+> & { is_active?: boolean };
+
 // ----------------------------------------------------------------------------
 // Catalog API
 // ----------------------------------------------------------------------------
@@ -112,6 +140,28 @@ export const lensCatalogApi = {
   metaOptions: async (): Promise<LensCatalogMetaOptions> => {
     const res = await api.get('/lens-catalog/meta/options');
     return res.data as LensCatalogMetaOptions;
+  },
+
+  /** Create a new lens line. Backend derives lens_line_id from the identity
+   *  tuple and 409s a duplicate. Returns the created line. */
+  create: async (payload: LensLineCreatePayload): Promise<LensCatalogDetailResponse> => {
+    const res = await api.post('/lens-catalog', payload);
+    return res.data as LensCatalogDetailResponse;
+  },
+
+  /** Patch the editable attributes of a line (ranges/pricing/gst/hsn/active).
+   *  Identity fields cannot change -- create a new line + move stock instead. */
+  update: async (
+    lensLineId: string,
+    patch: LensLineUpdatePayload,
+  ): Promise<LensCatalogDetailResponse> => {
+    const res = await api.patch(`/lens-catalog/${encodeURIComponent(lensLineId)}`, patch);
+    return res.data as LensCatalogDetailResponse;
+  },
+
+  /** Soft-delete (deactivate) a lens line. */
+  remove: async (lensLineId: string): Promise<void> => {
+    await api.delete(`/lens-catalog/${encodeURIComponent(lensLineId)}`);
   },
 };
 
