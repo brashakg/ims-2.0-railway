@@ -251,6 +251,10 @@ def _customers_query(store_id: Optional[str]) -> Dict[str, Any]:
             {"preferred_store_id": store_id},
             {"primary_store_id": store_id},
             {"store_ids": store_id},
+            # Legacy/edge fallback: a bare store_id. The real create-customer path
+            # never sets this on a customer doc, so it matches nothing extra in
+            # prod -- but keeps any legacy/imported doc that carries it in scope.
+            {"store_id": store_id},
         ]
     return q
 
