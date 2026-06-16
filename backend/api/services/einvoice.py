@@ -116,7 +116,10 @@ def _load_creds(db, gstin: str) -> Dict[str, Any]:
             doc = coll.find_one({"type": "einvoice"})
         if not doc:
             return {}
-        return doc.get("config") or {}
+        # BUG-155: secrets are Fernet-encrypted at rest; decrypt for provider use.
+        from api.services import cred_crypto
+
+        return cred_crypto.decrypt_config(doc.get("config") or {})
     except Exception as exc:  # noqa: BLE001
         logger.debug("[EINVOICE] creds load failed for gstin=%s: %s", gstin, exc)
         return {}

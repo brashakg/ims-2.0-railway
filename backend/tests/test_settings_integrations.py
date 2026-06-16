@@ -46,7 +46,7 @@ class _FakeColl:
 SUPER = {"roles": ["SUPERADMIN"]}
 
 
-def test_update_writes_canonical_type_keyed_plaintext(monkeypatch):
+def test_update_writes_canonical_type_keyed_encrypted(monkeypatch):
     coll = _FakeColl()
     monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
 
@@ -62,8 +62,18 @@ def test_update_writes_canonical_type_keyed_plaintext(monkeypatch):
     stored = coll.last_update["update"]["$set"]
     assert stored["type"] == "razorpay"
     assert stored["enabled"] is True
-    # Config persisted PLAINTEXT so nexus_providers can use it (no `enc:`)
-    assert stored["config"] == {"key_id": "rzp_live_abc", "key_secret": "supersecretvalue"}
+    # BUG-155: the secret is ENCRYPTED at rest (Fernet `fernet:` prefix), the
+    # raw value is never persisted, and the non-sensitive field is untouched.
+    assert stored["config"]["key_id"] == "rzp_live_abc"
+    assert stored["config"]["key_secret"].startswith("fernet:")
+    assert "supersecretvalue" not in stored["config"]["key_secret"]
+    # ...and it round-trips via the shared decrypt (providers read plaintext).
+    from api.services import cred_crypto
+
+    assert cred_crypto.decrypt_config(stored["config"]) == {
+        "key_id": "rzp_live_abc",
+        "key_secret": "supersecretvalue",
+    }
 
     # Response masks secrets - never echoes the raw secret value
     assert "supersecretvalue" not in str(resp)

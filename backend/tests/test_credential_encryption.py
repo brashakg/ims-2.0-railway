@@ -41,11 +41,18 @@ def _import_settings(env: dict):
     try:
         # Force a fresh import each time so module-level code re-runs.
         mod_name = "api.routers.settings"
-        if mod_name in sys.modules:
-            del sys.modules[mod_name]
+        sys.modules.pop(mod_name, None)
         # We also need auth and dependencies to be importable stubs.
         _stub_auth()
         _stub_dependencies()
+        # BUG-155: settings DELEGATES its credential crypto to the shared
+        # api.services.cred_crypto module, which derives its Fernet key from env
+        # AT IMPORT. importlib.reload re-runs it IN PLACE under the patched env so
+        # the test key takes effect (a plain sys.modules.pop is not enough -- the
+        # parent package keeps the stale submodule attribute, so settings would
+        # re-bind the old key).
+        import api.services.cred_crypto as _cc
+        importlib.reload(_cc)
         module = importlib.import_module(mod_name)
         return module
     finally:

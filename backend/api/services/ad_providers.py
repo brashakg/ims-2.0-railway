@@ -55,7 +55,10 @@ def _load_integration_config(db, integration_type: str) -> Dict[str, Any]:
         doc = coll.find_one({"type": integration_type.lower(), "enabled": True})
         if not doc:
             return {}
-        return doc.get("config") or {}
+        # BUG-155: secrets are Fernet-encrypted at rest; decrypt for provider use.
+        from api.services import cred_crypto
+
+        return cred_crypto.decrypt_config(doc.get("config") or {})
     except Exception as exc:
         logger.debug("[AD_PROVIDERS] Config read failed for %s: %s", integration_type, exc)
         return {}

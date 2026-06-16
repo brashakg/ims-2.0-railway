@@ -22,6 +22,11 @@ import re
 import logging
 from .auth import get_current_user, hash_password, verify_password, require_roles
 from ..dependencies import get_audit_repository
+# BUG-155: the canonical at-rest credential crypto now lives in a shared leaf
+# module so every read/write path (settings, admin, nexus, einvoice, ondc, ...)
+# encrypts/decrypts with the same key. The _encrypt_config/_decrypt_config/
+# _mask_config below delegate to it.
+from ..services import cred_crypto
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -118,16 +123,8 @@ def _mask_value(val: str) -> str:
 
 
 def _mask_config(config: dict) -> dict:
-    """Deep-mask any sensitive fields in a config dict."""
-    masked = {}
-    for k, v in config.items():
-        if isinstance(v, dict):
-            masked[k] = _mask_config(v)
-        elif isinstance(v, str) and k.lower() in _SENSITIVE_FIELDS:
-            masked[k] = _mask_value(v)
-        else:
-            masked[k] = v
-    return masked
+    """Deep-mask any sensitive fields in a config dict (delegates to cred_crypto)."""
+    return cred_crypto.mask_config(config)
 
 
 def _encrypt_value(plaintext: str) -> str:
@@ -184,38 +181,13 @@ def _decrypt_value(ciphertext: str) -> str:
 
 
 def _encrypt_config(config: dict) -> dict:
-    """Encrypt sensitive fields before writing to MongoDB."""
-    encrypted = {}
-    for k, v in config.items():
-        if isinstance(v, dict):
-            encrypted[k] = _encrypt_config(v)
-        elif (
-            isinstance(v, str)
-            and k.lower() in _SENSITIVE_FIELDS
-            # Skip values that are already encrypted (either scheme).
-            and not v.startswith("enc:")
-            and not v.startswith("fernet:")
-        ):
-            encrypted[k] = _encrypt_value(v)
-        else:
-            encrypted[k] = v
-    return encrypted
+    """Encrypt sensitive fields before writing to MongoDB (delegates to cred_crypto)."""
+    return cred_crypto.encrypt_config(config)
 
 
 def _decrypt_config(config: dict) -> dict:
-    """Decrypt sensitive fields after reading from MongoDB (for internal use)."""
-    decrypted = {}
-    for k, v in config.items():
-        if isinstance(v, dict):
-            decrypted[k] = _decrypt_config(v)
-        elif isinstance(v, str) and (v.startswith("enc:") or v.startswith("fernet:")):
-            try:
-                decrypted[k] = _decrypt_value(v)
-            except Exception:
-                decrypted[k] = v  # Can't decrypt -- return as-is
-        else:
-            decrypted[k] = v
-    return decrypted
+    """Decrypt sensitive fields after reading from MongoDB (delegates to cred_crypto)."""
+    return cred_crypto.decrypt_config(config)
 
 
 # ============================================================================
@@ -1641,7 +1613,8 @@ async def update_integration(
                 "$set": {
                     "type": integration_type.lower(),
                     "enabled": bool(payload.get("enabled")),
-                    "config": cfg,
+                    # BUG-155: encrypt secrets at rest (was stored plaintext).
+                    "config": _encrypt_config(cfg),
                     "updated_at": datetime.now().isoformat(),
                 }
             },
