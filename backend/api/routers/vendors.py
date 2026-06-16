@@ -178,6 +178,22 @@ class GRNItemCreate(BaseModel):
     # Receiving location for the minted serialized units (optional; falls back
     # to "DEFAULT" on the stock unit). Lets the receiver bin goods at post time.
     location_code: Optional[str] = None
+    # P2 (optical batch/expiry): a contact-lens line carries the supplier batch
+    # + expiry so each minted unit is dated for FEFO consumption + near-expiry
+    # reporting (the stock_unit model + FEFO helpers already key on these).
+    # Optional + backward-compatible: a frame/spectacle line simply omits them.
+    # lot_number is an accepted alias for batch_code (CL convention).
+    batch_code: Optional[str] = None
+    lot_number: Optional[str] = None
+    expiry_date: Optional[str] = None
+
+    @field_validator("batch_code", "lot_number", "expiry_date", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
 
     @model_validator(mode="after")
     def _validate_qty_coherence(self):
@@ -2109,6 +2125,20 @@ async def accept_grn(
                     )
                     continue
 
+            # P2 (optical batch/expiry): stamp the supplier batch + expiry on
+            # each minted unit so contact lenses are dated for FEFO consumption
+            # and near-expiry reporting (the stock model + FEFO helpers key on
+            # batch_code/expiry_date -- the SAME fields /stock/add persists, so a
+            # GRN-received CL unit is indistinguishable from a manually-added
+            # one). ADDITIVE + fail-soft: a line with no batch/expiry (frames,
+            # undated spectacle lenses) mints exactly as before.
+            batch_fields = {}
+            _bcode = item.get("batch_code") or item.get("lot_number")
+            if _bcode:
+                batch_fields["batch_code"] = _bcode
+            if item.get("expiry_date"):
+                batch_fields["expiry_date"] = item.get("expiry_date")
+
             for _ in range(to_mint):
                 created = stock_repo.create(
                     {
@@ -2127,6 +2157,7 @@ async def accept_grn(
                         "po_id": po_id,
                         "created_by": user_id,
                         **cost_fields,
+                        **batch_fields,
                     }
                 )
                 if created:
