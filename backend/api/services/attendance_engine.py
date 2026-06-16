@@ -397,3 +397,77 @@ def _to_date(value) -> Optional[date]:
         except ValueError:
             return None
     return None
+
+
+# ============================================================================
+# HALF-DAY CLASSIFICATION (owner-requested attendance rule)
+# ============================================================================
+
+
+def classify_half_day(
+    *,
+    check_in,
+    check_out=None,
+    min_hours: Optional[float] = None,
+    late_after: Optional[str] = None,
+) -> dict:
+    """Decide whether a workday should be marked HALF_DAY.
+
+    Two independent triggers (either fires):
+      * CHECK_IN_AFTER_CUTOFF -- check-in is later than ``late_after`` ('HH:MM').
+        Evaluable from check-in alone (no check-out needed).
+      * HOURS_BELOW_MIN -- hours worked (check_out - check_in) < ``min_hours``.
+        Needs both timestamps.
+
+    Args:
+        check_in:  datetime or ISO 'YYYY-MM-DDTHH:MM[:SS]' string.
+        check_out: same shape; None when the day isn't checked out yet (then only
+                   the late-arrival trigger can fire).
+        min_hours: threshold in hours; None/<=0 disables the hours trigger.
+        late_after: 'HH:MM' 24h cutoff; None/blank/invalid disables the late trigger.
+
+    Returns:
+        {"is_half_day": bool, "reason": str, "hours_worked": float|None}
+        reason in {CHECK_IN_AFTER_CUTOFF, HOURS_BELOW_MIN, FULL_DAY}.
+
+    Pure + fail-soft: garbage inputs never raise; they just don't trigger. This
+    only CLASSIFIES -- the caller decides whether to write the status, and only
+    ever downgrades a PRESENT day (never overrides an explicit ABSENT/LEAVE).
+    """
+    ci = _coerce_check_in(check_in)
+    co = _coerce_check_in(check_out) if check_out is not None else None
+
+    # Trigger 1: late arrival (check-in only).
+    if ci is not None and late_after:
+        cutoff = _parse_hhmm(late_after)
+        if cutoff is not None:
+            cutoff_dt = datetime.combine(ci.date(), cutoff)
+            if ci.timestamp() > cutoff_dt.timestamp():
+                return {
+                    "is_half_day": True,
+                    "reason": "CHECK_IN_AFTER_CUTOFF",
+                    "hours_worked": None,
+                }
+
+    # Trigger 2: short day (needs both ends).
+    if ci is not None and co is not None and min_hours is not None:
+        try:
+            threshold = float(min_hours)
+        except (TypeError, ValueError):
+            threshold = 0.0
+        if threshold > 0:
+            hours = (co.timestamp() - ci.timestamp()) / 3600.0
+            if hours >= 0:  # guard bad/negative spans (don't false-flag)
+                if hours < threshold:
+                    return {
+                        "is_half_day": True,
+                        "reason": "HOURS_BELOW_MIN",
+                        "hours_worked": round(hours, 2),
+                    }
+                return {
+                    "is_half_day": False,
+                    "reason": "FULL_DAY",
+                    "hours_worked": round(hours, 2),
+                }
+
+    return {"is_half_day": False, "reason": "FULL_DAY", "hours_worked": None}

@@ -398,3 +398,92 @@ class TestHttpGuards:
             "/api/v1/hr/reports/lwp?year=2026&month=13", headers=auth_headers
         )
         assert resp.status_code == 422
+
+
+class TestHalfDayClassification:
+    """Pure classify_half_day rule (owner-requested settings-system half-day)."""
+
+    def test_hours_below_min_is_half_day(self):
+        # 09:00 -> 12:30 = 3.5h worked, threshold 4h.
+        r = ae.classify_half_day(
+            check_in="2026-05-01T09:00:00",
+            check_out="2026-05-01T12:30:00",
+            min_hours=4.0,
+            late_after=None,
+        )
+        assert r["is_half_day"] is True
+        assert r["reason"] == "HOURS_BELOW_MIN"
+        assert r["hours_worked"] == 3.5
+
+    def test_full_hours_is_full_day(self):
+        # 09:00 -> 18:00 = 9h, threshold 4h.
+        r = ae.classify_half_day(
+            check_in="2026-05-01T09:00:00",
+            check_out="2026-05-01T18:00:00",
+            min_hours=4.0,
+            late_after="13:00",
+        )
+        assert r["is_half_day"] is False
+        assert r["reason"] == "FULL_DAY"
+        assert r["hours_worked"] == 9.0
+
+    def test_check_in_after_cutoff_is_half_day(self):
+        # Arrived 14:00, cutoff 13:00 -> half-day on the late trigger alone.
+        r = ae.classify_half_day(
+            check_in="2026-05-01T14:00:00",
+            check_out="2026-05-01T18:30:00",  # 4.5h -- would be a full day on hours
+            min_hours=4.0,
+            late_after="13:00",
+        )
+        assert r["is_half_day"] is True
+        assert r["reason"] == "CHECK_IN_AFTER_CUTOFF"
+
+    def test_late_trigger_fires_without_checkout(self):
+        r = ae.classify_half_day(
+            check_in="2026-05-01T13:30:00",
+            check_out=None,
+            min_hours=4.0,
+            late_after="13:00",
+        )
+        assert r["is_half_day"] is True
+        assert r["reason"] == "CHECK_IN_AFTER_CUTOFF"
+
+    def test_on_time_no_checkout_is_full_day(self):
+        # On time, not checked out yet -> can't judge hours -> not half-day (yet).
+        r = ae.classify_half_day(
+            check_in="2026-05-01T09:00:00",
+            check_out=None,
+            min_hours=4.0,
+            late_after="13:00",
+        )
+        assert r["is_half_day"] is False
+        assert r["reason"] == "FULL_DAY"
+
+    def test_disabled_triggers_never_fire(self):
+        # No min_hours + no late_after -> never half-day even on a 1h day.
+        r = ae.classify_half_day(
+            check_in="2026-05-01T09:00:00",
+            check_out="2026-05-01T10:00:00",
+            min_hours=None,
+            late_after=None,
+        )
+        assert r["is_half_day"] is False
+
+    def test_negative_span_does_not_false_flag(self):
+        # check-out before check-in (bad data) -> guarded, not a half-day.
+        r = ae.classify_half_day(
+            check_in="2026-05-01T18:00:00",
+            check_out="2026-05-01T09:00:00",
+            min_hours=4.0,
+            late_after=None,
+        )
+        assert r["is_half_day"] is False
+
+    def test_garbage_inputs_do_not_raise(self):
+        r = ae.classify_half_day(
+            check_in="not-a-date",
+            check_out="also-bad",
+            min_hours="oops",
+            late_after="25:99",
+        )
+        assert r["is_half_day"] is False
