@@ -26,8 +26,10 @@ import {
   Layers,
   ChevronRight,
   History,
+  Plus,
 } from 'lucide-react';
 import { lensCatalogApi, type LensLine, type LensCatalogMetaOptions } from '../../services/api/lensCatalog';
+import NewLensLineModal from './NewLensLineModal';
 import {
   lensStockApi,
   type LensStockCell,
@@ -151,6 +153,9 @@ export default function PowerGridPage() {
   // Cell drawer -- opens when the user clicks a cell in the matrix.
   const [drawerCell, setDrawerCell] = useState<LensStockCell | null>(null);
 
+  // "+ New lens line" modal (P1 cataloguing).
+  const [showNewLine, setShowNewLine] = useState(false);
+
   // ---- effects ----
 
   // Stores list (one-shot).
@@ -270,6 +275,15 @@ export default function PowerGridPage() {
               </option>
             ))}
           </select>
+          {canManageStock && (
+            <button
+              type="button"
+              onClick={() => setShowNewLine(true)}
+              className="inline-flex items-center gap-1.5 text-sm bg-bv text-white rounded-lg px-3 py-1.5"
+            >
+              <Plus className="w-4 h-4" /> New lens line
+            </button>
+          )}
           <button
             type="button"
             onClick={onRefresh}
@@ -302,10 +316,11 @@ export default function PowerGridPage() {
         <EmptyBox
           msg={
             anyFiltersSet(filters)
-              ? 'No lens lines match these filters. Try widening the filters or seed the lens catalog from Settings.'
-              : 'No lens lines in the catalog yet. Seed lens lines from Settings -> Lens Catalog, or paste a stock matrix to a new line.'
+              ? 'No lens lines match these filters. Try widening the filters, or add a new lens line.'
+              : 'No lens lines in the catalog yet. Add your first lens line to start cataloguing + stocking powers in the grid.'
           }
           onClear={anyFiltersSet(filters) ? onClearFilters : undefined}
+          onCreate={canManageStock ? () => setShowNewLine(true) : undefined}
         />
       ) : activeLine ? (
         <MatrixView
@@ -339,6 +354,21 @@ export default function PowerGridPage() {
           onSuccess={(m) => toast.success(m)}
         />
       ) : null}
+
+      {/* ---- New lens line modal (P1 cataloguing) ---- */}
+      {showNewLine && (
+        <NewLensLineModal
+          meta={meta}
+          onClose={() => setShowNewLine(false)}
+          onCreated={(line) => {
+            setShowNewLine(false);
+            // Clear filters so the new line shows, then open its matrix.
+            setFilters(EMPTY_FILTERS);
+            setActiveLineId(line.lens_line_id);
+            loadLines();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1189,20 +1219,39 @@ function LoadingBox() {
   );
 }
 
-function EmptyBox({ msg, onClear }: { msg: string; onClear?: () => void }) {
+function EmptyBox({
+  msg,
+  onClear,
+  onCreate,
+}: {
+  msg: string;
+  onClear?: () => void;
+  onCreate?: () => void;
+}) {
   return (
     <div className="border border-dashed border-line-strong rounded-lg bg-surface p-8 text-center flex flex-col items-center gap-2">
       <AlertTriangle className="w-5 h-5 text-ink-5" />
       <p className="text-sm text-ink-3 max-w-md">{msg}</p>
-      {onClear ? (
-        <button
-          type="button"
-          onClick={onClear}
-          className="text-xs text-bv hover:text-bv-600 underline-offset-2 hover:underline mt-1"
-        >
-          Clear filters
-        </button>
-      ) : null}
+      <div className="flex items-center gap-3 mt-1">
+        {onCreate ? (
+          <button
+            type="button"
+            onClick={onCreate}
+            className="inline-flex items-center gap-1.5 text-sm bg-bv text-white rounded-lg px-3 py-1.5"
+          >
+            <Plus className="w-4 h-4" /> New lens line
+          </button>
+        ) : null}
+        {onClear ? (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-xs text-bv hover:text-bv-600 underline-offset-2 hover:underline"
+          >
+            Clear filters
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }

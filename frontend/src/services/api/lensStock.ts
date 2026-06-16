@@ -86,6 +86,44 @@ export interface LensStockCellUpdate {
   notes?: string;
 }
 
+/** Body for POST /lens-stock: create one power cell. Mirrors backend
+ *  StockCellCreate (cyl defaults 0, add optional for non-progressive lines). */
+export interface LensStockCellCreate {
+  lens_line_id: string;
+  store_id: string;
+  sph: number;
+  cyl?: number;
+  add?: number | null;
+  on_hand?: number;
+  reserved?: number;
+  reorder_point?: number;
+  safety_stock?: number;
+}
+
+/** One row for the bulk-import matrix (paste-a-tray). */
+export interface LensStockBulkRow {
+  sph: number;
+  cyl?: number;
+  add?: number | null;
+  qty: number;
+}
+
+/** Body for POST /lens-stock/{id}/bulk-import: seed many cells at once. Pass
+ *  either a parsed `matrix` or a raw `csv` string ("sph,cyl,add,qty"). */
+export interface LensStockBulkImport {
+  store_id: string;
+  matrix?: LensStockBulkRow[];
+  csv?: string;
+  source_id?: string;
+}
+
+export interface LensStockBulkImportResponse {
+  created: number;
+  updated: number;
+  skipped?: number;
+  errors?: string[];
+}
+
 export const lensStockApi = {
   /** Full per-cell matrix for a lens line at a store. Backend returns
    *  cells the FE turns into the (sph x cyl[, add]) grid. */
@@ -111,6 +149,26 @@ export const lensStockApi = {
   ): Promise<LensStockCellResponse> => {
     const res = await api.patch(`/lens-stock/${encodeURIComponent(lineStockId)}`, body);
     return res.data as LensStockCellResponse;
+  },
+
+  /** Create one power cell (catalogue/stock a single SPH×CYL[,ADD] power).
+   *  Backend rejects a duplicate cell for the same (line, store, power). */
+  createCell: async (body: LensStockCellCreate): Promise<LensStockCellResponse> => {
+    const res = await api.post('/lens-stock', body);
+    return res.data as LensStockCellResponse;
+  },
+
+  /** Seed many cells in one shot (paste-a-tray). Pass a parsed `matrix` or a
+   *  raw `csv` string; store_id targets one store. */
+  bulkImport: async (
+    lensLineId: string,
+    body: LensStockBulkImport,
+  ): Promise<LensStockBulkImportResponse> => {
+    const res = await api.post(
+      `/lens-stock/${encodeURIComponent(lensLineId)}/bulk-import`,
+      body,
+    );
+    return res.data as LensStockBulkImportResponse;
   },
 
   /** Cells where (on_hand - reserved) < reorder_point at the active store. */
