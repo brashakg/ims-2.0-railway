@@ -167,8 +167,12 @@ export function StoreManagementSection() {
       await orgStoreApi.remove(storeId);
       toast.success('Store deleted successfully');
       loadStores();
-    } catch {
-      toast.error('Failed to delete store');
+    } catch (err) {
+      // Surface the backend's actual reason (e.g. "store still has on-hand
+      // stock / open orders / staff assigned") instead of a generic message --
+      // the delete is a soft-delete that intentionally refuses while a store
+      // has live dependents. Mirrors the save handler above.
+      toast.error(err instanceof Error ? err.message : 'Failed to delete store');
     }
   };
 
