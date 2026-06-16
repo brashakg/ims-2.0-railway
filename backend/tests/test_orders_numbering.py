@@ -9,9 +9,9 @@ Three audit findings on the revenue-critical order path:
         FY-scoped, and it IGNORED the operator's configured invoice prefix.
         New invoices honor the CONFIGURED `invoice_prefix` (store doc ->
         global invoice_settings -> "INV" default) and use an atomic
-        per-(prefix, FY) counter (`find_one_and_update($inc)`) ->
-        `{PREFIX}/{FY}/{serial}` e.g. `BV/2026-27/000123`. A UNIQUE partial
-        index on `invoice_number` makes a duplicate physically impossible.
+        per-(prefix, store, FY) counter (`find_one_and_update($inc)`) ->
+        `{PREFIX}/{STORE}/{FY}/{serial}` e.g. `BV/BOK-01/26-27/0001`. A UNIQUE
+        partial index on `invoice_number` makes a duplicate physically impossible.
         OLD orders keep their stored number (never rewritten) so historical
         invoices still resolve.
 
@@ -240,30 +240,33 @@ class TestFinancialYearHelpers:
 # ============================================================================
 
 
-# A store whose operator configured the invoice prefix "BV" (Better Vision).
-_BV_STORE = {"store_id": "BV-BOK-01", "invoice_prefix": "BV"}
-_BV2_STORE = {"store_id": "BV-RNC-02", "invoice_prefix": "BV"}
-_WO_STORE = {"store_id": "WO-PUN-01", "invoice_prefix": "WO"}
+# Stores whose operator configured an invoice prefix; store_code is the human
+# code that rides inside the per-store invoice series (the prod store_id is a
+# UUID). Segment = store_code with a redundant leading prefix stripped, e.g.
+# "BV-BOK-01" under prefix "BV" -> "BOK-01".
+_BV_STORE = {"store_id": "BV-BOK-01", "store_code": "BV-BOK-01", "invoice_prefix": "BV"}
+_BV2_STORE = {"store_id": "BV-RNC-02", "store_code": "BV-RNC-02", "invoice_prefix": "BV"}
+_WO_STORE = {"store_id": "WO-PUN-01", "store_code": "WO-PUN-01", "invoice_prefix": "WO"}
 
 
 class TestInvoiceNumbering:
-    def test_sequential_within_prefix_and_fy(self):
-        # Configured prefix is honored: store_doc.invoice_prefix == "BV" ->
-        # numbers read BV/2026-27/000001, NOT a store_id-derived fragment.
+    def test_sequential_within_store_and_fy(self):
+        # Format BV/BOK-01/26-27/0001: configured prefix "BV", store segment
+        # "BOK-01" (redundant "BV-" stripped), short FY, 4-pad consecutive serial.
         repo, _coll, _counters = _repo_with_counter()
         when = datetime(2026, 5, 1)
         n1 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
         n2 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
         n3 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
-        assert n1 == "BV/2026-27/000001"
-        assert n2 == "BV/2026-27/000002"
-        assert n3 == "BV/2026-27/000003"
+        assert n1 == "BV/BOK-01/26-27/0001"
+        assert n2 == "BV/BOK-01/26-27/0002"
+        assert n3 == "BV/BOK-01/26-27/0003"
 
-    def test_configured_prefix_read_from_stores_collection(self):
-        # No store_doc passed -> the resolver reads stores.invoice_prefix.
+    def test_configured_prefix_and_code_read_from_stores_collection(self):
+        # No store_doc passed -> prefix AND store_code both read from stores.
         repo, _coll, _counters = _repo_with_counter(stores=_stores(_BV_STORE))
         n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
-        assert n == "BV/2026-27/000001"
+        assert n == "BV/BOK-01/26-27/0001"
 
     def test_store_prefix_beats_global_invoice_settings(self):
         # Per-store prefix wins over the global invoice_settings default.
@@ -272,31 +275,33 @@ class TestInvoiceNumbering:
             invoice_settings=_invoice_settings("BV"),
         )
         n = repo.next_invoice_number("WO-PUN-01", datetime(2026, 5, 1))
-        assert n == "WO/2026-27/000001"
+        assert n == "WO/PUN-01/26-27/0001"
 
     def test_global_invoice_settings_prefix_used_when_store_has_none(self):
         # Store has no invoice_prefix -> fall back to global invoice settings.
+        # The store_code does not start with "ACME", so it is kept whole.
         repo, _coll, _counters = _repo_with_counter(
-            stores=_stores({"store_id": "BV-BOK-01"}),
+            stores=_stores({"store_id": "BV-BOK-01", "store_code": "BV-BOK-01"}),
             invoice_settings=_invoice_settings("ACME"),
         )
         n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
-        assert n == "ACME/2026-27/000001"
+        assert n == "ACME/BV-BOK-01/26-27/0001"
 
     def test_default_prefix_when_nothing_configured(self):
         # Neither store nor global settings configure a prefix -> "INV" default.
+        # No store_doc / stores row -> segment falls back to the store_id string.
         repo, _coll, _counters = _repo_with_counter()
         n = repo.next_invoice_number("BV-BOK-01", datetime(2026, 5, 1))
-        assert n == "INV/2026-27/000001"
+        assert n == "INV/BV-BOK-01/26-27/0001"
 
-    def test_serial_is_six_digit_zero_padded(self):
+    def test_serial_is_four_digit_zero_padded(self):
         repo, _coll, _counters = _repo_with_counter()
         n = repo.next_invoice_number(
             "BV-BOK-01", datetime(2026, 5, 1), store_doc=_BV_STORE
         )
         serial = n.rsplit("/", 1)[1]
-        assert len(serial) == 6
-        assert serial == "000001"
+        assert len(serial) == 4
+        assert serial == "0001"
 
     def test_distinct_prefixes_have_independent_series(self):
         # Two stores on DIFFERENT configured prefixes keep independent series.
@@ -305,22 +310,22 @@ class TestInvoiceNumbering:
         a1 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
         w1 = repo.next_invoice_number("WO-PUN-01", when, store_doc=_WO_STORE)
         a2 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
-        assert a1 == "BV/2026-27/000001"
-        assert w1 == "WO/2026-27/000001"
-        assert a2 == "BV/2026-27/000002"
+        assert a1 == "BV/BOK-01/26-27/0001"
+        assert w1 == "WO/PUN-01/26-27/0001"
+        assert a2 == "BV/BOK-01/26-27/0002"
 
-    def test_same_prefix_shares_one_consecutive_series(self):
-        # Two stores that SHARE a configured prefix (same legal billing
-        # identity) draw from ONE consecutive series -- GST Rule 46(b) scopes
-        # the serial to the invoice prefix, not the physical store.
+    def test_same_prefix_distinct_stores_have_independent_series(self):
+        # Two stores SHARING a prefix (same legal identity) now each run their
+        # OWN per-store series -- Rule 46(b) permits multiple series, and the
+        # owner wants the store visible + independently numbered in the invoice.
         repo, _coll, _counters = _repo_with_counter()
         when = datetime(2026, 5, 1)
         a1 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
         b1 = repo.next_invoice_number("BV-RNC-02", when, store_doc=_BV2_STORE)
         a2 = repo.next_invoice_number("BV-BOK-01", when, store_doc=_BV_STORE)
-        assert a1 == "BV/2026-27/000001"
-        assert b1 == "BV/2026-27/000002"  # continues the SAME BV series
-        assert a2 == "BV/2026-27/000003"
+        assert a1 == "BV/BOK-01/26-27/0001"
+        assert b1 == "BV/RNC-02/26-27/0001"  # its OWN series, starts at 0001
+        assert a2 == "BV/BOK-01/26-27/0002"
 
     def test_fy_boundary_resets_serial(self):
         repo, _coll, _counters = _repo_with_counter()
@@ -335,11 +340,11 @@ class TestInvoiceNumbering:
         first_new = repo.next_invoice_number(
             "BV-BOK-01", datetime(2026, 4, 1), store_doc=_BV_STORE
         )
-        assert last_old == "BV/2025-26/000001"
-        assert first_new == "BV/2026-27/000001"
+        assert last_old == "BV/BOK-01/25-26/0001"
+        assert first_new == "BV/BOK-01/26-27/0001"
 
     def test_parallel_inc_never_duplicates(self):
-        """Many allocations against the same (prefix, FY) counter must all be
+        """Many allocations against the same (prefix, store, FY) counter must all be
         distinct AND consecutive -- the $inc is the single point of
         serialization, so a burst of concurrent invoices is monotone 1..N with
         no gaps or repeats."""
@@ -352,7 +357,7 @@ class TestInvoiceNumbering:
         assert len(set(numbers)) == 200  # no collisions
         serials = sorted(int(n.rsplit("/", 1)[1]) for n in numbers)
         assert serials == list(range(1, 201))  # consecutive 1..200, no gaps
-        assert all(n.startswith("BV/2026-27/") for n in numbers)
+        assert all(n.startswith("BV/BOK-01/26-27/") for n in numbers)
 
     def test_no_counter_collection_falls_back_safely(self):
         """DB-less / no counters collection -> a usable, prefix + FY-labelled
@@ -363,8 +368,8 @@ class TestInvoiceNumbering:
         n = repo.next_invoice_number(
             "BV-BOK-01", datetime(2026, 5, 1), store_doc=_BV_STORE
         )
-        assert n.startswith("BV/2026-27/")
-        # Fallback suffix is not the 6-digit serial; just confirm it's present.
+        assert n.startswith("BV/BOK-01/26-27/")
+        # Fallback suffix is not the consecutive serial; just confirm it's present.
         assert len(n.rsplit("/", 1)[1]) > 0
 
     def test_messy_configured_prefix_is_sanitized(self):
@@ -374,9 +379,15 @@ class TestInvoiceNumbering:
         n = repo.next_invoice_number(
             "BV-BOK-01",
             datetime(2026, 5, 1),
-            store_doc={"store_id": "BV-BOK-01", "invoice_prefix": "  bv-opt "},
+            store_doc={
+                "store_id": "BV-BOK-01",
+                "store_code": "BV-BOK-01",
+                "invoice_prefix": "  bv-opt ",
+            },
         )
-        assert n == "BV-OPT/2026-27/000001"
+        # Prefix sanitised to BV-OPT; store_code "BV-BOK-01" does not start with
+        # "BV-OPT" so it is kept whole.
+        assert n == "BV-OPT/BV-BOK-01/26-27/0001"
 
     def test_garbage_store_id_uses_ims_prefix_not_blank(self):
         # _store_invoice_prefix is now the LAST-RESORT derivation (used only
@@ -544,7 +555,7 @@ class TestOldInvoiceLookupStillWorks:
         assert not order.get("invoice_number")
         new_num = repo.next_invoice_number(order["store_id"], datetime(2026, 5, 1))
         repo.set_invoice("O-new", new_num)
-        assert new_num == "BV/2026-27/000001"
+        assert new_num == "BV/BOK-01/26-27/0001"
         # Persisted and now resolvable by the new number.
         assert coll.find_one({"invoice_number": new_num})["order_id"] == "O-new"
 

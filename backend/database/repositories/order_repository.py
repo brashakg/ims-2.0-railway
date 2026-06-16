@@ -416,6 +416,48 @@ class OrderRepository(BaseRepository):
             return prefix
         return DEFAULT_INVOICE_PREFIX
 
+    def _resolve_invoice_store_segment(
+        self, store_id: Optional[str], store_doc: Optional[Dict], prefix: str
+    ) -> str:
+        """Human store segment for the per-store invoice series, e.g. ``BOK-01``.
+
+        Each store runs its OWN invoice series (Rule 46(b) permits multiple
+        series), so the store identifier rides inside the number:
+        ``BV/BOK-01/26-27/0001``. We use the store's human ``store_code`` -- the
+        production ``store_id`` is an opaque UUID, unfit for a printed invoice --
+        taken from the passed ``store_doc`` then looked up from the stores
+        collection. A redundant leading copy of the prefix is stripped on a
+        clean separator boundary (``BV-BOK-01`` under prefix ``BV`` -> ``BOK-01``),
+        never a partial-word match. Falls back to a sanitized store_id, then
+        ``NA`` -- never empty (an empty segment would merge two stores' series).
+        """
+        code = None
+        if store_doc is not None:
+            code = store_doc.get("store_code") or store_doc.get("code")
+        if not code and store_id:
+            try:
+                db = getattr(self.collection, "database", None)
+                if db is not None:
+                    sd = db["stores"].find_one(
+                        {"store_id": store_id}, {"store_code": 1}
+                    )
+                    code = (sd or {}).get("store_code")
+            except Exception:  # noqa: BLE001 - invoicing must not 500
+                code = None
+        raw = str(code or store_id or "").strip().upper()
+        seg = "".join(c for c in raw if c.isalnum() or c in ("-", "_"))
+        seg = seg.strip("-_")
+        if prefix:
+            stripped = False
+            for sep in ("-", "_"):
+                if seg.startswith(prefix + sep):
+                    seg = seg[len(prefix) + 1 :].strip("-_")
+                    stripped = True
+                    break
+            if not stripped and seg == prefix:
+                seg = ""
+        return seg[:16] or "NA"
+
     def _counters_collection(self):
         """Best-effort handle on the shared ``counters`` collection.
 
@@ -462,22 +504,25 @@ class OrderRepository(BaseRepository):
     ) -> str:
         """Allocate the next GST invoice number for ``store_id`` in its FY.
 
-        The prefix is the CONFIGURED ``invoice_prefix`` -- per the store doc,
-        then global invoice settings, then the "INV" default -- NOT a fragment
-        derived from the store_id string (see ``_resolve_invoice_prefix``). So a
-        store configured with prefix "BV" bills ``BV/2026-27/000123`` and one
-        configured "WO" bills ``WO/2026-27/000123``; the operator's configured
-        identity is honored.
+        Format: ``{PREFIX}/{STORE}/{FY}/{serial}`` e.g. ``BV/BOK-01/26-27/0001``.
+          * PREFIX -- the CONFIGURED ``invoice_prefix`` (store doc, then global
+            invoice settings, then the "INV" default; see
+            ``_resolve_invoice_prefix``). The operator's brand identity.
+          * STORE  -- the store's human ``store_code`` (see
+            ``_resolve_invoice_store_segment``), so EACH store runs its own
+            invoice series (Rule 46(b) permits multiple series). The opaque
+            production store_id UUID never appears on the printed invoice.
+          * FY     -- short Indian financial-year label ``YY-YY`` (Apr-Mar), so
+            ``2026-27`` reads ``26-27``. The serial RESETS each FY.
+          * serial -- consecutive within (prefix, store, FY), zero-padded to 4
+            (``0001``); grows past 9999 naturally, never overflows.
 
-        Atomic per (prefix, financial-year): a single ``find_one_and_update``
-        with ``$inc`` claims the next serial from a ``counters`` doc keyed
-        ``invoice:{prefix}:{fy_start_year}``. Mongo serialises the increment, so
-        two cashiers raising invoices at the same instant get distinct serials
-        -- no read-modify-write window, no duplicates (Rule 46(b)).
-
-        Format: ``{PREFIX}/{FY}/{serial}`` e.g. ``BV/2026-27/000123`` --
-        FY-scoped, zero-padded to 6. The serial RESETS for each new financial
-        year (a fresh counter doc) and is consecutive within the FY.
+        Atomic per (prefix, store, financial-year): a single
+        ``find_one_and_update`` with ``$inc`` claims the next serial from a
+        ``counters`` doc keyed ``invoice:{prefix}:{store}:{fy_start_year}``.
+        Mongo serialises the increment, so two cashiers raising invoices at the
+        same instant get distinct serials -- no read-modify-write window, no
+        duplicates (Rule 46(b)).
 
         We do NOT renumber existing invoices: callers only invoke this for an
         order with no stored invoice_number, and the stored value is never
@@ -485,19 +530,21 @@ class OrderRepository(BaseRepository):
 
         Fail-soft: with no counters collection (DB-less / mock), falls back to
         a timestamp-derived suffix so the caller still gets a usable, unique
-        string (with the same configured prefix + FY) rather than a 500. That
-        fallback path is only hit when the DB is unavailable, in which case
-        nothing is persisted anyway.
+        string (same prefix/store/FY shape) rather than a 500. That fallback
+        path is only hit when the DB is unavailable, in which case nothing is
+        persisted anyway.
         """
         now = when or now_ist()
-        label = fy_label(now)
+        start = fy_start_year(now)
+        label = f"{start % 100:02d}-{(start + 1) % 100:02d}"  # short FY, e.g. 26-27
         prefix = self._resolve_invoice_prefix(store_id, store_doc)
+        store_seg = self._resolve_invoice_store_segment(store_id, store_doc, prefix)
         counters = self._counters_collection()
         if counters is not None:
             try:
                 from pymongo import ReturnDocument
 
-                key = f"invoice:{prefix}:{fy_start_year(now)}"
+                key = f"invoice:{prefix}:{store_seg}:{start}"
                 doc = counters.find_one_and_update(
                     {"_id": key},
                     {"$inc": {"seq": 1}},
@@ -506,7 +553,7 @@ class OrderRepository(BaseRepository):
                 )
                 seq = (doc or {}).get("seq")
                 if isinstance(seq, int) and seq > 0:
-                    return f"{prefix}/{label}/{seq:06d}"
+                    return f"{prefix}/{store_seg}/{label}/{seq:04d}"
             except Exception:  # noqa: BLE001 - fall through to safe fallback
                 logger.warning(
                     "invoice counter $inc failed; using fallback serial",
@@ -515,7 +562,7 @@ class OrderRepository(BaseRepository):
         # Fail-soft fallback (DB-less / counter error): time-derived, still
         # unique and still FY-labelled so the format stays consistent.
         suffix = now.strftime("%m%d%H%M%S")
-        return f"{prefix}/{label}/{suffix}"
+        return f"{prefix}/{store_seg}/{label}/{suffix}"
 
     def create_unique(
         self, data: Dict, number_field: str, regenerate, max_retries: int = 6
