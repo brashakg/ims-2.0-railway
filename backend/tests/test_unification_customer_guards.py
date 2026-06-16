@@ -47,6 +47,7 @@ from api.routers.customers import (  # noqa: E402
     CustomerUpdate,
     PatientCreate,
     add_patient,
+    get_customer,
     update_customer,
 )
 
@@ -91,6 +92,11 @@ class _FakeCustomerRepo:
 
 
 def _patch_repo(monkeypatch, docs):
+    # get_customer / update / add_patient now enforce OBJECT-LEVEL store scope.
+    # These tests assert business rules (GSTIN/dedup/credit-role), not scope, so
+    # default each seed customer to the test store the acting user belongs to
+    # (BV-TEST-01) -- a doc may still override by setting its own home_store_id.
+    docs = [{"home_store_id": "BV-TEST-01", **d} for d in docs]
     repo = _FakeCustomerRepo(docs)
     monkeypatch.setattr(customers_mod, "get_customer_repository", lambda: repo)
     # Audit is best-effort; neuter it so a missing audit repo can't interfere.
@@ -502,3 +508,45 @@ class TestAddPatientDedup:
         )
         assert res.get("deduped") is None
         assert len(repo.added_patients) == 1
+
+
+class TestCrossStoreObjectScope:
+    """Object-level store scope (cross-store IDOR fix): a store-level user must
+    not read/edit a customer belonging to a store outside their reach. Seed
+    customers default to BV-TEST-01 (via _patch_repo); act from BV-OTHER-99."""
+
+    def _seed_other_store(self, monkeypatch):
+        return _patch_repo(
+            monkeypatch,
+            [{"customer_id": "C1", "name": "Alice", "mobile": "9876543210",
+              "phone": "9876543210", "customer_type": "B2C", "patients": []}],
+        )
+
+    def test_foreign_store_read_is_404(self, monkeypatch):
+        self._seed_other_store(monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(get_customer(customer_id="C1", current_user=_manager(store="BV-OTHER-99")))
+        assert exc.value.status_code == 404  # not 403 -> don't confirm it exists
+
+    def test_foreign_store_write_is_403(self, monkeypatch):
+        self._seed_other_store(monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                update_customer(
+                    customer_id="C1",
+                    customer=CustomerUpdate(name="Hacked"),
+                    current_user=_cashier(store="BV-OTHER-99"),
+                )
+            )
+        assert exc.value.status_code == 403
+
+    def test_same_store_read_ok(self, monkeypatch):
+        self._seed_other_store(monkeypatch)
+        res = asyncio.run(get_customer(customer_id="C1", current_user=_manager()))
+        assert res["customer_id"] == "C1"
+
+    def test_superadmin_cross_store_read_ok(self, monkeypatch):
+        self._seed_other_store(monkeypatch)
+        admin = {"user_id": "u-sa", "username": "sa", "roles": ["SUPERADMIN"]}
+        res = asyncio.run(get_customer(customer_id="C1", current_user=admin))
+        assert res["customer_id"] == "C1"
