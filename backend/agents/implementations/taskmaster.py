@@ -272,8 +272,18 @@ class TaskmasterAgent(JarvisAgent):
             candidates = list(
                 coll.find(
                     {
+                        # Incl. ESCALATED: an ignored task climbs the ladder
+                        # again on each fresh breach (multi-hop). should_escalate
+                        # gates cadence + level so this can't storm.
                         "status": {
-                            "$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]
+                            "$in": [
+                                "OPEN",
+                                "IN_PROGRESS",
+                                "ESCALATED",
+                                "open",
+                                "in_progress",
+                                "escalated",
+                            ]
                         },
                     }
                 ).limit(200)
