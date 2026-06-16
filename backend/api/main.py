@@ -49,6 +49,7 @@ from .routers import (
     prescriptions_router,
     vendors_router,
     purchase_invoices_router,
+    purchase_recon_router,
     vendor_returns_router,
     vendor_rma_router,
     rtv_debit_notes_router,
@@ -1185,6 +1186,15 @@ app.include_router(
 # vendors router so their concrete /purchase-invoices/* paths win over the
 # vendors `GET /{vendor_id}` catch-all (which would otherwise resolve
 # /vendors/purchase-invoices to get_vendor with vendor_id="purchase-invoices").
+# purchase_recon_router also mounts under /vendors and must be registered before
+# the vendors catch-all for the same reason.  Its paths are:
+#   POST/GET /vendors/purchase-invoices/{invoice_id}/recon
+#   GET      /vendors/recon/worklists
+app.include_router(
+    purchase_recon_router,
+    prefix="/api/v1/vendors",
+    tags=["Purchase Recon"],
+)
 app.include_router(
     purchase_invoices_router,
     prefix="/api/v1/vendors/purchase-invoices",

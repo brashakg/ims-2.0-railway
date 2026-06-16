@@ -15,6 +15,7 @@ from .orders import router as orders_router
 from .prescriptions import router as prescriptions_router
 from .vendors import router as vendors_router
 from .purchase_invoices import router as purchase_invoices_router
+from .purchase_recon import router as purchase_recon_router
 from .vendor_returns import router as vendor_returns_router
 from .vendor_rma import router as vendor_rma_router
 from .rtv_debit_notes import router as rtv_debit_notes_router
@@ -110,6 +111,7 @@ __all__ = [
     "prescriptions_router",
     "vendors_router",
     "purchase_invoices_router",
+    "purchase_recon_router",
     "vendor_returns_router",
     "vendor_rma_router",
     "rtv_debit_notes_router",

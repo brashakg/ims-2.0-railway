@@ -5960,6 +5960,25 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}",
         "allowed": "AUTHENTICATED",
     },
+    # S6: Accountant reconciliation ticks (inline recon sub-doc on vendor_bills).
+    # Both write and read are accounting actions -> ACCOUNTANT/ADMIN.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/recon",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/recon",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # S6: Accountant console worklists (stock-yet-to-receive, vendor returns,
+    # pending scheme + return CNs). ACCOUNTANT/ADMIN read-only.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/recon/worklists",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders",
