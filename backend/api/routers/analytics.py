@@ -18,6 +18,7 @@ from ..dependencies import (
     get_customer_repository,
     get_task_repository,
     validate_store_access,
+    user_store_scope,
     get_store_repository,
 )
 
@@ -569,11 +570,21 @@ async def get_store_performance(
         def _store_name(sid: str) -> str:
             return store_name_cache.get(sid) or sid
 
+        # Store-scope (BUG: cross-store leak). _ANALYTICS_ROLES includes the
+        # single-store STORE_MANAGER + ACCOUNTANT; without this they received
+        # EVERY store's revenue/orders/stock_value. Cross-store roles (ADMIN/
+        # AREA_MANAGER/SUPERADMIN) keep the all-store view; single-store roles
+        # see only their own store(s). Mirrors the sibling analytics endpoints'
+        # validate_store_access scoping.
+        is_cross, allowed_stores = user_store_scope(current_user)
+
         # Group by store (union of both windows so a store with only prior
         # sales still appears).
         stores = {}
         for order in list(window_orders) + list(prev_window_orders):
             store_id = order.get("store_id") or "store-001"
+            if not is_cross and store_id not in allowed_stores:
+                continue  # never group a store the caller may not see
             if store_id not in stores:
                 stores[store_id] = {
                     "store_id": store_id,
@@ -1095,8 +1106,13 @@ async def get_enterprise_kpis(
         store_comparison = []
         stores_by_id = {}
 
+        # Same cross-store leak as /store-performance: single-store roles
+        # (STORE_MANAGER/ACCOUNTANT) must not see other stores in the ranking.
+        kpi_is_cross, kpi_allowed = user_store_scope(current_user)
         for order in all_store_orders:
             order_store_id = order.get("store_id") or "store-001"
+            if not kpi_is_cross and order_store_id not in kpi_allowed:
+                continue
             if order_store_id not in stores_by_id:
                 stores_by_id[order_store_id] = {
                     "store_id": order_store_id,
