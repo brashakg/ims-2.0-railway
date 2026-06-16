@@ -90,6 +90,8 @@ const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').
 const GoodsReceiptCockpit = lazy(() => import('./pages/purchase/GoodsReceiptCockpit').then(m => ({ default: m.GoodsReceiptCockpit })));
 const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 const VendorRMA = lazy(() => import('./pages/purchase/VendorRMA').then(m => ({ default: m.VendorRMA })));
+// Purchase S6: Accountant Reconciliation Console
+const ReconConsole = lazy(() => import('./pages/purchase/ReconConsole'));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const OpeningStockImport = lazy(() => import('./pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
@@ -824,6 +826,18 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <VendorRMA />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Purchase S6: Accountant Reconciliation Console
+                      Gated to ACCOUNTANT / ADMIN / SUPERADMIN only.
+                      Provides 4-tick recon flags per purchase invoice + 4 worklists. */}
+                  <Route
+                    path="purchase/recon-console"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+                        <ReconConsole />
                       </ProtectedRoute>
                     }
                   />

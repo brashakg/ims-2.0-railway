@@ -125,6 +125,8 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF'] },
       { id: 'cashflow', label: 'Cash Flow', to: '/finance/cash-flow', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      // Purchase S6: Accountant reconciliation console (4 tick flags + 4 worklists)
+      { id: 'recon-console', label: 'Recon Console', to: '/purchase/recon-console', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
     ],
   },
   {
