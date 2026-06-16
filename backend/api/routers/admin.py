@@ -82,23 +82,34 @@ def _get_integrations_collection():
 
 
 def _get_integration_config(integration_type: str) -> dict:
-    """Get a specific integration config from database"""
+    """Get a specific integration config from database (secrets DECRYPTED for
+    internal/provider use; API responses mask separately)."""
     collection = _get_integrations_collection()
     if collection is not None:
         config = collection.find_one({"type": integration_type.lower()})
         if config:
             config.pop("_id", None)
+            # BUG-155: integration secrets are stored Fernet-encrypted at rest.
+            from api.services import cred_crypto
+
+            if isinstance(config.get("config"), dict):
+                config["config"] = cred_crypto.decrypt_config(config["config"])
             return config
     return {"enabled": False, "config": {}}
 
 
 def _save_integration_config(integration_type: str, config_data: dict) -> bool:
-    """Save integration config to database"""
+    """Save integration config to database (BUG-155: encrypt secrets at rest)."""
     collection = _get_integrations_collection()
     if collection is not None:
+        from api.services import cred_crypto
+
+        to_store = dict(config_data)
+        if isinstance(to_store.get("config"), dict):
+            to_store["config"] = cred_crypto.encrypt_config(to_store["config"])
         collection.update_one(
             {"type": integration_type.lower()},
-            {"$set": {**config_data, "type": integration_type.lower()}},
+            {"$set": {**to_store, "type": integration_type.lower()}},
             upsert=True,
         )
         return True
