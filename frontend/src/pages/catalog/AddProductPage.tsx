@@ -51,7 +51,7 @@ export function GuidedAddProduct() {
   const [mrp, setMrp] = useState('');
   const [offerPrice, setOfferPrice] = useState('');
   const [costPrice, setCostPrice] = useState('');
-  const [discountCategory, setDiscountCategory] = useState('MASS');
+  const [discountCategory, setDiscountCategory] = useState('');
 
   // Inventory
   const [initialQuantity, setInitialQuantity] = useState('0');
@@ -133,6 +133,12 @@ export function GuidedAddProduct() {
     if (currentStep === 'pricing') {
       if (!mrp || parseFloat(mrp) <= 0) {
         newErrors.mrp = 'MRP is required and must be greater than 0';
+      }
+      // Discount tier must be an explicit choice (no silent MASS default) so a
+      // premium/luxury product never lands on the highest discount caps by
+      // accident. It drives the POS discount ceiling.
+      if (!discountCategory) {
+        newErrors.discount_category = 'Please choose a discount tier';
       }
     }
 
@@ -462,16 +468,21 @@ export function GuidedAddProduct() {
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
             Discount Category
+            <span className="text-red-500 ml-1">*</span>
           </label>
           <select
             value={discountCategory}
             onChange={(e) => setDiscountCategory(e.target.value)}
             className="input-field w-full"
           >
+            <option value="" disabled>Select a discount tier…</option>
             <option value="MASS">Mass (Standard discount caps)</option>
             <option value="PREMIUM">Premium (Reduced discount caps)</option>
             <option value="LUXURY">Luxury (Minimal discounts)</option>
           </select>
+          {errors.discount_category && (
+            <p className="text-red-500 text-xs mt-1">{errors.discount_category}</p>
+          )}
         </div>
       </div>
     </div>

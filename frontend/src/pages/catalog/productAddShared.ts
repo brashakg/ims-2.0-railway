@@ -236,6 +236,13 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
     }
   }
 
+  // Discount tier must be an explicit choice (no silent MASS default) so a
+  // premium/luxury product never lands on the highest discount caps by
+  // accident -- it drives the POS discount ceiling.
+  if (!values.discountCategory) {
+    errors.discount_category = 'Please choose a discount tier';
+  }
+
   return errors;
 }
 
