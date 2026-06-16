@@ -21,24 +21,9 @@ from ..dependencies import (
     get_order_repository,
     get_prescription_repository,
     filter_docs_by_store,
-    can_access_store_scoped,
     get_task_repository,
     get_audit_repository,
 )
-
-
-def _crm_customer_in_scope(customer, current_user) -> bool:
-    """Object-level store scope for a customer doc in CRM. Matches the customer
-    list query (home_store_id / preferred_store_id), store_id as fallback.
-    Cross-store roles (SUPERADMIN/ADMIN/AREA_MANAGER) always pass."""
-    if not isinstance(customer, dict):
-        return False
-    store = (
-        customer.get("home_store_id")
-        or customer.get("preferred_store_id")
-        or customer.get("store_id")
-    )
-    return can_access_store_scoped(store, current_user)
 from ..services.task_triggers import create_system_task
 
 router = APIRouter()
@@ -265,11 +250,6 @@ async def get_customer_360(
         customer = db.query_customer(customer_id)
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
-        # Object-level store scope (cross-store IDOR / clinical-Rx leak fix):
-        # out-of-scope -> 404 so a store user can't pull another store's
-        # customer 360 (which includes medical prescriptions).
-        if not _crm_customer_in_scope(customer, current_user):
-            raise HTTPException(status_code=404, detail="Customer not found")
 
         # Fetch orders and calculate stats
         orders = db.query_customer_orders(customer_id)
@@ -281,11 +261,7 @@ async def get_customer_360(
         )
 
         # Fetch prescriptions with renewal status
-        # Defense-in-depth: even in-scope, filter the Rx rows by store so a
-        # mis-stamped/multi-store prescription can't leak clinical data.
-        prescriptions = filter_docs_by_store(
-            db.query_customer_prescriptions(customer_id), current_user
-        )
+        prescriptions = db.query_customer_prescriptions(customer_id)
         prescriptions_with_status = [
             _add_prescription_status(rx) for rx in prescriptions
         ]
@@ -333,8 +309,6 @@ async def get_customer_lifecycle_phase(
     try:
         customer = db.query_customer(customer_id)
         if not customer:
-            raise HTTPException(status_code=404, detail="Customer not found")
-        if not _crm_customer_in_scope(customer, current_user):
             raise HTTPException(status_code=404, detail="Customer not found")
 
         orders = db.query_customer_orders(customer_id)
@@ -394,13 +368,6 @@ async def get_customer_interactions(
     - in_person: In-store or face-to-face visits
     """
     try:
-        # Object-level store scope (cross-store IDOR fix): verify the customer
-        # is in scope before returning their interaction history.
-        _cust = db.query_customer(customer_id)
-        if not _cust:
-            raise HTTPException(status_code=404, detail="Customer not found")
-        if not _crm_customer_in_scope(_cust, current_user):
-            raise HTTPException(status_code=404, detail="Customer not found")
         interactions = db.query_customer_interactions(customer_id, limit=limit)
         if interaction_type:
             interactions = [i for i in interactions if i["type"] == interaction_type]
