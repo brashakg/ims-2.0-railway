@@ -35,6 +35,7 @@ from api.routers.purchase_recon import (
     get_recon,
     get_recon_worklists,
     upsert_recon,
+    mark_scheme_cn_received,
 )
 import api.routers.purchase_recon as recon_mod
 
@@ -475,4 +476,45 @@ def test_worklists_503_on_db_upsert_error(monkeypatch):
         asyncio.run(
             upsert_recon("INV-X", ReconUpdate(reconciled=True), current_user=_user())
         )
+    assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Endpoint tests: mark_scheme_cn_received (P4)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_scheme_cn_received_sets_timestamp(monkeypatch):
+    cn = {
+        "credit_note_number": "CN-REB-1",
+        "source": "VOLUME_REBATE",
+        "vendor_id": "V1",
+        "amount": 5000,
+    }
+    coll = _FakeCollection([cn])
+    db = _FakeDB({"vendor_debit_notes": coll})
+    monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
+
+    result = asyncio.run(mark_scheme_cn_received("CN-REB-1", current_user=_user()))
+    assert result["received"] is True
+    assert result["cn_received_at"]
+    # The doc now carries the received stamp -> drops off the pending worklist.
+    assert cn.get("cn_received_at")
+    assert cn.get("cn_received_by") == "acc-1"
+    # And the pending-scheme worklist no longer returns it.
+    assert _pending_scheme_cns(db, None) == []
+
+
+def test_mark_scheme_cn_received_404_when_missing(monkeypatch):
+    db = _FakeDB({"vendor_debit_notes": _FakeCollection([])})
+    monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(mark_scheme_cn_received("GHOST-CN", current_user=_user()))
+    assert exc_info.value.status_code == 404
+
+
+def test_mark_scheme_cn_received_503_when_db_none(monkeypatch):
+    monkeypatch.setattr(recon_mod, "_get_db", lambda: None)
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(mark_scheme_cn_received("CN-REB-1", current_user=_user()))
     assert exc_info.value.status_code == 503

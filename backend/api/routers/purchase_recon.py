@@ -392,3 +392,53 @@ async def get_recon_worklists(
         "pending_credit_notes_scheme": pending_cns_scheme,
         "pending_credit_notes_return": pending_cns_return,
     }
+
+
+@router.post("/recon/credit-notes/{credit_note_number}/mark-received", status_code=200)
+async def mark_scheme_cn_received(
+    credit_note_number: str,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Mark a scheme / volume-rebate credit note as physically RECEIVED.
+
+    Closes the loop on the 'pending scheme CNs' worklist: that list shows every
+    VOLUME_REBATE credit note WITHOUT a ``cn_received_at`` field; without a way
+    to set it, those rows would pile up forever (honest-but-un-actionable). The
+    accountant, on receiving the paper CN from the vendor, ticks it here -> the
+    row drops off the worklist. Idempotent (re-marking just refreshes the stamp).
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll = db.get_collection("vendor_debit_notes")
+    flt = {"credit_note_number": credit_note_number, "source": "VOLUME_REBATE"}
+    try:
+        existing = coll.find_one(flt, {"_id": 0})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RECON] DB error finding scheme CN %s: %s", credit_note_number, exc)
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if not existing:
+        raise HTTPException(status_code=404, detail="Scheme credit note not found")
+    now = _now_iso()
+    try:
+        coll.update_one(
+            flt,
+            {
+                "$set": {
+                    "cn_received_at": now,
+                    "cn_received_by": current_user.get("user_id"),
+                }
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[RECON] DB error marking scheme CN %s received: %s",
+            credit_note_number,
+            exc,
+        )
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return {
+        "credit_note_number": credit_note_number,
+        "cn_received_at": now,
+        "received": True,
+    }
