@@ -74,7 +74,7 @@ export function QuickAddPage() {
   const [mrp, setMrp] = useState('');
   const [offerPrice, setOfferPrice] = useState('');
   const [costPrice, setCostPrice] = useState('');
-  const [discountCategory, setDiscountCategory] = useState('MASS');
+  const [discountCategory, setDiscountCategory] = useState('');
 
   // Inventory
   const [initialQuantity, setInitialQuantity] = useState('0');
@@ -173,7 +173,7 @@ export function QuickAddPage() {
       setMrp('');
       setOfferPrice('');
       setCostPrice('');
-      setDiscountCategory('MASS');
+      setDiscountCategory('');
       setInitialQuantity('0');
       setBarcode('');
       setReorderLevel('5');
@@ -203,7 +203,7 @@ export function QuickAddPage() {
     setMrp(v.mrp || '');
     setOfferPrice(v.offerPrice || '');
     setCostPrice(v.costPrice || '');
-    setDiscountCategory(v.discountCategory || 'MASS');
+    setDiscountCategory(v.discountCategory || '');
     setSyncToShopify(Boolean(v.syncToShopify));
     setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
     setPublishPOS(v.publishPOS !== false);
@@ -901,17 +901,24 @@ export function QuickAddPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Discount Category</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Discount Category
+                  <span className="text-red-500 ml-1">*</span>
+                </label>
                 <select
                   title="Discount Category"
                   value={discountCategory}
                   onChange={(e) => setDiscountCategory(e.target.value)}
                   className="input-field w-full"
                 >
+                  <option value="" disabled>Select a discount tier…</option>
                   <option value="MASS">Mass (Standard discount caps)</option>
                   <option value="PREMIUM">Premium (Reduced discount caps)</option>
                   <option value="LUXURY">Luxury (Minimal discounts)</option>
                 </select>
+                {errors.discount_category && (
+                  <p className="text-red-500 text-xs mt-1">{errors.discount_category}</p>
+                )}
               </div>
             </div>
           </Section>
