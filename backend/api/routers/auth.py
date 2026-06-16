@@ -855,16 +855,58 @@ async def refresh_token(request: RefreshTokenRequest):
     """
     payload = decode_token(request.token)
 
+    # Re-validate against the LIVE user record so a disabled or role-downgraded
+    # account cannot keep elevated access for another 8h by refreshing. The access
+    # token is stateless, so /refresh is the natural session re-check point.
+    # Fail-soft: if the DB is unavailable, fall back to the token's own claims
+    # (the prior behaviour) rather than blocking a refresh.
+    from ..dependencies import get_user_repository
+
+    db_user = None
+    try:
+        user_repo = get_user_repository()
+        if user_repo:
+            db_user = user_repo.collection.find_one(
+                {"user_id": payload.get("user_id")}
+            ) or user_repo.collection.find_one({"username": payload.get("username")})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh: live user re-check failed: %s", e)
+        db_user = None
+
+    if db_user is not None:
+        if not db_user.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Account is disabled")
+        roles = db_user.get("roles", payload.get("roles", []))
+        store_ids = db_user.get("store_ids", payload.get("store_ids", []))
+        module_access = db_user.get("module_access") or {}
+        must_change = bool(db_user.get("must_change_password", False))
+    else:
+        roles = payload.get("roles", [])
+        store_ids = payload.get("store_ids", [])
+        module_access = payload.get("module_access") or {}
+        must_change = bool(payload.get("must_change_password", False))
+
+    # Keep the active store only if it is still one of the user's stores (a
+    # reassigned store-level user falls back to their first remaining store).
+    active_store = payload.get("active_store_id")
+    if (
+        store_ids
+        and active_store
+        and active_store not in store_ids
+        and not any(r in ("ADMIN", "SUPERADMIN") for r in roles)
+    ):
+        active_store = store_ids[0]
+
     # Create new token (preserve the force-password-change flag + the deny-only
     # module override across refresh so the restriction survives a re-issue).
     token_data = {
         "user_id": payload["user_id"],
         "username": payload["username"],
-        "roles": payload["roles"],
-        "store_ids": payload["store_ids"],
-        "active_store_id": payload.get("active_store_id"),
-        "must_change_password": bool(payload.get("must_change_password", False)),
-        "module_access": payload.get("module_access") or {},
+        "roles": roles,
+        "store_ids": store_ids,
+        "active_store_id": active_store,
+        "must_change_password": must_change,
+        "module_access": module_access,
     }
 
     new_token = create_access_token(token_data)

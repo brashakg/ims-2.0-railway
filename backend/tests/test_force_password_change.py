@@ -273,6 +273,34 @@ def test_default_password_forces_change_in_prod(client, patched_repo, monkeypatc
     assert repo.collection.docs[0].get("must_change_password") is True
 
 
+def test_refresh_rejects_disabled_user(client, patched_repo):
+    """A user disabled AFTER login cannot keep access by refreshing -- the stale
+    8h token is re-validated against the live record on /refresh."""
+    user = _make_user()  # active
+    repo = patched_repo([user])
+    token = client.post(
+        "/api/v1/auth/login",
+        json={"username": "newstaff", "password": "Temp@1234"},
+    ).json()["access_token"]
+    repo.collection.docs[0]["is_active"] = False  # admin disables the account
+    r = client.post("/api/v1/auth/refresh", json={"token": token})
+    assert r.status_code == 403, r.text
+
+
+def test_refresh_picks_up_role_change(client, patched_repo):
+    """A role downgrade takes effect on the next /refresh, not after 8h."""
+    user = _make_user(roles=["STORE_MANAGER"])
+    repo = patched_repo([user])
+    token = client.post(
+        "/api/v1/auth/login",
+        json={"username": "newstaff", "password": "Temp@1234"},
+    ).json()["access_token"]
+    repo.collection.docs[0]["roles"] = ["SALES_STAFF"]  # downgraded
+    r = client.post("/api/v1/auth/refresh", json={"token": token})
+    assert r.status_code == 200, r.text
+    assert decode_token(r.json()["access_token"])["roles"] == ["SALES_STAFF"]
+
+
 def test_default_password_not_forced_in_test_env(client, patched_repo, monkeypatch):
     """The deterministic CI/e2e suite (ENVIRONMENT=test) logs in with the default
     and must NOT be bounced to the change-password screen."""
