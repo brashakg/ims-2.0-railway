@@ -780,6 +780,31 @@ def _create_day_row_safe(attendance_repo, data: dict):
             )
 
 
+def _half_day_rule(store_id: Optional[str]) -> dict:
+    """Resolve the auto half-day attendance rule for a store (settings-system).
+
+    Returns {"auto": bool, "min_hours": float|None, "late_after": str|None}.
+    DARK by default: hr.half_day_auto is False unless the owner turns it on, so
+    attendance behaves exactly as before. Fail-soft -- any policy error resolves
+    to auto=False (never blocks a check-in/out)."""
+    try:
+        from ..services.policy_engine import get_policy
+
+        scope = {"store_id": store_id} if store_id else None
+        if not bool(get_policy("hr.half_day_auto", scope, default=False)):
+            return {"auto": False, "min_hours": None, "late_after": None}
+        try:
+            min_hours = float(get_policy("hr.half_day_min_hours", scope, default=4.0))
+        except (TypeError, ValueError):
+            min_hours = 4.0
+        late_after = get_policy("hr.half_day_late_after", scope, default="13:00")
+        if not isinstance(late_after, str) or not late_after.strip():
+            late_after = None
+        return {"auto": True, "min_hours": min_hours, "late_after": late_after}
+    except Exception:  # noqa: BLE001 -- attendance must never 500 on a policy read
+        return {"auto": False, "min_hours": None, "late_after": None}
+
+
 @router.post("/attendance/check-in")
 async def check_in(
     latitude: Optional[float] = None,
@@ -840,6 +865,19 @@ async def check_in(
         (shift or {}).get("grace_minutes", 0),
     )
 
+    # --- Half-day auto-rule (DARK by default; configured in settings-system) ---
+    # At check-in only the late-arrival trigger can fire (no check-out yet); the
+    # hours-below-min trigger is re-evaluated at check-out.
+    hd_rule = _half_day_rule(active_store)
+    checkin_half_day = False
+    if hd_rule["auto"]:
+        checkin_half_day = attendance_engine.classify_half_day(
+            check_in=now,
+            check_out=None,
+            min_hours=hd_rule["min_hours"],
+            late_after=hd_rule["late_after"],
+        )["is_half_day"]
+
     # --- Record (fail-soft, IDEMPOTENT) ---
     # Key the day-row on (employee_id, date) -- the SAME shape mark_attendance
     # and the grid use (date = a date-only ISO STRING), which is exactly the
@@ -861,15 +899,20 @@ async def check_in(
             # Preserve an EARLIER check-in time + its late-mark: the first stamp
             # of the day is the system of record. A repeat tap just keeps the row
             # PRESENT and never duplicates.
+            base_status = (
+                existing.get("status")
+                if existing.get("status") in ("PRESENT", "HALF_DAY")
+                else "PRESENT"
+            )
+            # Only ever DOWNGRADE a PRESENT day to HALF_DAY (the late-arrival
+            # trigger); never touch a manual HALF_DAY / other status.
+            if base_status == "PRESENT" and checkin_half_day:
+                base_status = "HALF_DAY"
             update_data = {
                 "employee_name": current_user.get("full_name")
                 or current_user.get("username"),
                 "store_id": existing.get("store_id") or active_store,
-                "status": (
-                    existing.get("status")
-                    if existing.get("status") in ("PRESENT", "HALF_DAY")
-                    else "PRESENT"
-                ),
+                "status": base_status,
                 "shift_id": (shift or {}).get("shift_id") or existing.get("shift_id"),
                 "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
             }
@@ -890,7 +933,7 @@ async def check_in(
                 or current_user.get("username"),
                 "store_id": active_store,
                 "date": today_iso,
-                "status": "PRESENT",
+                "status": "HALF_DAY" if checkin_half_day else "PRESENT",
                 "check_in": now.isoformat(),
                 "is_late": late["is_late"],
                 "late_minutes": late["late_minutes"],
@@ -954,9 +997,23 @@ async def check_out(
             status_code=409,
             detail="Already checked out today.",
         )
+    update = {"check_out": now_iso, "checked_out_by": employee_id}
+    # Half-day auto-rule (DARK by default): now that the day is checked out, the
+    # hours-below-min trigger is evaluable. Only DOWNGRADE a PRESENT day -- an
+    # explicit ABSENT/LEAVE/manual HALF_DAY is never overridden.
+    hd_rule = _half_day_rule(active_store)
+    if hd_rule["auto"] and existing.get("status") == "PRESENT":
+        hd = attendance_engine.classify_half_day(
+            check_in=existing.get("check_in"),
+            check_out=now_iso,
+            min_hours=hd_rule["min_hours"],
+            late_after=hd_rule["late_after"],
+        )
+        if hd["is_half_day"]:
+            update["status"] = "HALF_DAY"
     attendance_repo.update(
         existing.get("attendance_id") or existing.get("_id"),
-        {"check_out": now_iso, "checked_out_by": employee_id},
+        update,
     )
     return {
         "attendance_id": existing.get("attendance_id") or existing.get("_id"),

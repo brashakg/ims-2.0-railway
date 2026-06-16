@@ -772,6 +772,48 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "within 7 days (overdue bills are MUST_PAY regardless). "
         "Empty = only the per-bill vendor_critical flag applies.",
     ),
+    # --- HR: half-day attendance rule (owner-requested, settings-system) ---
+    # DARK by default: with hr.half_day_auto = False the attendance flow behaves
+    # exactly as today (status is whatever the admin marks). Turning it ON makes
+    # check-in/check-out auto-derive a HALF_DAY when the worked-hours or late
+    # arrival thresholds below are breached -- but ONLY downgrades a PRESENT day;
+    # an explicit ABSENT/LEAVE/HOLIDAY/WEEK_OFF/manual HALF_DAY is never touched.
+    _spec(
+        key="hr.half_day_auto",
+        type="bool",
+        default=False,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="HR",
+        label="Auto-mark half-day",
+        help="When ON, a workday is auto-marked HALF_DAY if hours worked fall "
+        "below the minimum OR check-in is after the cutoff time below. OFF "
+        "(default) keeps attendance status fully manual.",
+    ),
+    _spec(
+        key="hr.half_day_min_hours",
+        type="float",
+        default=4.0,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="HR",
+        label="Half-day minimum hours",
+        help="A checked-out workday with fewer hours worked than this is "
+        "auto-marked HALF_DAY (only when 'Auto-mark half-day' is ON).",
+        minimum=0.5,
+        maximum=12.0,
+    ),
+    _spec(
+        key="hr.half_day_late_after",
+        type="text",
+        default="13:00",
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="HR",
+        label="Half-day check-in cutoff (HH:MM)",
+        help="Check-in after this 24h time is auto-marked HALF_DAY (only when "
+        "'Auto-mark half-day' is ON). Blank disables the late-arrival trigger.",
+    ),
 ]
 
 REGISTRY = {s.key: s for s in _REGISTRY_LIST}
