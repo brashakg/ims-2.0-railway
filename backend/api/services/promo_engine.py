@@ -86,7 +86,9 @@ class Promo:
 
     promo_id: str
     kind: str
-    percent: float = 0.0
+    # None = unset. For SECOND_PAIR an unset percent defaults to 50; an EXPLICIT
+    # percent=0 means 0% (disabled), never the 50% default.
+    percent: Optional[float] = None
     stackable: bool = False
     categories: Optional[frozenset] = None
     product_ids: Optional[frozenset] = None
@@ -146,7 +148,10 @@ def _discount_second_pair(promo: Promo, lines: List[CartLine]) -> float:
     units = _eligible_unit_prices(promo, lines)
     if len(units) < max(2, promo.min_units):
         return 0.0
-    pct = _clamp_pct(promo.percent) or DEFAULT_SECOND_PAIR_PCT
+    # Unset (None) -> 50% default; an EXPLICIT percent (incl. 0) is honoured.
+    pct = (
+        DEFAULT_SECOND_PAIR_PCT if promo.percent is None else _clamp_pct(promo.percent)
+    )
     units.sort(reverse=True)
     discounted = units[1::2]  # the cheaper one in each (full, discounted) pair
     return round(sum(u * pct / 100.0 for u in discounted), 2)
@@ -187,9 +192,18 @@ def evaluate_cart(lines: List[CartLine], promos: List[Promo]) -> PromoResult:
 
     stackable: List[Tuple[Promo, float]] = []
     exclusive: List[Tuple[Promo, float]] = []
+    # promo_id keys `breakdown`, so it MUST be unique within one call -- a
+    # duplicate id would silently overwrite its breakdown entry while `total`
+    # still summed both, breaking the invariant total_discount == sum(breakdown).
+    # First occurrence wins; later duplicates are skipped (fail-soft -- a config
+    # list with two promos sharing an id is a caller bug, not a checkout-blocker).
+    seen_ids: set = set()
     for p in promos:
         if p.kind not in PROMO_KINDS:
             continue
+        if p.promo_id in seen_ids:
+            continue
+        seen_ids.add(p.promo_id)
         disc = _discount_for(p, lines)
         if disc <= 0:
             continue
@@ -230,3 +244,52 @@ def evaluate_cart(lines: List[CartLine], promos: List[Promo]) -> PromoResult:
 
     result.total_discount = round(min(total, subtotal), 2)
     return result
+
+
+def allocate_discount(lines: List[CartLine], total_discount: float) -> Dict[str, float]:
+    """Split one promo `total_discount` across cart lines proportional to each
+    line's value (unit_price * quantity), PAISA-EXACT: the per-line shares are
+    rounded to 2 dp yet provably sum to `total_discount` to the paisa.
+
+    The POS GST tax invoice needs a per-line discount to compute CGST/SGST/IGST
+    per line; `evaluate_cart` returns a single authoritative total (rounded once),
+    so a naive proportional split would drift by a paisa or two. This does the
+    largest-remainder split in integer paisa and hands the residual paisa to the
+    lines with the biggest fractional remainder, so sum(result) == total_discount
+    exactly. Returns {line_id: discount_rupees}. Lines with no value get 0.
+    """
+    out: Dict[str, float] = {ln.line_id: 0.0 for ln in lines}
+    total_paisa = int(round(_safe_price(total_discount) * 100))
+    if total_paisa <= 0 or not lines:
+        return out
+
+    values = [
+        (ln.line_id, _safe_price(ln.unit_price) * max(0, int(ln.quantity)))
+        for ln in lines
+    ]
+    value_total = sum(v for _, v in values)
+    if value_total <= 0:
+        return out
+
+    # Never allocate more than the lines are worth (caller should have capped the
+    # total at subtotal already, but guard anyway).
+    total_paisa = min(total_paisa, int(round(value_total * 100)))
+
+    floors: Dict[str, int] = {}
+    remainders: List[Tuple[float, str]] = []
+    assigned = 0
+    for line_id, val in values:
+        exact = val / value_total * total_paisa
+        f = int(exact)  # floor for non-negative
+        floors[line_id] = f
+        assigned += f
+        remainders.append((exact - f, line_id))
+
+    # Distribute the leftover paisa to the largest fractional remainders (ties ->
+    # line_id for determinism).
+    leftover = total_paisa - assigned
+    remainders.sort(key=lambda r: (-r[0], r[1]))
+    for i in range(leftover):
+        floors[remainders[i % len(remainders)][1]] += 1
+
+    return {lid: round(p / 100.0, 2) for lid, p in floors.items()}

@@ -204,3 +204,62 @@ def test_fully_discounted_cart_suppresses_exclusive_winner():
     assert res.applied == ["S"]
     assert res.exclusive_winner is None
     assert "E" in res.suppressed
+
+
+# --- review fixes: dedupe, explicit-0 second-pair, per-line allocation ------
+
+
+def test_duplicate_promo_id_skipped_invariant_holds():
+    # Two promos share id 'D'; only the first is honoured so the invariant
+    # total_discount == sum(breakdown.values()) holds.
+    d1 = Promo(promo_id="D", kind=pe.PROMO_PERCENT, percent=10, stackable=True)
+    d2 = Promo(promo_id="D", kind=pe.PROMO_PERCENT, percent=20, stackable=True)
+    res = pe.evaluate_cart([_line("a", 1000)], [d1, d2])
+    assert res.total_discount == 100.0  # only the first 'D' (10%) fires
+    assert res.applied == ["D"]
+    assert round(sum(res.breakdown.values()), 2) == res.total_discount
+
+
+def test_second_pair_explicit_zero_percent_disables():
+    # An EXPLICIT percent=0 means 0% (disabled), not the 50% default.
+    promo = Promo(promo_id="N10", kind=pe.PROMO_SECOND_PAIR, percent=0)
+    res = pe.evaluate_cart([_line("a", 2000), _line("b", 1200)], [promo])
+    assert res.total_discount == 0.0
+    assert res.applied == []
+
+
+def test_second_pair_none_percent_defaults_50():
+    promo = Promo(promo_id="N10", kind=pe.PROMO_SECOND_PAIR)  # percent=None
+    res = pe.evaluate_cart([_line("a", 2000), _line("b", 1200)], [promo])
+    assert res.total_discount == 600.0  # 50% of the cheaper (1200)
+
+
+def test_allocate_discount_sums_exactly_paisa():
+    # round-at-end total vs per-line split must reconcile to the paisa.
+    lines = [_line(str(i), 14.29) for i in range(7)]
+    promo = Promo(promo_id="N", kind=pe.PROMO_PERCENT, percent=50)
+    res = pe.evaluate_cart(lines, [promo])
+    alloc = pe.allocate_discount(lines, res.total_discount)
+    assert round(sum(alloc.values()), 2) == res.total_discount
+    assert all(v >= 0 for v in alloc.values())
+
+
+def test_allocate_discount_proportional_and_exact():
+    lines = [_line("big", 1000), _line("small", 100)]
+    alloc = pe.allocate_discount(lines, 110.0)
+    # 110 split over 1100 value -> 100 to big, 10 to small, exact.
+    assert alloc["big"] == 100.0
+    assert alloc["small"] == 10.0
+    assert round(sum(alloc.values()), 2) == 110.0
+
+
+def test_allocate_discount_zero_and_empty():
+    assert pe.allocate_discount([_line("a", 1000)], 0.0) == {"a": 0.0}
+    assert pe.allocate_discount([], 50.0) == {}
+
+
+def test_allocate_discount_never_exceeds_line_value():
+    # asking to allocate more than the cart is worth is capped at line value.
+    lines = [_line("a", 100)]
+    alloc = pe.allocate_discount(lines, 999.0)
+    assert alloc["a"] == 100.0
