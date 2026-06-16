@@ -6341,12 +6341,27 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/workshop/jobs/{job_id}/complete",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
+        # BUG-092: sales-confirmation gate is a SALES act, not WORKSHOP_STAFF's.
         "method": "PATCH",
         "path": "/api/v1/workshop/jobs/{job_id}/fitting-details",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "CASHIER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+        ],
     },
     {
         "method": "GET",
@@ -6403,7 +6418,13 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/workshop/jobs/{job_id}/rework",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "POST",
@@ -6419,12 +6440,24 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/workshop/jobs/{job_id}/start",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "PATCH",
         "path": "/api/v1/workshop/jobs/{job_id}/status",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "PATCH",
@@ -6440,7 +6473,13 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/workshop/jobs/{job_id}/vendor-status",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {"method": "GET", "path": "/api/v1/workshop/overdue", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/workshop/pending", "allowed": "AUTHENTICATED"},

@@ -70,6 +70,27 @@ def _is_admin(current_user: dict) -> bool:
     return any(r in current_user.get("roles", []) for r in _ADMIN_ROLES)
 
 
+def _assert_expense_object_access(existing: dict, current_user: dict) -> None:
+    """BUG-091: object-level authz for a single expense (bill download/upload).
+
+    Two dimensions, mirroring the LIST endpoint (own-only for non-approvers) and
+    the mutation endpoints (validate_store_access). Without this, ANY authenticated
+    role could stream/replace ANY expense's bill -- a private financial document
+    (receipt with amount / GSTIN / PII) -- across stores and employees by id.
+    """
+    # Store dimension: 403 for a store-level role asking outside its reach.
+    validate_store_access(existing.get("store_id"), current_user)
+    # Ownership dimension: approvers/finance/admins may review in-store bills;
+    # everyone else only their own.
+    roles = current_user.get("roles") or []
+    if any(r in roles for r in _APPROVAL_ROLES) or "SUPERADMIN" in roles:
+        return
+    if existing.get("employee_id") != current_user.get("user_id"):
+        raise HTTPException(
+            status_code=403, detail="You can only access your own expense bill"
+        )
+
+
 # ============================================================================
 # ANTI-FRAUD - DUPLICATE-BILL PURE HELPERS (no DB, unit-tested directly)
 # ============================================================================
@@ -760,6 +781,8 @@ async def upload_bill(
     if existing is None:
         raise HTTPException(status_code=404, detail="Expense not found")
 
+    _assert_expense_object_access(existing, current_user)
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
@@ -856,6 +879,8 @@ async def download_bill(
     existing = expense_repo.find_by_id(expense_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Expense not found")
+
+    _assert_expense_object_access(existing, current_user)
 
     file_id = existing.get("bill_file_id")
     if not file_id:
