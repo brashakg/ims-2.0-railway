@@ -452,7 +452,9 @@ class PaymentCreate(BaseModel):
     # the Orders-page Collect Payment modal). pydantic aliasing means the
     # request can send either — we canonicalize on the model.
     method: PaymentMethod = Field(..., validation_alias="method")
-    amount: float = Field(..., gt=0)
+    # BUG-108 residual: gt=0 already rejects NaN/<=0; the le bound additionally
+    # rejects +Infinity so a payment can't store inf on the order doc.
+    amount: float = Field(..., gt=0, le=100_000_000)
     reference: Optional[str] = None
     # Gift-voucher code (only used when method=GIFT_VOUCHER). The POS sends
     # both `reference` and `voucher_code` set to the card code; we prefer
@@ -464,7 +466,7 @@ class PaymentCreate(BaseModel):
     # POS-2: the loan principal (order_total - down_payment). When provided,
     # build_emi_schedule uses this amount so the schedule reflects the full
     # financed balance, not just the down-payment recorded in `amount`.
-    emi_principal: Optional[float] = Field(None, gt=0)
+    emi_principal: Optional[float] = Field(None, gt=0, le=100_000_000)
 
     model_config = ConfigDict(populate_by_name=True)
 
