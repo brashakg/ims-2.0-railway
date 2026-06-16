@@ -5866,6 +5866,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # P1/S2: vendor-first goods-receipt cockpit (open POs + worklists for the
+    # receiving screen). Same gate as receiving -- the receiving roles.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/goods-receipt/cockpit",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book is an accounting action -> ACCOUNTANT/ADMIN; reads
     # are AUTHENTICATED. (SUPERADMIN auto-passes via require_roles.)
