@@ -67,29 +67,47 @@ E2E_PRODUCTS = [
     },
 ]
 
-# One AVAILABLE unit per product at the primary store.
-E2E_STOCK = [
-    {
-        "_id": "e2e-stock-frame-001",
-        "stock_id": "e2e-stock-frame-001",
-        "product_id": "e2e-frame-999",
-        "store_id": "BV-BOK-01",
-        "barcode": "E2E999000001",
-        "status": "AVAILABLE",
-        "quantity": 1,
-        "cost_price": 400,
-    },
-    {
-        "_id": "e2e-stock-sunglass-001",
-        "stock_id": "e2e-stock-sunglass-001",
-        "product_id": "e2e-sunglass-1180",
-        "store_id": "BV-BOK-01",
-        "barcode": "E2E118000001",
-        "status": "AVAILABLE",
-        "quantity": 1,
-        "cost_price": 500,
-    },
+# AVAILABLE serialized units per product at the primary store.
+#
+# Why a POOL and not a single unit: the suite COMPLETES a frame sale several
+# times (gst-invoice x2, pos-gst-inclusive x2) and each completed sale flips one
+# stock_unit AVAILABLE -> SOLD via orders._mark_units_sold. Since the BUG-097
+# oversell guard (orders._assert_serialized_stock_available) now correctly 409s
+# a sale once AVAILABLE hits 0, a single seeded unit was consumed by the first
+# sale and every later sale 409'd ("0 available ... Cannot oversell") -> the POS
+# success screen never rendered and the suite went red. retries=2 multiplies the
+# consumption further. A generous pool (well above suite_sales x (1+retries))
+# keeps every run green without weakening the prod guard, and stays trivially
+# small in a fresh CI Mongo. No spec asserts an exact on-hand count, so a larger
+# pool changes no assertion.
+_E2E_STOCK_PER_PRODUCT = 50
+_E2E_STOCK_SPECS = [
+    {"prefix": "frame", "product_id": "e2e-frame-999", "barcode": "E2E999", "cost_price": 400},
+    {"prefix": "sunglass", "product_id": "e2e-sunglass-1180", "barcode": "E2E118", "cost_price": 500},
 ]
+
+
+def _build_e2e_stock():
+    units = []
+    for spec in _E2E_STOCK_SPECS:
+        for i in range(1, _E2E_STOCK_PER_PRODUCT + 1):
+            sid = "e2e-stock-%s-%03d" % (spec["prefix"], i)
+            units.append(
+                {
+                    "_id": sid,
+                    "stock_id": sid,
+                    "product_id": spec["product_id"],
+                    "store_id": "BV-BOK-01",
+                    "barcode": "%s%06d" % (spec["barcode"], i),
+                    "status": "AVAILABLE",
+                    "quantity": 1,
+                    "cost_price": spec["cost_price"],
+                }
+            )
+    return units
+
+
+E2E_STOCK = _build_e2e_stock()
 
 
 def _now_iso():
