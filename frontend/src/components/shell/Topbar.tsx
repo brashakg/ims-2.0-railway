@@ -180,7 +180,16 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                 padding: 4,
               }}
             >
-              {(user?.storeIds?.length ? user.storeIds : Object.keys(storeNames)).map((id) => (
+              {/* Store options source (data-consistency fix): an all-stores role
+                  (SUPERADMIN/ADMIN/AREA_MANAGER) picks from the ORG store list
+                  (GET /stores -> storeNames), not the per-user store_ids assignment
+                  -- which for an all-stores admin is often empty, leaving "No store"
+                  and a POS "No Store Selected" dead-end. Store-level roles still see
+                  only their assigned stores. */}
+              {(hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])
+                ? (Object.keys(storeNames).length ? Object.keys(storeNames) : (user?.storeIds || []))
+                : (user?.storeIds?.length ? user.storeIds : Object.keys(storeNames))
+              ).map((id) => (
                 <button
                   key={id}
                   type="button"
