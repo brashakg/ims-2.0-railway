@@ -92,8 +92,40 @@ from ..dependencies import (
     get_customer_repository,
     get_audit_repository,
     validate_store_access,
+    can_access_store_scoped,
 )
 from ..services.phone import normalize_indian_mobile
+
+
+def _customer_store_id(doc):
+    """The store a customer belongs to for object-level scope checks. Mirrors
+    the list query, which matches home_store_id (legacy/seed) OR
+    preferred_store_id (TechCherry import); store_id is a last-resort fallback."""
+    if not isinstance(doc, dict):
+        return None
+    return doc.get("home_store_id") or doc.get("preferred_store_id") or doc.get("store_id")
+
+
+def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
+    """Fetch a customer by id, enforcing OBJECT-LEVEL store scope.
+
+    Closes the cross-store IDOR where any logged-in user could read/edit another
+    store's customer by guessing an id (the list view was scoped; the single-
+    record reads behind it were not). Cross-store roles (SUPERADMIN/ADMIN/
+    AREA_MANAGER) always pass. Out-of-scope READ -> 404 (the id looks 'not
+    found', so we don't even confirm it exists in another store); out-of-scope
+    WRITE -> 403. Returns the customer doc."""
+    repo = get_customer_repository()
+    doc = repo.find_by_id(customer_id) if repo is not None else None
+    if not doc:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if not can_access_store_scoped(_customer_store_id(doc), current_user):
+        if write:
+            raise HTTPException(
+                status_code=403, detail="No access to this customer's store"
+            )
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return doc
 
 router = APIRouter()
 
@@ -735,7 +767,11 @@ async def get_customer_by_mobile(
 
     if repo is not None:
         customer = repo.find_by_mobile(mobile)
-        if customer:
+        # Object-level store scope: an out-of-scope match falls through to 404
+        # so a store user can't enumerate another store's customers by phone.
+        if customer and can_access_store_scoped(
+            _customer_store_id(customer), current_user
+        ):
             return customer
 
     raise HTTPException(status_code=404, detail="Customer not found")
@@ -808,14 +844,7 @@ async def get_customer(
     current_user: dict = Depends(get_current_user),
 ):
     """Get customer by ID"""
-    repo = get_customer_repository()
-
-    if repo is not None:
-        customer = repo.find_by_id(customer_id)
-        if customer:
-            return customer
-
-    raise HTTPException(status_code=404, detail="Customer not found")
+    return _scoped_customer_or_404(customer_id, current_user)
 
 
 @router.put("/{customer_id}")
@@ -834,9 +863,8 @@ async def update_customer(
     repo = get_customer_repository()
 
     if repo is not None:
-        existing = repo.find_by_id(customer_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Customer not found")
+        # Object-level store scope (cross-store IDOR fix): out-of-scope -> 403.
+        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
         update_data = customer.model_dump(exclude_unset=True)
         # Defense-in-depth: `tags` are governed by PATCH /{id}/tags (STORE_MANAGER+
@@ -981,9 +1009,8 @@ async def add_patient(
     repo = get_customer_repository()
 
     if repo is not None:
-        existing = repo.find_by_id(customer_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Customer not found")
+        # Object-level store scope (cross-store IDOR fix): out-of-scope -> 403.
+        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
         # Family-member dedup -- same (name, mobile) key the additive PUT uses.
         # Adding the same family member twice (e.g. a double-tap or a re-saved
@@ -1047,9 +1074,8 @@ async def get_customer_orders(
     if repo is None:
         return {"orders": []}
 
-    customer = repo.find_by_id(customer_id)
-    if customer is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    # Object-level store scope (cross-store IDOR fix): out-of-scope -> 404.
+    customer = _scoped_customer_or_404(customer_id, current_user)
 
     from ..dependencies import get_order_repository
 
@@ -1139,9 +1165,10 @@ async def get_customer_credit_summary(
     Fail-soft: all amounts default to 0 if the DB is unavailable.
     """
     repo = get_customer_repository()
-    customer = repo.find_by_id(customer_id) if repo is not None else None
-    if repo is not None and customer is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    # Object-level store scope (cross-store IDOR fix): out-of-scope -> 404.
+    customer = (
+        _scoped_customer_or_404(customer_id, current_user) if repo is not None else None
+    )
 
     credit_limit = float((customer or {}).get("credit_limit") or 0)
     ar_outstanding = _ar_outstanding(customer_id, customer)
@@ -1399,7 +1426,10 @@ async def get_store_credit_ledger(
 ):
     """Full credit-note ledger for a customer + current balance, newest first."""
     repo = get_customer_repository()
-    existing = repo.find_by_id(customer_id) if repo is not None else None
+    # Object-level store scope (cross-store IDOR fix): out-of-scope -> 404.
+    existing = (
+        _scoped_customer_or_404(customer_id, current_user) if repo is not None else None
+    )
     coll = _ledger_coll()
     entries = []
     if coll is not None:
