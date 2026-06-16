@@ -19,6 +19,7 @@ import {
   Lock,
 } from 'lucide-react';
 import { buyDeskApi, type BuyDeskRow, type EcomState } from '../../services/api/buyDesk';
+import BuyDeskDraftPOModal from './BuyDeskDraftPOModal';
 
 const ECOM_LABEL: Record<EcomState, string> = {
   NOT_LISTED: 'Not listed',
@@ -69,6 +70,10 @@ export default function BuyDeskPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showDraftModal, setShowDraftModal] = useState(false);
+
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -96,6 +101,37 @@ export default function BuyDeskPage() {
   }, [rows, query]);
 
   const readyCount = useMemo(() => rows.filter((r) => r.purchasable).length, [rows]);
+
+  // Only purchasable (catalog-complete) rows can be selected for a draft PO.
+  const selectablePids = useMemo(
+    () => filtered.filter((r) => r.purchasable).map((r) => r.product_id),
+    [filtered],
+  );
+  const allSelected = selectablePids.length > 0 && selectablePids.every((p) => selected.has(p));
+  const selectedRows = useMemo(() => rows.filter((r) => selected.has(r.product_id)), [rows, selected]);
+
+  const toggleRow = useCallback((pid: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(pid)) next.delete(pid);
+      else next.add(pid);
+      return next;
+    });
+  }, []);
+
+  const toggleAll = useCallback(() => {
+    setSelected((prev) => {
+      const allOn = selectablePids.length > 0 && selectablePids.every((p) => prev.has(p));
+      if (allOn) {
+        const next = new Set(prev);
+        selectablePids.forEach((p) => next.delete(p));
+        return next;
+      }
+      const next = new Set(prev);
+      selectablePids.forEach((p) => next.add(p));
+      return next;
+    });
+  }, [selectablePids]);
 
   return (
     <div className="p-6 space-y-4">
@@ -158,6 +194,16 @@ export default function BuyDeskPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
               <tr>
+                <th className="px-4 py-2.5 w-10">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all purchasable products"
+                    checked={allSelected}
+                    disabled={selectablePids.length === 0}
+                    onChange={toggleAll}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                </th>
                 <th className="px-4 py-2.5">Product</th>
                 <th className="px-4 py-2.5">Catalog</th>
                 <th className="px-4 py-2.5">Online</th>
@@ -170,6 +216,17 @@ export default function BuyDeskPage() {
             <tbody className="divide-y divide-gray-100">
               {filtered.map((r) => (
                 <tr key={r.product_id} className="hover:bg-gray-50">
+                  <td className="px-4 py-2.5">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${r.name || r.sku || r.product_id}`}
+                      checked={selected.has(r.product_id)}
+                      disabled={!r.purchasable}
+                      onChange={() => toggleRow(r.product_id)}
+                      className="h-4 w-4 rounded border-gray-300 disabled:opacity-40"
+                      title={r.purchasable ? '' : 'Finish cataloguing this product to purchase it'}
+                    />
+                  </td>
                   <td className="px-4 py-2.5">
                     <div className="font-medium text-gray-900">{r.name || r.sku || r.product_id}</div>
                     <div className="text-xs text-gray-500">
@@ -206,6 +263,40 @@ export default function BuyDeskPage() {
           </table>
         )}
       </div>
+
+      {selected.size > 0 && (
+        <div className="sticky bottom-4 z-10 flex items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-lg">
+          <span className="text-sm text-gray-700">
+            <span className="font-semibold text-gray-900">{selected.size}</span> product
+            {selected.size === 1 ? '' : 's'} selected
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={clearSelection}
+              className="rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100"
+            >
+              Clear
+            </button>
+            <button
+              onClick={() => setShowDraftModal(true)}
+              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              <ShoppingCart className="h-4 w-4" /> Create draft PO
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showDraftModal && selectedRows.length > 0 && (
+        <BuyDeskDraftPOModal
+          rows={selectedRows}
+          onClose={() => setShowDraftModal(false)}
+          onCreated={() => {
+            setShowDraftModal(false);
+            clearSelection();
+          }}
+        />
+      )}
     </div>
   );
 }
