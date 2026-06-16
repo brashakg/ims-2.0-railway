@@ -152,16 +152,43 @@ class TokenBlacklist:
         self._revoked: Dict[str, float] = {}  # token_hash → expiry timestamp
         self._last_cleanup = time.time()
 
+    # BUG-087: shared-cache key prefix. The cache is Redis-backed in prod
+    # (cross-worker) and in-memory in dev (single-worker fallback).
+    _PREFIX = "revoked_token:"
+
     def revoke(self, token: str, expires_at: float = None):
-        """Add a token to the blacklist."""
+        """Add a token to the blacklist (shared cache + local fast-path).
+
+        BUG-087: prod runs 4 uvicorn workers, so a purely per-process dict meant
+        logout only revoked the token in the ONE worker that handled it. Writing
+        to the shared cache (Redis SET + TTL) makes revocation visible to every
+        worker. Fail-soft: cache write errors never block a logout.
+        """
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        ttl = expires_at or (time.time() + ACCESS_TOKEN_EXPIRE_MINUTES * 60)
-        self._revoked[token_hash] = ttl
+        now = time.time()
+        ttl_at = expires_at or (now + ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        self._revoked[token_hash] = ttl_at
+        remaining = max(1, int(ttl_at - now))
+        try:
+            from api.services.cache import cache
+
+            cache.set(self._PREFIX + token_hash, "1", ttl=remaining)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Token revoke: shared-cache write failed: %s", e)
         self._maybe_cleanup()
 
     def is_revoked(self, token: str) -> bool:
-        """Check if a token has been revoked."""
+        """Check if a token has been revoked (cross-worker via shared cache)."""
         token_hash = hashlib.sha256(token.encode()).hexdigest()
+        # Cross-worker source of truth first (Redis in prod).
+        try:
+            from api.services.cache import cache
+
+            if cache.get(self._PREFIX + token_hash):
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Token revoke: shared-cache read failed: %s", e)
+        # Local fast-path / single-worker dev fallback.
         expiry = self._revoked.get(token_hash)
         if expiry is None:
             return False
