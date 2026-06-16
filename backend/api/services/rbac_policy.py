@@ -1704,7 +1704,9 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/gst/reconciliation",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Org-wide, entity-grouped GST reconciliation = finance-admin only
+        # (handler enforces _require_finance_admin).
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     {
         "method": "GET",
@@ -2602,7 +2604,9 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/tally/sales-jv",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Org-wide sales-voucher export = finance-admin only (handler enforces
+        # _require_finance_admin).
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     # E5 wiring: tender-routed Receipt voucher, sibling of the sales-JV export
     # (same finance role set). DARK by default -- the handler additionally 403s

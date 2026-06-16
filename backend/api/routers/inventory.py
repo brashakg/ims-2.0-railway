@@ -2797,14 +2797,21 @@ async def get_sell_through_analysis(
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)
 
+        # Store-scope: the endpoint accepted ?store_id but ignored it and
+        # aggregated across ALL stores. Resolve the caller's scope (None = all
+        # stores for HQ roles; the caller's OWN store for store-level roles) and
+        # apply it to both the sales and the stock side.
+        active_store = resolve_store_scope(store_id, current_user)
+        _order_q = {
+            "created_at": {"$gte": cutoff_date},
+            "status": {"$in": _SOLD_STATUSES},
+        }
+        if active_store:
+            _order_q["store_id"] = active_store
+
         # Get sales by brand from completed orders
         sales_by_brand = {}
-        orders = orders_coll.find(
-            {
-                "created_at": {"$gte": cutoff_date},
-                "status": {"$in": _SOLD_STATUSES},
-            }
-        )
+        orders = orders_coll.find(_order_q)
 
         for order in orders:
             for item in order.get("items", []):
@@ -2815,9 +2822,9 @@ async def get_sell_through_analysis(
                     qty = item.get("quantity", 0)
                     sales_by_brand[brand] = sales_by_brand.get(brand, 0) + qty
 
-        # Get current stock by brand
+        # Get current stock by brand (same store-scope as sales above)
         stock_by_brand = {}
-        stocks = stock_coll.find({})
+        stocks = stock_coll.find({"store_id": active_store} if active_store else {})
         for stock in stocks:
             product = products_coll.find_one({"_id": stock.get("product_id")})
             if product:
@@ -2886,14 +2893,20 @@ async def get_overstock_analysis(
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)
 
+        # Store-scope: honour the caller's reach (None = all stores for HQ roles;
+        # own store for store-level) instead of ignoring ?store_id and reading
+        # every store's sales + stock.
+        active_store = resolve_store_scope(store_id, current_user)
+        _order_q = {
+            "created_at": {"$gte": cutoff_date},
+            "status": {"$in": _SOLD_STATUSES},
+        }
+        if active_store:
+            _order_q["store_id"] = active_store
+
         # Get sales volume by product
         sales_by_product = {}
-        orders = orders_coll.find(
-            {
-                "created_at": {"$gte": cutoff_date},
-                "status": {"$in": _SOLD_STATUSES},
-            }
-        )
+        orders = orders_coll.find(_order_q)
 
         for order in orders:
             for item in order.get("items", []):
@@ -2911,6 +2924,8 @@ async def get_overstock_analysis(
         # flags) and emitted a duplicate entry per unit. $ifNull counts legacy
         # rows that predate the `quantity` field as one unit each.
         stock_match = {"status": {"$in": ["AVAILABLE", "RESERVED"]}}
+        if active_store:
+            stock_match["store_id"] = active_store
         stock_rows = list(
             stock_coll.aggregate(
                 [

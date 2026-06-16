@@ -1356,9 +1356,18 @@ async def profit_by_store(
         limit=0,
     )
 
+    # Store-scope: _REPORT_FINANCE_ROLES includes the single-store STORE_MANAGER,
+    # so without this a store manager saw EVERY store's revenue/cost/profit.
+    # Cross-store roles (ADMIN/AREA_MANAGER/SUPERADMIN) keep the all-store view.
+    from ..dependencies import user_store_scope
+
+    is_cross, allowed_stores = user_store_scope(current_user)
+
     profit_by_st = {}
     for order in orders:
         store = order.get("store_id", "Unknown")
+        if not is_cross and store not in allowed_stores:
+            continue
         if store not in profit_by_st:
             profit_by_st[store] = {
                 "store_id": store,

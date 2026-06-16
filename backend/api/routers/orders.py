@@ -563,6 +563,12 @@ async def list_orders(
     if repo is not None:
         if customer_id:
             orders = repo.find_by_customer(customer_id, limit=limit)
+            # Store-scope: a store-level role must not enumerate a customer's
+            # orders from OTHER stores via ?customer_id (cross-store IDOR).
+            # Cross-store roles (ADMIN/AREA_MANAGER/SUPERADMIN) are unaffected.
+            from ..dependencies import filter_docs_by_store
+
+            orders = filter_docs_by_store(orders, current_user)
         elif active_store:
             orders = repo.find_by_store(
                 active_store,
