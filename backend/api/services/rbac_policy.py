@@ -826,6 +826,20 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/catalog-import/commit",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
     },
+    # Hub Buy Desk: read-only rows for the one-screen catalog->purchase landing.
+    # Catalog owners + PO raisers may view (they decide what to buy).
+    {
+        "method": "GET",
+        "path": "/api/v1/buy-desk/rows",
+        "allowed": [
+            "ADMIN",
+            "CATALOG_MANAGER",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "ACCOUNTANT",
+            "SUPERADMIN",
+        ],
+    },
     {
         "method": "POST",
         "path": "/api/v1/catalog/products/bulk-sync-shopify",
