@@ -199,6 +199,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'inv-overview', label: 'Stock Overview', path: '/inventory' },
       { id: 'inv-catalog', label: 'Add Product', path: '/catalog/add', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'inv-buydesk', label: 'Buy Desk', path: '/catalog/buy-desk', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=low-stock' },
       { id: 'inv-reorders', label: 'Reorder Dashboard', path: '/inventory?tab=reorders', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
