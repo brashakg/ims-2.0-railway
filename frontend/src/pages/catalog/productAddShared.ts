@@ -23,8 +23,8 @@ export const CATEGORIES = [
   { code: 'CK', name: 'Clock', icon: '🕐' },
   { code: 'HA', name: 'Hearing Aid', icon: '🦻' },
   { code: 'ACC', name: 'Accessories', icon: '🎒' },
-  { code: 'SMTSG', name: 'Smart Sunglass', icon: '🥽' },
-  { code: 'SMTFR', name: 'Smart Glasses', icon: '🤓' },
+  { code: 'SMTSG', name: 'Smartglasses (Sunglass)', icon: '🥽' },
+  { code: 'SMTFR', name: 'Smartglasses', icon: '🤓' },
   { code: 'SMTWT', name: 'Smart Watch', icon: '⌚' },
 ] as const;
 
