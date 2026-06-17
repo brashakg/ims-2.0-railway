@@ -647,10 +647,15 @@ def build_ledger(
     for d in debit_notes or []:
         if not isinstance(d, dict):
             continue
+        # Credit-note category (RETURN_CN / SCHEME_CN / DISCOUNT_CN / QUALITY_CN
+        # for manual notes; VOLUME_REBATE for machine-posted rebate CNs). Surface
+        # it on the ledger row so the running-balance reduction is explained.
+        cn_type = d.get("cn_type") or d.get("source")
         rows.append(
             {
                 "date": d.get("date") or d.get("created_at"),
                 "type": "DEBIT_NOTE",
+                "cn_type": cn_type,
                 "ref": d.get("debit_note_number") or d.get("debit_note_id"),
                 "description": d.get("reason") or "Debit note",
                 "debit": _f(d.get("amount")),

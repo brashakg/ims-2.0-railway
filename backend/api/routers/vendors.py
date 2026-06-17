@@ -2556,12 +2556,39 @@ class VendorPaymentCreate(BaseModel):
     notes: Optional[str] = None
 
 
+# Recognized vendor credit-note / debit-note types. Every type lands in the
+# SAME vendor_debit_notes collection and reduces the payable by its `amount`
+# (ap_engine.build_aging / build_ledger treat all rows identically), so the
+# GL/ledger treatment of the two new types (DISCOUNT_CN, QUALITY_CN) mirrors the
+# existing ones exactly -- the type only categorises WHY the payable dropped.
+#   RETURN_CN  -- goods returned to vendor (RTV) -- the historical default here.
+#   SCHEME_CN  -- scheme / target / volume rebate from the vendor.
+#   DISCOUNT_CN-- a negotiated post-billing price discount (NEW).
+#   QUALITY_CN -- compensation for defective / sub-spec goods kept, not returned (NEW).
+# (VOLUME_REBATE is the machine-posted scheme source written by rebate_engine;
+#  it is recognised on read but not a manual-create option here.)
+VENDOR_CN_TYPES = ("RETURN_CN", "SCHEME_CN", "DISCOUNT_CN", "QUALITY_CN")
+
+
 class DebitNoteCreate(BaseModel):
     amount: float = Field(..., gt=0)
     date: str  # ISO date
     reason: str
     bill_id: Optional[str] = None  # allocate to a bill; else on-account
     grn_id: Optional[str] = None  # link to the rejected-goods GRN, if any
+    # Credit-note category. Defaults to RETURN_CN (the historical behaviour --
+    # debit notes here were created for rejected/returned goods).
+    cn_type: str = "RETURN_CN"
+
+    @field_validator("cn_type")
+    @classmethod
+    def _validate_cn_type(cls, v):
+        v = (v or "RETURN_CN").strip().upper()
+        if v not in VENDOR_CN_TYPES:
+            raise ValueError(
+                "cn_type must be one of " + ", ".join(VENDOR_CN_TYPES)
+            )
+        return v
 
 
 def _clean(doc: dict) -> dict:
@@ -2840,6 +2867,12 @@ async def create_debit_note(
         "amount": round(note.amount, 2),
         "date": note.date,
         "reason": note.reason,
+        # Credit-note category (RETURN_CN / SCHEME_CN / DISCOUNT_CN / QUALITY_CN).
+        # `source` mirrors it for parity with the machine-posted rebate CN rows
+        # (rebate_engine writes source=VOLUME_REBATE) so every AP/ledger reader
+        # can categorise a credit note by a single field.
+        "cn_type": note.cn_type,
+        "source": note.cn_type,
         "created_by": current_user.get("user_id"),
         "created_at": datetime.now().isoformat(),
     }
@@ -2933,6 +2966,93 @@ async def vendor_ledger(
 # empty states.  No fabricated numbers (SYSTEM_INTENT).
 
 
+def _vendor_mtd_spend(db, vendor_id: str) -> float:
+    """Sum of this vendor's bills dated in the CURRENT calendar month (rupees).
+
+    Reads vendor_bills.total_amount where bill_date (fallback created_at) falls
+    in the current month. Fail-soft: missing DB / collection / parse error -> 0.0
+    (an honest zero, never a fabricated number per SYSTEM_INTENT)."""
+    if db is None:
+        return 0.0
+    month_prefix = datetime.now().strftime("%Y-%m")  # "2026-06"
+    total = 0.0
+    try:
+        bills = db.get_collection("vendor_bills").find(
+            {"vendor_id": vendor_id},
+            {"_id": 0, "total_amount": 1, "bill_date": 1, "created_at": 1},
+        )
+        for b in bills:
+            when = str(b.get("bill_date") or b.get("created_at") or "")[:7]
+            if when == month_prefix:
+                try:
+                    total += float(b.get("total_amount") or 0)
+                except (TypeError, ValueError):
+                    pass
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return round(total, 2)
+
+
+def _vendor_qc_pass_rate(db, vendor_id: str):
+    """Quality pass-rate for a vendor, joining GRN QC + workshop QC outcomes.
+
+    Two QC signals are unioned into one pass-rate:
+      * GRN QC: units accepted vs received across this vendor's ACCEPTED GRNs
+        (total_accepted / total_received).
+      * Workshop QC: lens jobs routed to this vendor (lab) -- a job passes when
+        qc_passed is True (or waived), fails when qc_passed is False. Only jobs
+        that actually went through QC count toward the sample.
+
+    Returns (pass_rate, sample_size). pass_rate is units+jobs passed / total
+    units+jobs evaluated, rounded to 4 dp; None when there is NO QC signal at
+    all. Fail-soft: any error -> (None, 0). No fabricated numbers."""
+    if db is None:
+        return None, 0
+    passed = 0
+    total = 0
+    # --- GRN QC (goods-receipt inspection outcome) ---
+    try:
+        grns = db.get_collection("grns").find(
+            {"vendor_id": vendor_id, "status": "ACCEPTED"},
+            {"_id": 0, "total_received": 1, "total_accepted": 1},
+        )
+        for g in grns:
+            try:
+                recv = int(g.get("total_received") or 0)
+                acc = int(g.get("total_accepted") or 0)
+            except (TypeError, ValueError):
+                continue
+            if recv > 0:
+                total += recv
+                passed += max(0, min(acc, recv))
+    except Exception:  # noqa: BLE001
+        pass
+    # --- Workshop QC (lens jobs routed to this lab/vendor) ---
+    try:
+        jobs = db.get_collection("workshop_jobs").find(
+            {"vendor_id": vendor_id},
+            {"_id": 0, "qc_passed": 1, "qc_waived": 1, "qc_history": 1},
+        )
+        for j in jobs:
+            history = [h for h in (j.get("qc_history") or []) if isinstance(h, dict)]
+            had_qc = bool(history) or (j.get("qc_passed") is not None)
+            if not had_qc:
+                continue
+            total += 1
+            if history:
+                ok = not any(h.get("passed") is False for h in history)
+            else:
+                ok = bool(j.get("qc_passed")) or bool(j.get("qc_waived"))
+            if ok:
+                passed += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    if total <= 0:
+        return None, 0
+    return round(passed / total, 4), total
+
+
 @router.get("/{vendor_id}/performance")
 async def vendor_performance(
     vendor_id: str,
@@ -2961,6 +3081,14 @@ async def vendor_performance(
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
 
+    # MTD spend is independent of GRN history -- compute it up front so even a
+    # vendor with no GRNs in the window still reports what we've billed this
+    # month. Fail-soft: any error -> 0.0 (honest, never fabricated).
+    mtd_spend = _vendor_mtd_spend(db, vendor_id)
+    # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)
+    # for this vendor. Fail-soft: returns None when there is no QC signal at all.
+    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id)
+
     empty = {
         "vendor_id": vendor_id,
         "vendor_name": (
@@ -2970,6 +3098,9 @@ async def vendor_performance(
         "grns_evaluated": 0,
         "acceptance_rate": None,
         "on_time_rate": None,
+        "qc_pass_rate": qc_pass_rate,
+        "qc_sample_size": qc_sample,
+        "mtd_spend": mtd_spend,
         "overall_score": None,
         "insufficient_data": True,
         "note": "No GRN data found for this vendor in the selected window.",
@@ -3068,6 +3199,9 @@ async def vendor_performance(
             "total_rejected": total_received - total_accepted,
             "acceptance_rate": acceptance_rate,
             "on_time_rate": on_time_rate,
+            "qc_pass_rate": qc_pass_rate,
+            "qc_sample_size": qc_sample,
+            "mtd_spend": mtd_spend,
             "on_time_grns": on_time_count,
             "grns_with_po_date": grns_with_po_date,
             "overall_score": overall_score,
