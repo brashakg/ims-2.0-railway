@@ -179,7 +179,7 @@ export function BarcodeManagement({
         ) : (
           <>
             {/* Header Row */}
-            <div className="p-4 bg-gray-50 text-sm font-medium text-gray-700 grid grid-cols-8 gap-2 items-center min-w-[820px]">
+            <div className="p-4 bg-gray-50 text-sm font-medium text-gray-700 grid grid-cols-8 gap-2 items-center min-w-[640px]">
               <input
                 type="checkbox"
                 checked={selectedBarcodes.size === filteredBarcodes.length && filteredBarcodes.length > 0}
@@ -197,7 +197,7 @@ export function BarcodeManagement({
 
             {/* Barcode Rows */}
             {filteredBarcodes.map(barcode => (
-              <div key={barcode.id} className="p-4 hover:bg-gray-50 transition-colors grid grid-cols-8 gap-2 items-center min-w-[820px]">
+              <div key={barcode.id} className="p-4 hover:bg-gray-50 transition-colors grid grid-cols-8 gap-2 items-center min-w-[640px]">
                 <input
                   type="checkbox"
                   checked={selectedBarcodes.has(barcode.id)}

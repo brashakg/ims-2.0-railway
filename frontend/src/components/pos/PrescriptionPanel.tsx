@@ -197,7 +197,7 @@ export function PrescriptionPanel({
       </div>
 
       {/* Prescription Data */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {/* Right Eye */}
         <div className="p-4 bg-blue-50 rounded-lg">
           <h4 className="font-medium text-blue-700 mb-3">Right Eye (OD)</h4>

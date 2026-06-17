@@ -255,7 +255,7 @@ export function PrescriptionForm({
               <Eye className="w-5 h-5 text-teal-600" />
               Right Eye (OD)
             </h3>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   SPH (Sphere)
@@ -371,7 +371,7 @@ export function PrescriptionForm({
               <Eye className="w-5 h-5 text-teal-600" />
               Left Eye (OS)
             </h3>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   SPH (Sphere)
@@ -484,7 +484,7 @@ export function PrescriptionForm({
           {/* Recommendations — parity with the clinical Final Rx */}
           <div className="card">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Recommendations</h3>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   IPD (mm)
@@ -599,7 +599,7 @@ export function PrescriptionForm({
               <Contact className="w-5 h-5 text-teal-600" />
               Right Eye (OD)
             </h3>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Power
@@ -688,7 +688,7 @@ export function PrescriptionForm({
               <Contact className="w-5 h-5 text-teal-600" />
               Left Eye (OS)
             </h3>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Power

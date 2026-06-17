@@ -346,6 +346,7 @@ export function StockAudit() {
                         </div>
 
                         {audit.variances && audit.variances.filter((v) => v.variance !== 0).length > 0 ? (
+                          <div className="overflow-x-auto">
                           <table className="tbl">
                             <thead>
                               <tr>
@@ -374,6 +375,7 @@ export function StockAudit() {
                                 ))}
                             </tbody>
                           </table>
+                          </div>
                         ) : (
                           <p className="text-sm italic" style={{ color: 'var(--ink-4)' }}>
                             No variances found — perfect match!
