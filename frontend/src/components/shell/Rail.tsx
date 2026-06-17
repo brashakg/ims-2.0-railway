@@ -192,8 +192,25 @@ function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRo
 }
 
 export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wizopt'; mobileOpen?: boolean }) {
-  const { user, hasModuleAccess } = useAuth();
+  const { user, hasModuleAccess, logout } = useAuth();
   const { railExpanded, toggleRailExpanded } = useAppearance();
+  // User menu (sign out) anchored on the bottom rail avatar.
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [userMenuOpen]);
+  const handleSignOut = async () => {
+    setUserMenuOpen(false);
+    try { await logout(); } finally { window.location.assign('/login'); }
+  };
   // In the mobile drawer, always render the expanded layout (group headers +
   // labels) regardless of the desktop icon-only collapse state.
   const expanded = railExpanded || mobileOpen;
@@ -432,13 +449,48 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
         );
       })}
       <div className="rail-spacer" />
-      <div className="rail-avatar" title={user?.name ? `${user.name} • ${activeRole}` : 'User'}>
-        <span className="rail-avatar-initials">{userInitials}</span>
-        {expanded && (
-          <span className="rail-avatar-name" aria-hidden="true">
-            {user?.name?.split(' ')[0] || 'User'}
-          </span>
+      <div className="rail-usermenu" ref={userMenuRef}>
+        {userMenuOpen && (
+          <div className="rail-usermenu-pop" role="menu">
+            <div className="rail-usermenu-head">
+              <span className="rail-usermenu-name">{user?.name || 'User'}</span>
+              <span className="rail-usermenu-role">{(activeRole || '').toString().replaceAll('_', ' ')}</span>
+            </div>
+            <button
+              type="button"
+              className="rail-usermenu-signout"
+              role="menuitem"
+              onClick={handleSignOut}
+            >
+              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              Sign out
+            </button>
+          </div>
         )}
+        <button
+          type="button"
+          className="rail-avatar rail-avatar-btn"
+          aria-haspopup="menu"
+          aria-expanded={userMenuOpen}
+          title={user?.name ? `${user.name} • ${activeRole} — click to sign out` : 'Account'}
+          onClick={() => setUserMenuOpen((o) => !o)}
+        >
+          <span className="rail-avatar-initials">{userInitials}</span>
+          {expanded && (
+            <span className="rail-avatar-name">
+              {user?.name?.split(' ')[0] || 'User'}
+            </span>
+          )}
+          {expanded && (
+            <svg className="rail-avatar-caret" viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="18 15 12 9 6 15" />
+            </svg>
+          )}
+        </button>
       </div>
     </aside>
   );

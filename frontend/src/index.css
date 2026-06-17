@@ -1089,6 +1089,41 @@
   padding-right: 6px;
 }
 
+/* Account / sign-out menu anchored on the bottom rail avatar. */
+.rail .rail-usermenu { position: relative; }
+.rail .rail-avatar-btn {
+  border: 0; font: inherit; width: 100%; text-align: left;
+  appearance: none; -webkit-appearance: none;
+}
+.rail:not(.expanded) .rail-avatar-btn { width: 36px; }
+.rail .rail-avatar-caret { margin-left: auto; color: #9a9a92; flex-shrink: 0; }
+.rail .rail-avatar-btn:hover { background: #26261f; }
+.rail .rail-usermenu-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  min-width: 200px;
+  background: #1d1d1b;
+  border: 1px solid #34342f;
+  border-radius: 10px;
+  padding: 6px;
+  z-index: 60;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45);
+}
+.rail .rail-usermenu-head {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px 8px; border-bottom: 1px solid #2e2e2b; margin-bottom: 6px;
+}
+.rail .rail-usermenu-name { font-size: 13px; font-weight: 600; color: #f2f2ee; }
+.rail .rail-usermenu-role { font-size: 11px; color: #9a9a92; text-transform: capitalize; }
+.rail .rail-usermenu-signout {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: #f0d2d2; font-size: 13px; font-weight: 600;
+  cursor: pointer; text-align: left;
+}
+.rail .rail-usermenu-signout:hover { background: #4a1d1d; color: #fff; }
+
 /* Main column */
 .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .app-main > .page-body { flex: 1; min-height: 0; overflow: auto; }
