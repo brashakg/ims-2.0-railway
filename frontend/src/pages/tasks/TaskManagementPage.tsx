@@ -23,6 +23,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { tasksApi } from '../../services/api';
 import { SopEditorModal, type SopTemplateForm } from '../../components/tasks/SopEditorModal';
+import { NewTaskModal } from '../../components/tasks/NewTaskModal';
 
 type TabType = 'my-tasks' | 'team-tasks' | 'sop' | 'analytics';
 type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'OVERDUE';
@@ -446,7 +447,32 @@ export function TaskManagementPage() {
         <div>
           <div className="eyebrow mb-1.5">Tasks &amp; SOPs</div>
           <h1>The shift, by priority.</h1>
-          <div className="hint">P0–P4 priorities with countdown timers and auto-escalation tied to SOPs. 40-person ops coordination.</div>
+          <div className="hint">P0–P4 priorities with live countdown timers and role-ladder auto-escalation tied to SOPs.</div>
+          {/* Quick view chips — design's Mine / Team / Completed. They drive the
+              same activeTab + statusFilter the tabs/selects already use, so no
+              new behaviour: just a faster, design-spec entry point. */}
+          {activeTab !== 'sop' && activeTab !== 'analytics' && (
+            <div className="t-subfilter mt-3">
+              <button
+                className={'chip' + (activeTab === 'my-tasks' && statusFilter !== 'COMPLETED' ? ' on' : '')}
+                onClick={() => { setActiveTab('my-tasks'); setStatusFilter('ALL'); }}
+              >
+                Mine <span className="mono">· {myOpen}</span>
+              </button>
+              <button
+                className={'chip' + (activeTab === 'team-tasks' && statusFilter !== 'COMPLETED' ? ' on' : '')}
+                onClick={() => { setActiveTab('team-tasks'); setStatusFilter('ALL'); }}
+              >
+                Team
+              </button>
+              <button
+                className={'chip' + (statusFilter === 'COMPLETED' ? ' on' : '')}
+                onClick={() => setStatusFilter('COMPLETED')}
+              >
+                Completed
+              </button>
+            </div>
+          )}
         </div>
         <div className="row gap-2">
           <button
@@ -866,25 +892,15 @@ export function TaskManagementPage() {
         }}
       />
 
-      {/* Phase 6.14 — if user clicked "New task" on a non-SOP tab,
-          show it was acknowledged (full task-creation UI is on TasksPage). */}
-      {showCreateTask && activeTab !== 'sop' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowCreateTask(false)}>
-          <div className="bg-white rounded-xl w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-semibold text-gray-900">Create a task</h3>
-            <p className="text-sm text-gray-600">
-              The full task-creation form (assignee, priority, due date, store)
-              lives on the Tasks Dashboard. Open it to create a task.
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              <button onClick={() => setShowCreateTask(false)} className="btn sm">Cancel</button>
-              {/* QA F14: was href="/tasks" (this very page) -> a circular
-                  dead-end. The working create form is on TasksDashboard. */}
-              <a href="/tasks/dashboard" className="btn sm primary">Open Tasks Dashboard</a>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Tasks/SOP v2 — real in-place create surface (priority chips, due
+          presets, store-scoped owner picker, watchers, escalation preview).
+          Wired to the existing tasksApi.createTask contract; replaces the old
+          "Open Tasks Dashboard" dead-end (QA F14). */}
+      <NewTaskModal
+        isOpen={showCreateTask && activeTab !== 'sop'}
+        onClose={() => setShowCreateTask(false)}
+        onCreated={loadData}
+      />
     </div>
   );
 }
@@ -992,7 +1008,7 @@ function TasksV2View({ tasks, counts, selected, onSelect, onChanged }: TasksV2Vi
                   </div>
                 )}
               </div>
-              <div className="own" title={'Owner: ' + (t.assignedToName || '—')}>
+              <div className="own-av" title={'Owner: ' + (t.assignedToName || t.assignedTo || '—')}>
                 {ownerLabel}
               </div>
             </div>
