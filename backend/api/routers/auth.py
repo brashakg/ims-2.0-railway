@@ -735,6 +735,12 @@ async def login(request: LoginRequest, req: Request = None):
             "discount_cap": eff_cap,
             "must_change_password": must_change_password,
             "module_access": module_access,
+            # Per-user CAPABILITY override (council ruling sec.2). Carried in the
+            # RESPONSE BODY only -- deliberately NOT in the JWT (a revoke must
+            # take effect next request, not next 8h login). The FE merges it over
+            # the role baseline in hasPermission. Always a dict for a stable
+            # shape; absent on the doc -> {} -> DARK (role baseline unchanged).
+            "permissions": user.get("permissions") or {},
         },
     )
 
@@ -783,7 +789,12 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     me = dict(current_user)
     needs_pwd = "must_change_password" not in me
     needs_modules = "module_access" not in me
-    if needs_pwd or needs_modules:
+    # `permissions` (the capability override) is DELIBERATELY never in the JWT
+    # (ruling sec.2: a revoke must take effect next request, not next login), so
+    # /me ALWAYS hydrates it live from the DB doc -- it can never come from the
+    # token. Fail-soft -> {} (DARK).
+    needs_perms = True
+    if needs_pwd or needs_modules or needs_perms:
         rec = None
         try:
             from ..dependencies import get_user_repository
@@ -801,6 +812,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
             )
         if needs_modules:
             me["module_access"] = (rec or {}).get("module_access") or {}
+        me["permissions"] = (rec or {}).get("permissions") or {}
     return me
 
 

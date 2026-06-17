@@ -7,6 +7,7 @@ import type { ReactNode } from 'react';
 import type { User, AuthState, LoginCredentials, LoginResponse, UserRole } from '../types';
 import { authApi } from '../services/api';
 import { usePOSStore } from '../stores/posStore';
+import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
 
 // ============================================================================
 // Types
@@ -433,28 +434,46 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Check permissions for ALL user roles, not just activeRole
     const userRoles = state.user.roles || [];
 
-    // SUPERADMIN and ADMIN bypass all permission checks
+    // SUPERADMIN and ADMIN bypass all permission checks (they are the actors who
+    // SET overrides; an override must never lock the top admins out -- mirrors
+    // the server-side SUPERADMIN exemption in the middleware).
     if (userRoles.includes('SUPERADMIN') || userRoles.includes('ADMIN')) return true;
 
-    // Collect all permissions from all user roles
+    // ----- ROLE BASELINE (unchanged) -----
     const allPerms: string[] = [];
     for (const r of userRoles) {
       const perms = rolePermissions[r] || [];
       allPerms.push(...perms);
     }
+    let roleAllowed = false;
+    if (allPerms.includes('*')) {
+      roleAllowed = true;
+    } else {
+      roleAllowed = allPerms.some((perm) => {
+        if (perm === permission) return true;
+        if (perm.endsWith('.*')) {
+          const category = perm.slice(0, -2);
+          return permission.startsWith(category + '.');
+        }
+        return false;
+      });
+    }
 
-    // Check for wildcard permission
-    if (allPerms.includes('*')) return true;
-
-    // Check for exact match or category wildcard
-    return allPerms.some((perm) => {
-      if (perm === permission) return true;
-      if (perm.endsWith('.*')) {
-        const category = perm.slice(0, -2);
-        return permission.startsWith(category + '.');
+    // ----- PER-USER CAPABILITY OVERRIDE (council ruling sec.2) -----
+    // Merge the user's grant/deny over the role baseline, mirroring the backend
+    // permission_resolver's frozen precedence (deny beats grant beats role).
+    // DARK: with no `permissions` field, or a permission that maps to no
+    // capability, this returns `roleAllowed` unchanged -- identical to today.
+    const cap = permissionToCapability(permission);
+    if (cap) {
+      const denies = state.user.permissions?.deny || {};
+      const grants = state.user.permissions?.grant || {};
+      if (denies[cap] === true) return false; // deny always wins
+      if (!roleAllowed && grants[cap] === true && !isUngrantableCapability(cap)) {
+        return true; // grant adds a role-denied capability
       }
-      return false;
-    });
+    }
+    return roleAllowed;
   };
 
   // Role check - now checks user.roles array instead of activeRole

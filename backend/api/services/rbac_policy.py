@@ -5820,6 +5820,22 @@ POLICY: List[Dict[str, object]] = [
     },
     # --- /api/v1/users ---
     {"method": "POST", "path": "/api/v1/users", "allowed": ["ADMIN", "SUPERADMIN"]},
+    # Per-user capability permissions editor + audit/revert (require_admin).
+    {
+        "method": "GET",
+        "path": "/api/v1/users/permissions/options",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/users/{user_id}/permissions",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/users/{user_id}/permissions/revert",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/users/",

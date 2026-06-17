@@ -83,6 +83,13 @@ export interface User {
    *  The role is always the ceiling: this can only restrict, never grant.
    *  See AuthContext.hasModuleAccess + ModuleContext. */
   moduleAccess?: Record<string, boolean>;
+  /** Per-user CAPABILITY override (council ruling sec.2). Two-sided:
+   *  `{ grant: { <cap>: true }, deny: { <cap>: true } }`. A grant ADDS a
+   *  role-denied capability (capped server-side at the granting admin's level +
+   *  inviolable business floors); a deny REMOVES a role-granted one. Deny always
+   *  beats grant. Absent/empty => DARK: behaves exactly as the role baseline.
+   *  See AuthContext.hasPermission. */
+  permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
 }
 
 export interface AuthState {
