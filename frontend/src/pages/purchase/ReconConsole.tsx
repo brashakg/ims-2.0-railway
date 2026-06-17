@@ -255,9 +255,10 @@ const WORKLIST_TABS: { id: WorklistTab; label: string; icon: typeof Package }[] 
 
 interface WorklistsProps {
   lists: ReconWorklists;
+  onMarkCnReceived: (creditNoteNumber: string) => void | Promise<void>;
 }
 
-function Worklists({ lists }: WorklistsProps) {
+function Worklists({ lists, onMarkCnReceived }: WorklistsProps) {
   const [activeTab, setActiveTab] = useState<WorklistTab>('stock_yet_to_receive');
 
   const counts: Record<WorklistTab, number> = {
@@ -306,7 +307,10 @@ function Worklists({ lists }: WorklistsProps) {
           <VendorReturnsTable rows={lists.vendor_returns} />
         )}
         {activeTab === 'pending_credit_notes_scheme' && (
-          <SchemeCnTable rows={lists.pending_credit_notes_scheme} />
+          <SchemeCnTable
+            rows={lists.pending_credit_notes_scheme}
+            onMarkReceived={onMarkCnReceived}
+          />
         )}
         {activeTab === 'pending_credit_notes_return' && (
           <ReturnCnTable rows={lists.pending_credit_notes_return} />
@@ -450,8 +454,29 @@ function VendorReturnsTable({ rows }: { rows: ReconWorklists['vendor_returns'] }
   );
 }
 
-function SchemeCnTable({ rows }: { rows: ReconWorklists['pending_credit_notes_scheme'] }) {
+function SchemeCnTable({
+  rows,
+  onMarkReceived,
+}: {
+  rows: ReconWorklists['pending_credit_notes_scheme'];
+  onMarkReceived: (creditNoteNumber: string) => void | Promise<void>;
+}) {
+  const [saving, setSaving] = useState<Set<string>>(new Set());
   if (!rows.length) return <EmptyState message="Nothing pending — all scheme credit notes received." />;
+
+  const mark = async (cn: string) => {
+    setSaving((prev) => new Set([...prev, cn]));
+    try {
+      await onMarkReceived(cn);
+    } finally {
+      setSaving((prev) => {
+        const next = new Set(prev);
+        next.delete(cn);
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm text-left">
@@ -461,21 +486,41 @@ function SchemeCnTable({ rows }: { rows: ReconWorklists['pending_credit_notes_sc
             <th className="pb-2 pr-4 font-medium">Vendor</th>
             <th className="pb-2 pr-4 font-medium">Rebate #</th>
             <th className="pb-2 pr-4 font-medium text-right">Amount</th>
-            <th className="pb-2 font-medium">Raised</th>
+            <th className="pb-2 pr-4 font-medium">Raised</th>
+            <th className="pb-2 font-medium text-right">Action</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={row.credit_note_number ?? i} className="border-b border-gray-50 hover:bg-gray-50">
-              <td className="py-2 pr-4 font-medium text-gray-800">{row.credit_note_number ?? '-'}</td>
-              <td className="py-2 pr-4 text-gray-600">{row.vendor_id ?? '-'}</td>
-              <td className="py-2 pr-4 text-gray-500 text-xs">{row.rebate_id ?? '-'}</td>
-              <td className="py-2 pr-4 text-right text-green-700 font-medium">
-                {row.amount != null ? inr(row.amount) : row.amount_paise != null ? inr(row.amount_paise / 100) : '-'}
-              </td>
-              <td className="py-2 text-gray-500">{fmtDate(row.created_at)}</td>
-            </tr>
-          ))}
+          {rows.map((row, i) => {
+            const cn = row.credit_note_number;
+            const busy = cn ? saving.has(cn) : false;
+            return (
+              <tr key={cn ?? i} className="border-b border-gray-50 hover:bg-gray-50">
+                <td className="py-2 pr-4 font-medium text-gray-800">{cn ?? '-'}</td>
+                <td className="py-2 pr-4 text-gray-600">{row.vendor_id ?? '-'}</td>
+                <td className="py-2 pr-4 text-gray-500 text-xs">{row.rebate_id ?? '-'}</td>
+                <td className="py-2 pr-4 text-right text-green-700 font-medium">
+                  {row.amount != null ? inr(row.amount) : row.amount_paise != null ? inr(row.amount_paise / 100) : '-'}
+                </td>
+                <td className="py-2 pr-4 text-gray-500">{fmtDate(row.created_at)}</td>
+                <td className="py-2 text-right">
+                  {cn ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void mark(cn)}
+                      className="text-xs font-medium px-2.5 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                      title="Mark this scheme credit note as physically received"
+                    >
+                      {busy ? 'Saving…' : 'Mark received'}
+                    </button>
+                  ) : (
+                    <span className="text-xs text-gray-400">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -622,6 +667,26 @@ export default function ReconConsole() {
     }
   }, [toast]);
 
+  // ---- Mark a scheme credit-note received ----------------------------------
+
+  const handleMarkCnReceived = useCallback(async (creditNoteNumber: string) => {
+    try {
+      await purchaseReconApi.markSchemeCnReceived(creditNoteNumber);
+      // Optimistically drop it from the pending-scheme worklist (the backend
+      // now stamps cn_received_at, so a refetch would exclude it anyway).
+      setWorklists((prev) => ({
+        ...prev,
+        pending_credit_notes_scheme: prev.pending_credit_notes_scheme.filter(
+          (r) => r.credit_note_number !== creditNoteNumber,
+        ),
+      }));
+      toast.success(`Credit note ${creditNoteNumber} marked received`);
+    } catch (err) {
+      toast.error(`Failed to mark ${creditNoteNumber} received`);
+      console.error(err);
+    }
+  }, [toast]);
+
   // ---- Filtered invoice list -----------------------------------------------
 
   const filteredInvoices = useMemo(() => {
@@ -763,7 +828,7 @@ export default function ReconConsole() {
             <span className="text-sm">Loading worklists...</span>
           </div>
         ) : (
-          <Worklists lists={worklists} />
+          <Worklists lists={worklists} onMarkCnReceived={handleMarkCnReceived} />
         )}
       </section>
     </div>
