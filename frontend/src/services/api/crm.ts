@@ -270,4 +270,62 @@ export const crmApi = {
     });
     return response.data as ReactivationAnalytics;
   },
+
+  // CRM-2 phase 2: in-app CL refill-due worklist for a store. Read-only.
+  // Customers whose contact-lens refill is due within the horizon (default 14
+  // days) or overdue, most-overdue first. NO message is sent.
+  getCLRefillWorklist: async (storeId: string, dueWithinDays?: number) => {
+    const response = await api.get(`/crm/cl-refill/${storeId}/due`, {
+      params: dueWithinDays != null ? { due_within_days: dueWithinDays } : undefined,
+    });
+    return response.data as CLRefillWorklistResponse;
+  },
+
+  // CRM-2 phase 2: turn the worklist into deduped in-app SYSTEM follow-up tasks
+  // (one per due customer; rides the existing bell + escalation). NO message.
+  createCLRefillReminders: async (
+    storeId: string,
+    opts?: { dueWithinDays?: number; assignedTo?: string },
+  ) => {
+    const response = await api.post(`/crm/cl-refill/${storeId}/create-reminders`, {
+      due_within_days: opts?.dueWithinDays ?? 14,
+      assigned_to: opts?.assignedTo || undefined,
+    });
+    return response.data as CLRefillReminderResponse;
+  },
 };
+
+// ============================================================================
+// CRM-2 phase 2: CL refill worklist types
+// ============================================================================
+
+export interface CLRefillRow {
+  customer_id: string;
+  customer_name?: string | null;
+  last_cl_order_id?: string | null;
+  last_cl_order_date?: string | null;
+  refill_due_date: string;
+  days_remaining: number;
+  overdue: boolean;
+  sku?: string | null;
+  modality?: string | null;
+  pack_size?: number | null;
+}
+
+export interface CLRefillWorklistResponse {
+  store_id: string;
+  due_within_days: number;
+  generated_at: string;
+  count: number;
+  overdue_count: number;
+  items: CLRefillRow[];
+}
+
+export interface CLRefillReminderResponse {
+  store_id: string;
+  due_within_days: number;
+  candidates: number;
+  created: number;
+  deduped: number;
+  tasks: Array<{ task_id: string; customer_id: string }>;
+}
