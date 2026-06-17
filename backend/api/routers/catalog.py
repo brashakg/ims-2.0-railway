@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from enum import Enum
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
 from api.services.cost_mask import mask_cost, mask_cost_list
@@ -1408,41 +1411,6 @@ async def create_catalog_product(
     if not category_config:
         raise HTTPException(status_code=400, detail="Invalid category")
 
-    # Unification step-9: delegate the STRICT category-conditional required-field
-    # gate to the ONE canonical product-master registry (resolve_category ->
-    # validate_attributes), so this door enforces the SAME rulebook as
-    # POST /products and /products/bulk-create. The catalog CATEGORY_FIELDS now
-    # AGREE with the registry (reconciled), so a payload that passes here passes
-    # there and vice-versa. ProductMasterError (422) is mapped to the catalog
-    # door's existing 400 "Missing required field" contract so the response
-    # shape is unchanged. (Persistence stays the catalog_products nested doc --
-    # the spine-unification of this door is step-10, owner-gated.)
-    try:
-        _pm.build_canonical_product(
-            {
-                "category": product.category.value,
-                "attributes": dict(product.attributes or {}),
-                "mrp": product.pricing.mrp,
-                "offer_price": product.pricing.offer_price or product.pricing.mrp,
-                "discount_category": product.pricing.discount_category,
-                "hsn_code": product.hsn_code,
-                "gst_rate": product.gst_rate,
-            },
-            source="CATALOG",
-        )
-    except _pm.ProductMasterError as err:
-        # A missing-required-field breach (registry status 422) keeps this door's
-        # historical "Missing required field: <x>" 400 message + code, so the
-        # catalog response contract is unchanged. Any OTHER breach (e.g. the
-        # MRP-rule, status 400) surfaces with its own engine status/message --
-        # the pricing guard below also re-checks MRP>=offer, so this is belt+
-        # braces, not a new behaviour.
-        if err.status == 422 and err.field and err.field != "category":
-            raise HTTPException(
-                status_code=400, detail=f"Missing required field: {err.field}"
-            ) from err
-        raise HTTPException(status_code=err.status, detail=err.message) from err
-
     # Non-negotiable pricing guards (block offer > MRP; derive GST from
     # HSN/category) -- same rules the canonical /products path enforces.
     gst_rate, hsn_code = _guard_catalog_pricing(product)
@@ -1452,6 +1420,59 @@ async def create_catalog_product(
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
     sku = generate_sku(product.category, product.attributes, db=_get_db())
     title = generate_product_title(product.category, product.attributes)
+
+    # PRODUCTS-CONVERGENCE step-10: validate through the canonical registry AND
+    # persist a `products` SPINE row that SHARES this catalog id + sku, so a
+    # catalog/PIM product is a first-class BILLABLE + discount-cap-enforced master
+    # and POS -- which references the catalog id -- resolves straight to the
+    # spine. Nothing can then be ordered off a catalog-only doc (the order-create
+    # spine guard ③ fails loud otherwise). We insert the spine doc DIRECTLY
+    # (build_canonical_product validates + builds it, no persistence) instead of
+    # create_via_door, to avoid imposing the spine's identity duplicate-block on
+    # the catalog/PIM door (which legitimately holds same-identity variants) and
+    # to keep the native catalog_products doc (storefront/Shopify shape) below
+    # unchanged.
+    from ..dependencies import get_product_repository
+
+    try:
+        _spine = _pm.build_canonical_product(
+            {
+                "category": product.category.value,
+                "attributes": dict(product.attributes or {}),
+                "sku": sku,
+                "mrp": product.pricing.mrp,
+                "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                "cost_price": product.pricing.cost_price,
+                "discount_category": product.pricing.discount_category,
+                "hsn_code": hsn_code,
+                "gst_rate": gst_rate,
+                "created_by": current_user.get("user_id"),
+            },
+            source="CATALOG",
+        )
+    except _pm.ProductMasterError as err:
+        # Preserve the catalog door's historical 400 "Missing required field"
+        # contract for a missing-attr breach; surface other breaches verbatim.
+        if err.status == 422 and err.field and err.field != "category":
+            raise HTTPException(
+                status_code=400, detail=f"Missing required field: {err.field}"
+            ) from err
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+    # Share the catalog id + sku so the catalog doc and the spine are ONE product.
+    _spine["product_id"] = product_id
+    _spine["id"] = product_id
+    _spine["sku"] = sku
+    # Persist the spine. Fail-soft: a spine-write error never blocks the catalog
+    # save -- the order-create spine guard (③) then fails loud on a sale of a
+    # product that never got its spine row, surfacing the gap rather than hiding it.
+    try:
+        _pr = get_product_repository()
+        if _pr is not None:
+            _pr.create(_spine)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG] spine write skipped for %s (%s)", product_id, sku, exc_info=True
+        )
 
     # Build product data
     product_data = {
@@ -1590,6 +1611,35 @@ async def update_catalog_product(
     existing["updated_at"] = datetime.now().isoformat()
 
     _save_catalog_product(existing)
+
+    # Products-convergence: keep the billing SPINE in sync with this catalog edit
+    # (the catalog id == the spine product_id). Propagate price / tier / gst /
+    # active so POS bills the updated values. discount_category is upper-cased to
+    # match what the cap resolver expects. Fail-soft: a spine-sync error never
+    # breaks the catalog save.
+    try:
+        from ..dependencies import get_product_repository
+
+        _pr = get_product_repository()
+        if _pr is not None:
+            _pricing = existing.get("pricing") or {}
+            _tier = _pricing.get("discount_category")
+            _patch = {
+                "mrp": _pricing.get("mrp"),
+                "offer_price": _pricing.get("offer_price"),
+                "cost_price": _pricing.get("cost_price"),
+                "discount_category": _tier.upper() if isinstance(_tier, str) else _tier,
+                "hsn_code": existing.get("hsn_code"),
+                "gst_rate": existing.get("gst_rate"),
+                "is_active": existing.get("is_active", True),
+            }
+            _patch = {k: v for k, v in _patch.items() if v is not None}
+            _pr.update(product_id, _patch)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
+        )
+
     return {"product": mask_cost(existing, current_user, context="catalog_edit"), "message": "Product updated successfully"}
 
 
@@ -1612,6 +1662,20 @@ async def delete_catalog_product(
     product["deleted_by"] = current_user.get("user_id")
 
     _save_catalog_product(product)
+
+    # Products-convergence: deactivate the SPINE twin too (shared id) so a
+    # soft-deleted catalog product can't still be sold at POS. Fail-soft.
+    try:
+        from ..dependencies import get_product_repository
+
+        _pr = get_product_repository()
+        if _pr is not None:
+            _pr.update(product_id, {"is_active": False})
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG] spine deactivate on delete skipped for %s", product_id, exc_info=True
+        )
+
     return {"message": "Product deleted successfully"}
 
 
