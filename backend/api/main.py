@@ -114,6 +114,8 @@ from .routers import (
     display_fixtures_router,
     display_placements_router,
     print_overrides_router,
+    print_documents_router,
+    estimates_router,
     lens_catalog_router,
     lens_stock_router,
     lens_enums_router,
@@ -1455,6 +1457,20 @@ app.include_router(
     print_overrides_router,
     prefix="/api/v1/print-overrides",
     tags=["Print Overrides"],
+)
+# Server-side print HTML renderers for the two documents that had a frontend
+# component but no backend route: the Rule 55 Delivery Challan (for an order or
+# an inter-store transfer) + the non-binding Estimate / Quotation. Both reuse
+# the print_legal statutory primitives and (estimate) the order GST engine.
+app.include_router(
+    print_documents_router,
+    prefix="/api/v1/print",
+    tags=["Print Documents"],
+)
+app.include_router(
+    estimates_router,
+    prefix="/api/v1/estimates",
+    tags=["Estimates"],
 )
 # Audit trail integrity (SYSTEM_INTENT 10). READ-ONLY, SUPERADMIN-only:
 # GET /api/v1/audit/verify walks the tamper-evident hash-chain. The audit

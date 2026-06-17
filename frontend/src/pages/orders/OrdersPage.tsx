@@ -24,6 +24,8 @@ import {
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi } from '../../services/api';
+// Direct import: barrel re-export can fail to resolve for newly added modules.
+import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -226,6 +228,17 @@ export function OrdersPage() {
   };
 
   // Print order invoice — use hidden iframe if popup blocked
+  // Open the server-rendered Rule 55 Delivery Challan (goods moving to the
+  // customer). The endpoint is JWT-protected + returns HTML; the service
+  // fetches with the auth header and opens it in a new tab for printing.
+  const printChallan = async (order: Order) => {
+    try {
+      await printDocumentsApi.openOrderChallan(order.id);
+    } catch (e) {
+      toast.error('Could not open delivery challan');
+    }
+  };
+
   const printOrder = (order: Order) => {
     const items = (order.items || []).map((item: any, i: number) =>
       `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
@@ -693,6 +706,13 @@ export function OrdersPage() {
                   >
                     <Printer className="w-4 h-4" />
                     Print Invoice
+                  </button>
+                  <button
+                    onClick={() => printChallan(selectedOrder)}
+                    className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[150px]"
+                  >
+                    <Truck className="w-4 h-4" />
+                    Delivery Challan
                   </button>
                   {selectedOrder.orderStatus === 'READY' && selectedOrder.paymentStatus !== 'PENDING' && (
                     <button

@@ -1572,6 +1572,57 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/entities/{entity_id}/stores/{store_id}",
         "allowed": ["ADMIN"],
     },
+    # --- /api/v1/estimates ---
+    # Non-binding estimate/quotation. Reads are store-scoped (any authenticated
+    # caller, filtered to their stores); creation is POS-capable + ADMIN tier.
+    {
+        "method": "GET",
+        "path": "/api/v1/estimates",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/estimates/",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/estimates",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+        ],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/estimates/",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+        ],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/estimates/{estimate_id}",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/estimates/{estimate_id}/render",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
     # --- /api/v1/expenses ---
     {"method": "GET", "path": "/api/v1/expenses", "allowed": "AUTHENTICATED"},
     {"method": "POST", "path": "/api/v1/expenses", "allowed": "AUTHENTICATED"},
@@ -4723,6 +4774,36 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/print ---
     {"method": "GET", "path": "/api/v1/print/qz/cert", "allowed": "AUTHENTICATED"},
     {"method": "POST", "path": "/api/v1/print/qz/sign", "allowed": "AUTHENTICATED"},
+    # Delivery-challan HTML render: POS-capable roles + ACCOUNTANT (read-only,
+    # store-scoped via validate_store_access / transfer access guard).
+    {
+        "method": "GET",
+        "path": "/api/v1/print/delivery-challan/order/{order_id}",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "ACCOUNTANT",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/print/delivery-challan/transfer/{transfer_id}",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "ACCOUNTANT",
+        ],
+        "store_scoped": True,
+    },
     # --- /api/v1/print-overrides ---
     {"method": "GET", "path": "/api/v1/print-overrides", "allowed": "AUTHENTICATED"},
     {

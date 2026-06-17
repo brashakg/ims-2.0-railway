@@ -81,6 +81,8 @@ from .labels import router as labels_router
 from .display_fixtures import router as display_fixtures_router
 from .display_placements import router as display_placements_router
 from .print_overrides import router as print_overrides_router
+from .print_documents import router as print_documents_router
+from .estimates import router as estimates_router
 from .lens_catalog import router as lens_catalog_router
 from .lens_stock import router as lens_stock_router
 from .lens_enums import router as lens_enums_router
@@ -176,6 +178,8 @@ __all__ = [
     "display_fixtures_router",
     "display_placements_router",
     "print_overrides_router",
+    "print_documents_router",
+    "estimates_router",
     "lens_catalog_router",
     "lens_stock_router",
     "lens_enums_router",
