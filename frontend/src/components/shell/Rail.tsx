@@ -125,6 +125,10 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF'] },
       { id: 'cashflow', label: 'Cash Flow', to: '/finance/cash-flow', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      // B2B invoices -> Tally: e-invoice + e-way bill issued in Tally (owner
+      // decision). Export console + reminder worklist; finance-admin only.
+      { id: 'b2b-tally-export', label: 'B2B → Tally Export', to: '/finance/b2b-tally-export', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      { id: 'b2b-tally-worklist', label: 'B2B Tally Worklist', to: '/finance/b2b-tally-worklist', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // Purchase S6: Accountant reconciliation console (4 tick flags + 4 worklists)
       { id: 'recon-console', label: 'Recon Console', to: '/purchase/recon-console', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
     ],

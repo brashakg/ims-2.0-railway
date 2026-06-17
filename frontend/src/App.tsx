@@ -110,6 +110,8 @@ const ItcReconcilePage = lazy(() => import('./pages/finance/ItcReconcilePage'));
 const CashRegisterPage = lazy(() => import('./pages/finance/CashRegisterPage'));
 const BlindEodTallyPage = lazy(() => import('./pages/finance/BlindEodTallyPage'));
 const BudgetingPage = lazy(() => import('./pages/finance/BudgetingPage'));
+const B2BTallyExport = lazy(() => import('./pages/finance/B2BTallyExport'));
+const B2BTallyWorklist = lazy(() => import('./pages/finance/B2BTallyWorklist'));
 const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
 const WalkoutDetailPage = lazy(() => import('./pages/walkouts/WalkoutDetailPage').then(m => ({ default: m.WalkoutDetailPage })));
 const WalkoutsDashboardPage = lazy(() => import('./pages/walkouts/WalkoutsDashboardPage').then(m => ({ default: m.WalkoutsDashboardPage })));
@@ -1211,6 +1213,24 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <BudgetingPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  {/* B2B invoices -> Tally: e-invoice + e-way bill issued in Tally.
+                      Export console + reminder worklist. Finance-admin only. */}
+                  <Route
+                    path="finance/b2b-tally-export"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+                        <B2BTallyExport />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="finance/b2b-tally-worklist"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+                        <B2BTallyWorklist />
                       </ProtectedRoute>
                     }
                   />

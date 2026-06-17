@@ -159,7 +159,114 @@ export const financeApi = {
     const response = await api.get('/finance/tally/journal-jv', { params, responseType: 'blob' });
     return response.data as Blob;
   },
+
+  // --- B2B invoices -> Tally (accountant export console + reminder worklist) --
+  // Owner decision: GST e-invoice (IRN) + e-way bill are issued IN TALLY, not in
+  // IMS. The accountant pulls B2B sales invoices as Tally-importable XML and
+  // keeps a worklist of which invoices still need handling in Tally.
+  listB2BInvoices: async (params?: {
+    from_date?: string;
+    to_date?: string;
+    store_id?: string;
+    entity_id?: string;
+    tally_status?: 'PENDING' | 'IN_TALLY' | 'DONE';
+  }) => {
+    const response = await api.get('/finance/b2b-invoices', { params });
+    return response.data as B2BInvoiceListResponse;
+  },
+
+  downloadB2BInvoiceXml: async (orderId: string) => {
+    const response = await api.get(
+      `/finance/b2b-invoices/${encodeURIComponent(orderId)}/tally-xml`,
+      { responseType: 'blob' },
+    );
+    return response.data as Blob;
+  },
+
+  exportB2BInvoicesToTally: async (orderIds: string[], markInTally = true) => {
+    const response = await api.post(
+      '/finance/b2b-invoices/export',
+      { order_ids: orderIds, mark_in_tally: markInTally },
+      { responseType: 'blob' },
+    );
+    return response.data as Blob;
+  },
+
+  markB2BInvoicesExported: async (orderIds: string[]) => {
+    const response = await api.post('/finance/b2b-invoices/mark-exported', {
+      order_ids: orderIds,
+    });
+    return response.data as { ok: boolean; marked: number; exported_by: string };
+  },
+
+  markB2BInvoiceDone: async (orderId: string) => {
+    const response = await api.post(
+      `/finance/b2b-invoices/${encodeURIComponent(orderId)}/mark-done`,
+      {},
+    );
+    return response.data as { ok: boolean; order_id: string; tally_status: string };
+  },
+
+  setB2BAttentionNote: async (orderId: string, note: string) => {
+    const response = await api.post(
+      `/finance/b2b-invoices/${encodeURIComponent(orderId)}/attention-note`,
+      { note },
+    );
+    return response.data as { ok: boolean; order_id: string; attention_note: string };
+  },
 };
+
+// --- B2B invoice types ------------------------------------------------------
+export type TallyStatus = 'PENDING' | 'IN_TALLY' | 'DONE';
+
+export interface B2BInvoice {
+  order_id: string;
+  invoice_number: string;
+  has_invoice_number: boolean;
+  date: string;
+  store_id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_gstin: string;
+  place_of_supply: string;
+  interstate: boolean;
+  taxable: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  tax: number;
+  total: number;
+  needs_eway: boolean;
+  tally_status: TallyStatus;
+  exported_to_tally: boolean;
+  exported_at?: string | null;
+  exported_by?: string | null;
+  done_at?: string | null;
+  done_by?: string | null;
+  attention_note: string;
+  age_days: number | null;
+  overdue: boolean;
+}
+
+export interface B2BInvoiceSummary {
+  count: number;
+  pending: number;
+  in_tally: number;
+  done: number;
+  needs_eway: number;
+  overdue: number;
+  exported: number;
+  total_taxable: number;
+  total_tax: number;
+  total_value: number;
+}
+
+export interface B2BInvoiceListResponse {
+  invoices: B2BInvoice[];
+  summary: B2BInvoiceSummary;
+  eway_threshold: number;
+  pending_reminder_days: number;
+}
 
 // Per-store ticker entry. Money keys are OPTIONAL because they are ABSENT (not
 // null) for floor roles -- the server never sends them, so the client can never

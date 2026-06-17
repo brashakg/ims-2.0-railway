@@ -2613,6 +2613,39 @@ POLICY: List[Dict[str, object]] = [
         # 2026-06-16; handler enforces _require_finance_admin).
         "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
+    # --- B2B invoices -> Tally (accountant export console + worklist). Every
+    # endpoint enforces _require_finance_admin inline -> finance-admin only
+    # (ACCOUNTANT/ADMIN/SUPERADMIN); e-invoice + e-way are issued in Tally. ---
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/b2b-invoices",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/finance/b2b-invoices/{order_id}/tally-xml",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/b2b-invoices/export",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/b2b-invoices/mark-exported",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/b2b-invoices/{order_id}/mark-done",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/b2b-invoices/{order_id}/attention-note",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
     # E5 wiring: tender-routed Receipt voucher, sibling of the sales-JV export
     # (same finance role set -- finance-admin only). DARK by default -- the
     # handler additionally 403s until policy tally.tender_receipt_voucher is on.
