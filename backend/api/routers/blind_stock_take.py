@@ -105,19 +105,43 @@ def _cost_resolver(product_ids):
 
     Only a genuine DB fault degrades to an empty (zero-valuation) map -- a
     programmer error (bad helper, bad shape) must FAIL LOUDLY, never masquerade
-    as 'no costs found' and silently zero out a real shrinkage figure."""
+    as 'no costs found' and silently zero out a real shrinkage figure.
+
+    Falls back to catalog_products for ids not found in the products spine so
+    catalog-only products are included in the shrinkage valuation (not zeroed).
+    """
     db = _get_db()
     out: Dict[str, int] = {}
     if db is None:
         return out
+    ids = list(product_ids)
     try:
         rows = list(db.get_collection("products").find(
-            {"product_id": {"$in": list(product_ids)}}, {"product_id": 1, "cost_price": 1}))
+            {"product_id": {"$in": ids}}, {"product_id": 1, "cost_price": 1}))
     except PyMongoError:
         return {}
     # cost_price persists in RUPEES -> integer paise once, at the boundary.
+    found_ids = set()
     for p in rows:
-        out[p.get("product_id")] = rupees_to_paise(p.get("cost_price"))
+        pid = p.get("product_id")
+        if pid:
+            out[pid] = rupees_to_paise(p.get("cost_price"))
+            found_ids.add(pid)
+    # Catalog-only fallback for any ids that were not in the products spine.
+    missing = [i for i in ids if i not in found_ids]
+    if missing:
+        try:
+            cat_rows = list(db.get_collection("catalog_products").find(
+                {"id": {"$in": missing}},
+                {"id": 1, "pricing.cost_price": 1},
+            ))
+            for p in cat_rows:
+                pid = p.get("id")
+                if pid:
+                    cost = (p.get("pricing") or {}).get("cost_price")
+                    out[pid] = rupees_to_paise(cost)
+        except PyMongoError:
+            pass  # fail-soft: catalog miss -> zero paise for those ids
     return out
 
 

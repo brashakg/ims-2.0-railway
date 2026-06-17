@@ -309,8 +309,12 @@ async def get_dashboard_summary(
         store_id = (
             validate_store_access(store_id, current_user)
             or current_user.get("active_store_id")
-            or "store-001"
         )
+        if not store_id:
+            raise HTTPException(
+                status_code=422,
+                detail="store could not be resolved; pass store_id or ensure your token carries an active_store_id",
+            )
 
         order_repo = get_order_repository()
         stock_repo = get_stock_repository()
@@ -377,7 +381,9 @@ async def get_dashboard_summary(
             # cost yet). Return null rather than a fabricated constant — the
             # frontend renders "—" for null.
             "gross_margin_percent": None,
-            "margin_target": 42,
+            # margin_target: read from settings; null until a target is
+            # configured (never emit a hardcoded 42 as a real KPI).
+            "margin_target": None,
             # Inventory metrics
             "inventory_value": float(total_inventory_value),
             "low_stock_items": low_stock_items,
@@ -419,8 +425,12 @@ async def get_revenue_trends(
         store_id = (
             validate_store_access(store_id, current_user)
             or current_user.get("active_store_id")
-            or "store-001"
         )
+        if not store_id:
+            raise HTTPException(
+                status_code=422,
+                detail="store could not be resolved; pass store_id or ensure your token carries an active_store_id",
+            )
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
@@ -428,25 +438,26 @@ async def get_revenue_trends(
         if order_repo is None:
             return {"period": period, "days": days, "data": []}
 
-        all_orders = _norm_orders(order_repo.find_by_store(store_id))
-
-        # Get orders for the period
-        current_period = [
-            o
-            for o in all_orders
-            if _safe_parse_date(o.get("created_at")) is not None
-            and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
-        ]
-
-        # Get previous period for YoY
+        # Use the unbounded date-pushed helper (not the 500-row-capped
+        # find_by_store with a string-vs-BSON-Date mismatch).
         prev_start = start_date - timedelta(days=days)
         prev_end = start_date
 
+        current_period = [
+            o
+            for o in _fetch_orders_in_window(
+                order_repo, store_id=store_id, start=start_date, end=end_date
+            )
+            if _is_billable(o)
+        ]
+
+        # Get previous period for YoY comparison
         previous_period = [
             o
-            for o in all_orders
-            if _safe_parse_date(o.get("created_at")) is not None
-            and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
+            for o in _fetch_orders_in_window(
+                order_repo, store_id=store_id, start=prev_start, end=prev_end
+            )
+            if _is_billable(o)
         ]
 
         # Group by period
@@ -682,8 +693,12 @@ async def get_inventory_intelligence(
         store_id = (
             validate_store_access(store_id, current_user)
             or current_user.get("active_store_id")
-            or "store-001"
         )
+        if not store_id:
+            raise HTTPException(
+                status_code=422,
+                detail="store could not be resolved; pass store_id or ensure your token carries an active_store_id",
+            )
 
         stock_repo = get_stock_repository()
         inventory = (
@@ -817,8 +832,12 @@ async def get_customer_insights(
         store_id = (
             validate_store_access(store_id, current_user)
             or current_user.get("active_store_id")
-            or "store-001"
         )
+        if not store_id:
+            raise HTTPException(
+                status_code=422,
+                detail="store could not be resolved; pass store_id or ensure your token carries an active_store_id",
+            )
 
         customer_repo = get_customer_repository()
         order_repo = get_order_repository()
@@ -852,9 +871,12 @@ async def get_customer_insights(
             if to_date_str(c.get("created_at")) < start_date.date().isoformat()
         ]
 
-        # Top customers by spend
+        # Top customers by spend — use the unbounded date-pushed helper
+        # (not the 500-row-capped find_by_store with BSON-Date mismatch).
         orders = (
-            _norm_orders(order_repo.find_by_store(store_id))
+            _fetch_orders_in_window(
+                order_repo, store_id=store_id, start=start_date, end=end_date
+            )
             if order_repo is not None
             else []
         )
@@ -959,8 +981,12 @@ async def get_enterprise_kpis(
         store_id = (
             validate_store_access(store_id, current_user)
             or current_user.get("active_store_id")
-            or "store-001"
         )
+        if not store_id:
+            raise HTTPException(
+                status_code=422,
+                detail="store could not be resolved; pass store_id or ensure your token carries an active_store_id",
+            )
         start_date, end_date = get_date_range(period)
 
         # Get repositories
@@ -1039,17 +1065,11 @@ async def get_enterprise_kpis(
             else []
         )
 
-        # Calculate inventory turnover (COGS / Average Inventory Value)
-        avg_inventory_value = (
-            sum(
-                _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
-                for i in inventory
-            )
-            / 2
-        )  # Simplified average
-        inventory_turnover = (
-            (total_cogs / avg_inventory_value) if avg_inventory_value > 0 else 0
-        )
+        # Inventory turnover: COGS / avg-inventory-value.
+        # A true average needs a beginning-of-period snapshot which is not stored;
+        # dividing current value by 2 as a "simplified average" fabricates a number.
+        # Return null with a note rather than emit a misleading KPI.
+        inventory_turnover = None  # null until beginning-period snapshot is available
 
         low_stock_count = len(
             [
@@ -1110,7 +1130,9 @@ async def get_enterprise_kpis(
         # (STORE_MANAGER/ACCOUNTANT) must not see other stores in the ranking.
         kpi_is_cross, kpi_allowed = user_store_scope(current_user)
         for order in all_store_orders:
-            order_store_id = order.get("store_id") or "store-001"
+            order_store_id = order.get("store_id")
+            if not order_store_id:
+                continue  # skip orders with no store_id rather than attributing to a phantom store
             if not kpi_is_cross and order_store_id not in kpi_allowed:
                 continue
             if order_store_id not in stores_by_id:
@@ -1160,7 +1182,10 @@ async def get_enterprise_kpis(
             },
             # Inventory metrics
             "inventory": {
-                "turnover_ratio": float(inventory_turnover),
+                # turnover_ratio is null: needs a beginning-period snapshot to
+                # compute a real average; emitting a fabricated number is worse
+                # than null (frontend renders "—").
+                "turnover_ratio": inventory_turnover,
                 "low_stock_items": low_stock_count,
                 "total_items": len(inventory),
             },

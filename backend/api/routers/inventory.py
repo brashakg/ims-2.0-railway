@@ -1211,6 +1211,14 @@ async def get_stock_aging_report(
         pid = sg["_id"]
         product = product_repo.find_by_id(pid)
         if not product:
+            # Catalog-only products are not in the products spine; fall back to
+            # catalog_products using the helper from orders.py (reuse, not reimpl).
+            try:
+                from .orders import _resolve_catalog_product_doc
+                product = _resolve_catalog_product_doc(pid)
+            except Exception:
+                product = None
+        if not product:
             continue
 
         if category and product.get("category", "") != category:
