@@ -21,7 +21,8 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { settingsApi } from '../../services/api/settings';
-import { adminUserApi } from '../../services/api/stores';
+import { adminUserApi, orgStoreApi } from '../../services/api/stores';
+import { entitiesApi } from '../../services/api/entities';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
@@ -55,6 +56,19 @@ interface UserOpt {
   id: string;
   label: string;
   role?: string;
+}
+
+interface StoreOpt {
+  // `value` is what lands in audit rows' store_id (the human store code, e.g.
+  // BV-BOK-01) so it can be passed straight to the store filter.
+  value: string;
+  label: string;
+  orgId?: string; // entity_id, for narrowing the Store list to a chosen org
+}
+
+interface OrgOpt {
+  id: string; // entity_id
+  label: string;
 }
 
 const PAGE_SIZE = 100;
@@ -99,6 +113,10 @@ export default function ActivityLogPage() {
 
   const [users, setUsers] = useState<UserOpt[]>([]);
   const [userId, setUserId] = useState('');
+  const [stores, setStores] = useState<StoreOpt[]>([]);
+  const [storeId, setStoreId] = useState(''); // audit store_id (human store code)
+  const [orgs, setOrgs] = useState<OrgOpt[]>([]);
+  const [orgId, setOrgId] = useState(''); // entity_id
   const [action, setAction] = useState('');
   const [startDate, setStartDate] = useState(ymd(new Date(Date.now() - 7 * 864e5)));
   const [endDate, setEndDate] = useState(ymd(new Date()));
@@ -136,12 +154,54 @@ export default function ActivityLogPage() {
     };
   }, [isSuperadmin]);
 
+  // Load the store + organization (legal entity) lists once for the two new
+  // filters. Same fail-soft pattern as the user roster: an error just leaves
+  // the dropdown empty (operator can still filter by the other controls).
+  useEffect(() => {
+    if (!isSuperadmin) return;
+    let alive = true;
+    (async () => {
+      try {
+        const [storeRes, orgRes] = await Promise.all([
+          orgStoreApi.list().catch(() => ({ stores: [], total: 0 })),
+          entitiesApi.list(true).catch(() => ({ entities: [], total: 0 })),
+        ]);
+        if (!alive) return;
+        const storeOpts: StoreOpt[] = (storeRes?.stores || [])
+          .map((s) => ({
+            // Audit rows record the human store code, so filter by store_code.
+            value: String(s.store_code || s.store_id || ''),
+            label: String(s.store_name || s.store_code || s.store_id || ''),
+            orgId: s.entity_id ? String(s.entity_id) : undefined,
+          }))
+          .filter((o) => o.value)
+          .sort((a, b) => a.label.localeCompare(b.label));
+        setStores(storeOpts);
+        const orgOpts: OrgOpt[] = (orgRes?.entities || [])
+          .map((e) => ({
+            id: String(e.entity_id || ''),
+            label: String(e.name || e.legal_name || e.entity_id || ''),
+          }))
+          .filter((o) => o.id)
+          .sort((a, b) => a.label.localeCompare(b.label));
+        setOrgs(orgOpts);
+      } catch {
+        // Non-fatal: the store/org pickers stay empty.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [isSuperadmin]);
+
   const load = useCallback(
     async (nextOffset: number, append: boolean) => {
       setLoading(true);
       try {
         const res = await settingsApi.getAuditLogs({
           user_id: userId || undefined,
+          store_id: storeId || undefined,
+          org_id: orgId || undefined,
           action: action.trim() ? action.trim().toUpperCase() : undefined,
           start_date: startDate || undefined,
           end_date: endDate || undefined,
@@ -158,7 +218,7 @@ export default function ActivityLogPage() {
         setLoading(false);
       }
     },
-    [userId, action, startDate, endDate, toast]
+    [userId, storeId, orgId, action, startDate, endDate, toast]
   );
 
   // Initial load + reload whenever a filter changes (debounced for the action text).
@@ -167,11 +227,42 @@ export default function ActivityLogPage() {
     const t = setTimeout(() => load(0, false), 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, action, startDate, endDate, isSuperadmin]);
+  }, [userId, storeId, orgId, action, startDate, endDate, isSuperadmin]);
 
   const selectedUserLabel = useMemo(
     () => users.find((u) => u.id === userId)?.label,
     [users, userId]
+  );
+
+  const selectedOrgLabel = useMemo(
+    () => orgs.find((o) => o.id === orgId)?.label,
+    [orgs, orgId]
+  );
+
+  const selectedStoreLabel = useMemo(
+    () => stores.find((s) => s.value === storeId)?.label,
+    [stores, storeId]
+  );
+
+  // When an org is picked, narrow the Store dropdown to that org's stores. If
+  // the currently selected store belongs to a different org, reset it so the
+  // two filters never contradict each other.
+  const visibleStores = useMemo(
+    () => (orgId ? stores.filter((s) => s.orgId === orgId) : stores),
+    [stores, orgId]
+  );
+
+  const onOrgChange = useCallback(
+    (nextOrg: string) => {
+      setOrgId(nextOrg);
+      if (nextOrg && storeId) {
+        const stillValid = stores.some(
+          (s) => s.value === storeId && s.orgId === nextOrg
+        );
+        if (!stillValid) setStoreId('');
+      }
+    },
+    [stores, storeId]
   );
 
   if (!isSuperadmin) {
@@ -212,7 +303,7 @@ export default function ActivityLogPage() {
 
       {/* Filter bar */}
       <div className="bg-white border border-gray-200 rounded-xl p-4 mb-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
             <label className="block text-[10.5px] font-mono uppercase tracking-wider text-gray-400 mb-1.5">
               User
@@ -228,6 +319,42 @@ export default function ActivityLogPage() {
                 <option key={u.id} value={u.id}>
                   {u.label}
                   {u.role ? ` · ${u.role}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10.5px] font-mono uppercase tracking-wider text-gray-400 mb-1.5">
+              Organization
+            </label>
+            <select
+              value={orgId}
+              onChange={(e) => onOrgChange(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+              aria-label="Filter by organization"
+            >
+              <option value="">All organizations</option>
+              {orgs.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10.5px] font-mono uppercase tracking-wider text-gray-400 mb-1.5">
+              Store
+            </label>
+            <select
+              value={storeId}
+              onChange={(e) => setStoreId(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+              aria-label="Filter by store"
+            >
+              <option value="">All stores</option>
+              {visibleStores.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
                 </option>
               ))}
             </select>
@@ -322,6 +449,17 @@ export default function ActivityLogPage() {
             ) : (
               ' across all users'
             )}
+            {selectedStoreLabel ? (
+              <>
+                {' '}
+                at <span className="font-medium text-gray-900">{selectedStoreLabel}</span>
+              </>
+            ) : selectedOrgLabel ? (
+              <>
+                {' '}
+                in <span className="font-medium text-gray-900">{selectedOrgLabel}</span>
+              </>
+            ) : null}
             {startDate && endDate ? ` · ${startDate} → ${endDate}` : ''}
           </>
         )}
