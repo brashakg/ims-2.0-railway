@@ -118,6 +118,7 @@ export const MODULE_ACCESS_OPTIONS: { key: ModuleKey; label: string }[] = [
 const PATH_MODULE_PREFIXES: { prefix: string; key: ModuleKey }[] = [
   { prefix: '/pos', key: 'pos' },
   { prefix: '/orders', key: 'pos' },
+  { prefix: '/estimates', key: 'pos' },
   { prefix: '/returns', key: 'pos' },
   { prefix: '/walkouts', key: 'pos' },
   { prefix: '/clinical', key: 'clinic' },
@@ -165,6 +166,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'pos-new', label: 'New Sale', path: '/pos' },
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
+      { id: 'pos-estimates', label: 'Estimates / Quotations', path: '/estimates', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF'] },
       { id: 'pos-returns', label: 'Returns & Exchanges', path: '/returns', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },

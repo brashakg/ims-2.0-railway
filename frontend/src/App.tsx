@@ -79,6 +79,7 @@ const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
 const OutstandingPaymentsReport = lazy(() => import('./pages/reports/OutstandingPaymentsReport'));
 const PrintPage = lazy(() => import('./pages/print/PrintPage'));
 const ReturnsPage = lazy(() => import('./pages/orders/ReturnsPage'));
+const EstimatesPage = lazy(() => import('./pages/orders/EstimatesPage').then(m => ({ default: m.EstimatesPage })));
 const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
 const GoLiveChecklistPage = lazy(() => import('./pages/settings/GoLiveChecklistPage').then(m => ({ default: m.GoLiveChecklistPage })));
 
@@ -564,6 +565,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
                       >
                         <OrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Estimates / Quotations (non-binding priced quotes) */}
+                  <Route
+                    path="estimates"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <EstimatesPage />
                       </ProtectedRoute>
                     }
                   />

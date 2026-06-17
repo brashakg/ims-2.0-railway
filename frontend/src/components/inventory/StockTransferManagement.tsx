@@ -19,11 +19,14 @@ import {
   Building2,
   Calendar,
   Filter,
+  Truck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import api from '../../services/api/client';
+// Direct import: barrel re-export can fail to resolve for newly added modules.
+import { printDocumentsApi } from '../../services/api/printDocuments';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 
@@ -351,12 +354,28 @@ export function StockTransferManagement() {
                   Created on {new Date(selectedTransfer.created_at).toLocaleString()}
                 </p>
               </div>
-              <button
-                onClick={() => setShowDetails(false)}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <X className="w-5 h-5 text-gray-500" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    try {
+                      await printDocumentsApi.openTransferChallan(selectedTransfer.id);
+                    } catch {
+                      toast.error('Could not open delivery challan');
+                    }
+                  }}
+                  className="btn-outline flex items-center gap-2 text-sm"
+                  title="Print Rule 55 Delivery Challan"
+                >
+                  <Truck className="w-4 h-4" />
+                  Delivery Challan
+                </button>
+                <button
+                  onClick={() => setShowDetails(false)}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5 text-gray-500" />
+                </button>
+              </div>
             </div>
 
             {/* Modal Content */}
