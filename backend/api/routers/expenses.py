@@ -45,6 +45,12 @@ _CAP_EDIT_ROLES = ("ADMIN",)
 _PETTY_FLOAT_MANAGE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # Who may read a float balance + ledger (adds the ACCOUNTANT to the manage set).
 _PETTY_FLOAT_VIEW_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# F17 EOD settlement: who may VIEW the day's position + settlement history, and
+# who may SETTLE (count + record + close) a store-day. A store manager closes
+# their own day; the accountant reconciles; admins do either. SUPERADMIN
+# auto-passes inside require_roles, so it is intentionally omitted here.
+_PETTY_SETTLE_VIEW_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+_PETTY_SETTLE_MANAGE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # The expense category that identifies a petty-cash payout. Petty cash is a
 # CATEGORY of expense (not a separate collection); an APPROVED claim in this
 # category debits the store float (F17).
@@ -1463,6 +1469,16 @@ class PettyCashTopup(BaseModel):
     reason: Optional[str] = None
 
 
+class PettyCashSettle(BaseModel):
+    store_id: str
+    # The physically counted closing cash in the petty-cash box at end of day.
+    # Zero is a legitimate count (an empty box), so the floor is >= 0, not > 0.
+    counted_closing: float = Field(..., ge=0)
+    # IST day (YYYY-MM-DD); defaults to IST today server-side when omitted.
+    settle_date: Optional[str] = None
+    note: Optional[str] = None
+
+
 @router.post("/petty-cash/open", status_code=201)
 async def open_petty_cash_float(
     payload: PettyCashOpen,
@@ -1539,6 +1555,96 @@ async def get_petty_cash_balance(
     db = get_db()
     db = getattr(db, "db", db)
     return pcs.get_balance(db, scoped)
+
+
+# ============================================================================
+# F17 - PETTY CASH END-OF-DAY SETTLEMENT
+# ============================================================================
+# A per-store/day reconciliation of the petty-cash box: read the day's position
+# (opening float, payouts/debits, top-ups/credits, expected closing) derived from
+# the float's append-only ledger, then record the physically counted closing cash
+# and compute the variance (counted vs expected). One settlement per store-day
+# (idempotent). This is the petty-cash analogue of the cash-register blind-EOD
+# Z-Read -- it RECORDS a count, it does NOT move the float (petty cash is a
+# revolving imprest, not a till that zeroes nightly).
+
+
+@router.get("/petty-cash/settlement/position")
+async def get_petty_cash_settlement_position(
+    store_id: str = Query(...),
+    settle_date: Optional[str] = Query(
+        None, description="IST day YYYY-MM-DD; defaults to IST today"
+    ),
+    current_user: dict = Depends(require_roles(*_PETTY_SETTLE_VIEW_ROLES)),
+):
+    """The day's petty-cash position for a store: opening float, today's
+    credits (top-ups + reversals) and debits (payouts), and the EXPECTED closing
+    balance -- plus the recorded settlement if the day is already closed.
+
+    Store-scoped (a manager/accountant only sees their stores; admins see any).
+    Fail-soft to an exists=False envelope when no float / no DB."""
+    scoped = validate_store_access(store_id, current_user)
+    if not scoped:
+        raise HTTPException(status_code=400, detail="store_id required")
+    from ..services import petty_cash_settlement_service as pcss
+
+    db = get_db()
+    db = getattr(db, "db", db)
+    return pcss.get_day_position(db, scoped, settle_date)
+
+
+@router.post("/petty-cash/settlement", status_code=201)
+async def settle_petty_cash_day(
+    payload: PettyCashSettle,
+    current_user: dict = Depends(require_roles(*_PETTY_SETTLE_MANAGE_ROLES)),
+):
+    """Record the counted closing cash for a store-day and compute the variance
+    (counted - expected; positive = OVER, negative = SHORT). Closes the day.
+
+    Store-scoped. Idempotent per (store, day): a second settle returns 409
+    ``already_settled`` with the existing record and never re-writes the
+    variance. A store with no open float returns 404."""
+    scoped = validate_store_access(payload.store_id, current_user)
+    if not scoped:
+        raise HTTPException(status_code=400, detail="store_id required")
+    from ..services import petty_cash_settlement_service as pcss
+
+    db = get_db()
+    db = getattr(db, "db", db)
+    res = pcss.settle_day(
+        db, store_id=scoped, counted_closing=payload.counted_closing,
+        actor=current_user.get("user_id"),
+        settle_date=payload.settle_date, note=payload.note,
+    )
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=int(res.get("http", 400)),
+            detail={"error": res.get("error", "settle_failed"),
+                    **({"settlement": res["settlement"]} if res.get("settlement") else {})},
+        )
+    return {"message": "Petty-cash day settled", **res}
+
+
+@router.get("/petty-cash/settlement")
+async def list_petty_cash_settlements(
+    store_id: str = Query(...),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(require_roles(*_PETTY_SETTLE_VIEW_ROLES)),
+):
+    """Settlement history for a store (newest first). Store-scoped; fail-soft."""
+    scoped = validate_store_access(store_id, current_user)
+    if not scoped:
+        raise HTTPException(status_code=400, detail="store_id required")
+    from ..services import petty_cash_settlement_service as pcss
+
+    db = get_db()
+    db = getattr(db, "db", db)
+    rows = pcss.list_settlements(
+        db, scoped, limit=limit, from_date=from_date, to_date=to_date
+    )
+    return {"settlements": rows, "total": len(rows)}
 
 
 # ============================================================================
