@@ -915,7 +915,12 @@
   padding: 12px 0;
   position: relative;
   z-index: 20;
-  overflow: visible;
+  /* The admin/superadmin rail can list ~50 items. Let it scroll within the
+     viewport instead of growing the page (was overflow: visible, which made
+     the rail push past the main content and leave empty space on the right). */
+  max-height: 100vh;
+  overflow-y: auto;
+  overflow-x: visible;
 }
 .rail .brand {
   width: 40px; height: 40px; margin: 0 auto 0;
