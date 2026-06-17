@@ -915,10 +915,25 @@
   padding: 12px 0;
   position: relative;
   z-index: 20;
-  /* The admin/superadmin rail can list ~50 items. Let it scroll within the
-     viewport instead of growing the page (was overflow: visible, which made
-     the rail push past the main content and leave empty space on the right). */
+  /* The admin/superadmin rail can list ~50 items. The SCROLL lives on the
+     inner .rail-nav wrapper (below), NOT on .rail itself — so .rail keeps
+     overflow: visible and the collapsed-mode hover tooltips (.rail-label),
+     which sit to the RIGHT of the rail, are not clipped by a scroll box.
+     min-height: 0 lets the flex column shrink so .rail-nav can scroll. */
   max-height: 100vh;
+  min-height: 0;
+  overflow: visible;
+}
+/* Inner scroll region: the nav groups + items + flex spacer. flex:1 +
+   min-height:0 make it absorb the height between the pinned brand header and
+   the pinned bottom avatar, and overflow-y:auto scrolls the long admin nav.
+   overflow-x stays visible so item hover tooltips escape to the right. */
+.rail .rail-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: visible;
 }
@@ -1018,6 +1033,17 @@
   box-shadow: var(--sh-md);
 }
 .rail .rail-item:hover .rail-label { opacity: 1; }
+/* Collapsed icon-only mode: the nav list scrolls (.rail-nav is a scroll box),
+   which would clip an absolutely-positioned tooltip at the rail's right edge.
+   Position the tooltip FIXED (relative to the viewport) so it escapes the
+   scroll container entirely. JS sets --tip-x/--tip-y from the hovered item's
+   rect (see Rail.tsx); a sensible fallback keeps it beside the 64px rail. */
+.rail:not(.expanded) .rail-label {
+  position: fixed;
+  left: var(--tip-x, calc(var(--rail-width, 64px) + 10px));
+  top: var(--tip-y, 50%);
+  transform: translateY(-50%);
+}
 .rail .rail-sep { height: 1px; background: #2a2a28; margin: 8px 14px; }
 .rail .rail-spacer { flex: 1; }
 .rail .rail-avatar {
@@ -3062,6 +3088,16 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
     height: 100dvh;
   }
   .rail.rail-mobile-open .rail-spacer { display: none; }
+  /* The desktop inner-scroll wrapper must NOT create a nested scroll inside the
+     open drawer (the drawer itself is the block scroll container above). Let it
+     flow as a plain block so all rows stack at natural height and the drawer
+     owns the single scroll. */
+  .rail.rail-mobile-open .rail-nav {
+    display: block;
+    overflow: visible;
+    min-height: 0;
+    flex: none;
+  }
   /* Items must render icon-BESIDE-label (row), not stacked. A base rule computes
      flex-direction:column on the drawer rows, so the icon+label stacked and
      overflowed the 38px row box, overlapping the next row (the real "broken

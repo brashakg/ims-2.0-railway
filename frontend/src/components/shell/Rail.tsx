@@ -3,7 +3,7 @@
 // Ported from design_handoff_ims_2_0/shell/shell.jsx → Rail
 
 import { NavLink, useLocation } from 'react-router-dom';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
 import { moduleForPath } from '../../context/ModuleContext';
@@ -213,6 +213,18 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
   // User menu (sign out) anchored on the bottom rail avatar.
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const railRef = useRef<HTMLElement | null>(null);
+  // Collapsed-mode tooltips are position:fixed (so they escape the .rail-nav
+  // scroll-clip box). Fixed positioning can't read the hovered item's location
+  // from CSS, so on hover we publish the item's rect to --tip-x/--tip-y on the
+  // rail; the .rail-label reads them. Only meaningful in icon-only mode.
+  const positionTooltip = useCallback((e: ReactMouseEvent<HTMLElement>) => {
+    const rail = railRef.current;
+    if (!rail || rail.classList.contains('expanded')) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    rail.style.setProperty('--tip-x', `${Math.round(r.right + 10)}px`);
+    rail.style.setProperty('--tip-y', `${Math.round(r.top + r.height / 2)}px`);
+  }, []);
   useEffect(() => {
     if (!userMenuOpen) return;
     const onDoc = (e: MouseEvent) => {
@@ -324,6 +336,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
 
   return (
     <aside
+      ref={railRef}
       id="rail-drawer"
       className={'rail' + (expanded ? ' expanded' : '') + (mobileOpen ? ' rail-mobile-open' : '')}
       {...(mobileOpen ? { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Navigation menu' } : {})}
@@ -358,6 +371,11 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
         </button>
       </div>
 
+      {/* Scrollable nav list. The scroll lives HERE (not on .rail) so the rail
+          itself keeps overflow: visible and the hover tooltips (.rail-label)
+          aren't clipped in collapsed icon-only mode. The brand header above and
+          the avatar/user-menu below stay pinned outside this scroll region. */}
+      <div className="rail-nav">
       {visibleGroups.map((group, gi) => {
         const isCollapsible = expanded && !!group.title;
         const isCollapsed = isCollapsible && collapsedGroups.has(group.title!);
@@ -390,6 +408,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
                         type="button"
                         className="rail-item"
                         title={`${item.label} (opens in new tab)`}
+                        onMouseEnter={positionTooltip}
                         onClick={async () => {
                           try {
                             const r = await ecommerceSsoApi.getUrl();
@@ -413,6 +432,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
                       rel="noopener noreferrer"
                       className="rail-item"
                       title={`${item.label} (opens in new tab)`}
+                      onMouseEnter={positionTooltip}
                     >
                       <IconCmp />
                       <span className="rail-label">{item.label}</span>
@@ -425,6 +445,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
                     to={item.to}
                     className={({ isActive }) => 'rail-item' + (isActive ? ' active' : '')}
                     title={item.label}
+                    onMouseEnter={positionTooltip}
                   >
                     <IconCmp />
                     <span className="rail-label">{item.label}</span>
@@ -437,6 +458,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
         );
       })}
       <div className="rail-spacer" />
+      </div>
       <div className="rail-usermenu" ref={userMenuRef}>
         {userMenuOpen && (
           <div className="rail-usermenu-pop" role="menu">
