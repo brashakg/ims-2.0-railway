@@ -205,6 +205,8 @@ def _header_fragment(header: Dict[str, Any], title: str) -> str:
     name = _e(h.get("legal_name") or h.get("trade_name") or "")
     trade = _e(h.get("trade_name") or "")
     subtitle = _e(h.get("header_subtitle") or "")
+    brand_label = _e(h.get("brand_label") or "")
+    logo_url = str(h.get("logo_url") or "").strip()
 
     supplier_rows = ""
     for k, v in h.get("supplier_kv") or []:
@@ -233,12 +235,28 @@ def _header_fragment(header: Dict[str, Any], title: str) -> str:
         '<div class="copy-marker">' + copy_rendered + "</div>" if copy_rendered else ""
     )
 
+    # Per-store/brand logo: render the entity's invoice logo (or a per-brand
+    # default) above the legal name. Falls back to no image when none configured.
+    logo_html = (
+        '<div class="center"><img src="'
+        + _e(logo_url)
+        + '" alt="logo" style="max-height:60px;max-width:240px;margin-bottom:6px"></div>'
+        if logo_url
+        else ""
+    )
+
     head = (
         '<div class="border-box">'
         + copy_html
         + '<div class="center">'
+        + logo_html
         + "<h1>" + name + "</h1>"
         + ("<div>" + trade + "</div>" if trade and trade != name else "")
+        + (
+            '<div class="muted">' + brand_label + "</div>"
+            if brand_label and brand_label.lower() not in (name.lower(), trade.lower())
+            else ""
+        )
         + ('<div class="muted">' + subtitle + "</div>" if subtitle else "")
         + "</div>"
         + '<table class="kv" style="margin-top:8px">'
@@ -263,6 +281,88 @@ def _header_fragment(header: Dict[str, Any], title: str) -> str:
     )
 
     return head + title_band + meta_block
+
+
+def supplier_identity_html(header: Dict[str, Any]) -> str:
+    """Render a compact, self-contained issuing-store identity block from a
+    print_legal.LegalHeader dict. Used by simpler templates (e.g. the Rx card)
+    that want the store/entity identity header but not the full A4 challan
+    layout. Inline-styled so it renders identically inside any page CSS.
+
+    Shows: logo (when configured), legal name, trade name, registered office,
+    store branch + address, GSTIN, PAN, and -- for rx_card -- NCAHP/DMC reg.
+    """
+    h = header or {}
+    name = _e(h.get("legal_name") or h.get("trade_name") or "")
+    trade = _e(h.get("trade_name") or "")
+    brand_label = _e(h.get("brand_label") or "")
+    logo_url = str(h.get("logo_url") or "").strip()
+    store_name = _e(h.get("store_name") or "")
+    store_addr = _e(h.get("store_address") or "")
+    store_contact = _e(
+        " | ".join(
+            str(p) for p in [h.get("store_phone"), h.get("store_email")] if p
+        )
+    )
+
+    rows = ""
+    for k, v in h.get("supplier_kv") or []:
+        if not v:
+            continue
+        rows += (
+            '<tr><td style="color:#666;padding:1px 8px 1px 0;'
+            'text-transform:uppercase;font-size:10px;white-space:nowrap;'
+            'vertical-align:top">'
+            + _e(k)
+            + '</td><td style="padding:1px 0;font-size:11px">'
+            + _e(v)
+            + "</td></tr>"
+        )
+
+    logo_html = (
+        '<img src="' + _e(logo_url) + '" alt="logo" '
+        'style="max-height:54px;max-width:200px;margin-bottom:4px">'
+        if logo_url
+        else ""
+    )
+    brand_html = (
+        '<div style="color:#666;font-size:10px;text-transform:uppercase;'
+        'letter-spacing:.08em">' + brand_label + "</div>"
+        if brand_label
+        and brand_label.lower() not in (name.lower(), trade.lower())
+        else ""
+    )
+    trade_html = (
+        '<div style="color:#444;font-size:11px">' + trade + "</div>"
+        if trade and trade != name
+        else ""
+    )
+    branch_html = ""
+    if store_name or store_addr:
+        branch_html = (
+            '<div style="margin-top:6px;font-size:11px;color:#333">'
+            + ("<strong>" + store_name + "</strong>" if store_name else "")
+            + ("<div>" + store_addr + "</div>" if store_addr else "")
+            + ("<div>" + store_contact + "</div>" if store_contact else "")
+            + "</div>"
+        )
+
+    return (
+        '<div style="border:1.5px solid #111;padding:10px 14px;'
+        'margin-bottom:14px;text-align:center;font-family:Arial,Helvetica,'
+        'sans-serif;color:#111">'
+        + logo_html
+        + '<div style="font-size:16px;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:.5px">' + name + "</div>"
+        + trade_html
+        + brand_html
+        + branch_html
+        + '<table style="margin:8px auto 0;border-collapse:collapse;'
+        'text-align:left">'
+        + rows
+        + "</table>"
+        + "</div>"
+    )
 
 
 def _not_a_tax_invoice(text: str) -> str:
@@ -309,6 +409,7 @@ def render_delivery_challan(
     copy_marker: str = "ORIGINAL",
     place_of_supply: Any = None,
     transport_reason: str = "",
+    overrides: Optional[Dict[str, Any]] = None,
     auto_print: bool = False,
 ) -> str:
     """Render a Rule 55 Delivery Challan as a self-contained HTML page.
@@ -318,6 +419,10 @@ def render_delivery_challan(
     invoice (Rule 55: goods moved without an invoice -- e.g. an inter-store
     transfer, or goods sent for the customer to take delivery of). It carries
     Rule 55 copy markers (CONSIGNEE / TRANSPORTER / CONSIGNOR).
+
+    `overrides` is the per-entity print_template_overrides "fields" dict
+    (signatory/footer/logo); the caller loads it and threads it through so
+    owner-configured content actually reaches the printed challan.
     """
     items = items or []
 
@@ -329,6 +434,7 @@ def render_delivery_challan(
         doc_date=challan_date,
         place_of_supply=place_of_supply,
         copy_marker=copy_marker,
+        overrides=overrides,
         extra_meta=(
             [("Reason for transport", transport_reason)] if transport_reason else None
         ),
@@ -456,6 +562,7 @@ def render_estimate(
     interstate: bool = False,
     place_of_supply: Any = None,
     terms: str = "",
+    overrides: Optional[Dict[str, Any]] = None,
     auto_print: bool = False,
 ) -> str:
     """Render an Estimate / Quotation as a self-contained HTML page.
@@ -466,6 +573,9 @@ def render_estimate(
     (subtotal/taxable/tax/grand_total). The document header reads
     "ESTIMATE / QUOTATION - not a tax invoice"; it carries NO invoice serial
     and makes NO stock claim (it is non-binding).
+
+    `overrides` is the per-entity print_template_overrides "fields" dict so
+    owner-configured signatory / footer / logo reach the printed estimate.
     """
     items = items or []
     totals = totals or {}
@@ -478,6 +588,7 @@ def render_estimate(
         doc_date=estimate_date,
         place_of_supply=place_of_supply,
         copy_marker="ORIGINAL",
+        overrides=overrides,
         extra_meta=(
             [("Valid Until", format_date(valid_until))] if valid_until else None
         ),
