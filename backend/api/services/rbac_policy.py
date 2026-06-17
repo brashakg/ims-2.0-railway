@@ -1290,6 +1290,29 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/crm/customers/{customer_id}/cl-refill-status",
         "allowed": "AUTHENTICATED",
     },
+    # CRM-2 phase 2: in-app CL refill-due worklist + deduped reminder-task
+    # creator. Read worklist = any store staff; create reminders = manager+.
+    # NO outbound message (customer send stays WhatsApp-gated / dark).
+    {
+        "method": "GET",
+        "path": "/api/v1/crm/cl-refill/{store_id}/due",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+            "OPTOMETRIST",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/crm/cl-refill/{store_id}/create-reminders",
+        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/{customer_id}/interactions",

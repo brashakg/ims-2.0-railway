@@ -1344,53 +1344,24 @@ async def get_cl_refill_status(
         if cl_line is None:
             return empty
 
-        # Determine pack info.
-        pack_size = int(cl_line.get("pack_size") or cl_line.get("qty") or 0)
-        modality = str(cl_line.get("modality") or cl_line.get("cl_modality") or "")
-        sku = str(cl_line.get("sku") or cl_line.get("product_id") or "")
-        order_qty = int(cl_line.get("quantity") or cl_line.get("return_qty") or 1)
+        # Refill maths via the shared pure helper so this per-customer view and
+        # the store worklist (GET /crm/cl-refill/{store_id}/due) never diverge.
+        from ..services import cl_refill as clr
 
-        # Estimate supply in days.
-        # Daily disposables: total_lenses / 2 eyes / 1 per day.
-        # Monthly disposables: each pack = 30 days (one pair per box assumed).
-        total_lenses = pack_size * order_qty
-        if modality.upper() in ("DAILY", "DAILY DISPOSABLE", "1-DAY"):
-            supply_days = total_lenses // 2 if total_lenses >= 2 else total_lenses
-        elif modality.upper() in ("MONTHLY", "MONTHLY DISPOSABLE", "30-DAY"):
-            supply_days = order_qty * 30
-        elif modality.upper() in ("BIWEEKLY", "2-WEEK", "FORTNIGHTLY"):
-            supply_days = order_qty * 14
-        else:
-            # Unknown modality: use pack_size / 2 per day as a conservative guess.
-            supply_days = total_lenses // 2 if total_lenses >= 2 else 30
-
-        # Anchor from the order date.
         order_date_raw = cl_order.get("created_at") or cl_order.get("order_date")
-        try:
-            if isinstance(order_date_raw, str):
-                order_dt = datetime.fromisoformat(
-                    order_date_raw.replace("Z", "+00:00")
-                ).replace(tzinfo=None)
-            elif isinstance(order_date_raw, datetime):
-                order_dt = order_date_raw.replace(tzinfo=None)
-            else:
-                order_dt = datetime.utcnow()
-        except Exception:
-            order_dt = datetime.utcnow()
-
-        refill_due = order_dt + timedelta(days=max(supply_days, 1))
-        days_remaining = (refill_due - datetime.utcnow()).days
+        refill = clr.compute_refill(cl_line, order_date_raw)
+        days_remaining = refill["days_remaining"]
 
         return {
             "customer_id": customer_id,
             "has_cl_history": True,
-            "refill_due_date": refill_due.date().isoformat(),
+            "refill_due_date": refill["refill_due_date"],
             "days_remaining": days_remaining,
             "last_cl_order_id": cl_order.get("order_id"),
-            "last_cl_order_date": order_dt.date().isoformat(),
-            "sku": sku,
-            "modality": modality or None,
-            "pack_size": pack_size or None,
+            "last_cl_order_date": refill["last_cl_order_date"],
+            "sku": refill["sku"] or "",
+            "modality": refill["modality"],
+            "pack_size": refill["pack_size"],
             "note": (
                 "Refill overdue"
                 if days_remaining < 0
@@ -1404,6 +1375,125 @@ async def get_cl_refill_status(
     except Exception as exc:
         logger.warning("[CRM] cl-refill-status failed for %s: %s", customer_id, exc)
         return empty
+
+
+# ---------------------------------------------------------------------------
+# CL auto-refill IN-APP trigger (CRM-2 phase 2): a store worklist + a deduped
+# SYSTEM-task creator. NO outbound message -- the customer-facing WhatsApp/SMS
+# send stays dark. Staff follow-up only.
+# ---------------------------------------------------------------------------
+
+
+class CLRefillReminderBody(BaseModel):
+    """Optional knobs for the reminder-creator. Defaults match the worklist."""
+
+    due_within_days: int = Field(
+        14, ge=0, le=120, description="Refill-due horizon (days)"
+    )
+    assigned_to: Optional[str] = Field(
+        None, description="User to own the reminder tasks (default: the actor)"
+    )
+
+
+@router.get("/cl-refill/{store_id}/due")
+async def get_cl_refill_worklist(
+    store_id: str = Path(..., description="Store ID"),
+    due_within_days: int = Query(
+        14, ge=0, le=120, description="Refill-due horizon (days)"
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """In-app CL refill-due worklist for a store: customers whose contact-lens
+    refill is due within the horizon (default 14 days) or already overdue,
+    most-overdue first. Read-only -- NO message sent.
+
+    Store-scoped (validate_store_access): a store-scoped role gets 403 for
+    another store. Fail-soft: no DB -> empty list.
+    """
+    from ..dependencies import validate_store_access
+    from ..services import cl_refill as clr
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    rows = clr.scan_due_refills(db, store_id, due_within_days=due_within_days)
+    return {
+        "store_id": store_id,
+        "due_within_days": due_within_days,
+        "generated_at": datetime.utcnow().isoformat(),
+        "count": len(rows),
+        "overdue_count": sum(1 for r in rows if r.get("overdue")),
+        "items": rows,
+    }
+
+
+@router.post("/cl-refill/{store_id}/create-reminders")
+async def create_cl_refill_reminders(
+    store_id: str = Path(..., description="Store ID"),
+    body: CLRefillReminderBody = Body(default=CLRefillReminderBody()),
+    current_user: dict = Depends(get_current_user),
+):
+    """Turn the CL refill-due worklist into deduped in-app SYSTEM tasks (the
+    SAME task engine the SLA/variance reminders use, so each rides the existing
+    bell + escalation ladder). One task PER due customer, deduped by
+    source_ref=cl_refill:{customer_id}:{refill_due_date} so a re-run never
+    double-creates. NO outbound message is sent.
+
+    Store-scoped. Manager+ (creating follow-up work for the store).
+    """
+    from ..dependencies import validate_store_access
+    from ..services import cl_refill as clr
+
+    _MANAGE = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
+    roles = {str(r).upper() for r in (current_user.get("roles", []) or [])}
+    if not (roles & _MANAGE):
+        raise HTTPException(
+            status_code=403, detail="not permitted to create refill reminders"
+        )
+
+    store_id = validate_store_access(store_id, current_user)
+    db = _crm_get_db()
+    rows = clr.scan_due_refills(db, store_id, due_within_days=body.due_within_days)
+
+    repo = get_task_repository()
+    assigned_to = body.assigned_to or current_user.get("user_id")
+    created: List[dict] = []
+    deduped = 0
+    for r in rows:
+        cid = r.get("customer_id")
+        due_date = r.get("refill_due_date")
+        days = int(r.get("days_remaining") or 0)
+        name = r.get("customer_name") or cid
+        when = "overdue" if r.get("overdue") else f"due in {days}d"
+        task = create_system_task(
+            repo,
+            title=f"Contact-lens refill {when}: {name}",
+            description=(
+                f"Customer {name} ({cid}) is {when} for a contact-lens refill "
+                f"(due {due_date}, last order {r.get('last_cl_order_id')}). "
+                f"Call to reorder. SKU {r.get('sku') or 'n/a'}, "
+                f"modality {r.get('modality') or 'n/a'}."
+            ),
+            priority=clr.refill_task_priority(days),
+            category="CRM",
+            store_id=store_id,
+            dedupe_ref=f"cl_refill:{cid}:{due_date}",
+            assigned_to=assigned_to,
+        )
+        if task is None:
+            deduped += 1
+        else:
+            created.append(
+                {"task_id": task.get("task_id"), "customer_id": cid}
+            )
+
+    return {
+        "store_id": store_id,
+        "due_within_days": body.due_within_days,
+        "candidates": len(rows),
+        "created": len(created),
+        "deduped": deduped,
+        "tasks": created,
+    }
 
 
 @router.get("/customers/{customer_id}/return-risk")

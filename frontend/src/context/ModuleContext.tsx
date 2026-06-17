@@ -224,6 +224,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'crm-360', label: 'Customer 360', path: '/customers/360', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       { id: 'crm-segmentation', label: 'Segmentation (RFM)', path: '/customers/segmentation', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'crm-family-wallet', label: 'Family Wallet', path: '/customers/family-wallet', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
+      { id: 'crm-cl-refill', label: 'CL Refill Due', path: '/customers/cl-refill', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'OPTOMETRIST'] },
       { id: 'crm-campaigns', label: 'Campaign Manager', path: '/customers/campaigns', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },

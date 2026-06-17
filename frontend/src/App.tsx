@@ -40,6 +40,8 @@ const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').t
 const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
 const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
 const FollowUpDashboard = lazy(() => import('./pages/customers/FollowUpDashboard').then(m => ({ default: m.FollowUpDashboard })))
+const FamilyWalletPage = lazy(() => import('./pages/customers/FamilyWalletPage').then(m => ({ default: m.FamilyWalletPage })));
+const CLRefillWorklistPage = lazy(() => import('./pages/customers/CLRefillWorklistPage').then(m => ({ default: m.CLRefillWorklistPage })));
 const WhatsAppInboxPage = lazy(() => import('./pages/customers/WhatsAppInboxPage').then(m => ({ default: m.WhatsAppInboxPage })));
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
@@ -349,6 +351,34 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER']}
                       >
                         <LapsedReactivationPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* F49: Family/household loyalty wallet — shared points pool
+                      (max 7 members, any member redeems chain-wide). Manage =
+                      manager+; redeem mints a store-credit voucher. */}
+                  <Route
+                    path="customers/family-wallet"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                      >
+                        <FamilyWalletPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM-2: Contact-lens refill-due work-list — in-app follow-up
+                      for customers running out of lenses. Create-reminders =
+                      manager+; in-app only (no message send). */}
+                  <Route
+                    path="customers/cl-refill"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'OPTOMETRIST']}
+                      >
+                        <CLRefillWorklistPage />
                       </ProtectedRoute>
                     }
                   />
