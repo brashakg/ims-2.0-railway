@@ -1441,7 +1441,41 @@ async def create_order(
                             )
                             effective_cap = min(user_discount_cap, cat_brand_cap)
                 except Exception:
-                    pass  # fall back to user cap only
+                    # FAIL-CLOSED on the cap-TIGHTENING path (council go-live
+                    # blocker, ruling sec.1). A thrown product/category resolver
+                    # must NEVER widen the allowed discount back to the loose
+                    # user/role cap -- that silently dropped the 2-5% luxury
+                    # brand floor and let a Cartier/Gucci frame take the full
+                    # role cap (live compliance under-enforcement).
+                    #
+                    # We cannot re-read the DB here (it just threw), so we
+                    # tighten using the STRONGEST signal still on the line-item
+                    # payload itself: its brand. brand_cap_for() is a pure,
+                    # DB-free luxury-brand lookup. If the line names a luxury
+                    # brand, its (low) cap is applied as a floor even though the
+                    # DB lookup failed -> the luxury floor cannot vanish on a
+                    # resolver error.
+                    #
+                    # DELIBERATELY NOT over-corrected: a plain/MASS line (no
+                    # luxury brand on the payload) returns None from
+                    # brand_cap_for(), so effective_cap stays at the normal
+                    # user/role cap and an ordinary legitimate sale is NOT
+                    # blocked. "We couldn't determine the tier" only tightens
+                    # when there is a concrete luxury signal; it never invents a
+                    # cap that blocks a plain item.
+                    try:
+                        from api.services.pricing_caps import (
+                            brand_cap_for as _luxury_brand_cap,
+                        )
+
+                        _bcap = _luxury_brand_cap(item.brand)
+                        if _bcap is not None:
+                            effective_cap = min(effective_cap, _bcap)
+                    except Exception:
+                        # Even the pure fallback failed: do not loosen. Leave
+                        # effective_cap as-is (the user/role cap) so a normal
+                        # sale still goes through, but never widened.
+                        pass
 
                 if _eff_disc > effective_cap + 1e-9:
                     raise HTTPException(
