@@ -119,25 +119,26 @@ All calls **fail soft** — missing env = no degraded behavior, just no outbound
 
 **IMS 2.0** — Retail Operating System for Avinash's Indian optical chains (**Better Vision** + **WizOpt**). Replaces ~15 Excel files, WhatsApp-based task management, and manual ledgers across POS · Inventory · Clinical/Optometry · HR/Payroll · Finance · CRM/Marketing · Vendor Management · Task/SOP enforcement · AI (Jarvis).
 
-Not a POS — a full retail OS. 11 roles. 387+ API endpoints. 65+ frontend pages.
+Not a POS — a full retail OS. 12 roles. ~1,206 API routes. 120+ frontend routes.
 
 ## Stack
 
 - **Frontend:** React 19 + TypeScript + Vite + Tailwind v4 · `frontend/` · port 3000 · deployed to Vercel (`ims-2-0-railway.vercel.app`)
-- **Backend:** FastAPI + Python 3.12 · `backend/` · port 8000 · 31 routers at `/api/v1/*` · deployed to Railway (`ims-20-railway-production.up.railway.app`)
+- **Backend:** FastAPI + Python 3.12 · `backend/` · port 8000 · 90+ routers at `/api/v1/*` · deployed to Railway (`ims-20-railway-production.up.railway.app`)
 - **DB:** MongoDB on Railway · database `ims_2_0`
 - **Auth:** JWT HS256, 8h expiry, 11 roles, store-scoped tokens, geo-fenced login for store staff (roles 4-7)
 - **Test login:** `admin` / `admin123`
 
-## Active initiative: Design language rollout
+## Recently completed initiatives
 
-The app is being re-skinned with a new operational design language. Source: [docs/design/README.md](docs/design/README.md) (formerly in the user's Downloads, now in-repo).
+All design-language rollout phases are **DONE** (Phases 0–6.7). All 8 Jarvis agents are live. The following major modules are **COMPLETE + merged to main**:
 
-**Progress:**
-- **Phase 0 — Foundation — DONE** (commit 5453c2d). Design tokens, 3 Google Fonts, 64px rail + 52px topbar shell chrome, 19 nav items, AppearanceContext for brand/density, Jarvis rail item gated to SUPERADMIN. See [frontend/src/components/shell/](frontend/src/components/shell/).
-- **Phase 1 — Port 9 design screens** (Hub → Store Setup → Inventory → Reports → Clinical → POS → Tasks → Print → Jarvis). In progress.
-- **Phase 2 — Restyle remaining ~10 modules** with the new shell (Customers/CRM, Orders, Returns, HR, Purchase, Finance, Workshop, Catalog, Storefront, Marketing).
-- **Phase 3 — Agent expansion** — 8 superhero agents (see below).
+- **Payroll** — full Indian statutory engine (entities/PAN+GSTIN, Structured-CTC, state-aware PT, EPF/EPS/ESI/TDS, run+lock, Tally JV / PF ECR / payslip). ✅
+- **Finance & Accounting** — real P&L (by store + by category), GST reconciliation per entity, Tally sales-JV, AR/AP, cash flow, period lock, budgets, dashboard tables. ✅
+- **Tasks/SOP escalation engine** — per-priority SLA, role-ladder auto-escalation + reassignment, in-app bell + WhatsApp alerts, daily SOP-checklist completion tracking. ✅
+- **Purchase/Procurement** — PO → GRN → stock-add, mandatory-attachment gate, per-store/FY numbering, CL batch/expiry+FEFO, accountant reconcile console, scheme-CN, P3 variance-approval. ✅
+- **BVI Online Store (Phases 1–5)** — `ecommerce/` Next.js+Prisma/Postgres app integrated in IMS 2.0 Railway project, SSO live, "Online Store" nav item wired. ✅
+- **Products convergence** — `catalog_products` spine ↔ billing master unified; catalog create-door writes the billing spine; billing requires the spine. ✅
 
 ## Jarvis: 8 superhero agents (SUPERADMIN-only)
 
@@ -156,7 +157,7 @@ Source of truth for agents: [docs/reference/IMS2_Agent_Architecture.html](docs/r
 | TASKMASTER | Taskmaster (Marvel) | Real execution — SLA escalation, SOP verify, auto-reorder, expense anomaly (3-tier safety, audit-logged) | 5 min | Yes |
 | NEXUS | Cyborg (DC) | Integration sync — Shopify, Razorpay, Shiprocket, webhooks, Tally 11 PM | Hourly + webhook | Yes (when integrations active) |
 
-Currently implemented in [backend/agents/implementations/](backend/agents/implementations/): CORTEX + SENTINEL only. The other 6 need to be built in Phase 3.
+All 8 agents are implemented in [backend/agents/implementations/](backend/agents/implementations/): JARVIS, CORTEX, SENTINEL, PIXEL, MEGAPHONE, ORACLE, TASKMASTER, and NEXUS.
 
 ## Non-negotiable business rules
 
@@ -253,7 +254,7 @@ ims-2.0-railway/
 ├── CLAUDE.md                           ← you are here
 ├── backend/
 │   ├── api/
-│   │   ├── main.py                     ← FastAPI app, 44 routers mounted at /api/v1/*
+│   │   ├── main.py                     ← FastAPI app, 90+ routers mounted at /api/v1/*
 │   │   ├── routers/                    ← one file per domain
 │   │   └── services/
 │   ├── agents/                         ← Jarvis agents
@@ -263,7 +264,7 @@ ims-2.0-railway/
 ├── frontend/
 │   ├── index.html                      ← Google Fonts loaded here
 │   └── src/
-│       ├── App.tsx                     ← 57 routes, lazy-loaded
+│       ├── App.tsx                     ← 120+ routes, lazy-loaded
 │       ├── index.css                   ← Design tokens + shell CSS
 │       ├── components/
 │       │   ├── shell/                  ← Phase 0 primitives: Rail, Topbar, Icon, etc.
