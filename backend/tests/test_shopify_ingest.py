@@ -339,3 +339,65 @@ def test_non_order_topic_ignored(wired):
     )
     assert res["status"] == "ignored"
     assert not [d for d in wired["orders"].docs if d.get("shopify_order_id") == "6001"]
+
+
+# ---------------------------------------------------------------------------
+# Oversell fix: an online order DECREMENTS physical stock (BVI cutover)
+# ---------------------------------------------------------------------------
+
+
+class _FakeProductRepo:
+    def find_by_sku(self, sku):
+        if sku == "RB-1234":
+            return {"product_id": "P-RB", "hsn_code": "9003", "category": "FRAME"}
+        return None
+
+
+class _FakeStockRepo:
+    """Records FIFO claims so we can assert the decrement fired with the IMS pid."""
+
+    def __init__(self):
+        self.claims = []
+
+    def claim_one_available(self, pid, store_id, order_id, used):
+        self.claims.append((pid, store_id, order_id))
+        return f"unit-{len(self.claims)}"
+
+
+def test_online_order_decrements_physical_stock(wired, monkeypatch):
+    """The oversell fix: ingesting an online order FIFO-claims the sold
+    serialized units (so a walk-in can't sell the same unit), keyed by the IMS
+    product_id (resolved via SKU), at the fulfillment store."""
+    import api.dependencies as deps
+    from api.routers import orders as orders_mod
+
+    monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
+    stock = _FakeStockRepo()
+    monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: stock)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(7100, buyer_state="20"), topic="orders/create"
+    )
+    assert res["status"] == "created"
+    # Exactly one unit claimed, by the IMS product_id (NOT the Shopify 7001),
+    # at the fulfillment store (defaults to the online billing store).
+    assert len(stock.claims) == 1
+    assert stock.claims[0][0] == "P-RB"
+    assert stock.claims[0][1] == "BV-ONLINE-01"
+
+
+def test_online_order_unmapped_sku_skips_decrement(wired, monkeypatch):
+    """A line whose SKU has no IMS product is NOT our serialized stock -> no
+    decrement attempted (fail-soft, never blocks the booked order)."""
+    import api.dependencies as deps
+    from api.routers import orders as orders_mod
+
+    monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
+    stock = _FakeStockRepo()
+    monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: stock)
+
+    order = _frame_order(7101, buyer_state="20")
+    order["line_items"][0]["sku"] = "NOT-IN-IMS"
+    res = shopify_ingest.ingest_shopify_order(wired["db"], order, topic="orders/create")
+    assert res["status"] == "created"  # invoice still booked
+    assert stock.claims == []  # nothing claimed
