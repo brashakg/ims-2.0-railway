@@ -107,6 +107,7 @@ from .routers import (
     portal_router,
     techcherry_import_router,
     vouchers_router,
+    promotions_router,
     entities_router,
     notifications_router,
     shipping_router,
@@ -1430,6 +1431,12 @@ app.include_router(
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
 app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"])
+# F11/F12 - Advanced promotions + cross-category bundling engine. CRUD + pure
+# evaluate preview are always available; the live POS apply is gated by the
+# PROMO_ENGINE_ENABLED env flag (default OFF) inside orders.create_order.
+app.include_router(
+    promotions_router, prefix="/api/v1/promotions", tags=["Promotions"]
+)
 # E4 - PIN-gated maker-checker approval engine.
 app.include_router(approvals_router, prefix="/api/v1/approvals", tags=["Approvals"])
 # Vendor portal — PUBLIC, token-auth via path param. Mounted OUTSIDE the

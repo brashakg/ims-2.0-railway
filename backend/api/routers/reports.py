@@ -3194,6 +3194,132 @@ async def gstr3b_gstn_json(
 
 
 # ============================================================================
+# OFFER TALLY / PROMOTIONS REPORT (F11)
+# ============================================================================
+# "Which promos fired, how much did they give away, and what did that do to
+# margin?" Aggregates the immutable promo_applications audit collection by
+# promo over a date window. Margin uses cost_at_sale when present and ESTIMATES
+# at 60% otherwise -- estimated rows are flagged so the owner never mistakes
+# estimated margin for real margin (F11 business rule). Empty + fail-soft when
+# the engine is dark / no applications exist.
+@router.get("/promotions")
+async def promotions_report(
+    start_date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+):
+    """Offer Tally: per-promo fired-count, total discount given, estimated COGS,
+    net margin impact, and an estimated-COGS flag. ADMIN/AREA/STORE/ACCOUNTANT."""
+    db = get_db().db if get_db() else None
+    empty = {
+        "summary": {
+            "total_discount_given": 0.0,
+            "orders_with_promos": 0,
+            "promos_fired": 0,
+            "net_margin_impact": 0.0,
+            "any_cogs_estimated": False,
+        },
+        "promos": [],
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    if db is None:
+        return empty
+
+    # Store-scope: non-HQ callers are pinned to a store they can access.
+    active_store = None
+    if store_id:
+        active_store = validate_store_access(store_id, current_user)
+    elif not (set(current_user.get("roles", [])) & {"SUPERADMIN", "ADMIN"}):
+        active_store = current_user.get("active_store_id")
+
+    flt: dict = {}
+    if active_store:
+        flt["store_id"] = active_store
+    # applied_at is an ISO string; string range compare is correct for ISO dates.
+    if start_date:
+        flt["applied_at"] = {"$gte": f"{start_date}T00:00:00"}
+    if end_date:
+        flt.setdefault("applied_at", {})
+        flt["applied_at"]["$lte"] = f"{end_date}T23:59:59"
+
+    try:
+        apps = list(db.get_collection("promo_applications").find(flt))
+    except Exception:  # noqa: BLE001
+        return empty
+    for a in apps:
+        a.pop("_id", None)
+
+    # Aggregate per promo_id.
+    per_promo: Dict[str, dict] = {}
+    total_discount = 0.0
+    total_margin = 0.0
+    any_estimated = False
+    order_ids: set = set()
+    for app in apps:
+        order_ids.add(app.get("order_id"))
+        disc = float(app.get("total_discount_given") or 0.0)
+        total_discount += disc
+        total_margin += float(app.get("net_margin_after_promo") or -disc)
+        if app.get("cogs_is_estimated"):
+            any_estimated = True
+        for ap in app.get("applied_promos") or []:
+            pid = ap.get("promo_id") or "unknown"
+            row = per_promo.setdefault(
+                pid,
+                {
+                    "promo_id": pid,
+                    "promo_name": ap.get("promo_name") or pid,
+                    "promo_type": ap.get("promo_type"),
+                    "orders_count": 0,
+                    "total_discount_given": 0.0,
+                    "estimated_cogs": 0.0,
+                    "net_margin_after_promo": 0.0,
+                    "cogs_is_estimated": False,
+                },
+            )
+            row["orders_count"] += 1
+            row["promo_name"] = ap.get("promo_name") or row["promo_name"]
+            row["total_discount_given"] += float(ap.get("discount_given") or 0.0)
+        # Apportion the application's COGS/margin estimate across its promos.
+        promos_here = app.get("applied_promos") or []
+        if promos_here:
+            est_cogs_each = float(app.get("estimated_cogs") or 0.0) / len(promos_here)
+            for ap in promos_here:
+                pid = ap.get("promo_id") or "unknown"
+                row = per_promo.get(pid)
+                if row:
+                    row["estimated_cogs"] += est_cogs_each
+                    row["net_margin_after_promo"] -= float(
+                        ap.get("discount_given") or 0.0
+                    )
+                    if app.get("cogs_is_estimated"):
+                        row["cogs_is_estimated"] = True
+
+    promos_out = []
+    for row in per_promo.values():
+        row["total_discount_given"] = round(row["total_discount_given"], 2)
+        row["estimated_cogs"] = round(row["estimated_cogs"], 2)
+        row["net_margin_after_promo"] = round(row["net_margin_after_promo"], 2)
+        promos_out.append(row)
+    promos_out.sort(key=lambda r: r["total_discount_given"], reverse=True)
+
+    return {
+        "summary": {
+            "total_discount_given": round(total_discount, 2),
+            "orders_with_promos": len([o for o in order_ids if o]),
+            "promos_fired": len(promos_out),
+            "net_margin_impact": round(total_margin, 2),
+            "any_cogs_estimated": any_estimated,
+        },
+        "promos": promos_out,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
+# ============================================================================
 # NON-MOVING STOCK REPORT (Phase 6.3)
 # ============================================================================
 # "Which SKUs are tying up cash without turning over?" — core question for

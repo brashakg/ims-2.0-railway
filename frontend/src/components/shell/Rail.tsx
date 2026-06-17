@@ -138,6 +138,10 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Growth',
     items: [
       { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      // F11/F12: Promotions rules admin + Offer Tally report. The live POS apply
+      // is dark behind PROMO_ENGINE_ENABLED; rules are authored/previewed here.
+      { id: 'promotions', label: 'Promotions', to: '/promotions', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      { id: 'promotions-report', label: 'Offer Tally', to: '/reports/promotions', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // F40: VIP churn watchlist -- overdue high-LTV customers (personalised
       // buying rhythm). Read-only retention oversight; SUPERADMIN / ADMIN only.
       { id: 'vip-churn-watchlist', label: 'VIP Watch List', to: '/customers/vip-churn-watchlist', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN'] },
