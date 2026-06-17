@@ -1210,6 +1210,22 @@ async def create_order(
                     status_code=400,
                     detail=f"Product not found: {pid} ({item.product_name or 'unknown'})",
                 )
+            # Products-convergence ③: billing requires the `products` SPINE. A
+            # product that resolves ONLY from catalog_products (no spine row) is
+            # not a governed billing master -- fail LOUD instead of silently
+            # billing off the catalog (the path the discount-cap could not fully
+            # enforce). Post step-10 the catalog door writes the spine, so this
+            # only fires for a legacy un-converged catalog-only product; re-save
+            # it via Catalog/Add Product to mint its spine row.
+            if product.get("_resolved_from") == "catalog_products":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{item.product_name or pid} exists only in the catalog "
+                        f"and has no billing master record. Re-save it via "
+                        f"Catalog / Add Product before selling it."
+                    ),
+                )
 
     # BUG-119/BUG-118: the real server-side price ceiling / cost floor / discount
     # validation runs in the totals loop below (AFTER the idempotency check, using

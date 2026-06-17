@@ -453,9 +453,13 @@ def _frame_item(unit_price=1000.0, **over):
 def test_c1_order_create_resolves_catalog_only_product(
     client, auth_headers, hardening_orders, monkeypatch
 ):
-    """A product that exists ONLY in catalog_products (and a NON-virtual id, so
-    the existence check actually runs) can be ordered. Previously this 400'd
-    'Product not found'."""
+    """PRODUCTS-CONVERGENCE ③: a product that exists ONLY in catalog_products
+    (no `products` spine row) is NOT billable -- order-create FAILS LOUD with a
+    400 instead of silently billing off the catalog (the path the discount-cap
+    could not fully govern). Post step-10 the catalog door writes the spine, so
+    this only happens for a legacy un-converged catalog-only product. (This test
+    previously asserted such a product was orderable; the convergence reverses
+    that contract -- billing requires the spine.)"""
     from api.routers import orders as orders_module
     from database.repositories.product_repository import ProductRepository
 
@@ -499,9 +503,9 @@ def test_c1_order_create_resolves_catalog_only_product(
             }
         ],
     )
-    assert resp.status_code in (200, 201), resp.text
-    body = resp.json()
-    assert body["grand_total"] == 3000.0  # 5% GST is within the inclusive price
+    # ③: catalog-only (no spine) -> loud 400, NOT a silent sale.
+    assert resp.status_code == 400, resp.text
+    assert "no billing master" in resp.text.lower() or "only in the catalog" in resp.text.lower()
 
 
 def test_c1_order_create_unknown_product_still_404s(
