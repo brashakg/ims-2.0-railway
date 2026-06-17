@@ -99,7 +99,7 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
       { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
       { id: 'catalog-autopilot', label: 'Catalog Autopilot', to: '/catalog/autopilot', icon: 'cpu', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-      { id: 'pricing', label: 'Pricing & Offers', to: '/catalog/pricing', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'pricing', label: 'Pricing & Offers', to: '/catalog/pricing', icon: 'coins', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
     ],
   },
   {
@@ -109,15 +109,26 @@ const RAIL_GROUPS: NavGroup[] = [
       // E4: PIN-gated approval inbox. requireRoles mirrors the /approvals
       // ProtectedRoute gate (the approver set; ACCOUNTANT is inbox read-only).
       { id: 'approvals', label: 'Approvals', to: '/approvals', icon: 'shield', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'expenses', label: 'Expenses', to: '/finance/expenses', icon: 'banknote' },
+      { id: 'expenses', label: 'Expenses', to: '/finance/expenses', icon: 'wallet' },
       // Attendance is its OWN top-level item (was buried in HR tabs). Managers
       // see the full monthly grid + admin edit; staff (roles 5-7) get their
       // self check-in card. requireRoles mirrors the /attendance route gate.
       { id: 'attendance', label: 'Attendance', to: '/attendance', icon: 'calendarCheck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'] },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'payslip', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'calculator', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
+    ],
+  },
+  {
+    // Till / Day-close — cashier-facing till tools. These were mis-filed under
+    // "Analysis" with the accountant finance reports; the nav home follows the
+    // operator's mental model (a cashier's daily open/close), not the code
+    // package (URLs stay /finance/*). requireRoles are unchanged from before.
+    title: 'Till / Day-close',
+    items: [
+      { id: 'cash-register', label: 'Cash Register', to: '/finance/cash-register', icon: 'cashRegister', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'lock', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF'] },
     ],
   },
   {
@@ -125,10 +136,10 @@ const RAIL_GROUPS: NavGroup[] = [
     items: [
       { id: 'reports', label: 'Reports', to: '/reports', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'finance', label: 'Finance', to: '/finance/dashboard', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'cash-register', label: 'Cash Register', to: '/finance/cash-register', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF'] },
-      { id: 'cashflow', label: 'Cash Flow', to: '/finance/cash-flow', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-      { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      // cash-register + blind-eod re-homed to the Operations "Till / Day-close"
+      // group below (cashier tools, not accountant analysis). URLs + roles unchanged.
+      { id: 'cashflow', label: 'Cash Flow', to: '/finance/cash-flow', icon: 'trendingUp', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'percent', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // B2B invoices -> Tally: e-invoice + e-way bill issued in Tally (owner
       // decision). Export console + reminder worklist; finance-admin only.
       { id: 'b2b-tally-export', label: 'B2B → Tally Export', to: '/finance/b2b-tally-export', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
@@ -179,9 +190,14 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'System',
     items: [
       { id: 'print', label: 'Print', to: '/print', icon: 'printer', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      // Three items used to share the `settings` cog glyph (indistinguishable).
+      // Now: Settings keeps the cog; Staff Onboarding gets a user-plus mark and
+      // sits next to the people-admin tools; Organization gets a building mark.
+      // The /setup wizard is relabeled "Staff Onboarding" (it onboards staff via
+      // create_user) — route `to:` is unchanged.
+      { id: 'onboarding', label: 'Staff Onboarding', to: '/setup', icon: 'userPlus', requireRoles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'organization', label: 'Organization', to: '/organization', icon: 'building', requireRoles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'setup', label: 'Settings', to: '/settings', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'] },
-      { id: 'onboarding', label: 'Store Onboarding', to: '/setup', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'organization', label: 'Organization', to: '/organization', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
     ],
   },
 ];
@@ -246,14 +262,19 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
   // on every navigation so the user is never one click away from an invisible
   // nav item.
   //
-  // Default (no localStorage key) = ALL groups EXPANDED, so the sidebar shows
-  // its full grouped structure. AuthContext clears the key on every login, so
-  // each login starts grouped/expanded; in-session collapses still persist
-  // across refresh until the next login.
+  // Default (no localStorage key) = ALL titled groups COLLAPSED, so the rail is
+  // short immediately on login (the admin/superadmin rail lists ~50 items).
+  // AuthContext clears the key on every login, so each login starts collapsed;
+  // a user's manual expands are written to localStorage and survive refresh
+  // until the next login. The active-route group is force-expanded below.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
     const saved = loadCollapsedGroups();
     if (saved !== null) return saved;
-    return new Set<string>();
+    const allTitled = new Set<string>();
+    for (const g of RAIL_GROUPS) {
+      if (g.title) allTitled.add(g.title);
+    }
+    return allTitled;
   });
 
   const activeGroupTitle = useMemo(() => {
@@ -276,45 +297,12 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
     });
   }, [activeGroupTitle]);
 
-  // Latest active-group title for the auto-group timer (read at fire time so
-  // navigating around doesn't restart the countdown).
-  const activeGroupTitleRef = useRef(activeGroupTitle);
-  useEffect(() => {
-    activeGroupTitleRef.current = activeGroupTitle;
-  }, [activeGroupTitle]);
-
-  // The rail starts fully expanded after login (all groups open), which makes a
-  // long sidebar that can scroll past the main content, leaving empty space on
-  // the right. 15s after mount, auto-collapse every group except the active one
-  // so the rail settles into a compact grouped state. A manual group toggle
-  // cancels this (the user has taken control of the layout).
-  const autoGroupTimer = useRef<number | null>(null);
-  useEffect(() => {
-    autoGroupTimer.current = window.setTimeout(() => {
-      autoGroupTimer.current = null;
-      setCollapsedGroups(() => {
-        const next = new Set<string>();
-        for (const g of RAIL_GROUPS) {
-          if (g.title && g.title !== activeGroupTitleRef.current) next.add(g.title);
-        }
-        saveCollapsedGroups(next);
-        return next;
-      });
-    }, 15000);
-    return () => {
-      if (autoGroupTimer.current) {
-        window.clearTimeout(autoGroupTimer.current);
-        autoGroupTimer.current = null;
-      }
-    };
-  }, []);
+  // Groups now start COLLAPSED by default (see the collapsedGroups initializer),
+  // so the old 15s "auto-collapse after mount" timer was removed — the rail is
+  // already compact on login and a timer would only risk clobbering a user's
+  // manual expand.
 
   const toggleGroup = useCallback((title: string) => {
-    // User is managing groups manually — stop the pending auto-collapse.
-    if (autoGroupTimer.current) {
-      window.clearTimeout(autoGroupTimer.current);
-      autoGroupTimer.current = null;
-    }
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
       if (next.has(title)) next.delete(title);

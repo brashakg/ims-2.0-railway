@@ -66,6 +66,29 @@ export const Icon = {
   chat: makeIcon('M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'),
   // F39: NBA daily call list (a handset)
   phone: makeIcon('M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z'),
+  // --- Distinct money/admin glyphs so each nav destination is recognizable ---
+  // (breaks the 9x `banknote` + 3x `settings` reuse in the rail). Finance keeps
+  // `banknote`; the rest below give Cash-Register / Cash-Flow / ITC / Blind-EOD /
+  // Incentive / Pricing / Salary / Payroll / Expenses / Organization / Staff
+  // Onboarding their own marks.
+  // Cash register / till drawer — stacked drawer with a coin slot.
+  cashRegister: makeIcon('M4 21h16M4 21v-7h16v7M6 14v-3a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v3M9 6h6M10 17h4'),
+  // Cash flow — trending-up arrow.
+  trendingUp: makeIcon('M3 17l6-6 4 4 7-7M14 8h7v7'),
+  // Percent — GST credit / ITC.
+  percent: makeIcon('M19 5L5 19M7.5 5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM16.5 14a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z'),
+  // Coins — pricing & offers.
+  coins: makeIcon('M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM16 22a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM8.5 6h.01M16.5 14h.01'),
+  // Wallet — expenses.
+  wallet: makeIcon('M3 6a2 2 0 0 1 2-2h13v4M3 6v12a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H5a2 2 0 0 1-2-2zM17 13h.01'),
+  // Pay packet / salary — a banknote with a coin (distinct from plain banknote).
+  payslip: makeIcon('M3 7h14v8H3zM6 11a2 2 0 1 0 0 .01M20 9v8a2 2 0 0 1-2 2H6'),
+  // Calculator — payroll run.
+  calculator: makeIcon('M5 3h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01'),
+  // Building — organization (legal entities + stores).
+  building: makeIcon('M3 21h18M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M19 21V11a2 2 0 0 0-2-2h-2M9 7h2M9 11h2M9 15h2'),
+  // User-plus — staff onboarding (sits next to Users).
+  userPlus: makeIcon('M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM19 8v6M22 11h-6'),
 };
 
 export type IconName = keyof typeof Icon;
