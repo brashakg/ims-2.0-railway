@@ -352,7 +352,33 @@ def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
         "webhooks": failed_webhook_summary(db),
         "drift": drift,
         "fulfillment_store": fulfillment_store_health(db),
+        "stock_miss": online_stock_miss_summary(db),
     }
+
+
+def online_stock_miss_summary(db) -> Dict[str, Any]:
+    """Count UNRESOLVED online stock-decrement misses (oversells): paid online
+    orders whose physical units could not all be claimed (shopify_ingest writes
+    an `online_stock_miss` doc on each). A non-zero `unresolved` is an oversell
+    that needs operator action. Read-only + fail-soft -> {checked: False} on no DB."""
+    out: Dict[str, Any] = {"checked": False, "unresolved": 0, "total": 0, "recent": []}
+    coll = _coll(db, "online_stock_miss")
+    if coll is None:
+        return out
+    try:
+        out["unresolved"] = int(coll.count_documents({"resolved": {"$ne": True}}))
+        out["total"] = int(coll.count_documents({}))
+        out["checked"] = True
+        recent = list(
+            coll.find(
+                {"resolved": {"$ne": True}},
+                {"_id": 0, "order_id": 1, "store_id": 1, "reason": 1, "created_at": 1},
+            ).limit(10)
+        )
+        out["recent"] = recent
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SYNC_HEALTH] online_stock_miss read failed: %s", exc)
+    return out
 
 
 # ===========================================================================

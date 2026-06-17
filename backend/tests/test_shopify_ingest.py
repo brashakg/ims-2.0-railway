@@ -401,3 +401,35 @@ def test_online_order_unmapped_sku_skips_decrement(wired, monkeypatch):
     res = shopify_ingest.ingest_shopify_order(wired["db"], order, topic="orders/create")
     assert res["status"] == "created"  # invoice still booked
     assert stock.claims == []  # nothing claimed
+
+
+class _FakeStockRepoNoStock:
+    """A stock repo with NOTHING available -> every FIFO claim returns None."""
+
+    def claim_one_available(self, pid, store_id, order_id, used):
+        return None
+
+
+def test_online_order_underclaim_records_loud_stock_miss(wired, monkeypatch):
+    """FAIL-LOUD: when a paid online order cannot claim all its physical units
+    (out of on-hand at the fulfillment store), the invoice still books BUT an
+    `online_stock_miss` doc is written so the oversell surfaces (sync-health +
+    Sentry) instead of slipping by as a warning."""
+    import api.dependencies as deps
+    from api.routers import orders as orders_mod
+
+    monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
+    monkeypatch.setattr(
+        orders_mod, "get_stock_repository", lambda: _FakeStockRepoNoStock()
+    )
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(7102, buyer_state="20"), topic="orders/create"
+    )
+    assert res["status"] == "created"  # paid order is NEVER blocked
+    misses = wired["db"].get_collection("online_stock_miss").docs
+    assert len(misses) == 1, "an unfulfillable online order must record a stock miss"
+    assert misses[0]["reason"] == "under_claim"
+    assert misses[0]["resolved"] is False
+    assert misses[0]["detail"]["expected"] == 1
+    assert misses[0]["detail"]["claimed"] == 0

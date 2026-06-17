@@ -1605,6 +1605,45 @@ async def update_product(
             status_fields = _pm.apply_restamp_atomic(
                 product_id, existing, update_data, product_repo=repo
             )
+            # Products-convergence (inverse of catalog.py update->spine): mirror a
+            # price / tier / gst / active edit onto the catalog_products twin
+            # (shared id) so the storefront/PIM does not silently diverge from the
+            # billing spine after a spine-side edit. Only the fields actually
+            # changed are pushed (dot-notation onto the nested catalog pricing).
+            # Fail-soft: a catalog-sync error never breaks the product save.
+            try:
+                _cat_patch: dict = {}
+                if "mrp" in update_data:
+                    _cat_patch["pricing.mrp"] = update_data["mrp"]
+                if "offer_price" in update_data:
+                    _cat_patch["pricing.offer_price"] = update_data["offer_price"]
+                if "cost_price" in update_data:
+                    _cat_patch["pricing.cost_price"] = update_data["cost_price"]
+                if "discount_category" in update_data:
+                    _dc = update_data["discount_category"]
+                    _cat_patch["pricing.discount_category"] = (
+                        _dc.upper() if isinstance(_dc, str) else _dc
+                    )
+                if "hsn_code" in update_data:
+                    _cat_patch["hsn_code"] = update_data["hsn_code"]
+                if "gst_rate" in update_data:
+                    _cat_patch["gst_rate"] = update_data["gst_rate"]
+                if "is_active" in update_data:
+                    _cat_patch["is_active"] = update_data["is_active"]
+                if _cat_patch:
+                    from ..dependencies import get_db as _gdb
+
+                    _conn = _gdb()
+                    if _conn is not None and getattr(_conn, "is_connected", False):
+                        _cat = _conn.get_collection("catalog_products")
+                        if _cat is not None:
+                            _cat.update_one({"id": product_id}, {"$set": _cat_patch})
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[PRODUCTS] catalog mirror on update skipped for %s",
+                    product_id,
+                    exc_info=True,
+                )
             # Step-13: recompute SMART collections (fail-soft). Use the merged doc
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}

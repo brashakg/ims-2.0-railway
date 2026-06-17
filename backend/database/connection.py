@@ -999,10 +999,29 @@ def get_seeded_mock_db() -> MockDatabase:
     return _seeded_mock_db
 
 
+def _is_production() -> bool:
+    """True on a deployed (production) environment. Mirrors api.main's detector:
+    ENVIRONMENT=production/prod, OR any Railway deploy marker present. Railway
+    always sets RAILWAY_DEPLOYMENT_ID, so prod is reliably detected; local + test
+    (no Railway vars, ENVIRONMENT unset/dev/test) are NOT production."""
+    import os
+
+    return os.getenv("ENVIRONMENT", "").lower() in ("production", "prod") or bool(
+        os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_DEPLOYMENT_ID")
+    )
+
+
 class SeededDatabaseConnection:
     """
     Database connection that falls back to seeded mock data
-    when MongoDB is not available
+    when MongoDB is not available -- BUT ONLY off production.
+
+    LAUNCH-SAFETY: in production the seeded mock is NEVER served. If the real
+    Mongo is unreachable, is_connected reports False and db/get_collection return
+    None, so every caller's `if db is None -> 503` path fails LOUD. Previously a
+    prod Mongo outage silently fell back to fake seed data -> the app would bill
+    orders against fabricated stock/prices while reporting is_connected=True. The
+    mock fallback remains for local dev + tests (no Railway markers).
     """
 
     _instance = None
@@ -1021,19 +1040,27 @@ class SeededDatabaseConnection:
     def is_connected(self) -> bool:
         if self._real_db.is_connected:
             return True
-        # If not connected to real DB, use mock
+        # Real DB down. In production NEVER pretend (no mock) -> report the true
+        # disconnected state so callers fail loud (503) instead of serving fake
+        # data. Off production, fall back to the seeded mock as before.
+        if _is_production():
+            return False
         self._use_mock = True
-        return True  # Mock is always "connected"
+        return True  # dev/test: the seeded mock is "connected"
 
     @property
     def db(self):
         if self._real_db.is_connected:
             return self._real_db.db
+        if _is_production():
+            return None  # fail loud in prod; never serve the seeded mock
         return get_seeded_mock_db()
 
     def get_collection(self, name: str):
         if self._real_db.is_connected:
             return self._real_db.get_collection(name)
+        if _is_production():
+            return None  # fail loud in prod; never serve the seeded mock
         return get_seeded_mock_db()[name]
 
     # Collection shortcuts
