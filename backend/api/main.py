@@ -228,6 +228,17 @@ async def lifespan(app: FastAPI):
                 _pc_indexes(get_db().db)
             except Exception as e:
                 logger.warning(f"[WARN] Petty-cash index creation skipped: {e}")
+            # F17 petty-cash EOD settlement: one settlement doc per store/day.
+            # The unique (store_id, settle_date) compound index backs the
+            # idempotent re-settle. Idempotent; fail-soft.
+            try:
+                from .services.petty_cash_settlement_service import (
+                    ensure_indexes as _pcs_indexes,
+                )
+
+                _pcs_indexes(get_db().db)
+            except Exception as e:
+                logger.warning(f"[WARN] Petty-cash settlement index creation skipped: {e}")
             # E6 reminder rail: indexes + 6 GLOBAL inactive seed rules (idempotent,
             # non-destructive). active=False -> ZERO automated sends on deploy; the
             # owner opts each rule on later (comms channel currently build-dark).

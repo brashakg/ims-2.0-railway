@@ -1691,6 +1691,22 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/expenses/petty-cash/balance",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # F17 petty-cash EOD settlement (position view + settle + history).
+    {
+        "method": "GET",
+        "path": "/api/v1/expenses/petty-cash/settlement/position",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/expenses/petty-cash/settlement",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/expenses/petty-cash/settlement",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/expenses/duplicate-bills",

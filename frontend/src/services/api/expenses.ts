@@ -107,6 +107,44 @@ export interface PettyCashBalance {
   recent_ledger: PettyCashLedgerEntry[];
 }
 
+// F17 EOD settlement: the day's position for a store (read).
+export interface PettyCashSettlementRecord {
+  settlement_id: string;
+  store_id: string;
+  entity_id?: string | null;
+  settle_date: string;
+  opening_float: number;
+  credits_today: number;
+  debits_today: number;
+  payouts_count: number;
+  expected_closing: number;
+  counted_closing: number;
+  variance: number;
+  variance_status: 'BALANCED' | 'OVER' | 'SHORT';
+  tolerance: number;
+  status: string;
+  note?: string | null;
+  settled_by?: string;
+  settled_at?: string;
+}
+
+export interface PettyCashSettlementPosition {
+  ok: boolean;
+  store_id: string;
+  settle_date: string;
+  exists: boolean;
+  float_status?: string | null;
+  opening_float: number;
+  credits_today: number;
+  debits_today: number;
+  payouts_count: number;
+  expected_closing: number;
+  tolerance: number;
+  settled: boolean;
+  settlement?: PettyCashSettlementRecord | null;
+  day_ledger: PettyCashLedgerEntry[];
+}
+
 export const expensesApi = {
   getExpenses: async (params?: { store_id?: string; status?: string; from_date?: string; to_date?: string }) => {
     const response = await api.get('/expenses/', { params });
@@ -215,6 +253,40 @@ export const expensesApi = {
   // Top up a store float (manager / admin).
   topupPettyCashFloat: async (data: { store_id: string; amount: number; reason?: string }) => {
     const response = await api.post('/expenses/petty-cash/topup', data);
+    return response.data;
+  },
+
+  // F17 EOD settlement: the day's position (opening / payouts / expected close)
+  // + any recorded settlement for a store on an IST day.
+  getPettyCashSettlementPosition: async (
+    storeId: string,
+    settleDate?: string,
+  ): Promise<PettyCashSettlementPosition> => {
+    const response = await api.get('/expenses/petty-cash/settlement/position', {
+      params: { store_id: storeId, settle_date: settleDate },
+    });
+    return response.data;
+  },
+
+  // Record the counted closing cash + compute variance; closes the day.
+  settlePettyCashDay: async (data: {
+    store_id: string;
+    counted_closing: number;
+    settle_date?: string;
+    note?: string;
+  }) => {
+    const response = await api.post('/expenses/petty-cash/settlement', data);
+    return response.data;
+  },
+
+  // Settlement history for a store (newest first).
+  listPettyCashSettlements: async (
+    storeId: string,
+    params?: { from_date?: string; to_date?: string; limit?: number },
+  ): Promise<{ settlements: PettyCashSettlementRecord[]; total: number }> => {
+    const response = await api.get('/expenses/petty-cash/settlement', {
+      params: { store_id: storeId, ...(params || {}) },
+    });
     return response.data;
   },
 };
