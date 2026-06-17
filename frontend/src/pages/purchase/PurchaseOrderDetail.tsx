@@ -14,6 +14,7 @@ import {
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
 import { POPrint } from '../../components/print/POPrint';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 
 interface PurchaseOrderDetailProps {
   po: PurchaseOrder;
@@ -24,17 +25,15 @@ interface PurchaseOrderDetailProps {
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
   const [showPrint, setShowPrint] = useState(false);
 
-  // Build the minimal StoreInfo shape POPrint needs.
-  // storeName is not on the User JWT shape; use the user's name or a fallback.
-  // Full store address can be wired once a store-detail fetch is available.
-  const storeInfo = {
-    storeName: 'Better Vision Opticals',
+  // STORE-SPECIFIC: a PO is issued BY the operator's active store; print THAT
+  // store's identity (name / address / GSTIN), not a hardcoded brand. The
+  // PurchaseOrder shape carries no store id, so fall back to the active store.
+  const storeInfo = useStorePrintInfo((po as any)?.storeId || (po as any)?.store_id) || {
+    storeName: '',
     address: '',
     city: '',
     state: '',
     pincode: '',
-    phone: undefined as string | undefined,
-    gstin: undefined as string | undefined,
   };
 
   // Build the POPrintData shape from the PurchaseOrder.

@@ -47,6 +47,9 @@ export interface JobLabelData {
 
 export interface ProductLabelData {
   barcode_value: string;
+  /** Issuing store name (resolved from the stock unit's store_id by the
+   *  backend) -- printed so a tag shows which store holds the unit. */
+  store_name?: string;
   name?: string;
   brand?: string;
   sku?: string;
@@ -187,7 +190,10 @@ export function travelerZpl(d: JobLabelData): string {
     `^LL${h}`,
     '^CI28',
     '^CF0,26',
-    `^FO16,16^FD${zplSafe(d.store_name || 'Better Vision')}^FS`,
+    // STORE-SPECIFIC: print the issuing store's name (resolved from the job's
+    // store_id by the backend). Neutral fallback -- never a fixed brand that
+    // would mislabel another store's work order.
+    `^FO16,16^FD${zplSafe(d.store_name || 'Work Order')}^FS`,
     '^CF0,22',
     `^FO16,46^FDJob ${zplSafe(d.job_number || d.job_id)}^FS`,
     `^FO16,72^FDOrder ${zplSafe(d.order_number || '')}^FS`,
@@ -211,7 +217,7 @@ export function travelerZpl(d: JobLabelData): string {
 export function travelerHtml(d: JobLabelData): string {
   return `
   <div class="label" style="width:75mm;min-height:50mm">
-    <div class="lbl-title">${esc(d.store_name || 'Better Vision')} - Work Order</div>
+    <div class="lbl-title">${d.store_name ? esc(d.store_name) + ' - ' : ''}Work Order</div>
     <div class="lbl-row"><span class="lbl-strong lbl-mono">${esc(d.job_number || d.job_id)}</span>
       ${d.order_number ? `&nbsp;&middot;&nbsp;Order ${esc(d.order_number)}` : ''}</div>
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value || d.job_number || d.job_id, 38)}</div>
@@ -296,6 +302,7 @@ export function frameHtml(d: ProductLabelData): string {
     ${d.sku ? `<div class="lbl-row lbl-mono lbl-muted">${esc(d.sku)}</div>` : ''}
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value, 32)}</div>
     ${d.price_label ? `<div class="lbl-row lbl-strong" style="font-size:11pt">${esc(d.price_label)}</div>` : ''}
+    ${d.store_name ? `<div class="lbl-muted">${esc(d.store_name)}</div>` : ''}
     ${notesHtml('Note', 1)}
   </div>`;
 }
@@ -347,6 +354,7 @@ export function clHtml(d: ProductLabelData): string {
     ${spec ? `<div class="lbl-row">${spec}</div>` : ''}
     <div class="lbl-row lbl-muted">Exp: ${esc(d.expiry || '__________')} &nbsp; Lot: ${esc(d.batch_code || '________')}</div>
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value, 30)}</div>
+    ${d.store_name ? `<div class="lbl-muted">${esc(d.store_name)}</div>` : ''}
     ${notesHtml('Note', 1)}
   </div>`;
 }

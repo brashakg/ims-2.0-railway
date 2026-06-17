@@ -580,3 +580,141 @@ def test_staff_header_fail_soft_on_empty_inputs():
     assert isinstance(out, dict)
     assert out["trade_name"] == ""
     assert out["branch_label"] == ""
+
+
+# ---------------------------------------------------------------------------
+# STORE-SPECIFIC printouts: two different stores / entities must produce two
+# different headers (store name + GSTIN). This is the core guarantee for the
+# multi-store / multi-GSTIN owner -- a printed document carries the ISSUING
+# store's identity, never one shared hardcoded company block.
+# ---------------------------------------------------------------------------
+
+
+def _entity_better_vision():
+    return {
+        "name": "Better Vision",
+        "legal_name": "Better Vision Opticals Private Limited",
+        "pan": "AAACB1111A",
+        "registered_address": "HQ, Bokaro 827001",
+        "gstins": [
+            {
+                "gstin": "20AAACB1111A1Z5",
+                "state_code": "20",
+                "state_name": "Jharkhand",
+                "is_primary": True,
+            },
+        ],
+    }
+
+
+def _entity_wizopt():
+    return {
+        "name": "WizOpt",
+        "legal_name": "WizOpt Eyewear LLP",
+        "pan": "AAACW2222B",
+        "registered_address": "HQ, Pune 411001",
+        "gstins": [
+            {
+                "gstin": "27AAACW2222B1Z9",
+                "state_code": "27",
+                "state_name": "Maharashtra",
+                "is_primary": True,
+            },
+        ],
+    }
+
+
+def test_two_stores_two_headers_and_gstins():
+    """A sale at Better Vision Bokaro and a sale at WizOpt Pune must each print
+    THAT store's name + entity GSTIN -- not one shared block."""
+    bv_store = {
+        "name": "Better Vision - Bokaro City Centre",
+        "store_code": "BV-BOK-01",
+        "address": "Shop 5, City Centre",
+        "city": "Bokaro",
+        "state": "Jharkhand",
+        "state_code": "20",
+        "pincode": "827004",
+    }
+    wo_store = {
+        "name": "WizOpt - Pune FC Road",
+        "store_code": "WO-PUN-01",
+        "address": "12, FC Road",
+        "city": "Pune",
+        "state": "Maharashtra",
+        "state_code": "27",
+        "pincode": "411004",
+    }
+
+    bv = LegalHeader(_entity_better_vision(), bv_store, doc_type="tax_invoice")
+    wo = LegalHeader(_entity_wizopt(), wo_store, doc_type="tax_invoice")
+
+    # Store name on the document is the issuing store's, not shared.
+    assert bv["store_name"] == "Better Vision - Bokaro City Centre"
+    assert wo["store_name"] == "WizOpt - Pune FC Road"
+    assert bv["store_name"] != wo["store_name"]
+
+    # Legal/trade identity differs per entity.
+    assert bv["legal_name"] == "Better Vision Opticals Private Limited"
+    assert wo["legal_name"] == "WizOpt Eyewear LLP"
+    assert bv["trade_name"] != wo["trade_name"]
+
+    # GSTIN on the tax invoice is the issuing entity's registration for that
+    # store's state -- two different GSTINs.
+    assert bv["gstin"] == "20AAACB1111A1Z5"
+    assert wo["gstin"] == "27AAACW2222B1Z9"
+    assert bv["gstin"] != wo["gstin"]
+
+
+def test_no_hardcoded_brand_fallback_in_header():
+    """With no entity/store data, the header must NOT invent a brand name --
+    it returns empty strings the renderer hides, never 'Better Vision'."""
+    out = LegalHeader(None, None, doc_type="tax_invoice")
+    assert out["legal_name"] == ""
+    assert out["trade_name"] == ""
+    assert out["store_name"] == ""
+    assert out["gstin"] == ""
+    # Defensive: no brand string leaked into any header value.
+    blob = " ".join(str(v) for v in out.values())
+    assert "Better Vision" not in blob
+    assert "WizOpt" not in blob
+
+
+def test_rendered_challan_uses_passed_store_not_brand():
+    """The server-rendered delivery challan HTML must show the passed store's
+    identity, and a different store must change the rendered output."""
+    from api.services.print_render import render_delivery_challan
+
+    bv_html = render_delivery_challan(
+        entity=_entity_better_vision(),
+        store={
+            "name": "Better Vision - Bokaro City Centre",
+            "address": "Shop 5, City Centre",
+            "city": "Bokaro",
+            "state": "Jharkhand",
+            "state_code": "20",
+            "pincode": "827004",
+        },
+        challan_number="BV/DC/0001",
+        challan_date=datetime(2026, 4, 19),
+        items=[{"name": "Frame", "qty": 1, "hsn_code": "9003"}],
+    )
+    wo_html = render_delivery_challan(
+        entity=_entity_wizopt(),
+        store={
+            "name": "WizOpt - Pune FC Road",
+            "address": "12, FC Road",
+            "city": "Pune",
+            "state": "Maharashtra",
+            "state_code": "27",
+            "pincode": "411004",
+        },
+        challan_number="WO/DC/0001",
+        challan_date=datetime(2026, 4, 19),
+        items=[{"name": "Frame", "qty": 1, "hsn_code": "9003"}],
+    )
+    assert "Better Vision - Bokaro City Centre" in bv_html
+    assert "WizOpt - Pune FC Road" in wo_html
+    # The two stores' challans differ -- neither leaks the other's identity.
+    assert "WizOpt - Pune FC Road" not in bv_html
+    assert "Better Vision - Bokaro City Centre" not in wo_html

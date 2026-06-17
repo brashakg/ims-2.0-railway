@@ -15,6 +15,7 @@ import { vendorsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 
 interface GRNLineItem {
   po_item_id: string;
@@ -382,10 +383,12 @@ export function GoodsReceiptNote() {
     inspection_remarks: undefined,
   });
 
-  // storeName is not available on the User JWT shape; use a static fallback
-  // until store-detail fetch is wired here.
-  const storeInfo = {
-    storeName: 'Better Vision Opticals',
+  // STORE-SPECIFIC: a GRN is issued at the receiving store; print THAT store's
+  // identity (name / address / GSTIN), not a hardcoded brand. Resolved from the
+  // active store id used for the rest of this screen's data.
+  const resolvedStoreInfo = useStorePrintInfo(storeId);
+  const storeInfo = resolvedStoreInfo || {
+    storeName: '',
     address: '',
     city: '',
     state: '',

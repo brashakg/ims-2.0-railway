@@ -23,7 +23,7 @@ import {
   CheckCheck,
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
-import { orderApi } from '../../services/api';
+import { orderApi, storeApi } from '../../services/api';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
@@ -239,7 +239,32 @@ export function OrdersPage() {
     }
   };
 
-  const printOrder = (order: Order) => {
+  const printOrder = async (order: Order) => {
+    // STORE-SPECIFIC: resolve the ISSUING store's identity (name / address /
+    // GSTIN) from THIS order's store, not a hardcoded company block. Fail-soft
+    // to whatever the order carries, then a neutral label -- never a fixed brand
+    // that would mislabel another store's invoice.
+    const escapeHtml = (v: any) =>
+      String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let storeName = (order as any).storeName || '';
+    let storeGstin = '';
+    let storeAddress = '';
+    const orderStoreId = (order as any).storeId || (order as any).store_id;
+    if (orderStoreId) {
+      try {
+        const s: any = await storeApi.getStore(orderStoreId);
+        if (s) {
+          storeName = s.storeName || s.store_name || s.name || storeName;
+          storeGstin = s.gstin || '';
+          storeAddress = [s.address || s.street, s.city, s.state || s.state_name, s.pincode]
+            .filter(Boolean)
+            .join(', ');
+        }
+      } catch {
+        // keep order-carried / neutral values
+      }
+    }
+    const headerName = storeName || 'Tax Invoice';
     const items = (order.items || []).map((item: any, i: number) =>
       `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
     ).join('');
@@ -251,7 +276,7 @@ export function OrdersPage() {
       table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left}
       th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
       .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button,.no-print{display:none}}</style></head><body>
-      <div class="header"><h2>Better Vision Opticals</h2><p>Tax Invoice</p></div>
+      <div class="header"><h2>${escapeHtml(headerName)}</h2>${storeAddress ? `<p style="color:#555;font-size:13px;margin:2px 0">${escapeHtml(storeAddress)}</p>` : ''}${storeGstin ? `<p style="color:#555;font-size:13px;margin:2px 0">GSTIN: ${escapeHtml(storeGstin)}</p>` : ''}<p>Tax Invoice</p></div>
       <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
       <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
       <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
@@ -264,7 +289,7 @@ export function OrdersPage() {
       ${(order.balanceDue || 0) > 0 ? `<div class="row" style="color:red"><span>Balance Due:</span><span>₹${Math.round(order.balanceDue).toLocaleString('en-IN')}</span></div>` : ''}
       </div>
       ${payments ? `<div style="margin-top:15px"><strong>Payments:</strong>${payments}</div>` : ''}
-      <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you for shopping with Better Vision Opticals</div>
+      <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you${storeName ? ` for shopping with ${escapeHtml(storeName)}` : ' for your business'}</div>
       <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#b3122b;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
       </body></html>`;
 

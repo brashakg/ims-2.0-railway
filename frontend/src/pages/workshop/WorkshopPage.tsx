@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrint';
 import type { JobStatus, JobPriority } from '../../types';
-import { workshopApi, orderApi, vendorsApi } from '../../services/api';
+import { workshopApi, orderApi, vendorsApi, storeApi } from '../../services/api';
 import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -200,21 +200,24 @@ const loadJobs = async () => {
         console.warn('[Workshop] getDashboardKpis failed (non-fatal):', kpisResp.reason);
       }
 
-      // Load store info for printing
-      if (!storeInfo) {
+      // Load the ISSUING store's identity for the printed job card. Resolve it
+      // from the active store via storeApi (the previous orderApi.getStore did
+      // not exist, so the card always fell back to a hardcoded brand name).
+      if (!storeInfo && user?.activeStoreId) {
         try {
-          const store = await (orderApi as any).getStore?.(user.activeStoreId);
+          const store: any = await storeApi.getStore(user.activeStoreId);
           if (store) {
             setStoreInfo({
-              storeName: store.storeName || store.name || 'Better Vision Optics',
-              address: store.address || '',
+              storeName: store.storeName || store.store_name || store.name || user.activeStoreId,
+              address: store.address || store.street || '',
               city: store.city || '',
-              state: store.state || '',
+              state: store.state || store.state_name || '',
               pincode: store.pincode || '',
+              stateCode: store.stateCode || store.state_code || '',
             });
           }
         } catch {
-          // Store info is optional
+          // Store info is optional for the card header; fail silently.
         }
       }
     } catch {

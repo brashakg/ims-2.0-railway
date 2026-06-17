@@ -21,6 +21,7 @@ import {
 import clsx from 'clsx';
 import { PrescriptionPrint } from './PrescriptionPrint';
 import type { PrescriptionPrintData } from './PrescriptionPrint';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 
 import type {
   EyeTestFormProps,
@@ -60,6 +61,10 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
   const [activeTab, setActiveTab] = useState<TabId>('lensometer');
   const [isSaving, setIsSaving] = useState(false);
   const [showPrint, setShowPrint] = useState(false);
+  // STORE-SPECIFIC: the printed Rx card carries the issuing store's identity
+  // (resolved from the active store), not a generic 'Optical Store' stub.
+  // Must be called unconditionally, BEFORE the `if (!isOpen)` early return.
+  const printStore = useStorePrintInfo();
 
   // Header data
   const [examDate, setExamDate] = useState(new Date().toISOString().split('T')[0]);
@@ -188,8 +193,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     setUploads(uploads.filter(f => f.id !== id));
   };
 
-  const defaultStore = {
-    storeName: 'Optical Store',
+  const storeForPrint = printStore || {
+    storeName: '',
     address: '',
     city: '',
     state: '',
@@ -201,7 +206,7 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     {showPrint && (
       <PrescriptionPrint
         prescription={buildPrintData()}
-        store={defaultStore}
+        store={storeForPrint}
         onClose={() => setShowPrint(false)}
       />
     )}

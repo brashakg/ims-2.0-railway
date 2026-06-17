@@ -162,10 +162,11 @@ export function ClinicalPage() {
       const tests = testsData?.tests || testsData || [];
       setCompletedTests(Array.isArray(tests) ? tests : []);
       
-      // Load store info for printing tokens
+      // Load the ISSUING store's identity for printed tokens. Neutral fallback
+      // (store id) -- never a fixed brand that would mislabel another store.
       if (storeData && !storeInfo) {
         setStoreInfo({
-          storeName: storeData.storeName || storeData.name || 'Better Vision Optics',
+          storeName: storeData.storeName || storeData.store_name || storeData.name || user.activeStoreId,
           address: storeData.address || '',
           city: storeData.city || '',
           state: storeData.state || '',
@@ -735,7 +736,7 @@ export function ClinicalPage() {
                           pd: 0,
                           visualAcuity: '',
                           notes: '',
-                          storeName: storeInfo?.storeName || 'Better Vision Optics',
+                          storeName: storeInfo?.storeName || '',
                           storePhone: storeInfo?.phone || '',
                         })}
                         className="p-2 text-gray-500 hover:text-green-500 transition-colors"
