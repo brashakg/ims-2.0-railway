@@ -72,6 +72,7 @@ from .routers import (
     endless_aisle_router,
     vendor_rebates_router,
     hr_router,
+    hr_self_service_router,
     workshop_router,
     reports_router,
     settings_router,
@@ -1322,6 +1323,15 @@ app.include_router(
 # per-store service catalog + INTAKE->DELIVERED job lifecycle (guarded transitions),
 # DARK status SMS on READY, store-scoped. POS-billing on DELIVERED is DEFERRED.
 app.include_router(repair_portal_router, prefix="/api/v1/repairs", tags=["Repairs"])
+# Employee self-service: own-data reads (/hr/me/*) for ANY authenticated staff
+# member. Mounted at the /api/v1/hr prefix but SEPARATELY and BEFORE hr_router so
+# it is NOT behind the _FINANCE_ROLES gate below -- floor staff (sales / cashier /
+# optometrist / workshop) are not in _FINANCE_ROLES and would otherwise 403 on the
+# entire HR prefix. Every endpoint is pinned to the requesting user (no employee_id
+# param), so there is no cross-employee read. Mirrors the roster_router pattern.
+app.include_router(
+    hr_self_service_router, prefix="/api/v1/hr", tags=["HR · Self-Service"]
+)
 app.include_router(
     hr_router,
     prefix="/api/v1/hr",

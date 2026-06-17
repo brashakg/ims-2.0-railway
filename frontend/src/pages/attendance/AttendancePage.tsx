@@ -12,7 +12,8 @@
 // Light theme only. No mock data — grid + check-in are server-authoritative.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Clock, Loader2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Clock, Loader2, LayoutDashboard } from 'lucide-react';
 import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -93,6 +94,15 @@ export function AttendancePage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Entry point to the mobile-first self-service dashboard. Visible to
+              every operational role that can reach this page. */}
+          <Link
+            to="/my-work"
+            className="btn-secondary flex items-center gap-2 text-sm"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            My Work
+          </Link>
           <button
             onClick={handleCheckIn}
             disabled={checking}

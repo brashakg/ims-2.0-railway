@@ -38,6 +38,7 @@ from .cl_po import router as cl_po_router
 from .endless_aisle import router as endless_aisle_router
 from .vendor_rebates import router as vendor_rebates_router
 from .hr import router as hr_router
+from .hr_self_service import router as hr_self_service_router
 from .workshop import router as workshop_router
 from .reports import router as reports_router
 from .settings import router as settings_router
@@ -137,6 +138,7 @@ __all__ = [
     "endless_aisle_router",
     "vendor_rebates_router",
     "hr_router",
+    "hr_self_service_router",
     "workshop_router",
     "reports_router",
     "settings_router",

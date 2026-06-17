@@ -121,6 +121,45 @@ export const hrApi = {
     return response.data;
   },
 
+  // --- Employee self-service (own data; /hr/me/*) -------------------
+  // These hit the hr_self_service_router, which is mounted OUTSIDE the HR
+  // finance-role gate so ANY logged-in staff member can read their OWN data.
+  // The backend pins every read to the requesting user (no employee_id param),
+  // so floor staff (sales / cashier / optometrist / workshop) can use them even
+  // though they cannot hit the rest of /hr/* or /payroll/*. All fail-soft.
+
+  /** This-month (or given month) own attendance: per-day codes + counts. */
+  getMyAttendance: async (opts?: { month?: number; year?: number }) => {
+    const params: Record<string, number> = {};
+    if (opts?.month) params.month = opts.month;
+    if (opts?.year) params.year = opts.year;
+    const response = await api.get('/hr/me/attendance', { params });
+    return response.data as MyAttendance;
+  },
+
+  /** Own leaves for the year + approved/pending balance summary. */
+  getMyLeaves: async (opts?: { year?: number }) => {
+    const params: Record<string, number> = {};
+    if (opts?.year) params.year = opts.year;
+    const response = await api.get('/hr/me/leaves', { params });
+    return response.data as MyLeaves;
+  },
+
+  /** Own most-recent payslip (same shape as GET /payroll/payslip/{id}). */
+  getMyPayslip: async () => {
+    const response = await api.get('/hr/me/payslip');
+    return response.data as { payslip: MyPayslip | null };
+  },
+
+  /** Own commission for this (or given) month. */
+  getMyCommission: async (opts?: { month?: number; year?: number }) => {
+    const params: Record<string, number> = {};
+    if (opts?.month) params.month = opts.month;
+    if (opts?.year) params.year = opts.year;
+    const response = await api.get('/hr/me/commission', { params });
+    return response.data as MyCommission;
+  },
+
   // Monthly attendance grid (per-employee x per-day status matrix).
   // month: 'YYYY-MM'. Returns AttendanceGrid (see type below).
   getAttendanceGrid: async (opts: { month: string; storeId?: string }) => {
@@ -248,6 +287,71 @@ export const hrApi = {
     return response.data;
   },
 };
+
+// --- Employee self-service response shapes (/hr/me/*) ----------------------
+
+export interface MyAttendanceSummary {
+  present: number;
+  absent: number;
+  half_day: number;
+  leave: number;
+  holiday: number;
+  week_off: number;
+  lwp: number;
+  late: number;
+}
+
+export interface MyAttendance {
+  month: number;
+  year: number;
+  /** date 'YYYY-MM-DD' -> code (P/A/HD/L/LWP/WO/-). */
+  days: Record<string, AttendanceCode>;
+  summary: MyAttendanceSummary;
+}
+
+export interface MyLeaveRow {
+  leave_id: string;
+  leave_type: string;
+  from_date: string;
+  to_date: string;
+  days: number;
+  status: string;
+  reason: string;
+  applied_at: string;
+}
+
+export interface MyLeaves {
+  year: number;
+  leaves: MyLeaveRow[];
+  summary: {
+    approved_days: number;
+    pending_days: number;
+    by_type: Record<string, number>;
+  };
+}
+
+export interface MyPayslip {
+  payslip_id?: string;
+  employee_id?: string;
+  employee_name?: string;
+  month?: number;
+  year?: number;
+  breakdown?: Record<string, unknown> & {
+    gross_salary?: number;
+    total_deductions?: number;
+    net_pay?: number;
+  };
+  [k: string]: unknown;
+}
+
+export interface MyCommission {
+  month: number;
+  year: number;
+  sales_count: number;
+  revenue: number;
+  commission_rate_percent: number;
+  commission_amount: number;
+}
 
 export type AttendanceCode = 'P' | 'A' | 'L' | 'HD' | 'LWP' | 'WO' | '-';
 
