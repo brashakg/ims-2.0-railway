@@ -45,6 +45,7 @@ import { LensRangePricingSection } from '../../components/settings/LensRangePric
 import { HsnRatesSection } from '../../components/settings/HsnRatesSection';
 import { TdsRatesSection } from '../../components/settings/TdsRatesSection';
 import { PolicySchemaForm } from '../../components/settings/PolicySchemaForm';
+import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 
 // Sub-components
 import { ProfileSection, BusinessSection } from './SettingsProfile';
@@ -1207,6 +1208,10 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
       {/* F34 target-ticker config (SUPERADMIN/ADMIN; the System tab is already
           role-gated to them). Persisted to the two E2 policy keys. */}
       <TargetTickerSettings />
+
+      {/* Idle auto-logout policy (SUPERADMIN-editable; persisted to the
+          system_settings singleton, served on /health to every user). */}
+      <AutoLogoutSettings />
     </div>
   );
 }

@@ -1055,6 +1055,73 @@ async def global_exception_handler(request: Request, exc: Exception):
     return response
 
 
+# ---------------------------------------------------------------------------
+# Idle auto-logout policy (served on the PUBLIC /health so EVERY authenticated
+# user -- including SALES_STAFF -- can read it without an admin-gated call).
+# ---------------------------------------------------------------------------
+# Read fail-soft from the `system_settings` singleton (_id="default"). /health
+# is probed frequently by uptime monitors, so the read is wrapped in a tiny
+# monotonic-clock TTL cache to keep the endpoint fast and to avoid hammering
+# Mongo. Mirrors the existing pricing_mode try/except: this NEVER 500s /health.
+_AUTO_LOGOUT_DEFAULTS = {"enabled": True, "minutes": 15, "warn_seconds": 60}
+_AUTO_LOGOUT_CACHE_TTL_SECONDS = 30.0
+# (value, monotonic_expiry). Module-level so it survives across requests.
+_auto_logout_cache = {"value": None, "expires_at": 0.0}
+
+
+def _reset_auto_logout_cache():
+    """Clear the TTL cache so the next /health read re-fetches system_settings.
+    Used by tests (and safe to call anytime) so a freshly-saved override is
+    reflected immediately instead of waiting out the TTL."""
+    _auto_logout_cache["value"] = None
+    _auto_logout_cache["expires_at"] = 0.0
+
+
+def _clamp_int(value, lo, hi, fallback):
+    """Coerce `value` to an int within [lo, hi]; return `fallback` on any error."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if n < lo:
+        return lo
+    if n > hi:
+        return hi
+    return n
+
+
+def _get_auto_logout_policy():
+    """Resolve the idle auto-logout policy (enabled/minutes/warn_seconds) from
+    the `system_settings` singleton, fail-soft to defaults. TTL-cached on the
+    monotonic clock so the frequently-probed /health stays fast. Never raises."""
+    now = time.monotonic()
+    cached = _auto_logout_cache.get("value")
+    if cached is not None and now < _auto_logout_cache.get("expires_at", 0.0):
+        return cached
+
+    policy = dict(_AUTO_LOGOUT_DEFAULTS)
+    try:
+        if DATABASE_AVAILABLE:
+            db = get_db()
+            if db and db.is_connected:
+                doc = db.get_collection("system_settings").find_one({"_id": "default"})
+                if doc:
+                    if "auto_logout_enabled" in doc:
+                        policy["enabled"] = bool(doc.get("auto_logout_enabled"))
+                    policy["minutes"] = _clamp_int(
+                        doc.get("auto_logout_minutes"), 1, 480, policy["minutes"]
+                    )
+                    policy["warn_seconds"] = _clamp_int(
+                        doc.get("auto_logout_warn_seconds"), 10, 600, policy["warn_seconds"]
+                    )
+    except Exception:  # noqa: BLE001
+        policy = dict(_AUTO_LOGOUT_DEFAULTS)
+
+    _auto_logout_cache["value"] = policy
+    _auto_logout_cache["expires_at"] = now + _AUTO_LOGOUT_CACHE_TTL_SECONDS
+    return policy
+
+
 # Health check endpoint
 # Audit Run #3 noted uptime monitors pointing at /api/v1/health silently
 # 404ing. Expose the same handler at both paths so external probes work
@@ -1081,6 +1148,10 @@ async def health_check():
         or os.environ.get("RAILWAY_DEPLOYMENT_ID")
         or "dev"
     )[:12]
+    # Idle auto-logout policy for the frontend session watcher. Served here (the
+    # PUBLIC /health) so every authenticated user can read it without an
+    # admin-gated call. Fail-soft defaults: enabled / 15 min / warn 60s.
+    auto_logout = _get_auto_logout_policy()
     return {
         "status": "healthy",
         "service": "IMS 2.0 API",
@@ -1088,6 +1159,11 @@ async def health_check():
         "database": db_status,
         "pricing_mode": pricing_mode,
         "build_sha": build_sha,
+        "auto_logout": {
+            "enabled": auto_logout["enabled"],
+            "minutes": auto_logout["minutes"],
+            "warn_seconds": auto_logout["warn_seconds"],
+        },
     }
 
 
