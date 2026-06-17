@@ -188,11 +188,10 @@ export function CartSidebar() {
                   </span>
                 )}
                 <span
+                  className="figure"
                   style={{
                     fontSize: 13,
-                    fontWeight: 600,
                     color: 'var(--ink)',
-                    fontVariantNumeric: 'tabular-nums',
                   }}
                 >
                   ₹{Math.round(item.line_total).toLocaleString('en-IN')}
@@ -235,17 +234,17 @@ export function CartSidebar() {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-3)' }}>
           <span>Subtotal</span>
-          <span>₹{Math.round(subtotal).toLocaleString('en-IN')}</span>
+          <span className="figure" style={{ fontSize: 'inherit' }}>₹{Math.round(subtotal).toLocaleString('en-IN')}</span>
         </div>
         {totalDiscount > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ok)' }}>
             <span>Discount</span>
-            <span>−₹{Math.round(totalDiscount).toLocaleString('en-IN')}</span>
+            <span className="figure" style={{ fontSize: 'inherit' }}>−₹{Math.round(totalDiscount).toLocaleString('en-IN')}</span>
           </div>
         )}
         <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-3)' }}>
           <span>GST</span>
-          <span>₹{Math.round(gst).toLocaleString('en-IN')}</span>
+          <span className="figure" style={{ fontSize: 'inherit' }}>₹{Math.round(gst).toLocaleString('en-IN')}</span>
         </div>
         <div
           style={{
@@ -260,7 +259,7 @@ export function CartSidebar() {
           }}
         >
           <span>Total (incl. GST)</span>
-          <span style={{ color: 'var(--bv)' }}>
+          <span className="figure" style={{ color: 'var(--bv)', fontSize: 'inherit' }}>
             ₹{Math.round(grand).toLocaleString('en-IN')}
           </span>
         </div>

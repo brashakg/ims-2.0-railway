@@ -57,15 +57,15 @@ export function FootfallAuditCard({ storeId }: { storeId?: string }) {
           <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3 mb-4">
             <div className="bg-white rounded p-3 border border-gray-100">
               <p className="text-xs text-gray-500">Walk-ins (6m)</p>
-              <p className="text-lg font-bold text-gray-900 mt-1 tabular-nums">{data.rolling.walkins_total}</p>
+              <p className="figure text-lg text-gray-900 mt-1">{data.rolling.walkins_total}</p>
             </div>
             <div className="bg-white rounded p-3 border border-gray-100">
               <p className="text-xs text-gray-500">Orders (6m)</p>
-              <p className="text-lg font-bold text-gray-900 mt-1 tabular-nums">{data.rolling.orders_total}</p>
+              <p className="figure text-lg text-gray-900 mt-1">{data.rolling.orders_total}</p>
             </div>
             <div className="bg-white rounded p-3 border border-gray-100">
               <p className="text-xs text-gray-500">Hidden sales</p>
-              <p className={`text-lg font-bold mt-1 tabular-nums ${
+              <p className={`figure text-lg mt-1 ${
                 data.rolling.hidden_sales_pct > 0.5 ? 'text-red-600' :
                 data.rolling.hidden_sales_pct > 0.25 ? 'text-amber-600' : 'text-gray-900'
               }`}>
@@ -74,7 +74,7 @@ export function FootfallAuditCard({ storeId }: { storeId?: string }) {
             </div>
             <div className="bg-white rounded p-3 border border-gray-100">
               <p className="text-xs text-gray-500">True / Reported conv.</p>
-              <p className="text-lg font-bold text-gray-900 mt-1 tabular-nums">
+              <p className="figure text-lg text-gray-900 mt-1">
                 {pct(data.rolling.true_conversion_pct)} <span className="text-xs text-gray-400">/ {pct(data.rolling.staff_reported_conversion_pct)}</span>
               </p>
             </div>

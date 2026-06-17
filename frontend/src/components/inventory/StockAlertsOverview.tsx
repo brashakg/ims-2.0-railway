@@ -166,19 +166,19 @@ export function StockAlertsOverview() {
       <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <p className="text-xs font-semibold text-red-700 uppercase tracking-wider">Critical</p>
-          <p className="text-3xl font-bold text-red-900 mt-2">{stats.critical}</p>
+          <p className="figure text-3xl text-red-900 mt-2">{stats.critical}</p>
         </div>
         <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
           <p className="text-xs font-semibold text-orange-700 uppercase tracking-wider">High</p>
-          <p className="text-3xl font-bold text-orange-900 mt-2">{stats.high}</p>
+          <p className="figure text-3xl text-orange-900 mt-2">{stats.high}</p>
         </div>
         <div className="bg-green-50 border border-green-200 rounded-lg p-4">
           <p className="text-xs font-semibold text-green-700 uppercase tracking-wider">Dead Stock Value</p>
-          <p className="text-2xl font-bold text-green-900 mt-2">₹{(stats.deadStockValue / 1000).toFixed(0)}K</p>
+          <p className="figure text-2xl text-green-900 mt-2">₹{(stats.deadStockValue / 1000).toFixed(0)}K</p>
         </div>
         <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
           <p className="text-xs font-semibold text-purple-700 uppercase tracking-wider">Restock Value</p>
-          <p className="text-2xl font-bold text-purple-900 mt-2">₹{(stats.recommendedRestockValue / 1000).toFixed(0)}K</p>
+          <p className="figure text-2xl text-purple-900 mt-2">₹{(stats.recommendedRestockValue / 1000).toFixed(0)}K</p>
         </div>
       </div>
 
