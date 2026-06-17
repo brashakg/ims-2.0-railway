@@ -655,7 +655,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
           {/* Basic Information */}
           <div>
             <h3 className="font-medium text-gray-900 mb-3">Basic Information</h3>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Full Name <span className="text-red-500">*</span>
@@ -901,7 +901,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
             {/* Add Patient Form */}
             {showAddPatient && (
               <div className="bg-yellow-50 rounded-lg p-4 space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       Patient Name <span className="text-red-500">*</span>

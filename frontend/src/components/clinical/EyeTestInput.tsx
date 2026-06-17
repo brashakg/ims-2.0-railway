@@ -48,21 +48,23 @@ export function EyePowerRow({
   showVA = true,
 }: EyePowerRowProps) {
   return (
-    <div className="flex items-center gap-2 py-2">
-      <div className={clsx(
-        'w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm',
-        eye === 'R' ? 'bg-blue-100 text-blue-600' : 'bg-green-100 text-green-600'
-      )}>
-        {eye}
+    <div className="overflow-x-auto">
+      <div className="flex items-center gap-2 py-2 min-w-max">
+        <div className={clsx(
+          'w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm',
+          eye === 'R' ? 'bg-blue-100 text-blue-600' : 'bg-green-100 text-green-600'
+        )}>
+          {eye}
+        </div>
+        <PowerInput label="SPH" value={data.sphere} onChange={(v) => onChange('sphere', v)} placeholder="±0.00" />
+        <PowerInput label="CYL" value={data.cylinder} onChange={(v) => onChange('cylinder', v)} placeholder="±0.00" />
+        <PowerInput label="AXIS" value={data.axis} onChange={(v) => onChange('axis', v)} placeholder="0-180" width="w-16" />
+        <PowerInput label="ADD" value={data.add} onChange={(v) => onChange('add', v)} placeholder="+0.00" width="w-16" />
+        <PowerInput label="PD" value={data.pd} onChange={(v) => onChange('pd', v)} placeholder="mm" width="w-16" />
+        {showVA && (
+          <PowerInput label="VA" value={data.va} onChange={(v) => onChange('va', v)} placeholder="6/6" width="w-16" />
+        )}
       </div>
-      <PowerInput label="SPH" value={data.sphere} onChange={(v) => onChange('sphere', v)} placeholder="±0.00" />
-      <PowerInput label="CYL" value={data.cylinder} onChange={(v) => onChange('cylinder', v)} placeholder="±0.00" />
-      <PowerInput label="AXIS" value={data.axis} onChange={(v) => onChange('axis', v)} placeholder="0-180" width="w-16" />
-      <PowerInput label="ADD" value={data.add} onChange={(v) => onChange('add', v)} placeholder="+0.00" width="w-16" />
-      <PowerInput label="PD" value={data.pd} onChange={(v) => onChange('pd', v)} placeholder="mm" width="w-16" />
-      {showVA && (
-        <PowerInput label="VA" value={data.va} onChange={(v) => onChange('va', v)} placeholder="6/6" width="w-16" />
-      )}
     </div>
   );
 }

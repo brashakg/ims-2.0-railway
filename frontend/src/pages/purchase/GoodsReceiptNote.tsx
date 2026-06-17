@@ -578,6 +578,7 @@ export function GoodsReceiptNote() {
                   {totals.rec} / {totals.ord} units · auto-detects shortages
                 </span>
               </div>
+              <div className="overflow-x-auto -mx-4 sm:mx-0">
               <table className="tbl">
                 <thead>
                   <tr>
@@ -653,6 +654,7 @@ export function GoodsReceiptNote() {
                   })}
                 </tbody>
               </table>
+              </div>
               {/* Totals strip */}
               <div className="grn-totals" style={{ borderTop: '1px solid var(--line)' }}>
                 <div>

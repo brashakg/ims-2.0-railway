@@ -507,7 +507,7 @@ function CampaignBuilder({
           {/* Channels */}
           <div>
             <label className="block text-gray-900 font-semibold mb-3">Channels</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {CHANNEL_OPTIONS.map((c) => (
                 <label key={c} className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={channels.includes(c)} onChange={() => toggleChannel(c)} className="rounded" />
@@ -623,7 +623,7 @@ function AnalyticsModal({ analytics, onClose }: { analytics: CampaignAnalytics; 
           </button>
         </div>
 
-        <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
           <Metric label="Sent" value={analytics.sent} />
           <Metric label="Delivered" value={analytics.delivered} tone="text-green-600" />
           <Metric label="Failed" value={analytics.failed} tone="text-red-600" />
@@ -632,7 +632,7 @@ function AnalyticsModal({ analytics, onClose }: { analytics: CampaignAnalytics; 
           <Metric label="Converted" value={analytics.converted} tone="text-purple-600" />
         </div>
 
-        <div className="grid grid-cols-3 gap-3 mb-4 text-center">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-center">
           <div className="bg-gray-50 rounded p-2">
             <p className="text-gray-500 text-xs">Open rate</p>
             <p className="font-semibold text-gray-900">{analytics.open_rate}%</p>
