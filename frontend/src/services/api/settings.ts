@@ -355,6 +355,7 @@ export const settingsApi = {
     user_id?: string;
     action?: string;
     store_id?: string;
+    org_id?: string; // legal entity (organization) -> constrains to its stores
     start_date?: string; // inclusive YYYY-MM-DD
     end_date?: string; // inclusive YYYY-MM-DD
     limit?: number;

@@ -21,7 +21,7 @@ import base64
 import re
 import logging
 from .auth import get_current_user, hash_password, verify_password, require_roles
-from ..dependencies import get_audit_repository
+from ..dependencies import get_audit_repository, get_store_repository
 # BUG-155: the canonical at-rest credential crypto now lives in a shared leaf
 # module so every read/write path (settings, admin, nexus, einvoice, ondc, ...)
 # encrypts/decrypts with the same key. The _encrypt_config/_decrypt_config/
@@ -1959,6 +1959,38 @@ def _audit_changes(log: dict):
     return None
 
 
+def _org_store_values(org_id: str) -> list:
+    """Collect every audit `store_id` value belonging to a legal entity (org).
+
+    The Activity Log lets the operator filter by organization. Audit rows carry
+    `store_id`, but across the app that value is sometimes the human store code
+    (e.g. "BV-BOK-01") and sometimes the internal store_id (a UUID). So for each
+    store assigned to the org (stores collection, entity_id == org_id) we return
+    BOTH its store_id and its store_code; the caller constrains the audit query
+    to `store_id IN {these}` so it matches regardless of which one a row wrote.
+
+    Fail-soft: a missing DB / repo, an org with no stores, or any lookup error
+    returns []. The caller treats [] as "no matching stores" (empty result set),
+    never a 500.
+    """
+    try:
+        store_repo = get_store_repository()
+        if store_repo is None:
+            return []
+        stores = store_repo.find_many({"entity_id": org_id})
+        values: set = set()
+        for s in stores:
+            sid = s.get("store_id")
+            code = s.get("store_code")
+            if sid:
+                values.add(sid)
+            if code:
+                values.add(code)
+        return list(values)
+    except Exception:  # noqa: BLE001 - org->store resolution is best-effort
+        return []
+
+
 @router.get("/audit-logs")
 async def get_audit_logs(
     entity_type: Optional[str] = None,
@@ -1966,6 +1998,7 @@ async def get_audit_logs(
     user_id: Optional[str] = None,
     action: Optional[str] = None,
     store_id: Optional[str] = None,
+    org_id: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 50,
@@ -1975,8 +2008,15 @@ async def get_audit_logs(
     """Query the audit trail (SUPERADMIN/ADMIN only).
 
     Powers the SUPERADMIN Activity Log screen: filter by user, action, entity,
-    store, and an inclusive YYYY-MM-DD date range — newest first. Every filter
-    is optional and ANDs together; an unparseable date is ignored, never fatal.
+    store, organization, and an inclusive YYYY-MM-DD date range — newest first.
+    Every filter is optional and ANDs together; an unparseable date is ignored,
+    never fatal.
+
+    Organization (`org_id` = legal entity) resolves to the set of its stores'
+    audit `store_id` values and constrains the query to `store_id IN {those}`.
+    If BOTH `org_id` and an explicit `store_id` are given, the explicit store
+    wins (it is applied as-is and the org clause is skipped). If the org has no
+    stores or the lookup fails, the result is an empty set — never a 500.
     """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -1997,7 +2037,13 @@ async def get_audit_logs(
         if action:
             filter_dict["action"] = action
         if store_id:
+            # Explicit store wins over org (intersect to the simplest correct
+            # behavior: just that store, even when an org is also supplied).
             filter_dict["store_id"] = store_id
+        elif org_id:
+            # Constrain to the org's stores; an org with no stores yields [],
+            # i.e. an impossible match -> empty result set (fail-soft, no 500).
+            filter_dict["store_id"] = {"$in": _org_store_values(org_id)}
         filter_dict.update(_audit_time_filter(start_date, end_date))
 
         logs = audit_repo.find_many(
