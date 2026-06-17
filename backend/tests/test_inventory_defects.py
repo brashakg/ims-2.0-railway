@@ -295,3 +295,127 @@ class TestStockCountCategoryFilter:
             "category resolves to known products -- INV-6"
         )
         assert set(pipeline[0]["$match"]["product_id"]["$in"]) == {"p1", "p2"}
+
+
+# ===========================================================================
+# INV-6 — END-TO-END: drive the REAL start_stock_count endpoint.
+#
+# TestStockCountCategoryFilter above replicates the resolution logic in the
+# test body, so it would still pass if someone reverted the real handler.
+# These tests mount the inventory router and POST to the actual endpoint with
+# a stock_repo that captures the aggregation pipeline -- a regression in
+# start_stock_count itself is what fails them.
+# ===========================================================================
+
+
+class TestStartStockCountEndpointCategory:
+    def _client(self, monkeypatch, product_repo, stock_repo):
+        import os
+        import sys
+
+        os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+        os.environ.setdefault("MONGODB_URI", "")
+        sys.path.insert(
+            0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from api.routers import inventory as inv
+        from api.routers.auth import get_current_user
+
+        app = FastAPI()
+        app.include_router(inv.router, prefix="/api/v1/inventory")
+
+        async def _fake_user():
+            return {
+                "user_id": "u1",
+                "full_name": "Tester",
+                "active_store_id": "BV-TEST-01",
+                "roles": ["STORE_MANAGER"],
+            }
+
+        app.dependency_overrides[get_current_user] = _fake_user
+        monkeypatch.setattr(inv, "get_product_repository", lambda: product_repo)
+        monkeypatch.setattr(inv, "get_stock_repository", lambda: stock_repo)
+        # No raw DB persistence needed -- the endpoint returns the count_doc.
+        monkeypatch.setattr(inv, "_get_db", lambda: None)
+        # validate_store_access(None, user) -> caller's active store.
+        monkeypatch.setattr(
+            inv, "validate_store_access", lambda store, user: "BV-TEST-01"
+        )
+        return TestClient(app)
+
+    def test_endpoint_scopes_aggregation_to_resolved_product_ids(self, monkeypatch):
+        """POST /stock-count/start?category=FRAME must build an aggregation
+        whose $match filters on the RESOLVED product_ids (never a raw
+        `category` field, which stock_units do not carry) -- INV-6 end-to-end."""
+        captured: list = []
+
+        class FakeStockRepo:
+            def aggregate(self, pipeline):
+                captured.append(pipeline)
+                return [{"_id": "p1", "qty": 4}, {"_id": "p2", "qty": 1}]
+
+        class FakeProductRepo:
+            def find_many(self, filt, limit=5000):
+                if filt.get("category") == "FRAME":
+                    return [{"product_id": "p1"}, {"product_id": "p2"}]
+                return []
+
+        client = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
+        resp = client.post(
+            "/api/v1/inventory/stock-count/start", json={"category": "FRAME"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # The handler counted only the FRAME products.
+        assert body["system_quantities"] == {"p1": 4, "p2": 1}
+        # And it did so by scoping on product_id, NOT a raw category filter.
+        assert captured, "the real handler must run the aggregation"
+        match = captured[0][0]["$match"]
+        assert "category" not in match
+        assert set(match["product_id"]["$in"]) == {"p1", "p2"}
+
+    def test_endpoint_empty_category_yields_no_system_quantities(self, monkeypatch):
+        """A category with no products must NOT fall back to counting all store
+        stock -- system_quantities stays empty and the aggregation is skipped."""
+        aggregate_calls: list = []
+
+        class FakeStockRepo:
+            def aggregate(self, pipeline):
+                aggregate_calls.append(pipeline)
+                return [{"_id": "SHOULD-NOT-APPEAR", "qty": 99}]
+
+        class FakeProductRepo:
+            def find_many(self, filt, limit=5000):
+                return []  # no products in this category
+
+        client = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
+        resp = client.post(
+            "/api/v1/inventory/stock-count/start", json={"category": "NOPE"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["system_quantities"] == {}
+        assert aggregate_calls == []  # aggregation skipped, not run store-wide
+
+    def test_endpoint_no_category_counts_whole_store(self, monkeypatch):
+        """Without a category, the aggregation runs with NO product_id / category
+        constraint -- the whole-store baseline path is preserved."""
+        captured: list = []
+
+        class FakeStockRepo:
+            def aggregate(self, pipeline):
+                captured.append(pipeline)
+                return [{"_id": "p9", "qty": 7}]
+
+        class FakeProductRepo:
+            def find_many(self, filt, limit=5000):  # pragma: no cover - unused
+                raise AssertionError("product lookup must not run without category")
+
+        client = self._client(monkeypatch, FakeProductRepo(), FakeStockRepo())
+        resp = client.post("/api/v1/inventory/stock-count/start", json={})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["system_quantities"] == {"p9": 7}
+        match = captured[0][0]["$match"]
+        assert "product_id" not in match
+        assert "category" not in match
