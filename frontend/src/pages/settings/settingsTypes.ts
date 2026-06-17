@@ -26,6 +26,7 @@ export type SettingsTab =
   | 'loyalty'
   | 'lens-pricing'
   | 'policies'
+  | 'refund-policy'
   | 'system';
 
 export interface StoreData {

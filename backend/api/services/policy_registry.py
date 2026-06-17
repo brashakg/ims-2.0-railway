@@ -133,6 +133,25 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "and requesting role. Empty -> the code DEFAULT_MATRIX is used. "
         "Has no effect unless 'Refund approval matrix enabled' is on.",
     ),
+    # F27: refunds always go back to the ORIGINAL tender (DECISIONS sec 6). The
+    # refund path already DEFAULTS a refund to the original payment method; this
+    # flag (default True) HARD-LOCKS it -- a refund_method that differs from the
+    # order's original tender is rejected (422 TENDER_MISMATCH) so a cashier
+    # cannot reroute a card sale to a cash refund. Turn OFF only to permit an
+    # explicit tender override (every override is audit-logged on the return).
+    _spec(
+        key="refund.original_tender_enforce",
+        type="bool",
+        default=True,
+        scopes=("global", "entity", "store"),
+        write_roles=("SUPERADMIN", "ADMIN"),
+        group="Refunds & Returns",
+        label="Refund to original tender (hard-lock)",
+        help="Force every refund back to the order's original payment method "
+        "(card -> card, UPI -> UPI, cash -> cash). When ON (default) a refund "
+        "method that differs from the original tender is blocked. Turn OFF to "
+        "allow an explicit, audit-logged tender override.",
+    ),
     # --- Approvals & Loyalty ---
     _spec(
         key="approval.pin_validity_min",

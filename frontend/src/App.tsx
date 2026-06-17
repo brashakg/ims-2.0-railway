@@ -75,6 +75,7 @@ const GrowthBlueprintPage = lazy(() => import('./pages/reports/GrowthBlueprintPa
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const ApprovalInboxPage = lazy(() => import('./pages/approvals/ApprovalInboxPage').then(m => ({ default: m.ApprovalInboxPage })));
 const MyRequestsPage = lazy(() => import('./pages/approvals/MyRequestsPage').then(m => ({ default: m.MyRequestsPage })));
+const PendingApprovalsPage = lazy(() => import('./pages/returns/PendingApprovalsPage').then(m => ({ default: m.PendingApprovalsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
 const OutstandingPaymentsReport = lazy(() => import('./pages/reports/OutstandingPaymentsReport'));
 const PrintPage = lazy(() => import('./pages/print/PrintPage'));
@@ -226,6 +227,18 @@ function App() {
                   <Route
                     path="approvals/mine"
                     element={<ProtectedRoute><MyRequestsPage /></ProtectedRoute>}
+                  />
+                  {/* F27 refund approvals queue — the refund-only slice of the
+                      E4 inbox. Gate mirrors the backend approvals inbox roles
+                      (ACCOUNTANT is read-only; approve/reject is gated again
+                      server-side to the approver set). */}
+                  <Route
+                    path="returns/approvals"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <PendingApprovalsPage />
+                      </ProtectedRoute>
+                    }
                   />
                   <Route
                     path="dashboard/executive"

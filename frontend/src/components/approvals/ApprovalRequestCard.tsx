@@ -23,6 +23,7 @@ const ACTION_LABELS: Record<string, string> = {
   endless_aisle: 'Endless Aisle',
   rtv: 'Return to Vendor',
   RETURN_SERIAL_OVERRIDE: 'Return Serial Override',
+  REFUND_APPROVAL_MATRIX: 'Refund Approval',
   leave_approval: 'Leave Approval',
 };
 
