@@ -100,6 +100,7 @@ def _resolve_line_tax_basis(line: Dict[str, Any], product_repo) -> Dict[str, Any
 
     hsn: Optional[str] = None
     category = ""
+    ims_product_id: Optional[str] = None
 
     sku = str(line.get("sku") or "").strip()
     if sku and product_repo is not None:
@@ -108,6 +109,9 @@ def _resolve_line_tax_basis(line: Dict[str, Any], product_repo) -> Dict[str, Any
             if prod:
                 hsn = prod.get("hsn_code") or prod.get("hsn") or None
                 category = prod.get("category") or ""
+                # Capture the IMS product_id (join via SKU) so the online-sale
+                # stock decrement can FIFO-claim the right serialized units.
+                ims_product_id = prod.get("product_id") or prod.get("id")
         except Exception:  # noqa: BLE001 - product lookup is best-effort
             pass
 
@@ -115,7 +119,12 @@ def _resolve_line_tax_basis(line: Dict[str, Any], product_repo) -> Dict[str, Any
         category = _category_hint_from_shopify(line)
 
     rate = resolve_gst_rate(hsn_code=hsn, category=category)
-    return {"hsn_code": hsn, "category": category, "gst_rate": rate}
+    return {
+        "hsn_code": hsn,
+        "category": category,
+        "gst_rate": rate,
+        "ims_product_id": ims_product_id,
+    }
 
 
 def _f(value, default: float = 0.0) -> float:
@@ -182,7 +191,12 @@ def _map_line_items(payload: Dict[str, Any], product_repo) -> List[Dict[str, Any
                 "gst_rate": rate,
                 "taxable_value": taxable,
                 "tax_amount": tax,
+                # IMS product_id (resolved via SKU) -- the join key the online
+                # stock decrement claims serialized units by (the Shopify
+                # product_id below is NOT the IMS one).
+                "ims_product_id": basis.get("ims_product_id"),
                 # Shopify identifiers kept for traceability / future reconcile.
+                "shopify_product_id": str(line.get("product_id") or "") or None,
                 "shopify_line_item_id": line.get("id"),
                 "shopify_variant_id": line.get("variant_id"),
             }
@@ -200,6 +214,22 @@ def _online_store_id(payload: Dict[str, Any]) -> str:
         str(payload.get("_ims_online_store_id") or "").strip()
         or os.getenv("ONLINE_STORE_ID", "").strip()
         or "BV-ONLINE-01"
+    )
+
+
+def _online_fulfillment_store_id(payload: Dict[str, Any]) -> str:
+    """The PHYSICAL store an online order draws stock from (the online billing
+    store above is a virtual bucket with no serialized stock_units). The decrement
+    + Shopify write-back claim units at THIS store. Configurable via
+    ONLINE_FULFILLMENT_STORE_ID (env) / the shopify integration config; falls
+    back to the online billing store (so a single-store setup works by pointing
+    ONLINE_STORE_ID at the real fulfilling store). Empty -> no decrement (logged)."""
+    import os
+
+    return (
+        str(payload.get("_ims_fulfillment_store_id") or "").strip()
+        or os.getenv("ONLINE_FULFILLMENT_STORE_ID", "").strip()
+        or _online_store_id(payload)
     )
 
 
@@ -497,6 +527,47 @@ def ingest_shopify_order(
         invoice_number,
         order_doc["interstate"],
     )
+
+    # ONLINE-SALE STOCK DECREMENT (oversell fix). An online order previously
+    # booked the GST invoice but NEVER reduced physical stock -> a walk-in and an
+    # online buyer could sell the SAME serialized unit. Now we (1) FIFO-claim the
+    # sold serialized units at the online FULFILLMENT store (reusing the POS
+    # _mark_units_sold atomic-claim path), then (2) push the reduced available
+    # qty to Shopify so the online listing can't oversell either. BOTH fail-soft:
+    # Shopify already took payment, so a stock-side error must NEVER raise out of
+    # ingestion -- the invoice is booked regardless and the reconcile sweep
+    # (online_sync_health) catches any miss.
+    fulfillment_store = _online_fulfillment_store_id(payload)
+    try:
+        # _mark_units_sold claims by IMS product_id; map each line's resolved
+        # ims_product_id onto product_id (the Shopify product_id is NOT the IMS
+        # one). Lines with no IMS match are skipped -- not our serialized stock.
+        decrement_items = [
+            {**it, "product_id": it.get("ims_product_id")}
+            for it in items
+            if it.get("ims_product_id")
+        ]
+        if decrement_items:
+            from ..routers.orders import _mark_units_sold
+
+            _mark_units_sold(order_id, decrement_items, fulfillment_store)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] online stock decrement skipped for %s: %s",
+            order_id,
+            exc,
+        )
+    try:
+        from .online_stock_writeback import writeback_after_sale
+
+        writeback_after_sale(db, items, fulfillment_store)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] online stock writeback skipped for %s: %s",
+            order_id,
+            exc,
+        )
+
     return {
         "status": "created",
         "order_id": order_id,
