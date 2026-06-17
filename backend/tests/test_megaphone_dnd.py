@@ -99,6 +99,37 @@ def test_old_utc_logic_would_have_been_wrong_at_0100_ist(agent):
     assert agent._in_dnd_window(one_am_ist) is True
 
 
+def test_utc_instant_daytime_utc_but_night_ist_is_dnd(agent):
+    """A tz-aware UTC instant that reads as DAYTIME in UTC but NIGHT in IST must
+    be treated as DND (the core regression: the window is IST, not UTC).
+
+    20:00 UTC == 01:30 IST (next day). UTC hour 20 is NOT inside the naive
+    21..9 window, so the old UTC-based check would have ALLOWED a 1:30 AM IST
+    promo. The IST-correct check must block it."""
+    utc_2000 = datetime(2026, 5, 15, 20, 0, 0, tzinfo=timezone.utc)
+    # The UTC hour (20) is daytime-ish and outside a naive 21..9 read.
+    assert utc_2000.hour == 20
+    # In IST it is 01:30 the next day -- deep inside quiet hours.
+    assert _now_ist(utc_2000).hour == 1
+    assert agent._in_dnd_window(utc_2000) is True
+
+
+def test_utc_instant_night_utc_but_daytime_ist_is_allowed(agent):
+    """The inverse: a tz-aware UTC instant that reads as NIGHT in UTC but
+    DAYTIME in IST must be ALLOWED (not DND).
+
+    23:00 UTC == 04:30 IST -- still quiet hours -- so use 05:00 UTC == 10:30
+    IST instead. UTC hour 5 IS inside a naive 21..9 window (<9), so the old
+    UTC-based check would have WRONGLY blocked a legit 10:30 AM IST promo. The
+    IST-correct check must allow it."""
+    utc_0500 = datetime(2026, 5, 15, 5, 0, 0, tzinfo=timezone.utc)
+    # The UTC hour (5) is night-ish and inside a naive <9 read.
+    assert utc_0500.hour == 5
+    # In IST it is 10:30 -- well within the 09:00-21:00 allowed send window.
+    assert _now_ist(utc_0500).hour == 10
+    assert agent._in_dnd_window(utc_0500) is False
+
+
 # ---------------------------------------------------------------------------
 # scheduled_for == next 09:00 IST
 # ---------------------------------------------------------------------------
