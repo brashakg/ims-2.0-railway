@@ -523,6 +523,178 @@
   .t-body.detail-open .t-detail { display: block; }
 }
 
+/* Owner avatar circle (task list + detail) */
+.t-item .own-av,
+.d-head .own-av {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--bg-sunk, #f1f1ec);
+  display: grid; place-items: center;
+  font: 600 11px/1 var(--font-mono); color: var(--ink-2, #2e2e2b);
+  flex-shrink: 0;
+}
+
+/* Sub-filter chips in the editorial header (Mine / Team / Completed) */
+.t-subfilter { display: flex; gap: 6px; flex-wrap: wrap; }
+.t-subfilter .chip {
+  padding: 6px 11px; border: 1px solid var(--line, #e6e6e0); border-radius: 20px;
+  background: var(--surface, #fff); font: 500 11.5px/1 var(--font-sans);
+  color: var(--ink-3, #555550); cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+  transition: background .1s, border-color .1s, color .1s;
+}
+.t-subfilter .chip:hover:not(.on) { background: var(--bg-sunk, #f1f1ec); color: var(--ink, #141413); }
+.t-subfilter .chip.on { background: var(--ink, #141413); color: #fff; border-color: var(--ink, #141413); }
+.t-subfilter .chip .mono { font-family: var(--font-mono); font-size: 10.5px; opacity: .7; }
+
+/* ============================================================================
+   New-task modal (Tasks/SOP v2) — ported from docs/design/tasks.html.
+   nt- prefix so these don't collide with the generic .modal styles.
+   ============================================================================ */
+.nt-overlay {
+  position: fixed; inset: 0; background: rgba(22,22,20,.42);
+  backdrop-filter: blur(2px);
+  display: grid; place-items: center; z-index: 200;
+  animation: nt-fade .18s ease-out;
+  padding: 20px;
+}
+@keyframes nt-fade { from { opacity: 0 } to { opacity: 1 } }
+.nt-modal {
+  width: 1060px; max-width: 100%; max-height: calc(100vh - 40px);
+  background: var(--surface, #fff); border-radius: 14px;
+  box-shadow: 0 40px 80px -20px rgba(0,0,0,.4), 0 0 0 1px var(--line-strong, #d3d3cc);
+  display: grid; grid-template-rows: auto 1fr auto; overflow: hidden;
+  animation: nt-pop .22s cubic-bezier(.2,.9,.3,1.2);
+}
+@keyframes nt-pop { from { transform: scale(.96); opacity: 0 } to { transform: scale(1); opacity: 1 } }
+
+.nt-head {
+  display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: center;
+  padding: 18px 24px; border-bottom: 1px solid var(--line, #e6e6e0);
+}
+.nt-head h2 { margin: 0; font-family: var(--font-display); font-size: 24px; letter-spacing: -.01em; font-weight: 400; }
+.nt-head .sub { font-size: 12px; color: var(--ink-4, #6b6b65); margin-top: 3px; }
+.nt-close {
+  background: transparent; border: 0; width: 32px; height: 32px; border-radius: 6px;
+  display: grid; place-items: center; cursor: pointer; color: var(--ink-4, #6b6b65);
+}
+.nt-close:hover { background: var(--bg-sunk, #f1f1ec); color: var(--ink, #141413); }
+
+.nt-body { display: grid; grid-template-columns: 1fr 340px; gap: 0; overflow: hidden; min-height: 0; }
+.nt-form { padding: 22px 26px; overflow-y: auto; }
+.nt-preview { background: var(--bg-sunk, #f1f1ec); border-left: 1px solid var(--line, #e6e6e0); padding: 22px; overflow-y: auto; }
+
+.nt-field { margin-bottom: 18px; }
+.nt-field label {
+  display: block; font: 500 10.5px/1 var(--font-mono); color: var(--ink-4, #6b6b65);
+  text-transform: uppercase; letter-spacing: .1em; margin-bottom: 8px;
+}
+.nt-field label .req { color: var(--err, #b42318); margin-left: 3px; }
+.nt-hint { font-size: 11px; color: var(--ink-4, #6b6b65); margin-top: 5px; font-style: italic; }
+.nt-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+/* Priority chips */
+.nt-pri-pick { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.nt-pri-chip {
+  padding: 10px 12px; border: 1.5px solid var(--line, #e6e6e0); border-radius: 8px;
+  cursor: pointer; background: var(--surface, #fff); text-align: left;
+  transition: border-color .1s, background .1s;
+}
+.nt-pri-chip:hover:not(.on) { background: var(--bg-sunk, #f1f1ec); border-color: var(--line-strong, #d3d3cc); }
+.nt-pri-chip.on { border-color: var(--ink, #141413); background: var(--bg-sunk, #f1f1ec); box-shadow: 0 0 0 2px rgba(20,20,19,.04); }
+.nt-pri-chip .bar { height: 3px; border-radius: 2px; margin-bottom: 8px; }
+.nt-pri-chip .t { font: 600 12px/1 var(--font-sans); color: var(--ink, #141413); }
+.nt-pri-chip .s { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-4, #6b6b65); text-transform: uppercase; letter-spacing: .08em; margin-top: 4px; }
+
+/* Due presets */
+.nt-preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.nt-preset {
+  padding: 6px 11px; border: 1px solid var(--line, #e6e6e0); border-radius: 20px;
+  background: var(--surface, #fff); font: 500 11.5px/1 var(--font-sans); color: var(--ink-3, #555550);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+  transition: background .1s, border-color .1s;
+}
+.nt-preset:hover:not(.on) { background: var(--bg-sunk, #f1f1ec); border-color: var(--line-strong, #d3d3cc); color: var(--ink, #141413); }
+.nt-preset.on { background: var(--ink, #141413); color: #fff; border-color: var(--ink, #141413); }
+.nt-preset .mono { font-family: var(--font-mono); font-size: 10.5px; opacity: .7; }
+.nt-preset.on .mono { opacity: .85; }
+
+/* Owner / watcher pickers */
+.nt-owner-pick { display: flex; gap: 6px; flex-wrap: wrap; }
+.nt-owner-opt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px 6px 6px; border: 1px solid var(--line, #e6e6e0); border-radius: 20px;
+  background: var(--surface, #fff); cursor: pointer; font: 500 11.5px/1 var(--font-sans); color: var(--ink-2, #2e2e2b);
+  transition: border-color .1s, background .1s;
+}
+.nt-owner-opt .av {
+  width: 22px; height: 22px; border-radius: 50%; background: var(--bg-sunk, #f1f1ec);
+  display: grid; place-items: center; font: 600 9.5px/1 var(--font-mono); color: var(--ink-2, #2e2e2b);
+}
+.nt-owner-opt.on { background: var(--ink, #141413); color: #fff; border-color: var(--ink, #141413); }
+.nt-owner-opt.on .av { background: #3a3a37; color: #fff; }
+.nt-owner-opt:hover:not(.on) { border-color: var(--line-strong, #d3d3cc); }
+
+/* Escalation toggle */
+.nt-esc-toggle {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; background: var(--bg-sunk, #f1f1ec); border-radius: 10px; cursor: pointer;
+}
+.nt-esc-toggle .sw {
+  width: 36px; height: 22px; border-radius: 11px; background: var(--line-strong, #d3d3cc);
+  position: relative; transition: background .15s; flex-shrink: 0;
+}
+.nt-esc-toggle .sw::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.nt-esc-toggle.on .sw { background: var(--ok, #0d7b4c); }
+.nt-esc-toggle.on .sw::after { transform: translateX(14px); }
+.nt-esc-toggle .t { font: 500 13px/1.2 var(--font-sans); color: var(--ink, #141413); }
+.nt-esc-toggle .s { font-size: 11.5px; color: var(--ink-4, #6b6b65); margin-top: 2px; }
+
+/* Preview card + ladder + notifications */
+.nt-eyebrow { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4, #6b6b65); text-transform: uppercase; letter-spacing: .12em; margin-bottom: 10px; }
+.nt-prv-task {
+  padding: 14px; background: var(--surface, #fff); border: 1px solid var(--line, #e6e6e0);
+  border-radius: 10px; display: grid; grid-template-columns: auto 1fr; gap: 12px;
+}
+.nt-prv-task.overdue { border-color: var(--err, #b42318); background: var(--err-50, #fbeae7); }
+.nt-mini-av {
+  width: 16px; height: 16px; border-radius: 50%; background: var(--bg-sunk, #f1f1ec);
+  display: inline-grid; place-items: center; font: 600 8px/1 var(--font-mono); color: var(--ink-2, #2e2e2b);
+}
+.nt-prv-ladder {
+  background: var(--surface, #fff); border: 1px solid var(--line, #e6e6e0); border-radius: 10px;
+  padding: 12px 14px;
+}
+.nt-prv-ladder .step { display: flex; gap: 10px; align-items: center; padding: 5px 0; font-size: 11.5px; color: var(--ink-2, #2e2e2b); }
+.nt-prv-ladder .step .dot-r { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong, #d3d3cc); flex-shrink: 0; }
+.nt-prv-ladder .step.cur .dot-r { background: var(--err, #b42318); }
+.nt-prv-ladder .step .when { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4, #6b6b65); margin-left: auto; }
+.nt-prv-ladder .step.cur { font-weight: 600; color: var(--err, #b42318); }
+.nt-notif {
+  font-size: 11.5px; color: var(--ink-3, #555550); line-height: 1.55;
+  background: var(--surface, #fff); border: 1px solid var(--line, #e6e6e0); border-radius: 8px; padding: 10px 12px;
+}
+.nt-notif .k { font-family: var(--font-mono); font-size: 10px; color: var(--ink-4, #6b6b65); text-transform: uppercase; letter-spacing: .08em; }
+
+/* Footer */
+.nt-foot {
+  padding: 14px 24px; border-top: 1px solid var(--line, #e6e6e0); background: var(--bg-sunk, #f1f1ec);
+  display: flex; gap: 10px; align-items: center; font-size: 11.5px; color: var(--ink-4, #6b6b65);
+}
+.nt-foot .kbd {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4, #6b6b65);
+  padding: 3px 6px; background: var(--surface, #fff); border: 1px solid var(--line, #e6e6e0); border-radius: 4px; margin-right: 4px;
+}
+
+/* New-task modal — tablet/phone: stack the preview under the form */
+@media (max-width: 1023px) {
+  .nt-body { grid-template-columns: 1fr; }
+  .nt-preview { border-left: 0; border-top: 1px solid var(--line, #e6e6e0); }
+  .nt-pri-pick { grid-template-columns: repeat(2, 1fr); }
+  .nt-row-2 { grid-template-columns: 1fr; }
+}
+
 /* ============================================================================
    Clinical queue — token-first row layout
    Ported from docs/design/clinical.html (.q-item etc.)
