@@ -440,6 +440,7 @@ _PUSH_ROUTES = [
     ("POST", "/api/v1/online-store/push/collection/{collection_id}"),
     ("POST", "/api/v1/online-store/push/menu/{menu_id}"),
     ("POST", "/api/v1/online-store/push/image/{image_id}"),
+    ("POST", "/api/v1/online-store/push/all-pending"),
 ]
 
 _PUSH_SET = {"ADMIN", "SUPERADMIN"}
@@ -608,4 +609,98 @@ def test_db_down_push_is_503_not_false_200(client, auth_headers, monkeypatch):
     from api import dependencies as deps
     monkeypatch.setattr(deps, "get_db", lambda: None)
     r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
+    assert r.status_code == 503, r.text
+
+
+# ===========================================================================
+# Batch "push all pending" sweep (the Phase-6 cutover queue-drain)
+# ===========================================================================
+
+
+def _seed_pending(conn):
+    """Seed a mix of pending + already-pushed/clean docs across all four entities."""
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "title": "RB", "brand": "RB",
+         "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
+    conn.db["catalog_products"].insert_one(  # clean -> NOT swept
+        {"id": "P2", "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C1", "title": "SG", "handle": "sg",
+         "collection_type": "CUSTOM", "locally_modified": True})
+    conn.db["ecom_menus"].insert_one(
+        {"menu_id": "M1", "title": "Main", "handle": "main-menu",
+         "items": [], "locally_modified": True})
+    conn.db["product_images"].insert_one(  # APPROVED + unpushed -> swept
+        {"image_id": "I1", "product_id": "P1", "url": "http://x/a.jpg",
+         "status": "APPROVED"})
+    conn.db["product_images"].insert_one(  # already pushed -> NOT swept
+        {"image_id": "I2", "product_id": "P1", "url": "http://x/b.jpg",
+         "status": "APPROVED", "shopify_image_id": "gid://shopify/MediaImage/9"})
+
+
+def test_push_all_pending_dark_sweeps_every_dirty_doc(client, auth_headers, patched_db, monkeypatch):
+    """The batch sweep pushes exactly the pending docs (dirty product/collection/
+    menu + APPROVED-unpushed image), all SIMULATED, one audit row each."""
+    conn, audit_repo = patched_db
+    _force_dark(monkeypatch, "writes_off")  # boom-spy: a network call fails the test
+    _seed_pending(conn)
+
+    r = client.post("/api/v1/online-store/push/all-pending", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"]["mode"] == "SIMULATED"
+    assert body["db_connected"] is True
+    # P1 + C1 + M1 + I1 = 4 (P2 clean, I2 already pushed -> skipped).
+    assert body["pushed_count"] == 4, body
+    assert body["summary"]["products"]["pushed"] == 1
+    assert body["summary"]["collections"]["pushed"] == 1
+    assert body["summary"]["menus"]["pushed"] == 1
+    assert body["summary"]["images"]["pushed"] == 1
+    # Every push is a dry-run + every push wrote an audit row.
+    assert all(res["mode"] == "SIMULATED" for res in body["results"])
+    assert len(audit_repo.find_many({"action": "ONLINE_STORE_PUSH"})) == 4
+
+
+def test_push_all_pending_entities_filter(client, auth_headers, patched_db, monkeypatch):
+    """The entities CSV filter restricts the sweep to the named entity only."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=collections",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pushed_count"] == 1
+    assert body["summary"].get("collections", {}).get("pushed") == 1
+    assert "products" not in body["summary"]
+
+
+def test_push_all_pending_limit_caps_the_sweep(client, auth_headers, patched_db, monkeypatch):
+    """`limit` caps the total pushes and flags limit_reached."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?limit=1", headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pushed_count"] == 1
+    assert body["limit_reached"] is True
+
+
+def test_push_all_pending_403_for_catalog_manager(client, catalog_headers, patched_db):
+    """The batch sweep is on the narrowed push surface -> CATALOG_MANAGER 403."""
+    r = client.post("/api/v1/online-store/push/all-pending", headers=catalog_headers)
+    assert r.status_code == 403, r.text
+
+
+def test_push_all_pending_503_no_db(client, auth_headers, monkeypatch):
+    from api import dependencies as deps
+    monkeypatch.setattr(deps, "get_db", lambda: None)
+    r = client.post("/api/v1/online-store/push/all-pending", headers=auth_headers)
     assert r.status_code == 503, r.text

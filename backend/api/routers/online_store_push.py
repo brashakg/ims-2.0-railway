@@ -245,6 +245,105 @@ async def push_status(
     return {"mode": mode, "db_connected": True, "counts": counts}
 
 
+@router.post("/all-pending")
+async def push_all_pending(
+    entities: Optional[str] = None,
+    limit: int = 500,
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """Sweep EVERY pending/dirty ecom doc and push it via the same per-entity
+    engine -- the queue-drain that the Phase-6 cutover actually runs (today only
+    per-entity single pushes exist). Pending = a `locally_modified` product /
+    collection / menu, or an APPROVED product image with no Shopify id yet.
+
+    `entities` is an optional CSV filter (products,collections,menus,images;
+    default all). `limit` caps the total number of pushes in one sweep (a safety
+    valve against a runaway batch).
+
+    DARK by default -- each push is SIMULATED (a dry-run plan, NO Shopify network
+    call) unless the same three gates are open (IMS_SHOPIFY_WRITES + DISPATCH_MODE
+    =live + creds). The current posture is returned in `mode` so the caller knows
+    whether this sweep was a dry-run or a real cutover push. Writes one chained
+    audit row per push. Fail-soft: a single doc's failure never aborts the sweep;
+    no DB -> 503."""
+    db = _require_db()
+    selected = {
+        e.strip().lower()
+        for e in (
+            entities.split(",")
+            if entities
+            else ["products", "collections", "menus", "images"]
+        )
+        if e.strip()
+    }
+
+    mode = shopify_push.push_mode_status(db)
+    results: List[Dict[str, Any]] = []
+    summary: Dict[str, Dict[str, int]] = {}
+
+    def _tally(entity: str, data: Dict[str, Any]) -> None:
+        bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0})
+        if data.get("ok"):
+            bucket["pushed"] += 1
+        else:
+            bucket["failed"] += 1
+        results.append(data)
+
+    # The sweep order mirrors a dependency-safe cutover: products (+ variants)
+    # first, then the collections/menus that reference them, then images last.
+    if "products" in selected:
+        for doc in _all_docs(db, "catalog_products"):
+            if len(results) >= limit:
+                break
+            ecom = doc.get("ecom")
+            if not ecom or not ecom.get("locally_modified"):
+                continue
+            variants = _get_variants_for_product(db, doc)
+            data = (await shopify_push.push_product(db, doc, variants)).to_dict()
+            _write_audit(data, current_user)
+            _tally("products", data)
+
+    if "collections" in selected:
+        for doc in _all_docs(db, "ecom_collections"):
+            if len(results) >= limit:
+                break
+            if not doc.get("locally_modified"):
+                continue
+            data = (await shopify_push.push_collection(db, doc)).to_dict()
+            _write_audit(data, current_user)
+            _tally("collections", data)
+
+    if "menus" in selected:
+        for doc in _all_docs(db, "ecom_menus"):
+            if len(results) >= limit:
+                break
+            if not doc.get("locally_modified"):
+                continue
+            data = (await shopify_push.push_menu(db, doc)).to_dict()
+            _write_audit(data, current_user)
+            _tally("menus", data)
+
+    if "images" in selected:
+        for doc in _all_docs(db, "product_images"):
+            if len(results) >= limit:
+                break
+            is_approved = str(doc.get("status") or "").upper() == "APPROVED"
+            if not is_approved or doc.get("shopify_image_id"):
+                continue
+            data = (await shopify_push.push_image(db, doc)).to_dict()
+            _write_audit(data, current_user)
+            _tally("images", data)
+
+    return {
+        "mode": mode,
+        "db_connected": True,
+        "pushed_count": len(results),
+        "limit_reached": len(results) >= limit,
+        "summary": summary,
+        "results": results,
+    }
+
+
 def _all_docs(db, name: str) -> List[Dict]:
     """All docs in a collection (Mongo _id stripped). Fail-soft -> []."""
     try:
