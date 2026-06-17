@@ -42,6 +42,9 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
   const [roleOpen, setRoleOpen] = useState(false);
   const [storeOpen, setStoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Store-switch confirmation: switching store clears the current POS cart +
+  // any in-progress forms (the context/JWT is re-issued). Warn before doing it.
+  const [pendingStoreId, setPendingStoreId] = useState<string | null>(null);
   const roleRef = useRef<HTMLDivElement>(null);
   const storeRef = useRef<HTMLDivElement>(null);
 
@@ -196,8 +199,11 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                   role="option"
                   aria-selected={id === user?.activeStoreId}
                   onClick={() => {
-                    setActiveStore(id);
                     setStoreOpen(false);
+                    // Same store -> no-op. Different store -> confirm first
+                    // (switching clears the POS cart + in-progress forms).
+                    if (id === user?.activeStoreId) return;
+                    setPendingStoreId(id);
                   }}
                   style={{
                     width: '100%',
@@ -308,6 +314,62 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
       <NotificationBell />
 
       {actions}
+
+      {pendingStoreId && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm store switch"
+          onClick={() => setPendingStoreId(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 200,
+            background: 'rgba(17,17,17,0.45)',
+            display: 'grid', placeItems: 'center', padding: 16,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(440px, 100%)', background: 'var(--surface)',
+              border: '1px solid var(--line)', borderRadius: 'var(--r-md, 12px)',
+              boxShadow: 'var(--sh-md)', padding: 20,
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--ink)', marginBottom: 8 }}>
+              Switch store?
+            </div>
+            <div style={{ fontSize: 13.5, color: 'var(--ink-2)', lineHeight: 1.5, marginBottom: 18 }}>
+              You're switching to <strong>{storeNames[pendingStoreId] || pendingStoreId}</strong>.
+              Any unsaved work on the current store — your <strong>POS cart</strong> and any open forms —
+              will be cleared and cannot be recovered. Save first if you need it.
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => setPendingStoreId(null)}
+                style={{
+                  padding: '8px 16px', borderRadius: 8, minHeight: 40,
+                  border: '1px solid var(--line)', background: 'var(--surface)',
+                  color: 'var(--ink-2)', font: '600 13px var(--font-sans)', cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => { const id = pendingStoreId; setPendingStoreId(null); setActiveStore(id); }}
+                style={{
+                  padding: '8px 16px', borderRadius: 8, minHeight: 40, border: 0,
+                  background: 'var(--bv)', color: '#fff',
+                  font: '600 13px var(--font-sans)', cursor: 'pointer',
+                }}
+              >
+                Switch store
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </header>
