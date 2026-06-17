@@ -396,6 +396,7 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
         if not updates:
             return None
         products = db.get_collection("products")
+        catalog_products = db.get_collection("catalog_products")
         applied = []
         for u in updates:
             pid = u.get("product_id")
@@ -419,6 +420,21 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 applied.append(u)
             except Exception:
                 continue
+            # Fail-soft companion write to catalog_products so catalog-only
+            # products (not yet in the products spine) also get a fresh cost.
+            try:
+                catalog_products.update_one(
+                    {"id": pid},
+                    {
+                        "$set": {
+                            "pricing.cost_price": new_cost,
+                            "pricing.cost_updated_at": datetime.now().isoformat(),
+                            "pricing.cost_source": "PURCHASE_INVOICE",
+                        }
+                    },
+                )
+            except Exception:
+                pass  # never roll back the products write on a catalog miss
         return applied or None
     except Exception:
         return None
@@ -1654,6 +1670,7 @@ async def allocate_invoice_landed_costs(
     if per_product:
         try:
             products = db.get_collection("products")
+            catalog_products = db.get_collection("catalog_products")
             for pid, unit_paise in per_product.items():
                 try:
                     products.update_one(
@@ -1676,6 +1693,22 @@ async def allocate_invoice_landed_costs(
                     )
                 except Exception:
                     continue
+                # Fail-soft companion write to catalog_products for catalog-only
+                # products that are not yet in the products spine.
+                try:
+                    catalog_products.update_one(
+                        {"id": pid},
+                        {
+                            "$set": {
+                                "pricing.landed_cost": round(unit_paise / 100.0, 2),
+                                "pricing.landed_cost_paise": int(unit_paise),
+                                "pricing.landed_cost_source": "LANDED_COST_ALLOCATION",
+                                "pricing.landed_cost_updated_at": now,
+                            }
+                        },
+                    )
+                except Exception:
+                    pass  # never roll back the products write on a catalog miss
         except Exception:
             rolled_in = []
 

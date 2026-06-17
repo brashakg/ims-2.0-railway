@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_customer_repository,
+    get_loyalty_account_repository,
     get_order_repository,
     get_prescription_repository,
     filter_docs_by_store,
@@ -255,9 +256,11 @@ async def get_customer_360(
         orders = db.query_customer_orders(customer_id)
         stats = _calculate_customer_stats(customer, orders)
 
-        # Calculate loyalty tier
+        # Calculate loyalty tier — pass customer_id so we read the real points
+        # balance from loyalty_accounts, and customer for birthday_month from DOB.
         loyalty_data = _calculate_loyalty_tier(
-            stats["total_lifetime_value"], customer["created_at"]
+            stats["total_lifetime_value"], customer["created_at"],
+            customer_id=customer_id, customer_doc=customer,
         )
 
         # Fetch prescriptions with renewal status
@@ -1525,6 +1528,8 @@ async def add_loyalty_points(
         return _calculate_loyalty_tier(
             updated_customer.get("loyalty_points", 0),
             updated_customer.get("created_at", ""),
+            customer_id=customer_id,
+            customer_doc=updated_customer,
         )
     except HTTPException:
         raise
@@ -1569,8 +1574,17 @@ def _calculate_customer_stats(customer: dict, orders: list) -> dict:
     }
 
 
-def _calculate_loyalty_tier(lifetime_value: float, created_at: str) -> dict:
-    """Calculate loyalty tier based on lifetime value"""
+def _calculate_loyalty_tier(lifetime_value: float, created_at: str,
+                             customer_id: str = "", customer_doc: dict = None) -> dict:
+    """Calculate loyalty tier based on lifetime value.
+
+    Reads the real points balance from the loyalty_accounts ledger when
+    customer_id is supplied (fail-soft to 0 if the account does not exist or the
+    DB is unavailable). `points` / `total_points_earned` / `redeemed_points` were
+    previously fabricated as rupee amounts cast to int -- that is wrong; loyalty
+    points are earned at the configured rate, not 1pt-per-rupee.
+    Also populates birthday_month from the customer DOB if available.
+    """
     if lifetime_value >= 100000:
         tier = "Diamond"
     elif lifetime_value >= 50000:
@@ -1592,13 +1606,48 @@ def _calculate_loyalty_tier(lifetime_value: float, created_at: str) -> dict:
     next_threshold = thresholds[tier]
     points_to_next = max(0, next_threshold - lifetime_value)
 
+    # Read real points balance from the loyalty_accounts ledger.
+    balance_points = 0
+    lifetime_earned = 0
+    lifetime_redeemed = 0
+    if customer_id:
+        try:
+            acct_repo = get_loyalty_account_repository()
+            if acct_repo is not None:
+                acct = acct_repo.find_or_create(customer_id)
+                if acct:
+                    balance_points = int(acct.get("balance_points") or 0)
+                    lifetime_earned = int(acct.get("lifetime_earned") or 0)
+                    lifetime_redeemed = int(acct.get("lifetime_redeemed") or 0)
+        except Exception:
+            pass  # fail-soft: leave zeros rather than 500 the caller
+
+    # Birthday month from customer DOB field (multiple possible keys).
+    birthday_month = None
+    if customer_doc:
+        dob = (
+            customer_doc.get("dob")
+            or customer_doc.get("date_of_birth")
+            or customer_doc.get("birthday")
+        )
+        if dob:
+            try:
+                if isinstance(dob, str):
+                    dob = dob[:10]  # "YYYY-MM-DD" prefix
+                    birthday_month = int(dob.split("-")[1])
+                elif hasattr(dob, "month"):
+                    birthday_month = dob.month
+            except Exception:
+                birthday_month = None
+
     return {
         "tier": tier,
-        "points": int(lifetime_value),
+        "points": balance_points,
         "points_to_next_tier": int(points_to_next),
-        "redeemed_points": 0,
-        "total_points_earned": int(lifetime_value),
+        "redeemed_points": lifetime_redeemed,
+        "total_points_earned": lifetime_earned,
         "member_since": created_at,
+        "birthday_month": birthday_month,
     }
 
 
