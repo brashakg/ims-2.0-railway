@@ -13,16 +13,19 @@ from datetime import datetime
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_user_repository, resolve_store_scope
-from ..services.role_caps import role_baseline_cap
+from ..dependencies import get_user_repository, resolve_store_scope, get_audit_repository
+from ..services.role_caps import role_baseline_cap, effective_discount_cap
 from ..services.user_roles import (
     BCRYPT_MAX_BYTES,
     can_assign_roles,
+    grantable_capabilities_for,
     highest_level,
     password_within_bcrypt_limit,
     sanitize_module_access,
+    sanitize_permissions,
     validate_roles,
 )
+from ..services import permission_audit as _perm_audit
 
 router = APIRouter()
 
@@ -79,6 +82,13 @@ class UserCreate(BaseModel):
     # forbids (enforced client-side by AND-ing with the role filter; there is no
     # server path that reads this to GRANT). None/absent -> role defaults apply.
     module_access: Optional[Dict[str, bool]] = None
+    # Per-user CAPABILITY override (council ruling sec.2). TWO-SIDED:
+    # {"grant": {cap: true}, "deny": {cap: true}}. A grant adds a role-denied
+    # capability (capped at the actor's level + the inviolable business floors);
+    # a deny removes a role-granted one. Sanitized + escalation-guarded in the
+    # endpoint where the actor's roles are known. None/absent -> DARK (today's
+    # behaviour exactly).
+    permissions: Optional[Dict[str, Dict[str, bool]]] = None
 
     @field_validator("phone")
     @classmethod
@@ -111,6 +121,9 @@ class UserUpdate(BaseModel):
     # persisted when explicitly provided on update so an unrelated edit (e.g. a
     # phone change) never wipes an existing grant -- handled via exclude_unset.
     module_access: Optional[Dict[str, bool]] = None
+    # Two-sided capability override (see UserCreate.permissions). Only persisted
+    # when explicitly sent (exclude_unset) so an unrelated edit never wipes it.
+    permissions: Optional[Dict[str, Dict[str, bool]]] = None
 
     @field_validator("phone")
     @classmethod
@@ -227,6 +240,70 @@ def _find_by_email_ci(repo, email: str):
     except Exception:
         pass
     return repo.find_by_email(email)
+
+
+# ============================================================================
+# PERMISSION ESCALATION GUARD + DISCOUNT-CAP CLAMP (council ruling sec.2)
+# ============================================================================
+
+
+def _guard_permission_grants(actor: dict, permissions: Optional[dict]) -> None:
+    """Reject any GRANT the actor is not themselves allowed to give.
+
+    An actor may only grant capabilities they themselves HOLD and that are not
+    ungrantable (jarvis:* / SUPERADMIN-only) -- the per-user analogue of the
+    role-assignment ceiling (reuses the same level model via
+    grantable_capabilities_for). DENIES are always allowed (removing access is
+    never an escalation). Raises HTTPException(403) naming the first offending
+    capability. ``permissions`` is the ALREADY-SANITIZED map; None/empty -> no-op.
+    """
+    if not permissions:
+        return
+    grant = permissions.get("grant") or {}
+    granted = {k for k, v in grant.items() if v is True}
+    if not granted:
+        return
+    allowed = grantable_capabilities_for(actor.get("roles", []))
+    for cap in sorted(granted):
+        if cap not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "You cannot grant a permission you do not hold or that is "
+                    f"above your level: {cap}"
+                ),
+            )
+
+
+def _clamp_discount_cap(
+    actor: dict, requested_cap: Optional[float], target_roles: list
+) -> Optional[float]:
+    """Clamp a requested per-user discount_cap to what the ACTOR may grant.
+
+    LIVE BUG (ruling sec.2): role_caps/create_user stored ``discount_cap`` with
+    NO escalation guard, so any user-editing admin could set a 100% cap on a
+    junior. We clamp the requested cap to the actor's OWN effective cap: an
+    admin can never grant a higher discount authority than they themselves wield.
+    SUPERADMIN/ADMIN have an effective 100 cap, so they are unconstrained (as
+    intended -- they are the unlimited tier). Returns the clamped value (or None
+    when none was requested, leaving the role baseline to apply downstream).
+    """
+    if requested_cap is None:
+        return None
+    actor_cap = effective_discount_cap(actor.get("roles", []), None)
+    # effective_discount_cap floors at the actor's role baseline; for the clamp
+    # we want the actor's MAX authority, which is exactly that value (100 for
+    # SUPERADMIN/ADMIN). Reject above it rather than silently clamping so the
+    # admin learns their action was rejected.
+    req = max(0.0, min(100.0, float(requested_cap)))
+    if req > actor_cap + 1e-9:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"You cannot grant a discount cap above your own ({actor_cap:.0f}%)."
+            ),
+        )
+    return req
 
 
 # ============================================================================
@@ -369,6 +446,16 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             detail=f"You cannot assign a role above your own level: {bad_role}",
         )
 
+    # PER-USER CAPABILITY OVERRIDE (council ruling sec.2): sanitize to the
+    # well-formed grant/deny shape (junk + ungrantable-grant dropped), then run
+    # the escalation guard (an actor may only grant what they themselves hold).
+    _actor_is_super = "SUPERADMIN" in set(current_user.get("roles", []))
+    _clean_perms = sanitize_permissions(user.permissions, _actor_is_super)
+    _guard_permission_grants(current_user, _clean_perms)
+    # LIVE BUG retrofit: clamp the requested discount_cap to the actor's own cap
+    # (was stored unguarded -- a junior could be given 100%).
+    _clamped_cap = _clamp_discount_cap(current_user, user.discount_cap, user.roles)
+
     if repo is not None:
         # Check if username exists
         if repo.find_by_username(user.username):
@@ -392,11 +479,11 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             "primary_store_id": user.primary_store_id
             or (user.store_ids[0] if user.store_ids else None),
             # Store a concrete, role-appropriate cap: an admin-supplied override
-            # wins; otherwise fall back to the role baseline (0 for non-discount
-            # roles) instead of a blanket 10.
+            # wins (now CLAMPED to the actor's own cap -- see _clamp_discount_cap);
+            # otherwise fall back to the role baseline (0 for non-discount roles).
             "discount_cap": (
-                user.discount_cap
-                if user.discount_cap is not None
+                _clamped_cap
+                if _clamped_cap is not None
                 else role_baseline_cap(user.roles)
             ),
             "is_active": True,
@@ -410,10 +497,41 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             # dropped, only explicit deny (False) survives. Default {} so the
             # stored shape is always a dict, not null.
             "module_access": sanitize_module_access(user.module_access) or {},
+            # Two-sided capability override (sanitized + guarded above). {} when
+            # none -> DARK (the resolver returns the role decision unchanged).
+            "permissions": _clean_perms or {},
         }
 
         created = repo.create(user_data)
         if created:
+            # AUDIT (no-log-no-commit): only when an actual override was set --
+            # a plain account create with no permission deltas needs no
+            # permission-audit row (the existing create flow is unchanged/DARK).
+            if _clean_perms or _clamped_cap is not None:
+                audit = _perm_audit.write_permission_audit(
+                    get_audit_repository(),
+                    action="PERMISSIONS_CREATE",
+                    actor=current_user,
+                    target_user_id=created["user_id"],
+                    prior=_perm_audit.snapshot_of(None),
+                    after=_perm_audit.snapshot_of(user_data),
+                    store_id=user_data.get("primary_store_id"),
+                )
+                if audit is None:
+                    # The control-surface audit could not be written. Roll the
+                    # account back so we never leave an un-audited permission
+                    # grant standing (no-log-no-commit).
+                    try:
+                        repo.update(
+                            created["user_id"],
+                            {"is_active": False, "permissions": {}},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Could not record the permission change; user not created.",
+                    )
             return {
                 "user_id": created["user_id"],
                 "username": created["username"],
@@ -500,7 +618,51 @@ async def update_user(
                 sanitize_module_access(update_data["module_access"]) or {}
             )
 
+        # PER-USER CAPABILITY OVERRIDE (council ruling sec.2): sanitize + run the
+        # escalation guard on the edit path exactly as create. Only when the
+        # client explicitly sent ``permissions`` (exclude_unset) so an unrelated
+        # edit never wipes an existing override.
+        _actor_is_super = "SUPERADMIN" in set(actor_roles)
+        _perm_touched = "permissions" in update_data
+        if _perm_touched:
+            _clean = sanitize_permissions(update_data["permissions"], _actor_is_super)
+            _guard_permission_grants(current_user, _clean)
+            update_data["permissions"] = _clean or {}
+
+        # LIVE BUG retrofit: clamp any requested discount_cap to the actor's own
+        # cap (was stored unguarded on update too).
+        _cap_touched = "discount_cap" in update_data
+        if _cap_touched:
+            update_data["discount_cap"] = _clamp_discount_cap(
+                current_user,
+                update_data.get("discount_cap"),
+                update_data.get("roles", existing.get("roles", [])),
+            )
+
         update_data["updated_by"] = current_user.get("user_id")
+
+        # AUDIT (no-log-no-commit): a change touching ANY override-bearing field
+        # writes the full prior+after snapshot BEFORE we commit. A plain edit
+        # (phone/name only) skips this -- the existing flow stays DARK.
+        _audit_needed = _perm_touched or _cap_touched or "module_access" in update_data
+        if _audit_needed:
+            _prior = _perm_audit.snapshot_of(existing)
+            _after_doc = dict(existing)
+            _after_doc.update(update_data)
+            audit = _perm_audit.write_permission_audit(
+                get_audit_repository(),
+                action="PERMISSIONS_UPDATE",
+                actor=current_user,
+                target_user_id=user_id,
+                prior=_prior,
+                after=_perm_audit.snapshot_of(_after_doc),
+                store_id=existing.get("primary_store_id"),
+            )
+            if audit is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not record the permission change; update aborted.",
+                )
 
         if repo.update(user_id, update_data):
             return {"user_id": user_id, "message": "User updated successfully"}
@@ -849,3 +1011,143 @@ async def get_approval_pin_status(
 
     db = get_db().db
     return _appr.has_approver_pin(db, user_id)
+
+
+# ============================================================================
+# PER-USER CAPABILITY PERMISSIONS (council ruling sec.2) - editor + audit/revert
+# ============================================================================
+# NOTE: /permissions/options is a LITERAL path; it is declared BEFORE the
+# templated /{user_id}/permissions so the router never tries to match "options"
+# as a user_id.
+
+
+@router.get("/permissions/options")
+async def get_permission_options(current_user: dict = Depends(require_admin)):
+    """Delta-toggle metadata for the per-user override editor (plain-English
+    sentences, never raw capability keys for the owner). The FE asks once and
+    renders the preset toggles per the target user's role.
+
+    Returns: the curated commonOverrides per role + the capabilities the ACTOR
+    may grant (so the FE can gray out anything above the actor's level) + the
+    schema version (recorded against each override for audit vintage)."""
+    from ..services import capability_deltas as _cd
+    from ..services.user_roles import grantable_capabilities_for
+
+    return {
+        "schema_version": _cd.DELTA_SCHEMA_VERSION,
+        "discount_cap_field": _cd.DISCOUNT_CAP_FIELD,
+        "role_deltas": _cd.ROLE_DELTAS,
+        # The capabilities THIS actor may grant (cap their own level). The FE
+        # uses this to show ungrantable toggles grayed-with-reason.
+        "grantable": sorted(grantable_capabilities_for(current_user.get("roles", []))),
+    }
+
+
+@router.get("/{user_id}/permissions")
+async def get_user_permissions(
+    user_id: str, current_user: dict = Depends(require_admin)
+):
+    """The user's current capability override + the change history timeline
+    (reuses the immutable audit_logs rows for the visible diff timeline)."""
+    repo = get_user_repository()
+    if repo is None:
+        return {"permissions": {}, "module_access": {}, "discount_cap": None, "history": []}
+    existing = repo.find_by_id(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    history = _perm_audit.find_permission_history(get_audit_repository(), user_id)
+    # Strip Mongo _id from history rows for a clean JSON response.
+    clean_hist = []
+    for h in history:
+        h.pop("_id", None)
+        clean_hist.append(h)
+    return {
+        "permissions": existing.get("permissions") or {},
+        "module_access": existing.get("module_access") or {},
+        "discount_cap": existing.get("discount_cap"),
+        "history": clean_hist,
+    }
+
+
+class PermissionRevertBody(BaseModel):
+    # The audit log_id of the prior snapshot to re-apply. The revert re-runs the
+    # SAME escalation guard + sanitize so it can never launder an escalation.
+    audit_log_id: str = Field(..., min_length=1)
+
+
+@router.post("/{user_id}/permissions/revert")
+async def revert_user_permissions(
+    user_id: str,
+    body: PermissionRevertBody,
+    current_user: dict = Depends(require_admin),
+):
+    """Re-apply a PRIOR permission snapshot THROUGH the same escalation guard +
+    sanitize + audit (council ruling sec.2). A lower-level admin can only revert
+    to a state THEY are allowed to set -- the revert cannot launder an
+    escalation a higher admin once made. Writes its own PERMISSIONS_REVERT row."""
+    repo = get_user_repository()
+    audit_repo = get_audit_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="User store unavailable")
+
+    existing = repo.find_by_id(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    actor_roles = current_user.get("roles", [])
+    # Same higher-account guard as update_user: a non-SUPERADMIN cannot touch a
+    # higher-ranked user.
+    if "SUPERADMIN" not in set(actor_roles):
+        if highest_level(existing.get("roles", [])) > highest_level(actor_roles):
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot modify a user with a higher role than yours",
+            )
+
+    # Locate the prior snapshot in the immutable audit trail.
+    history = _perm_audit.find_permission_history(audit_repo, user_id, limit=200)
+    target = next((h for h in history if h.get("log_id") == body.audit_log_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Audit snapshot not found")
+    # Re-apply the AFTER state of the chosen historical row (that is the state
+    # the user wants to return TO). Re-run it through the guard + sanitize so a
+    # state set by a higher admin can't be re-applied by a lower one.
+    restore = target.get("permissions_after") or {}
+    _actor_is_super = "SUPERADMIN" in set(actor_roles)
+    _clean = sanitize_permissions(restore.get("permissions"), _actor_is_super)
+    _guard_permission_grants(current_user, _clean)
+    _cap = _clamp_discount_cap(
+        current_user, restore.get("discount_cap"), existing.get("roles", [])
+    )
+
+    prior = _perm_audit.snapshot_of(existing)
+    update_data = {
+        "permissions": _clean or {},
+        "module_access": sanitize_module_access(restore.get("module_access")) or {},
+        "discount_cap": _cap
+        if _cap is not None
+        else role_baseline_cap(existing.get("roles", [])),
+        "updated_by": current_user.get("user_id"),
+    }
+    after_doc = dict(existing)
+    after_doc.update(update_data)
+
+    # No-log-no-commit: the REVERT writes its own audit row before committing.
+    audit = _perm_audit.write_permission_audit(
+        audit_repo,
+        action="PERMISSIONS_REVERT",
+        actor=current_user,
+        target_user_id=user_id,
+        prior=prior,
+        after=_perm_audit.snapshot_of(after_doc),
+        store_id=existing.get("primary_store_id"),
+        note=f"reverted to snapshot {body.audit_log_id}",
+    )
+    if audit is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not record the revert; nothing changed.",
+        )
+    if repo.update(user_id, update_data):
+        return {"user_id": user_id, "message": "Permissions reverted"}
+    raise HTTPException(status_code=500, detail="Failed to revert permissions")

@@ -182,6 +182,7 @@ export const adminUserApi = {
     mustChangePassword?: boolean;
     status?: string;
     moduleAccess?: Record<string, boolean>;
+    permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
   }) => {
     // Map the UI shape onto the backend UserCreate contract
     // (full_name/roles[]/store_ids[]/discount_cap). Accepts the multi-select
@@ -225,6 +226,9 @@ export const adminUserApi = {
     // Deny-only per-user module override (canonical key -> bool). Only sent when
     // provided so create defaults to {} server-side (all role defaults apply).
     if (data.moduleAccess != null) payload.module_access = data.moduleAccess;
+    // Two-sided capability override (council ruling sec.2). Only sent when
+    // provided so create defaults to {} server-side -> DARK.
+    if (data.permissions != null) payload.permissions = data.permissions;
     const response = await api.post('/users', payload);
     return response.data;
   },
@@ -241,6 +245,7 @@ export const adminUserApi = {
     discountCap: number;
     status: string;
     moduleAccess: Record<string, boolean>;
+    permissions: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
   }>) => {
     // name->full_name / roles[] / store_ids[] / discount_cap mapping the backend
     // UserUpdate expects. Prefers the multi-select arrays the forms collect.
@@ -265,12 +270,52 @@ export const adminUserApi = {
     // Only include module_access when explicitly provided so an unrelated edit
     // never wipes an existing grant (backend update uses exclude_unset too).
     if (data.moduleAccess != null) payload.module_access = data.moduleAccess;
+    // Two-sided capability override; only sent when explicitly provided so an
+    // unrelated edit never wipes an existing override (backend exclude_unset).
+    if (data.permissions != null) payload.permissions = data.permissions;
     const response = await api.put(`/users/${userId}`, payload);
     return response.data;
   },
 
   deleteUser: async (userId: string) => {
     const response = await api.delete(`/users/${userId}`);
+    return response.data;
+  },
+
+  // Per-user permissions layer (council ruling sec.2): the delta-toggle metadata
+  // (plain-English sentences) + the capabilities THIS actor may grant.
+  getPermissionOptions: async () => {
+    const response = await api.get('/users/permissions/options');
+    return response.data as {
+      schema_version: number;
+      discount_cap_field: string;
+      role_deltas: Record<string, {
+        defaults: string[];
+        commonOverrides: Array<{
+          key: string; label: string; type: 'toggle' | 'number';
+          default: boolean | number; hard_floor_note: string | null;
+        }>;
+      }>;
+      grantable: string[];
+    };
+  },
+
+  // A user's current override + the immutable change-history timeline.
+  getUserPermissions: async (userId: string) => {
+    const response = await api.get(`/users/${userId}/permissions`);
+    return response.data as {
+      permissions: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
+      module_access: Record<string, boolean>;
+      discount_cap: number | null;
+      history: Array<Record<string, unknown>>;
+    };
+  },
+
+  // Re-apply a prior snapshot THROUGH the same escalation guard + audit.
+  revertUserPermissions: async (userId: string, auditLogId: string) => {
+    const response = await api.post(`/users/${userId}/permissions/revert`, {
+      audit_log_id: auditLogId,
+    });
     return response.data;
   },
 

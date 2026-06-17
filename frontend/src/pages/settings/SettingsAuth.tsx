@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { useState, useEffect } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import {
   Plus, Edit2, Trash2, X,
 } from 'lucide-react';
@@ -64,6 +65,8 @@ const transformUser = (u: any): UserData => ({
   // Load existing deny-only module override so editing a user preserves it
   // (snake_case from the API; camelCase tolerated). Default {} = role defaults.
   moduleAccess: u.module_access || u.moduleAccess || {},
+  // Two-sided capability override (council ruling sec.2). Default {} -> DARK.
+  permissions: u.permissions || {},
 });
 
 // ============================================================================
@@ -134,6 +137,9 @@ export function UserManagementSection() {
         // checkboxes but DROPPED here -- now forwarded so it actually persists
         // (adminUserApi maps it to the backend `module_access` field).
         moduleAccess: userData.moduleAccess,
+        // Two-sided capability override (council ruling sec.2). Only sent when
+        // the editor produced one; the backend escalation-guards + audits it.
+        permissions: userData.permissions,
       };
 
       if (editingUser?.id) {
@@ -588,37 +594,15 @@ function UserModal({
             </div>
           </div>
 
-          {/* User-wise Permissions */}
-          <div>
-            <label className="block text-sm font-medium text-gray-600 mb-2">Individual Permissions</label>
-            <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
-              {[
-                { key: 'can_void_orders', label: 'Void/Cancel Orders' },
-                { key: 'can_process_returns', label: 'Process Returns' },
-                { key: 'can_export_data', label: 'Export Data' },
-                { key: 'can_view_financials', label: 'View Financial Reports' },
-                { key: 'can_approve_expenses', label: 'Approve Expenses' },
-                { key: 'can_manage_stock', label: 'Manage Stock Levels' },
-              ].map(perm => {
-                const userPerms = (formData as any).permissions || {};
-                const isGranted = userPerms[perm.key] !== false;
-                return (
-                  <label key={perm.key} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
-                    <input
-                      type="checkbox"
-                      checked={isGranted}
-                      onChange={e => {
-                        const current = (formData as any).permissions || {};
-                        setFormData(prev => ({ ...prev, permissions: { ...current, [perm.key]: e.target.checked } } as any));
-                      }}
-                      className="rounded border-gray-300"
-                    />
-                    <span className="text-sm text-gray-600">{perm.label}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
+          {/* User-wise Permissions -- PRESET-DRIVEN per-user override editor.
+              Council ruling sec.2: the owner sees SENTENCES (from the role's
+              delta toggles), never raw capability keys. Each toggle ON/OFF
+              writes a grant/deny capability on the user; the discount field
+              edits discount_cap. Hard-floor items are shown grayed-with-reason.
+              "Reset to standard role" clears all overrides. PRESETS-ONLY-FIRST:
+              this is a CLIENT-SIDE template that expands to capability keys
+              written on the user -- no "preset" reference is ever persisted. */}
+          <PermissionDeltaEditor formData={formData} setFormData={setFormData} />
         </div>
 
         <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
@@ -629,6 +613,180 @@ function UserModal({
             {user ? 'Update User' : 'Create User'}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Preset-driven per-user permission delta editor (council ruling sec.2)
+// ============================================================================
+// Owner sees SENTENCES, never raw capability keys. The role's curated delta
+// toggles + the discount field; hard-floor items grayed-with-reason; a
+// "Reset to standard role" button. PRESETS-ONLY-FIRST: a preset is a CLIENT-SIDE
+// template that expands to capability keys written on the user -- we NEVER
+// persist a "preset" reference. The raw all-capabilities matrix is deliberately
+// deferred (not built here).
+
+interface DeltaRow {
+  key: string;
+  label: string;
+  type: 'toggle' | 'number';
+  default: boolean | number;
+  hard_floor_note: string | null;
+}
+interface PermissionOptions {
+  schema_version: number;
+  discount_cap_field: string;
+  role_deltas: Record<string, { defaults: string[]; commonOverrides: DeltaRow[] }>;
+  grantable: string[];
+}
+
+function PermissionDeltaEditor({
+  formData,
+  setFormData,
+}: {
+  formData: Partial<UserData>;
+  setFormData: Dispatch<SetStateAction<Partial<UserData>>>;
+}) {
+  const [options, setOptions] = useState<PermissionOptions | null>(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    adminUserApi
+      .getPermissionOptions()
+      .then(o => { if (alive) setOptions(o as PermissionOptions); })
+      .catch(() => { if (alive) setLoadError(true); });
+    return () => { alive = false; };
+  }, []);
+
+  // The delta rows for the user's HIGHEST role (the one that drives the preset).
+  const roles = formData.roles || [];
+  const highestRole = [...roles].sort(
+    (a, b) => (ROLE_HIERARCHY[b] || 0) - (ROLE_HIERARCHY[a] || 0),
+  )[0];
+  const discountField = options?.discount_cap_field || '__discount_cap__';
+  const rows: DeltaRow[] = (highestRole && options?.role_deltas[highestRole]?.commonOverrides) || [];
+
+  const perms = formData.permissions || {};
+  const grants = perms.grant || {};
+  const denies = perms.deny || {};
+
+  // The on/off state of a capability toggle, given its role-baseline default:
+  // explicit deny -> off; explicit grant -> on; otherwise the role default.
+  const toggleState = (row: DeltaRow): boolean => {
+    if (denies[row.key]) return false;
+    if (grants[row.key]) return true;
+    return Boolean(row.default);
+  };
+
+  const setToggle = (row: DeltaRow, on: boolean) => {
+    const nextGrant = { ...grants };
+    const nextDeny = { ...denies };
+    delete nextGrant[row.key];
+    delete nextDeny[row.key];
+    // Only record an OVERRIDE when it DIFFERS from the role default (so the
+    // stored map stays minimal + the preset stays the source of truth).
+    if (on && !row.default) nextGrant[row.key] = true;
+    if (!on && row.default) nextDeny[row.key] = true;
+    setFormData(prev => ({
+      ...prev,
+      permissions: { grant: nextGrant, deny: nextDeny },
+    }));
+  };
+
+  const resetToStandard = () => {
+    setFormData(prev => ({ ...prev, permissions: { grant: {}, deny: {} } }));
+  };
+
+  const isGrantable = (key: string) =>
+    !options || options.grantable.includes(key);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <label className="block text-sm font-medium text-gray-600">
+          Permissions {highestRole ? `(beyond standard ${highestRole.replace(/_/g, ' ')})` : ''}
+        </label>
+        <button
+          type="button"
+          onClick={resetToStandard}
+          className="text-xs text-bv-red-600 hover:underline"
+        >
+          Reset to standard role
+        </button>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        Turn extra abilities on or off for this person. Limits like discount caps,
+        GST and prescription ranges are always enforced and can't be lifted here.
+      </p>
+
+      {loadError && (
+        <p className="text-xs text-amber-600">
+          Could not load permission options; this person will use their standard role.
+        </p>
+      )}
+
+      {!loadError && rows.length === 0 && (
+        <p className="text-xs text-gray-500">
+          {highestRole
+            ? 'No extra permission toggles for this role; they use the standard role.'
+            : 'Choose a role first to customise permissions.'}
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {rows.map(row => {
+          if (row.type === 'number' || row.key === discountField) {
+            return (
+              <div key={row.key} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded">
+                <span className="text-sm text-gray-700 flex-1">{row.label}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={formData.discountCap ?? (row.default as number) ?? 0}
+                  onChange={e =>
+                    setFormData(prev => ({ ...prev, discountCap: parseInt(e.target.value || '0', 10) }))
+                  }
+                  className="w-20 px-2 py-1 border border-gray-300 rounded text-sm"
+                />
+                <span className="text-sm text-gray-500">%</span>
+              </div>
+            );
+          }
+          const grantable = isGrantable(row.key);
+          const checked = toggleState(row);
+          const disabled = !grantable; // above the actor's level -> shown grayed
+          return (
+            <label
+              key={row.key}
+              className={clsx(
+                'flex items-start gap-2 p-2 rounded border',
+                disabled ? 'bg-gray-100 border-gray-200 opacity-70 cursor-not-allowed'
+                  : checked ? 'bg-green-50 border-green-200 cursor-pointer'
+                  : 'bg-gray-50 border-gray-200 cursor-pointer',
+              )}
+              title={disabled ? 'This permission is above your level and cannot be granted.' : undefined}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={e => setToggle(row, e.target.checked)}
+                className="mt-0.5 rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">
+                {row.label}
+                {disabled && <span className="block text-xs text-gray-400">Above your level — cannot grant</span>}
+                {row.hard_floor_note && (
+                  <span className="block text-xs text-gray-400">{row.hard_floor_note}</span>
+                )}
+              </span>
+            </label>
+          );
+        })}
       </div>
     </div>
   );

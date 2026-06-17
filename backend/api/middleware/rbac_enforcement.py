@@ -68,9 +68,9 @@ _SKIP_PATHS = frozenset(
 )
 
 
-def _roles_from_bearer(request: Request):
-    """Return the caller's roles from a valid Bearer token, or ``None`` if there
-    is no usable token (missing / malformed / invalid / expired / revoked).
+def _payload_from_bearer(request: Request):
+    """Return the decoded JWT payload from a valid Bearer token, or ``None`` if
+    there is no usable token (missing / malformed / invalid / expired).
 
     Reuses auth.py's ``decode_token`` so the secret + algorithm + expiry handling
     can never diverge from ``get_current_user``. ``None`` deliberately means
@@ -87,10 +87,69 @@ def _roles_from_bearer(request: Request):
         # lazy import used by block_investor_writes.
         from ..routers.auth import decode_token
 
-        payload = decode_token(token)
+        return decode_token(token)
     except Exception:  # noqa: BLE001 - any decode failure => defer to route 401
         return None
+
+
+def _roles_from_payload(payload):
+    """The ``roles`` claim from a decoded payload (same claim get_current_user
+    reads). ``None`` payload -> None; a payload with no/empty roles -> []."""
+    if payload is None:
+        return None
     return payload.get("roles", []) or []
+
+
+# Sentinel for "we looked up the user's overrides this request and there were
+# none" so a per-request lookup is done at most once even when both the deny and
+# the grant insertion points run (they can't both run -- deny on allow-branch,
+# grant on deny-branch -- but the cache also covers the SUPERADMIN short-circuit).
+_NO_OVERRIDES = ({}, {})
+
+
+def _user_overrides(request: Request, payload):
+    """Live per-request lookup of the user's stored ``permissions`` +
+    ``module_access`` overrides, CACHED on ``request.state`` so a revoke takes
+    effect on the NEXT request (overrides stay OUT of the JWT, ruling sec.2).
+
+    Returns ``(permissions, module_access)`` -- both possibly empty/None. The
+    lookup is by ``user_id`` (then ``username``) via the user repository,
+    mirroring auth.py's profile path. Fail-soft: any lookup problem returns
+    ``_NO_OVERRIDES`` so the per-user layer is simply inert (the role decision
+    stands) -- it can NEVER turn a lookup failure into a denial of a legit user.
+
+    DARK: a user with no ``permissions`` field and no ``module_access`` returns
+    (None/{}, None/{}), and the resolver then returns the role decision
+    unchanged -- identical to today.
+    """
+    cached = getattr(request.state, "_rbac_user_overrides", None)
+    if cached is not None:
+        return cached
+    result = _NO_OVERRIDES
+    try:
+        uid = payload.get("user_id") if payload else None
+        uname = payload.get("username") if payload else None
+        from ..dependencies import get_user_repository
+
+        repo = get_user_repository()
+        if repo is not None and (uid or uname):
+            rec = None
+            if uid:
+                rec = repo.find_by_id(uid)
+            if rec is None and uname:
+                try:
+                    rec = repo.collection.find_one({"username": uname})
+                except Exception:  # noqa: BLE001
+                    rec = None
+            if rec:
+                result = (rec.get("permissions"), rec.get("module_access"))
+    except Exception:  # noqa: BLE001 - fail-soft: no overrides applied
+        result = _NO_OVERRIDES
+    try:
+        request.state._rbac_user_overrides = result
+    except Exception:  # noqa: BLE001 - request.state always assignable, be safe
+        pass
+    return result
 
 
 def _forbidden_response(
@@ -148,12 +207,13 @@ async def rbac_enforcement_middleware(request: Request, call_next):
 
     allowed = policy["allowed"]
 
-    # PUBLIC -> no auth at all.
+    # PUBLIC -> no auth at all. (No capability either -> per-user layer inert.)
     if allowed == rbac_policy.PUBLIC:
         return await call_next(request)
 
-    # AUTHENTICATED or a role list: inspect the token's roles.
-    roles = _roles_from_bearer(request)
+    # AUTHENTICATED or a role list: inspect the token's payload + roles.
+    payload = _payload_from_bearer(request)
+    roles = _roles_from_payload(payload)
     if not roles:
         # Either no usable token (missing / malformed / invalid / expired ->
         # None) OR a valid token whose ``roles`` claim is empty/absent (-> []).
@@ -166,17 +226,46 @@ async def rbac_enforcement_middleware(request: Request, call_next):
         # contract. The route decides.
         return await call_next(request)
 
-    if rbac_policy.check_access(method, path, roles):
+    role_allowed = rbac_policy.check_access(method, path, roles)
+
+    # ----- PER-USER CAPABILITY LAYER (council ruling sec.2) -----------------
+    # Resolve the route's single capability + apply the frozen precedence chain.
+    # SUPERADMIN is exempt from the per-user override layer entirely (they are
+    # the actor who SETS overrides; an override must never lock the top admin
+    # out of anything). DARK: with no stored overrides this is a pure no-op and
+    # the decision equals ``role_allowed`` -- identical to today.
+    from ..services.capabilities import capability_for
+    from ..services.permission_resolver import apply_user_permissions
+
+    capability = capability_for(method, path)
+    if "SUPERADMIN" not in set(roles) and capability is not None:
+        permissions, module_access = _user_overrides(request, payload)
+        final_allowed = apply_user_permissions(
+            role_allowed, capability, permissions, module_access
+        )
+    else:
+        final_allowed = role_allowed
+
+    # INSERTION POINT 1 (DENY subtract) -- runs on the role-ALLOWED branch: a
+    # capability DENY (or a module-deny shim) turned a role-allowed route into a
+    # denial. INSERTION POINT 2 (GRANT add) -- runs on the role-DENIED branch: a
+    # capability GRANT turned a role-denied route into an allow. Both are folded
+    # into ``apply_user_permissions``; the single ``final_allowed`` carries the
+    # result of whichever fired.
+    if final_allowed:
         return await call_next(request)
 
-    # Denied at the role-class level. For routes that DELIBERATELY reject with a
-    # non-generic response (404 existence-hiding under /jarvis & /admin/techcherry,
-    # or a body-specific clinical 403 on prescription create), DEFER to the route
-    # so its canonical response - and any security intent like not leaking that
-    # the path exists - is preserved exactly. The route's own gate (still in
-    # place) returns the real rejection. ``allowed`` is unchanged; only the
-    # delivery of the denial is left to the route.
-    if policy.get("self_enforced"):
+    # Denied (by role and not grant-rescued, OR by an explicit capability/module
+    # deny that overrode a role allow). For routes that DELIBERATELY reject with
+    # a non-generic response (404 existence-hiding under /jarvis &
+    # /admin/techcherry, or a body-specific clinical 403 on prescription create),
+    # DEFER to the route so its canonical response is preserved exactly.
+    #
+    # NOTE: deferral only matters when the ROLE denied (the route's own gate will
+    # then produce the canonical rejection). When a per-user DENY overrode a
+    # role-ALLOW, the route would otherwise 200, so the enforcer MUST deliver the
+    # 403 itself -- deferring would silently honour the role and ignore the deny.
+    if policy.get("self_enforced") and not role_allowed:
         return await call_next(request)
 
     return _forbidden_response(request, method, path, allowed)

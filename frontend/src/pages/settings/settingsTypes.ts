@@ -66,6 +66,10 @@ export interface UserData {
    *  set to false hides + route-blocks that module for the user on top of their
    *  role. Loaded from the backend `module_access` field; sent back on save. */
   moduleAccess?: Record<string, boolean>;
+  /** Per-user CAPABILITY override (council ruling sec.2). Two-sided
+   *  `{ grant: { <cap>: true }, deny: { <cap>: true } }`. Loaded from / sent
+   *  back to the backend `permissions` field. Absent/empty => DARK. */
+  permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
 }
 
 export interface Category {

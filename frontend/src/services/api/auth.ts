@@ -49,6 +49,9 @@ export const authApi = {
         // for pre-fix backends. snake_case from the server; camelCase tolerated.
         module_access?: Record<string, boolean>;
         moduleAccess?: Record<string, boolean>;
+        // Two-sided capability override (grant/deny). Optional for pre-fix
+        // backends. Absent -> {} -> DARK (role baseline unchanged).
+        permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
       };
     }
 
@@ -79,6 +82,8 @@ export const authApi = {
           // Deny-only module override. Tolerate snake/camel; default to {} so a
           // missing field never reads as "deny everything".
           moduleAccess: data.user.module_access ?? data.user.moduleAccess ?? {},
+          // Capability override (grant/deny). Default {} -> DARK.
+          permissions: data.user.permissions ?? {},
         },
       };
     } catch (error) {
@@ -145,6 +150,7 @@ export const authApi = {
       must_change_password?: boolean;
       module_access?: Record<string, boolean>;
       moduleAccess?: Record<string, boolean>;
+      permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
       exp?: number;
     }>('/auth/me');
     const raw = response.data;
@@ -164,6 +170,8 @@ export const authApi = {
       mustChangePassword: raw.must_change_password ?? false,
       // Deny-only module override; tolerate snake/camel, default to {}.
       moduleAccess: raw.module_access ?? raw.moduleAccess ?? {},
+      // Capability override (grant/deny). Default {} -> DARK.
+      permissions: raw.permissions ?? {},
     };
   },
 

@@ -173,3 +173,129 @@ def password_within_bcrypt_limit(password: str) -> bool:
     """True when the password fits bcrypt's 72-byte input window (so the stored
     hash covers the whole secret, no silent truncation)."""
     return len(password.encode("utf-8")) <= BCRYPT_MAX_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Per-user CAPABILITY permissions (council ruling sec.2) -- grant/deny shape
+# ---------------------------------------------------------------------------
+# The per-user ``permissions`` field is a TWO-SIDED override layered on top of
+# the role (unlike the deny-only module_access). Shape:
+#
+#     {"grant": {"<cap>": true, ...}, "deny": {"<cap>": true, ...}}
+#
+# A DENY removes a role-granted capability; a GRANT adds a role-denied one (the
+# GRANT's real reach is still capped at WRITE time by the actor's level + by the
+# inviolable business floors at the data layer). ``sanitize_permissions`` is the
+# write-path coercion mirroring ``sanitize_module_access``:
+#   * keep only KNOWN capability keys (junk dropped),
+#   * DROP ungrantable keys from the GRANT side for a non-SUPERADMIN actor
+#     (jarvis:* / SUPERADMIN-only) -- they can never be granted by a lesser
+#     admin; a DENY of one is harmless and kept (deny is always safe),
+#   * a key present on BOTH sides resolves to DENY (deny beats grant -- the
+#     frozen precedence) and is removed from grant,
+#   * empty sides are omitted so the stored shape is minimal.
+#
+# This does NOT decide WHO may grant WHAT (that is the escalation guard at the
+# router, which needs the actor's roles + the prior state). sanitize only
+# guarantees the stored shape is well-formed and free of impossible grants.
+
+
+def sanitize_permissions(
+    permissions, actor_is_superadmin: bool = False
+):
+    """Coerce a per-user ``permissions`` override to its well-formed shape.
+
+    ``permissions`` is the raw ``{"grant": {...}, "deny": {...}}`` map (either
+    side optional). Returns a cleaned dict with only known capability keys,
+    ALL ungrantable keys stripped from GRANT (jarvis/SUPERADMIN-only can never be
+    granted via the per-user layer -- not even by a SUPERADMIN actor; those
+    routes are SUPERADMIN-by-role already, and this layer only ever GRANTS to a
+    LESSER user), and deny-beats-grant applied. None in -> None out (the caller
+    defaults to {}). Pure; never raises. ``actor_is_superadmin`` is accepted for
+    call-site symmetry but does NOT relax the ungrantable rule (it is inviolable).
+    """
+    if permissions is None:
+        return None
+    # Lazy import keeps user_roles import-light + avoids a cycle at module load.
+    from .capabilities import VALID_CAPABILITY_KEYS, is_ungrantable
+
+    if not isinstance(permissions, dict):
+        return {}
+
+    def _clean_side(side, drop_ungrantable: bool):
+        raw = permissions.get(side)
+        out = {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if value is not True:
+                    # Only an explicit True asserts the grant/deny; anything else
+                    # (False/None/junk) is dropped -- the absence IS the default.
+                    continue
+                if key not in VALID_CAPABILITY_KEYS:
+                    continue
+                if drop_ungrantable and is_ungrantable(key):
+                    # An ungrantable (jarvis:* / SUPERADMIN-only) capability can
+                    # never be GRANTED via this layer -- inviolable invariant.
+                    # (DENY side never drops -- deny is always safe.)
+                    continue
+                out[key] = True
+        return out
+
+    # Ungrantable stripping on GRANT is unconditional (inviolable invariant);
+    # actor_is_superadmin is intentionally NOT used to relax it.
+    _ = actor_is_superadmin
+    grant = _clean_side("grant", drop_ungrantable=True)
+    deny = _clean_side("deny", drop_ungrantable=False)
+
+    # Deny beats grant (frozen precedence): a key on both sides stays only in
+    # deny.
+    for key in list(grant.keys()):
+        if key in deny:
+            del grant[key]
+
+    cleaned = {}
+    if grant:
+        cleaned["grant"] = grant
+    if deny:
+        cleaned["deny"] = deny
+    return cleaned
+
+
+def grantable_capabilities_for(actor_roles: Iterable[str]):
+    """The set of capability keys an actor may GRANT to others: those reachable
+    by the actor's own roles (you can't grant what you can't do) MINUS the
+    ungrantable set (unless SUPERADMIN, who may grant anything they hold).
+
+    Used by the WRITE-time escalation guard. SUPERADMIN -> the full grantable
+    universe (everything except the structurally-ungrantable, which even a
+    SUPERADMIN does not grant to a LESSER user -- a SUPERADMIN target is set by
+    role assignment, not by this layer).
+    """
+    from .capabilities import (
+        VALID_CAPABILITY_KEYS,
+        capability_roles,
+        is_ungrantable,
+    )
+
+    actor_set = set(actor_roles or [])
+    is_super = "SUPERADMIN" in actor_set
+    grantable = set()
+    for cap in VALID_CAPABILITY_KEYS:
+        if is_ungrantable(cap):
+            # jarvis:* / SUPERADMIN-only: never grantable via the per-user layer,
+            # not even by a SUPERADMIN actor (those routes are SUPERADMIN-by-role
+            # already; the layer would only ever GRANT to a lesser user).
+            continue
+        if is_super:
+            grantable.add(cap)
+            continue
+        # Non-super: the actor must themselves be able to reach the capability.
+        cap_roles = set(capability_roles(cap))
+        # AUTHENTICATED-reachable capabilities are reachable by any logged-in
+        # user, so any actor may grant them.
+        if "AUTHENTICATED" in cap_roles:
+            grantable.add(cap)
+            continue
+        if actor_set & cap_roles:
+            grantable.add(cap)
+    return grantable
