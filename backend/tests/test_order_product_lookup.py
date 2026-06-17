@@ -65,3 +65,33 @@ def test_missing_returns_none():
     repo = _FakeRepo([{"product_id": "P1"}])
     assert _resolve_product_doc(repo, "NOPE") is None
     assert _resolve_product_doc(repo, "") is None
+
+
+def test_catalog_only_resolve_surfaces_tier_and_brand(monkeypatch):
+    """Products-convergence cap-hole fix: a catalog-only product (absent from
+    the spine) must surface its discount_category AND brand so the POS discount
+    cap enforces the category / luxury-brand cap. Before the fix the cap
+    re-queried the spine only -> None -> the cap silently no-op'd."""
+    import api.routers.orders as orders_mod
+
+    cat = _FakeColl([{
+        "id": "C1", "sku": "CART-1", "title": "Cartier Frame",
+        "category": "FRAME", "brand": "Cartier",
+        "pricing": {"mrp": 50000, "offer_price": 50000, "cost_price": 20000,
+                    "discount_category": "LUXURY"},
+        "is_active": True,
+    }])
+    monkeypatch.setattr(orders_mod, "_get_catalog_collection", lambda: cat)
+
+    # product_repo=None -> straight to the catalog fallback path.
+    doc = _resolve_product_doc(None, "C1")
+    assert doc is not None
+    assert doc["discount_category"] == "LUXURY"
+    assert doc["brand"] == "Cartier"
+    assert doc["_resolved_from"] == "catalog_products"
+
+    # The cap engine now computes the lower luxury-brand cap from these fields.
+    from api.services.pricing_caps import effective_discount_cap
+
+    cap = effective_discount_cap(doc["discount_category"], doc["brand"])
+    assert cap <= 2  # Cartier luxury-brand cap (2%), not the cashier's full cap

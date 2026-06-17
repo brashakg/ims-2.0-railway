@@ -918,6 +918,9 @@ def _resolve_catalog_product_doc(pid: str):
         "offer_price": pricing.get("offer_price"),
         "cost_price": pricing.get("cost_price"),
         "discount_category": pricing.get("discount_category"),
+        # brand is needed for the luxury-brand discount cap (Cartier 2% etc.).
+        # The catalog doc may hold it flat or under pricing; surface either.
+        "brand": doc.get("brand") or pricing.get("brand"),
         "is_active": doc.get("is_active", True),
         # Mark the source so any future caller can tell a catalog-resolved
         # product from a `products` one without re-querying.
@@ -1393,13 +1396,19 @@ async def create_order(
                 try:
                     pr = get_product_repository()
                     if (
-                        pr is not None
-                        and item.product_id
+                        item.product_id
                         and not item.product_id.startswith(
                             ("custom-", "lens-", "lens-sug-")
                         )
                     ):
-                        product = pr.find_by_id(item.product_id)
+                        # Products-convergence: resolve via the SAME path
+                        # order-create used for existence (spine first, then the
+                        # catalog_products fallback) so a catalog-only product's
+                        # discount_category + brand are also cap-enforced. The
+                        # old pr.find_by_id() hit only the spine -> None for a
+                        # catalog-only product -> the cap silently no-op'd (a
+                        # luxury item could take the full role cap).
+                        product = _resolve_product_doc(pr, item.product_id)
                         if product:
                             # Canonical category + luxury-brand cap (SYSTEM_INTENT
                             # discount matrix). Pass the real discount_category
@@ -1614,9 +1623,10 @@ async def create_order(
                         ),
                     )
                 try:
-                    _prod = (
-                        _cap_repo.find_by_id(_pid) if _cap_repo is not None else None
-                    )
+                    # Products-convergence: spine-first, catalog-fallback resolve
+                    # so a catalog-only product is cap-enforced at cart level too
+                    # (was _cap_repo.find_by_id -> spine only -> None -> no cap).
+                    _prod = _resolve_product_doc(_cap_repo, _pid)
                 except Exception:
                     _prod = None
                 if _prod:
