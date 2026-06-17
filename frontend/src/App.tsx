@@ -37,6 +37,8 @@ const LapsedReactivationPage = lazy(() => import('./pages/customers/LapsedReacti
 const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
 const LoyaltyLedger = lazy(() => import('./pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
+const PromotionsPage = lazy(() => import('./pages/promotions/PromotionsPage'));
+const PromotionsReportPage = lazy(() => import('./pages/promotions/PromotionsReportPage'));
 const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
 const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
 const FollowUpDashboard = lazy(() => import('./pages/customers/FollowUpDashboard').then(m => ({ default: m.FollowUpDashboard })))
@@ -428,6 +430,41 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <CampaignManager />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* F11/F12: Promotions admin (rules) + Offer Tally report.
+                      Live POS apply is dark behind PROMO_ENGINE_ENABLED. */}
+                  <Route
+                    path="promotions"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={[
+                          'SUPERADMIN',
+                          'ADMIN',
+                          'AREA_MANAGER',
+                          'STORE_MANAGER',
+                          'CATALOG_MANAGER',
+                        ]}
+                      >
+                        <PromotionsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="reports/promotions"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={[
+                          'SUPERADMIN',
+                          'ADMIN',
+                          'AREA_MANAGER',
+                          'STORE_MANAGER',
+                          'ACCOUNTANT',
+                        ]}
+                      >
+                        <PromotionsReportPage />
                       </ProtectedRoute>
                     }
                   />

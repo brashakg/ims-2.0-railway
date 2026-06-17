@@ -35,7 +35,20 @@ from typing import Dict, List, Optional, Tuple
 # Promo kinds ---------------------------------------------------------------
 PROMO_PERCENT = "PERCENT"  # flat % off every eligible unit
 PROMO_SECOND_PAIR = "SECOND_PAIR"  # % off the cheaper unit of each eligible pair
-PROMO_KINDS = frozenset({PROMO_PERCENT, PROMO_SECOND_PAIR})
+# F11/F12 additions (cross-category bundling + offer-tallying). These extend the
+# original PR-#677 engine without changing PERCENT / SECOND_PAIR behaviour.
+PROMO_THRESHOLD = "THRESHOLD"  # spend >= min_cart_value, get % off eligible lines
+PROMO_BOGO = "BOGO"  # buy N eligible units, get M units % off (cheapest)
+PROMO_COMBO = "COMBO"  # cross-category bundle: all groups present -> % off reward set
+PROMO_KINDS = frozenset(
+    {
+        PROMO_PERCENT,
+        PROMO_SECOND_PAIR,
+        PROMO_THRESHOLD,
+        PROMO_BOGO,
+        PROMO_COMBO,
+    }
+)
 
 # Default discount for the "2nd pair" promo when a campaign omits it.
 DEFAULT_SECOND_PAIR_PCT = 50.0
@@ -70,13 +83,22 @@ def _safe_price(value: object) -> float:
 @dataclass(frozen=True)
 class CartLine:
     """One POS cart line, priced BEFORE any promo (i.e. after MRP->offer and any
-    per-line manual discount the cashier already applied). unit_price is per unit."""
+    per-line manual discount the cashier already applied). unit_price is per unit.
+
+    `brand` + `discount_category` feed the pricing-caps clamp in the F11/F12
+    layer (evaluate_promos) -- they are optional so the original PR-#677 callers
+    that build a CartLine without them keep working unchanged."""
 
     line_id: str
     product_id: str
     category: str  # discount/product category, matched case-insensitively
     unit_price: float
     quantity: int
+    # F11/F12: drive the pricing_caps clamp + cross-category bundle matching.
+    brand: Optional[str] = None
+    discount_category: Optional[str] = None
+    item_type: Optional[str] = None
+    cost_at_sale: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +116,20 @@ class Promo:
     product_ids: Optional[frozenset] = None
     min_units: int = 1  # promo only fires once this many eligible units are present
     label: str = ""
+    # --- F11/F12 fields (ignored by PERCENT / SECOND_PAIR) ---
+    # THRESHOLD: minimum cart subtotal that must be reached before the promo fires.
+    min_cart_value: Optional[float] = None
+    # BOGO: buy `buy_quantity` eligible units -> `get_quantity` units at `percent` off.
+    buy_quantity: int = 1
+    get_quantity: int = 1
+    # COMBO: every group (a category/item_type/brand filter) must be present in the
+    # cart; the reward (percent) then applies to the eligible lines.
+    combo_groups: Optional[tuple] = None
+    # Hard rupee ceiling on this single promo's discount (F12 max_discount_amount).
+    max_discount_amount: Optional[float] = None
+    # CRM gating (optional, fail-open).
+    customer_tiers: Optional[frozenset] = None
+    first_purchase_only: bool = False
 
 
 @dataclass
@@ -157,11 +193,67 @@ def _discount_second_pair(promo: Promo, lines: List[CartLine]) -> float:
     return round(sum(u * pct / 100.0 for u in discounted), 2)
 
 
+def _discount_threshold(promo: Promo, lines: List[CartLine]) -> float:
+    """THRESHOLD: only fires when the WHOLE cart subtotal reaches
+    `min_cart_value`; then `percent` off every eligible unit (same line filter
+    as PERCENT). An unset/zero min_cart_value behaves like a plain PERCENT."""
+    if promo.min_cart_value is not None:
+        if cart_subtotal(lines) + 1e-9 < _safe_price(promo.min_cart_value):
+            return 0.0
+    return _discount_percent(promo, lines)
+
+
+def _discount_bogo(promo: Promo, lines: List[CartLine]) -> float:
+    """BOGO: for every (buy_quantity) eligible units, (get_quantity) units get
+    `percent` off (default 100 = free). The discount lands on the CHEAPEST
+    eligible units (the store gives away its least valuable stock)."""
+    units = _eligible_unit_prices(promo, lines)
+    buy = max(1, int(promo.buy_quantity or 1))
+    get = max(1, int(promo.get_quantity or 1))
+    group = buy + get
+    if len(units) < group:
+        return 0.0
+    # percent unset for BOGO defaults to 100% (the classic "get one free").
+    pct = 100.0 if promo.percent is None else _clamp_pct(promo.percent)
+    num_groups = len(units) // group
+    free_count = num_groups * get
+    units.sort()  # cheapest first -> those become the discounted units
+    return round(sum(u * pct / 100.0 for u in units[:free_count]), 2)
+
+
+def _discount_combo(promo: Promo, lines: List[CartLine]) -> float:
+    """COMBO (cross-category bundle): every group in `combo_groups` must be
+    present in the cart; the reward is `percent` off every eligible unit (the
+    line filter on the promo, or all lines if none). Each group is a dict with
+    optional category / item_type / brand keys."""
+    groups = promo.combo_groups or ()
+    if groups:
+        for grp in groups:
+            cat = _norm(grp.get("category")) if grp.get("category") else None
+            it = _norm(grp.get("item_type")) if grp.get("item_type") else None
+            br = _norm(grp.get("brand")) if grp.get("brand") else None
+            present = any(
+                (cat is None or _norm(ln.discount_category or ln.category) == cat)
+                and (it is None or _norm(ln.item_type) == it)
+                and (br is None or _norm(ln.brand) == br)
+                for ln in lines
+            )
+            if not present:
+                return 0.0
+    return _discount_percent(promo, lines)
+
+
 def _discount_for(promo: Promo, lines: List[CartLine]) -> float:
     if promo.kind == PROMO_PERCENT:
         return _discount_percent(promo, lines)
     if promo.kind == PROMO_SECOND_PAIR:
         return _discount_second_pair(promo, lines)
+    if promo.kind == PROMO_THRESHOLD:
+        return _discount_threshold(promo, lines)
+    if promo.kind == PROMO_BOGO:
+        return _discount_bogo(promo, lines)
+    if promo.kind == PROMO_COMBO:
+        return _discount_combo(promo, lines)
     return 0.0  # unknown kind never discounts
 
 
@@ -205,6 +297,11 @@ def evaluate_cart(lines: List[CartLine], promos: List[Promo]) -> PromoResult:
             continue
         seen_ids.add(p.promo_id)
         disc = _discount_for(p, lines)
+        # F12: hard rupee ceiling per promo (max_discount_amount). Applied here
+        # so it bounds the promo BEFORE stacking/exclusive resolution + the
+        # subtotal clamp below. Unset -> no ceiling (original behaviour).
+        if p.max_discount_amount is not None:
+            disc = min(disc, _safe_price(p.max_discount_amount))
         if disc <= 0:
             continue
         (stackable if p.stackable else exclusive).append((p, disc))
@@ -293,3 +390,305 @@ def allocate_discount(lines: List[CartLine], total_discount: float) -> Dict[str,
         floors[remainders[i % len(remainders)][1]] += 1
 
     return {lid: round(p / 100.0, 2) for lid, p in floors.items()}
+
+
+# ===========================================================================
+# F11 / F12 high-level layer: rule-doc adapter + cap-clamping evaluate_promos
+# ===========================================================================
+# The functions below adapt persisted promo-rule documents (from the promotions
+# router) + a POS cart payload into the pure CartLine/Promo core above, then
+# enforce the OUTER hardlock: a promo can NEVER drive a line below its
+# category / luxury-brand discount cap (pricing_caps). This is the supreme
+# authority -- the engine clamps to it BEFORE returning a discount. The router
+# layer owns the DB read, the atomic uses-count guard, and the audit write;
+# everything here is pure + deterministic + never raises.
+
+from api.services.pricing_caps import effective_discount_cap  # noqa: E402
+
+_KIND_BY_PROMO_TYPE = {
+    "THRESHOLD": PROMO_THRESHOLD,
+    "BOGO": PROMO_BOGO,
+    "COMBO": PROMO_COMBO,
+    "SECOND_PAIR": PROMO_SECOND_PAIR,
+    "PERCENT": PROMO_PERCENT,
+    # F12 cross-category bundle synonym.
+    "CROSS_CATEGORY": PROMO_COMBO,
+    "BUNDLE": PROMO_COMBO,
+}
+
+
+def _frozen(values) -> Optional[frozenset]:
+    if not values:
+        return None
+    if isinstance(values, str):
+        values = [values]
+    out = frozenset(str(v) for v in values if v not in (None, ""))
+    return out or None
+
+
+def cart_line_from_item(item: Dict[str, object], index: int) -> CartLine:
+    """Build a pure CartLine from an order-create / POS item dict. The category
+    used for FILTER matching prefers discount_category (the real cap tier) but
+    falls back to the item's category. brand + item_type feed COMBO + the cap."""
+    disc_cat = item.get("discount_category") or item.get("category") or ""
+    line_id = (
+        item.get("line_id")
+        or item.get("item_id")
+        or (f"L{index}")
+    )
+    return CartLine(
+        line_id=str(line_id),
+        product_id=str(item.get("product_id") or line_id),
+        category=str(disc_cat),
+        unit_price=_safe_price(item.get("unit_price")),
+        quantity=int(item.get("quantity") or 0)
+        if isinstance(item.get("quantity"), (int, float))
+        else 0,
+        brand=(str(item.get("brand")) if item.get("brand") else None),
+        discount_category=(
+            str(item.get("discount_category"))
+            if item.get("discount_category")
+            else None
+        ),
+        item_type=(str(item.get("item_type")) if item.get("item_type") else None),
+        cost_at_sale=(
+            _safe_price(item.get("cost_at_sale"))
+            if item.get("cost_at_sale") is not None
+            else None
+        ),
+    )
+
+
+def promo_from_rule(rule: Dict[str, object]) -> Optional[Promo]:
+    """Adapt a persisted promo-rule document into a pure Promo. Returns None for
+    an unknown promo_type so a malformed rule is simply skipped (fail-soft)."""
+    ptype = (str(rule.get("promo_type") or rule.get("kind") or "")).strip().upper()
+    kind = _KIND_BY_PROMO_TYPE.get(ptype)
+    if kind is None:
+        return None
+    combo_groups = rule.get("combo_groups") or rule.get("trigger_rules")
+    combo_tuple = (
+        tuple(combo_groups) if isinstance(combo_groups, (list, tuple)) else None
+    )
+    # reward percent: prefer explicit reward_value; fall back to type-specific
+    # legacy field names for compatibility with the campaigns promo_templates.
+    percent = rule.get("reward_value")
+    if percent is None:
+        percent = (
+            rule.get("threshold_discount_pct")
+            or rule.get("combo_discount_pct")
+            or rule.get("percent")
+        )
+    return Promo(
+        promo_id=str(rule.get("promo_id") or rule.get("_id") or rule.get("name") or "?"),
+        kind=kind,
+        percent=(float(percent) if percent is not None else None),
+        stackable=bool(rule.get("stackable")),
+        categories=_frozen(rule.get("trigger_categories") or rule.get("categories")),
+        product_ids=_frozen(rule.get("product_ids")),
+        min_units=int(rule.get("min_qty") or rule.get("min_units") or 1),
+        label=str(rule.get("name") or ""),
+        min_cart_value=(
+            float(rule["min_cart_value"])
+            if rule.get("min_cart_value") is not None
+            else (
+                float(rule["min_order_value"])
+                if rule.get("min_order_value") is not None
+                else None
+            )
+        ),
+        buy_quantity=int(rule.get("buy_quantity") or rule.get("min_qty") or 1),
+        get_quantity=int(rule.get("get_quantity") or 1),
+        combo_groups=combo_tuple,
+        max_discount_amount=(
+            float(rule["max_discount_amount"])
+            if rule.get("max_discount_amount") is not None
+            else None
+        ),
+        customer_tiers=_frozen(rule.get("customer_tiers")),
+        first_purchase_only=bool(rule.get("first_purchase_only")),
+    )
+
+
+def _customer_passes(promo: Promo, customer: Optional[Dict[str, object]]) -> bool:
+    """Optional CRM gate (tier / first-purchase). Fail-OPEN: a promo with no
+    customer conditions always passes; a condition with no customer to check also
+    passes (the engine never blocks a sale on missing CRM)."""
+    if promo.customer_tiers:
+        if customer:
+            tier = _norm(
+                str(customer.get("loyalty_tier") or customer.get("tier") or "")
+            )
+            allowed = {_norm(t) for t in promo.customer_tiers}
+            if tier and tier not in allowed:
+                return False
+    if promo.first_purchase_only and customer:
+        orders = customer.get("total_orders")
+        try:
+            if orders is not None and int(orders) > 0:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+def _clamp_to_caps(
+    lines: List[CartLine], result: PromoResult
+) -> Tuple[float, Dict[str, float]]:
+    """Clamp the engine's per-line allocation of the total promo discount so NO
+    line is discounted beyond its category / luxury-brand cap (pricing_caps).
+    Returns (capped_total, per_line_capped_discount).
+
+    The pure engine already clamps the cart total to the subtotal but does not
+    know category/brand caps. This is the F11/F12 OUTER hardlock: the supreme
+    authority a promo can never breach (DECISIONS + F11 business rules)."""
+    per_line = allocate_discount(lines, result.total_discount)
+    capped: Dict[str, float] = {}
+    total = 0.0
+    by_id = {ln.line_id: ln for ln in lines}
+    for line_id, disc in per_line.items():
+        ln = by_id.get(line_id)
+        if ln is None or disc <= 0:
+            capped[line_id] = 0.0
+            continue
+        line_value = _safe_price(ln.unit_price) * max(0, int(ln.quantity))
+        cap_pct = effective_discount_cap(
+            ln.discount_category or ln.category, ln.brand
+        )
+        max_disc = round(line_value * cap_pct / 100.0, 2)
+        allowed = min(disc, max_disc)
+        capped[line_id] = round(allowed, 2)
+        total += allowed
+    return round(total, 2), capped
+
+
+def evaluate_promos(
+    cart: Dict[str, object],
+    customer: Optional[Dict[str, object]] = None,
+    store: Optional[Dict[str, object]] = None,
+    rules: Optional[List[Dict[str, object]]] = None,
+) -> Dict[str, object]:
+    """High-level F11/F12 entrypoint: evaluate persisted promo-rule docs against
+    a POS cart and return the BEST applicable outcome, with the discount clamped
+    to the category/luxury caps.
+
+    Args:
+        cart:     {"items": [ {product_id, brand, item_type, discount_category,
+                  quantity, unit_price, cost_at_sale, ...}, ... ]}.
+        customer: optional customer doc (tier / first-purchase gating; fail-open).
+        store:    optional store doc (reserved; store filtering is done by the
+                  router before passing `rules`).
+        rules:    pre-filtered ACTIVE rule docs (the router owns the DB read +
+                  store/date/active filtering so the engine stays pure).
+
+    Returns a JSON-safe dict:
+        {
+          "applied": bool,
+          "total_discount": float,            # cap-clamped rupee total
+          "raw_total_discount": float,        # pre-cap engine total (for audit)
+          "fired": [promo_id, ...],
+          "suppressed": [promo_id, ...],
+          "exclusive_winner": promo_id | None,
+          "breakdown": {promo_id: rupees},    # pre-cap per-promo (for the tally)
+          "per_line_discount": {line_id: rupees},  # cap-clamped, paisa-exact
+          "evaluated_count": int,
+          "names": {promo_id: name},
+        }
+
+    When no rule applies (or `rules` is empty / flag-off path), ``applied`` is
+    False and every amount is 0.0 -- order totals are then byte-identical to the
+    no-engine path. Pure + fail-soft: never raises.
+    """
+    empty = {
+        "applied": False,
+        "total_discount": 0.0,
+        "raw_total_discount": 0.0,
+        "fired": [],
+        "suppressed": [],
+        "exclusive_winner": None,
+        "breakdown": {},
+        "per_line_discount": {},
+        "evaluated_count": 0,
+        "names": {},
+    }
+    try:
+        items = (cart or {}).get("items") or []
+        if not isinstance(items, list) or not items:
+            return empty
+        rule_list = rules or []
+        empty["evaluated_count"] = len(rule_list)
+        if not rule_list:
+            return empty
+
+        lines = [cart_line_from_item(it, i) for i, it in enumerate(items)]
+        names: Dict[str, str] = {}
+        promos: List[Promo] = []
+        for rule in rule_list:
+            p = promo_from_rule(rule)
+            if p is None:
+                continue
+            if not _customer_passes(p, customer):
+                continue
+            names[p.promo_id] = p.label or p.promo_id
+            promos.append(p)
+        if not promos:
+            return {**empty, "evaluated_count": len(rule_list)}
+
+        result = evaluate_cart(lines, promos)
+        if result.total_discount <= 0:
+            return {**empty, "evaluated_count": len(rule_list), "names": names}
+
+        capped_total, per_line = _clamp_to_caps(lines, result)
+        return {
+            "applied": capped_total > 0,
+            "total_discount": capped_total,
+            "raw_total_discount": result.total_discount,
+            "fired": list(result.applied),
+            "suppressed": list(result.suppressed),
+            "exclusive_winner": result.exclusive_winner,
+            "breakdown": dict(result.breakdown),
+            "per_line_discount": per_line,
+            "evaluated_count": len(rule_list),
+            "names": names,
+        }
+    except Exception:  # noqa: BLE001 - engine is fail-soft, never blocks a sale
+        return empty
+
+
+def estimate_margin_impact(
+    cart: Dict[str, object], evaluation: Dict[str, object]
+) -> Dict[str, object]:
+    """Best-effort margin impact of an evaluation for the audit row + Offer
+    Tally. COGS is read from each line's cost_at_sale when present; else
+    ESTIMATED at 60% of the pre-promo line value (the same fallback finance
+    uses) and flagged cogs_is_estimated=True so the dashboard never presents
+    estimated margin as real. Pure; never raises."""
+    try:
+        items = (cart or {}).get("items") or []
+        total_discount = _safe_price(evaluation.get("total_discount"))
+        est_cogs = 0.0
+        cogs_estimated = False
+        for it in items:
+            qty = int(it.get("quantity") or 0) if isinstance(
+                it.get("quantity"), (int, float)
+            ) else 0
+            cost = it.get("cost_at_sale")
+            if cost is not None and _safe_price(cost) > 0:
+                est_cogs += _safe_price(cost) * qty
+            else:
+                est_cogs += _safe_price(it.get("unit_price")) * 0.60 * qty
+                cogs_estimated = True
+        return {
+            "total_discount_given": round(total_discount, 2),
+            "estimated_cogs": round(est_cogs, 2),
+            # The promo's marginal P&L effect is the giveaway itself.
+            "net_margin_after_promo": round(-total_discount, 2),
+            "cogs_is_estimated": cogs_estimated,
+        }
+    except Exception:  # noqa: BLE001
+        return {
+            "total_discount_given": 0.0,
+            "estimated_cogs": 0.0,
+            "net_margin_after_promo": 0.0,
+            "cogs_is_estimated": True,
+        }

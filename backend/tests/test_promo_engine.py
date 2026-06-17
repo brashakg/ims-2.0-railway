@@ -263,3 +263,231 @@ def test_allocate_discount_never_exceeds_line_value():
     lines = [_line("a", 100)]
     alloc = pe.allocate_discount(lines, 999.0)
     assert alloc["a"] == 100.0
+
+
+# ===========================================================================
+# F11 / F12 high-level layer: evaluate_promos(cart, customer, store, rules)
+# ===========================================================================
+# Best-promo selection across the new rule types, the OUTER cap clamp
+# (category/luxury), EXCLUSIVE-by-default stacking, and the margin estimator.
+
+
+def _item(pid, price, qty=1, brand=None, item_type=None, disc_cat="MASS",
+          cost=None):
+    return {
+        "product_id": pid,
+        "item_id": pid,
+        "brand": brand,
+        "item_type": item_type,
+        "discount_category": disc_cat,
+        "quantity": qty,
+        "unit_price": float(price),
+        "cost_at_sale": cost,
+    }
+
+
+# --- THRESHOLD ------------------------------------------------------------
+
+
+def test_evaluate_threshold_fires_above_min_cart():
+    cart = {"items": [_item("a", 1000)]}
+    rule = {
+        "promo_id": "T1", "name": "Spend 500 get 10%", "promo_type": "THRESHOLD",
+        "reward_value": 10, "min_cart_value": 500,
+    }
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    assert out["applied"] is True
+    assert out["total_discount"] == 100.0  # 10% of 1000
+    assert out["fired"] == ["T1"]
+
+
+def test_evaluate_threshold_below_min_does_not_fire():
+    cart = {"items": [_item("a", 300)]}
+    rule = {
+        "promo_id": "T1", "name": "Spend 500 get 10%", "promo_type": "THRESHOLD",
+        "reward_value": 10, "min_cart_value": 500,
+    }
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    assert out["applied"] is False
+    assert out["total_discount"] == 0.0
+
+
+# --- BOGO -----------------------------------------------------------------
+
+
+def test_evaluate_bogo_raw_engine_picks_cheapest_unit():
+    # The pure core (evaluate_cart) computes the RAW BOGO discount: buy 1 get 1
+    # free on 2 frames at 2000 + 1000 -> the cheapest (1000) is free.
+    promo = pe.Promo(promo_id="B1", kind=pe.PROMO_BOGO, percent=100,
+                     buy_quantity=1, get_quantity=1)
+    lines = [_line("a", 2000), _line("b", 1000)]
+    res = pe.evaluate_cart(lines, [promo])
+    assert res.total_discount == 1000.0  # cheaper unit free (pre-cap)
+
+
+def test_evaluate_bogo_is_clamped_to_category_cap():
+    # Through the F11/F12 layer the BOGO is clamped to the category cap (the
+    # OUTER hardlock): a "free" MASS frame can't exceed the 15% cap. This is the
+    # task's locked rule -- a promo NEVER breaches the category/luxury caps.
+    cart = {"items": [_item("a", 2000, item_type="FRAME", disc_cat="MASS"),
+                      _item("b", 1000, item_type="FRAME", disc_cat="MASS")]}
+    rule = {
+        "promo_id": "B1", "name": "BOGO frames", "promo_type": "BOGO",
+        "buy_quantity": 1, "get_quantity": 1, "reward_value": 100,
+    }
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    assert out["applied"] is True
+    # Raw 1000 free, but clamped: no line may be discounted beyond its 15% cap.
+    assert out["total_discount"] <= 0.15 * 3000 + 0.01
+    # Every per-line discount is within that line's cap.
+    for lid, disc in out["per_line_discount"].items():
+        # each MASS line value -> 15% ceiling
+        line_val = 2000 if lid == "a" else 1000
+        assert disc <= 0.15 * line_val + 0.01
+
+
+# --- COMBO (cross-category bundle) ----------------------------------------
+
+
+def test_evaluate_combo_requires_all_groups_present():
+    # Watch + Sunglass bundle: 10% off when BOTH categories are in the cart.
+    rule = {
+        "promo_id": "C1", "name": "Watch+Sunglass", "promo_type": "COMBO",
+        "reward_value": 10,
+        "combo_groups": [{"item_type": "WATCH"}, {"item_type": "SUNGLASS"}],
+    }
+    # Only a watch -> does NOT fire.
+    cart_one = {"items": [_item("w", 5000, item_type="WATCH", disc_cat="PREMIUM")]}
+    assert pe.evaluate_promos(cart_one, None, None, [rule])["applied"] is False
+    # Watch + Sunglass present -> fires, 10% off both (PREMIUM cap is 20% so OK).
+    cart_two = {"items": [
+        _item("w", 5000, item_type="WATCH", disc_cat="PREMIUM"),
+        _item("s", 3000, item_type="SUNGLASS", disc_cat="PREMIUM"),
+    ]}
+    out = pe.evaluate_promos(cart_two, None, None, [rule])
+    assert out["applied"] is True
+    assert out["total_discount"] == 800.0  # 10% of 8000
+
+
+# --- best-promo selection (EXCLUSIVE by default) --------------------------
+
+
+def test_evaluate_exclusive_only_best_fires():
+    cart = {"items": [_item("a", 1000)]}
+    r10 = {"promo_id": "P10", "name": "10", "promo_type": "PERCENT", "reward_value": 10}
+    r15 = {"promo_id": "P15", "name": "15", "promo_type": "PERCENT", "reward_value": 15}
+    out = pe.evaluate_promos(cart, None, None, [r10, r15])
+    # MASS cap is 15% -> 15% wins (150), 10% suppressed (single best fires).
+    assert out["total_discount"] == 150.0
+    assert out["fired"] == ["P15"]
+    assert "P10" in out["suppressed"]
+
+
+def test_evaluate_stackable_combines_when_opted_in():
+    cart = {"items": [_item("a", 1000)]}
+    s1 = {"promo_id": "S1", "name": "s1", "promo_type": "PERCENT",
+          "reward_value": 5, "stackable": True}
+    s2 = {"promo_id": "S2", "name": "s2", "promo_type": "PERCENT",
+          "reward_value": 8, "stackable": True}
+    out = pe.evaluate_promos(cart, None, None, [s1, s2])
+    # 5% + 8% = 13% of 1000 = 130 (both stack; under the 15% MASS cap).
+    assert out["total_discount"] == 130.0
+    assert set(out["fired"]) == {"S1", "S2"}
+
+
+# --- the OUTER cap clamp (category + luxury) ------------------------------
+
+
+def test_evaluate_clamps_to_category_cap():
+    # A LUXURY line (cap 5%) with a 30% promo is clamped to 5%.
+    cart = {"items": [_item("a", 10000, disc_cat="LUXURY")]}
+    rule = {"promo_id": "P", "name": "big", "promo_type": "PERCENT", "reward_value": 30}
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    assert out["total_discount"] == 500.0  # 5% of 10000, not 30%
+
+
+def test_evaluate_clamps_to_luxury_brand_cap():
+    # Cartier (brand cap 2%) overrides even the LUXURY 5% category cap.
+    cart = {"items": [_item("a", 10000, brand="Cartier", disc_cat="LUXURY")]}
+    rule = {"promo_id": "P", "name": "big", "promo_type": "PERCENT", "reward_value": 30}
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    assert out["total_discount"] == 200.0  # 2% of 10000
+
+
+def test_evaluate_non_discountable_clamps_to_zero():
+    cart = {"items": [_item("a", 10000, disc_cat="NON_DISCOUNTABLE")]}
+    rule = {"promo_id": "P", "name": "big", "promo_type": "PERCENT", "reward_value": 30}
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    assert out["total_discount"] == 0.0
+    assert out["applied"] is False
+
+
+def test_evaluate_max_discount_amount_ceiling():
+    cart = {"items": [_item("a", 10000, disc_cat="PREMIUM")]}  # cap 20%
+    rule = {"promo_id": "P", "name": "big", "promo_type": "PERCENT",
+            "reward_value": 20, "max_discount_amount": 500}
+    out = pe.evaluate_promos(cart, None, None, [rule])
+    # 20% of 10000 = 2000, but capped at the 500 rupee ceiling.
+    assert out["total_discount"] == 500.0
+
+
+# --- empty / dark inputs --------------------------------------------------
+
+
+def test_evaluate_no_rules_is_noop():
+    cart = {"items": [_item("a", 1000)]}
+    out = pe.evaluate_promos(cart, None, None, [])
+    assert out["applied"] is False
+    assert out["total_discount"] == 0.0
+    assert out["per_line_discount"] == {}
+
+
+def test_evaluate_empty_cart_is_noop():
+    out = pe.evaluate_promos({"items": []}, None, None,
+                            [{"promo_id": "P", "promo_type": "PERCENT",
+                              "reward_value": 10, "name": "x"}])
+    assert out["applied"] is False
+    assert out["total_discount"] == 0.0
+
+
+def test_evaluate_unknown_promo_type_skipped():
+    cart = {"items": [_item("a", 1000)]}
+    out = pe.evaluate_promos(cart, None, None,
+                            [{"promo_id": "P", "promo_type": "MYSTERY",
+                              "reward_value": 50, "name": "x"}])
+    assert out["applied"] is False
+
+
+# --- customer gating (fail-open) ------------------------------------------
+
+
+def test_evaluate_first_purchase_only_excludes_returning_customer():
+    cart = {"items": [_item("a", 1000)]}
+    rule = {"promo_id": "P", "name": "welcome", "promo_type": "PERCENT",
+            "reward_value": 10, "first_purchase_only": True}
+    returning = {"total_orders": 5}
+    assert pe.evaluate_promos(cart, returning, None, [rule])["applied"] is False
+    new_cust = {"total_orders": 0}
+    assert pe.evaluate_promos(cart, new_cust, None, [rule])["applied"] is True
+
+
+# --- margin estimator -----------------------------------------------------
+
+
+def test_estimate_margin_uses_cost_when_present():
+    cart = {"items": [_item("a", 1000, cost=400)]}
+    rule = {"promo_id": "P", "name": "10", "promo_type": "PERCENT", "reward_value": 10}
+    ev = pe.evaluate_promos(cart, None, None, [rule])
+    m = pe.estimate_margin_impact(cart, ev)
+    assert m["estimated_cogs"] == 400.0
+    assert m["cogs_is_estimated"] is False
+    assert m["total_discount_given"] == 100.0
+
+
+def test_estimate_margin_flags_estimated_cogs():
+    cart = {"items": [_item("a", 1000)]}  # no cost_at_sale
+    rule = {"promo_id": "P", "name": "10", "promo_type": "PERCENT", "reward_value": 10}
+    ev = pe.evaluate_promos(cart, None, None, [rule])
+    m = pe.estimate_margin_impact(cart, ev)
+    assert m["cogs_is_estimated"] is True
+    assert m["estimated_cogs"] == 600.0  # 60% fallback

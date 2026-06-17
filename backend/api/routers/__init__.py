@@ -74,6 +74,7 @@ from .vendor_portal import router as vendor_portal_router
 from .portal import router as portal_router
 from .techcherry_import import router as techcherry_import_router
 from .vouchers import router as vouchers_router
+from .promotions import router as promotions_router
 from .entities import router as entities_router
 from .notifications import router as notifications_router
 from .shipping import router as shipping_router
@@ -171,6 +172,7 @@ __all__ = [
     "portal_router",
     "techcherry_import_router",
     "vouchers_router",
+    "promotions_router",
     "entities_router",
     "notifications_router",
     "shipping_router",

@@ -84,6 +84,21 @@ export type { PolicySpecPublic, PolicyEffective } from './settings';
 // Marketing Automation
 export { marketingApi } from './marketing';
 
+// Promotions (F11 advanced promotions + F12 cross-category bundling, dark-gated)
+export { promotionsApi } from './promotions';
+export type {
+  PromoType,
+  ComboGroup,
+  PromoRule,
+  PromoRuleCreate,
+  PromoRuleUpdate,
+  EvaluateItem,
+  EvaluateResponse,
+  PromoEvaluation,
+  PromoReport,
+  PromoReportRow,
+} from './promotions';
+
 // Configurable Reminders (F46 / Engine E6) — config only, send-dark
 export { remindersApi } from './reminders';
 export type {

@@ -1659,6 +1659,61 @@ async def create_order(
                     f"maximum {cart_cap}% allowed for these items "
                     f"(role + category/brand caps). Contact a manager for approval.",
                 )
+
+        # ============================================================
+        # F11/F12 ADVANCED PROMOTIONS + CROSS-CATEGORY BUNDLING (DARK)
+        # ------------------------------------------------------------
+        # Gated by PROMO_ENGINE_ENABLED (default OFF). When OFF this block is a
+        # COMPLETE no-op: `applied_promos` stays [] and items_data is untouched,
+        # so the GST + grand_total math below is byte-identical to the pre-promo
+        # path (asserted by test_promo_engine dark-by-default). When ON, the
+        # pure engine (services/promo_engine.evaluate_promos) picks the single
+        # best promo (EXCLUSIVE by default; a campaign may opt into stacking),
+        # NEVER breaches the category/luxury caps (the engine clamps), and the
+        # resulting per-line rupee discount reduces each line's item_total before
+        # GST. The atomic uses_count guard + promo_applications audit row are
+        # written by promotions.commit_promo_application AFTER the order persists.
+        # Fully fail-soft: any promo error logs + skips -- a promo can NEVER
+        # block or alter the sale beyond the discount it grants.
+        applied_promos: List[Dict[str, Any]] = []
+        promo_total_discount = 0.0
+        promo_evaluation: Optional[Dict[str, Any]] = None
+        try:
+            from .promotions import promo_engine_enabled, evaluate_for_order
+
+            if promo_engine_enabled() and db is not None:
+                # PURE evaluate (no DB writes yet) so the per-line discount can be
+                # folded into the GST math; the atomic uses_count $inc +
+                # promo_applications audit row are committed AFTER the order
+                # persists (commit_promo_application below, with the real order_id).
+                promo_evaluation = evaluate_for_order(
+                    db,
+                    store_id=store_id,
+                    customer_id=order.customer_id,
+                    items=items_data,
+                    customer=customer,
+                )
+                if promo_evaluation and promo_evaluation.get("applied"):
+                    promo_per_line = promo_evaluation.get("per_line_discount") or {}
+                    applied_promos = promo_evaluation.get("applied_promos") or []
+                    # Apply the per-line discount to each line's all-in total. The
+                    # engine already clamped each share to that line's category/
+                    # luxury cap, so this can never breach a hardlock.
+                    for _line in items_data:
+                        _lid = str(_line.get("item_id") or "")
+                        _pd = float(promo_per_line.get(_lid, 0.0) or 0.0)
+                        if _pd > 0:
+                            _new_total = max(
+                                0.0, float(_line.get("item_total") or 0.0) - _pd
+                            )
+                            _line["promo_discount_amount"] = round(_pd, 2)
+                            _line["item_total"] = round(_new_total, 2)
+                            promo_total_discount += _pd
+                    promo_total_discount = round(promo_total_discount, 2)
+        except Exception as _promo_exc:  # noqa: BLE001 - promos never block a sale
+            logger.warning("[PROMO] order-create evaluation skipped: %s", _promo_exc)
+            applied_promos, promo_total_discount, promo_evaluation = [], 0.0, None
+
         gst = _compute_per_category_gst(items_data, cart_discount_percent)
         taxable_after_cart_discount = gst["taxable"]
         tax_amount = gst["tax"]
@@ -1894,6 +1949,11 @@ async def create_order(
             # order view can surface a Rs 0 sale and who approved it).
             "zero_total": bool(is_zero_total),
             "zero_total_approved_by": zero_total_approved_by,
+            # F11/F12: promos that fired on this order (empty [] when the engine
+            # is dark or nothing matched -- the dark-default path). Surfaced on
+            # the order view, the Tally JV, and the Offer Tally report.
+            "applied_promos": applied_promos,
+            "promo_discount_total": round(promo_total_discount, 2),
             # C-5 (DELTA 3): the request's Idempotency-Key (None when absent).
             # A repeat POST with the same key returns this order rather than
             # creating a duplicate (store-scoped lookup at the top of create).
@@ -2013,6 +2073,32 @@ async def create_order(
                 writeback_after_sale(None, items_data, store_id)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[STOCK] online write-back skipped: %s", exc)
+
+            # F11/F12: commit the promo application AFTER the order persists --
+            # atomically $inc each fired promo's uses_count (guarded
+            # find_one_and_update; concurrent terminals can't overshoot) and write
+            # the immutable promo_applications audit row with the real order_id +
+            # margin estimate. Fully fail-soft: any error logs + skips; the order
+            # is already saved with applied_promos stamped, so the audit is
+            # best-effort and never blocks the sale. No-op when nothing fired.
+            if applied_promos and promo_evaluation is not None:
+                try:
+                    from .promotions import commit_promo_application
+
+                    commit_promo_application(
+                        db,
+                        order_id=created_order_id,
+                        order_number=created.get("order_number") or "",
+                        store_id=store_id,
+                        customer_id=order.customer_id,
+                        cashier_id=current_user.get("user_id"),
+                        items=items_data,
+                        # commit reads the RAW engine dict (fired/breakdown/...),
+                        # which evaluate_for_order nests under "evaluation".
+                        evaluation=(promo_evaluation or {}).get("evaluation") or {},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[PROMO] commit skipped: %s", exc)
 
             # Pune-incentive walk-in counter (Module i, Phase 4): bump
             # the per-store-per-day counter, dedup'd by mobile.

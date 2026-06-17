@@ -4125,6 +4125,67 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
         "store_scoped": True,
     },
+    # --- /api/v1/promotions (F11/F12 advanced promotions + bundling engine) ---
+    # WRITE (create/update/deactivate): ADMIN/SUPERADMIN + CATALOG_MANAGER (pricing
+    # visibility) + AREA/STORE managers (store-scoped inside the handler).
+    # READ + the pure /evaluate preview: the write roles plus ACCOUNTANT (margin)
+    # and the POS staff who see what applied. uses_count is never client-settable.
+    {
+        "method": "GET",
+        "path": "/api/v1/promotions",
+        "allowed": [
+            "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER",
+            "ACCOUNTANT", "SALES_CASHIER", "SALES_STAFF", "CASHIER",
+        ],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/promotions/",
+        "allowed": [
+            "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER",
+            "ACCOUNTANT", "SALES_CASHIER", "SALES_STAFF", "CASHIER",
+        ],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/promotions",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/promotions/",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/promotions/evaluate",
+        "allowed": [
+            "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER",
+            "ACCOUNTANT", "SALES_CASHIER", "SALES_STAFF", "CASHIER",
+        ],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/promotions/{promo_id}",
+        "allowed": [
+            "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER",
+            "ACCOUNTANT", "SALES_CASHIER", "SALES_STAFF", "CASHIER",
+        ],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/promotions/{promo_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/promotions/{promo_id}",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+        "store_scoped": True,
+    },
     # CRM-15: WhatsApp opt-in / opt-out STOP ledger.
     # Any authenticated staff can record a consent event (staff relay verbal
     # opt-out from customers).  The full audit ledger is ADMIN-only (compliance).
@@ -5076,6 +5137,12 @@ POLICY: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/reports/hr/attendance",
         "allowed": "AUTHENTICATED",
+    },
+    # F11 Offer Tally / promotions report (finance-sensitive margin data).
+    {
+        "method": "GET",
+        "path": "/api/v1/reports/promotions",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     {"method": "GET", "path": "/api/v1/reports/inventory", "allowed": "AUTHENTICATED"},
     {
