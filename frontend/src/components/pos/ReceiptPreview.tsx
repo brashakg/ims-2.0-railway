@@ -22,11 +22,15 @@ interface ReceiptPreviewProps {
   selectedCustomer: any;
   cartItems: any[];
   onClose: () => void;
-  storeData?: { name?: string; address?: string; phone?: string; gst?: string; stateCode?: string };
+  /** Identity of the ISSUING store (resolved from the order's store_id by the
+   *  caller). `name` is the store/trade name, `gst` its own GSTIN. `logo` is an
+   *  optional per-store/brand logo URL. NEVER defaulted to a fixed brand name --
+   *  a missing name shows the store code (or blank), never another store's brand. */
+  storeData?: { name?: string; address?: string; phone?: string; gst?: string; stateCode?: string; logo?: string };
   /** Per-entity content overrides surfaced from the editor. */
   overrides?: OverrideFields | null;
-  /** Entity trade name override (e.g. "Better Vision") -- thermal can only
-   *  fit a short name; defaults to storeData.name. */
+  /** Entity trade name override (e.g. the legal entity's trade name) -- thermal
+   *  can only fit a short name; defaults to storeData.name. */
   entityTradeName?: string;
 }
 
@@ -42,11 +46,16 @@ export function ReceiptPreview({
   entityTradeName,
 }: ReceiptPreviewProps) {
   const [format, setFormat] = useState<ReceiptFormat>('thermal');
+  // Identity is the ISSUING store's, passed by the caller from the order's
+  // store_id. We NEVER substitute a fixed brand name here -- mislabeling a
+  // WizOpt sale as "Better Vision" (or vice-versa) would be a statutory error.
+  // The only neutral fallback is the bill's own store code, else blank.
   const storeInfo = {
-    name: storeData?.name || 'Better Vision Opticals',
+    name: storeData?.name || billData?.store_code || '',
     address: storeData?.address || '',
     phone: storeData?.phone || '',
     gst: storeData?.gst || '',
+    logo: storeData?.logo || overrides?.logo_url || '',
   };
   const tradeName = entityTradeName || overrides?.header_subtitle || storeInfo.name;
   const subtitle = overrides?.header_subtitle || '';
@@ -132,7 +141,14 @@ export function ReceiptPreview({
             >
               {/* Compact statutory header */}
               <div style={{ textAlign: 'center', borderBottom: '1px solid #1a1a19', paddingBottom: 6 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.01em' }}>{tradeName.toUpperCase()}</div>
+                {storeInfo.logo && (
+                  <img
+                    src={storeInfo.logo}
+                    alt=""
+                    style={{ maxHeight: 36, maxWidth: '70%', objectFit: 'contain', margin: '0 auto 4px', display: 'block' }}
+                  />
+                )}
+                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.01em' }}>{(tradeName || '').toUpperCase()}</div>
                 {subtitle && <div style={{ fontSize: 9, color: '#4a4a45', letterSpacing: '.08em', textTransform: 'uppercase' }}>{subtitle}</div>}
                 <div style={{ fontSize: 9, color: '#4a4a45', marginTop: 2 }}>{storeInfo.address}</div>
                 {storeInfo.phone && <div style={{ fontSize: 9, color: '#4a4a45' }}>{storeInfo.phone}</div>}
@@ -256,6 +272,9 @@ export function ReceiptPreview({
             <div className="bg-white text-black p-8 rounded border-2 border-gray-300 space-y-4">
               <div className="grid grid-cols-2 gap-8 pb-4 border-b-2 border-black">
                 <div>
+                  {storeInfo.logo && (
+                    <img src={storeInfo.logo} alt="" className="mb-2 max-h-12 object-contain" />
+                  )}
                   <h1 className="text-2xl font-bold">{storeInfo.name}</h1>
                   <p className="text-sm text-gray-600">{storeInfo.address}</p>
                   <p className="text-sm text-gray-600">Phone: {storeInfo.phone}</p>

@@ -23,7 +23,7 @@ import {
   CheckCheck,
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
-import { orderApi } from '../../services/api';
+import { orderApi, storeApi } from '../../services/api';
 // Direct import: barrel re-export can fail to resolve for newly added modules.
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
@@ -239,21 +239,50 @@ export function OrdersPage() {
     }
   };
 
-  const printOrder = (order: Order) => {
+  const printOrder = async (order: Order) => {
+    // Resolve the ISSUING store's identity for the invoice header from the
+    // ORDER's own store_id (fail-soft) -- never a hardcoded brand, which would
+    // mislabel an order placed at a different store/brand. The store carries
+    // its own GSTIN (single source of truth), so the printed tax invoice shows
+    // the correct registration.
+    const escHtml = (v: unknown) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    let storeName = '';
+    let storeAddr = '';
+    let storeGstin = '';
+    const orderStoreId = (order as any).storeId || (order as any).store_id || user?.activeStoreId;
+    if (orderStoreId) {
+      try {
+        const s: any = await storeApi.getStore(orderStoreId);
+        if (s) {
+          storeName = s.store_name || s.storeName || s.name || '';
+          storeAddr = [s.address || s.address_line_1 || s.street, s.city, s.state || s.state_name, s.pincode]
+            .filter(Boolean)
+            .join(', ');
+          storeGstin = s.gstin || '';
+        }
+      } catch {
+        /* fail-soft: print with whatever identity we have, never a fixed brand */
+      }
+    }
+    const headerName = storeName || 'Tax Invoice';
     const items = (order.items || []).map((item: any, i: number) =>
-      `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
+      `<tr><td>${i + 1}</td><td>${escHtml(item.productName || item.product_name || item.name || 'Item')}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
     ).join('');
     const payments = (order.payments || []).map((p: any) =>
-      `<div>${p.mode || p.method}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${p.reference})` : ''}</div>`
+      `<div>${escHtml(p.mode || p.method)}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${escHtml(p.reference)})` : ''}</div>`
     ).join('');
-    const html = `<!DOCTYPE html><html><head><title>Invoice ${order.orderNumber || 'N/A'}</title>
+    const html = `<!DOCTYPE html><html><head><title>Invoice ${escHtml(order.orderNumber || 'N/A')}</title>
       <style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto}
       table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left}
       th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
       .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button,.no-print{display:none}}</style></head><body>
-      <div class="header"><h2>Better Vision Opticals</h2><p>Tax Invoice</p></div>
-      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
-      <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
+      <div class="header"><h2>${escHtml(headerName)}</h2>${storeAddr ? `<p style="color:#666;font-size:12px;margin:2px 0">${escHtml(storeAddr)}</p>` : ''}${storeGstin ? `<p style="color:#666;font-size:12px;margin:2px 0">GSTIN: ${escHtml(storeGstin)}</p>` : ''}<p>Tax Invoice</p></div>
+      <div class="row"><div><strong>Invoice:</strong> ${escHtml(order.orderNumber || 'N/A')}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
+      <div class="row"><div><strong>Customer:</strong> ${escHtml(order.customerName || 'Walk-in')}</div><div><strong>Phone:</strong> ${escHtml(order.customerPhone || '-')}</div></div>
       <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
       <div style="text-align:right;margin-top:10px">
       <div class="row"><span>Subtotal:</span><span>₹${Math.round(order.subtotal || 0).toLocaleString('en-IN')}</span></div>
@@ -264,7 +293,7 @@ export function OrdersPage() {
       ${(order.balanceDue || 0) > 0 ? `<div class="row" style="color:red"><span>Balance Due:</span><span>₹${Math.round(order.balanceDue).toLocaleString('en-IN')}</span></div>` : ''}
       </div>
       ${payments ? `<div style="margin-top:15px"><strong>Payments:</strong>${payments}</div>` : ''}
-      <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you for shopping with Better Vision Opticals</div>
+      <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you${storeName ? ' for shopping with ' + escHtml(storeName) : ' for your business'}</div>
       <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#b3122b;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
       </body></html>`;
 

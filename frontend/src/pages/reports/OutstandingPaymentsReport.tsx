@@ -3,7 +3,7 @@
 // ============================================================================
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { orderApi } from '../../services/api';
+import { orderApi, storeApi } from '../../services/api';
 import {
   IndianRupee, Phone,
   ChevronDown, ChevronUp, Printer, Search,
@@ -35,8 +35,28 @@ export default function OutstandingPaymentsReport() {
   const [sortBy, setSortBy] = useState<'amount' | 'age' | 'name'>('amount');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedBucket, setSelectedBucket] = useState<AgeBucket | 'ALL'>('ALL');
+  // Issuing store name for the printed report header (this report is scoped to
+  // the active store) -- never a hardcoded brand.
+  const [storeName, setStoreName] = useState('');
 
   useEffect(() => { loadOutstanding(); }, []);
+
+  useEffect(() => {
+    const storeId = user?.activeStoreId;
+    if (!storeId) return;
+    let cancelled = false;
+    storeApi
+      .getStore(storeId)
+      .then((s: any) => {
+        if (!cancelled && s) setStoreName(s.store_name || s.storeName || s.name || '');
+      })
+      .catch(() => {
+        /* fail-soft: header falls back to a neutral title */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.activeStoreId]);
 
   const loadOutstanding = async () => {
     setIsLoading(true);
@@ -152,7 +172,7 @@ export default function OutstandingPaymentsReport() {
 
       {/* Print header */}
       <div className="hidden print:block text-center mb-4">
-        <h2 className="text-lg font-bold">Better Vision Opticals — Outstanding Payments Report</h2>
+        <h2 className="text-lg font-bold">{storeName ? `${storeName} — ` : ''}Outstanding Payments Report</h2>
         <p className="text-sm text-gray-600">{new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}</p>
       </div>
 

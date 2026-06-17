@@ -2,7 +2,7 @@
 // IMS 2.0 - Purchase Order Detail Modal
 // ============================================================================
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   FileText,
   CheckCircle,
@@ -14,6 +14,8 @@ import {
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
 import { POPrint } from '../../components/print/POPrint';
+import { useAuth } from '../../context/AuthContext';
+import { storeApi } from '../../services/api';
 
 interface PurchaseOrderDetailProps {
   po: PurchaseOrder;
@@ -23,19 +25,47 @@ interface PurchaseOrderDetailProps {
 
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
   const [showPrint, setShowPrint] = useState(false);
+  const { user } = useAuth();
 
-  // Build the minimal StoreInfo shape POPrint needs.
-  // storeName is not on the User JWT shape; use the user's name or a fallback.
-  // Full store address can be wired once a store-detail fetch is available.
-  const storeInfo = {
-    storeName: 'Better Vision Opticals',
+  // Resolve the ISSUING store's identity for the PO header. The PO is raised
+  // within the user's store scope (POs are store-scoped on the backend), so we
+  // load that store's real name/address/GSTIN -- never a hardcoded brand, which
+  // would mislabel a PO raised by a different store/brand.
+  const [storeInfo, setStoreInfo] = useState({
+    storeName: '',
     address: '',
     city: '',
     state: '',
     pincode: '',
     phone: undefined as string | undefined,
     gstin: undefined as string | undefined,
-  };
+  });
+
+  useEffect(() => {
+    const storeId = (po as any).storeId || (po as any).store_id || user?.activeStoreId;
+    if (!storeId) return;
+    let cancelled = false;
+    storeApi
+      .getStore(storeId)
+      .then((s: any) => {
+        if (cancelled || !s) return;
+        setStoreInfo({
+          storeName: s.store_name || s.storeName || s.name || '',
+          address: s.address || s.address_line_1 || s.street || '',
+          city: s.city || '',
+          state: s.state || s.state_name || '',
+          pincode: s.pincode || '',
+          phone: s.phone || undefined,
+          gstin: s.gstin || undefined,
+        });
+      })
+      .catch(() => {
+        /* fail-soft: POPrint renders whatever store identity is available */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [po, user?.activeStoreId]);
 
   // Build the POPrintData shape from the PurchaseOrder.
   const poPrintData = {

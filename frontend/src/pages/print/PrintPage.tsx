@@ -363,8 +363,12 @@ export default function PrintPage() {
                 <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-4)', marginTop: 4 }}>{sel.sub.toUpperCase()}</div>
               </div>
               <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--ink-3)' }}>
-                <div>Better Vision Opticals</div>
-                <div>GSTIN: 07AABCB1234M1Z5</div>
+                {/* Placeholder only -- the real print pulls the ISSUING store's
+                    name + GSTIN from the document's store at print time. We show
+                    neutral placeholders here, not a fixed brand/GSTIN, so this
+                    index never implies one store's identity for every doc. */}
+                <div>{'{{ store.legal_name }}'}</div>
+                <div>GSTIN: {'{{ store.gstin }}'}</div>
                 <div>tpl.{sel.id}.v3</div>
               </div>
             </div>

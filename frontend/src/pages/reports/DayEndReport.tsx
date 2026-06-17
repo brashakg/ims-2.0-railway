@@ -4,7 +4,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { orderApi, reportsApi } from '../../services/api';
+import { orderApi, reportsApi, storeApi } from '../../services/api';
 import type { DayEndClose } from '../../services/api/reports';
 import {
   IndianRupee, CreditCard, Phone, FileText,
@@ -46,12 +46,31 @@ export default function DayEndReport() {
   const [isClosing, setIsClosing] = useState(false);
 
   const storeId = user?.activeStoreId || user?.storeIds?.[0] || '';
+  // Issuing store name for the printed Z-report header -- resolved from the
+  // report's own store, never a hardcoded brand.
+  const [storeName, setStoreName] = useState('');
 
   useEffect(() => {
     loadDayOrders();
     loadCloseStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportDate, storeId]);
+
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    storeApi
+      .getStore(storeId)
+      .then((s: any) => {
+        if (!cancelled && s) setStoreName(s.store_name || s.storeName || s.name || '');
+      })
+      .catch(() => {
+        /* fail-soft: header falls back to a neutral title */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storeId]);
 
   const loadDayOrders = async () => {
     setIsLoading(true);
@@ -200,7 +219,7 @@ export default function DayEndReport() {
 
       {/* Print header */}
       <div className="hidden print:block text-center mb-6">
-        <h2 className="text-lg font-bold">Better Vision Opticals — Day-End Report</h2>
+        <h2 className="text-lg font-bold">{storeName ? `${storeName} — ` : ''}Day-End Report</h2>
         <p className="text-sm text-gray-600">{new Date(reportDate).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}</p>
       </div>
 

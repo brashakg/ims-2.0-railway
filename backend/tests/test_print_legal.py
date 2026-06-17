@@ -580,3 +580,104 @@ def test_staff_header_fail_soft_on_empty_inputs():
     assert isinstance(out, dict)
     assert out["trade_name"] == ""
     assert out["branch_label"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Store-specific printouts: two distinct stores/entities -> two distinct
+# headers (legal_name, GSTIN, store_name). Proves a printout is keyed off the
+# DOCUMENT's store/entity, and that no hardcoded brand name is ever substituted.
+# ---------------------------------------------------------------------------
+
+
+def _entity_b_fixture():
+    """A SECOND, different legal entity (different brand) -- never-shipped fixture."""
+    return {
+        "name": "WizOpt Vision",
+        "legal_name": "WizOpt Vision LLP",
+        "pan": "AABFW5678B",
+        "cin": "AAB-5678",
+        "registered_address": "12 MG Road, Mumbai 400001",
+        "registered_phone": "+91 22 555 0000",
+        "registered_email": "ops@wizopt.test",
+        "website": "wizopt.test",
+        "logo_url": "https://cdn.example.test/wizopt-logo.png",
+        "gstins": [
+            {
+                "gstin": "27AABFW5678B1Z2",
+                "state_code": "27",
+                "state_name": "Maharashtra",
+                "is_primary": True,
+            },
+        ],
+    }
+
+
+def _store_b_fixture():
+    return {
+        "name": "WizOpt Andheri West",
+        "store_code": "WO-AND-01",
+        "address": "Unit 3, Link Road",
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "state_code": "27",
+        "pincode": "400053",
+        "phone": "+91 22 123 9999",
+        "email": "andheri@wizopt.test",
+    }
+
+
+def test_legal_header_two_stores_two_distinct_identities():
+    """A printout for store A must carry A's identity; for store B, B's --
+    different legal_name, GSTIN, and store_name. This is the core guarantee of
+    store-specific printouts."""
+    a = LegalHeader(_entity_fixture(), _store_fixture(), doc_type="tax_invoice")
+    b = LegalHeader(_entity_b_fixture(), _store_b_fixture(), doc_type="tax_invoice")
+
+    # Legal identity differs.
+    assert a["legal_name"] == "Acme Optical Private Limited"
+    assert b["legal_name"] == "WizOpt Vision LLP"
+    assert a["legal_name"] != b["legal_name"]
+
+    # The issuing store's OWN GSTIN is shown (not a single shared one).
+    assert a["gstin"] == "20AAACA1234A1Z5"
+    assert b["gstin"] == "27AABFW5678B1Z2"
+    assert a["gstin"] != b["gstin"]
+
+    # The issuing store name differs.
+    assert a["store_name"] == "Acme Ranchi Main Road"
+    assert b["store_name"] == "WizOpt Andheri West"
+    assert a["store_name"] != b["store_name"]
+
+
+def test_legal_header_no_hardcoded_brand_fallback():
+    """With empty entity/store the header is BLANK -- it must NOT substitute a
+    fixed brand name like 'Better Vision'/'WizOpt'. Mislabeling another store's
+    document with a hardcoded brand is a statutory error."""
+    out = LegalHeader(None, None, doc_type="tax_invoice")
+    assert out["legal_name"] == ""
+    assert out["trade_name"] == ""
+    assert out["store_name"] == ""
+    assert out["gstin"] == ""
+    # Be explicit: no brand string leaked into the rendered identity fields.
+    blob = " ".join(
+        str(out.get(k, "")) for k in ("legal_name", "trade_name", "store_name")
+    ).lower()
+    assert "better vision" not in blob
+    assert "wizopt" not in blob
+
+
+def test_legal_header_carries_store_entity_logo():
+    """A per-store/brand logo flows from the entity's logo_url into the header so
+    the renderer can show it -- enabling per-brand logos on printouts."""
+    out = LegalHeader(_entity_b_fixture(), _store_b_fixture(), doc_type="tax_invoice")
+    assert out["logo_url"] == "https://cdn.example.test/wizopt-logo.png"
+
+
+def test_print_legal_source_has_no_hardcoded_brand():
+    """Defense-in-depth: the print_legal module must not contain a hardcoded
+    brand name as a default/fallback anywhere in its source."""
+    import api.services.print_legal as pl
+
+    src = open(pl.__file__, "r", encoding="utf-8").read().lower()
+    assert "better vision" not in src
+    assert "wizopt" not in src

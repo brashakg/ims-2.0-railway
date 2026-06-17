@@ -578,6 +578,22 @@ async def get_product_label(
             product_id = stock_doc.get("product_id")
             out["product_id"] = product_id
 
+    # Issuing-store name for the label (best-effort). A frame/CL tag printed at a
+    # given store should carry THAT store's name, not a hardcoded brand. Resolved
+    # from the stock unit's own store_id; fail-soft so a label never 500s.
+    out_store_id = out.get("store_id")
+    if out_store_id:
+        try:
+            store_repo = get_store_repository()
+            if store_repo is not None:
+                store = store_repo.find_by_id(out_store_id)
+                if store:
+                    out["store_name"] = (
+                        store.get("name") or store.get("store_name") or ""
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LABELS] product-label store lookup failed: %s", e)
+
     # Product master (name / brand / MRP / category / CL fields).
     if product_id:
         try:

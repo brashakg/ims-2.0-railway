@@ -162,13 +162,15 @@ export function ClinicalPage() {
       const tests = testsData?.tests || testsData || [];
       setCompletedTests(Array.isArray(tests) ? tests : []);
       
-      // Load store info for printing tokens
+      // Load store info for printing tokens -- the ISSUING store's identity,
+      // never a hardcoded brand (a token printed at a WizOpt store must not
+      // read "Better Vision").
       if (storeData && !storeInfo) {
         setStoreInfo({
-          storeName: storeData.storeName || storeData.name || 'Better Vision Optics',
-          address: storeData.address || '',
+          storeName: (storeData as any).store_name || storeData.storeName || storeData.name || '',
+          address: storeData.address || (storeData as any).address_line_1 || (storeData as any).street || '',
           city: storeData.city || '',
-          state: storeData.state || '',
+          state: storeData.state || (storeData as any).state_name || '',
           pincode: storeData.pincode || '',
           phone: (storeData as any).phone || '',
         });
@@ -735,7 +737,7 @@ export function ClinicalPage() {
                           pd: 0,
                           visualAcuity: '',
                           notes: '',
-                          storeName: storeInfo?.storeName || 'Better Vision Optics',
+                          storeName: storeInfo?.storeName || '',
                           storePhone: storeInfo?.phone || '',
                         })}
                         className="p-2 text-gray-500 hover:text-green-500 transition-colors"

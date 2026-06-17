@@ -205,11 +205,13 @@ const loadJobs = async () => {
         try {
           const store = await (orderApi as any).getStore?.(user.activeStoreId);
           if (store) {
+            // Identity of the issuing store -- never a hardcoded brand (a job
+            // card raised by a WizOpt store must not read "Better Vision").
             setStoreInfo({
-              storeName: store.storeName || store.name || 'Better Vision Optics',
-              address: store.address || '',
+              storeName: store.store_name || store.storeName || store.name || '',
+              address: store.address || store.address_line_1 || store.street || '',
               city: store.city || '',
-              state: store.state || '',
+              state: store.state || store.state_name || '',
               pincode: store.pincode || '',
             });
           }

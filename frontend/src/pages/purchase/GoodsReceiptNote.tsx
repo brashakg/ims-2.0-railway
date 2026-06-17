@@ -11,7 +11,7 @@
 import { useState, useEffect, useMemo, startTransition } from 'react';
 import { Check, AlertCircle, Package, FileText, Printer, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
-import { vendorsApi } from '../../services/api';
+import { vendorsApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -147,6 +147,43 @@ export function GoodsReceiptNote() {
   const [printGrn, setPrintGrn] = useState<GRN | null>(null);
 
   const storeId = user?.activeStoreId || '';
+
+  // ISSUING store identity for the GRN header. GRNs on this page are loaded
+  // for this store (store_id=storeId), so the issuing store is this store; we
+  // resolve its real name/address/GSTIN rather than hardcoding a brand (which
+  // would mislabel a GRN raised by a different store/brand).
+  const [storeInfo, setStoreInfo] = useState({
+    storeName: '',
+    address: '',
+    city: '',
+    state: '',
+    pincode: '',
+    gstin: undefined as string | undefined,
+  });
+
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    storeApi
+      .getStore(storeId)
+      .then((s: any) => {
+        if (cancelled || !s) return;
+        setStoreInfo({
+          storeName: s.store_name || s.storeName || s.name || '',
+          address: s.address || s.address_line_1 || s.street || '',
+          city: s.city || '',
+          state: s.state || s.state_name || '',
+          pincode: s.pincode || '',
+          gstin: s.gstin || undefined,
+        });
+      })
+      .catch(() => {
+        /* fail-soft: GRNPrint renders whatever store identity is available */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storeId]);
 
   // Only POs that still have goods to receive belong in the receive picker.
   // A DRAFT PO hasn't been sent; a RECEIVED/CANCELLED one is closed. Keep the
@@ -381,16 +418,6 @@ export function GoodsReceiptNote() {
           : ('partially_accepted' as const),
     inspection_remarks: undefined,
   });
-
-  // storeName is not available on the User JWT shape; use a static fallback
-  // until store-detail fetch is wired here.
-  const storeInfo = {
-    storeName: 'Better Vision Opticals',
-    address: '',
-    city: '',
-    state: '',
-    pincode: '',
-  };
 
   return (
     <>
