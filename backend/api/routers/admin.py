@@ -941,3 +941,31 @@ async def online_store_parity(
         "parity": parity_summary(db),
         "uploads_audit": uploads_image_audit(db),
     }
+
+
+@router.post("/online-store/rehost-images")
+async def online_store_rehost_images(
+    dry_run: bool = True,
+    limit: int = 500,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only /uploads/ image RE-HOST (Step 6c -- the R3 cutover fix).
+
+    Re-hosts product images still on a local /uploads/ path to durable object
+    storage and rewrites the product_images url so Shopify can pull them after
+    the cutover. The companion WRITE side of GET /online-store/parity's
+    uploads_audit (which only detects them).
+
+    DARK by default (dry_run=True): returns the migration PLAN + the resolved
+    storage backend and whether it is durable -- no fetch, no upload, no DB
+    write. Set dry_run=False to migrate once a durable store (IMAGE_S3_* /
+    Settings -> Integrations) is configured; set BVI_UPLOADS_BASE_URL so the
+    tool can fetch BVI's local files over HTTP. Fail-soft; never 500s."""
+    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Image re-host is restricted to SUPERADMIN",
+        )
+    from ..services.online_sync_health import rehost_uploads_images
+
+    return rehost_uploads_images(_sync_health_db(), dry_run=dry_run, limit=limit)
