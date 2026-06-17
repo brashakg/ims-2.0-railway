@@ -15,7 +15,7 @@ import { vendorsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
-import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
 interface GRNLineItem {
   po_item_id: string;
@@ -146,8 +146,22 @@ export function GoodsReceiptNote() {
   const [submitting, setSubmitting] = useState(false);
   // Print state: which GRN is currently being previewed (null = no print modal).
   const [printGrn, setPrintGrn] = useState<GRN | null>(null);
+  // Issuing (receiving) store identity for the GRN print, resolved from the
+  // GRN's own store_id (falls back to the active store) + its legal entity.
+  const [grnIdentity, setGrnIdentity] = useState<StoreIdentity | null>(null);
 
   const storeId = user?.activeStoreId || '';
+
+  // Resolve the GRN's issuing-store identity when the print modal opens.
+  useEffect(() => {
+    const sid = (printGrn as any)?.store_id || storeId;
+    if (!printGrn || !sid) { setGrnIdentity(null); return; }
+    let cancelled = false;
+    resolveStoreIdentity(sid)
+      .then((id) => { if (!cancelled) setGrnIdentity(id); })
+      .catch(() => { if (!cancelled) setGrnIdentity(null); });
+    return () => { cancelled = true; };
+  }, [printGrn, storeId]);
 
   // Only POs that still have goods to receive belong in the receive picker.
   // A DRAFT PO hasn't been sent; a RECEIVED/CANCELLED one is closed. Keep the
@@ -383,16 +397,21 @@ export function GoodsReceiptNote() {
     inspection_remarks: undefined,
   });
 
-  // STORE-SPECIFIC: a GRN is issued at the receiving store; print THAT store's
-  // identity (name / address / GSTIN), not a hardcoded brand. Resolved from the
-  // active store id used for the rest of this screen's data.
-  const resolvedStoreInfo = useStorePrintInfo(storeId);
-  const storeInfo = resolvedStoreInfo || {
-    storeName: '',
-    address: '',
-    city: '',
-    state: '',
-    pincode: '',
+  // Resolve the receiving store + its legal entity from the GRN's own store_id
+  // so the GRN prints the REAL receiving entity name + GSTIN + logo (never a
+  // hardcoded "Better Vision Opticals" with a blank address / no GSTIN).
+  const grnSv = grnIdentity?.store;
+  const storeInfo = {
+    storeName: grnSv?.storeName || grnSv?.storeCode || '',
+    storeCode: grnSv?.storeCode || '',
+    brand: grnSv?.brand || '',
+    address: grnSv?.address || '',
+    city: grnSv?.city || '',
+    state: grnSv?.state || '',
+    stateCode: grnSv?.stateCode || '',
+    pincode: grnSv?.pincode || '',
+    phone: (grnSv as any)?.phone as string | undefined,
+    gstin: grnSv?.gstin as string | undefined,
   };
 
   return (
@@ -402,6 +421,7 @@ export function GoodsReceiptNote() {
         <GRNPrint
           grn={buildGrnPrintData(printGrn)}
           store={storeInfo}
+          entity={grnIdentity?.entity ?? null}
           onClose={() => setPrintGrn(null)}
         />
       )}

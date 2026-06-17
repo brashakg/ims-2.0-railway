@@ -5,7 +5,7 @@
 // Lensometer, Slit Lamp, Auto-Refractometer, Subjective Rx, Final Rx,
 // SOAP Note (CLI-11 structured EHR), Uploads
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   X,
@@ -21,7 +21,8 @@ import {
 import clsx from 'clsx';
 import { PrescriptionPrint } from './PrescriptionPrint';
 import type { PrescriptionPrintData } from './PrescriptionPrint';
-import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { useAuth } from '../../context/AuthContext';
+import { resolveStoreIdentity, type StoreIdentity } from '../print/storeIdentity';
 
 import type {
   EyeTestFormProps,
@@ -58,13 +59,22 @@ export type { EyeTestData } from './eyeTestTypes';
 
 export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName = '' }: EyeTestFormProps) {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  // Resolve the issuing store + legal entity for the inline Rx print (legal
+  // name, address, GSTIN, NCAHP/DMC reg, logo) -- never a generic "Optical
+  // Store" placeholder.
+  const [storeIdentity, setStoreIdentity] = useState<StoreIdentity | null>(null);
+  useEffect(() => {
+    if (!isOpen || !user?.activeStoreId) return;
+    let cancelled = false;
+    resolveStoreIdentity(user.activeStoreId)
+      .then((id) => { if (!cancelled) setStoreIdentity(id); })
+      .catch(() => { if (!cancelled) setStoreIdentity(null); });
+    return () => { cancelled = true; };
+  }, [isOpen, user?.activeStoreId]);
   const [activeTab, setActiveTab] = useState<TabId>('lensometer');
   const [isSaving, setIsSaving] = useState(false);
   const [showPrint, setShowPrint] = useState(false);
-  // STORE-SPECIFIC: the printed Rx card carries the issuing store's identity
-  // (resolved from the active store), not a generic 'Optical Store' stub.
-  // Must be called unconditionally, BEFORE the `if (!isOpen)` early return.
-  const printStore = useStorePrintInfo();
 
   // Header data
   const [examDate, setExamDate] = useState(new Date().toISOString().split('T')[0]);
@@ -193,12 +203,18 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     setUploads(uploads.filter(f => f.id !== id));
   };
 
-  const storeForPrint = printStore || {
-    storeName: '',
-    address: '',
-    city: '',
-    state: '',
-    pincode: '',
+  const sv = storeIdentity?.store;
+  const printStore = {
+    storeName: sv?.storeName || sv?.storeCode || '',
+    storeCode: sv?.storeCode || '',
+    brand: sv?.brand || '',
+    address: sv?.address || '',
+    city: sv?.city || '',
+    state: sv?.state || '',
+    stateCode: sv?.stateCode || '',
+    pincode: sv?.pincode || '',
+    phone: (sv as any)?.phone as string | undefined,
+    gstin: sv?.gstin as string | undefined,
   };
 
   return (
@@ -206,7 +222,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     {showPrint && (
       <PrescriptionPrint
         prescription={buildPrintData()}
-        store={storeForPrint}
+        store={printStore}
+        entity={storeIdentity?.entity ?? null}
         onClose={() => setShowPrint(false)}
       />
     )}

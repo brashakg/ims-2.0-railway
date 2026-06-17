@@ -19,8 +19,10 @@ import {
   AlertTriangle,
   TrendingUp,
 } from 'lucide-react';
-import { clinicalApi, storeApi } from '../../services/api';
+import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
@@ -112,6 +114,7 @@ export function ClinicalPage() {
   // Print and store state
   const [printToken, setPrintToken] = useState<any>(null);
   const [storeInfo, setStoreInfo] = useState<any>(null);
+  const [storeEntity, setStoreEntity] = useState<EntityLike | null>(null);
   const [printRxCard, setPrintRxCard] = useState<any>(null);
 
   // F50: clinical -> retail handover. `sendToFloorFor` opens the drawer for a
@@ -150,10 +153,10 @@ export function ClinicalPage() {
     setError(null);
 
     try {
-      const [queueData, testsData, storeData] = await Promise.all([
+      const [queueData, testsData, identity] = await Promise.all([
         clinicalApi.getQueue(user.activeStoreId).catch(() => ({ queue: [] })),
         clinicalApi.getTodayTests(user.activeStoreId).catch(() => ({ tests: [] })),
-        !storeInfo ? storeApi.getStore(user.activeStoreId).catch(() => null) : Promise.resolve(null),
+        !storeInfo ? resolveStoreIdentity(user.activeStoreId).catch(() => null) : Promise.resolve(null),
       ]);
 
       const queueItems = queueData?.queue || queueData || [];
@@ -161,18 +164,24 @@ export function ClinicalPage() {
 
       const tests = testsData?.tests || testsData || [];
       setCompletedTests(Array.isArray(tests) ? tests : []);
-      
-      // Load the ISSUING store's identity for printed tokens. Neutral fallback
-      // (store id) -- never a fixed brand that would mislabel another store.
-      if (storeData && !storeInfo) {
+
+      // Load the issuing store + legal entity for printing tokens / Rx cards.
+      // NEVER default to a fixed brand name (a WizOpt store prints WizOpt).
+      if (identity && !storeInfo) {
+        const sv = identity.store;
         setStoreInfo({
-          storeName: storeData.storeName || storeData.store_name || storeData.name || user.activeStoreId,
-          address: storeData.address || '',
-          city: storeData.city || '',
-          state: storeData.state || '',
-          pincode: storeData.pincode || '',
-          phone: (storeData as any).phone || '',
+          storeName: sv.storeName || sv.storeCode || '',
+          storeCode: sv.storeCode || '',
+          brand: sv.brand || '',
+          address: sv.address || '',
+          city: sv.city || '',
+          state: sv.state || '',
+          stateCode: sv.stateCode || '',
+          pincode: sv.pincode || '',
+          phone: (sv as any).phone || '',
+          gstin: sv.gstin || '',
         });
+        setStoreEntity(identity.entity);
       }
     } catch {
       setError('Failed to load data. Please try again.');
@@ -736,8 +745,12 @@ export function ClinicalPage() {
                           pd: 0,
                           visualAcuity: '',
                           notes: '',
-                          storeName: storeInfo?.storeName || '',
+                          storeName: storeInfo?.storeName || storeInfo?.storeCode || '',
                           storePhone: storeInfo?.phone || '',
+                          storeLegalName: storeEntity?.legal_name || storeEntity?.name || '',
+                          storeAddress: storeInfo ? [storeInfo.address, storeInfo.city, storeInfo.state, storeInfo.pincode].filter(Boolean).join(', ') : '',
+                          storeGstin: storeInfo?.gstin || '',
+                          storeLogoUrl: storeEntity?.invoice?.logo_url || (storeEntity as any)?.logo_url || '',
                         })}
                         className="p-2 text-gray-500 hover:text-green-500 transition-colors"
                         title="Print Rx Card"
@@ -812,6 +825,7 @@ export function ClinicalPage() {
         <EyeTestTokenPrint
           token={printToken}
           store={storeInfo}
+          entity={storeEntity}
           onClose={() => setPrintToken(null)}
         />
       )}

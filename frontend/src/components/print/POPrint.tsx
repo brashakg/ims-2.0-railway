@@ -1,10 +1,25 @@
 // ============================================================================
-// IMS 2.0 - Purchase Order Print Component
+// IMS 2.0 - Purchase Order Print Component (statutory aesthetic)
 // ============================================================================
-// Professional A4 purchase order template for optical retail supply chain
+// A4 purchase order. Migrated to the shared statutory primitives so the issuing
+// (buyer) entity legal name + GSTIN + logo print from the PO's OWN store + its
+// legal entity -- never a hardcoded "Better Vision Opticals" name.
 
 import { useRef } from 'react';
 import { Printer, X } from 'lucide-react';
+import {
+  buildLegalHeader,
+  LegalHeaderView,
+  LegalFooterBlock,
+  formatDate,
+  inr,
+  tblHead,
+  tblCell,
+  tblNum,
+  type EntityLike,
+  type OverrideFields,
+  type StoreLike,
+} from './legalPrimitives';
 
 interface POItem {
   product_id: string;
@@ -38,35 +53,62 @@ interface StoreInfo {
   pincode: string;
   phone?: string;
   gstin?: string;
+  stateCode?: string;
+  brand?: string;
+  storeCode?: string;
 }
 
 interface POPrintProps {
   po: POPrintData;
   store: StoreInfo;
+  /** Issuing legal entity (legal_name, pan, cin, gstins[], invoice.logo_url). */
+  entity?: EntityLike | null;
+  overrides?: OverrideFields | null;
   onClose: () => void;
 }
 
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
-}
-
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-  }).format(value);
-}
-
-export function POPrint({ po, store, onClose }: POPrintProps) {
+export function POPrint({ po, store, entity, overrides, onClose }: POPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
 
   const handlePrint = () => {
     window.print();
   };
+
+  // Fall back to a thin entity synthesized from the store ONLY so legacy callers
+  // that don't pass an entity still show THIS store's name + GSTIN (never a
+  // fixed brand). Real callers should pass the resolved parent entity.
+  const effectiveEntity: EntityLike = entity || {
+    legal_name: store.storeName,
+    name: store.storeName,
+    registered_address: store.address,
+    gstins: store.gstin ? [{
+      gstin: store.gstin,
+      state_code: store.stateCode || '',
+      state_name: store.state || '',
+      is_primary: true,
+    }] : [],
+  };
+  const effectiveStore: StoreLike = {
+    name: store.storeName,
+    store_code: store.storeCode,
+    brand: store.brand,
+    address: store.address,
+    city: store.city,
+    state: store.state,
+    state_code: store.stateCode,
+    pincode: store.pincode,
+    phone: store.phone,
+    gstin: store.gstin,
+  };
+  const header = buildLegalHeader(effectiveEntity, effectiveStore, 'tax_invoice', {
+    docNumber: po.po_number,
+    docDate: po.po_date,
+    placeOfSupply: store.state,
+    copyMarker: 'ORIGINAL',
+    overrides,
+    copyMarkerMode: 'none',
+    extraMeta: [['Expected Delivery', formatDate(po.expected_delivery)]],
+  });
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -82,201 +124,119 @@ export function POPrint({ po, store, onClose }: POPrintProps) {
               <Printer className="w-4 h-4" />
               Print
             </button>
-            <button
-              onClick={onClose}
-              className="p-2 hover:bg-gray-100 rounded-lg"
-            >
+            <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
               <X className="w-5 h-5" />
             </button>
           </div>
         </div>
 
-        {/* Printable Document */}
+        {/* Printable Document - statutory aesthetic */}
         <div
           ref={printRef}
-          className="po-print-area bg-white p-8"
-          style={{ maxWidth: '210mm', margin: '0 auto' }}
+          className="po-print-area bg-white text-black"
+          style={{
+            maxWidth: '210mm',
+            margin: '0 auto',
+            fontFamily: 'Inter, system-ui, sans-serif',
+            color: '#1a1a19',
+            border: '1px solid #1a1a19',
+          }}
         >
-          {/* Company Header */}
-          <div className="text-center mb-8 pb-4 border-b-4 border-gray-800">
-            <h1 className="text-2xl font-bold text-gray-900 uppercase tracking-wide">
-              {store.storeName}
-            </h1>
-            <p className="text-gray-600 text-sm mt-1">{store.address}</p>
-            <p className="text-gray-600 text-sm">
-              {store.city}, {store.state} - {store.pincode}
-            </p>
-            {store.phone && <p className="text-gray-600 text-sm">Phone: {store.phone}</p>}
-            {store.gstin && <p className="text-gray-600 text-sm">GSTIN: {store.gstin}</p>}
-          </div>
+          {/* Statutory header (entity legal name + GSTIN + logo from the PO store) */}
+          <LegalHeaderView header={header} docTypeLabel="PURCHASE ORDER" />
 
-          {/* Document Title */}
-          <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-gray-900 uppercase tracking-widest">
-              PURCHASE ORDER
-            </h2>
-          </div>
-
-          {/* PO Details */}
-          <div className="grid grid-cols-2 gap-6 mb-6 text-sm">
-            <div>
-              <p className="text-gray-500 font-semibold">PO Number</p>
-              <p className="text-gray-900 font-mono text-lg">{po.po_number}</p>
+          {/* Vendor block */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: '1.5px solid #1a1a19' }}>
+            <div style={{ padding: '10px 16px', borderRight: '1px solid #7a7a72' }}>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>To Vendor</div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 4 }}>{po.vendor_name}</div>
+              <div style={{ fontSize: 10.5, color: '#4a4a45', marginTop: 2 }}>{po.vendor_address}</div>
+              {po.vendor_gstin && (
+                <div style={{ fontSize: 10.5, color: '#4a4a45', marginTop: 2 }}>
+                  GSTIN: <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{po.vendor_gstin}</span>
+                </div>
+              )}
             </div>
-            <div className="text-right">
-              <p className="text-gray-500 font-semibold">PO Date</p>
-              <p className="text-gray-900 text-lg">{formatDate(po.po_date)}</p>
-            </div>
-            <div>
-              <p className="text-gray-500 font-semibold">Expected Delivery</p>
-              <p className="text-gray-900 text-lg">{formatDate(po.expected_delivery)}</p>
+            <div style={{ padding: '10px 16px' }}>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Deliver To</div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 4 }}>{header.store_name}</div>
+              <div style={{ fontSize: 10.5, color: '#4a4a45', marginTop: 2, lineHeight: 1.4 }}>{header.store_address}</div>
+              <div style={{ fontSize: 10.5, color: '#4a4a45', marginTop: 4 }}>
+                <span style={{ color: '#7a7a72', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Expected:</span>{' '}
+                <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatDate(po.expected_delivery)}</span>
+              </div>
             </div>
           </div>
 
-          {/* Vendor Details */}
-          <div className="mb-6 p-4 bg-gray-50 border border-gray-300 rounded">
-            <h3 className="font-bold text-gray-900 mb-2 uppercase">Vendor Details</h3>
-            <p className="text-gray-900 font-semibold">{po.vendor_name}</p>
-            <p className="text-gray-700 text-sm">{po.vendor_address}</p>
-            {po.vendor_gstin && (
-              <p className="text-gray-700 text-sm mt-1">GSTIN: {po.vendor_gstin}</p>
-            )}
-          </div>
-
-          {/* Items Table */}
-          <div className="mb-6">
-            <h3 className="font-bold text-gray-900 mb-2 uppercase">Items Ordered</h3>
-            <table className="w-full border-collapse">
+          {/* Items table */}
+          <div style={{ padding: '12px 16px' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
-                <tr className="bg-white text-gray-900">
-                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Sr.</th>
-                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Product Name</th>
-                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Quantity</th>
-                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">Unit Price</th>
-                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">Total</th>
+                <tr>
+                  <th style={{ ...tblHead, width: '6%' }}>#</th>
+                  <th style={{ ...tblHead, textAlign: 'left' }}>Product</th>
+                  <th style={{ ...tblHead, width: '12%' }}>Qty</th>
+                  <th style={{ ...tblHead, width: '18%' }}>Unit Price</th>
+                  <th style={{ ...tblHead, width: '18%' }}>Total</th>
                 </tr>
               </thead>
               <tbody>
                 {po.items.map((item, index) => (
-                  <tr key={item.product_id} className="hover:bg-gray-50">
-                    <td className="border border-gray-300 px-3 py-2 text-gray-900">{index + 1}</td>
-                    <td className="border border-gray-300 px-3 py-2 text-gray-900">{item.product_name}</td>
-                    <td className="border border-gray-300 px-3 py-2 text-center text-gray-900">
-                      {item.quantity}
-                    </td>
-                    <td className="border border-gray-300 px-3 py-2 text-right text-gray-900 font-mono">
-                      {formatCurrency(item.unit_price)}
-                    </td>
-                    <td className="border border-gray-300 px-3 py-2 text-right text-gray-900 font-mono font-semibold">
-                      {formatCurrency(item.total)}
-                    </td>
+                  <tr key={item.product_id}>
+                    <td style={tblCell}>{index + 1}</td>
+                    <td style={{ ...tblCell, textAlign: 'left' }}>{item.product_name}</td>
+                    <td style={tblCell}>{item.quantity}</td>
+                    <td style={tblNum}>{inr(item.unit_price, { withPaise: true })}</td>
+                    <td style={{ ...tblNum, fontWeight: 600 }}>{inr(item.total, { withPaise: true })}</td>
                   </tr>
                 ))}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Totals */}
-          <div className="mb-6 flex justify-end">
-            <table className="w-80 text-sm">
-              <tbody>
                 <tr>
-                  <td className="text-gray-700 px-4 py-2 font-semibold">Subtotal</td>
-                  <td className="text-gray-900 px-4 py-2 font-mono text-right">
-                    {formatCurrency(po.subtotal)}
-                  </td>
+                  <td colSpan={4} style={{ ...tblCell, textAlign: 'right', fontWeight: 700 }}>Subtotal</td>
+                  <td style={{ ...tblNum, fontWeight: 700 }}>{inr(po.subtotal, { withPaise: true })}</td>
                 </tr>
-                <tr className="bg-gray-100">
-                  <td className="text-gray-700 px-4 py-2 font-semibold">Tax (SGST+CGST)</td>
-                  <td className="text-gray-900 px-4 py-2 font-mono text-right">
-                    {formatCurrency(po.tax_amount)}
-                  </td>
+                <tr>
+                  <td colSpan={4} style={{ ...tblCell, textAlign: 'right', fontWeight: 700 }}>Tax</td>
+                  <td style={{ ...tblNum, fontWeight: 700 }}>{inr(po.tax_amount, { withPaise: true })}</td>
                 </tr>
-                <tr className="border-t-2 border-gray-800 bg-white text-gray-900">
-                  <td className="px-4 py-2 font-bold uppercase">Grand Total</td>
-                  <td className="px-4 py-2 font-mono text-right font-bold text-lg">
-                    {formatCurrency(po.grand_total)}
-                  </td>
+                <tr>
+                  <td colSpan={4} style={{ ...tblCell, textAlign: 'right', fontWeight: 700, fontSize: 12.5 }}>Grand Total</td>
+                  <td style={{ ...tblNum, fontWeight: 700, fontSize: 12.5 }}>{inr(po.grand_total, { withPaise: true })}</td>
                 </tr>
               </tbody>
             </table>
           </div>
 
-          {/* Terms & Conditions */}
+          {/* Terms */}
           {po.terms_conditions && (
-            <div className="mb-6 p-4 bg-gray-50 border border-gray-300 rounded">
-              <h3 className="font-bold text-gray-900 mb-2 uppercase">Terms & Conditions</h3>
-              <p className="text-gray-700 text-sm whitespace-pre-wrap">{po.terms_conditions}</p>
+            <div style={{ padding: '0 16px 12px' }}>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500, marginBottom: 4 }}>
+                Terms &amp; Conditions
+              </div>
+              <div style={{ fontSize: 10.5, color: '#4a4a45', whiteSpace: 'pre-wrap' }}>{po.terms_conditions}</div>
             </div>
           )}
 
-          {/* Signature Line */}
-          <div className="mt-8 pt-6 border-t border-gray-300 flex justify-between items-end">
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Authorized By</p>
-            </div>
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Vendor Signature</p>
-            </div>
-          </div>
-
-          {/* Footer */}
-          <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-500">
-              {store.storeName} &middot; {store.city}, {store.state} &middot; {po.po_number}
-            </p>
-          </div>
+          {/* Signatory + statutory footer */}
+          <LegalFooterBlock
+            header={header}
+            showAmountInWords={false}
+            signLabel={`For ${header.legal_name || header.trade_name}`}
+          />
         </div>
       </div>
 
-      {/* Print-specific CSS for A4 page */}
       <style>{`
         @media print {
-          body * {
-            visibility: hidden;
-          }
-          .po-print-area,
-          .po-print-area * {
-            visibility: visible;
-          }
+          body * { visibility: hidden; }
+          .po-print-area, .po-print-area * { visibility: visible; }
           .po-print-area {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-            padding: 12mm;
-            margin: 0;
-            max-width: none;
+            position: absolute; left: 0; top: 0;
+            width: 100%; padding: 0; margin: 0; max-width: none;
+            border: none !important;
           }
-
-          .no-print {
-            display: none !important;
-          }
-
-          @page {
-            size: A4;
-            margin: 12mm;
-          }
-
-          table {
-            page-break-inside: avoid;
-          }
-          .po-print-area {
-            font-size: 11pt;
-            color: #000;
-            background: #fff;
-          }
-          .po-print-area h1 {
-            font-size: 18pt;
-          }
-          .po-print-area h2 {
-            font-size: 16pt;
-          }
-          .po-print-area h3 {
-            font-size: 10pt;
-          }
+          .no-print { display: none !important; }
+          @page { size: A4; margin: 12mm; }
+          table { page-break-inside: avoid; }
         }
       `}</style>
     </div>

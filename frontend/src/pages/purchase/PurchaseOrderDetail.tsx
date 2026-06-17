@@ -2,7 +2,7 @@
 // IMS 2.0 - Purchase Order Detail Modal
 // ============================================================================
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   FileText,
   CheckCircle,
@@ -14,7 +14,8 @@ import {
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
 import { POPrint } from '../../components/print/POPrint';
-import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { useAuth } from '../../context/AuthContext';
+import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
 interface PurchaseOrderDetailProps {
   po: PurchaseOrder;
@@ -23,17 +24,35 @@ interface PurchaseOrderDetailProps {
 }
 
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
+  const { user } = useAuth();
   const [showPrint, setShowPrint] = useState(false);
 
-  // STORE-SPECIFIC: a PO is issued BY the operator's active store; print THAT
-  // store's identity (name / address / GSTIN), not a hardcoded brand. The
-  // PurchaseOrder shape carries no store id, so fall back to the active store.
-  const storeInfo = useStorePrintInfo((po as any)?.storeId || (po as any)?.store_id) || {
-    storeName: '',
-    address: '',
-    city: '',
-    state: '',
-    pincode: '',
+  // Resolve the issuing (buyer) store + its legal entity from the PO's own
+  // store_id (falls back to the user's active store) so the PO header shows the
+  // real buyer entity legal name + GSTIN + logo -- never a hardcoded brand.
+  const issuingStoreId = (po as any).storeId || (po as any).store_id || user?.activeStoreId;
+  const [identity, setIdentity] = useState<StoreIdentity | null>(null);
+  useEffect(() => {
+    if (!issuingStoreId) return;
+    let cancelled = false;
+    resolveStoreIdentity(issuingStoreId)
+      .then((id) => { if (!cancelled) setIdentity(id); })
+      .catch(() => { if (!cancelled) setIdentity(null); });
+    return () => { cancelled = true; };
+  }, [issuingStoreId]);
+
+  const sv = identity?.store;
+  const storeInfo = {
+    storeName: sv?.storeName || sv?.storeCode || '',
+    storeCode: sv?.storeCode || '',
+    brand: sv?.brand || '',
+    address: sv?.address || '',
+    city: sv?.city || '',
+    state: sv?.state || '',
+    stateCode: sv?.stateCode || '',
+    pincode: sv?.pincode || '',
+    phone: (sv as any)?.phone as string | undefined,
+    gstin: sv?.gstin as string | undefined,
   };
 
   // Build the POPrintData shape from the PurchaseOrder.
@@ -65,6 +84,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
       <POPrint
         po={poPrintData}
         store={storeInfo}
+        entity={identity?.entity ?? null}
         onClose={() => setShowPrint(false)}
       />
     )}

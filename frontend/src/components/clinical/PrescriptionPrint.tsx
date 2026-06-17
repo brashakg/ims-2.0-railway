@@ -61,6 +61,8 @@ export interface StoreInfo {
   phone?: string;
   gstin?: string;
   stateCode?: string;
+  brand?: string;
+  storeCode?: string;
 }
 
 interface PrescriptionPrintProps {
@@ -138,12 +140,15 @@ export function PrescriptionPrint({
   };
   const effectiveStore: StoreLike = {
     name: store.storeName,
+    store_code: store.storeCode,
+    brand: store.brand,
     address: store.address,
     city: store.city,
     state: store.state,
     state_code: store.stateCode,
     pincode: store.pincode,
     phone: store.phone,
+    gstin: store.gstin,
   };
   const header = buildLegalHeader(effectiveEntity, effectiveStore, 'rx_card', {
     docNumber: rxNumber,
