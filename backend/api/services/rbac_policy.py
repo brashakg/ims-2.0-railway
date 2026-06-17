@@ -5055,6 +5055,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/reports/workshop/pending-jobs",
         "allowed": "AUTHENTICATED",
     },
+    # Workshop productivity report (per-technician scorecard: completion,
+    # QC-fail-rate, on-time, utilization over a date range). A management lens
+    # -> store/area managers + admins (SUPERADMIN auto-passes via require_roles).
+    {
+        "method": "GET",
+        "path": "/api/v1/reports/workshop/productivity",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     # --- /api/v1/returns ---
     {"method": "GET", "path": "/api/v1/returns", "allowed": "AUTHENTICATED"},
     {

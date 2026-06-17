@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
-from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist, ist_day_start_utc
+from ..utils.ist import now_ist, now_ist_naive, fy_start_year_ist, ist_day_start_utc, ist_today
 from calendar import monthrange
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
@@ -1675,6 +1675,232 @@ async def pending_workshop_jobs(
             "overdue": overdue_count,
             "by_aging_bucket": bucket_counts,
             "by_technician": by_technician,
+        },
+    }
+
+
+# Roles allowed to view the workshop productivity report. A technician
+# scorecard (per-staff completion / QC-fail / utilization) is a management
+# lens, so it is gated to the store/area managers + admins (SUPERADMIN auto-
+# passes via require_roles). Sales / cashier / workshop-staff cannot see it.
+_WORKSHOP_REPORT_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+@router.get("/workshop/productivity")
+async def workshop_productivity(
+    from_date: Optional[date] = Query(
+        None, description="Start of the window (inclusive). Defaults to 30 days ago."
+    ),
+    to_date: Optional[date] = Query(
+        None, description="End of the window (inclusive). Defaults to today (IST)."
+    ),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_WORKSHOP_REPORT_ROLES)),
+):
+    """
+    Workshop PRODUCTIVITY report -- per-technician utilization + QC-failure
+    rate over a date range. Complements /workshop/dashboard-kpis (point-in-time
+    counts) and /reports/workshop/pending-jobs (open queue) by scoring the
+    technicians who DID the work in the window.
+
+    A job is attributed to the window when it was CLOSED (completed_at) inside
+    [from_date, to_date]. We score the technician who was assigned to it.
+
+    Per-technician metrics:
+        jobs_completed     -- closed jobs (COMPLETED/READY/DELIVERED) in window
+        avg_turnaround_days-- mean (completed_at - created_at) across those jobs
+        qc_fail_rate       -- fraction of the tech's QC'd jobs that failed at
+                              least once (uses qc_history; fail-soft to qc_passed)
+        on_time_rate       -- fraction completed on/before expected_date
+        utilization        -- this tech's jobs_completed / busiest tech's
+                              jobs_completed (0-1; relative load index)
+
+    Plus store totals over the same window. Fail-soft: no DB / no jobs -> an
+    honest empty envelope (never a fabricated average), never raises.
+    """
+    from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
+
+    active_store = validate_store_access(store_id, current_user) or current_user.get(
+        "active_store_id"
+    )
+
+    # Window: default to the last 30 days ending today (IST business date).
+    end_d = to_date or ist_today()
+    start_d = from_date or (end_d - timedelta(days=30))
+    start_str = start_d.isoformat()
+    end_str = end_d.isoformat()
+
+    empty = {
+        "from_date": start_str,
+        "to_date": end_str,
+        "store_id": active_store,
+        "technicians": [],
+        "totals": {
+            "jobs_completed": 0,
+            "avg_turnaround_days": None,
+            "qc_fail_rate": None,
+            "on_time_rate": None,
+            "remake_rate": None,
+            "technicians_active": 0,
+        },
+    }
+
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True) or not active_store:
+        return empty
+
+    try:
+        repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
+        all_jobs = repo.find_by_store(active_store)
+    except Exception:
+        return empty
+
+    def _to_dt(v):
+        """Parse a stored timestamp (str or datetime) to a naive datetime, or None."""
+        if not v:
+            return None
+        try:
+            dt = (
+                v
+                if isinstance(v, datetime)
+                else datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            )
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+        except (ValueError, TypeError):
+            return None
+
+    CLOSED = ("COMPLETED", "READY", "DELIVERED")
+
+    # Per-technician accumulators.
+    techs: Dict[str, Dict[str, Any]] = {}
+
+    def _bucket(tech_id: str) -> Dict[str, Any]:
+        key = tech_id or "unassigned"
+        if key not in techs:
+            techs[key] = {
+                "technician_id": None if key == "unassigned" else key,
+                "jobs_completed": 0,
+                "_turnaround_sum": 0.0,
+                "_turnaround_n": 0,
+                "_qc_total": 0,
+                "_qc_failed": 0,
+                "_ontime_total": 0,
+                "_ontime_hit": 0,
+                "_remake_jobs": 0,
+            }
+        return techs[key]
+
+    # Store totals.
+    tot_completed = 0
+    tot_turn_sum = 0.0
+    tot_turn_n = 0
+    tot_qc_total = 0
+    tot_qc_failed = 0
+    tot_ontime_total = 0
+    tot_ontime_hit = 0
+    tot_remake_jobs = 0
+
+    for job in all_jobs:
+        if job.get("status") not in CLOSED:
+            continue
+        completed = _to_dt(job.get("completed_at"))
+        if completed is None:
+            continue
+        # Window filter on the CLOSE (completed) date.
+        comp_date = completed.date()
+        if comp_date < start_d or comp_date > end_d:
+            continue
+
+        b = _bucket(job.get("technician_id"))
+        b["jobs_completed"] += 1
+        tot_completed += 1
+
+        # Turnaround: completed_at - created_at in days (>= 0 only).
+        created = _to_dt(job.get("created_at"))
+        if created is not None:
+            days = (completed - created).total_seconds() / 86400.0
+            if days >= 0:
+                b["_turnaround_sum"] += days
+                b["_turnaround_n"] += 1
+                tot_turn_sum += days
+                tot_turn_n += 1
+
+        # QC outcome: a job is "QC failed" if any QC attempt in qc_history
+        # failed, else fall back to the qc_passed flag. Only count jobs that
+        # actually went through QC (have history or a qc_passed value).
+        qc_history = [h for h in (job.get("qc_history") or []) if isinstance(h, dict)]
+        had_qc = bool(qc_history) or (job.get("qc_passed") is not None)
+        if had_qc:
+            b["_qc_total"] += 1
+            tot_qc_total += 1
+            if qc_history:
+                failed = any(h.get("passed") is False for h in qc_history)
+            else:
+                failed = job.get("qc_passed") is False
+            if failed:
+                b["_qc_failed"] += 1
+                tot_qc_failed += 1
+
+        # On-time: completed on/before expected_date (date-only compare).
+        expected = _to_dt(job.get("expected_date"))
+        if expected is not None:
+            b["_ontime_total"] += 1
+            tot_ontime_total += 1
+            if comp_date <= expected.date():
+                b["_ontime_hit"] += 1
+                tot_ontime_hit += 1
+
+        # Remake incidence (any logged remake reason on the job).
+        if [e for e in (job.get("remake_reasons") or []) if isinstance(e, dict)]:
+            b["_remake_jobs"] += 1
+            tot_remake_jobs += 1
+
+    # Busiest tech sets the utilization denominator (relative load index).
+    max_jobs = max((t["jobs_completed"] for t in techs.values()), default=0)
+
+    def _rate(hit, total):
+        return round(hit / total, 4) if total > 0 else None
+
+    technicians = []
+    for t in techs.values():
+        avg_turn = (
+            round(t["_turnaround_sum"] / t["_turnaround_n"], 2)
+            if t["_turnaround_n"] > 0
+            else None
+        )
+        technicians.append(
+            {
+                "technician_id": t["technician_id"],
+                "jobs_completed": t["jobs_completed"],
+                "avg_turnaround_days": avg_turn,
+                "qc_fail_rate": _rate(t["_qc_failed"], t["_qc_total"]),
+                "qc_jobs": t["_qc_total"],
+                "on_time_rate": _rate(t["_ontime_hit"], t["_ontime_total"]),
+                "remake_jobs": t["_remake_jobs"],
+                "utilization": (
+                    round(t["jobs_completed"] / max_jobs, 4) if max_jobs > 0 else None
+                ),
+            }
+        )
+
+    technicians.sort(key=lambda r: r["jobs_completed"], reverse=True)
+
+    return {
+        "from_date": start_str,
+        "to_date": end_str,
+        "store_id": active_store,
+        "technicians": technicians,
+        "totals": {
+            "jobs_completed": tot_completed,
+            "avg_turnaround_days": (
+                round(tot_turn_sum / tot_turn_n, 2) if tot_turn_n > 0 else None
+            ),
+            "qc_fail_rate": _rate(tot_qc_failed, tot_qc_total),
+            "on_time_rate": _rate(tot_ontime_hit, tot_ontime_total),
+            "remake_rate": _rate(tot_remake_jobs, tot_completed),
+            "technicians_active": len(technicians),
         },
     }
 

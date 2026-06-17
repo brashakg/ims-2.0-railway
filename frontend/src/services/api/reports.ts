@@ -449,6 +449,45 @@ export const reportsApi = {
       error?: string;
     };
   },
+
+  // Workshop productivity report — per-technician scorecard (completion,
+  // turnaround, QC-fail-rate, on-time, utilization) over a date range.
+  getWorkshopProductivity: async (
+    storeId?: string,
+    fromDate?: string,
+    toDate?: string,
+  ) => {
+    const r = await api.get('/reports/workshop/productivity', {
+      params: {
+        ...(storeId ? { store_id: storeId } : {}),
+        ...(fromDate ? { from_date: fromDate } : {}),
+        ...(toDate ? { to_date: toDate } : {}),
+      },
+    });
+    return r.data as {
+      from_date: string;
+      to_date: string;
+      store_id: string | null;
+      technicians: Array<{
+        technician_id: string | null;
+        jobs_completed: number;
+        avg_turnaround_days: number | null;
+        qc_fail_rate: number | null;
+        qc_jobs: number;
+        on_time_rate: number | null;
+        remake_jobs: number;
+        utilization: number | null;
+      }>;
+      totals: {
+        jobs_completed: number;
+        avg_turnaround_days: number | null;
+        qc_fail_rate: number | null;
+        on_time_rate: number | null;
+        remake_rate: number | null;
+        technicians_active: number;
+      };
+    };
+  },
 };
 
 // ============================================================================
