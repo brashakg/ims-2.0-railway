@@ -159,4 +159,15 @@ export const purchaseReconApi = {
       return empty;
     }
   },
+
+  /**
+   * Mark a scheme / volume-rebate credit note as physically RECEIVED, so it
+   * drops off the pending-scheme-CN worklist. THROWS on error so the UI can
+   * toast a failure.
+   */
+  markSchemeCnReceived: async (creditNoteNumber: string): Promise<void> => {
+    await api.post(
+      `/vendors/recon/credit-notes/${encodeURIComponent(creditNoteNumber)}/mark-received`,
+    );
+  },
 };
