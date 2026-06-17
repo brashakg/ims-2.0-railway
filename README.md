@@ -47,9 +47,9 @@ The authoritative business-rules document is [`docs/SYSTEM_INTENT.md`](docs/SYST
 
 | Thing | Count |
 |---|---|
-| Backend routers mounted | **44** |
-| Registered API method+path pairs | **~677** (incl. bare/slash variants) |
-| Frontend routes | **57** (`App.tsx`) — 52 protected + public |
+| Backend routers mounted | **90+** |
+| Registered API method+path pairs | **~1,206** (incl. bare/slash variants) |
+| Frontend routes | **120+** (`App.tsx`) |
 | MongoDB collections in use | **~69** |
 | Jarvis AI agents | **8** (all implemented) |
 | Roles | **12** (11 operational + `INVESTOR` read-only) |
@@ -107,7 +107,7 @@ This entity/GSTIN/store structure matters across the app: GST is computed per st
                         │  Middleware: rate-limit → security headers │
                         │   → dynamic CORS → process-time            │
                         │   → block-investor-writes                  │
-                        │  44 routers @ /api/v1/*                    │
+                        │  90+ routers @ /api/v1/*                   │
                         │                                            │
                         │  ┌──────────────┐   ┌────────────────────┐ │
                         │  │ Jarvis agents│   │ APScheduler        │ │
@@ -180,7 +180,7 @@ ims-2.0-railway/
 │   ├── Dockerfile                 ← the real production image (Railway builds this)
 │   ├── requirements.txt
 │   ├── api/
-│   │   ├── main.py                ← FastAPI app: middleware, CORS, lifespan, 44 routers
+│   │   ├── main.py                ← FastAPI app: middleware, CORS, lifespan, 90+ routers
 │   │   ├── routers/               ← one file per domain (auth, orders, inventory, ...)
 │   │   └── services/              ← pure logic + infra (role_caps, lens_pricing,
 │   │                                 loyalty_engine, points_calculator,
@@ -202,7 +202,7 @@ ims-2.0-railway/
 │   ├── vercel.json                ← Vite framework, SPA rewrite, cache headers
 │   ├── vite.config.ts             ← dev proxy, path aliases, manualChunks
 │   └── src/
-│       ├── App.tsx                ← 57 routes, all lazy-loaded
+│       ├── App.tsx                ← 120+ routes, all lazy-loaded
 │       ├── components/shell/      ← Rail (left nav) + Topbar + Shell chrome
 │       ├── components/layout/     ← AppLayout, ProtectedRoute, ErrorBoundary
 │       ├── context/               ← Auth, Appearance, Toast, Module, Theme
@@ -307,11 +307,14 @@ Lens-fitting job pipeline PENDING → IN_PROGRESS → QC → READY → DELIVERED
 ### Inventory
 Stock levels, low-stock & expiring alerts, barcode lookup, stock counts (with scanning), aging/turnover, non-moving & overstock analysis, serial-number tracking, contact-lens expiry grid, and a **power-wise lens grid** (SPH × CYL). Backend: `inventory.py`, `transfers.py`.
 
-### Catalog
-Product catalog with category-specific fields, brands/sub-brands, lens masters (brands/indices/coatings/add-ons) and **range-based lens pricing**, SKU generation, bulk import (CSV/XLSX), and optional Shopify sync. Backend: `catalog.py`, `products.py`, `admin_catalog.py`.
-
 ### Purchase & Vendors
-Vendors, purchase orders (create → send → cancel), goods-receipt notes (GRN) with variance tracking and stock-add on accept, vendor returns, vendor performance, and replenishment suggestions (reorder points → draft POs). Backend: `vendors.py`, `vendor_returns.py`, `supply_chain.py`.
+Vendors, purchase orders (create → send → cancel), goods-receipt notes (GRN) with variance tracking and stock-add on accept, mandatory-attachment gate, per-store/FY PO/RCPT numbering, contact-lens batch/expiry+FEFO, accountant 4-tick reconcile console, scheme credit-notes, and P3 variance-approval panel. Vendor returns, vendor performance, and replenishment suggestions (reorder points → draft POs). Backend: `vendors.py`, `vendor_returns.py`, `supply_chain.py`, `purchase_orders.py`, `grns.py`.
+
+### Online Store (BVI / Shopify)
+The **bettervision-inventory** (BVI) Next.js + Prisma/Postgres Shopify PIM app is consolidated into this repo under `ecommerce/`. It runs as a separate service in the IMS 2.0 Railway project with its own Postgres database. SSO between IMS and the Online Store is live (shared JWT). The "Online Store" nav item in the IMS left rail links into the BVI admin shell. The Shopify storefront (`bettervision.in`) stays on Shopify; BVI owns catalog/PIM sync. Backend: `ecommerce/` (Next.js + Prisma). Phases 1–5 complete.
+
+### Catalog & Products
+Product catalog with category-specific fields, brands/sub-brands, lens masters (brands/indices/coatings/add-ons) and range-based lens pricing, SKU generation, bulk import (CSV/XLSX), and optional Shopify sync. **Products convergence:** `catalog_products` (Shopify/online spine) and `products` (billing master) are unified — the catalog create-door writes the billing spine and billing requires it, eliminating the dual-master split. Backend: `catalog.py`, `products.py`, `admin_catalog.py`.
 
 ### Tasks, SOPs & Escalation
 Tasks on a canonical model (UPPERCASE status, `due_at`, `source`) with priority P0–P4. A **per-priority SLA engine** (`services/task_sla.py` — the Standard matrix P0 15m/30m … P4 3d/7d, tunable via `GET/PUT /tasks/sla-config`) runs two clocks: time-to-acknowledge and overdue-grace. Breached tasks **escalate up the role ladder** (`services/task_escalation.py`: assignee → Store Manager → Area Manager → Admin → Superadmin, store-scoped, climbing past empty rungs) and are **reassigned** to the resolved owner, who is alerted **in-app** (the topbar bell + `notifications` collection) and over **WhatsApp** (quiet-hours-gated except P0/P1). The `/tasks/auto-escalate-overdue` endpoint and the **TASKMASTER** 5-minute tick share the same SLA check + resolver, so they always agree. Plus daily SOP checklists + persisted SOP templates. Backend: `tasks.py`, `notifications.py`, `services/task_{sla,escalation,notify}.py`.
@@ -614,17 +617,20 @@ Frontend tests are minimal (auth flow, one modal, one hook) — a known gap. Run
 
 Detailed status is tracked in [`docs/reference/IMS2_Updated_Feature_Status.md`](docs/reference/IMS2_Updated_Feature_Status.md).
 
-**Recently shipped:**
+**Complete + merged to main:**
 - **Payroll** — full Indian statutory engine (legal entities, state-aware PT, EPS split, ₹21k ESI gate, batch run/lock, Tally JV, PF ECR, payslips). ✅
 - **Finance & Accounting** — real P&L (per store + per category), GST reconciliation per entity + Tally sales-JV, receivables/payables, period lock, dashboard breakdown tables. ✅
-- **Tasks/SOP escalation engine** — canonical task model, per-priority SLA, role-ladder auto-escalation **with reassignment**, and in-app + WhatsApp alerts. ✅ *(daily SOP-checklist completion tracking in progress)*
+- **Tasks/SOP escalation engine** — canonical task model, per-priority SLA, role-ladder auto-escalation **with reassignment**, in-app bell + WhatsApp alerts, daily SOP-checklist completion tracking. ✅
+- **Purchase/Procurement** — PO→GRN→stock-add, mandatory-attachment gate, per-store/FY PO/RCPT numbering, CL batch/expiry+FEFO, accountant 4-tick reconcile console, scheme-CN, P3 variance-approval panel. ✅
+- **BVI Online Store (Phases 1–5)** — `ecommerce/` (Next.js + Prisma/Postgres) consolidated into IMS 2.0 Railway project, SSO live, "Online Store" nav item wired. ✅
+- **Products convergence** — `catalog_products` spine ↔ `products` billing master unified; the catalog create-door writes the billing spine and billing requires it. ✅
+- **Jarvis (all 8 agents)** — JARVIS, CORTEX, SENTINEL, PIXEL, MEGAPHONE, ORACLE, TASKMASTER, NEXUS all implemented, registered, and live in `backend/agents/implementations/`. ✅
 
 **Highest-impact areas still ahead (priority order):**
-1. **E-commerce consolidation** — fold the `bettervision-inventory` Shopify catalog/PIM app (Next.js + Prisma/Postgres; storefront `bettervision.in`) into this repo as a unified-shell monorepo (one login, one nav), with a SKU/`storeBarcode` bridge so in-store (Mongo) and online (Postgres↔Shopify) stock reconcile.
-2. **Inventory depth** — daily count + barcode, batch/expiry, inter-store transfer polish.
-3. **Clinical/Workshop completion** — Rx token queue, QC checklist, lab status.
-4. **CRM/marketing automation** — WhatsApp send (MEGAPHONE built; needs MSG91 activation), POS additions (EMI, credit billing).
-5. **Integrations** (Tally, Razorpay, Shiprocket, GST portal) and **AI intelligence** expansion.
+1. **Integration activation** — flip `DISPATCH_MODE=live` + provision MSG91/Razorpay/Shiprocket/Tally/GST-portal keys on Railway (all code exists, gated by env).
+2. **Inventory depth** — daily count + barcode, inter-store transfer polish (most backend endpoints exist; verify UI wiring).
+3. **CRM/marketing automation** — WhatsApp send (MEGAPHONE built; needs MSG91 activation).
+4. **AI intelligence expansion** — AI change-proposal workflow (SYSTEM_INTENT §8 loop), natural-language query.
 
 ---
 

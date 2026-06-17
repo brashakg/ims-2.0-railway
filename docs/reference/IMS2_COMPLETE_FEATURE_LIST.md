@@ -1,6 +1,15 @@
 # IMS 2.0 — COMPLETE FEATURE LIST
 ## Everything Avinash Requested Across All Conversations
 
+> **WARNING: STALE — superseded by `IMS2_Updated_Feature_Status.md` (2026-05-29).**
+> The vast majority of items listed "Not Yet Built" (❌) **are BUILT** — Payroll,
+> Finance & Accounting, Tasks/SOP escalation, Expenses, GST export, AI inventory
+> analytics, clinical queue, workshop QC, print templates, audit viewer,
+> store-credit ledger, Purchase/Procurement, and BVI Online Store are all complete
+> and merged to main. The summary count of "117 built / 166 remaining" is
+> substantially wrong (real count is ~245–260 built). **Verify in code, not this
+> list.** See `IMS2_Updated_Feature_Status.md` for the reconciled picture.
+
 Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 
 ---
@@ -191,20 +200,24 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 
 ## MODULE 6: WORKSHOP
 
+> **Note (2026-06-17):** Most items below marked ❌ are now BUILT. See `IMS2_Updated_Feature_Status.md`.
+
 - ✅ Job list with status/priority filters
 - ✅ Job detail view
 - ✅ Create job from order (order search → frame/lens extraction → priority/date/notes)
 - ✅ Job status pipeline (Created → Lens Ordered → In Progress → QC → Ready → Delivered)
 - ✅ Assign job to technician
-- ❌ Workshop dashboard KPIs (pending, overdue, completed today)
-- ❌ Lens order tracking (ordered → received → mounted)
-- ❌ QC checklist (power verification, fitting, cosmetic check)
-- ❌ Customer notification when job is ready
-- ❌ Workshop job linked back to order + prescription
+- ✅ Workshop dashboard KPIs — `GET /workshop/dashboard-kpis` (pending, overdue, completed today, avg turnaround)
+- ✅ Lens order tracking (`jobs/{id}/lens-status`)
+- ✅ QC checklist (`jobs/{id}/qc`, `/rework` — backend built; UI wiring thin)
+- ✅ Customer notification when job is ready (`jobs/{id}/notify-ready` — gated on `DISPATCH_MODE=live`)
+- ✅ Workshop job linked back to order + prescription
 
 ---
 
 ## MODULE 7: INVENTORY
+
+> **Note (2026-06-17):** Most items below marked ❌ are now BUILT. See `IMS2_Updated_Feature_Status.md`.
 
 - ✅ Stock overview with category tabs (7 categories)
 - ✅ Product search with auto-suggestions (store-scoped)
@@ -217,17 +230,16 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 - ✅ Stock aging report
 - ✅ Barcode management
 - ✅ Stock movement history
-- ❌ Daily stock count per staff member (zone-assigned)
-- ❌ Stock count barcode scanning interface
-- ❌ Auto-variance detection (system vs physical count)
-- ❌ Non-moving stock identification (90+ days no sale)
-- ❌ AI-recommended inter-store transfer
-- ❌ Stock photo gallery per product
-- ❌ Sell-through % per brand group
-- ❌ Contact lens batch/expiry tracking grid
-- ❌ Power-wise lens stock grid (SPH × CYL matrix)
-- ❌ Stock dump analysis (overstocked items flagged)
-- ❌ Staff-assigned stock accountability
+- ✅ Daily stock count (`stock-count/start|items|complete`) with barcode scanning (`stock-count-scan`)
+- ✅ Auto-variance / shrinkage detection (`accountability/shrinkage`)
+- ✅ Non-moving stock identification (`/inventory/non-moving`, 90+ days no sale)
+- ✅ AI-recommended inter-store transfer (`transfer-recommendations`)
+- ✅ Sell-through % per brand group (`sell-through-analysis`, `reports/inventory/brand-sellthrough`)
+- ✅ Contact lens batch/expiry tracking grid (`contact-lenses/expiry-status`)
+- ✅ Power-wise lens stock grid (`lenses/power-grid`, SPH x CYL matrix)
+- ✅ Stock dump / overstock analysis (`overstock-analysis`)
+- ✅ Staff-assigned stock accountability (`accountability`)
+- ❌ Stock photo gallery per product (possible gap — not confirmed built)
 
 ---
 
@@ -267,33 +279,37 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 
 ## MODULE 10: PAYROLL & INCENTIVES
 
-- ❌ Monthly salary calculation (basic + HRA + allowances - deductions)
-- ❌ Advance salary tracking (taken, settled, outstanding)
-- ❌ Incentive target setup wizard (per person, per month)
-- ❌ Kicker system: Zeiss SmartLife/Progressive/Photofusion + Safilo targets
-- ❌ Minimum 80% target + 3 kickers mandatory rule
-- ❌ Incentive slabs: 0.8% at 80%, 1% at 100%, 1.5% at 120%+
-- ❌ Google review incentive (₹25/₹50 per review)
-- ❌ Real-time incentive dashboard per staff
-- ❌ Payslip generation
-- ❌ Salary sheet export (like existing Excel SALARY SHEET)
+> **Note (2026-06-17):** This entire module is BUILT. See `IMS2_Updated_Feature_Status.md`.
+
+- ✅ Monthly salary calculation — full statutory engine (EPF/EPS/ESI/PT/TDS, LWP proration, advances)
+- ✅ Advance salary tracking (taken, settled, outstanding)
+- ✅ Incentive target setup wizard (per person, per month) — `points.py`, `payout.py`
+- ✅ Kicker system: Zeiss SmartLife/Progressive/Photofusion + Safilo targets
+- ✅ Minimum 80% target + kicker rules
+- ✅ Incentive slabs (0.8% / 1% / 1.5%)
+- ✅ Real-time incentive dashboard per staff (MTD leaderboard, daily scorecards)
+- ✅ Payslip generation (HTML print)
+- ✅ Salary sheet export (PF ECR, Tally salary JV, statutory summary)
+- ❌ Google review incentive (₹25/₹50 per review) — not found in code
 
 ---
 
 ## MODULE 11: FINANCE & ACCOUNTING
 
-- ❌ Revenue tracking (daily/monthly/yearly with MoM/YoY)
-- ❌ Expense heads with actual vs survival budgets
-- ❌ Dual-mode budgeting (full ops vs survival) toggled by superadmin
-- ❌ GST filing preparation (GSTR-1, GSTR-3B)
-- ❌ GST portal API integration (verify GSTIN, check status)
-- ❌ Tally export integration
-- ❌ Outstanding receivables aging report
-- ❌ Vendor payment tracking
-- ❌ Profit & loss by store/category
-- ❌ Period locking (prevent edits to closed months)
-- ❌ Cash flow statement
-- ❌ Inter-store reconciliation
+> **Note (2026-06-17):** This entire module is BUILT. See `IMS2_Updated_Feature_Status.md`.
+
+- ✅ Revenue tracking (daily/monthly/yearly with MoM/YoY) — `sales/growth`, `analytics`
+- ✅ Expense heads with actual vs survival budgets — `expenses.py`, `budgets`
+- ❌ Dual-mode budgeting (full ops vs survival toggled by superadmin) — the one true Finance gap
+- ✅ GST filing preparation (GSTR-1, GSTR-3B) — `gstn_export.py`, `/reports/gstr1`, `/reports/gstr3b`
+- 🔧 GST portal API integration (verify GSTIN) — `org_validation.py` validates locally; live portal API not wired
+- ✅ Tally export integration — Tally sales-JV + salary JV (`payroll_exports.py`, `finance.py`)
+- ✅ Outstanding receivables aging report — `GET /finance/outstanding`, due-date buckets
+- ✅ Vendor payment tracking — `ap_engine.py`, AP aging, vendor ledger
+- ✅ Profit & loss by store / by category — `/finance/pnl/by-store`, `/finance/pnl/by-category`
+- ✅ Period locking (prevent edits to closed months) — `/finance/period-lock`
+- ✅ Cash flow statement + forecast — `/finance/cash-flow`, `/finance/cash-flow-forecast`
+- 🔧 Inter-store reconciliation — `itc_reconcile` endpoint exists; full cross-store view is a UI item
 
 ---
 
@@ -314,18 +330,20 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 
 ## MODULE 13: TASKS, SOPs & ESCALATION
 
+> **Note (2026-06-17):** This entire module is BUILT. See `IMS2_Updated_Feature_Status.md`.
+
 - ✅ Task management page with status/priority
-- 🔧 Task creation and assignment
-- ❌ System-generated tasks (auto-created on stock mismatch, payment variance, SLA breach)
-- ❌ SOP-bound tasks (daily opening checklist, closing checklist, stock count)
-- ❌ Priority color coding (P0 dark red → P4 blue, non-customizable)
-- ❌ Time-based escalation engine (not acknowledged → escalate → escalate further)
-- ❌ Silence detection (task opened but untouched → auto-escalate)
-- ❌ Assign tasks to each other through the app (replace WhatsApp)
-- ❌ Task countdown timers visible on dashboard
-- ❌ Fake closure detection (closed immediately after escalation → reopen)
-- ❌ Clear checkboxes for daily activities
-- ❌ Task mutation audit trail (edit/reassign/close all logged)
+- ✅ Task creation and assignment (`{id}/assign`, `{id}/reassign`)
+- ✅ System-generated tasks (auto-created on stock variance, payment, SLA breach — `auto-generate`)
+- ✅ SOP-bound tasks — `sop-templates` + `sop-checklist` + daily `checklists/{type}/complete-item`
+- ✅ Priority color coding P0–P4 (`TasksDashboard.PRIORITY_COLORS`)
+- ✅ Time-based escalation engine — `task_sla.py` (P0–P4 SLA matrix) + `task_escalation.py` (role ladder)
+- ✅ Silence detection (`tasks/integrity/silent`)
+- ✅ Assign tasks through the app (in-app + WhatsApp alerts via `task_notify.py`)
+- ✅ Task SLA countdown chip (frontend)
+- ✅ Fake closure detection (`tasks/integrity/fake-closures`)
+- ✅ Daily SOP checklists with checkboxes (`checklists/{type}/complete-item`)
+- ✅ Task mutation audit trail (via `audit_logs`)
 
 ---
 
@@ -339,19 +357,21 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 - ✅ Inventory reports tab
 - ✅ GST reports tab
 
-### Requested but Not Built
-- ❌ Daily/Monthly/Yearly sales comparison
-- ❌ MoM and YoY growth reports
-- ❌ Profit by category and store
-- ❌ Discount average by category and store
-- ❌ Staff performance ranking
-- ❌ Daily stock count report
-- ❌ Eye test count report
-- ❌ Pending jobs report
-- ❌ Expense vs revenue report
-- ❌ Customer acquisition/retention report
-- ❌ Brand-wise sell-through report
-- ❌ Stock movement report (Inwards/Outwards/Closing per brand group)
+### Built (updated 2026-06-17)
+> All items below were previously marked ❌ "Not Built" — all are now confirmed built.
+
+- ✅ Daily/Monthly/Yearly sales comparison (`reports/sales/comparison`)
+- ✅ MoM and YoY growth reports (`reports/sales/growth`)
+- ✅ Profit by category and store (`reports/profit/by-category`, `reports/profit/by-store`)
+- ✅ Discount average by category and store (`reports/discount/analysis`)
+- ✅ Staff performance ranking (`reports/staff/ranking`)
+- ✅ Daily stock count report (`reports/stock/count`)
+- ✅ Eye test count report (`reports/clinical/eye-tests`)
+- ✅ Pending jobs report (`reports/workshop/pending-jobs`)
+- ✅ Expense vs revenue report (`reports/finance/expense-vs-revenue`)
+- ✅ Customer acquisition/retention report (`reports/customers/acquisition`)
+- ✅ Brand-wise sell-through report (`reports/inventory/brand-sellthrough`)
+- 🔌 Stock movement report — `reports/inventory/brand-sellthrough` + extras; full inwards/outwards breakdown may need UI wiring
 
 ---
 
@@ -379,36 +399,43 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 
 ## MODULE 16: AI INTELLIGENCE (Superadmin Only, READ-ONLY)
 
-### Built
-- ✅ Jarvis page (630 lines frontend, 1714 lines backend)
-- ✅ Chat interface ("Ask Intelligence")
-- ✅ 5 Subagents: Stock Health, Payment Collection, SOP Compliance, Incentive Tracking, Discount Abuse
-- ✅ Subagent API endpoints (list, run-all, run-single)
+> **Note (2026-06-17):** All 8 agents are built and live. See `IMS2_Updated_Feature_Status.md`.
 
-### Requested but Not Built
-- ❌ AI Change Proposals (AI suggests UI/code changes → superadmin approves → rollout)
-- ❌ Marketing intelligence (Google/Meta ad performance via API)
-- ❌ Purchase advisor (scan product at trade fair → AI recommends buy/skip + which store)
-- ❌ Inventory optimization suggestions (transfer, discount, vendor return)
-- ❌ Sales trend analysis with ML predictions
-- ❌ Customer behavior pattern detection
-- ❌ Staff performance anomaly detection
-- ❌ Finance intelligence (government rule changes → suggestion)
-- ❌ Natural language query: "Show me all gold rimless frames in Bokaro between ₹5,000-₹10,000"
+### Built
+- ✅ Jarvis page with 8-agent grid, toggles, activity feed, diagnostic endpoint
+- ✅ Chat interface ("Ask Intelligence") — JARVIS NLP core wired to Claude API
+- ✅ All 8 agents: JARVIS, CORTEX, SENTINEL, PIXEL, MEGAPHONE, ORACLE, TASKMASTER, NEXUS
+- ✅ Cross-agent activity feed (`GET /jarvis/agents/activity`)
+- ✅ ORACLE → Claude API for anomaly narratives + EOD analytics + fraud detection
+- ✅ MEGAPHONE → MSG91 WhatsApp + SMS (gated on `DISPATCH_MODE=live`)
+- ✅ PIXEL → Google PageSpeed Insights (gated on `PAGESPEED_API_KEY`)
+- ✅ NEXUS → Shopify/Razorpay/Shiprocket/Tally integration sync (gated)
+- ✅ TASKMASTER — SLA escalation, SOP verify, auto-reorder drafts (DB-only, no external provider)
+- ✅ SENTINEL — system health monitoring + Slack alerts
+- ✅ Redis event bus (`event_bus.py`) for cross-worker agent event dispatch
+- ✅ Sentry APM + per-agent-tick transactions (observability.py)
+- ✅ `GET /jarvis/agents/diagnostic` — SUPERADMIN live introspection endpoint
+
+### Remaining
+- ❌ AI Change Proposals (SYSTEM_INTENT §8 loop: AI suggests → superadmin approves → audited execute)
+- ❌ Natural language product query ("Show me gold rimless frames in Bokaro ₹5k–₹10k")
 - ❌ AI image-based product search
+- ❌ Marketing intelligence (Google/Meta ad performance via API)
 
 ---
 
-## MODULE 17: MARKETPLACE & E-COMMERCE
+## MODULE 17: MARKETPLACE & E-COMMERCE / ONLINE STORE (BVI)
+
+> **Note (2026-06-17):** BVI Online Store (Phases 1–5) is COMPLETE. See `IMS2_Updated_Feature_Status.md`.
 
 - ✅ Storefront page (basic structure)
-- 🔧 Shopify integration (47 backend endpoints built)
+- ✅ BVI Online Store (`ecommerce/` — Next.js + Prisma/Postgres) — full Shopify PIM/catalog app consolidated into IMS 2.0 Railway project (Phases 1–5 complete)
+- ✅ SSO between IMS 2.0 and BVI Online Store (shared JWT)
+- ✅ "Online Store" nav item in IMS left rail
+- 🔧 Shopify catalog sync (code exists for `sync-shopify`, `bulk-sync-shopify` — gated on keys)
 - ❌ Marketplace control panel (Amazon/Flipkart/Shopify unified view)
-- ❌ Auto-sync products from IMS to Shopify/Amazon/Flipkart
-- ❌ Channel-wise sales tracking
-- ❌ Omnichannel stock sync (online sale reduces store stock)
-- ❌ Shiprocket integration for delivery tracking
-- ❌ Customer order tracking via WhatsApp + Shopify page
+- ❌ Omnichannel stock sync across Amazon/Flipkart
+- 🚪 Shiprocket integration — code exists (`shipping.py`) gated on `DISPATCH_MODE=live` + creds
 - ❌ Multiple website management (category-specific: watches only, etc.)
 
 ---
@@ -511,6 +538,11 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 
 ## SUMMARY COUNTS
 
+> **WARNING: These counts are STALE (last updated early 2026 before Payroll, Finance, Tasks,
+> Workshop, Inventory depth, Purchase/Procurement, BVI Online Store, and all 8 Jarvis agents
+> were shipped). The real picture is ~245–260 items built. See `IMS2_Updated_Feature_Status.md`
+> for the reconciled status.**
+
 | Category | ✅ Built | 🔧 Partial | ❌ Not Built |
 |----------|---------|-----------|-------------|
 | Dashboard | 8 | 3 | 12 |
@@ -535,6 +567,6 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 | Print | 5 | 0 | 7 |
 | Integrations | 0 | 1 | 7 |
 | Training | 0 | 0 | 5 |
-| **TOTALS** | **117** | **12** | **166** |
+| **TOTALS (STALE)** | **117** | **12** | **166** |
 
-**117 features built. 12 partially built. 166 remaining.**
+**Stale count: 117 built / 166 remaining. Actual: ~245–260 built (see IMS2_Updated_Feature_Status.md).**
