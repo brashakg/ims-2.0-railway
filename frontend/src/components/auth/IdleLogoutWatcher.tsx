@@ -7,15 +7,17 @@
 // /login?reason=idle. During the warning window it shows an accessible modal
 // with a live MM:SS countdown and "Stay signed in" / "Sign out now" actions.
 //
-// Known/intended interaction: a logout clears the POS cart (existing
-// clearAllOnLogout). The warning modal is the deliberate mitigation -- staff get
-// a 60s heads-up (configurable) to click "Stay signed in" before any in-progress
-// sale is lost. See the PR body.
+// Non-destructive logout: an in-progress POS sale is AUTO-PARKED to the held-
+// bills queue BEFORE logout fires (logout's clearAllOnLogout then clears only
+// the in-progress draft, never the parked carts). So the cashier's cart is
+// never lost on an idle logout -- it can be recalled after re-login. The
+// warning modal still gives staff a heads-up to click "Stay signed in".
 
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useIdleLogout } from '../../hooks/useIdleLogout';
+import { usePOSStore } from '../../stores/posStore';
 import { loadSessionPolicy, getSessionPolicy, type SessionPolicy } from '../../constants/sessionPolicy';
 
 function formatMMSS(totalSeconds: number): string {
@@ -27,7 +29,7 @@ function formatMMSS(totalSeconds: number): string {
 
 export function IdleLogoutWatcher() {
   const navigate = useNavigate();
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
 
   // Seed from the synchronous accessor (last-known / default) so the timer is
   // armed immediately, then refresh from /health.
@@ -44,6 +46,20 @@ export function IdleLogoutWatcher() {
   }, []);
 
   const handleLogout = () => {
+    // Non-destructive: AUTO-PARK any in-progress POS sale BEFORE logging out so
+    // the cart is never lost (logout's clearAllOnLogout clears the draft but
+    // keeps parked bills). Wrapped so a park failure can never block logout.
+    try {
+      const heldId = usePOSStore
+        .getState()
+        .parkCurrentSale({ auto: true, heldBy: user?.id });
+      if (heldId) {
+        // eslint-disable-next-line no-console
+        console.info('[idle-logout] in-progress sale auto-parked before logout', heldId);
+      }
+    } catch {
+      /* never let a park error block the logout */
+    }
     // Clear auth state, then route to login with the idle reason. logout() is
     // async (best-effort server call) but we don't need to await it to navigate.
     void logout();
@@ -74,6 +90,9 @@ export function IdleLogoutWatcher() {
           You&rsquo;ll be signed out in{' '}
           <span className="font-semibold text-gray-900">{formatMMSS(remainingSec)}</span> due to
           inactivity.
+        </p>
+        <p className="mt-2 text-xs text-gray-500">
+          Any in-progress sale will be saved and can be resumed after you sign back in.
         </p>
         <div className="mt-6 flex items-center justify-end gap-3">
           <button

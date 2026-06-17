@@ -227,6 +227,14 @@ export interface POSState {
   // Reset
   resetTransaction: () => void;
   clearAllOnLogout: () => void;
+  // Park/Hold: push the CURRENT cart onto the held-bills queue
+  // (`ims-held-bills`) as a snapshot, tagged with the owning user/store so a
+  // shared terminal never leaks one cashier's cart to another. Used both by
+  // the manual "Hold Bill" button (via POSLayout) and the idle auto-logout
+  // (auto:true). Returns the held bill id, or null if the cart is empty.
+  // Does NOT reset the transaction — the caller decides (manual hold resets,
+  // auto-park lets logout clear).
+  parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string }) => string | null;
   // Park/Hold: atomically REPLACE the current transaction with a previously
   // held one (no merge into the existing cart, per-item discounts preserved,
   // cart-level discount + delivery fields restored).
@@ -532,6 +540,65 @@ export const usePOSStore = create<POSState>()(
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
       },
 
+      // --- Park/Hold: snapshot the CURRENT cart onto the held-bills queue ---
+      // Single source of truth for "park a sale". Builds the same snapshot
+      // shape POSLayout.holdCurrentBill used (so manual hold + auto-park share
+      // one code path) and tags it with held_by / store_id / auto so a shared
+      // terminal can scope recall to the owning cashier. Caller decides whether
+      // to reset the transaction afterward (manual hold does; auto-park lets the
+      // subsequent logout clear it).
+      parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string }) => {
+        const state = get();
+        const cart = state.cart || [];
+        if (cart.length === 0) return null; // nothing to park
+        const auto = meta?.auto === true;
+        const id = `hold-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        let bills: any[] = [];
+        try {
+          bills = JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
+          if (!Array.isArray(bills)) bills = [];
+        } catch {
+          bills = [];
+        }
+        bills.push({
+          id,
+          customer: state.customer?.name || 'Walk-in',
+          items: cart.length,
+          total: get().getGrandTotal(),
+          heldAt: new Date().toISOString(),
+          // Multi-user safety: who owns this parked cart + which store it
+          // belongs to. recall/list filter on held_by so cashier B never
+          // sees cashier A's cart on a shared terminal.
+          held_by: meta?.heldBy ?? state.salesperson_id ?? null,
+          store_id: state.store_id ?? null,
+          auto,
+          reason: auto ? 'Auto-saved on inactivity logout' : 'Held by cashier',
+          state: {
+            sale_type: state.sale_type,
+            customer: state.customer,
+            patient: state.patient,
+            prescription: state.prescription,
+            cart,
+            cart_note: state.cart_note,
+            payments: state.payments,
+            is_advance_payment: state.is_advance_payment,
+            cart_discount_percent: state.cart_discount_percent,
+            cart_discount_amount: state.cart_discount_amount,
+            cart_discount_reason: state.cart_discount_reason,
+            cart_discount_approved_by: state.cart_discount_approved_by,
+            delivery_date: state.delivery_date,
+            delivery_time_slot: state.delivery_time_slot,
+            delivery_priority: state.delivery_priority,
+          },
+        });
+        try {
+          localStorage.setItem('ims-held-bills', JSON.stringify(bills));
+        } catch {
+          /* quota / private-mode: best-effort, don't throw */
+        }
+        return id;
+      },
+
       // --- Park/Hold: recall a held sale, REPLACING the current one ---
       // The previous recall path re-added each line via addToCart (which merges
       // into whatever was already in the cart -> two customers' sales could
@@ -569,11 +636,16 @@ export const usePOSStore = create<POSState>()(
       },
 
       // --- Full clear (for logout) ---
+      // Clears the IN-PROGRESS draft + in-memory state, but deliberately KEEPS
+      // `ims-held-bills`: parked/held sales (including the auto-park done by the
+      // idle-logout watcher) must survive logout so the cashier can resume after
+      // re-login. Cross-user leakage is prevented at the recall layer
+      // (POSLayout filters held bills by held_by === current user), not by
+      // wiping every parked cart on logout.
       clearAllOnLogout: () => {
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');
-          localStorage.removeItem('ims-held-bills');
         } catch { /* ignore */ }
       },
 
