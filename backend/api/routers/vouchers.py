@@ -520,7 +520,7 @@ async def list_vouchers(
     if status:
         query["status"] = status.upper()
 
-    docs = list(coll.find(query).sort("created_at", -1))
+    docs = list(coll.find(query).sort("created_at", -1).limit(1000))
     vouchers = [_public_view(d) for d in docs]
     return {"vouchers": vouchers, "total": len(vouchers)}
 

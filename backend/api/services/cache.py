@@ -166,6 +166,33 @@ class CacheService:
         self.delete_pattern(f"*:{store_id}:*")
         self.delete_pattern(f"*:{store_id}")
 
+    def incr(self, key: str, ttl: int = 0) -> int:
+        """Atomic increment. Sets TTL on first increment (Redis) or treats as a
+        plain int counter in memory. Returns the new count, or 0 on error."""
+        try:
+            if _redis_client:
+                full_key = f"ims:{key}"
+                count = _redis_client.incr(full_key)
+                if count == 1 and ttl:
+                    _redis_client.expire(full_key, ttl)
+                return int(count)
+            else:
+                raw = _memory.get(key)
+                count = (int(json.loads(raw)) if raw else 0) + 1
+                _memory.set(key, json.dumps(count), ttl or 900)
+                return count
+        except Exception:
+            return 0
+
+    def ttl(self, key: str) -> int:
+        """Returns remaining TTL in seconds for a key, or 0 on miss/error."""
+        try:
+            if _redis_client:
+                return max(0, int(_redis_client.ttl(f"ims:{key}") or 0))
+            return 0
+        except Exception:
+            return 0
+
     def flush(self):
         """Clear entire cache."""
         try:

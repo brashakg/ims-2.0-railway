@@ -355,7 +355,7 @@ def _already_returned_qty(
         return 0.0
     total = 0.0
     try:
-        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+        for doc in coll.find({"order_id": order_id, "status": {"$ne": "CANCELLED"}}, {"_id": 0}):
             for prior in doc.get("items") or []:
                 if not isinstance(prior, dict):
                     continue
@@ -720,11 +720,11 @@ def _reactivate_original_unit(
             q = dict(base)
             q["order_id"] = order_id
             q.update(sold_only)
-            candidates = stock_repo.find_many(q) or []
+            candidates = stock_repo.find_many(q, limit=0) or []
         if not candidates:
             q = dict(base)
             q.update(sold_only)
-            candidates = stock_repo.find_many(q) or []
+            candidates = stock_repo.find_many(q, limit=0) or []
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] stock lookup failed: %s", exc)
         return None
@@ -968,9 +968,9 @@ def _matched_unit_serial(stock_repo, product_id, store_id, order_id) -> Optional
         if order_id:
             q = dict(base)
             q["order_id"] = order_id
-            candidates = stock_repo.find_many(q) or []
+            candidates = stock_repo.find_many(q, limit=0) or []
         if not candidates:
-            candidates = stock_repo.find_many(dict(base)) or []
+            candidates = stock_repo.find_many(dict(base), limit=0) or []
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] serial-match lookup failed: %s", exc)
         return None

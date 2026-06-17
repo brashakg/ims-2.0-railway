@@ -9,7 +9,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, timedelta
-from collections import defaultdict
 import time
 import jwt
 import hashlib
@@ -70,68 +69,67 @@ _SEED_DEFAULT_PASSWORD = "admin123"
 # ============================================================================
 # Per-IP: 5 failed attempts in 15 minutes → 15 minute lockout
 # Per-username: 10 failed attempts in 30 minutes → 30 minute lockout
+# Uses cache (Redis when available) so lockouts are shared across all workers.
 
 
 class LoginRateLimiter:
-    """In-memory sliding-window rate limiter for login attempts."""
+    """Rate limiter for login attempts.
 
-    def __init__(self):
-        # { key: [(timestamp, success)] }
-        self._attempts: Dict[str, list] = defaultdict(list)
-        self._lockouts: Dict[str, float] = {}  # key → lockout_until timestamp
+    Persists failure counts and lockouts in the shared cache so all Railway
+    workers enforce the same limits (prevents 4-worker bypass that was possible
+    with the old in-process dict).  Falls back to an in-memory dict when Redis
+    is unavailable (single-worker dev mode).
+    """
 
-    def _cleanup(self, key: str, window_seconds: int):
-        cutoff = time.time() - window_seconds
-        self._attempts[key] = [
-            (ts, ok) for ts, ok in self._attempts[key] if ts > cutoff
-        ]
+    _IP_MAX = 5
+    _IP_WINDOW = 900   # 15 min
+    _USER_MAX = 10
+    _USER_WINDOW = 1800  # 30 min
+
+    def _cache(self):
+        from ..services.cache import cache
+        return cache
 
     def check(self, ip: str, username: str) -> Optional[str]:
         """Returns error message if rate-limited, None if OK."""
-        now = time.time()
+        c = self._cache()
+        ip_lock_key = f"login:lock:ip:{ip}"
+        user_lock_key = f"login:lock:user:{username.lower().strip()}"
 
-        # Check IP lockout
-        ip_key = f"ip:{ip}"
-        if ip_key in self._lockouts and now < self._lockouts[ip_key]:
-            remaining = int(self._lockouts[ip_key] - now)
-            return (
-                f"Too many login attempts. Try again in {remaining // 60 + 1} minutes."
-            )
+        ip_ttl = c.ttl(ip_lock_key)
+        if ip_ttl > 0:
+            return f"Too many login attempts. Try again in {ip_ttl // 60 + 1} minutes."
 
-        # Check username lockout
-        user_key = f"user:{username.lower().strip()}"
-        if user_key in self._lockouts and now < self._lockouts[user_key]:
-            remaining = int(self._lockouts[user_key] - now)
-            return f"Account temporarily locked. Try again in {remaining // 60 + 1} minutes."
+        user_ttl = c.ttl(user_lock_key)
+        if user_ttl > 0:
+            return f"Account temporarily locked. Try again in {user_ttl // 60 + 1} minutes."
 
-        # Check IP failures (5 in 15 min)
-        self._cleanup(ip_key, 900)
-        ip_failures = sum(1 for _, ok in self._attempts[ip_key] if not ok)
-        if ip_failures >= 5:
-            self._lockouts[ip_key] = now + 900  # 15 min lockout
-            return (
-                "Too many login attempts from this location. Try again in 15 minutes."
-            )
+        ip_fail_key = f"login:fail:ip:{ip}"
+        user_fail_key = f"login:fail:user:{username.lower().strip()}"
 
-        # Check username failures (10 in 30 min)
-        self._cleanup(user_key, 1800)
-        user_failures = sum(1 for _, ok in self._attempts[user_key] if not ok)
-        if user_failures >= 10:
-            self._lockouts[user_key] = now + 1800  # 30 min lockout
+        ip_failures = int(c.get(ip_fail_key) or 0)
+        if ip_failures >= self._IP_MAX:
+            c.set(ip_lock_key, 1, ttl=self._IP_WINDOW)
+            return "Too many login attempts from this location. Try again in 15 minutes."
+
+        user_failures = int(c.get(user_fail_key) or 0)
+        if user_failures >= self._USER_MAX:
+            c.set(user_lock_key, 1, ttl=self._USER_WINDOW)
             return "Account temporarily locked due to too many failed attempts. Try again in 30 minutes."
 
         return None
 
     def record(self, ip: str, username: str, success: bool):
-        now = time.time()
-        ip_key = f"ip:{ip}"
-        user_key = f"user:{username.lower().strip()}"
-        self._attempts[ip_key].append((now, success))
-        self._attempts[user_key].append((now, success))
-        # On success, clear lockouts
+        c = self._cache()
+        user = username.lower().strip()
         if success:
-            self._lockouts.pop(ip_key, None)
-            self._lockouts.pop(user_key, None)
+            c.delete(f"login:fail:ip:{ip}")
+            c.delete(f"login:fail:user:{user}")
+            c.delete(f"login:lock:ip:{ip}")
+            c.delete(f"login:lock:user:{user}")
+        else:
+            c.incr(f"login:fail:ip:{ip}", ttl=self._IP_WINDOW)
+            c.incr(f"login:fail:user:{user}", ttl=self._USER_WINDOW)
 
 
 _login_limiter = LoginRateLimiter()

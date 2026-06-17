@@ -14,6 +14,8 @@ loyalty failure can NEVER block POS.
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from pymongo import ReturnDocument
+
 from .base_repository import BaseRepository
 
 

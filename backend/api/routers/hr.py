@@ -1398,7 +1398,7 @@ async def list_leaves(
     if status:
         filter_dict["status"] = status
 
-    leaves = leave_repo.find_many(filter_dict)
+    leaves = leave_repo.find_many(filter_dict, limit=0)
 
     return {"leaves": leaves or [], "total": len(leaves) if leaves else 0}
 
@@ -1754,7 +1754,7 @@ async def generate_payroll(
         return {"message": "Payroll generation initiated", "count": 0}
 
     # Get all employees for the store
-    employees = user_repo.find_many({"store_ids": active_store})
+    employees = user_repo.find_many({"store_ids": active_store}, limit=0)
 
     generated_count = 0
     for employee in employees or []:

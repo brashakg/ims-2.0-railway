@@ -45,4 +45,4 @@ python-dateutil==2.9.0.post0
 openpyxl==3.1.5
 
 # Production Server (optional, uvicorn is primary)
-gunicorn==23.0.0
+gunicorn==26.0.0

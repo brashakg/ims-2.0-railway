@@ -583,7 +583,7 @@ async def get_store_stats(
     try:
         if user_repo is not None:
             # Users whose store access includes this store
-            staff = user_repo.find_many({"store_ids": store_id}) or []
+            staff = user_repo.find_many({"store_ids": store_id}, limit=0) or []
             stats["staff_count"] = len(staff)
     except Exception:
         pass
@@ -641,7 +641,7 @@ async def get_store_users(
         if role_list:
             query["roles"] = {"$in": role_list}
 
-    users = user_repo.find_many(query) or []
+    users = user_repo.find_many(query, limit=0) or []
     safe = []
     for u in users:
         u.pop("password", None)

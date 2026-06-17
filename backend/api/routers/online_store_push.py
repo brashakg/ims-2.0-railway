@@ -340,7 +340,7 @@ def _get_variants_for_product(db, product: Dict) -> List[Dict]:
         rows = repo.list_by_parent(pid) if pid else []
         if not rows and product.get("sku"):
             # Fall back to parent_sku linkage when the id link wasn't set.
-            rows = repo.find_many({"parent_sku": product.get("sku")})
+            rows = repo.find_many({"parent_sku": product.get("sku")}, limit=0)
         return rows or []
     except Exception:  # noqa: BLE001
         return []
