@@ -12,6 +12,7 @@ import { useAppearance } from '../../context/AppearanceContext';
 import { useAuth } from '../../context/AuthContext';
 import { loadHsnRates, loadPricingMode } from '../../constants/gstRuntime';
 import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
+import { IdleLogoutWatcher } from '../auth/IdleLogoutWatcher';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
 const SEGMENT_LABELS: Record<string, string> = {
@@ -103,6 +104,10 @@ export function AppLayout() {
 
   return (
     <Shell crumbs={crumbs} brand={brand}>
+      {/* Idle auto-logout enforcement for the whole authenticated app. Renders
+          nothing until the warning window; reads its policy at runtime from
+          /health (SUPERADMIN-configurable). */}
+      <IdleLogoutWatcher />
       {/* INVESTOR read-only banner — sticky top-of-page strip when the
           signed-in user is INVESTOR-only. Backend middleware also blocks
           writes server-side; this is the user-facing acknowledgement so
