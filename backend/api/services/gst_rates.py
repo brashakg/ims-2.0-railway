@@ -24,10 +24,10 @@ correcting vision continue to attract 18%").
 Watches 9101 / 9102 and smartwatches (8517 / 9102) ... 18% (unchanged).
 Accessories (cases / cloths / solutions) ............. 18%.
 
-GST-REVIEW (flagged for the accountant, left at the EXISTING IMS rate, not
-guessed): SMARTGLASSES — electronic eyewear with a display can be argued under
-Ch. 85 (18%) or as corrective eyewear (5%) if prescription-fitted. Kept at 18%
-to match prior IMS behaviour; confirm with the accountant before changing.
+SMARTGLASSES — electronic eyewear with a display can be argued under Ch. 85
+(18%) or as corrective eyewear (5%) if prescription-fitted. CONFIRMED 18% by
+the owner on 2026-06-17 (HSN 8525.80). This is now a settled rate, not a guess;
+edit here only on a fresh ruling.
 ------------------------------------------------------------------------------
 
 NOTE: rates are floats to match the existing `gst_rate` field shape. The HSN
@@ -54,7 +54,7 @@ GST_CATEGORY_TABLE: dict = {
     "SMARTGLASSES": (
         "852580",
         18.0,
-    ),  # GST-REVIEW: electronic eyewear; 18% (see module docstring)
+    ),  # electronic eyewear -> 18% (owner-confirmed 2026-06-17; see docstring)
     "WALL_CLOCK": ("910500", 18.0),  # 9105 clocks -> 18%
     "ACCESSORIES": ("392690", 18.0),  # cases / cloths / accessories -> 18%
     "SERVICES": ("998599", 18.0),  # optical services -> 18%
@@ -113,8 +113,8 @@ GST_CATEGORY_TABLE: dict = {
     "CK": ("910500", 18.0),  # Clock
     "HA": ("902140", 0.0),  # Hearing Aid (NIL/exempt)
     "ACC": ("392690", 18.0),  # Accessories
-    "SMTSG": ("852580", 18.0),  # Smart Sunglass     (GST-REVIEW)
-    "SMTFR": ("852580", 18.0),  # Smart Glasses      (GST-REVIEW)
+    "SMTSG": ("852580", 18.0),  # Smartglasses (Sunglass) -> 18% (owner-confirmed 2026-06-17)
+    "SMTFR": ("852580", 18.0),  # Smartglasses -> 18% (owner-confirmed 2026-06-17)
     "SMTWT": ("910221", 18.0),  # Smart Watch
 }
 

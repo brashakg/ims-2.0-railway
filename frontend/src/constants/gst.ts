@@ -203,8 +203,8 @@ export function getGSTRateByCategory(category: string): number {
     case 'SMARTWATCH':
     case 'SMTWT':
       return 18;
-    // GST-REVIEW: electronic smart eyewear classification is ambiguous
-    // (Ch. 85 18% vs corrective 5%); kept at 18% pending accountant confirmation.
+    // Smartglasses (electronic eyewear, HSN 8525.80) -> 18%.
+    // Owner-confirmed 2026-06-17 (Ch. 85 standard rate, not the 5% optical rate).
     case 'SMARTGLASSES':
     case 'SMTSG':
     case 'SMTFR':
