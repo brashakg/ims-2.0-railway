@@ -2359,6 +2359,30 @@ async def add_order_item(
                         product.get("discount_category"), product.get("brand")
                     ),
                 )
+            else:
+                # FAIL-CLOSED on the cap-TIGHTENING path (mirror create_order
+                # ~line 1443). The product/category resolver returned nothing
+                # (it threw, or the id wasn't found), so the category/luxury-brand
+                # tightening above was skipped and _cap would silently stay at the
+                # loose role cap -- dropping the 2-5% luxury brand floor and
+                # letting a Cartier/Gucci frame take the full role cap when added
+                # to a DRAFT order. We cannot re-read the DB (it just failed), so
+                # we tighten using the STRONGEST signal still on the line payload:
+                # its brand. brand_cap_for() is a pure, DB-free luxury-brand
+                # lookup -- a named luxury brand keeps its low floor even on a
+                # resolver error. DELIBERATELY NOT over-corrected: a plain/MASS
+                # line (no luxury brand -> brand_cap_for returns None) keeps the
+                # normal role cap, so an ordinary add is NOT blocked.
+                try:
+                    from api.services.pricing_caps import (
+                        brand_cap_for as _luxury_brand_cap,
+                    )
+
+                    _bcap = _luxury_brand_cap(item.brand)
+                    if _bcap is not None:
+                        _cap = min(_cap, _bcap)
+                except Exception:
+                    pass  # even the pure fallback failed: do not loosen
         if not _is_admin and _eff_disc > _cap + 1e-9:
             raise HTTPException(
                 status_code=403,
