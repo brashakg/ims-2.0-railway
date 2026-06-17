@@ -4287,6 +4287,11 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/image/{image_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/push/all-pending",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # --- /api/v1/online-store/orders ---  (BVI Phase 3b: online sales into IMS books)
     # The read + recovery surface over the canonical IMS orders that
     # online_order_mapper creates from Shopify orders (channel='ONLINE', GST invoice
