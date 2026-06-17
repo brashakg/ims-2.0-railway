@@ -233,6 +233,46 @@ def _online_fulfillment_store_id(payload: Dict[str, Any]) -> str:
     )
 
 
+def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
+    """Fail-LOUD record of an online stock-decrement miss (an oversell: a paid
+    online order whose physical units could not all be claimed). Logs at ERROR
+    (so Sentry captures it) and writes an `online_stock_miss` doc that the
+    sync-health tile surfaces for operator follow-up. Itself fully fail-soft --
+    recording the miss must never raise out of ingestion (the invoice is already
+    booked). reason: 'under_claim' | 'exception'."""
+    logger.error(
+        "[SHOPIFY_INGEST] ONLINE STOCK MISS order=%s store=%s reason=%s detail=%s",
+        order_id,
+        store_id,
+        reason,
+        detail,
+    )
+    try:
+        if db is None:
+            return
+        coll = (
+            db.get_collection("online_stock_miss")
+            if hasattr(db, "get_collection")
+            else db["online_stock_miss"]
+        )
+        if coll is None:
+            return
+        coll.insert_one(
+            {
+                "order_id": order_id,
+                "store_id": store_id,
+                "reason": reason,
+                "detail": detail,
+                "resolved": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] could not record stock miss for %s: %s", order_id, exc
+        )
+
+
 def _webhook_already_seen(db, webhook_id: Optional[str]) -> bool:
     """Layer-2 dedupe: record + detect a replayed X-Shopify-Webhook-Id.
 
@@ -550,13 +590,24 @@ def ingest_shopify_order(
         if decrement_items:
             from ..routers.orders import _mark_units_sold
 
-            _mark_units_sold(order_id, decrement_items, fulfillment_store)
+            expected = sum(int(it.get("quantity") or 1) for it in decrement_items)
+            marked = _mark_units_sold(order_id, decrement_items, fulfillment_store)
+            # FAIL LOUD on an under-claim: we booked a paid online order but could
+            # NOT decrement every serialized unit (out of physical on-hand at the
+            # fulfillment store, or it has no stock_units at all). The invoice
+            # stands (Shopify took payment) but this is an oversell that needs
+            # operator action -- record it loudly so the sync-health tile + Sentry
+            # surface it instead of it slipping by as a warning.
+            if len(marked) < expected:
+                _record_stock_miss(
+                    db,
+                    order_id,
+                    fulfillment_store,
+                    "under_claim",
+                    {"expected": expected, "claimed": len(marked)},
+                )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[SHOPIFY_INGEST] online stock decrement skipped for %s: %s",
-            order_id,
-            exc,
-        )
+        _record_stock_miss(db, order_id, fulfillment_store, "exception", str(exc))
     try:
         from .online_stock_writeback import writeback_after_sale
 
