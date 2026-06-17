@@ -395,7 +395,14 @@ export function AdminControlPanel() {
       {activeTab === 'rules' && (
         <div className="space-y-6">
           {['billing', 'inventory', 'hr', 'clinical', 'security'].map(category => {
-            const categoryRules = rules.filter(r => r.category === category);
+            // COUNCIL RULING §3: HIDE inert security controls. session_timeout +
+            // two_factor (2FA) are written to admin_controls.operational_rules but
+            // NOTHING in the backend reads/enforces them -- a visible-but-inert
+            // auth control is a false-security lie, so it's hidden until wired.
+            // (password_expiry stays: force-change-on-first-login IS enforced.)
+            const INERT_RULE_IDS = new Set(['session_timeout', 'two_factor']);
+            const categoryRules = rules.filter(r => r.category === category && !INERT_RULE_IDS.has(r.id));
+            if (categoryRules.length === 0) return null;
             return (
               <div key={category}>
                 <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3 border-b border-gray-200 pb-2">

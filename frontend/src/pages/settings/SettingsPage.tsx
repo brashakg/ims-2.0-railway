@@ -10,7 +10,7 @@
 // audit-logs, approvals, feature-toggles, system) are rendered inline.
 
 import { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Store, Users, Tag, Percent, Database,
   ChevronRight, Plus, AlertCircle,
@@ -18,7 +18,7 @@ import {
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer, Save,
   Search, Calendar, Filter, X, Shield, LogOut, Bot, Award, Sliders, Target,
-  RotateCcw,
+  RotateCcw, ExternalLink, ArrowRight,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -33,7 +33,9 @@ import { financeApi } from '../../services/api/finance';
 
 import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
 import { FeatureToggles } from '../../components/settings/FeatureToggles';
-import { IntegrationSettings } from '../../components/settings/IntegrationSettings';
+// IntegrationSettings (legacy 5-card panel) is NOT imported here anymore — the
+// IntegrationsHub embeds it as a "Supplementary tools" section, so it remains the
+// single integrations UI (COUNCIL RULING §3).
 import { IntegrationsHub } from '../../components/settings/IntegrationsHub';
 import { NotificationSettings } from '../../components/settings/NotificationSettings';
 import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
@@ -47,7 +49,11 @@ import { PolicySchemaForm } from '../../components/settings/PolicySchemaForm';
 // Sub-components
 import { ProfileSection, BusinessSection } from './SettingsProfile';
 import { UserManagementSection } from './SettingsAuth';
-import { StoreManagementSection, CategorySection, BrandSection, DiscountSection } from './SettingsStore';
+// StoreManagementSection intentionally NOT imported: Stores are managed ONLY on
+// the canonical /organization screen now. The Settings "Stores" tab shows a
+// redirect card (below). The component still exists in ./SettingsStore for a
+// later-release deletion (COUNCIL RULING §3: redirect first, delete later).
+import { CategorySection, BrandSection, DiscountSection } from './SettingsStore';
 import { LensMasterSection } from './SettingsLens';
 import { LensCatalogEnumsSection } from './SettingsLensEnums';
 import { RemindersSettings } from './RemindersSettings';
@@ -92,13 +98,20 @@ const AUDIT_ACTION_ROW_STYLES: Record<AuditAction, string> = {
 };
 
 // ============================================================================
+// Settings IA — audience groups (COUNCIL RULING §3)
+// ============================================================================
+// Five audience buckets. The per-tab assignment below is a typed TOTAL map, so
+// a new SettingsTab with no group is a compile error (no silent "More" orphan).
+type GroupId = 'account' | 'org' | 'catalog' | 'compliance' | 'system';
+
+// ============================================================================
 // Sidebar section config
 // ============================================================================
 
 const SETTINGS_SECTIONS = [
   { id: 'profile' as SettingsTab, label: 'My Profile', icon: User, description: 'Account settings and preferences', role: ['ALL'] },
   { id: 'business' as SettingsTab, label: 'Business Profile', icon: Building2, description: 'Company info and branding', role: ['SUPERADMIN', 'ADMIN'] },
-  { id: 'stores' as SettingsTab, label: 'Store Management', icon: Store, description: 'Create and manage stores', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'stores' as SettingsTab, label: 'Stores & Entities', icon: Store, description: 'Managed on the Organization screen', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'users' as SettingsTab, label: 'User Management', icon: Users, description: 'Manage users and roles', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
   { id: 'categories' as SettingsTab, label: 'Category Master', icon: Tag, description: 'Product categories and attributes', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
@@ -130,6 +143,7 @@ const SETTINGS_SECTIONS = [
 export function SettingsPage() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
 
@@ -206,19 +220,51 @@ export function SettingsPage() {
   });
 
   /**
-   * DELTAS punch-list: 17 settings sections were rendered as a flat
-   * list, forcing a long visual scan. Bucketed into 5 functional
-   * groups (Account, Organisation, Catalog, Operations, System) so
-   * the operator can locate a setting by intent. Items + content
-   * panels are unchanged; only the side-nav rendering changed.
+   * COUNCIL RULING §3 — taxonomy by AUDIENCE, ~5 buckets, NO "More" orphan.
+   * Group membership is a TYPED TOTAL MAP (`Record<SettingsTab, GroupId>`):
+   * every tab MUST name its group, so adding a SettingsTab without assigning
+   * it a group is a COMPILE ERROR rather than silently falling into a "More"
+   * bucket (which is how Lens Pricing + Loyalty were previously dropped). The
+   * orphan-catch is removed — the type system is the guarantee now.
    */
-  type GroupId = 'account' | 'org' | 'catalog' | 'ops' | 'system';
-  const SETTINGS_GROUPS: Array<{ id: GroupId; label: string; members: SettingsTab[] }> = [
-    { id: 'account', label: 'Account',      members: ['profile'] },
-    { id: 'org',     label: 'Organisation', members: ['business', 'stores', 'users'] },
-    { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts'] },
-    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'refund-policy', 'printers', 'notifications', 'reminders', 'integrations', 'loyalty'] },
-    { id: 'system',  label: 'System',       members: ['approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'] },
+  const SETTINGS_GROUP_OF: Record<SettingsTab, GroupId> = {
+    // My Account
+    profile: 'account',
+    // Business & Org (the Organization link lives in this group's header)
+    business: 'org',
+    stores: 'org',
+    users: 'org',
+    // Catalog & Pricing
+    categories: 'catalog',
+    brands: 'catalog',
+    'lens-master': 'catalog',
+    'lens-enums': 'catalog',
+    'lens-pricing': 'catalog',
+    discounts: 'catalog',
+    loyalty: 'catalog',
+    // Compliance & Finance
+    'tax-invoice': 'compliance',
+    'hsn-rates': 'compliance',
+    'tds-rates': 'compliance',
+    policies: 'compliance',
+    'refund-policy': 'compliance',
+    // System & Admin
+    notifications: 'system',
+    reminders: 'system',
+    integrations: 'system',
+    printers: 'system',
+    approvals: 'system',
+    agents: 'system',
+    'feature-toggles': 'system',
+    'audit-logs': 'system',
+    system: 'system',
+  };
+  const SETTINGS_GROUPS: Array<{ id: GroupId; label: string }> = [
+    { id: 'account',    label: 'My Account' },
+    { id: 'org',        label: 'Business & Org' },
+    { id: 'catalog',    label: 'Catalog & Pricing' },
+    { id: 'compliance', label: 'Compliance & Finance' },
+    { id: 'system',     label: 'System & Admin' },
   ];
 
   // Load data for inline tabs
@@ -309,7 +355,7 @@ export function SettingsPage() {
       <nav className="s-nav">
         <span className="eyebrow">Configuration · {visibleSections.length} sections</span>
         {SETTINGS_GROUPS.map((group) => {
-          const groupSections = visibleSections.filter((s) => group.members.includes(s.id));
+          const groupSections = visibleSections.filter((s) => SETTINGS_GROUP_OF[s.id] === group.id);
           if (groupSections.length === 0) return null;
           return (
             <div key={group.id}>
@@ -329,38 +375,23 @@ export function SettingsPage() {
                   </button>
                 );
               })}
+              {/* Business & Org links out to the canonical Organization screen
+                  (entities + stores live there, not here). */}
+              {group.id === 'org' && (
+                <button
+                  type="button"
+                  onClick={() => navigate('/organization')}
+                  className="s-nav-item"
+                  title="Manage legal entities and stores (canonical screen)"
+                >
+                  <Building2 className="s-nav-icon" />
+                  <span className="s-nav-label">Organization</span>
+                  <ExternalLink className="s-nav-icon" style={{ marginLeft: 'auto', opacity: 0.5 }} />
+                </button>
+              )}
             </div>
           );
         })}
-        {/* Orphan-catch: any visible section not assigned to a group above
-            still renders here, so a newly-added section can never be silently
-            unreachable from the nav (this is how Lens Pricing + Loyalty were
-            previously dropped). */}
-        {(() => {
-          const grouped = new Set<SettingsTab>(SETTINGS_GROUPS.flatMap((g) => g.members));
-          const orphans = visibleSections.filter((s) => !grouped.has(s.id));
-          if (orphans.length === 0) return null;
-          return (
-            <div key="more">
-              <span className="s-nav-group">More</span>
-              {orphans.map((section) => {
-                const IconCmp = section.icon;
-                return (
-                  <button
-                    key={section.id}
-                    type="button"
-                    onClick={() => setActiveTab(section.id)}
-                    className={'s-nav-item' + (activeTab === section.id ? ' on' : '')}
-                    title={section.description}
-                  >
-                    <IconCmp className="s-nav-icon" />
-                    <span className="s-nav-label">{section.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          );
-        })()}
         {user?.activeRole === 'SUPERADMIN' && (
           <>
             <div className="divider" />
@@ -406,7 +437,7 @@ export function SettingsPage() {
           {/* ---- Delegated sub-components ---- */}
           {activeTab === 'profile' && <ProfileSection />}
           {activeTab === 'business' && <BusinessSection />}
-          {activeTab === 'stores' && <StoreManagementSection />}
+          {activeTab === 'stores' && <StoresRedirectCard onGo={() => navigate('/organization')} />}
           {activeTab === 'users' && <UserManagementSection />}
           {activeTab === 'categories' && <CategorySection />}
           {activeTab === 'brands' && <BrandSection />}
@@ -417,12 +448,13 @@ export function SettingsPage() {
           {/* ---- Existing component delegates ---- */}
           {activeTab === 'integrations' && (
             <div>
-              {/* SUPERADMIN gets the full catalog hub; everyone else gets the
-                  existing card list (ADMIN can still configure the 5 legacy types). */}
-              {user?.activeRole === 'SUPERADMIN'
-                ? <IntegrationsHub />
-                : <IntegrationSettings />
-              }
+              {/* COUNCIL RULING §3: IntegrationsHub is the ONLY integrations UI.
+                  The Hub already embeds the legacy 5-type panel (IntegrationSettings)
+                  as its "Supplementary tools" section, so ADMIN keeps the legacy
+                  types as a filtered view INSIDE the Hub — no second parallel UI.
+                  (The catalog grid is SUPERADMIN-gated server-side and fails soft
+                  to empty for ADMIN; gating is unchanged.) */}
+              <IntegrationsHub />
             </div>
           )}
           {activeTab === 'notifications' && <div><NotificationSettings /></div>}
@@ -475,6 +507,43 @@ export function SettingsPage() {
           {!isLoading && activeTab === 'system' && (
             <SystemSection systemStatus={systemStatus} />
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Stores Redirect Card (COUNCIL RULING §3 — single source of truth)
+// ============================================================================
+// Stores + legal entities are created/edited ONLY on the canonical /organization
+// screen (it captures the required entity link + derives each store's GSTIN by
+// state). This card keeps the Settings "Stores" tab slot but points the operator
+// at the one place that works — no second, drifting store editor.
+
+function StoresRedirectCard({ onGo }: { onGo: () => void }) {
+  return (
+    <div className="card">
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-lg bg-bv-red-50 flex items-center justify-center flex-shrink-0">
+          <Building2 className="w-5 h-5 text-bv-red-600" />
+        </div>
+        <div className="flex-1">
+          <h2 className="text-lg font-semibold text-gray-900">Stores &amp; entities moved to Organization</h2>
+          <p className="text-sm text-gray-500 mt-1 max-w-prose">
+            Legal entities (PAN / GSTIN) and their stores are now managed in one
+            place: the <strong>Organization</strong> screen. It links each store
+            to its entity and derives the store GSTIN by state — the single source
+            of truth for store data.
+          </p>
+          <button
+            type="button"
+            onClick={onGo}
+            className="btn-primary mt-4 inline-flex items-center gap-2"
+          >
+            Open Organization
+            <ArrowRight className="w-4 h-4" />
+          </button>
         </div>
       </div>
     </div>
@@ -535,63 +604,23 @@ function TaxInvoiceSection({
               />
             </div>
           </div>
-          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-            <div>
-              <p className="font-medium text-gray-900">E-Invoice Enabled</p>
-              <p className="text-sm text-gray-500">Generate IRN for B2B transactions</p>
-            </div>
-            {taxSettings?.e_invoice_enabled ? (
-              <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_invoice_enabled: false } : null)} />
-            ) : (
-              <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_invoice_enabled: true } : null)} />
-            )}
-          </div>
-          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-            <div>
-              <p className="font-medium text-gray-900">E-Way Bill Auto-Generate</p>
-              <p className="text-sm text-gray-500">For invoices above threshold</p>
-            </div>
-            {taxSettings?.e_way_bill_enabled ? (
-              <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_way_bill_enabled: false } : null)} />
-            ) : (
-              <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_way_bill_enabled: true } : null)} />
-            )}
-          </div>
+          {/* COUNCIL RULING §3: HIDE until wired. E-Invoice (IRN / digital
+              signature), E-Way Bill auto-generate, and HSN-validation are inert
+              toggles — a control that does nothing is a false-security lie. They
+              are intentionally not rendered until the integration is actually
+              wired. (The underlying fields stay in the settings model so no data
+              is lost; nothing reads them yet.) */}
         </div>
       </div>
 
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Invoice Settings</h2>
         <div className="space-y-4">
-          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Invoice Prefix</label>
-              <input
-                type="text"
-                value={invoiceSettings?.invoice_prefix || 'INV'}
-                onChange={e => setInvoiceSettings((prev: any) => prev ? { ...prev, invoice_prefix: e.target.value.toUpperCase() } : null)}
-                className="input-field"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Current Number</label>
-              <input
-                type="number"
-                value={invoiceSettings?.current_invoice_number || 1}
-                readOnly
-                className="input-field bg-gray-100"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Financial Year</label>
-              <input
-                type="text"
-                value={invoiceSettings?.financial_year || '2024-25'}
-                onChange={e => setInvoiceSettings((prev: any) => prev ? { ...prev, financial_year: e.target.value } : null)}
-                className="input-field"
-              />
-            </div>
-          </div>
+          {/* COUNCIL RULING §3: HIDE until wired. Invoice-numbering config
+              (prefix / current number / financial year) is NOT GST-compliant
+              yet (the serial generator is a separate, sign-off-gated change) and
+              editing it here does not change the numbers the system actually
+              issues. Hidden so it can't read as a working control. */}
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-1">Default Terms & Conditions</label>
             <textarea
@@ -674,6 +703,15 @@ function PrinterSection({
     <div className="space-y-4">
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Printer Configuration</h2>
+        {/* COUNCIL RULING §3: KEEP printer settings, with an honesty note. */}
+        <div className="mb-4 flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>
+            These preferences are saved, but the silent-print path (QZ Tray) only
+            takes effect on terminals where QZ + a signing certificate are
+            installed. Where it is not yet wired, labels open in a print window.
+          </span>
+        </div>
         <div className="space-y-4">
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
