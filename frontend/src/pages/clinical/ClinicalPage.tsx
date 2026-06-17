@@ -19,12 +19,12 @@ import {
   AlertTriangle,
   TrendingUp,
 } from 'lucide-react';
-import { clinicalApi, customerApi, storeApi } from '../../services/api';
+import { clinicalApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import { SendToFloorDrawer } from '../../components/clinical/SendToFloorDrawer';
-import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
+import { PatientIntakeModal } from '../../components/clinical/PatientIntakeModal';
 import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import { AbuseDetection } from '../../components/clinical/AbuseDetection';
@@ -356,191 +356,10 @@ export function ClinicalPage() {
     }
   };
 
-  // Save customer and add to queue.
-  // The flow tolerates duplicates by design: if a record with this mobile
-  // already exists we silently use it instead of 400'ing — repeat walk-ins
-  // shouldn't get blocked at the front desk. Order of operations:
-  //   1. sanitize the mobile to 10 digits (matches backend regex)
-  //   2. lookup by mobile — if found, use that record
-  //   3. otherwise create
-  //   4. if create races against a parallel create and 400s with "already
-  //      exists", retry the lookup and use the winner
-  //   5. queue the patient against whichever customer id we ended up with
-  const handleSaveCustomer = async (customerData: CustomerFormData) => {
-    try {
-      const sanitizedMobile = (customerData.mobileNumber || '').replace(/\D/g, '').slice(-10);
-      if (sanitizedMobile.length !== 10) {
-        toast.error('Mobile number must contain 10 digits');
-        throw new Error('Invalid mobile');
-      }
-
-      const lookupByMobile = async (): Promise<any | null> => {
-        try {
-          const r = await customerApi.searchByPhone(sanitizedMobile);
-          if (!r) return null;
-          if (Array.isArray(r)) return r[0] || null;
-          if ((r as any).customer) return (r as any).customer;
-          if (Array.isArray((r as any).customers)) return (r as any).customers[0] || null;
-          // Bare object response (legacy shape)
-          if ((r as any).customer_id || (r as any)._id || (r as any).id) return r;
-          return null;
-        } catch {
-          return null;
-        }
-      };
-
-      let existing = await lookupByMobile();
-      let isExisting = !!existing;
-
-      let customerId: string | undefined;
-      let customerName: string;
-
-      // Build a billing_address object only when at least one address
-      // field has content; otherwise omit so we don't blow away any
-      // existing address on update.
-      const billingAddress =
-        customerData.address || customerData.city || customerData.pincode || customerData.state
-          ? {
-              address: customerData.address || undefined,
-              city: customerData.city || undefined,
-              state: customerData.state || undefined,
-              pincode: customerData.pincode || undefined,
-            }
-          : undefined;
-
-      const patientsPayload = (customerData.patients || [])
-        .filter(p => p.name && p.name.trim())
-        .map(p => ({
-          name: p.name,
-          mobile: p.mobile ? p.mobile.replace(/\D/g, '').slice(-10) : undefined,
-          dob: p.dateOfBirth || undefined,
-          relation: p.relation || 'Self',
-        }));
-
-      if (existing) {
-        customerId = existing.customer_id || existing._id || existing.id;
-        customerName = existing.name || customerData.fullName;
-
-        // Amend the existing record — backend ignores empty diffs and
-        // appends patients additively (de-dups on name+mobile). This lets
-        // the operator add a DOB / marketing-opt-out / new dependent on
-        // a return visit without ever hitting the duplicate-mobile wall.
-        const updatePayload: Record<string, unknown> = {
-          marketing_consent: customerData.marketingConsent,
-        };
-        if (customerData.dateOfBirth) updatePayload.dob = customerData.dateOfBirth;
-        if (customerData.anniversary) updatePayload.anniversary = customerData.anniversary;
-        if (customerData.email && customerData.email !== existing.email) {
-          updatePayload.email = customerData.email;
-        }
-        if (
-          customerData.customerType === 'B2B' &&
-          customerData.gstNumber &&
-          customerData.gstNumber !== existing.gstin
-        ) {
-          updatePayload.gstin = customerData.gstNumber;
-          updatePayload.customer_type = 'B2B';
-        }
-        if (billingAddress) updatePayload.billing_address = billingAddress;
-        if (patientsPayload.length > 0) updatePayload.patients = patientsPayload;
-
-        try {
-          await customerApi.updateCustomer(customerId as string, updatePayload);
-        } catch {
-          // Don't block the queue add if the amend fails — log + continue.
-          // eslint-disable-next-line no-console
-          console.warn('[Clinical] updateCustomer failed; proceeding with queue add anyway');
-        }
-      } else {
-        const customerPayload = {
-          name: customerData.fullName,
-          mobile: sanitizedMobile,
-          email: customerData.email || undefined,
-          dob: customerData.dateOfBirth || undefined,
-          anniversary: customerData.anniversary || undefined,
-          customer_type: customerData.customerType,
-          gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
-          billing_address: billingAddress,
-          marketing_consent: customerData.marketingConsent,
-          patients: patientsPayload,
-        };
-
-        try {
-          const created = await customerApi.createCustomer(customerPayload as any);
-          customerId = created?.customer_id || created?.id;
-          customerName = created?.name || customerData.fullName;
-        } catch (err: any) {
-          const detail: string =
-            err?.response?.data?.detail ?? err?.message ?? '';
-          if (/already exists/i.test(detail)) {
-            // Race: someone created the record between our lookup and POST.
-            // Fall back to lookup-and-use rather than blocking the operator.
-            existing = await lookupByMobile();
-            if (existing) {
-              customerId = existing.customer_id || existing._id || existing.id;
-              customerName = existing.name || customerData.fullName;
-              isExisting = true;
-            } else {
-              throw err;
-            }
-          } else {
-            throw err;
-          }
-        }
-      }
-
-      // Decide which patient to queue. Prefer the modal's first patient (the
-      // operator's explicit choice for this visit); fall back to the
-      // existing customer's first registered patient; finally fall back to
-      // the customer themselves.
-      const modalPatient = customerData.patients?.[0];
-      const existingPatient =
-        Array.isArray(existing?.patients) && existing.patients.length > 0
-          ? existing.patients[0]
-          : null;
-      const queuePatientName =
-        (modalPatient?.name && modalPatient.name.trim()) ||
-        (existingPatient?.name) ||
-        customerName;
-      const queueAge = modalPatient?.dateOfBirth
-        ? calculateAge(modalPatient.dateOfBirth)
-        : undefined;
-
-      const queuePatientId =
-        (modalPatient as any)?.id ||
-        (modalPatient as any)?.patient_id ||
-        (existingPatient as any)?.patient_id ||
-        (existingPatient as any)?.id ||
-        undefined;
-      await clinicalApi.addToQueue({
-        storeId: user?.activeStoreId || '',
-        patientName: queuePatientName,
-        customerPhone: sanitizedMobile,
-        customerId,
-        patientId: queuePatientId,
-        age: queueAge,
-        reason: 'Eye examination',
-      });
-
-      if (isExisting) {
-        toast.info(
-          `Existing customer record amended — ${queuePatientName} added to queue (${customerName})`,
-        );
-      } else {
-        toast.success(
-          `Customer created and ${queuePatientName} added to queue`,
-        );
-      }
-
-      setShowAddCustomerModal(false);
-      setAddCustomerInitialName('');
-      await loadData();
-    } catch (error: any) {
-      const detail = error?.response?.data?.detail || error?.message || 'Failed to add customer';
-      toast.error(detail);
-      throw error;
-    }
-  };
+  // Patient intake (create-or-reuse customer + optional Rx + queue) now lives
+  // inside PatientIntakeModal — the clinical, token-first intake flow. It
+  // reuses the same customer/prescription/queue APIs. ClinicalPage only needs
+  // to refresh the queue once the modal reports completion.
 
   // Helper function to calculate age from date of birth
   const calculateAge = (dob: string): number => {
@@ -1020,19 +839,26 @@ export function ClinicalPage() {
         />
       )}
 
-      {/* Add Customer Modal (replaces simple patient modal) */}
-      <AddCustomerModal
+      {/* Clinical patient-intake modal: token-first patient identity + inline
+          Rx grid (OD/OS x SPH/CYL/AXIS/ADD/PD/VA). Reuses the customer +
+          prescription + queue APIs. Distinct from the POS "Add Customer" form. */}
+      <PatientIntakeModal
         isOpen={showAddCustomerModal}
         onClose={() => {
           setShowAddCustomerModal(false);
           setAddCustomerInitialName('');
         }}
-        onSave={handleSaveCustomer}
+        storeId={user?.activeStoreId}
         initialName={addCustomerInitialName}
+        onComplete={async () => {
+          setShowAddCustomerModal(false);
+          setAddCustomerInitialName('');
+          await loadData();
+        }}
       />
 
       {/* Phase 6.13 — Queue existing customer. Opens first; falls
-          through to AddCustomerModal if no match. */}
+          through to the clinical PatientIntakeModal if no match. */}
       <QueueExistingCustomerModal
         isOpen={showQueueExistingModal}
         onClose={() => setShowQueueExistingModal(false)}

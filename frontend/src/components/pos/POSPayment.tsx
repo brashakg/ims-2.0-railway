@@ -127,10 +127,10 @@ export function StepPayment() {
     <div className="w-full max-w-2xl mx-auto space-y-4">
       <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
         <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due (incl. GST)'}</p>
-        <p className="text-4xl font-bold text-gray-900">{'₹'}{Math.round(total).toLocaleString('en-IN')}</p>
+        <p className="figure text-4xl text-gray-900">{'₹'}{Math.round(total).toLocaleString('en-IN')}</p>
         {paid > 0 && <div className="mt-3 flex justify-center gap-6 text-sm">
-          <span className="text-green-600">Paid: {'₹'}{Math.round(paid).toLocaleString('en-IN')}</span>
-          <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: {'₹'}{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
+          <span className="figure text-green-600">Paid: {'₹'}{Math.round(paid).toLocaleString('en-IN')}</span>
+          <span className={balance > 0 ? 'figure text-red-600' : 'figure text-green-600'}>Balance: {'₹'}{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
         </div>}
       </div>
 

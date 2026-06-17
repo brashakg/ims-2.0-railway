@@ -68,13 +68,13 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
               <p className="text-xs text-emerald-700 inline-flex items-center gap-1">
                 <ArrowUpRight className="w-3 h-3" /> Premiumized
               </p>
-              <p className="text-lg font-bold text-emerald-700 mt-1 tabular-nums">
+              <p className="figure text-lg text-emerald-700 mt-1">
                 {pct(data.movement_summary.premiumized_pct)}
               </p>
             </div>
             <div className="bg-gray-50 rounded p-3 border border-gray-100">
               <p className="text-xs text-gray-500">Stable</p>
-              <p className="text-lg font-bold text-gray-700 mt-1 tabular-nums">
+              <p className="figure text-lg text-gray-700 mt-1">
                 {pct(data.movement_summary.stable_pct)}
               </p>
             </div>
@@ -82,7 +82,7 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
               <p className="text-xs text-red-700 inline-flex items-center gap-1">
                 <ArrowDownRight className="w-3 h-3" /> Downgraded
               </p>
-              <p className="text-lg font-bold text-red-700 mt-1 tabular-nums">
+              <p className="figure text-lg text-red-700 mt-1">
                 {pct(data.movement_summary.downgraded_pct)}
               </p>
             </div>
