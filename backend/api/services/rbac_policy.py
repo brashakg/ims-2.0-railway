@@ -2910,6 +2910,34 @@ POLICY: List[Dict[str, object]] = [
     },
     # --- /api/v1/health ---
     {"method": "GET", "path": "/api/v1/health", "allowed": "PUBLIC"},
+    # --- /api/v1/hr employee self-service (hr_self_service_router) ---
+    # Mounted at /api/v1/hr but OUTSIDE the _FINANCE_ROLES gate so any logged-in
+    # staff member can read their OWN attendance / leaves / payslip / commission.
+    # Each route is pinned to the requesting user (no employee_id param) -> self.
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/me/attendance",
+        "allowed": AUTHENTICATED,
+        "self_enforced": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/me/leaves",
+        "allowed": AUTHENTICATED,
+        "self_enforced": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/me/payslip",
+        "allowed": AUTHENTICATED,
+        "self_enforced": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/me/commission",
+        "allowed": AUTHENTICATED,
+        "self_enforced": True,
+    },
     # --- /api/v1/hr ---
     {
         "method": "GET",
