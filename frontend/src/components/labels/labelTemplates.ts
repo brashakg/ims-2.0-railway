@@ -37,8 +37,15 @@ export interface JobLabelData {
   fitting_instructions?: string;
   special_notes?: string;
   promised_date?: string;
+  // Issuing-store identity (multi-store / multi-brand). Populated by the backend
+  // get_job_label payload + a client-side fallback. NEVER a fixed brand name.
   store_name?: string;
   store_id?: string;
+  store_code?: string;
+  store_brand?: string;
+  store_address?: string;
+  store_gstin?: string;
+  store_phone?: string;
   stage?: string;
   stage_label?: string;
   next_stage?: string | null;
@@ -47,9 +54,6 @@ export interface JobLabelData {
 
 export interface ProductLabelData {
   barcode_value: string;
-  /** Issuing store name (resolved from the stock unit's store_id by the
-   *  backend) -- printed so a tag shows which store holds the unit. */
-  store_name?: string;
   name?: string;
   brand?: string;
   sku?: string;
@@ -59,6 +63,10 @@ export interface ProductLabelData {
   is_contact_lens?: boolean;
   batch_code?: string;
   expiry?: string;
+  // Issuing-store identity so a frame tag / CL box is traceable to its store.
+  store_name?: string;
+  store_code?: string;
+  store_brand?: string;
   cl?: {
     modality?: string;
     base_curve?: string;
@@ -94,6 +102,20 @@ function esc(v: unknown): string {
 function zplSafe(v: unknown): string {
   if (v === null || v === undefined) return '';
   return String(v).replace(/[\^~]/g, ' ').replace(/[^\x20-\x7E]/g, '');
+}
+
+/** Human-readable brand label from the store.brand enum (no fixed default). */
+function brandText(brand?: string): string {
+  const b = (brand || '').trim().toUpperCase();
+  if (b === 'BETTER_VISION') return 'Better Vision';
+  if (b === 'WIZOPT') return 'WizOpt';
+  return '';
+}
+
+/** The issuing-store display name for a label. Prefers the resolved store name,
+ *  then the brand label, then the store code. NEVER a hardcoded brand. */
+function storeDisplayName(d: { store_name?: string; store_brand?: string; store_code?: string }): string {
+  return (d.store_name || '').trim() || brandText(d.store_brand) || (d.store_code || '').trim() || '';
 }
 
 function fmtDate(value?: string): string {
@@ -183,6 +205,11 @@ export function travelerZpl(d: JobLabelData): string {
   const bc = zplSafe(d.barcode_value || d.job_number || d.job_id);
   const w = 75 * A_DOT;
   const h = 50 * A_DOT;
+  // Issuing-store identity (name + code + GSTIN) -- NO hardcoded brand fallback.
+  const storeName = storeDisplayName(d);
+  const storeLine2 = [d.store_code, d.store_gstin ? `GSTIN ${d.store_gstin}` : '']
+    .filter(Boolean)
+    .join('  ');
   // Note the blank box at the bottom drawn with ^GB for handwritten notes.
   return [
     '^XA',
@@ -190,22 +217,21 @@ export function travelerZpl(d: JobLabelData): string {
     `^LL${h}`,
     '^CI28',
     '^CF0,26',
-    // STORE-SPECIFIC: print the issuing store's name (resolved from the job's
-    // store_id by the backend). Neutral fallback -- never a fixed brand that
-    // would mislabel another store's work order.
-    `^FO16,16^FD${zplSafe(d.store_name || 'Work Order')}^FS`,
+    `^FO16,12^FD${zplSafe(storeName)}^FS`,
+    '^CF0,16',
+    storeLine2 ? `^FO16,40^FD${zplSafe(storeLine2)}^FS` : '',
     '^CF0,22',
-    `^FO16,46^FDJob ${zplSafe(d.job_number || d.job_id)}^FS`,
-    `^FO16,72^FDOrder ${zplSafe(d.order_number || '')}^FS`,
+    `^FO16,60^FDJob ${zplSafe(d.job_number || d.job_id)}^FS`,
+    `^FO16,82^FDOrder ${zplSafe(d.order_number || '')}^FS`,
     // Barcode (CODE128)
-    `^FO16,98^BY2^BCN,70,Y,N,N^FD${bc}^FS`,
+    `^FO16,106^BY2^BCN,64,Y,N,N^FD${bc}^FS`,
     '^CF0,20',
-    `^FO16,190^FD${zplSafe(d.customer_name || '')}  ${zplSafe(d.customer_phone || '')}^FS`,
-    `^FO16,214^FDFrame: ${zplSafe(d.frame || '')}^FS`,
-    `^FO16,236^FDLens: ${zplSafe(d.lens || '')}^FS`,
-    `^FO16,258^FDR: ${zplSafe(d.rx?.right || '')}^FS`,
-    `^FO16,278^FDL: ${zplSafe(d.rx?.left || '')}^FS`,
-    `^FO16,300^FDPromised: ${zplSafe(fmtDate(d.promised_date))}^FS`,
+    `^FO16,194^FD${zplSafe(d.customer_name || '')}  ${zplSafe(d.customer_phone || '')}^FS`,
+    `^FO16,216^FDFrame: ${zplSafe(d.frame || '')}^FS`,
+    `^FO16,238^FDLens: ${zplSafe(d.lens || '')}^FS`,
+    `^FO16,260^FDR: ${zplSafe(d.rx?.right || '')}^FS`,
+    `^FO16,280^FDL: ${zplSafe(d.rx?.left || '')}^FS`,
+    `^FO16,302^FDPromised: ${zplSafe(fmtDate(d.promised_date))}^FS`,
     '^CF0,16',
     `^FO16,326^FDNOTES (write below):^FS`,
     // Blank box for handwriting
@@ -215,9 +241,14 @@ export function travelerZpl(d: JobLabelData): string {
 }
 
 export function travelerHtml(d: JobLabelData): string {
+  const storeName = storeDisplayName(d);
+  const storeMeta = [d.store_code, d.store_gstin ? `GSTIN ${d.store_gstin}` : '']
+    .filter(Boolean)
+    .join(' &middot; ');
   return `
   <div class="label" style="width:75mm;min-height:50mm">
-    <div class="lbl-title">${d.store_name ? esc(d.store_name) + ' - ' : ''}Work Order</div>
+    <div class="lbl-title">${esc(storeName)}${storeName ? ' - ' : ''}Work Order</div>
+    ${storeMeta ? `<div class="lbl-muted">${storeMeta}</div>` : ''}
     <div class="lbl-row"><span class="lbl-strong lbl-mono">${esc(d.job_number || d.job_id)}</span>
       ${d.order_number ? `&nbsp;&middot;&nbsp;Order ${esc(d.order_number)}` : ''}</div>
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value || d.job_number || d.job_id, 38)}</div>
@@ -260,12 +291,14 @@ export function stageZpl(d: JobLabelData): string {
 }
 
 export function stageHtml(d: JobLabelData): string {
+  const storeTag = storeDisplayName(d);
   return `
   <div class="label" style="width:50mm;min-height:25mm">
     <div class="lbl-stage">${esc(d.stage_label || d.stage || 'Stage')}</div>
     <div class="lbl-row lbl-mono" style="margin-top:1mm">${esc(d.job_number || d.job_id)}</div>
     ${d.customer_name ? `<div class="lbl-row">${esc(d.customer_name)}</div>` : ''}
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value || d.job_number || d.job_id, 30)}</div>
+    ${storeTag ? `<div class="lbl-muted">${esc(storeTag)}</div>` : ''}
     ${notesHtml('Note', 1)}
   </div>`;
 }
@@ -295,6 +328,7 @@ export function frameZpl(d: ProductLabelData): string {
 }
 
 export function frameHtml(d: ProductLabelData): string {
+  const storeTag = storeDisplayName(d);
   return `
   <div class="label" style="width:50mm;min-height:25mm">
     ${d.brand ? `<div class="lbl-title">${esc(d.brand)}</div>` : ''}
@@ -302,7 +336,7 @@ export function frameHtml(d: ProductLabelData): string {
     ${d.sku ? `<div class="lbl-row lbl-mono lbl-muted">${esc(d.sku)}</div>` : ''}
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value, 32)}</div>
     ${d.price_label ? `<div class="lbl-row lbl-strong" style="font-size:11pt">${esc(d.price_label)}</div>` : ''}
-    ${d.store_name ? `<div class="lbl-muted">${esc(d.store_name)}</div>` : ''}
+    ${storeTag ? `<div class="lbl-muted">${esc(storeTag)}</div>` : ''}
     ${notesHtml('Note', 1)}
   </div>`;
 }
@@ -348,13 +382,14 @@ export function clHtml(d: ProductLabelData): string {
   ]
     .filter(Boolean)
     .join(' &middot; ');
+  const storeTag = storeDisplayName(d);
   return `
   <div class="label" style="width:50mm;min-height:25mm">
     <div class="lbl-title">${esc((d.brand || '') + ' ' + (d.name || ''))}</div>
     ${spec ? `<div class="lbl-row">${spec}</div>` : ''}
     <div class="lbl-row lbl-muted">Exp: ${esc(d.expiry || '__________')} &nbsp; Lot: ${esc(d.batch_code || '________')}</div>
     <div class="lbl-barcode">${barcodeSvg(d.barcode_value, 30)}</div>
-    ${d.store_name ? `<div class="lbl-muted">${esc(d.store_name)}</div>` : ''}
+    ${storeTag ? `<div class="lbl-muted">${esc(storeTag)}</div>` : ''}
     ${notesHtml('Note', 1)}
   </div>`;
 }
@@ -387,9 +422,11 @@ export function readyZpl(d: JobLabelData): string {
 }
 
 export function readyHtml(d: JobLabelData): string {
+  const storeTag = storeDisplayName(d);
   return `
   <div class="label" style="width:50mm;min-height:30mm">
     <div class="lbl-stage" style="font-size:10pt">Ready for Pickup</div>
+    ${storeTag ? `<div class="lbl-muted">${esc(storeTag)}</div>` : ''}
     <div class="lbl-row lbl-strong" style="margin-top:1mm">${esc(d.customer_name || '')}</div>
     ${d.customer_phone ? `<div class="lbl-row">${esc(d.customer_phone)}</div>` : ''}
     <div class="lbl-row lbl-mono">${esc(d.job_number || d.job_id)}</div>

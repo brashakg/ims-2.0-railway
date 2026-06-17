@@ -51,7 +51,7 @@ function printLabel(label: QuarantineLabel): void {
         <p style="margin:8px 0 0;font-weight:600;">${safe(label.name)} ${safe(label.brand)}</p>
         <p style="margin:4px 0;font-family:monospace;font-size:18px;">${safe(label.barcode_value)}</p>
         <p style="margin:4px 0;font-size:12px;">Reason: ${safe(label.quarantine_reason)}</p>
-        <p style="margin:4px 0;font-size:12px;">Store: ${safe(label.store_name)} &middot; ${safe(label.quarantine_at)}</p>
+        <p style="margin:4px 0;font-size:12px;">Store: ${[safe(label.store_brand), safe(label.store_name), label.store_code ? '(' + safe(label.store_code) + ')' : ''].filter(Boolean).join(' ')} &middot; ${safe(label.quarantine_at)}</p>
         ${label.luxury_brand_line ? `<p style="margin:6px 0 0;font-weight:700;color:${label.background_color || '#DC2626'};">${safe(label.luxury_brand_line)}</p>` : ''}
       </div>
     </body></html>`);

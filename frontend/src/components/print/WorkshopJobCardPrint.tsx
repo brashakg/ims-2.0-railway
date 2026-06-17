@@ -45,6 +45,8 @@ interface StoreInfo {
   state: string;
   pincode: string;
   stateCode?: string;
+  brand?: string;
+  storeCode?: string;
 }
 
 interface WorkshopJobCardPrintProps {
@@ -107,6 +109,8 @@ export function WorkshopJobCardPrint({
   const effectiveEntity: EntityLike = entity || { name: store.storeName };
   const effectiveStore: StoreLike = {
     name: store.storeName,
+    store_code: store.storeCode,
+    brand: store.brand,
     address: store.address,
     city: store.city,
     state: store.state,

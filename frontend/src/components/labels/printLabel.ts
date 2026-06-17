@@ -16,6 +16,29 @@ import {
 } from './labelTemplates';
 import type { JobLabelData, ProductLabelData } from './labelTemplates';
 
+/** Fill any EMPTY store-identity field on `data` from `fallback` (active store).
+ *  Backend-populated values win; only blanks are filled. So the issuing-store
+ *  identity is always present even when the backend label payload is thin -- the
+ *  label never falls back to a hardcoded brand. */
+function mergeStoreFallback<T extends Record<string, any>>(
+  data: T,
+  fallback?: Partial<T>,
+): T {
+  if (!fallback) return data;
+  const out: T = { ...data };
+  const keys: Array<keyof T> = [
+    'store_name', 'store_code', 'store_brand', 'store_address',
+    'store_gstin', 'store_phone', 'store_id',
+  ] as Array<keyof T>;
+  for (const k of keys) {
+    const cur = out[k];
+    if ((cur === undefined || cur === null || cur === '') && fallback[k]) {
+      out[k] = fallback[k] as T[keyof T];
+    }
+  }
+  return out;
+}
+
 /** Read the configured label printer name from persisted printer settings. */
 async function getLabelPrinterName(): Promise<string | undefined> {
   try {
@@ -51,6 +74,9 @@ export async function printJobLabel(
     data = { job_id: jobId, ...(fallbackData || {}) } as JobLabelData;
   }
 
+  // Fill the issuing-store identity from the active-store fallback when absent.
+  data = mergeStoreFallback(data, fallbackData);
+
   const built = buildJobLabel(type, data);
   const doc = wrapLabelDocument(built, copies);
   return printZpl(await getLabelPrinterName(), built.zpl, doc);
@@ -79,6 +105,9 @@ export async function printProductLabel(
       ...(fallbackData || {}),
     } as ProductLabelData;
   }
+
+  // Fill the issuing-store identity from the active-store fallback when absent.
+  data = mergeStoreFallback(data, fallbackData);
 
   const built = buildProductLabel(data);
   const doc = wrapLabelDocument(built, copies);

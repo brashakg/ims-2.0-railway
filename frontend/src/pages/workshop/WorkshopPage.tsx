@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrint';
 import type { JobStatus, JobPriority } from '../../types';
-import { workshopApi, orderApi, vendorsApi, storeApi } from '../../services/api';
+import { workshopApi, orderApi, vendorsApi } from '../../services/api';
 import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -38,6 +38,8 @@ import { StationQueueBoard } from '../../components/labels/StationQueueBoard';
 import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
+import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import type { EntityLike } from '../../components/print/legalPrimitives';
 
 // Job type
 interface Job {
@@ -200,24 +202,28 @@ const loadJobs = async () => {
         console.warn('[Workshop] getDashboardKpis failed (non-fatal):', kpisResp.reason);
       }
 
-      // Load the ISSUING store's identity for the printed job card. Resolve it
-      // from the active store via storeApi (the previous orderApi.getStore did
-      // not exist, so the card always fell back to a hardcoded brand name).
+      // Load the issuing-store identity (store + legal entity) for printing the
+      // job card + thermal labels. NEVER defaulted to a fixed brand name (a
+      // WizOpt store must print WizOpt).
       if (!storeInfo && user?.activeStoreId) {
         try {
-          const store: any = await storeApi.getStore(user.activeStoreId);
-          if (store) {
-            setStoreInfo({
-              storeName: store.storeName || store.store_name || store.name || user.activeStoreId,
-              address: store.address || store.street || '',
-              city: store.city || '',
-              state: store.state || store.state_name || '',
-              pincode: store.pincode || '',
-              stateCode: store.stateCode || store.state_code || '',
-            });
-          }
+          const id = await resolveStoreIdentity(user.activeStoreId);
+          const sv = id.store;
+          setStoreInfo({
+            storeName: sv.storeName || sv.storeCode || '',
+            storeCode: sv.storeCode || '',
+            brand: sv.brand || '',
+            address: sv.address || '',
+            city: sv.city || '',
+            state: sv.state || '',
+            stateCode: sv.stateCode || '',
+            pincode: sv.pincode || '',
+            phone: (sv as any).phone || '',
+            gstin: sv.gstin || '',
+          });
+          setStoreEntity(id.entity);
         } catch {
-          // Store info is optional for the card header; fail silently.
+          // Store info is optional
         }
       }
     } catch {
@@ -269,6 +275,7 @@ const loadJobs = async () => {
   // Thermal label modal (traveler / stage / ready / product).
   const [labelSpec, setLabelSpec] = useState<LabelModalSpec | null>(null);
   const [storeInfo, setStoreInfo] = useState<any>(null);
+  const [storeEntity, setStoreEntity] = useState<EntityLike | null>(null);
   const [createOrderSearch, setCreateOrderSearch] = useState('');
   const [createOrders, setCreateOrders] = useState<any[]>([]);
   const [createSelectedOrder, setCreateSelectedOrder] = useState<any>(null);
@@ -1088,13 +1095,26 @@ const loadJobs = async () => {
             createdDate: printJob.createdAt,
           }}
           store={storeInfo}
+          entity={storeEntity}
           onClose={() => setPrintJob(null)}
         />
       )}
 
       {/* Thermal Label Preview + Print modal (QZ silent or HTML fallback) */}
       {labelSpec && (
-        <LabelPreviewModal spec={labelSpec} onClose={() => setLabelSpec(null)} />
+        <LabelPreviewModal
+          spec={labelSpec}
+          fallbackJob={{
+            store_id: user?.activeStoreId,
+            store_name: storeInfo?.storeName,
+            store_code: storeInfo?.storeCode,
+            store_brand: storeInfo?.brand,
+            store_gstin: storeInfo?.gstin,
+            store_phone: storeInfo?.phone,
+            store_address: [storeInfo?.address, storeInfo?.city, storeInfo?.state, storeInfo?.pincode].filter(Boolean).join(', '),
+          }}
+          onClose={() => setLabelSpec(null)}
+        />
       )}
 
       {/* QC checklist modal — posts to /qc-checklist (structured items) -> READY or QC_FAILED */}
