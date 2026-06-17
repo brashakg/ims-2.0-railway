@@ -89,7 +89,7 @@ export function StepPayment() {
 
   const handleEMISubmit = () => {
     const downPayment = parseFloat(emiDownPayment) || 0;
-    if (downPayment < 0 || downPayment >= balance) return;
+    if (downPayment <= 0 || downPayment >= balance) return;
     // POS-2: emiBalance is the financed amount (loan principal).
     // `amount` on the payment entry is the down-payment collected NOW
     // (which reduces balance_due); emiBalance is forwarded to the backend

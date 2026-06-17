@@ -75,9 +75,14 @@ api.interceptors.request.use(
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
   if (error.response?.status === 401) {
-    // Clear auth state on unauthorized
+    // Clear auth + POS cart state on unauthorized so the next user's session
+    // starts clean, especially important on shared POS terminals.
     localStorage.removeItem('ims_token');
     localStorage.removeItem('ims_user');
+    localStorage.removeItem('ims_login_time');
+    localStorage.removeItem('ims_active_module');
+    localStorage.removeItem('ims-pos-draft');
+    localStorage.removeItem('ims-held-bills');
     window.location.href = '/login';
   }
 
