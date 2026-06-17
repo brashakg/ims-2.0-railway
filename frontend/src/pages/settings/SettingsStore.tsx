@@ -602,8 +602,12 @@ export function DiscountSection() {
       <div className="mb-5 flex items-start gap-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg p-3">
         <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
         <span>
-          These are the caps the POS actually enforces. They are set in code
-          (single source of truth) -- contact an administrator to change them.
+          These are the caps the POS actually enforces, read live from the
+          canonical source <code className="font-mono">GET /admin/discounts/enforced-caps</code>
+          (services/role_caps.py + services/pricing_caps.py). The old editable
+          "discount rules" screen wrote storage the POS never read and has been
+          retired -- this is now a read-only pointer to the enforced caps. To
+          change a cap, contact an administrator (it is a code change).
         </span>
       </div>
 

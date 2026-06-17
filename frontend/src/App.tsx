@@ -72,7 +72,9 @@ const AttendancePage = lazy(() => import('./pages/attendance/AttendancePage').th
 const PayrollDashboard = lazy(() => import('./pages/hr/PayrollDashboard').then(m => ({ default: m.PayrollDashboard })));
 const SalarySetupPage = lazy(() => import('./pages/hr/SalarySetupPage').then(m => ({ default: m.SalarySetupPage })));
 const PayrollRunPage = lazy(() => import('./pages/hr/PayrollRunPage').then(m => ({ default: m.PayrollRunPage })));
-const EntitiesPage = lazy(() => import('./pages/settings/EntitiesPage').then(m => ({ default: m.EntitiesPage })));
+// EntitiesPage retired from routing — /settings/entities now redirects to the
+// canonical /organization screen (COUNCIL RULING §3). The page file is kept for
+// a later-release deletion.
 const OrganizationPage = lazy(() => import('./pages/settings/OrganizationPage'));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const GrowthBlueprintPage = lazy(() => import('./pages/reports/GrowthBlueprintPage').then(m => ({ default: m.GrowthBlueprintPage })));
@@ -1127,13 +1129,13 @@ function App() {
                       </ProtectedRoute>
                     }
                   />
+                  {/* COUNCIL RULING §3: Entities are managed on the canonical
+                      /organization screen. Redirect the orphaned SPA route
+                      instead of shipping a parallel editor (delete the page a
+                      release later). */}
                   <Route
                     path="settings/entities"
-                    element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
-                        <EntitiesPage />
-                      </ProtectedRoute>
-                    }
+                    element={<Navigate to="/organization" replace />}
                   />
                   <Route
                     path="organization"
