@@ -278,3 +278,93 @@ def test_consume_min_tier_none_is_backcompat():
         amount=1500.0,  # no min_tier -> historical consumers unaffected
     )
     assert res["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# F27 original-tender hard-lock (_gate_original_tender) -- DECISIONS sec 6:
+# refunds always go back to the original tender (configurable per scope).
+# --------------------------------------------------------------------------- #
+class _TenderBody:
+    def __init__(self, refund_method=None, return_type="RETURN"):
+        self.return_type = return_type
+        self.refund_method = refund_method
+
+
+def _set_tender_policy(monkeypatch, enforce: bool):
+    """Force the refund.original_tender_enforce policy read to `enforce`."""
+    monkeypatch.setattr(
+        "api.services.policy_engine.get_policy",
+        lambda key, scope=None, *, default=None: (
+            enforce if key == "refund.original_tender_enforce" else default
+        ),
+    )
+
+
+def test_normalize_tender_folds_card_synonyms():
+    from api.routers import returns as r
+    assert r._normalize_tender("CREDIT_CARD") == r._normalize_tender("card")
+    assert r._normalize_tender("DEBIT_CARD") == "CARD"
+    assert r._normalize_tender("neft") == "BANK_TRANSFER"
+    assert r._normalize_tender("UPI") == "UPI"
+    assert r._normalize_tender(None) == ""
+
+
+def test_tender_gate_blocks_mismatch_when_enforced(monkeypatch):
+    from api.routers import returns as r
+    from fastapi import HTTPException
+    _set_tender_policy(monkeypatch, True)
+    order = {"payment_method": "CARD"}
+    body = _TenderBody(refund_method="CASH")  # cashier reroutes card sale to cash
+    with pytest.raises(HTTPException) as ei:
+        r._gate_original_tender(body, order=order, store_id="BV-01", entity_id=None)
+    assert ei.value.status_code == 422
+    assert ei.value.detail.get("reason") == "TENDER_MISMATCH"
+
+
+def test_tender_gate_allows_matching_tender(monkeypatch):
+    from api.routers import returns as r
+    _set_tender_policy(monkeypatch, True)
+    order = {"payments": [{"method": "UPI"}]}
+    body = _TenderBody(refund_method="UPI")  # same tender -> allowed
+    assert r._gate_original_tender(body, order=order, store_id="BV-01", entity_id=None) is None
+
+
+def test_tender_gate_card_synonym_is_not_a_mismatch(monkeypatch):
+    from api.routers import returns as r
+    _set_tender_policy(monkeypatch, True)
+    order = {"payment_method": "CREDIT_CARD"}
+    body = _TenderBody(refund_method="DEBIT_CARD")  # both fold to CARD
+    assert r._gate_original_tender(body, order=order, store_id="BV-01", entity_id=None) is None
+
+
+def test_tender_gate_noop_when_policy_off(monkeypatch):
+    from api.routers import returns as r
+    _set_tender_policy(monkeypatch, False)  # override permitted
+    order = {"payment_method": "CARD"}
+    body = _TenderBody(refund_method="CASH")
+    assert r._gate_original_tender(body, order=order, store_id="BV-01", entity_id=None) is None
+
+
+def test_tender_gate_permissive_without_chosen_method(monkeypatch):
+    from api.routers import returns as r
+    _set_tender_policy(monkeypatch, True)
+    order = {"payment_method": "CARD"}
+    body = _TenderBody(refund_method=None)  # defaults to original downstream
+    assert r._gate_original_tender(body, order=order, store_id="BV-01", entity_id=None) is None
+
+
+def test_tender_gate_permissive_on_unknown_original(monkeypatch):
+    from api.routers import returns as r
+    _set_tender_policy(monkeypatch, True)
+    body = _TenderBody(refund_method="CASH")
+    # order=None -> _order_payment_method returns SOURCE -> cannot enforce
+    assert r._gate_original_tender(body, order=None, store_id="BV-01", entity_id=None) is None
+
+
+def test_tender_gate_skips_exchange_and_credit_note(monkeypatch):
+    from api.routers import returns as r
+    _set_tender_policy(monkeypatch, True)
+    order = {"payment_method": "CARD"}
+    for rt in ("EXCHANGE", "CREDIT_NOTE"):
+        body = _TenderBody(refund_method="CASH", return_type=rt)
+        assert r._gate_original_tender(body, order=order, store_id="BV-01", entity_id=None) is None

@@ -1119,6 +1119,79 @@ def _gate_refund_approval_matrix(
             or current_user.get("user_id"))
 
 
+def _normalize_tender(method: Optional[str]) -> str:
+    """Canonicalise a payment/refund method for original-tender comparison.
+    Folds the common card synonyms together (CARD == CREDIT_CARD == DEBIT_CARD)
+    and upper-cases so a cosmetic-case difference never trips the hard-lock."""
+    m = (method or "").strip().upper()
+    if not m:
+        return ""
+    if m in ("CARD", "CREDIT_CARD", "DEBIT_CARD", "CREDITCARD", "DEBITCARD"):
+        return "CARD"
+    if m in ("BANK", "BANK_TRANSFER", "NEFT", "IMPS", "RTGS"):
+        return "BANK_TRANSFER"
+    return m
+
+
+def _gate_original_tender(
+    body: "ReturnCreate",
+    *,
+    order: Optional[Dict[str, Any]],
+    store_id: Optional[str],
+    entity_id: Optional[str],
+) -> None:
+    """F27 / DECISIONS sec 6: refunds always go back to the ORIGINAL tender.
+
+    When ``refund.original_tender_enforce`` is ON (default True) for this scope
+    and the cashier supplied a ``refund_method`` that differs from the order's
+    original payment method, reject with 422 TENDER_MISMATCH -- a card sale can
+    never be rerouted to a cash refund. Only applies to RETURN (an EXCHANGE/
+    CREDIT_NOTE settles to store credit by design). PERMISSIVE / fail-soft: no
+    user-chosen method, an unknown original tender (``SOURCE``), or a policy
+    read error -> no block (the refund still DEFAULTS to the original method
+    downstream). Turn the flag OFF to permit an explicit tender override.
+    """
+    if body.return_type != "RETURN":
+        return
+    chosen = (body.refund_method or "").strip()
+    if not chosen:
+        return  # no override attempted -> defaults to original tender downstream
+    try:
+        from ..services.policy_engine import get_policy
+
+        scope: Dict[str, Any] = {}
+        if store_id:
+            scope["store_id"] = store_id
+        if entity_id:
+            scope["entity_id"] = entity_id
+        enforce = bool(get_policy(
+            "refund.original_tender_enforce", scope or None, default=True
+        ))
+    except Exception as exc:  # noqa: BLE001 - fail OPEN (no block) on a policy error
+        logger.warning("[RETURNS] F27 tender-enforce policy read failed; no block: %s", exc)
+        return
+    if not enforce:
+        return  # override explicitly permitted by policy
+
+    original = _order_payment_method(order)
+    if _normalize_tender(original) == "SOURCE" or not original:
+        return  # original tender unknown -> cannot enforce, stay permissive
+    if _normalize_tender(chosen) != _normalize_tender(original):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason": "TENDER_MISMATCH",
+                "original_tender": original,
+                "requested_method": chosen,
+                "message": (
+                    f"Refunds must go back to the original tender "
+                    f"({original}). This cannot be changed while "
+                    f"'Refund to original tender' is enforced."
+                ),
+            },
+        )
+
+
 def _guard_return_serial_mismatch(resolved_lines, body: "ReturnCreate",
                                   resolved_order_id, store_id, current_user):
     """E3 acceptance #8 (return half): hard-block a serial-mismatched return.
@@ -1409,6 +1482,17 @@ async def create_return(
                 f"already refunded: Rs {_prior_refunds:.2f}; this refund: Rs {net_amount:.2f}."
             ),
         )
+
+    # F27 ORIGINAL-TENDER HARD-LOCK. Runs before recording (and before the matrix
+    # gate) so a tender mismatch rejects with nothing reserved. PERMISSIVE: no-op
+    # unless the cashier supplied a refund_method that differs from the order's
+    # original tender AND the policy is enforced (default True) for this scope.
+    _gate_original_tender(
+        body,
+        order=order,
+        store_id=store_id,
+        entity_id=(order or {}).get("entity_id"),
+    )
 
     # F27 REFUND APPROVAL MATRIX GATE. Runs AFTER all money math + the over-refund
     # cap (so net_amount is final) and BEFORE any recording / atomic stock claim,

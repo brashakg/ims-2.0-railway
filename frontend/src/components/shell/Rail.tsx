@@ -76,6 +76,9 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
       { id: 'estimates', label: 'Estimates', to: '/estimates', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF'] },
       { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
+      // F27: refund-approval queue (the refund-only slice of the E4 inbox).
+      // requireRoles mirrors the /returns/approvals ProtectedRoute gate.
+      { id: 'refund-approvals', label: 'Refund Approvals', to: '/returns/approvals', icon: 'shield', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
     ],
   },
   {

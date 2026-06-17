@@ -30,6 +30,8 @@ export type ApprovalActionType =
   | 'endless_aisle'
   | 'rtv'
   | 'RETURN_SERIAL_OVERRIDE'
+  // F27: a tiered, PIN-gated refund approval (configurable refund matrix).
+  | 'REFUND_APPROVAL_MATRIX'
   // F26: a remote PIN-gated leave approval routed through the same engine.
   | 'leave_approval';
 
