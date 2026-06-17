@@ -1,85 +1,112 @@
 // ============================================================================
-// IMS 2.0 — Staff Onboarding
+// IMS 2.0 — Employee Onboarding Wizard
 // ============================================================================
-// COUNCIL RULING §3: the legacy "Stores" step is removed from this page. Stores
-// and legal entities are managed ONLY on the canonical /organization screen
-// (it captures the required entity link + derives each store's GSTIN by state).
-// This page is now staff onboarding only — one canonical path each: stores in
-// Organization, staff here (over the mature, escalation-guarded create_user path).
-import { useState, useEffect } from 'react';
+// COUNCIL RULING §5 (Settings/Permissions/Nav redesign): repurpose the redundant
+// SetupPage store wizard IN-PLACE into a hardened Employee Onboarding wizard over
+// the EXISTING, mature `create_user` endpoint (no new endpoint). The mature path
+// already enforces the escalation guard (can_assign_roles), sanitizes module
+// access, and forces a password change on first login (must_change_password,
+// BUG-027). This wizard is a thin, friendly assembly over it.
+//
+// COUNCIL RULING §3: stores + legal entities are CREATED/EDITED only on the
+// canonical /organization screen. Here they are read-only — the wizard offers
+// store ASSIGNMENT, nothing more.
+//
+// Steps:
+//   1. Who          — name, Indian-mobile (#367 validator), email, photo.
+//   2. Role(s)      — friendly plain-English role list (single default;
+//                     multi-role behind an "Advanced" reveal). Capped at the
+//                     creating admin's own level (mirrors backend can_assign_roles).
+//   3. Store        — defaults to the admin's active store; roles 4-7 get the
+//                     geo-fence automatically (shown as a plain note).
+//   4. Permissions  — PLACEHOLDER ONLY. Read-only "Uses standard <Role>
+//                     permissions" card. The editable override step is PR2.x,
+//                     gated on the per-user permission layer. NOT built here.
+//   5. Credentials  — username + temp password (or generate) + copyable handoff
+//                     card. must_change_password=True is PRESERVED (no skip toggle).
+//
+// On submit: POST /users (adminUserApi.createUser) then assign each store via
+// POST /users/{id}/assign-store. A role-above-actor attempt surfaces the backend
+// 403 reason cleanly.
+import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { adminStoreApi, adminUserApi } from '../../services/api';
+import { validatePhone } from '../../utils/validators';
+import { ROLE_HIERARCHY } from './settingsTypes';
 import {
-  Building, Users, Plus, Shield, X, ChevronRight, CheckCircle, AlertTriangle,
+  Building, Users, Plus, Shield, X, ChevronRight, ChevronLeft, CheckCircle,
+  AlertTriangle, Copy, RefreshCw, Lock, MapPin, UserPlus, Camera,
 } from 'lucide-react';
 import clsx from 'clsx';
 
 // ---------------------------------------------------------------------------
-// Store shape (read-only) — used for the onboarding store-assignment picker.
+// Store shape (read-only) — used only for the onboarding store-assignment picker.
 // ---------------------------------------------------------------------------
 interface StoreConfig {
-  id?: string;
+  id: string;
   name: string;
   code: string;
-  brand: 'BETTER_VISION' | 'WIZOPT';
-  address: string;
   city: string;
   state: string;
-  pincode: string;
-  phone: string;
-  email: string;
-  gstNumber: string;
-  openingTime: string;
-  closingTime: string;
-  categories: string[];
   isActive: boolean;
 }
 
-const ROLES = [
-  { id: 'SALES_STAFF', label: 'Sales Staff', desc: 'Billing, customer facing' },
-  { id: 'CASHIER', label: 'Sales + Cashier', desc: 'Sales + cash drawer access' },
-  { id: 'OPTOMETRIST', label: 'Optometrist', desc: 'Eye testing, prescriptions' },
-  { id: 'WORKSHOP_STAFF', label: 'Workshop / Fitting', desc: 'Frame fitting, lens mounting' },
-  { id: 'STORE_MANAGER', label: 'Store Head', desc: 'Full store operations' },
-  { id: 'ACCOUNTANT', label: 'Accountant', desc: 'Finance, GST, reconciliation' },
-  { id: 'CATALOG_MANAGER', label: 'Catalog Manager', desc: 'HQ product catalog' },
-  { id: 'AREA_MANAGER', label: 'Area Manager', desc: 'Multi-store oversight' },
-  { id: 'ADMIN', label: 'Admin (Director)', desc: 'HQ administration' },
-  { id: 'SUPERADMIN', label: 'Superadmin (CEO)', desc: 'Full system control' },
+// ---------------------------------------------------------------------------
+// Friendly, plain-English role catalogue. The owner is NOT a developer, so the
+// list reads as sentences, not role codes. `level` mirrors ROLE_HIERARCHY so we
+// can hide anything above the creating admin's own level (UI half of the backend
+// can_assign_roles guard — the server is still the source of truth).
+// `geoFenced` marks the store-staff tiers (roles 4-7) whose login is fenced to
+// their assigned store automatically (SYSTEM_INTENT geo-fence).
+// ---------------------------------------------------------------------------
+interface RoleOption {
+  id: string;
+  label: string;
+  desc: string;
+  level: number;
+  geoFenced: boolean;
+}
+
+const ROLE_CATALOGUE: RoleOption[] = [
+  { id: 'SALES_STAFF', label: 'Sales Staff', desc: 'Rings up sales and searches the catalogue. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_STAFF, geoFenced: true },
+  { id: 'SALES_CASHIER', label: 'Sales Cashier', desc: 'Rings up sales, takes payments, opens the cash drawer. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_CASHIER, geoFenced: true },
+  { id: 'CASHIER', label: 'Cashier', desc: 'Takes payments only — no selling, no discounts.', level: ROLE_HIERARCHY.CASHIER ?? 3, geoFenced: true },
+  { id: 'OPTOMETRIST', label: 'Optometrist', desc: 'Runs eye tests and writes prescriptions. No selling.', level: ROLE_HIERARCHY.OPTOMETRIST, geoFenced: true },
+  { id: 'WORKSHOP_STAFF', label: 'Workshop / Fitting', desc: 'Updates job status — frame fitting, lens mounting. No selling.', level: ROLE_HIERARCHY.WORKSHOP_STAFF, geoFenced: true },
+  { id: 'STORE_MANAGER', label: 'Store Manager', desc: 'Runs one store end-to-end. Discount up to 20%.', level: ROLE_HIERARCHY.STORE_MANAGER, geoFenced: false },
+  { id: 'ACCOUNTANT', label: 'Accountant', desc: 'Finance, GST and reconciliation. No POS or inventory.', level: ROLE_HIERARCHY.ACCOUNTANT, geoFenced: false },
+  { id: 'CATALOG_MANAGER', label: 'Catalog Manager', desc: 'Owns the head-office product catalogue and pricing.', level: ROLE_HIERARCHY.CATALOG_MANAGER, geoFenced: false },
+  { id: 'AREA_MANAGER', label: 'Area Manager', desc: 'Oversees several stores. Discount up to 25%.', level: ROLE_HIERARCHY.AREA_MANAGER, geoFenced: false },
+  { id: 'ADMIN', label: 'Admin (Director)', desc: 'Head-office administration across all stores and staff.', level: ROLE_HIERARCHY.ADMIN, geoFenced: false },
+  { id: 'SUPERADMIN', label: 'Superadmin (CEO)', desc: 'Full control of the entire system, including AI.', level: ROLE_HIERARCHY.SUPERADMIN, geoFenced: false },
 ];
 
+const ROLE_LABEL: Record<string, string> = Object.fromEntries(
+  ROLE_CATALOGUE.map((r) => [r.id, r.label]),
+);
+
 // ---------------------------------------------------------------------------
-// EMPLOYEE ONBOARDING
+// New-employee form state.
 // ---------------------------------------------------------------------------
 interface NewEmployee {
   name: string;
   email: string;
   phone: string;
+  photoDataUrl: string;
   roles: string[];
   assignedStores: string[];
   primaryStore: string;
-  discountCap: number;
-  shiftStart: string;
-  shiftEnd: string;
-  weekOff: string;
-  employeeCode: string;
-  joiningDate: string;
   username: string;
   tempPassword: string;
 }
 
-const DEFAULT_EMPLOYEE: NewEmployee = {
-  name: '', email: '', phone: '', roles: [], assignedStores: [], primaryStore: '',
-  discountCap: 0, shiftStart: '10:00', shiftEnd: '20:00', weekOff: 'SUNDAY',
-  employeeCode: '', joiningDate: new Date().toISOString().split('T')[0],
-  username: '', tempPassword: '',
-};
+const TOTAL_STEPS = 5;
 
 // BUG-132: never ship a default credential ('admin123') in the frontend bundle.
 // Generate a strong random temp password per new-employee form -- a usable
 // default that is NOT a known constant; the new user is forced to change it on
-// first login (must_change_password).
+// first login (must_change_password preserved server-side).
 function randomTempPassword(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
   const arr = new Uint32Array(12);
@@ -87,53 +114,66 @@ function randomTempPassword(): string {
   return Array.from(arr, (n) => chars[n % chars.length]).join('');
 }
 
+function defaultEmployee(): NewEmployee {
+  return {
+    name: '', email: '', phone: '', photoDataUrl: '',
+    roles: [], assignedStores: [], primaryStore: '',
+    username: '', tempPassword: randomTempPassword(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PAGE
+// ---------------------------------------------------------------------------
 export default function SetupPage() {
   const { user } = useAuth();
   const toast = useToast();
-  // Stores are loaded read-only so the onboarding wizard can offer store
-  // assignment. They are CREATED/EDITED only on /organization.
+  // Stores are loaded read-only so the wizard can offer store assignment. They
+  // are CREATED/EDITED only on /organization (council ruling §3).
   const [stores, setStores] = useState<StoreConfig[]>([]);
-  const [, setEditEmployee] = useState<NewEmployee | null>(null);
-  const [showEmployeeForm, setShowEmployeeForm] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
 
   useEffect(() => {
     adminStoreApi.getStores().then((data: any) => {
-      if (Array.isArray(data?.stores || data)) {
-        const storeList = data?.stores || data;
-        setStores(storeList.map((s: any) => ({
+      const list = data?.stores || data;
+      if (Array.isArray(list)) {
+        setStores(list.map((s: any) => ({
           id: s.store_id || s.store_code || s.id,
           name: s.store_name || s.name || '',
           code: s.store_code || s.store_id || '',
-          brand: s.brand || 'BETTER_VISION',
-          address: s.address || '',
           city: s.city || '',
           state: s.state || '',
-          pincode: s.pincode || '',
-          phone: s.phone || '',
-          email: s.email || '',
-          gstNumber: s.gstin || s.gst_number || '',
-          openingTime: s.opening_time || '10:00',
-          closingTime: s.closing_time || '21:00',
-          categories: s.categories || [],
           isActive: s.is_active !== false,
         })));
       }
     }).catch(() => {});
   }, []);
 
-  const isHQ = user?.roles?.some((r: string) => ['ADMIN', 'SUPERADMIN'].includes(r));
-  if (!isHQ) {
+  // Gate: who may create users. ADMIN/SUPERADMIN always, plus STORE_MANAGER /
+  // AREA_MANAGER (who can create roles at or below their own level). The backend
+  // create_user is still the authority (can_assign_roles) -- this is only which
+  // roles see the screen.
+  const actorLevel = Math.max(
+    0,
+    ...(user?.roles || []).map((r: string) => ROLE_HIERARCHY[r] || 0),
+  );
+  const canOnboard = actorLevel >= ROLE_HIERARCHY.STORE_MANAGER; // >= 6
+
+  if (!canOnboard) {
     return (
       <div className="max-w-4xl mx-auto p-6 text-center">
-        <Shield className="w-12 h-12 text-gray-700 mx-auto mb-3" />
-        <p className="text-gray-500">Staff onboarding is restricted to Admin and Superadmin roles.</p>
+        <Shield className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+        <h1 className="text-lg font-semibold text-gray-900">Staff Onboarding</h1>
+        <p className="text-gray-500 mt-1">
+          Onboarding new staff is restricted to Store Managers and above.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="max-w-5xl mx-auto p-4 tablet:p-6 space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Staff Onboarding</h1>
           <p className="text-sm text-gray-500 mt-0.5 flex items-center gap-1">
@@ -141,226 +181,560 @@ export default function SetupPage() {
             Stores &amp; entities are managed on the Organization screen.
           </p>
         </div>
+        <button
+          onClick={() => setShowWizard(true)}
+          className="flex items-center gap-1.5 px-4 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 whitespace-nowrap"
+        >
+          <UserPlus className="w-4 h-4" /> Onboard Employee
+        </button>
       </div>
 
-      {/* ================================================================ */}
-      {/* EMPLOYEES                                                        */}
-      {/* ================================================================ */}
-      <div className="space-y-4">
-        <div className="flex justify-end">
-          <button onClick={() => { setEditEmployee(null); setShowEmployeeForm(true); }}
-            className="flex items-center gap-1.5 px-4 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700">
-            <Plus className="w-4 h-4" /> Onboard Employee
-          </button>
-        </div>
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800 flex gap-2">
+        <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+        <span>
+          The wizard walks you through the few things a new account needs — who
+          they are, what they do, where they work, and a login. It takes about a
+          minute. The new staff member is asked to set their own password the
+          first time they sign in.
+        </span>
+      </div>
 
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-700">
-          <AlertTriangle className="w-4 h-4 inline mr-1" />
-          Employee onboarding is a detailed process. Each field controls what the employee can see and do in the system.
-          Take your time — getting this right means fewer support requests later.
-        </div>
+      <div className="bg-white border border-gray-200 rounded-xl p-8 text-center text-gray-500">
+        <Users className="w-12 h-12 mx-auto mb-2 opacity-40" />
+        <p className="text-sm">
+          Use <span className="font-semibold text-gray-700">Onboard Employee</span> to add a new staff account.
+        </p>
+        <p className="text-xs mt-1">
+          Manage existing staff (edit role, reset password, deactivate) under
+          Settings &rarr; Users &amp; Roles.
+        </p>
+      </div>
 
-        {/* Placeholder employee list */}
-        <div className="bg-white border border-gray-200 rounded-xl p-5 text-center text-gray-500">
-          <Users className="w-12 h-12 mx-auto mb-2 opacity-50" />
-          <p className="text-sm">Employee list loads from the backend. Use "Onboard Employee" to add new staff.</p>
-        </div>
-
-        {showEmployeeForm && <EmployeeFormModal
+      {showWizard && (
+        <OnboardingWizard
           stores={stores}
-          onSave={async (emp) => {
-            // Onboard the employee through the ONE canonical user path
-            // (adminUserApi -> POST /users). The wizard collects roles[],
-            // assigned stores, discount cap + a temp password that must be
-            // changed on first login (mustChangePassword: true).
-            try {
-              await adminUserApi.createUser({
-                name: emp.name,
-                email: emp.email,
-                phone: emp.phone || undefined,
-                roles: emp.roles,
-                storeIds: emp.assignedStores,
-                primaryStoreId: emp.primaryStore || undefined,
-                discountCap: emp.discountCap,
-                username: emp.username || undefined,
-                password: emp.tempPassword || undefined,
-                mustChangePassword: true,
-              });
-              toast.success(`${emp.name || 'Employee'} onboarded`);
-              setShowEmployeeForm(false);
-            } catch (e: any) {
-              toast.error(e?.response?.data?.detail || 'Failed to onboard employee');
-            }
+          actorLevel={actorLevel}
+          defaultStoreId={user?.activeStoreId || ''}
+          onClose={() => setShowWizard(false)}
+          onCreated={(name) => {
+            toast.success(`${name || 'Employee'} onboarded successfully`);
+            setShowWizard(false);
           }}
-          onClose={() => setShowEmployeeForm(false)}
-        />}
-      </div>
+          onError={(msg) => toast.error(msg)}
+        />
+      )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// EMPLOYEE FORM MODAL
+// WIZARD
 // ---------------------------------------------------------------------------
-function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[]; onSave: (emp: NewEmployee) => void | Promise<void>; onClose: () => void }) {
-  const [form, setForm] = useState<NewEmployee>(() => ({
-    ...DEFAULT_EMPLOYEE,
-    tempPassword: randomTempPassword(),
-  }));
+function OnboardingWizard({
+  stores, actorLevel, defaultStoreId, onClose, onCreated, onError,
+}: {
+  stores: StoreConfig[];
+  actorLevel: number;
+  defaultStoreId: string;
+  onClose: () => void;
+  onCreated: (name: string) => void;
+  onError: (msg: string) => void;
+}) {
   const [step, setStep] = useState(1);
+  const [advancedRoles, setAdvancedRoles] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [form, setForm] = useState<NewEmployee>(() => {
+    const base = defaultEmployee();
+    // Default to the admin's active store (council §5: store step defaults to
+    // the active store). Only if it's a real, assignable store in the list.
+    if (defaultStoreId && stores.some((s) => s.id === defaultStoreId)) {
+      base.assignedStores = [defaultStoreId];
+      base.primaryStore = defaultStoreId;
+    }
+    return base;
+  });
+
+  // If the store list arrives after the wizard opened, seed the active store.
+  useEffect(() => {
+    if (!form.assignedStores.length && defaultStoreId && stores.some((s) => s.id === defaultStoreId)) {
+      setForm((p) => ({ ...p, assignedStores: [defaultStoreId], primaryStore: defaultStoreId }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stores]);
+
+  // Roles the creating admin is actually allowed to assign (UI mirror of the
+  // backend can_assign_roles ceiling). Anything strictly above the actor's level
+  // is hidden so the owner is never offered an account they cannot create.
+  const assignableRoles = useMemo(
+    () => ROLE_CATALOGUE.filter((r) => r.level <= actorLevel),
+    [actorLevel],
+  );
+
+  const set = (patch: Partial<NewEmployee>) => setForm((p) => ({ ...p, ...patch }));
+
+  // Auto-username from the name, used when the admin doesn't type one.
+  const autoUsername = useMemo(
+    () => form.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 20),
+    [form.name],
+  );
+  const effectiveUsername = form.username || autoUsername;
+
+  const primaryRole = form.roles[0] || '';
+  const primaryRoleOpt = ROLE_CATALOGUE.find((r) => r.id === primaryRole);
+  const isGeoFenced = form.roles.some((rid) => ROLE_CATALOGUE.find((r) => r.id === rid)?.geoFenced);
+  const fenceStore = stores.find((s) => s.id === form.primaryStore || s.id === form.assignedStores[0]);
+
+  // ---- per-step validation -------------------------------------------------
+  const phoneError = form.phone ? validatePhone(form.phone) : 'A mobile number is required.';
+  const emailError = form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)
+    ? 'Enter a valid email or leave it blank.' : null;
+
+  const stepValid = (s: number): string | null => {
+    if (s === 1) {
+      if (form.name.trim().length < 2) return "Enter the employee's full name.";
+      if (phoneError) return phoneError;
+      if (emailError) return emailError;
+      return null;
+    }
+    if (s === 2) {
+      if (!form.roles.length) return 'Pick at least one role.';
+      return null;
+    }
+    if (s === 3) {
+      // Store-staff roles MUST have a store (the geo-fence has to point somewhere).
+      if (isGeoFenced && !form.assignedStores.length) {
+        return 'This role logs in at a store, so at least one store is required.';
+      }
+      return null;
+    }
+    if (s === 5) {
+      if (effectiveUsername.length < 3) return 'Username must be at least 3 characters.';
+      if ((form.tempPassword || '').length < 8) return 'Temporary password must be at least 8 characters.';
+      return null;
+    }
+    return null;
+  };
+
+  // Light conflict guard (council §5): warn, don't block, on an odd role+store mix.
+  const conflictWarning = useMemo((): string | null => {
+    if (step < 3) return null;
+    if (isGeoFenced && form.assignedStores.length > 1 && primaryRole !== 'AREA_MANAGER') {
+      return 'Store staff usually work at one store. You have assigned more than one — they will be able to log in at any of them.';
+    }
+    if (primaryRole === 'AREA_MANAGER' && form.assignedStores.length === 1) {
+      return 'An Area Manager normally oversees several stores. Only one is assigned.';
+    }
+    if ((primaryRole === 'ADMIN' || primaryRole === 'SUPERADMIN') && form.assignedStores.length) {
+      return 'Admins work across all stores, so a store assignment is usually not needed.';
+    }
+    return null;
+  }, [step, isGeoFenced, form.assignedStores, primaryRole]);
+
+  const goNext = () => {
+    const err = stepValid(step);
+    if (err) { onError(err); return; }
+    setSubmitError('');
+    setStep((s) => Math.min(TOTAL_STEPS, s + 1));
+  };
+  const goBack = () => (step > 1 ? setStep((s) => s - 1) : onClose());
 
   const toggleRole = (roleId: string) => {
-    setForm(p => ({
-      ...p, roles: p.roles.includes(roleId) ? p.roles.filter(r => r !== roleId) : [...p.roles, roleId]
-    }));
+    setForm((p) => {
+      const has = p.roles.includes(roleId);
+      // Single-role default: when Advanced is OFF, picking a role REPLACES the
+      // selection. With Advanced ON we accumulate multiple roles.
+      if (!advancedRoles) return { ...p, roles: has ? [] : [roleId] };
+      return { ...p, roles: has ? p.roles.filter((r) => r !== roleId) : [...p.roles, roleId] };
+    });
   };
 
   const toggleStore = (storeId: string) => {
-    setForm(p => ({
-      ...p, assignedStores: p.assignedStores.includes(storeId) ? p.assignedStores.filter(s => s !== storeId) : [...p.assignedStores, storeId]
-    }));
+    setForm((p) => {
+      const has = p.assignedStores.includes(storeId);
+      const next = has ? p.assignedStores.filter((s) => s !== storeId) : [...p.assignedStores, storeId];
+      let primary = p.primaryStore;
+      if (has && primary === storeId) primary = next[0] || '';
+      if (!has && !primary) primary = storeId;
+      return { ...p, assignedStores: next, primaryStore: primary };
+    });
   };
 
-  // Auto-generate username from name
-  const autoUsername = form.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 20);
+  const onPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => set({ photoDataUrl: String(reader.result) });
+    reader.readAsDataURL(file);
+  };
+
+  const copyHandoff = async () => {
+    const lines = [
+      `IMS 2.0 login for ${form.name || 'new staff'}`,
+      `Username: ${effectiveUsername}`,
+      `Temporary password: ${form.tempPassword}`,
+      `Sign in at the IMS 2.0 app and set your own password when asked.`,
+    ].join('\n');
+    try {
+      await navigator.clipboard.writeText(lines);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      onError('Could not copy automatically — please copy the details manually.');
+    }
+  };
+
+  const submit = async () => {
+    const err = stepValid(5);
+    if (err) { onError(err); return; }
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      // ONE canonical user path: POST /users via create_user. The endpoint
+      // enforces the escalation guard (can_assign_roles), sanitizes module
+      // access, and -- because mustChangePassword:true -- forces a password
+      // change on first login (BUG-027 preserved; no skip toggle exists).
+      const created = await adminUserApi.createUser({
+        name: form.name.trim(),
+        email: form.email.trim() || `${effectiveUsername}@staff.local`,
+        phone: form.phone || undefined,
+        roles: form.roles,
+        storeIds: form.assignedStores,
+        primaryStoreId: form.primaryStore || form.assignedStores[0] || undefined,
+        username: effectiveUsername,
+        password: form.tempPassword,
+        mustChangePassword: true,
+      });
+
+      // Assign each store explicitly via the dedicated endpoint so a store grant
+      // is recorded even if create-time store_ids needs reinforcing. Best-effort:
+      // the account already exists, so a store-assign hiccup must not fail the
+      // whole onboarding -- surface a soft warning instead.
+      const newUserId = created?.user_id;
+      if (newUserId && form.assignedStores.length) {
+        const results = await Promise.allSettled(
+          form.assignedStores.map((sid) => adminUserApi.assignStore(newUserId, sid)),
+        );
+        if (results.some((r) => r.status === 'rejected')) {
+          onError('Account created, but one or more store assignments need to be re-applied under Users & Roles.');
+        }
+      }
+      onCreated(form.name.trim());
+    } catch (e: any) {
+      // Surface the backend reason cleanly -- notably the escalation 403
+      // ("You cannot assign a role above your own level: <ROLE>").
+      const detail = e?.response?.data?.detail || e?.message || 'Failed to onboard employee.';
+      setSubmitError(typeof detail === 'string' ? detail : 'Failed to onboard employee.');
+      onError(typeof detail === 'string' ? detail : 'Failed to onboard employee.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const STEP_TITLES = ['Who', 'Role', 'Store', 'Permissions', 'Login'];
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        <div className="p-5 border-b border-gray-200 flex items-center justify-between">
-          <div>
-            <h3 className="font-semibold text-gray-900">Onboard New Employee</h3>
-            <p className="text-xs text-gray-500">Step {step} of 4</p>
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-y-auto">
+        {/* Header + stepper */}
+        <div className="p-5 border-b border-gray-200 sticky top-0 bg-white z-10">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-semibold text-gray-900">Onboard New Employee</h3>
+              <p className="text-xs text-gray-500">Step {step} of {TOTAL_STEPS} — {STEP_TITLES[step - 1]}</p>
+            </div>
+            <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded" aria-label="Close">
+              <X className="w-5 h-5" />
+            </button>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
+          <div className="flex items-center gap-1.5 mt-3">
+            {STEP_TITLES.map((t, i) => (
+              <div key={t} className="flex-1">
+                <div className={clsx('h-1.5 rounded-full transition-colors',
+                  i + 1 < step ? 'bg-bv-red-600' : i + 1 === step ? 'bg-bv-red-400' : 'bg-gray-200')} />
+              </div>
+            ))}
+          </div>
         </div>
 
         <div className="p-5 space-y-4">
-          {/* Step 1: Basic Info */}
+          {/* ============ STEP 1: WHO ============ */}
           {step === 1 && (
             <>
-              <h4 className="font-medium text-gray-900">Personal Information</h4>
-              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-                <div><label className="text-xs text-gray-500 block mb-1">Full Name *</label>
-                  <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
-                <div><label className="text-xs text-gray-500 block mb-1">Employee Code</label>
-                  <input value={form.employeeCode} onChange={e => setForm(p => ({ ...p, employeeCode: e.target.value.toUpperCase() }))} placeholder="BV-EMP-001" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
+              <h4 className="font-medium text-gray-900">Who is joining?</h4>
+              <div className="flex items-start gap-4">
+                <label className="flex-shrink-0 cursor-pointer">
+                  <div className="w-20 h-20 rounded-full bg-gray-100 border-2 border-dashed border-gray-300 flex items-center justify-center overflow-hidden hover:border-bv-red-400">
+                    {form.photoDataUrl
+                      ? <img src={form.photoDataUrl} alt="" className="w-full h-full object-cover" />
+                      : <Camera className="w-6 h-6 text-gray-400" />}
+                  </div>
+                  <input type="file" accept="image/*" className="hidden" onChange={onPhoto} />
+                  <span className="block text-[11px] text-gray-400 text-center mt-1">Photo (optional)</span>
+                </label>
+                <div className="flex-1 space-y-3">
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Full Name *</label>
+                    <input value={form.name} onChange={(e) => set({ name: e.target.value })}
+                      placeholder="e.g. Priya Sharma"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400 outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Mobile Number *</label>
+                    <input value={form.phone}
+                      onChange={(e) => set({ phone: e.target.value.replace(/[^\d]/g, '').slice(0, 10) })}
+                      inputMode="numeric" placeholder="10-digit mobile (starts 6-9)"
+                      className={clsx('w-full px-3 py-2 border rounded-lg text-sm outline-none focus:ring-2',
+                        form.phone && phoneError ? 'border-red-400 focus:ring-red-200' : 'border-gray-300 focus:ring-bv-red-200 focus:border-bv-red-400')} />
+                    {form.phone && phoneError && <p className="text-[11px] text-red-600 mt-1">{phoneError}</p>}
+                  </div>
+                </div>
               </div>
-              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-                <div><label className="text-xs text-gray-500 block mb-1">Phone *</label>
-                  <input value={form.phone} onChange={e => setForm(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
-                <div><label className="text-xs text-gray-500 block mb-1">Email</label>
-                  <input type="email" value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Email (optional)</label>
+                <input type="email" value={form.email} onChange={(e) => set({ email: e.target.value })}
+                  placeholder="name@example.com"
+                  className={clsx('w-full px-3 py-2 border rounded-lg text-sm outline-none focus:ring-2',
+                    emailError ? 'border-red-400 focus:ring-red-200' : 'border-gray-300 focus:ring-bv-red-200 focus:border-bv-red-400')} />
+                {emailError && <p className="text-[11px] text-red-600 mt-1">{emailError}</p>}
               </div>
-              <div><label className="text-xs text-gray-500 block mb-1">Joining Date</label>
-                <input type="date" value={form.joiningDate} onChange={e => setForm(p => ({ ...p, joiningDate: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
             </>
           )}
 
-          {/* Step 2: Roles */}
+          {/* ============ STEP 2: ROLE(S) ============ */}
           {step === 2 && (
             <>
-              <h4 className="font-medium text-gray-900">Assign Roles</h4>
-              <p className="text-xs text-gray-500">One person can have multiple roles. Each role grants specific permissions.</p>
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium text-gray-900">What will they do?</h4>
+                <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+                  <input type="checkbox" checked={advancedRoles}
+                    onChange={(e) => {
+                      setAdvancedRoles(e.target.checked);
+                      // Leaving advanced mode collapses to a single role.
+                      if (!e.target.checked && form.roles.length > 1) set({ roles: [form.roles[0]] });
+                    }}
+                    className="rounded border-gray-300 text-bv-red-600 focus:ring-bv-red-400" />
+                  Advanced (assign more than one role)
+                </label>
+              </div>
+              <p className="text-xs text-gray-500">
+                {advancedRoles
+                  ? 'Tick every role this person needs. Most staff need just one.'
+                  : 'Pick the one role that best describes this person.'}
+              </p>
               <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
-                {ROLES.map(role => (
-                  <button key={role.id} onClick={() => toggleRole(role.id)}
-                    className={clsx('p-3 rounded-lg border-2 text-left transition-all',
-                      form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
-                    <div className="flex items-center gap-2">
-                      <div className={clsx('w-5 h-5 rounded border-2 flex items-center justify-center',
-                        form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-red-600' : 'border-gray-300')}>
-                        {form.roles.includes(role.id) && <CheckCircle className="w-3 h-3 text-gray-900" />}
+                {assignableRoles.map((role) => {
+                  const selected = form.roles.includes(role.id);
+                  return (
+                    <button key={role.id} type="button" onClick={() => toggleRole(role.id)}
+                      className={clsx('p-3 rounded-lg border-2 text-left transition-all',
+                        selected ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
+                      <div className="flex items-center gap-2">
+                        <div className={clsx('w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0',
+                          selected ? 'border-bv-red-600 bg-bv-red-600' : 'border-gray-300')}>
+                          {selected && <CheckCircle className="w-3.5 h-3.5 text-white" />}
+                        </div>
+                        <span className="text-sm font-semibold text-gray-900">{role.label}</span>
                       </div>
-                      <span className="text-sm font-medium">{role.label}</span>
-                    </div>
-                    <p className="text-xs text-gray-500 mt-1 ml-7">{role.desc}</p>
-                  </button>
-                ))}
+                      <p className="text-xs text-gray-500 mt-1 ml-7">{role.desc}</p>
+                    </button>
+                  );
+                })}
               </div>
             </>
           )}
 
-          {/* Step 3: Store Assignment + Shift */}
+          {/* ============ STEP 3: STORE ============ */}
           {step === 3 && (
             <>
-              <h4 className="font-medium text-gray-900">Store Assignment & Shift</h4>
-              <div>
-                <label className="text-xs text-gray-500 block mb-2">Assigned Stores</label>
-                <div className="space-y-2">
-                  {stores.map(s => (
-                    <button key={s.id} onClick={() => toggleStore(s.id || '')}
-                      className={clsx('w-full p-3 rounded-lg border-2 text-left flex items-center justify-between',
-                        form.assignedStores.includes(s.id || '') ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200')}>
-                      <div>
-                        <p className="text-sm font-medium">{s.name}</p>
-                        <p className="text-xs text-gray-500">{s.city}</p>
-                      </div>
-                      {form.assignedStores.includes(s.id || '') && (
-                        <button onClick={e => { e.stopPropagation(); setForm(p => ({ ...p, primaryStore: s.id || '' })); }}
-                          className={clsx('text-xs px-2 py-1 rounded',
-                            form.primaryStore === s.id ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-600')}>
-                          {form.primaryStore === s.id ? 'Primary' : 'Set Primary'}
-                        </button>
-                      )}
-                    </button>
-                  ))}
+              <h4 className="font-medium text-gray-900">Where do they work?</h4>
+              {isGeoFenced && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800 flex gap-2">
+                  <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>
+                    {primaryRoleOpt ? `A ${primaryRoleOpt.label} ` : 'This role '}
+                    can only log in while at their assigned store
+                    {fenceStore ? ` (${fenceStore.name})` : ''}. This happens automatically — you don&apos;t need to set anything.
+                  </span>
                 </div>
-              </div>
-              <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div><label className="text-xs text-gray-500 block mb-1">Shift Start</label>
-                  <input type="time" value={form.shiftStart} onChange={e => setForm(p => ({ ...p, shiftStart: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
-                <div><label className="text-xs text-gray-500 block mb-1">Shift End</label>
-                  <input type="time" value={form.shiftEnd} onChange={e => setForm(p => ({ ...p, shiftEnd: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
-                <div><label className="text-xs text-gray-500 block mb-1">Week Off</label>
-                  <select value={form.weekOff} onChange={e => setForm(p => ({ ...p, weekOff: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                    {['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'].map(d => <option key={d} value={d}>{d}</option>)}
-                  </select></div>
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">Discount Authority (%)</label>
-                <input type="number" min="0" max="100" value={form.discountCap} onChange={e => setForm(p => ({ ...p, discountCap: Number(e.target.value) }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-                <p className="text-xs text-gray-500 mt-1">Maximum discount this employee can apply without approval. Default by role: Sales 10%, Manager 20%, Area Manager 25%</p>
-              </div>
+              )}
+              {!stores.length ? (
+                <div className="text-sm text-gray-500 bg-gray-50 rounded-lg p-4 text-center">
+                  No stores found. Create stores on the Organization screen first.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {stores.map((s) => {
+                    const selected = form.assignedStores.includes(s.id);
+                    return (
+                      <div key={s.id}
+                        className={clsx('w-full p-3 rounded-lg border-2 flex items-center justify-between gap-3',
+                          selected ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200')}>
+                        <button type="button" onClick={() => toggleStore(s.id)} className="flex items-center gap-3 text-left flex-1">
+                          <div className={clsx('w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0',
+                            selected ? 'border-bv-red-600 bg-bv-red-600' : 'border-gray-300')}>
+                            {selected && <CheckCircle className="w-3.5 h-3.5 text-white" />}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">
+                              {s.name}{!s.isActive && <span className="ml-2 text-[10px] uppercase text-gray-400">inactive</span>}
+                            </p>
+                            <p className="text-xs text-gray-500">{[s.code, s.city].filter(Boolean).join(' · ')}</p>
+                          </div>
+                        </button>
+                        {selected && form.assignedStores.length > 1 && (
+                          <button type="button"
+                            onClick={() => set({ primaryStore: s.id })}
+                            className={clsx('text-xs px-2 py-1 rounded flex-shrink-0',
+                              form.primaryStore === s.id ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>
+                            {form.primaryStore === s.id ? 'Primary' : 'Set primary'}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {conflictWarning && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 flex gap-2">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>{conflictWarning}</span>
+                </div>
+              )}
             </>
           )}
 
-          {/* Step 4: Login Credentials */}
+          {/* ============ STEP 4: PERMISSIONS (PLACEHOLDER ONLY) ============ */}
+          {/* The editable per-user override is PR2.x, gated on the permission */}
+          {/* layer. For now this is a READ-ONLY confirmation that the account   */}
+          {/* uses the standard permissions for its role.                        */}
           {step === 4 && (
             <>
-              <h4 className="font-medium text-gray-900">Login Credentials</h4>
-              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-                <div><label className="text-xs text-gray-500 block mb-1">Username *</label>
-                  <input value={form.username || autoUsername} onChange={e => setForm(p => ({ ...p, username: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
-                <div><label className="text-xs text-gray-500 block mb-1">Temporary Password</label>
-                  <input value={form.tempPassword} onChange={e => setForm(p => ({ ...p, tempPassword: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-                  <p className="text-xs text-gray-500 mt-1">Employee must change on first login</p></div>
-              </div>
-
-              <div className="bg-gray-50 rounded-lg p-4 mt-4">
-                <h5 className="text-sm font-medium text-gray-900 mb-2">Summary</h5>
-                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-y-1 text-xs">
-                  <span className="text-gray-500">Name:</span><span className="font-medium">{form.name}</span>
-                  <span className="text-gray-500">Roles:</span><span className="font-medium">{form.roles.join(', ') || 'None'}</span>
-                  <span className="text-gray-500">Stores:</span><span className="font-medium">{form.assignedStores.length} store(s)</span>
-                  <span className="text-gray-500">Shift:</span><span className="font-medium">{form.shiftStart} – {form.shiftEnd}</span>
-                  <span className="text-gray-500">Discount Cap:</span><span className="font-medium">{form.discountCap}%</span>
-                  <span className="text-gray-500">Username:</span><span className="font-medium">{form.username || autoUsername}</span>
+              <h4 className="font-medium text-gray-900">Permissions</h4>
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex gap-3">
+                <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-green-900">
+                    Uses standard {primaryRoleOpt ? primaryRoleOpt.label : 'role'} permissions
+                  </p>
+                  <p className="text-xs text-green-800 mt-1">
+                    {form.roles.length > 1
+                      ? `This person gets the standard access for ${form.roles.map((r) => ROLE_LABEL[r] || r).join(' + ')}.`
+                      : 'This person gets exactly the access that comes with their role — nothing more, nothing less.'}
+                    {' '}That is the right choice for almost everyone.
+                  </p>
                 </div>
               </div>
+              <div
+                aria-disabled="true"
+                className="border border-gray-200 rounded-lg p-4 opacity-60 cursor-not-allowed select-none"
+                title="Per-user permission customisation is coming soon"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Lock className="w-4 h-4 text-gray-400" />
+                    <span className="text-sm font-medium text-gray-600">Customize permissions</span>
+                  </div>
+                  <span className="text-[10px] uppercase tracking-wide bg-gray-100 text-gray-500 px-2 py-0.5 rounded">Coming soon</span>
+                </div>
+                <p className="text-xs text-gray-400 mt-2">
+                  Soon you&apos;ll be able to fine-tune what an individual can do — e.g. allow a
+                  slightly higher discount or hide a module — without changing their role.
+                </p>
+              </div>
+            </>
+          )}
+
+          {/* ============ STEP 5: CREDENTIALS ============ */}
+          {step === 5 && (
+            <>
+              <h4 className="font-medium text-gray-900">Create their login</h4>
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Username *</label>
+                  <input value={form.username || autoUsername}
+                    onChange={(e) => set({ username: e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, '') })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Temporary Password *</label>
+                  <div className="flex gap-2">
+                    <input value={form.tempPassword} onChange={(e) => set({ tempPassword: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono outline-none focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400" />
+                    <button type="button" onClick={() => set({ tempPassword: randomTempPassword() })}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50" title="Generate a new password">
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800 flex gap-2">
+                <Lock className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <span>For their security, this is a temporary password — the new staff member is required to set their own the first time they sign in.</span>
+              </div>
+
+              {/* Copyable handoff card */}
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <div className="bg-gray-50 px-4 py-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-600">Login handoff</span>
+                  <button type="button" onClick={copyHandoff}
+                    className="text-xs flex items-center gap-1 text-bv-red-600 hover:text-bv-red-700 font-medium">
+                    {copied ? <><CheckCircle className="w-3.5 h-3.5" /> Copied</> : <><Copy className="w-3.5 h-3.5" /> Copy</>}
+                  </button>
+                </div>
+                <div className="p-4 space-y-1.5 text-sm">
+                  <Row label="Name" value={form.name || '—'} />
+                  <Row label="Role(s)" value={form.roles.map((r) => ROLE_LABEL[r] || r).join(', ') || '—'} />
+                  <Row label="Store(s)" value={
+                    form.assignedStores.length
+                      ? form.assignedStores.map((id) => stores.find((s) => s.id === id)?.name || id).join(', ')
+                      : 'All stores'
+                  } />
+                  <Row label="Username" value={effectiveUsername} mono />
+                  <Row label="Temp password" value={form.tempPassword} mono />
+                </div>
+              </div>
+
+              {submitError && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-700 flex gap-2">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>{submitError}</span>
+                </div>
+              )}
             </>
           )}
         </div>
 
-        <div className="p-5 border-t border-gray-200 flex justify-between">
-          <button onClick={() => step > 1 ? setStep(step - 1) : onClose()} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">{step === 1 ? 'Cancel' : 'Back'}</button>
-          <button onClick={() => step < 4 ? setStep(step + 1) : onSave(form)}
-            className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700">
-            {step === 4 ? 'Create Employee' : 'Continue'} <ChevronRight className="w-4 h-4 inline ml-1" />
+        {/* Footer */}
+        <div className="p-5 border-t border-gray-200 flex justify-between sticky bottom-0 bg-white">
+          <button onClick={goBack} disabled={submitting}
+            className="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-1 disabled:opacity-50">
+            {step === 1 ? 'Cancel' : <><ChevronLeft className="w-4 h-4" /> Back</>}
           </button>
+          {step < TOTAL_STEPS ? (
+            <button onClick={goNext}
+              className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 flex items-center gap-1">
+              Continue <ChevronRight className="w-4 h-4" />
+            </button>
+          ) : (
+            <button onClick={submit} disabled={submitting}
+              className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 flex items-center gap-1.5 disabled:opacity-60">
+              {submitting ? 'Creating…' : <><Plus className="w-4 h-4" /> Create Account</>}
+            </button>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-gray-500">{label}</span>
+      <span className={clsx('font-medium text-gray-900 text-right break-all', mono && 'font-mono')}>{value}</span>
     </div>
   );
 }
