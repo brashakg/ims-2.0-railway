@@ -559,6 +559,11 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["SUPERADMIN"],
     },
     {
+        "method": "POST",
+        "path": "/api/v1/admin/online-store/rehost-images",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/admin/products",
         "allowed": ["ADMIN", "SUPERADMIN"],

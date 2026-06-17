@@ -251,6 +251,83 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
     return out
 
 
+def fulfillment_store_health(db) -> Dict[str, Any]:
+    """R6 guard: does the resolved ONLINE fulfillment store actually carry
+    serialized stock_units?
+
+    An online order decrements physical stock at the fulfillment store
+    (shopify_ingest._mark_units_sold -> StockRepository on db.stock_units, status
+    "AVAILABLE"). If that resolves to the virtual billing bucket (BV-ONLINE-01)
+    or any store holding ZERO available units, every online-order decrement
+    SILENTLY no-ops -> the online listing can oversell physical stock. This
+    surfaces that misconfiguration BEFORE the cutover instead of after the first
+    lost sale.
+
+    Resolution mirrors shopify_ingest._online_fulfillment_store_id: the
+    ONLINE_FULFILLMENT_STORE_ID env wins, else the resolved online billing store
+    (integration config / ONLINE_STORE_ID / settings / primary store / the
+    BV-ONLINE-01 default).
+
+    Read-only + fail-soft -> never raises, never 500s the status tile.
+    """
+    import os
+
+    out: Dict[str, Any] = {
+        "checked": False,
+        "store_id": None,
+        "source": None,
+        "available_units": 0,
+        "is_virtual_default": False,
+        "warning": None,
+    }
+
+    store_id = (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip()
+    source = "ONLINE_FULFILLMENT_STORE_ID" if store_id else None
+    if not store_id:
+        try:
+            from .online_order_mapper import _resolve_online_store_id
+
+            store_id = _resolve_online_store_id({}, db)
+            source = "online_store_id (config/env/settings/primary/default)"
+        except Exception:  # noqa: BLE001
+            store_id = "BV-ONLINE-01"
+            source = "default"
+
+    out["store_id"] = store_id
+    out["source"] = source
+    out["is_virtual_default"] = store_id == "BV-ONLINE-01"
+
+    if db is None:
+        return out
+
+    try:
+        coll = _coll(db, "stock_units")
+        if coll is not None:
+            count = int(
+                coll.count_documents({"store_id": store_id, "status": "AVAILABLE"})
+            )
+            out["available_units"] = count
+            out["checked"] = True
+            if count == 0:
+                out["warning"] = (
+                    f"Online fulfillment store '{store_id}' holds 0 AVAILABLE "
+                    f"serialized stock units -- every online-order stock decrement "
+                    f"will SILENTLY no-op (oversell risk). Set "
+                    f"ONLINE_FULFILLMENT_STORE_ID to the physical store that fulfils "
+                    f"online orders before go-live."
+                )
+            elif out["is_virtual_default"]:
+                out["warning"] = (
+                    "Online fulfillment store is the virtual default 'BV-ONLINE-01'. "
+                    "It currently has stock, but set ONLINE_FULFILLMENT_STORE_ID "
+                    "explicitly to the real fulfilling store to avoid ambiguity."
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SYNC_HEALTH] fulfillment-store check failed: %s", exc)
+
+    return out
+
+
 def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
     """Assemble the full online-store sync-health summary. Fully fail-soft:
     each section degrades to its empty/zero shape independently, so the status
@@ -259,7 +336,10 @@ def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
     The `drift` block reports a lightweight Shopify dual-writer check. When
     Shopify creds are absent (the common case during build) it degrades to
     {checked: False, reason: ...}. A live check requires awaiting detect_drift()
-    directly -- sync_health calls the sync shim which is a no-op without creds."""
+    directly -- sync_health calls the sync shim which is a no-op without creds.
+
+    The `fulfillment_store` block (R6) warns when online orders would decrement
+    stock at a store that holds no serialized units (a silent oversell footgun)."""
     from .online_catalog import ecommerce_db_configured
 
     drift = _drift_sync_shim(db)
@@ -271,6 +351,7 @@ def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
         "reconcile": pending_reconcile_summary(db, safety_buffer=safety_buffer),
         "webhooks": failed_webhook_summary(db),
         "drift": drift,
+        "fulfillment_store": fulfillment_store_health(db),
     }
 
 
@@ -875,3 +956,200 @@ def _is_local_url(url: str) -> bool:
         return False
     # Relative path or unknown scheme -> local.
     return True
+
+
+# ===========================================================================
+# STEP 6c -- /uploads/ image RE-HOST migration (the R3 cutover prereq fix)
+# ===========================================================================
+# uploads_image_audit() DETECTS images still on a local /uploads/ path; this
+# closes the loop by RE-HOSTING them to durable object storage + rewriting the
+# product_images url so Shopify can pull them after the cutover (Shopify cannot
+# fetch a private /uploads/ path on the Railway container).
+#
+# The local files live on BVI's disk, NOT the IMS container -- so a bare
+# "/uploads/x.jpg" usually isn't readable from here. Set BVI_UPLOADS_BASE_URL
+# (e.g. https://uniparallel.com) so the tool fetches "/uploads/x" over HTTP from
+# BVI's still-running server. http(s) URLs are fetched as-is. If neither works
+# the item fails with a clear reason (the others still migrate).
+#
+# DRY-RUN BY DEFAULT: dry_run=True only PLANS (no fetch, no write, no DB update)
+# and reports the storage backend + whether it is durable. Owner runs
+# dry_run=False once a durable store (IMAGE_S3_* / Settings -> Integrations) is
+# configured. Fully fail-soft: one bad image never aborts the batch.
+
+_REHOST_FIELDS = ("url", "edited_url", "raw_url", "original_url")
+
+
+def _guess_content_type(url: str) -> str:
+    u = (url or "").lower()
+    if u.endswith(".png"):
+        return "image/png"
+    if u.endswith(".webp"):
+        return "image/webp"
+    if u.endswith(".gif"):
+        return "image/gif"
+    if u.endswith(".svg"):
+        return "image/svg+xml"
+    return "image/jpeg"
+
+
+def _ext_from_url(url: str) -> str:
+    u = (url or "").split("?", 1)[0]
+    for ext in (".png", ".webp", ".gif", ".svg", ".jpeg", ".jpg"):
+        if u.lower().endswith(ext):
+            return ext
+    return ".jpg"
+
+
+def _resolve_fetch_url(local_url: str) -> Optional[str]:
+    """Turn a stored image url into something fetchable. http(s) -> as-is. A local
+    /uploads/ path -> {BVI_UPLOADS_BASE_URL}/uploads/... when that env is set,
+    else the bare path (only works if /uploads/ is mounted on this host).
+    Returns None when there is nothing usable to fetch."""
+    import os
+
+    u = (local_url or "").strip()
+    if not u:
+        return None
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    base = (os.getenv("BVI_UPLOADS_BASE_URL") or "").strip().rstrip("/")
+    path = u if u.startswith("/") else f"/{u}"
+    if base:
+        return f"{base}{path}"
+    return path  # bare local path -- only readable if mounted here
+
+
+def _fetch_bytes(fetch_url: str) -> bytes:
+    """Fetch image bytes from an http(s) URL or a local filesystem path. Raises
+    on failure (the caller records it per-item)."""
+    if fetch_url.startswith("http://") or fetch_url.startswith("https://"):
+        import httpx
+
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            resp = client.get(fetch_url)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code} fetching {fetch_url}")
+        return resp.content
+    with open(fetch_url.lstrip("/"), "rb") as fh:
+        return fh.read()
+
+
+def rehost_uploads_images(db, dry_run: bool = True, limit: int = 500) -> Dict[str, Any]:
+    """Re-host product images still on a local /uploads/ path to durable object
+    storage and rewrite their product_images url(s). The R3 cutover prereq.
+
+    dry_run=True (default) only PLANS -- no fetch, no upload, no DB write. It
+    reports the storage backend + whether it is durable so the operator can
+    confirm before arming. Set dry_run=False to migrate.
+
+    Returns {checked, dry_run, storage_backend, durable, candidates, rehosted,
+    failed, items:[{image_id, sku, field, old_url, new_url|error}]}.
+    Fully fail-soft -- never raises."""
+    out: Dict[str, Any] = {
+        "checked": False,
+        "dry_run": dry_run,
+        "storage_backend": None,
+        "durable": False,
+        "candidates": 0,
+        "rehosted": 0,
+        "failed": 0,
+        "items": [],
+    }
+    if db is None:
+        return out
+
+    # Resolve the storage backend + whether it is durable enough for the cutover
+    # (local-disk on the ephemeral Railway container is NOT -- Shopify still
+    # cannot reach it). We surface this rather than silently re-host to nowhere.
+    try:
+        from .object_storage import get_object_storage
+
+        storage = get_object_storage()
+        out["storage_backend"] = getattr(storage, "name", "unknown")
+        out["durable"] = bool(
+            getattr(storage, "name", "") == "s3" and storage.available()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[REHOST] storage resolve failed: %s", exc)
+        storage = None
+
+    try:
+        coll = _coll(db, "product_images")
+        if coll is None:
+            return out
+        rows = list(
+            coll.find(
+                {},
+                {
+                    "_id": 0,
+                    "image_id": 1,
+                    "product_id": 1,
+                    "sku": 1,
+                    "url": 1,
+                    "edited_url": 1,
+                    "raw_url": 1,
+                    "original_url": 1,
+                },
+            ).limit(limit)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[REHOST] image scan failed: %s", exc)
+        return out
+
+    out["checked"] = True
+    items: List[Dict[str, Any]] = []
+
+    for img in rows:
+        image_id = img.get("image_id") or ""
+        sku = img.get("sku") or img.get("product_id") or ""
+        for field in _REHOST_FIELDS:
+            old_url = img.get(field)
+            if not old_url or not _is_local_url(str(old_url)):
+                continue
+            out["candidates"] += 1
+            entry: Dict[str, Any] = {
+                "image_id": image_id,
+                "sku": sku,
+                "field": field,
+                "old_url": old_url,
+            }
+            if dry_run:
+                entry["fetch_url"] = _resolve_fetch_url(str(old_url))
+                items.append(entry)
+                continue
+
+            if storage is None:
+                entry["error"] = "no storage backend"
+                out["failed"] += 1
+                items.append(entry)
+                continue
+
+            fetch_url = _resolve_fetch_url(str(old_url))
+            if not fetch_url:
+                entry["error"] = "no fetchable source url"
+                out["failed"] += 1
+                items.append(entry)
+                continue
+            try:
+                data = _fetch_bytes(fetch_url)
+                key = f"bvi-rehost/{sku or 'misc'}/{image_id}_{field}{_ext_from_url(str(old_url))}"
+                new_url = storage.put(
+                    key, data, content_type=_guess_content_type(str(old_url))
+                )
+                coll.update_one(
+                    {"image_id": image_id},
+                    {"$set": {field: new_url, "locally_modified": True}},
+                )
+                entry["new_url"] = new_url
+                out["rehosted"] += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[REHOST] image %s field %s failed: %s", image_id, field, exc
+                )
+                entry["error"] = str(exc)
+                out["failed"] += 1
+            items.append(entry)
+
+    out["items"] = items
+    return out
