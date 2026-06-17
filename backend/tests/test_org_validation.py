@@ -73,6 +73,30 @@ def test_phone():
     assert not ov.validate_phone("98765")
 
 
+# --- store code (now the store's primary id, so a uuid must NOT pass) ---
+def test_store_code_valid():
+    assert ov.validate_store_code("BV-BOK-01")
+    assert ov.validate_store_code("bv-pun-01")  # normalised to upper
+    assert ov.validate_store_code("WZ01")
+    assert ov.validate_store_code("HQ")
+
+
+def test_store_code_invalid():
+    # a raw uuid (the leaking-id bug) must be rejected
+    assert not ov.validate_store_code("4dc49c44-08a1-46e1-85fb-8b7eca55f560")
+    assert not ov.validate_store_code("1BV")  # must start with a letter
+    assert not ov.validate_store_code("B")  # too short (< 2)
+    assert not ov.validate_store_code("BV-BOKARO-001")  # too long (> 10)
+    assert not ov.validate_store_code("BV BOK 01")  # no spaces
+    assert not ov.validate_store_code("")
+    assert not ov.validate_store_code(None)
+
+
+def test_normalize_store_code():
+    assert ov.normalize_store_code("  bv-bok-01 ") == "BV-BOK-01"
+    assert ov.normalize_store_code(None) == ""
+
+
 # --- consistency ---
 def test_gstin_embeds_pan():
     assert ov.gstin_pan("27AAPFU0939F1ZV") == "AAPFU0939F"

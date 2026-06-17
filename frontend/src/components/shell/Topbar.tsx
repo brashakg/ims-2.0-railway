@@ -25,6 +25,25 @@ interface TopbarProps {
   navOpen?: boolean;
 }
 
+// A store's id SHOULD be its human code (BV-BOK-01). A legacy store created
+// before that convention can carry a raw uuid as its id, which must never be
+// shown to a user. This matches a uuid v4-ish string (8-4-4-4-12 hex) so we can
+// hide it behind the store NAME instead.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const looksLikeUuid = (v?: string | null): boolean => !!v && UUID_RE.test(v.trim());
+
+// Friendly label for a store id: prefer the store NAME from the org list; never
+// surface a raw uuid. Falls back to the id only when it's a human code.
+function friendlyStoreLabel(
+  id: string | null | undefined,
+  storeNames: Record<string, string>,
+): string {
+  if (!id) return 'No store';
+  const name = storeNames[id];
+  if (name) return name;
+  return looksLikeUuid(id) ? 'Store' : id;
+}
+
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, onOutside: () => void) {
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -86,8 +105,12 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
       .catch(() => {});
   }, []);
 
-  const activeStoreName =
-    (user?.activeStoreId && storeNames[user.activeStoreId]) || user?.activeStoreId || 'No store';
+  const activeStoreName = friendlyStoreLabel(user?.activeStoreId, storeNames);
+  // The little mono "code" line under the name: show the code only when it's a
+  // real human code -- a raw uuid id is hidden (the name already identifies it).
+  const activeStoreCode = looksLikeUuid(user?.activeStoreId)
+    ? ''
+    : user?.activeStoreId || '';
   const roleLabel = (user?.activeRole || '—').toString().replaceAll('_', ' ');
   const multiStore =
     hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) ||
@@ -159,7 +182,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
             {/* On mobile (<sm) show just the store code to prevent wrapping;
                 on desktop show the full store name + code. */}
             <span className="name" style={{ fontSize: 16 }}>{activeStoreName}</span>
-            <span className="code" style={{ fontSize: 12 }}>{user?.activeStoreId || ''}</span>
+            <span className="code" style={{ fontSize: 12 }}>{activeStoreCode}</span>
             <Icon.chevronDown width={12} height={12} />
           </button>
           {storeOpen && (
@@ -218,9 +241,9 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                     cursor: 'pointer',
                   }}
                 >
-                  <div>{storeNames[id] || id}</div>
+                  <div>{friendlyStoreLabel(id, storeNames)}</div>
                   <div className="mono" style={{ color: 'var(--ink-4)', fontSize: 10.5 }}>
-                    {id}
+                    {looksLikeUuid(id) ? '' : id}
                   </div>
                 </button>
               ))}
@@ -339,7 +362,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
               Switch store?
             </div>
             <div style={{ fontSize: 13.5, color: 'var(--ink-2)', lineHeight: 1.5, marginBottom: 18 }}>
-              You're switching to <strong>{storeNames[pendingStoreId] || pendingStoreId}</strong>.
+              You're switching to <strong>{friendlyStoreLabel(pendingStoreId, storeNames)}</strong>.
               Any unsaved work on the current store — your <strong>POS cart</strong> and any open forms —
               will be cleared and cannot be recovered. Save first if you need it.
             </div>

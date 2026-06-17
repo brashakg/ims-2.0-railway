@@ -7,7 +7,6 @@ Store management endpoints
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
-import uuid
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
@@ -505,10 +504,30 @@ async def create_store(
 
     _validate_store_payload(store.model_dump())
 
+    # The store CODE is the store's identity. Every consumer -- users[].store_ids,
+    # store-scope checks, the topbar store pill, order/invoice store context --
+    # keys off store_id, and the whole app was built assuming store_id IS the
+    # human code (BV-BOK-01, ...). So we make store_id == the validated, uppercased
+    # store_code rather than letting the repo mint a random uuid (which leaked into
+    # the UI and broke assignment-by-code). Reject a malformed code up front.
+    code = ov.normalize_store_code(store.store_code)
+    if not ov.validate_store_code(code):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid store code. Use a short human code like 'BV-BOK-01' "
+                "(2-10 chars, letters/digits/hyphens, starting with a letter)."
+            ),
+        )
+
     if repo is not None:
-        # Check if store code exists
-        if repo.find_by_code(store.store_code):
-            raise HTTPException(status_code=400, detail="Store code already exists")
+        # store_code is now the unique identifier -- reject a duplicate (409).
+        # Check both store_code (legacy) and store_id (== code going forward) so a
+        # collision can't slip in either way.
+        if repo.find_by_code(code) or repo.find_by_id(code):
+            raise HTTPException(
+                status_code=409, detail=f"Store code '{code}' already exists"
+            )
 
         state_code = _state_code_for(store.state_code, store.state)
         derived_gstin = _derive_store_gstin(db, store.entity_id, state_code)
@@ -517,6 +536,10 @@ async def create_store(
         store_data = store.model_dump()
         store_data.update(
             {
+                "store_code": code,
+                # store_id == store_code (NOT a uuid). Set explicitly so the repo
+                # does not auto-generate a uuid in BaseRepository.create().
+                "store_id": code,
                 "state_code": state_code,
                 "gstin": derived_gstin,  # single source of truth = entity
                 "is_active": True,
@@ -536,7 +559,9 @@ async def create_store(
 
         raise HTTPException(status_code=500, detail="Failed to create store")
 
-    return {"store_id": str(uuid.uuid4()), "message": "Store created"}
+    # No repo (DB unreachable). Still echo the human code as the store_id so the
+    # convention holds even in mock mode -- never invent a uuid.
+    return {"store_id": code, "store_code": code, "message": "Store created"}
 
 
 @router.get("/{store_id}")

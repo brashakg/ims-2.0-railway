@@ -111,6 +111,14 @@ STATE_ABBR = {
 }
 
 _PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+# Store code: the human, business-meaningful store identifier (e.g. BV-BOK-01,
+# WZ-PUN-02). This is ALSO the store's primary id (store_id) -- users[].store_ids,
+# store-scope checks, the topbar pill and order/invoice context all key off it --
+# so it must be a clean, stable, uppercase token, NOT a random uuid. Allowed:
+# 2-10 chars, letters/digits/hyphens, must start with a letter (so a uuid like
+# "4dc49c44-..." is rejected). Matches the established BV-XXX-NN convention while
+# staying liberal enough for legacy/abbreviated codes.
+_STORE_CODE_RE = re.compile(r"^[A-Z][A-Z0-9-]{1,9}$")
 # TAN: 4 letters (3 jurisdiction + 1 first-letter-of-name), 5 digits, 1 letter.
 _TAN_RE = re.compile(r"^[A-Z]{4}[0-9]{5}[A-Z]$")
 # 2 state digits, 5 PAN letters, 4 PAN digits, 1 PAN letter, 1 entity char,
@@ -125,6 +133,18 @@ _GSTIN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 def _norm(v: Optional[str]) -> str:
     return (v or "").strip().upper()
+
+
+def normalize_store_code(code: Optional[str]) -> str:
+    """Canonical form of a store code = trimmed + uppercased. This is what we
+    persist as both store_code AND store_id, so '  bv-bok-01 ' -> 'BV-BOK-01'."""
+    return _norm(code)
+
+
+def validate_store_code(code: Optional[str]) -> bool:
+    """True for a clean human store code (the BV-XXX-NN style). Used because the
+    store code is now the store's primary id; a uuid-shaped value must fail."""
+    return bool(_STORE_CODE_RE.match(_norm(code)))
 
 
 def validate_pan(pan: Optional[str]) -> bool:
