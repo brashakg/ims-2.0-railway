@@ -18,7 +18,11 @@ logger = logging.getLogger(__name__)
 
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
-from ..dependencies import validate_store_access, resolve_store_scope
+from ..dependencies import (
+    validate_store_access,
+    resolve_store_scope,
+    can_access_store_scoped,
+)
 from ..utils.ist import now_ist, ist_day_start_utc
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
@@ -453,14 +457,32 @@ async def create_salary_config(
 async def get_salary_config(
     employee_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get salary configuration for an employee"""
+    """Get salary configuration for an employee.
+
+    Store-scoped (BUG-062 sibling): the single-record GET carries the same
+    bank/PAN/UAN/ESI PII as the LIST endpoint, but was gated only by
+    authentication -- a STORE_MANAGER of store A could read ANY employee's
+    full salary config by id. Mirror the per-object guard the prescriptions
+    IDOR uses: resolve the config's store and 404-hide it from a caller whose
+    store reach doesn't cover it. SUPERADMIN/ADMIN (cross-store) pass; a
+    legacy config with NO store_id is readable only by those cross-store
+    admins, never by store-scoped staff.
+    """
     db = _get_db()
     if not db:
         return {"config": None}
 
     try:
         config = _get_salary_config(db, employee_id)
+        if config and not can_access_store_scoped(
+            config.get("store_id"), current_user
+        ):
+            # 404 (not 403) so an out-of-scope caller can't confirm the
+            # employee/config even exists -- consistent with the Rx guards.
+            raise HTTPException(status_code=404, detail="Salary config not found")
         return {"config": _strip_id(config) or {}}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(

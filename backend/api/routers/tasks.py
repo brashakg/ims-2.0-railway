@@ -28,6 +28,7 @@ from ..services.task_triggers import (
 )
 from ..services.task_sla import (
     DEFAULT_SLA,
+    MAX_ESCALATION_LEVEL,
     canon_source,
     canon_status,
     should_escalate,
@@ -72,6 +73,46 @@ def _ensure_task_store_access(task: dict, current_user: dict) -> None:
         raise HTTPException(
             status_code=403, detail="No access to this task's store"
         )
+
+
+# Manager-tier roles that may act on ANY task in a store they can reach
+# (the same rungs the escalation ladder climbs). A non-manager who is neither
+# the assignee nor the assigner/creator must not act on someone else's task.
+_TASK_MANAGER_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
+
+
+def _ensure_task_actor(task: dict, current_user: dict) -> None:
+    """Object-level ownership guard for the MUTATING lifecycle actions (P2).
+
+    ``_ensure_task_store_access`` only proves the caller is in the task's
+    store -- in a shared-POS store that lets ANY low-role staffer complete /
+    start / acknowledge / escalate / reassign a colleague's task, defeating
+    SLA accountability (live-proven: a non-assignee SALES_STAFF completed a
+    Store-Manager-owned task). Allow the action only if the caller is:
+      - the assignee (assigned_to), or
+      - the assigner / creator (assigned_by / created_by), or
+      - a manager-tier role (STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN)
+        -- they have already passed the store gate, so they may manage their
+        store's tasks.
+    Anyone else (a plain SALES_STAFF / CASHIER who doesn't own the task) gets
+    403. This is the INNER gate; ``_ensure_task_store_access`` stays the outer
+    one and must be called first.
+    """
+    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
+    if roles & _TASK_MANAGER_ROLES:
+        return
+    uid = current_user.get("user_id")
+    owners = {
+        task.get("assigned_to"),
+        task.get("assigned_by"),
+        task.get("created_by"),
+    }
+    if uid and uid in owners:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Only the assignee, the assigner, or a manager may act on this task",
+    )
 
 
 # ============================================================================
@@ -597,6 +638,7 @@ async def complete_task(
         raise HTTPException(status_code=404, detail="Task not found")
 
     _ensure_task_store_access(task, current_user)
+    _ensure_task_actor(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -799,6 +841,7 @@ async def acknowledge_task(
         raise HTTPException(status_code=404, detail="Task not found")
 
     _ensure_task_store_access(task, current_user)
+    _ensure_task_actor(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -853,6 +896,7 @@ async def escalate_task(
         raise HTTPException(status_code=404, detail="Task not found")
 
     _ensure_task_store_access(task, current_user)
+    _ensure_task_actor(task, current_user)
 
     current_status = canon_status(task.get("status"))
     if current_status in TERMINAL_STATUSES:
@@ -860,6 +904,20 @@ async def escalate_task(
             status_code=400,
             detail=f"Cannot escalate a task in '{current_status}' status.",
         )
+
+    # Storm guard (P3): cap manual escalation at the top of the ladder, exactly
+    # like the AUTO path (should_escalate stops at MAX_ESCALATION_LEVEL). Once a
+    # task is at/above the top rung there is no higher owner; without this the
+    # manual button kept bumping escalation_level + history unboundedly with
+    # escalated_to=null. Return 200 (no-op) so the UI doesn't error.
+    if int(task.get("escalation_level", 0) or 0) >= MAX_ESCALATION_LEVEL:
+        return {
+            "task_id": task_id,
+            "status": canon_status(task.get("status")),
+            "escalation_level": int(task.get("escalation_level", 0) or 0),
+            "escalated_to": task.get("escalated_to"),
+            "message": "Task already at the top of the escalation ladder",
+        }
 
     now = datetime.now()
     by = current_user.get("user_id")
@@ -1802,6 +1860,7 @@ async def start_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     _ensure_task_store_access(task, current_user)
+    _ensure_task_actor(task, current_user)
     existing = canon_status(task.get("status"))
     if existing == "IN_PROGRESS":
         return {
@@ -1842,6 +1901,7 @@ async def reassign_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     _ensure_task_store_access(task, current_user)
+    _ensure_task_actor(task, current_user)
     task_status = canon_status(task.get("status"))
     if task_status in TERMINAL_STATUSES:
         raise HTTPException(
