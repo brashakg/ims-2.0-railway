@@ -50,6 +50,7 @@ interface GRN {
   items: GRNDiscrepancyItem[];
   quality_status: 'passed' | 'failed' | 'conditional';
   created_by: string;
+  created_by_name?: string;
 }
 
 interface POOption {
@@ -97,6 +98,7 @@ function transformGRN(grn: any): GRN {
     quality_status:
       totalRejected === 0 ? 'passed' : totalAccepted === 0 ? 'failed' : 'conditional',
     created_by: grn.created_by || 'Unknown',
+    created_by_name: grn.created_by_name,
   };
 }
 
@@ -849,7 +851,7 @@ export function GoodsReceiptNote() {
                   </div>
                   <div>
                     <div className="l">Received by</div>
-                    <div className="v" style={{ fontSize: 14 }}>{grn.created_by}</div>
+                    <div className="v" style={{ fontSize: 14 }}>{grn.created_by_name || grn.created_by}</div>
                   </div>
                 </div>
               </div>

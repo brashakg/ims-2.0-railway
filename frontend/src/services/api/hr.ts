@@ -520,13 +520,18 @@ export type WeekOffSwapStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED
 export interface WeekOffSwap {
   swap_id: string;
   employee_id: string;
+  /** Resolved employee display name (router enrichment); falls back to id. */
+  employee_name?: string;
   store_id?: string | null;
+  store_name?: string | null;
   from_date: string;
   to_date: string;
   reason?: string;
   status: WeekOffSwapStatus;
   requested_by?: string;
+  requested_by_name?: string;
   approved_by?: string;
+  approved_by_name?: string;
   approved_at?: string;
   rejection_reason?: string;
   created_at?: string;

@@ -233,7 +233,12 @@ export function SalarySetupPage() {
             <tbody>
               {configs.map((c) => (
                 <tr key={c.employee_id} className="border-t border-gray-100">
-                  <td className="px-3 py-2 font-medium text-gray-900">{c.employee_id}</td>
+                  <td className="px-3 py-2 font-medium text-gray-900">
+                    {c.employee_name || c.employee_id}
+                    {c.employee_name && (
+                      <div className="text-[10px] text-gray-400 font-mono">{c.employee_id}</div>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-gray-600">{c.designation || '—'}</td>
                   <td className="px-3 py-2 text-gray-600">{entityName(c.entity_id)}</td>
                   <td className="px-3 py-2 text-right">₹{(c.basic || 0).toLocaleString('en-IN')}</td>

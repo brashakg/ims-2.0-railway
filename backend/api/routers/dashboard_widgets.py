@@ -447,6 +447,16 @@ async def owner_digest(
         except Exception:
             present_today = 0
 
+    # backlog #4: resolve per-store ids -> names for the by_store digest rows.
+    _store_names: Dict[str, str] = {}
+    try:
+        from database.connection import get_db
+        from ..services.name_resolver import store_name_map
+
+        _store_names = store_name_map(get_db(), list(by_store.keys()))
+    except Exception:
+        _store_names = {}
+
     return {
         "date": t.isoformat(),
         "store_id": store_id,
@@ -470,6 +480,7 @@ async def owner_digest(
             "by_store": [
                 {
                     "store_id": k,
+                    "store_name": _store_names.get(str(k), k),
                     "sales": round(v["sales"], 2),
                     "orders": int(v["orders"]),
                 }

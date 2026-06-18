@@ -38,6 +38,8 @@ interface AuditRow {
   entity_id?: string;
   entity_name?: string;
   store_id?: string;
+  /** Resolved store display name (router enrichment); falls back to store_id. */
+  store_name?: string;
   severity?: string;
   status?: string;
   description?: string;
@@ -522,7 +524,7 @@ export default function ActivityLogPage() {
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-gray-700">{onWhat}</td>
-                      <td className="px-3 py-2.5 text-gray-500">{r.store_id || '—'}</td>
+                      <td className="px-3 py-2.5 text-gray-500">{r.store_name || r.store_id || '—'}</td>
                       <td className="px-3 py-2.5 text-gray-400">
                         {hasDetail && (
                           <ChevronDown

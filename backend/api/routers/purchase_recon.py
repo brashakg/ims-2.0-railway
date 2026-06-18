@@ -353,12 +353,24 @@ def _pending_scheme_cns(db, vendor_id: Optional[str]) -> list:
             {
                 "credit_note_number": r.get("credit_note_number"),
                 "vendor_id": r.get("vendor_id"),
+                "vendor_name": r.get("vendor_name"),
                 "amount": r.get("amount"),
                 "amount_paise": r.get("amount_paise"),
                 "rebate_id": r.get("rebate_id"),
                 "created_at": r.get("created_at"),
             }
         )
+    # backlog #4: resolve vendor_id -> name where the CN didn't store one.
+    try:
+        from ..services.name_resolver import vendor_name_map
+
+        vmap = vendor_name_map(db, [o.get("vendor_id") for o in out if not o.get("vendor_name")])
+        for o in out:
+            vid = o.get("vendor_id")
+            if not o.get("vendor_name") and vid and str(vid) in vmap:
+                o["vendor_name"] = vmap[str(vid)]
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 

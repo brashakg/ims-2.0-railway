@@ -1988,14 +1988,40 @@ def _rx_has_redo(rx: dict) -> bool:
     return False
 
 
-def _opto_label(rx: dict) -> str:
-    """Human label for the optometrist on an Rx (name preferred, else id)."""
-    return (
-        rx.get("optometrist_name")
-        or rx.get("optometristName")
-        or rx.get("optometrist_id")
-        or "Unknown"
-    )
+def _looks_like_id(value: str) -> bool:
+    """Heuristic: a UUID-ish / opaque-id-ish string we should NOT show a human.
+
+    A 32-hex / 8-4-4-4-12 UUID, or any token with no spaces longer than ~16
+    chars that is mostly hex/dashes. Real names have spaces or are short words.
+    """
+    if not isinstance(value, str):
+        return False
+    s = value.strip()
+    if not s or " " in s:
+        return False
+    compact = s.replace("-", "")
+    if len(compact) >= 24 and all(c in "0123456789abcdefABCDEF" for c in compact):
+        return True
+    return False
+
+
+def _opto_label(rx: dict, name_map: Optional[dict] = None) -> str:
+    """Human label for the optometrist on an Rx.
+
+    Prefers an embedded name, else resolves the optometrist_id via ``name_map``
+    (id -> name), else falls back to the raw id. The owner saw bare UUIDs here
+    (backlog #4): when the Rx row only stored optometrist_id, the resolver map
+    now turns it into the real name.
+    """
+    name = rx.get("optometrist_name") or rx.get("optometristName")
+    if name and not _looks_like_id(name):
+        return name
+    oid = rx.get("optometrist_id") or rx.get("optometristId")
+    if oid and name_map:
+        resolved = name_map.get(str(oid))
+        if resolved:
+            return resolved
+    return name or oid or "Unknown"
 
 
 def _patient_label(rx: dict) -> str:
@@ -2010,7 +2036,9 @@ def _patient_label(rx: dict) -> str:
     )
 
 
-def _build_abuse_alerts(prescriptions: List[dict], now: datetime) -> List[dict]:
+def _build_abuse_alerts(
+    prescriptions: List[dict], now: datetime, name_map: Optional[dict] = None
+) -> List[dict]:
     """Pure-ish assembly of AbuseAlert dicts from a window of prescriptions.
 
     Takes the already-fetched, already-window-filtered prescription list and
@@ -2018,6 +2046,11 @@ def _build_abuse_alerts(prescriptions: List[dict], now: datetime) -> List[dict]:
     detector in ``services.clinical_abuse``. Returns a list of dicts matching
     the frontend ``AbuseAlert`` interface (camelCase keys). No IO -> unit-test
     friendly. Each detector is wrapped so a malformed row can't sink the rest.
+
+    ``name_map`` (optometrist_id -> human name) lets the caller resolve the
+    optometrist NAME when the Rx row only stored the id (backlog #4 -- the
+    owner saw "Optometrist: <uuid>"). Optional + fail-soft: absent map -> the
+    previous id-fallback behaviour.
     """
     alerts: List[dict] = []
     now_iso = now.isoformat()
@@ -2027,10 +2060,20 @@ def _build_abuse_alerts(prescriptions: List[dict], now: datetime) -> List[dict]:
     for rx in prescriptions:
         if not isinstance(rx, dict):
             continue
-        opto_id = rx.get("optometrist_id") or rx.get("optometristId") or _opto_label(rx)
+        opto_id = (
+            rx.get("optometrist_id")
+            or rx.get("optometristId")
+            or _opto_label(rx, name_map)
+        )
         bucket = by_opto.setdefault(
             opto_id,
-            {"name": _opto_label(rx), "rxs": [], "redos": 0, "oor": 0, "dates": []},
+            {
+                "name": _opto_label(rx, name_map),
+                "rxs": [],
+                "redos": 0,
+                "oor": 0,
+                "dates": [],
+            },
         )
         bucket["rxs"].append(rx)
         if _rx_has_redo(rx):
@@ -2227,8 +2270,23 @@ async def get_abuse_detection(
         if dt is None or dt >= cutoff:
             in_window.append(rx)
 
+    # Resolve optometrist ids -> human names so the alert card never shows a
+    # bare UUID (backlog #4). Batched single lookup; fail-soft to {}.
+    name_map: dict = {}
     try:
-        alerts = _build_abuse_alerts(in_window, now)
+        from ..services.name_resolver import user_name_map
+
+        opto_ids = [
+            rx.get("optometrist_id") or rx.get("optometristId")
+            for rx in in_window
+            if isinstance(rx, dict)
+        ]
+        name_map = user_name_map(db, opto_ids)
+    except Exception:  # pragma: no cover - defensive
+        name_map = {}
+
+    try:
+        alerts = _build_abuse_alerts(in_window, now, name_map)
     except Exception as e:  # pragma: no cover - defensive
         import logging
 

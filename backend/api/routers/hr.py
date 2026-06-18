@@ -2178,6 +2178,27 @@ async def list_weekoff_swaps(
         )
     except Exception:
         swaps = []
+
+    # backlog #4: show the employee/approver NAME, not the raw user id.
+    try:
+        from ..services.name_resolver import user_name_map
+
+        ids = []
+        for s in swaps:
+            ids.extend([s.get("employee_id"), s.get("requested_by"), s.get("approved_by")])
+        nmap = user_name_map(db, ids)
+        for s in swaps:
+            for src, dst in (
+                ("employee_id", "employee_name"),
+                ("requested_by", "requested_by_name"),
+                ("approved_by", "approved_by_name"),
+            ):
+                v = s.get(src)
+                if v and str(v) in nmap:
+                    s[dst] = nmap[str(v)]
+    except Exception:
+        pass
+
     return {"swaps": swaps, "total": len(swaps)}
 
 

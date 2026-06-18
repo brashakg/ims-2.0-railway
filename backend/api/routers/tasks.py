@@ -247,6 +247,26 @@ def _canon_task_out(task: dict) -> dict:
     return task
 
 
+def _enrich_assignee_names(tasks: list) -> None:
+    """backlog #4: add assigned_to_name beside assigned_to so the Hub shows the
+    assignee's NAME, not a raw user id. Batched single lookup, in-place, fail-
+    soft. If assigned_to is a role label (not a user_id) it simply stays as-is.
+    """
+    if not tasks:
+        return
+    try:
+        from ..services.name_resolver import user_name_map
+
+        db = get_db()
+        nmap = user_name_map(db, [t.get("assigned_to") for t in tasks])
+        for t in tasks:
+            a = t.get("assigned_to")
+            if a and not t.get("assigned_to_name") and str(a) in nmap:
+                t["assigned_to_name"] = nmap[str(a)]
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # NOTE: `should_escalate(task, *, now=None, sla_config=None)` is imported from
 # services.task_sla -- a pure, per-priority SLA check (ack clock + overdue
 # grace) that replaces the old hard-coded 2-hour rule.
@@ -421,6 +441,7 @@ async def list_tasks(
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
     ]
+    _enrich_assignee_names(tasks)
     total = repo.count(filters)
 
     return {"tasks": tasks, "total": total}
@@ -645,6 +666,7 @@ async def get_my_tasks(
             filters, sort=[("priority", 1), ("due_at", 1)], limit=0
         )
     ]
+    _enrich_assignee_names(tasks)
 
     return {"tasks": tasks, "total": len(tasks)}
 
@@ -677,6 +699,7 @@ async def get_overdue_tasks(
         _canon_task_out(t)
         for t in repo.find_many(filters, sort=[("due_at", 1)], limit=0)
     ]
+    _enrich_assignee_names(tasks)
 
     return {"tasks": tasks, "total": len(tasks)}
 

@@ -87,6 +87,7 @@ export interface VendorReturnRow {
 export interface SchemeCreditNoteRow {
   credit_note_number?: string;
   vendor_id?: string;
+  vendor_name?: string;
   amount?: number;
   amount_paise?: number;
   rebate_id?: string;

@@ -653,6 +653,7 @@ interface TransferRec {
 }
 interface ShrinkRow {
   store_id: string;
+  store_name?: string | null;
   audit_number?: string;
   shrinkage_percentage: number;
   custodian_name?: string | null;
@@ -745,7 +746,7 @@ export function TransferRecommendationsWidget() {
               {shrink.map((s, i) => (
                 <tr key={s.audit_number || i} className="border-b border-gray-100">
                   <td className="px-3 py-2 text-gray-600">{s.audit_number || '-'}</td>
-                  <td className="px-3 py-2 text-gray-600">{s.store_id}</td>
+                  <td className="px-3 py-2 text-gray-600">{s.store_name || s.store_id}</td>
                   <td className="px-3 py-2 text-gray-900">{s.custodian_name || <span className="text-gray-400">unassigned</span>}</td>
                   <td className={clsx('px-3 py-2 text-right font-semibold', (s.shrinkage_percentage || 0) >= 2 ? 'text-red-600' : 'text-gray-700')}>
                     {(s.shrinkage_percentage || 0).toFixed(1)}%

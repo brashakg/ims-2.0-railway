@@ -31,6 +31,8 @@ interface Task {
   priority: string;  // P0, P1, P2, P3, P4
   status: string;    // OPEN, IN_PROGRESS, COMPLETED, ESCALATED, CANCELLED
   assigned_to: string;
+  /** Resolved assignee display name (router enrichment); falls back to id. */
+  assigned_to_name?: string;
   due_at?: string;
   due_date?: string;  // legacy fallback
   source?: string;    // SYSTEM, USER, SOP
@@ -634,7 +636,7 @@ export function TasksDashboard() {
                             <p className="text-sm text-gray-500 mb-2">{task.description}</p>
                           )}
                           <div className="flex items-center gap-4 text-xs text-gray-500">
-                            <span>Assigned to: <span className="text-gray-600">{task.assigned_to}</span></span>
+                            <span>Assigned to: <span className="text-gray-600">{task.assigned_to_name || task.assigned_to}</span></span>
                             <span>Due: <span className={isOverdue ? 'text-orange-600' : 'text-gray-600'}>{new Date(task.due_at || task.due_date || task.created_at).toLocaleDateString()}</span></span>
                             <span>Type: {task.source || task.type}</span>
                           </div>

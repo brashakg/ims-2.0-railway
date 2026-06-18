@@ -189,7 +189,7 @@ export default function OwnerDigestCard({ storeId }: { storeId?: string }) {
                     <ul className="rounded-lg border border-gray-200 divide-y divide-gray-100 text-sm">
                       {ex.by_store.map((s) => (
                         <li key={s.store_id} className="flex items-center justify-between px-3 py-1.5">
-                          <span className="text-gray-700">{s.store_id}</span>
+                          <span className="text-gray-700">{s.store_name || s.store_id}</span>
                           <span className="tabular-nums text-gray-900">
                             {inr(s.sales)} <span className="text-gray-400">· {s.orders}</span>
                           </span>
