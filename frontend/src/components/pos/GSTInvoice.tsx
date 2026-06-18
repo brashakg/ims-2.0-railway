@@ -401,13 +401,21 @@ export function GSTInvoice({
         />
       </div>
 
-      {/* Print Styles */}
+      {/* Print Styles — isolate the invoice node so only the tax invoice prints,
+          never any surrounding page content (mirrors the print/* templates). */}
       <style>{`
         @media print {
+          body * { visibility: hidden; }
+          .tax-invoice-print, .tax-invoice-print * { visibility: visible; }
+          .tax-invoice-print {
+            position: absolute; left: 0; top: 0;
+            width: 100%; max-width: none !important; margin: 0;
+            border: none !important;
+          }
           .no-print { display: none !important; }
           body { margin: 0; padding: 0; }
           @page { size: A4; margin: 10mm; }
-          .tax-invoice-print { border: none !important; }
+          table { page-break-inside: avoid; }
         }
       `}</style>
     </div>

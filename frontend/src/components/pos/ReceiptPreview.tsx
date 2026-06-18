@@ -13,6 +13,7 @@ import {
   amountInWords,
   declarations,
   formatDateTimeIST,
+  inr,
   statutoryFooter,
   type OverrideFields,
 } from '../print/legalPrimitives';
@@ -92,7 +93,7 @@ export function ReceiptPreview({
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-lg max-w-2xl w-full max-h-screen overflow-y-auto">
         {/* Header */}
-        <div className="bg-white border-b border-gray-200 px-6 py-4 sticky top-0">
+        <div className="no-print bg-white border-b border-gray-200 px-6 py-4 sticky top-0">
           <h2 className="text-xl font-bold text-gray-900 mb-4">Receipt Preview</h2>
 
           {/* Format Selector */}
@@ -123,7 +124,7 @@ export function ReceiptPreview({
         </div>
 
         {/* Receipt Content */}
-        <div className="p-6">
+        <div className={`receipt-print-area p-6 ${format === 'thermal' ? 'receipt-thermal' : 'receipt-a4'}`}>
           {format === 'thermal' ? (
             // Thermal Receipt — compact statutory layout (80mm)
             <div
@@ -253,7 +254,7 @@ export function ReceiptPreview({
                 )}
                 <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #1a1a19', marginTop: 3, paddingTop: 3, fontWeight: 700, fontSize: 11 }}>
                   <span>TOTAL</span>
-                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>₹{billData.total_amount}</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>{inr(grandTotalRupees)}</span>
                 </div>
               </div>
 
@@ -374,7 +375,7 @@ export function ReceiptPreview({
                   )}
                   <div className="border-t border-black pt-1 flex justify-between font-bold text-lg">
                     <span>TOTAL:</span>
-                    <span>₹{billData.total_amount}</span>
+                    <span>{inr(grandTotalRupees)}</span>
                   </div>
                 </div>
               </div>
@@ -389,7 +390,7 @@ export function ReceiptPreview({
         </div>
 
         {/* Action Buttons */}
-        <div className="bg-white border-t border-gray-200 px-6 py-4 flex gap-4 flex-wrap">
+        <div className="no-print bg-white border-t border-gray-200 px-6 py-4 flex gap-4 flex-wrap">
           <button
             onClick={handlePrint}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
@@ -430,6 +431,31 @@ export function ReceiptPreview({
           </button>
         </div>
       </div>
+
+      {/* Print isolation — print ONLY the receipt body, not the modal shell /
+          backdrop / action buttons / app chrome. Mirrors the print/* templates
+          (POPrint etc.). @page size switches with the chosen format. */}
+      <style>{`
+        @media print {
+          body * { visibility: hidden; }
+          .receipt-print-area, .receipt-print-area * { visibility: visible; }
+          .receipt-print-area {
+            position: absolute; left: 0; top: 0;
+            width: 100%; padding: 0 !important; margin: 0;
+            max-width: none;
+            background: #fff;
+          }
+          .no-print { display: none !important; }
+          .receipt-print-area.receipt-thermal > div { margin: 0 auto; border: none !important; }
+          table { page-break-inside: avoid; }
+        }
+        @media print {
+          .receipt-print-area.receipt-thermal { page: thermal; }
+          .receipt-print-area.receipt-a4 { page: a4doc; }
+        }
+        @page thermal { size: 80mm auto; margin: 0; }
+        @page a4doc { size: A4; margin: 10mm; }
+      `}</style>
     </div>
   );
 }

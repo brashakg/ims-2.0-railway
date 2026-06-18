@@ -32,6 +32,7 @@ import { TaxCodeAuditCard } from './sections/TaxCodeAuditCard';
 import { PriceBandCard } from './sections/PriceBandCard';
 import { LensDeepDiveCard } from './sections/LensDeepDiveCard';
 import { SeasonalityCard } from './sections/SeasonalityCard';
+import { WorkshopProductivityCard } from './sections/WorkshopProductivityCard';
 
 type ReportType = 'sales' | 'inventory' | 'customers' | 'gst' | 'forecast';
 type DateRange = 'today' | 'week' | 'month' | 'quarter' | 'custom';
@@ -1108,6 +1109,13 @@ export function ReportsPage() {
                 )}
               </div>
             )}
+          </div>
+
+          {/* Workshop Productivity — per-technician scorecard (jobs, turnaround,
+              QC-fail %, on-time %). Built end-to-end but previously unwired into
+              the Reports UI; surfaced here as a full-width operations report. */}
+          <div className="laptop:col-span-2">
+            <WorkshopProductivityCard storeId={user?.activeStoreId} />
           </div>
         </div>
       )}

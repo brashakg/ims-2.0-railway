@@ -143,7 +143,7 @@ export function CommissionLeaderboard({ storeId }: { storeId?: string }) {
               {/* Stats */}
               <div className="text-right shrink-0">
                 <p className="text-sm font-bold text-gray-900">
-                  Rs {entry.revenue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                  ₹{entry.revenue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                 </p>
                 <p className="text-xs text-gray-400">{entry.sales_count} sales</p>
               </div>
@@ -176,14 +176,14 @@ export function CommissionLeaderboard({ storeId }: { storeId?: string }) {
                     <td className="py-1.5 text-gray-900 font-medium">{item.name}</td>
                     <td className="py-1.5 text-right text-gray-600">{item.sales_count}</td>
                     <td className="py-1.5 text-right text-gray-600">
-                      Rs {item.revenue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                      ₹{item.revenue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                     </td>
                     <td className="py-1.5 text-right text-gray-400">
                       {item.commission_rate_percent}%
                     </td>
                     <td className="py-1.5 text-right font-semibold text-green-700">
                       {item.commission_amount > 0
-                        ? `Rs ${item.commission_amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+                        ? `₹${item.commission_amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
                         : '--'}
                     </td>
                   </tr>
@@ -194,7 +194,7 @@ export function CommissionLeaderboard({ storeId }: { storeId?: string }) {
                   <tr className="border-t border-gray-200">
                     <td colSpan={4} className="py-1.5 text-gray-600 font-medium">Total</td>
                     <td className="py-1.5 text-right font-bold text-green-700">
-                      Rs {commissionData.total_commission.toLocaleString('en-IN', {
+                      ₹{commissionData.total_commission.toLocaleString('en-IN', {
                         maximumFractionDigits: 2,
                       })}
                     </td>

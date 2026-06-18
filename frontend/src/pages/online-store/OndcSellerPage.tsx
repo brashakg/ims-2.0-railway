@@ -206,7 +206,7 @@ export default function OndcSellerPage() {
           <KpiCard
             icon={IndianRupee}
             label="TCS recorded"
-            value={`Rs ${status.tcs_total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
+            value={`₹${status.tcs_total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
             sub="1% on gross payout"
             color="purple"
           />
