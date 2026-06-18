@@ -9,9 +9,10 @@ import {
   CheckCircle, Plus, Printer, FileText, X, Sparkles, AlertTriangle,
 } from 'lucide-react';
 import { usePOSStore } from '../../stores/posStore';
-import { storeApi } from '../../services/api';
 import type { Store } from '../../types';
 import { GSTInvoice } from './GSTInvoice';
+import { resolveStoreIdentity, type StoreIdentity } from '../print/storeIdentity';
+import type { EntityLike } from '../print/legalPrimitives';
 
 /** Safe currency format */
 function fc(amount: number | undefined | null): string {
@@ -28,26 +29,41 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
   const store = usePOSStore();
   const [showGSTInvoice, setShowGSTInvoice] = useState(false);
 
-  // Fetch real store details from the API instead of using a hardcoded map
-  const [fetchedStore, setFetchedStore] = useState<Store | null>(null);
+  // Resolve the DOCUMENT store identity (store + its legal entity) from the
+  // order's own store_id. The resolver normalises the snake_case /stores/{id}
+  // doc into the camelCase Store the invoice reads (fixing the blank-header
+  // bug) and fetches the parent entity so the tax invoice shows the real legal
+  // name + PAN + per-state GSTIN + brand logo.
+  const [identity, setIdentity] = useState<StoreIdentity | null>(null);
   const [storeWarning, setStoreWarning] = useState<string | null>(null);
 
   useEffect(() => {
     if (!store.store_id) return;
-    storeApi.getStore(store.store_id)
-      .then((data: Store) => {
-        setFetchedStore(data);
-        if (!data.gstin) {
-          setStoreWarning('Store GSTIN is not configured. Tax invoice may be invalid.');
+    let cancelled = false;
+    resolveStoreIdentity(store.store_id)
+      .then((id) => {
+        if (cancelled) return;
+        setIdentity(id);
+        if (!id.hasIdentity) {
+          setStoreWarning('Could not load store details. The tax invoice cannot be issued without the issuing store identity.');
+        } else if (!id.hasGstin) {
+          setStoreWarning('Store GSTIN is not configured. A GST tax invoice cannot be issued for this store.');
         } else {
           setStoreWarning(null);
         }
       })
       .catch(() => {
-        setFetchedStore(null);
-        setStoreWarning('Could not load store details. Tax invoice data may be incomplete.');
+        if (cancelled) return;
+        setIdentity(null);
+        setStoreWarning('Could not load store details. The tax invoice cannot be issued without the issuing store identity.');
       });
+    return () => { cancelled = true; };
   }, [store.store_id]);
+
+  const fetchedStore: Store | null = identity?.store ?? null;
+  const entityForInvoice: EntityLike | null = identity?.entity ?? null;
+  // A tax invoice can only be issued when the issuing store + its GSTIN resolved.
+  const canIssueTaxInvoice = !!(identity?.hasIdentity && identity?.hasGstin);
 
   // Build Order-shaped object from POS store for GSTInvoice
   const orderForInvoice = useMemo(() => ({
@@ -91,27 +107,11 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
     createdAt: new Date().toISOString(),
   }), [store.order_id]);
 
-  // Build store object for invoice from fetched API data
-  const storeForInvoice = useMemo(() => {
-    if (fetchedStore) return fetchedStore;
-    // Fallback: minimal stub so GSTInvoice can render — warning is shown to user
-    return {
-      id: store.store_id,
-      storeCode: store.store_id,
-      storeName: '',
-      brand: 'BETTER_VISION' as any,
-      gstin: '',
-      address: '',
-      city: '',
-      state: '',
-      stateCode: '',
-      pincode: '',
-      latitude: 0, longitude: 0, geoFenceRadius: 0,
-      isActive: true, isHQ: false,
-      enabledCategories: [],
-      openingTime: '10:00', closingTime: '21:00',
-    };
-  }, [fetchedStore, store.store_id]);
+  // The store passed to GSTInvoice is ALWAYS the resolved document store. When
+  // the fetch failed we do NOT synthesize a brand-defaulted blank store -- the
+  // Tax Invoice button is disabled below so a blank, BV-branded statutory
+  // document can never be printed.
+  const storeForInvoice = fetchedStore;
 
   return (
     <div className="max-w-md mx-auto text-center py-8 space-y-6">
@@ -176,11 +176,16 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
 
       <div className="flex gap-3 justify-center flex-wrap">
         <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-100"><Printer className="w-4 h-4" /> Receipt</button>
-        <button onClick={() => setShowGSTInvoice(true)} className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100"><FileText className="w-4 h-4" /> Tax Invoice</button>
+        <button
+          onClick={() => setShowGSTInvoice(true)}
+          disabled={!canIssueTaxInvoice}
+          title={canIssueTaxInvoice ? 'Print GST tax invoice' : 'Store identity / GSTIN unavailable — cannot issue a tax invoice'}
+          className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
+        ><FileText className="w-4 h-4" /> Tax Invoice</button>
         <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700"><Plus className="w-4 h-4" /> New Sale</button>
       </div>
 
-      {showGSTInvoice && (
+      {showGSTInvoice && storeForInvoice && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between no-print">
@@ -188,7 +193,7 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
               <button onClick={() => setShowGSTInvoice(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
             </div>
             <div className="p-4">
-              <GSTInvoice order={orderForInvoice as any} store={storeForInvoice as any} onPrint={() => setShowGSTInvoice(false)} />
+              <GSTInvoice order={orderForInvoice as any} store={storeForInvoice as any} entity={entityForInvoice} onPrint={() => setShowGSTInvoice(false)} />
             </div>
           </div>
         </div>

@@ -5,6 +5,16 @@
 
 import { useRef } from 'react';
 import { Printer, X } from 'lucide-react';
+import {
+  buildLegalHeader,
+  LegalHeaderView,
+  LegalFooterBlock,
+  amountInWords,
+  declarations,
+  type EntityLike,
+  type OverrideFields,
+  type StoreLike,
+} from './legalPrimitives';
 
 interface CreditNoteItem {
   description: string;
@@ -34,11 +44,18 @@ interface StoreInfo {
   pincode: string;
   phone?: string;
   gstin?: string;
+  stateCode?: string;
+  brand?: string;
+  storeCode?: string;
 }
 
 interface CreditNotePrintProps {
   creditNote: CreditNotePrintData;
   store: StoreInfo;
+  /** Issuing legal entity (legal_name, pan, cin, gstins[], invoice.logo_url). */
+  entity?: EntityLike | null;
+  overrides?: OverrideFields | null;
+  copyMarker?: 'ORIGINAL' | 'DUPLICATE' | 'TRIPLICATE';
   onClose: () => void;
 }
 
@@ -60,6 +77,9 @@ function formatCurrency(value: number): string {
 export function CreditNotePrint({
   creditNote,
   store,
+  entity,
+  overrides,
+  copyMarker = 'ORIGINAL',
   onClose,
 }: CreditNotePrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
@@ -67,6 +87,46 @@ export function CreditNotePrint({
   const handlePrint = () => {
     window.print();
   };
+
+  // Statutory supplier identity from the issuing store + its legal entity.
+  // A credit note is statutory under Sec. 34(1) CGST -- it MUST carry the
+  // issuing entity legal name + GSTIN, not a single store-name string.
+  const effectiveEntity: EntityLike = entity || {
+    legal_name: store.storeName,
+    name: store.storeName,
+    registered_address: store.address,
+    gstins: store.gstin ? [{
+      gstin: store.gstin,
+      state_code: store.stateCode || '',
+      state_name: store.state || '',
+      is_primary: true,
+    }] : [],
+  };
+  const effectiveStore: StoreLike = {
+    name: store.storeName,
+    store_code: store.storeCode,
+    brand: store.brand,
+    address: store.address,
+    city: store.city,
+    state: store.state,
+    state_code: store.stateCode,
+    pincode: store.pincode,
+    phone: store.phone,
+    gstin: store.gstin,
+  };
+  const header = buildLegalHeader(effectiveEntity, effectiveStore, 'credit_note', {
+    docNumber: creditNote.creditNoteNumber,
+    docDate: creditNote.date,
+    placeOfSupply: store.state,
+    copyMarker,
+    overrides,
+    copyMarkerMode: 'rule_48',
+    extraMeta: [
+      ['Against Invoice', creditNote.originalInvoiceNumber],
+      ['Reason', creditNote.reason],
+    ],
+  });
+  const declarationText = overrides?.declaration_text || declarations('credit_note');
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -91,32 +151,13 @@ export function CreditNotePrint({
         {/* Printable Document */}
         <div
           ref={printRef}
-          className="credit-note-print-area bg-white p-8"
-          style={{ maxWidth: '210mm', margin: '0 auto' }}
+          className="credit-note-print-area bg-white"
+          style={{ maxWidth: '210mm', margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif', color: '#1a1a19', border: '1px solid #1a1a19' }}
         >
-          {/* Company Header */}
-          <div className="text-center mb-8 pb-4 border-b-4 border-gray-800">
-            <h1 className="text-2xl font-bold text-gray-900 uppercase tracking-wide">
-              {store.storeName}
-            </h1>
-            <p className="text-gray-600 text-sm mt-1">{store.address}</p>
-            <p className="text-gray-600 text-sm">
-              {store.city}, {store.state} - {store.pincode}
-            </p>
-            {store.phone && <p className="text-gray-600 text-sm">Phone: {store.phone}</p>}
-            {store.gstin && <p className="text-gray-600 text-sm">GSTIN: {store.gstin}</p>}
-          </div>
+          {/* Statutory header (entity legal name + GSTIN + logo) */}
+          <LegalHeaderView header={header} docTypeLabel="CREDIT NOTE · SEC. 34(1) CGST" />
 
-          {/* Document Title */}
-          <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-gray-900 uppercase tracking-widest">
-              CREDIT NOTE
-            </h2>
-            <p className="text-red-600 text-sm font-semibold mt-1">
-              Issued for Return / Adjustment
-            </p>
-          </div>
-
+          <div className="p-8 pt-4">
           {/* CN Details */}
           <div className="grid grid-cols-3 gap-4 mb-6 text-sm">
             <div>
@@ -226,25 +267,15 @@ export function CreditNotePrint({
               be paid on refunds.
             </p>
           </div>
-
-          {/* Signature Lines */}
-          <div className="mt-8 pt-6 border-t border-gray-300 flex justify-between items-end">
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Authorized By</p>
-            </div>
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Received By</p>
-            </div>
           </div>
 
-          {/* Footer */}
-          <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-500">
-              {store.storeName} • {creditNote.creditNoteNumber} • {formatDate(creditNote.date)}
-            </p>
-          </div>
+          {/* Amount-in-words + declaration + signatory + statutory footer */}
+          <LegalFooterBlock
+            header={header}
+            amountInWordsText={amountInWords(creditNote.creditAmount)}
+            declarationText={declarationText}
+            signLabel={`For ${header.legal_name || header.trade_name}`}
+          />
         </div>
       </div>
 

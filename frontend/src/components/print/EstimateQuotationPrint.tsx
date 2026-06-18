@@ -5,6 +5,13 @@
 
 import { useRef } from 'react';
 import { Printer, X } from 'lucide-react';
+import {
+  buildLegalHeader,
+  LegalHeaderView,
+  type EntityLike,
+  type OverrideFields,
+  type StoreLike,
+} from './legalPrimitives';
 
 interface QuotationItem {
   description: string;
@@ -25,8 +32,11 @@ interface EstimateQuotationPrintData {
   subtotal: number;
   cgst: number;
   sgst: number;
+  igst?: number;
   totalGst: number;
   grandTotal: number;
+  /** True for an inter-state supply (IGST rather than CGST+SGST). */
+  interstate?: boolean;
   termsAndConditions?: string;
 }
 
@@ -38,11 +48,17 @@ interface StoreInfo {
   pincode: string;
   phone?: string;
   gstin?: string;
+  stateCode?: string;
+  brand?: string;
+  storeCode?: string;
 }
 
 interface EstimateQuotationPrintProps {
   quotation: EstimateQuotationPrintData;
   store: StoreInfo;
+  /** Issuing legal entity (legal_name, gstins[], invoice.logo_url). */
+  entity?: EntityLike | null;
+  overrides?: OverrideFields | null;
   onClose: () => void;
 }
 
@@ -64,6 +80,8 @@ function formatCurrency(value: number): string {
 export function EstimateQuotationPrint({
   quotation,
   store,
+  entity,
+  overrides,
   onClose,
 }: EstimateQuotationPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
@@ -76,6 +94,43 @@ export function EstimateQuotationPrint({
     (new Date(quotation.validUntil).getTime() - new Date(quotation.date).getTime()) /
       (1000 * 60 * 60 * 24)
   );
+
+  // Issuing identity from the store + its legal entity (no hardcoded name).
+  const effectiveEntity: EntityLike = entity || {
+    legal_name: store.storeName,
+    name: store.storeName,
+    registered_address: store.address,
+    gstins: store.gstin ? [{
+      gstin: store.gstin,
+      state_code: store.stateCode || '',
+      state_name: store.state || '',
+      is_primary: true,
+    }] : [],
+  };
+  const effectiveStore: StoreLike = {
+    name: store.storeName,
+    store_code: store.storeCode,
+    brand: store.brand,
+    address: store.address,
+    city: store.city,
+    state: store.state,
+    state_code: store.stateCode,
+    pincode: store.pincode,
+    phone: store.phone,
+    gstin: store.gstin,
+  };
+  const header = buildLegalHeader(effectiveEntity, effectiveStore, 'tax_invoice', {
+    docNumber: quotation.quoteNumber,
+    docDate: quotation.date,
+    placeOfSupply: store.state,
+    overrides,
+    copyMarkerMode: 'none',
+    extraMeta: [['Valid Until', formatDate(quotation.validUntil)]],
+  });
+  // GST labels are driven by the actual split, NOT a fixed 9% literal. This
+  // optical business bills 5% (frames/lenses/CL) or 18% (sunglasses/watches);
+  // inter-state is IGST.
+  const isInterstate = !!quotation.interstate || (!!quotation.igst && !quotation.cgst && !quotation.sgst);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -100,29 +155,13 @@ export function EstimateQuotationPrint({
         {/* Printable Document */}
         <div
           ref={printRef}
-          className="quote-print-area bg-white p-8"
-          style={{ maxWidth: '210mm', margin: '0 auto' }}
+          className="quote-print-area bg-white"
+          style={{ maxWidth: '210mm', margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif', color: '#1a1a19', border: '1px solid #1a1a19' }}
         >
-          {/* Company Header */}
-          <div className="text-center mb-8 pb-4 border-b-4 border-gray-800">
-            <h1 className="text-2xl font-bold text-gray-900 uppercase tracking-wide">
-              {store.storeName}
-            </h1>
-            <p className="text-gray-600 text-sm mt-1">{store.address}</p>
-            <p className="text-gray-600 text-sm">
-              {store.city}, {store.state} - {store.pincode}
-            </p>
-            {store.phone && <p className="text-gray-600 text-sm">Phone: {store.phone}</p>}
-            {store.gstin && <p className="text-gray-600 text-sm">GSTIN: {store.gstin}</p>}
-          </div>
+          {/* Statutory header (entity legal name + GSTIN + logo) */}
+          <LegalHeaderView header={header} docTypeLabel="ESTIMATE / QUOTATION" />
 
-          {/* Document Title */}
-          <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-gray-900 uppercase tracking-widest">
-              ESTIMATE / QUOTATION
-            </h2>
-          </div>
-
+          <div className="p-8 pt-4">
           {/* Quote Details */}
           <div className="grid grid-cols-3 gap-4 mb-6 text-sm">
             <div>
@@ -205,18 +244,29 @@ export function EstimateQuotationPrint({
                     {formatCurrency(quotation.subtotal)}
                   </td>
                 </tr>
-                <tr className="bg-gray-100">
-                  <td className="text-gray-700 px-4 py-2 font-semibold">CGST (9%)</td>
-                  <td className="text-gray-900 px-4 py-2 font-mono text-right">
-                    {formatCurrency(quotation.cgst)}
-                  </td>
-                </tr>
-                <tr className="bg-gray-100">
-                  <td className="text-gray-700 px-4 py-2 font-semibold">SGST (9%)</td>
-                  <td className="text-gray-900 px-4 py-2 font-mono text-right">
-                    {formatCurrency(quotation.sgst)}
-                  </td>
-                </tr>
+                {isInterstate ? (
+                  <tr className="bg-gray-100">
+                    <td className="text-gray-700 px-4 py-2 font-semibold">IGST</td>
+                    <td className="text-gray-900 px-4 py-2 font-mono text-right">
+                      {formatCurrency(quotation.igst ?? quotation.totalGst)}
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    <tr className="bg-gray-100">
+                      <td className="text-gray-700 px-4 py-2 font-semibold">CGST</td>
+                      <td className="text-gray-900 px-4 py-2 font-mono text-right">
+                        {formatCurrency(quotation.cgst)}
+                      </td>
+                    </tr>
+                    <tr className="bg-gray-100">
+                      <td className="text-gray-700 px-4 py-2 font-semibold">SGST</td>
+                      <td className="text-gray-900 px-4 py-2 font-mono text-right">
+                        {formatCurrency(quotation.sgst)}
+                      </td>
+                    </tr>
+                  </>
+                )}
                 <tr>
                   <td className="text-gray-700 px-4 py-2 font-semibold">Total GST</td>
                   <td className="text-gray-900 px-4 py-2 font-mono text-right">
@@ -269,8 +319,9 @@ export function EstimateQuotationPrint({
           {/* Footer */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
             <p className="text-[10px] text-gray-500">
-              {store.storeName} • {quotation.quoteNumber}
+              {header.legal_name || header.trade_name || store.storeName} • {quotation.quoteNumber}
             </p>
+          </div>
           </div>
         </div>
       </div>

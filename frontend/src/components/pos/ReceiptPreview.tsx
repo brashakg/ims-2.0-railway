@@ -22,7 +22,7 @@ interface ReceiptPreviewProps {
   selectedCustomer: any;
   cartItems: any[];
   onClose: () => void;
-  storeData?: { name?: string; address?: string; phone?: string; gst?: string; stateCode?: string };
+  storeData?: { name?: string; legalName?: string; address?: string; phone?: string; gst?: string; stateCode?: string; logo?: string; storeCode?: string };
   /** Per-entity content overrides surfaced from the editor. */
   overrides?: OverrideFields | null;
   /** Entity trade name override (e.g. "Better Vision") -- thermal can only
@@ -42,14 +42,23 @@ export function ReceiptPreview({
   entityTradeName,
 }: ReceiptPreviewProps) {
   const [format, setFormat] = useState<ReceiptFormat>('thermal');
+  // STORE-SPECIFIC: render the ISSUING store's identity. NEVER fall back to a
+  // fixed brand name -- that would mislabel a sale made at a different store /
+  // entity. When nothing is available we leave the name blank (the caller
+  // passes a neutral store code as a last resort).
   const storeInfo = {
-    name: storeData?.name || 'Better Vision Opticals',
+    name: storeData?.name || storeData?.storeCode || '',
+    legalName: storeData?.legalName || '',
     address: storeData?.address || '',
     phone: storeData?.phone || '',
     gst: storeData?.gst || '',
+    logo: storeData?.logo || '',
   };
-  const tradeName = entityTradeName || overrides?.header_subtitle || storeInfo.name;
+  const tradeName = entityTradeName || overrides?.header_subtitle || storeInfo.name || '';
   const subtitle = overrides?.header_subtitle || '';
+  // A tax-bearing receipt is statutory (Sec. 31): label it "TAX INVOICE" only
+  // when a GSTIN is actually present; otherwise it is a plain sales receipt.
+  const hasGstin = !!storeInfo.gst;
   const declarationText = overrides?.declaration_text || declarations('thermal_receipt');
   const footerLine = statutoryFooter('thermal_receipt', overrides?.retention_years || 7);
   const grandTotalRupees = typeof billData?.total_amount === 'number'
@@ -132,18 +141,33 @@ export function ReceiptPreview({
             >
               {/* Compact statutory header */}
               <div style={{ textAlign: 'center', borderBottom: '1px solid #1a1a19', paddingBottom: 6 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.01em' }}>{tradeName.toUpperCase()}</div>
+                {storeInfo.logo && (
+                  <img
+                    src={storeInfo.logo}
+                    alt=""
+                    style={{ maxHeight: 36, maxWidth: '70%', objectFit: 'contain', margin: '0 auto 4px', display: 'block' }}
+                  />
+                )}
+                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.01em' }}>{(tradeName || '').toUpperCase()}</div>
+                {storeInfo.legalName && storeInfo.legalName !== tradeName && (
+                  <div style={{ fontSize: 8.5, color: '#4a4a45' }}>{storeInfo.legalName}</div>
+                )}
                 {subtitle && <div style={{ fontSize: 9, color: '#4a4a45', letterSpacing: '.08em', textTransform: 'uppercase' }}>{subtitle}</div>}
                 <div style={{ fontSize: 9, color: '#4a4a45', marginTop: 2 }}>{storeInfo.address}</div>
                 {storeInfo.phone && <div style={{ fontSize: 9, color: '#4a4a45' }}>{storeInfo.phone}</div>}
-                {storeInfo.gst && (
+                {storeInfo.gst ? (
                   <div style={{ fontSize: 9, color: '#4a4a45', marginTop: 2, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
                     GSTIN: {storeInfo.gst}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 8.5, color: '#a01c1c', marginTop: 2, fontWeight: 600 }}>
+                    GSTIN NOT CONFIGURED
                   </div>
                 )}
               </div>
 
-              {/* Doc strip — compact copy-marker pseudo */}
+              {/* Doc strip — label TAX INVOICE only when a GSTIN is present (a
+                  GSTIN-less receipt is not a statutory tax invoice). */}
               <div
                 style={{
                   background: '#1a1a19',
@@ -156,7 +180,7 @@ export function ReceiptPreview({
                   marginTop: 6,
                 }}
               >
-                TAX INVOICE · ORIGINAL FOR RECIPIENT
+                {hasGstin ? 'TAX INVOICE · ORIGINAL FOR RECIPIENT' : 'SALES RECEIPT'}
               </div>
 
               {/* Bill meta */}
@@ -256,13 +280,21 @@ export function ReceiptPreview({
             <div className="bg-white text-black p-8 rounded border-2 border-gray-300 space-y-4">
               <div className="grid grid-cols-2 gap-8 pb-4 border-b-2 border-black">
                 <div>
-                  <h1 className="text-2xl font-bold">{storeInfo.name}</h1>
+                  {storeInfo.logo && (
+                    <img src={storeInfo.logo} alt="" className="h-12 mb-2 object-contain" />
+                  )}
+                  <h1 className="text-2xl font-bold">{storeInfo.legalName || storeInfo.name}</h1>
+                  {storeInfo.name && storeInfo.legalName && storeInfo.name !== storeInfo.legalName && (
+                    <p className="text-sm text-gray-600">{storeInfo.name}</p>
+                  )}
                   <p className="text-sm text-gray-600">{storeInfo.address}</p>
-                  <p className="text-sm text-gray-600">Phone: {storeInfo.phone}</p>
-                  <p className="text-sm text-gray-600">GST: {storeInfo.gst}</p>
+                  {storeInfo.phone && <p className="text-sm text-gray-600">Phone: {storeInfo.phone}</p>}
+                  {storeInfo.gst
+                    ? <p className="text-sm text-gray-600">GSTIN: {storeInfo.gst}</p>
+                    : <p className="text-sm text-red-700 font-semibold">GSTIN NOT CONFIGURED</p>}
                 </div>
                 <div className="text-right">
-                  <h2 className="text-xl font-bold mb-2">TAX INVOICE</h2>
+                  <h2 className="text-xl font-bold mb-2">{hasGstin ? 'TAX INVOICE' : 'SALES RECEIPT'}</h2>
                   <p className="text-sm"><strong>Bill #:</strong> {billData.bill_number}</p>
                   <p className="text-sm"><strong>Date:</strong> {new Date().toLocaleDateString('en-IN')}</p>
                 </div>

@@ -5,6 +5,14 @@
 
 import { useRef } from 'react';
 import { Printer, X } from 'lucide-react';
+import {
+  buildLegalHeader,
+  LegalHeaderView,
+  LegalFooterBlock,
+  type EntityLike,
+  type OverrideFields,
+  type StoreLike,
+} from './legalPrimitives';
 
 interface ChallanItem {
   productName: string;
@@ -31,25 +39,28 @@ interface StoreInfo {
   state: string;
   pincode: string;
   phone?: string;
+  gstin?: string;
+  stateCode?: string;
+  brand?: string;
+  storeCode?: string;
 }
 
 interface DeliveryChallanPrintProps {
   challan: ChallanPrintData;
   store: StoreInfo;
+  /** Issuing (consignor) legal entity -- supplies legal name + GSTIN + logo. */
+  entity?: EntityLike | null;
+  overrides?: OverrideFields | null;
+  copyMarker?: 'ORIGINAL' | 'DUPLICATE' | 'TRIPLICATE';
   onClose: () => void;
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
 }
 
 export function DeliveryChallanPrint({
   challan,
   store,
+  entity,
+  overrides,
+  copyMarker = 'ORIGINAL',
   onClose,
 }: DeliveryChallanPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
@@ -57,6 +68,43 @@ export function DeliveryChallanPrint({
   const handlePrint = () => {
     window.print();
   };
+
+  // Statutory consignor identity. Goods moved under Rule 55 must carry the
+  // consignor GSTIN -- the header below renders it from the issuing entity.
+  const effectiveEntity: EntityLike = entity || {
+    legal_name: store.storeName,
+    name: store.storeName,
+    registered_address: store.address,
+    gstins: store.gstin ? [{
+      gstin: store.gstin,
+      state_code: store.stateCode || '',
+      state_name: store.state || '',
+      is_primary: true,
+    }] : [],
+  };
+  const effectiveStore: StoreLike = {
+    name: store.storeName,
+    store_code: store.storeCode,
+    brand: store.brand,
+    address: store.address,
+    city: store.city,
+    state: store.state,
+    state_code: store.stateCode,
+    pincode: store.pincode,
+    phone: store.phone,
+    gstin: store.gstin,
+  };
+  const header = buildLegalHeader(effectiveEntity, effectiveStore, 'delivery_challan', {
+    docNumber: challan.challanNumber,
+    docDate: challan.date,
+    placeOfSupply: store.state,
+    copyMarker,
+    overrides,
+    copyMarkerMode: 'rule_55',
+    extraMeta: [['Reason', 'Inter-store / outward movement']],
+  });
+  const declarationText = overrides?.declaration_text
+    || 'This challan accompanies goods being moved and is NOT a tax invoice (CGST Rule 55).';
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -81,40 +129,13 @@ export function DeliveryChallanPrint({
         {/* Printable Document */}
         <div
           ref={printRef}
-          className="challan-print-area bg-white p-8"
-          style={{ maxWidth: '210mm', margin: '0 auto' }}
+          className="challan-print-area bg-white"
+          style={{ maxWidth: '210mm', margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif', color: '#1a1a19', border: '1px solid #1a1a19' }}
         >
-          {/* Company Header */}
-          <div className="text-center mb-8 pb-4 border-b-4 border-gray-800">
-            <h1 className="text-2xl font-bold text-gray-900 uppercase tracking-wide">
-              {store.storeName}
-            </h1>
-            <p className="text-gray-600 text-sm mt-1">{store.address}</p>
-            <p className="text-gray-600 text-sm">
-              {store.city}, {store.state} - {store.pincode}
-            </p>
-            {store.phone && <p className="text-gray-600 text-sm">Phone: {store.phone}</p>}
-          </div>
+          {/* Statutory consignor header (legal name + GSTIN + Rule-55 markers) */}
+          <LegalHeaderView header={header} docTypeLabel="DELIVERY CHALLAN · RULE 55 CGST" />
 
-          {/* Document Title */}
-          <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-gray-900 uppercase tracking-widest">
-              DELIVERY CHALLAN
-            </h2>
-          </div>
-
-          {/* Challan Details */}
-          <div className="grid grid-cols-2 gap-6 mb-6 text-sm">
-            <div>
-              <p className="text-gray-500 font-semibold">Challan Number</p>
-              <p className="text-gray-900 font-mono text-lg">{challan.challanNumber}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-gray-500 font-semibold">Date</p>
-              <p className="text-gray-900 text-lg">{formatDate(challan.date)}</p>
-            </div>
-          </div>
-
+          <div className="p-8 pt-4">
           {/* Store Details */}
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div className="p-4 bg-gray-50 border border-gray-300 rounded">
@@ -171,35 +192,15 @@ export function DeliveryChallanPrint({
               <p className="text-gray-700 text-sm whitespace-pre-wrap">{challan.notes}</p>
             </div>
           )}
-
-          {/* Signature Lines */}
-          <div className="mt-8 pt-6 border-t border-gray-300 flex justify-between items-end">
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Dispatched By</p>
-              {challan.dispatchedBy && (
-                <p className="text-xs text-gray-700 mt-1 font-medium">{challan.dispatchedBy}</p>
-              )}
-            </div>
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Received By</p>
-              {challan.receivedBy && (
-                <p className="text-xs text-gray-700 mt-1 font-medium">{challan.receivedBy}</p>
-              )}
-            </div>
-            <div className="text-center">
-              <div className="w-40 border-b border-gray-400 mb-2" />
-              <p className="text-xs text-gray-600">Verified By</p>
-            </div>
           </div>
 
-          {/* Footer */}
-          <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-500">
-              {store.storeName} • {challan.challanNumber} • {formatDate(challan.date)}
-            </p>
-          </div>
+          {/* Declaration + signatory + Rule-55 statutory footer */}
+          <LegalFooterBlock
+            header={header}
+            declarationText={declarationText}
+            showAmountInWords={false}
+            signLabel={`For ${header.legal_name || header.trade_name} (Consignor)`}
+          />
         </div>
       </div>
 

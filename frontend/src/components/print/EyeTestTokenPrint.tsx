@@ -5,6 +5,7 @@
 
 import { useRef } from 'react';
 import { Printer, X } from 'lucide-react';
+import type { EntityLike } from './legalPrimitives';
 
 interface TokenPrintData {
   tokenNumber: string;
@@ -26,7 +27,15 @@ interface StoreInfo {
 interface EyeTestTokenPrintProps {
   token: TokenPrintData;
   store: StoreInfo;
+  /** Issuing legal entity -- supplies the per-store/brand logo + legal name on
+   *  the (non-statutory) queue token. */
+  entity?: EntityLike | null;
   onClose: () => void;
+}
+
+function entityLogo(entity?: EntityLike | null): string {
+  if (!entity) return '';
+  return entity.invoice?.logo_url || (entity as any).logo_url || '';
 }
 
 function formatDateTime(dateStr: string): string {
@@ -39,8 +48,10 @@ function formatDateTime(dateStr: string): string {
   });
 }
 
-export function EyeTestTokenPrint({ token, store, onClose }: EyeTestTokenPrintProps) {
+export function EyeTestTokenPrint({ token, store, entity, onClose }: EyeTestTokenPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
+  const logoUrl = entityLogo(entity);
+  const legalName = entity?.legal_name || entity?.name || '';
 
   const handlePrint = () => {
     window.print();
@@ -74,9 +85,15 @@ export function EyeTestTokenPrint({ token, store, onClose }: EyeTestTokenPrintPr
         >
           {/* Store Header */}
           <div className="text-center mb-4 pb-3 border-b-2 border-gray-800">
+            {logoUrl && (
+              <img src={logoUrl} alt="logo" className="mx-auto h-10 mb-1 object-contain" />
+            )}
             <h1 className="text-base font-bold text-gray-900 uppercase tracking-wide">
-              {store.storeName}
+              {legalName || store.storeName}
             </h1>
+            {store.storeName && legalName && store.storeName !== legalName && (
+              <p className="text-gray-700 text-xs">{store.storeName}</p>
+            )}
             <p className="text-gray-700 text-xs mt-1">{store.address}</p>
             <p className="text-gray-700 text-xs">{store.city}, {store.state} {store.pincode}</p>
             {store.phone && <p className="text-gray-700 text-xs">Ph: {store.phone}</p>}

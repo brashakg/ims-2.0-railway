@@ -1251,8 +1251,10 @@ def _cell(value) -> str:
     return str(value)
 
 
-def _build_spectacle_print_html(prescription: dict) -> str:
-    """Existing spectacle Rx card (unchanged output)."""
+def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> str:
+    """Spectacle Rx card. `identity_html` is the issuing store/entity supplier
+    block (legal name, address, GSTIN, NCAHP/DMC reg, logo) prepended above the
+    Rx so a customer-facing prescription always shows WHO issued it."""
     right = prescription.get("right_eye", {}) or {}
     left = prescription.get("left_eye", {}) or {}
     return f"""
@@ -1263,6 +1265,7 @@ def _build_spectacle_print_html(prescription: dict) -> str:
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
+            {identity_html}
             <div class="header">
                 <h2>Eye Prescription</h2>
                 <p class="rx-number">{prescription.get('prescription_number')}</p>
@@ -1300,9 +1303,10 @@ def _build_spectacle_print_html(prescription: dict) -> str:
         """
 
 
-def _build_cl_print_html(prescription: dict) -> str:
+def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
     """Contact-lens Rx card: brand/series/modality header + per-eye
-    power/CYL/AXIS/ADD/BC/DIA (no PD -- a CL is fit by base-curve+diameter)."""
+    power/CYL/AXIS/ADD/BC/DIA (no PD -- a CL is fit by base-curve+diameter).
+    `identity_html` prepends the issuing store/entity supplier block."""
     right = prescription.get("cl_right") or {}
     left = prescription.get("cl_left") or {}
     brand = prescription.get("cl_brand") or "-"
@@ -1318,6 +1322,7 @@ def _build_cl_print_html(prescription: dict) -> str:
             <style>{_PRINT_STYLE}</style>
         </head>
         <body>
+            {identity_html}
             <div class="header">
                 <h2>Contact Lens Prescription</h2>
                 <p class="rx-number">{prescription.get('prescription_number')}</p>
@@ -1359,12 +1364,45 @@ def _build_cl_print_html(prescription: dict) -> str:
         """
 
 
+def _rx_identity_html(prescription: dict) -> str:
+    """Build the issuing store/entity supplier-identity HTML block for an Rx,
+    resolved from the prescription's OWN store_id -> entity -> per-entity
+    rx_card overrides. Fail-soft to '' so the Rx print never 500s; the goal is
+    that a configured store always shows its identity (legal name, address,
+    GSTIN, NCAHP/DMC reg, logo)."""
+    try:
+        from ..services.print_identity import (
+            load_store,
+            load_entity_for_store,
+            load_overrides,
+        )
+        from ..services.print_legal import LegalHeader
+        from ..services.print_render import supplier_identity_html
+
+        store = load_store(prescription.get("store_id"))
+        if not store:
+            return ""
+        entity = load_entity_for_store(store)
+        overrides = load_overrides(entity, "rx_card")
+        header = LegalHeader(
+            entity=entity,
+            store=store,
+            doc_type="rx_card",
+            overrides=overrides or None,
+        )
+        return supplier_identity_html(header)
+    except Exception:  # noqa: BLE001 - identity is additive; never break the Rx print
+        return ""
+
+
 @router.get("/{prescription_id}/print")
 async def print_prescription(
     prescription_id: str, current_user: dict = Depends(require_rx_read)
 ):
     """Generate printable prescription HTML. Renders a contact-lens card when
-    the Rx is rx_kind=CONTACT_LENS, else the existing spectacle card."""
+    the Rx is rx_kind=CONTACT_LENS, else the spectacle card. Both now carry the
+    issuing store/entity supplier-identity block (legal name, address, GSTIN,
+    NCAHP/DMC reg, logo) resolved from the Rx's own store."""
     repo = get_prescription_repository()
 
     if repo is not None:
@@ -1375,10 +1413,11 @@ async def print_prescription(
         ):
             raise HTTPException(status_code=404, detail="Prescription not found")
 
+        identity_html = _rx_identity_html(prescription)
         if (prescription.get("rx_kind") or "SPECTACLE") == "CONTACT_LENS":
-            html = _build_cl_print_html(prescription)
+            html = _build_cl_print_html(prescription, identity_html)
         else:
-            html = _build_spectacle_print_html(prescription)
+            html = _build_spectacle_print_html(prescription, identity_html)
 
         return {
             "html": html,

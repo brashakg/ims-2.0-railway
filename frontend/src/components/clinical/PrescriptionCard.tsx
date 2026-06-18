@@ -26,8 +26,14 @@ interface PrescriptionData {
   pd: number;
   visualAcuity: string;
   notes: string;
+  // Issuing store identity. storeName must be the RESOLVED store (never a fixed
+  // brand). legalName/address/gstin/logoUrl come from the store's legal entity.
   storeName: string;
   storePhone: string;
+  storeLegalName?: string;
+  storeAddress?: string;
+  storeGstin?: string;
+  storeLogoUrl?: string;
   validUntil: string;
 }
 
@@ -88,8 +94,16 @@ export function PrescriptionCard({ prescription }: PrescriptionCardProps) {
       >
         {/* A5 Landscape: 210mm x 148mm */}
         <div style={{ textAlign: 'center', marginBottom: '8mm' }}>
-          <div style={{ fontSize: '14px', fontWeight: 'bold' }}>{prescription.storeName}</div>
+          {prescription.storeLogoUrl && (
+            <img src={prescription.storeLogoUrl} alt="logo" style={{ maxHeight: '48px', maxWidth: '160px', objectFit: 'contain', marginBottom: '4px' }} />
+          )}
+          <div style={{ fontSize: '14px', fontWeight: 'bold' }}>{prescription.storeLegalName || prescription.storeName}</div>
+          {prescription.storeName && prescription.storeLegalName && prescription.storeName !== prescription.storeLegalName && (
+            <div style={{ fontSize: '11px' }}>{prescription.storeName}</div>
+          )}
+          {prescription.storeAddress && <div style={{ fontSize: '10px' }}>{prescription.storeAddress}</div>}
           <div style={{ fontSize: '11px' }}>{prescription.storePhone}</div>
+          {prescription.storeGstin && <div style={{ fontSize: '10px' }}>GSTIN: {prescription.storeGstin}</div>}
         </div>
 
         <div style={{ borderBottom: '1px solid #000', paddingBottom: '4mm', marginBottom: '4mm' }}>

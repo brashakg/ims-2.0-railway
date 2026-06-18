@@ -489,14 +489,36 @@ async def get_job_label(
         except Exception as e:  # noqa: BLE001
             logger.warning("[LABELS] rx lookup failed: %s", e)
 
-    # Store name (best-effort).
+    # Store identity (best-effort): name + code + brand + address + GSTIN +
+    # phone so the work-order traveler can show the FULL issuing-store block and
+    # never falls back to a hardcoded brand name. The org module persists all of
+    # these on the store doc (GSTIN derived from the entity by state).
     store_name = ""
+    store_code = ""
+    store_brand = ""
+    store_address = ""
+    store_gstin = ""
+    store_phone = ""
     try:
         store_repo = get_store_repository()
         if store_repo is not None and job.get("store_id"):
             store = store_repo.find_by_id(job.get("store_id"))
             if store:
                 store_name = store.get("name") or store.get("store_name") or ""
+                store_code = store.get("store_code") or store.get("code") or ""
+                store_brand = store.get("brand") or ""
+                store_gstin = store.get("gstin") or ""
+                store_phone = store.get("phone") or store.get("whatsapp") or ""
+                store_address = ", ".join(
+                    str(p)
+                    for p in [
+                        store.get("address"),
+                        store.get("city"),
+                        store.get("state"),
+                        store.get("pincode"),
+                    ]
+                    if p
+                )
     except Exception as e:  # noqa: BLE001
         logger.warning("[LABELS] store lookup failed: %s", e)
 
@@ -520,6 +542,11 @@ async def get_job_label(
         "promised_date": job.get("expected_date") or job.get("promised_date") or "",
         "store_id": job.get("store_id") or "",
         "store_name": store_name,
+        "store_code": store_code,
+        "store_brand": store_brand,
+        "store_address": store_address,
+        "store_gstin": store_gstin,
+        "store_phone": store_phone,
         "stage": status,
         "stage_label": STAGE_LABELS.get(status, status),
         "lens_status": job.get("lens_status") or "NOT_ORDERED",
@@ -577,6 +604,25 @@ async def get_product_label(
         if not product_id:
             product_id = stock_doc.get("product_id")
             out["product_id"] = product_id
+
+    # Issuing-store identity (best-effort): so a frame tag / CL box is traceable
+    # to the store/brand it was printed at in a multi-store chain.
+    store_id_resolved = out.get("store_id")
+    if store_id_resolved:
+        try:
+            store_repo = get_store_repository()
+            if store_repo is not None:
+                store = store_repo.find_by_id(store_id_resolved)
+                if store:
+                    out["store_name"] = (
+                        store.get("name") or store.get("store_name") or ""
+                    )
+                    out["store_code"] = (
+                        store.get("store_code") or store.get("code") or ""
+                    )
+                    out["store_brand"] = store.get("brand") or ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LABELS] product-label store lookup failed: %s", e)
 
     # Product master (name / brand / MRP / category / CL fields).
     if product_id:
@@ -658,14 +704,19 @@ async def get_quarantine_label(
         except Exception as e:  # noqa: BLE001
             logger.warning("[LABELS] quarantine product lookup failed: %s", e)
 
-    # Store name -- best-effort.
+    # Store identity -- best-effort (name + code + brand so a stray quarantined
+    # unit is traceable to its origin store in a multi-store chain).
     store_name = ""
+    store_code = ""
+    store_brand = ""
     try:
         store_repo = get_store_repository()
         if store_repo is not None and store_id:
             store = store_repo.find_by_id(store_id)
             if store:
                 store_name = store.get("name") or store.get("store_name") or ""
+                store_code = store.get("store_code") or store.get("code") or ""
+                store_brand = store.get("brand") or ""
     except Exception as e:  # noqa: BLE001
         logger.warning("[LABELS] quarantine store lookup failed: %s", e)
 
@@ -688,6 +739,8 @@ async def get_quarantine_label(
         "quarantine_by_name": stock_doc.get("quarantine_by_name") or "",
         "store_id": store_id,
         "store_name": store_name,
+        "store_code": store_code,
+        "store_brand": store_brand,
         "rtv_vendor_id": rtv_vendor_id,
         "generated_at": datetime.now().isoformat(),
     }

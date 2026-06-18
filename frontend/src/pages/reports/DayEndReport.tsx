@@ -4,6 +4,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 import { orderApi, reportsApi } from '../../services/api';
 import type { DayEndClose } from '../../services/api/reports';
 import {
@@ -46,6 +47,9 @@ export default function DayEndReport() {
   const [isClosing, setIsClosing] = useState(false);
 
   const storeId = user?.activeStoreId || user?.storeIds?.[0] || '';
+  // STORE-SPECIFIC: the printed Z-report header carries the issuing store's
+  // name, not a hardcoded brand. Resolved from the report's store.
+  const printStore = useStorePrintInfo(storeId);
 
   useEffect(() => {
     loadDayOrders();
@@ -200,7 +204,7 @@ export default function DayEndReport() {
 
       {/* Print header */}
       <div className="hidden print:block text-center mb-6">
-        <h2 className="text-lg font-bold">Better Vision Opticals — Day-End Report</h2>
+        <h2 className="text-lg font-bold">{printStore?.storeName ? `${printStore.storeName} — ` : ''}Day-End Report</h2>
         <p className="text-sm text-gray-600">{new Date(reportDate).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}</p>
       </div>
 

@@ -47,7 +47,15 @@ export function LabelPreviewModal({ spec, onClose, fallbackJob }: LabelPreviewMo
         if (spec.kind === 'job') {
           const d = await labelsApi.getJobLabel(spec.jobId, spec.type);
           if (active) {
-            setJobData(d?.job_id ? d : ({ job_id: spec.jobId, ...(fallbackJob || {}) } as JobLabelData));
+            // Merge the active-store fallback UNDER the backend payload so the
+            // issuing-store identity is always present even when the label
+            // lookup returns a thin payload (no hardcoded brand fallback).
+            const base = (fallbackJob || {}) as Partial<JobLabelData>;
+            setJobData(
+              d?.job_id
+                ? ({ ...base, ...d } as JobLabelData)
+                : ({ job_id: spec.jobId, ...base } as JobLabelData),
+            );
           }
         } else {
           const d = await labelsApi.getProductLabel({

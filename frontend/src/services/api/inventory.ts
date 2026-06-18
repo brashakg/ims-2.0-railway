@@ -294,6 +294,8 @@ export interface QuarantineLabel {
   quarantine_at?: string;
   quarantine_by_name?: string;
   store_name?: string;
+  store_code?: string;
+  store_brand?: string;
   rtv_vendor_id?: string;
   luxury_brand_line?: string;
 }

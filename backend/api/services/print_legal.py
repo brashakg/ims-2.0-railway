@@ -654,6 +654,45 @@ def _pick(entity: Optional[Dict[str, Any]], *keys: str) -> str:
     return ""
 
 
+# Per-brand default logo (used only when neither the entity nor an override
+# carries a logo). Keyed on the store.brand enum (BETTER_VISION / WIZOPT). Empty
+# strings mean "no default asset bundled" -- the renderer falls back to a
+# monogram. Owners upload the real logo via the Organization -> entity invoice
+# identity screen (entity.invoice.logo_url); these are only a last resort so a
+# fully-unconfigured store does not print a wrong-brand mark.
+_BRAND_DEFAULT_LOGO: Dict[str, str] = {
+    "BETTER_VISION": "",
+    "WIZOPT": "",
+}
+
+# Human-readable brand label for the header subtitle / badge.
+_BRAND_LABEL: Dict[str, str] = {
+    "BETTER_VISION": "Better Vision",
+    "WIZOPT": "WizOpt",
+}
+
+
+def _entity_logo(entity: Optional[Dict[str, Any]]) -> str:
+    """Resolve the entity logo URL. The Organization module stores the logo
+    NESTED under entity.invoice.logo_url (InvoiceIdentity); older / ad-hoc docs
+    may carry a top-level logo_url. Read the nested one first, then top-level."""
+    if not isinstance(entity, dict):
+        return ""
+    invoice = entity.get("invoice")
+    if isinstance(invoice, dict):
+        nested = str(invoice.get("logo_url") or "").strip()
+        if nested:
+            return nested
+    return _pick(entity, "logo_url")
+
+
+def _brand_of(store: Optional[Dict[str, Any]]) -> str:
+    """Normalised store brand enum (BETTER_VISION / WIZOPT / '')."""
+    if not isinstance(store, dict):
+        return ""
+    return str(store.get("brand") or "").strip().upper()
+
+
 def _gstin_for_state(
     entity: Optional[Dict[str, Any]], state_code: str
 ) -> Tuple[str, str]:
@@ -751,6 +790,7 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     store_phone = _pick(store, "phone")
     store_email = _pick(store, "email")
     store_state_code = _pick(store, "state_code")
+    store_brand = _brand_of(store)
 
     store_addr_full = ", ".join(
         part for part in store_addr_lines + [city, state_name_store, pincode] if part
@@ -759,6 +799,10 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     # ---- pick the GSTIN for the store state ------------------------------
     gstin, state_name_gst = _gstin_for_state(entity, store_state_code)
     state_name = state_name_gst or state_name_store
+
+    # ---- logo (entity invoice identity, then per-brand default) -----------
+    logo_url = _entity_logo(entity) or _BRAND_DEFAULT_LOGO.get(store_brand, "")
+    brand_label = _BRAND_LABEL.get(store_brand, "")
 
     # ---- defaults that can be overridden ----------------------------------
     defaults: Dict[str, Any] = {
@@ -777,7 +821,7 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         "signatory_name": "",
         "signatory_designation": "Authorised Signatory",
         "footer_terms": "",
-        "logo_url": _pick(entity, "logo_url"),
+        "logo_url": logo_url,
         "retention_years": 7,
         "reverse_charge_default": False,
     }
@@ -866,6 +910,8 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         "store_address": store_addr_full,
         "store_phone": store_phone,
         "store_email": store_email,
+        "brand": store_brand,
+        "brand_label": brand_label,
         "place_of_supply": place_of_supply_str,
         "state_code": store_state_code,
         "state_name": state_name,
@@ -896,10 +942,11 @@ def StaffHeader(  # noqa: N802 - intentionally mirror the JSX export name
     CIN, or registered office -- those statutory fields belong to customer /
     vendor-facing documents only.
     """
+    store_brand = _brand_of(store)
     defaults: Dict[str, Any] = {
         "trade_name": _pick(entity, "name"),
         "header_subtitle": "",
-        "logo_url": _pick(entity, "logo_url"),
+        "logo_url": _entity_logo(entity) or _BRAND_DEFAULT_LOGO.get(store_brand, ""),
         "signatory_name": "",
         "signatory_designation": "",
         "footer_terms": "",
@@ -934,6 +981,8 @@ def StaffHeader(  # noqa: N802 - intentionally mirror the JSX export name
         "trade_name": applied["trade_name"],
         "header_subtitle": applied.get("header_subtitle", ""),
         "branch_label": branch_label,
+        "brand": store_brand,
+        "brand_label": _BRAND_LABEL.get(store_brand, ""),
         "logo_url": applied.get("logo_url", ""),
         "meta": meta_rows,
         "signatory_name": applied.get("signatory_name", ""),

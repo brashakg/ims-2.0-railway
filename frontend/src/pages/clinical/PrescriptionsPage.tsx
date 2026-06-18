@@ -15,8 +15,10 @@ import {
   Printer,
   RotateCcw,
 } from 'lucide-react';
-import { clinicalApi, prescriptionApi, storeApi } from '../../services/api';
+import { clinicalApi, prescriptionApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionPrint } from '../../components/clinical/PrescriptionPrint';
 import type { PrescriptionPrintData, StoreInfo } from '../../components/clinical/PrescriptionPrint';
@@ -62,6 +64,7 @@ export function PrescriptionsPage() {
   const [selectedPrescription, setSelectedPrescription] = useState<Prescription | null>(null);
   const [printPrescription, setPrintPrescription] = useState<PrescriptionPrintData | null>(null);
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
+  const [storeEntity, setStoreEntity] = useState<EntityLike | null>(null);
 
   // user?.activeStoreId in deps so topbar store-switch triggers re-fetch.
   // dateFilter in deps so changing the window re-queries the server-side range.
@@ -76,18 +79,23 @@ export function PrescriptionsPage() {
     try {
       const storeId = user?.activeStoreId;
       if (!storeId) return;
-      const store = await storeApi.getStore(storeId);
-      if (store) {
-        setStoreInfo({
-          storeName: store.storeName,
-          address: store.address,
-          city: store.city,
-          state: store.state,
-          pincode: store.pincode,
-          phone: (store as any).phone,
-          gstin: store.gstin,
-        });
-      }
+      // Resolve the issuing store (normalised snake->camel) + its legal entity
+      // so the Rx print shows the real legal name + GSTIN + NCAHP/DMC + logo.
+      const id = await resolveStoreIdentity(storeId);
+      const sv = id.store;
+      setStoreInfo({
+        storeName: sv.storeName,
+        storeCode: sv.storeCode,
+        brand: sv.brand,
+        address: sv.address,
+        city: sv.city,
+        state: sv.state,
+        stateCode: sv.stateCode,
+        pincode: sv.pincode,
+        phone: (sv as any).phone,
+        gstin: sv.gstin,
+      } as StoreInfo);
+      setStoreEntity(id.entity);
     } catch {
       // Store info is optional for display; fail silently
     }
@@ -446,6 +454,7 @@ export function PrescriptionsPage() {
         <PrescriptionPrint
           prescription={printPrescription}
           store={storeInfo}
+          entity={storeEntity}
           onClose={() => setPrintPrescription(null)}
         />
       )}

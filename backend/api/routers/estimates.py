@@ -41,6 +41,12 @@ from pydantic import BaseModel, Field, field_validator
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services.print_render import render_estimate
+from ..services.print_identity import (
+    assert_issuing_identity,
+    load_entity_for_store,
+    load_overrides,
+    load_store,
+)
 
 router = APIRouter()
 
@@ -326,24 +332,14 @@ async def render_estimate_html(
     """Render the estimate as a self-contained printable HTML page."""
     doc = _load_estimate(estimate_id, current_user)
 
-    store = {}
-    entity = {}
-    db = _get_db()
-    if db is not None:
-        try:
-            store = db.get_collection("stores").find_one(
-                {"store_id": doc.get("store_id")}
-            ) or {}
-        except Exception:  # noqa: BLE001
-            store = {}
-        eid = (store or {}).get("entity_id")
-        if eid:
-            try:
-                entity = db.get_collection("entities").find_one(
-                    {"entity_id": eid}
-                ) or {}
-            except Exception:  # noqa: BLE001
-                entity = {}
+    # Resolve the issuing store + its legal entity from the estimate's OWN
+    # store_id (not the logged-in active store) + the per-entity overrides.
+    store = load_store(doc.get("store_id"))
+    entity = load_entity_for_store(store)
+    # An estimate is non-statutory (no GSTIN required) but must still identify
+    # the issuing store -- fail loudly rather than print a blank header.
+    assert_issuing_identity(store, entity=entity)
+    overrides = load_overrides(entity, "tax_invoice")
 
     html = render_estimate(
         entity=entity,
@@ -358,6 +354,7 @@ async def render_estimate_html(
         totals=doc.get("totals") or {},
         interstate=bool(doc.get("interstate")),
         terms=doc.get("terms") or "",
+        overrides=overrides,
         auto_print=bool(auto_print),
     )
     return HTMLResponse(content=html)

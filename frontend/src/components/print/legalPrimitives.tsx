@@ -49,6 +49,7 @@ export interface LegalHeaderData {
   signatory_designation: string;
   footer_terms: string;
   logo_url: string;
+  brand_label: string;
   retention_years: number;
 }
 
@@ -60,6 +61,7 @@ export interface StaffHeaderData {
   header_subtitle: string;
   branch_label: string;
   logo_url: string;
+  brand_label: string;
   meta: Array<[string, string]>;
   signatory_name: string;
   signatory_designation: string;
@@ -77,7 +79,18 @@ export interface EntityLike {
   registered_phone?: string;
   registered_email?: string;
   website?: string;
+  /** Legacy / ad-hoc top-level logo. The Organization module stores the logo
+   *  NESTED under invoice.logo_url -- buildLegalHeader reads both. */
   logo_url?: string;
+  /** Entity invoice identity (Organization module). The brand logo lives here. */
+  invoice?: {
+    logo_url?: string;
+    legal_display_name?: string;
+    signatory_name?: string;
+    signatory_designation?: string;
+    footer_text?: string;
+    terms?: string;
+  };
   gstins?: Array<{
     gstin: string;
     state_code: string;
@@ -90,7 +103,9 @@ export interface StoreLike {
   name?: string;
   store_name?: string;
   store_code?: string;
+  code?: string;
   trade_name?: string;
+  brand?: string;
   address?: string;
   street?: string;
   address_line_1?: string;
@@ -101,6 +116,27 @@ export interface StoreLike {
   pincode?: string;
   phone?: string;
   email?: string;
+  gstin?: string;
+}
+
+// Human-readable brand label keyed on the store.brand enum.
+const BRAND_LABEL: Record<string, string> = {
+  BETTER_VISION: 'Better Vision',
+  WIZOPT: 'WizOpt',
+};
+
+/** Resolve the entity logo: nested invoice.logo_url first (the Organization
+ *  module writes it there), then a top-level logo_url fallback. */
+function logoFromEntity(entity: EntityLike | null | undefined): string {
+  if (!entity) return '';
+  const nested = entity.invoice?.logo_url;
+  if (nested && String(nested).trim()) return String(nested).trim();
+  return pick(entity as Record<string, unknown>, 'logo_url');
+}
+
+function brandLabelOf(store: StoreLike | null | undefined): string {
+  const b = String(store?.brand || '').trim().toUpperCase();
+  return BRAND_LABEL[b] || '';
 }
 
 export interface OverrideFields {
@@ -437,7 +473,7 @@ export function buildLegalHeader(
     signatory_name: '',
     signatory_designation: 'Authorised Signatory',
     footer_terms: '',
-    logo_url: pick(entity as Record<string, unknown>, 'logo_url'),
+    logo_url: logoFromEntity(entity),
     retention_years: 7,
     reverse_charge_default: false,
   };
@@ -502,6 +538,7 @@ export function buildLegalHeader(
     signatory_designation: String(applied.signatory_designation || 'Authorised Signatory'),
     footer_terms: String(applied.footer_terms || ''),
     logo_url: String(applied.logo_url || ''),
+    brand_label: brandLabelOf(store),
     retention_years: Number(applied.retention_years ?? 7),
   };
 }
@@ -520,7 +557,7 @@ export function buildStaffHeader(
   const defaults: Record<string, unknown> = {
     trade_name: pick(entity as Record<string, unknown>, 'name'),
     header_subtitle: '',
-    logo_url: pick(entity as Record<string, unknown>, 'logo_url'),
+    logo_url: logoFromEntity(entity),
     signatory_name: '',
     signatory_designation: '',
     footer_terms: '',
@@ -549,6 +586,7 @@ export function buildStaffHeader(
     header_subtitle: String(applied.header_subtitle || ''),
     branch_label: branchLabel,
     logo_url: String(applied.logo_url || ''),
+    brand_label: brandLabelOf(store),
     meta,
     signatory_name: String(applied.signatory_name || ''),
     signatory_designation: String(applied.signatory_designation || ''),
@@ -781,22 +819,30 @@ export function LegalHeaderView({
       <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', borderBottom: `1.5px solid ${INK}` }}>
         <div style={{ padding: '12px 18px', borderRight: `1px solid ${INK_4}` }}>
           <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-            <div
-              style={{
-                width: 34,
-                height: 34,
-                border: `1.5px solid ${INK}`,
-                display: 'grid',
-                placeItems: 'center',
-                fontFamily:
-                  'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-                fontSize: 18,
-                fontWeight: 700,
-                color: INK,
-              }}
-            >
-              {(header.trade_name || header.legal_name || 'B').charAt(0).toUpperCase()}
-            </div>
+            {header.logo_url ? (
+              <img
+                src={header.logo_url}
+                alt="logo"
+                style={{ maxWidth: 56, maxHeight: 40, objectFit: 'contain' }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 34,
+                  height: 34,
+                  border: `1.5px solid ${INK}`,
+                  display: 'grid',
+                  placeItems: 'center',
+                  fontFamily:
+                    'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+                  fontSize: 18,
+                  fontWeight: 700,
+                  color: INK,
+                }}
+              >
+                {(header.trade_name || header.legal_name || 'B').charAt(0).toUpperCase()}
+              </div>
+            )}
             <div>
               <div style={{ fontSize: 13.5, fontWeight: 700, letterSpacing: '.01em', color: INK }}>
                 {header.legal_name || header.trade_name}
@@ -914,20 +960,28 @@ export function StaffHeaderView({
         }}
       >
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <div
-            style={{
-              width: 30,
-              height: 30,
-              border: `1.5px solid ${INK}`,
-              display: 'grid',
-              placeItems: 'center',
-              fontWeight: 700,
-              fontSize: 16,
-              color: INK,
-            }}
-          >
-            {(header.trade_name || 'B').charAt(0).toUpperCase()}
-          </div>
+          {header.logo_url ? (
+            <img
+              src={header.logo_url}
+              alt="logo"
+              style={{ maxWidth: 48, maxHeight: 34, objectFit: 'contain' }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 30,
+                height: 30,
+                border: `1.5px solid ${INK}`,
+                display: 'grid',
+                placeItems: 'center',
+                fontWeight: 700,
+                fontSize: 16,
+                color: INK,
+              }}
+            >
+              {(header.trade_name || 'B').charAt(0).toUpperCase()}
+            </div>
+          )}
           <div>
             <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '.01em', color: INK }}>{header.trade_name || '—'}</div>
             <div style={{ fontSize: 9, color: INK_3, textTransform: 'uppercase', letterSpacing: '.1em', marginTop: 1 }}>

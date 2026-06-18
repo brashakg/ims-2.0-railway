@@ -38,6 +38,8 @@ import { StationQueueBoard } from '../../components/labels/StationQueueBoard';
 import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
+import { resolveStoreIdentity } from '../../components/print/storeIdentity';
+import type { EntityLike } from '../../components/print/legalPrimitives';
 
 // Job type
 interface Job {
@@ -200,19 +202,26 @@ const loadJobs = async () => {
         console.warn('[Workshop] getDashboardKpis failed (non-fatal):', kpisResp.reason);
       }
 
-      // Load store info for printing
-      if (!storeInfo) {
+      // Load the issuing-store identity (store + legal entity) for printing the
+      // job card + thermal labels. NEVER defaulted to a fixed brand name (a
+      // WizOpt store must print WizOpt).
+      if (!storeInfo && user?.activeStoreId) {
         try {
-          const store = await (orderApi as any).getStore?.(user.activeStoreId);
-          if (store) {
-            setStoreInfo({
-              storeName: store.storeName || store.name || 'Better Vision Optics',
-              address: store.address || '',
-              city: store.city || '',
-              state: store.state || '',
-              pincode: store.pincode || '',
-            });
-          }
+          const id = await resolveStoreIdentity(user.activeStoreId);
+          const sv = id.store;
+          setStoreInfo({
+            storeName: sv.storeName || sv.storeCode || '',
+            storeCode: sv.storeCode || '',
+            brand: sv.brand || '',
+            address: sv.address || '',
+            city: sv.city || '',
+            state: sv.state || '',
+            stateCode: sv.stateCode || '',
+            pincode: sv.pincode || '',
+            phone: (sv as any).phone || '',
+            gstin: sv.gstin || '',
+          });
+          setStoreEntity(id.entity);
         } catch {
           // Store info is optional
         }
@@ -266,6 +275,7 @@ const loadJobs = async () => {
   // Thermal label modal (traveler / stage / ready / product).
   const [labelSpec, setLabelSpec] = useState<LabelModalSpec | null>(null);
   const [storeInfo, setStoreInfo] = useState<any>(null);
+  const [storeEntity, setStoreEntity] = useState<EntityLike | null>(null);
   const [createOrderSearch, setCreateOrderSearch] = useState('');
   const [createOrders, setCreateOrders] = useState<any[]>([]);
   const [createSelectedOrder, setCreateSelectedOrder] = useState<any>(null);
@@ -1085,13 +1095,26 @@ const loadJobs = async () => {
             createdDate: printJob.createdAt,
           }}
           store={storeInfo}
+          entity={storeEntity}
           onClose={() => setPrintJob(null)}
         />
       )}
 
       {/* Thermal Label Preview + Print modal (QZ silent or HTML fallback) */}
       {labelSpec && (
-        <LabelPreviewModal spec={labelSpec} onClose={() => setLabelSpec(null)} />
+        <LabelPreviewModal
+          spec={labelSpec}
+          fallbackJob={{
+            store_id: user?.activeStoreId,
+            store_name: storeInfo?.storeName,
+            store_code: storeInfo?.storeCode,
+            store_brand: storeInfo?.brand,
+            store_gstin: storeInfo?.gstin,
+            store_phone: storeInfo?.phone,
+            store_address: [storeInfo?.address, storeInfo?.city, storeInfo?.state, storeInfo?.pincode].filter(Boolean).join(', '),
+          }}
+          onClose={() => setLabelSpec(null)}
+        />
       )}
 
       {/* QC checklist modal — posts to /qc-checklist (structured items) -> READY or QC_FAILED */}

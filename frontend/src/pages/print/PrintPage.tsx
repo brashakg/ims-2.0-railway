@@ -17,12 +17,13 @@
 //
 // Pixel-perfect inspector + live template editing is Phase 2 work.
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Printer, FileText, Eye, Ticket, Package, Receipt, RotateCcw, ExternalLink, Pencil } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { PrintTemplateContentEditor } from '../../components/print/PrintTemplateContentEditor';
 import type { PrintTemplateKey } from '../../services/api/printOverrides';
+import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
 type TemplateKind = 'paper' | 'thermal';
 type PaperSize = 'A4' | 'A5' | 'A6' | '80mm';
@@ -219,6 +220,30 @@ export default function PrintPage() {
   const sel = TEMPLATES.find((t) => t.id === selId) ?? TEMPLATES[0];
   const SelIcon = sel.icon;
 
+  // Reflect the logged-in user's OWN store / entity in the preview placeholder
+  // (not a hardcoded Better Vision identity / fake GSTIN), so a WizOpt / other-
+  // entity user sees what their documents will actually show.
+  const [identity, setIdentity] = useState<StoreIdentity | null>(null);
+  useEffect(() => {
+    if (!user?.activeStoreId) return;
+    let cancelled = false;
+    resolveStoreIdentity(user.activeStoreId)
+      .then((id) => { if (!cancelled) setIdentity(id); })
+      .catch(() => { if (!cancelled) setIdentity(null); });
+    return () => { cancelled = true; };
+  }, [user?.activeStoreId]);
+
+  const previewEntity = identity?.entity;
+  const previewStore = identity?.store;
+  const previewName = previewEntity?.legal_name || previewEntity?.name || previewStore?.storeName || 'Your store identity';
+  const previewGstinList = previewEntity?.gstins || [];
+  const previewGstin =
+    previewGstinList.find((g) => g.state_code && g.state_code === previewStore?.stateCode)?.gstin
+    || previewGstinList.find((g) => g.is_primary)?.gstin
+    || previewStore?.gstin
+    || '';
+  const previewLogo = previewEntity?.invoice?.logo_url || (previewEntity as any)?.logo_url || '';
+
   // Content editor is gated to SUPERADMIN/ADMIN. Entity-level content edits
   // affect every print across that entity, same blast radius as the HSN/GST
   // master edits.
@@ -358,13 +383,19 @@ export default function PrintPage() {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, paddingBottom: 16, borderBottom: '1px solid var(--ink)' }}>
               <div>
-                <div style={{ fontFamily: 'var(--font-display)', fontSize: 28, color: 'var(--bv)' }}>B</div>
+                {previewLogo ? (
+                  <img src={previewLogo} alt="logo" style={{ maxHeight: 36, maxWidth: 140, objectFit: 'contain' }} />
+                ) : (
+                  <div style={{ fontFamily: 'var(--font-display)', fontSize: 28, color: 'var(--bv)' }}>
+                    {previewName.charAt(0).toUpperCase()}
+                  </div>
+                )}
                 <div style={{ fontFamily: 'var(--font-display)', fontSize: 24, letterSpacing: '-.01em' }}>{sel.name}</div>
                 <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-4)', marginTop: 4 }}>{sel.sub.toUpperCase()}</div>
               </div>
               <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--ink-3)' }}>
-                <div>Better Vision Opticals</div>
-                <div>GSTIN: 07AABCB1234M1Z5</div>
+                <div>{previewName}</div>
+                <div>{previewGstin ? `GSTIN: ${previewGstin}` : 'GSTIN: (configure in Organization)'}</div>
                 <div>tpl.{sel.id}.v3</div>
               </div>
             </div>

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -39,6 +39,12 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services.print_render import render_delivery_challan
+from ..services.print_identity import (
+    assert_issuing_identity,
+    load_entity_for_store,
+    load_overrides,
+    load_store,
+)
 
 router = APIRouter()
 
@@ -64,45 +70,6 @@ def _require_challan_role(current_user: dict) -> None:
             status_code=403,
             detail="Not permitted to print a delivery challan.",
         )
-
-
-def _get_db():
-    try:
-        from ..dependencies import get_db
-
-        conn = get_db()
-        if conn is not None and getattr(conn, "is_connected", False):
-            return conn.db
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
-def _load_store(store_id: Optional[str]) -> Dict[str, Any]:
-    """Load a store doc (by store_id) -- empty dict when unavailable."""
-    if not store_id:
-        return {}
-    db = _get_db()
-    if db is None:
-        return {}
-    try:
-        return db.get_collection("stores").find_one({"store_id": store_id}) or {}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _load_entity_for_store(store: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve the legal entity for a store via its entity_id -- empty when none."""
-    eid = (store or {}).get("entity_id")
-    if not eid:
-        return {}
-    db = _get_db()
-    if db is None:
-        return {}
-    try:
-        return db.get_collection("entities").find_one({"entity_id": eid}) or {}
-    except Exception:  # noqa: BLE001
-        return {}
 
 
 def _challan_number(prefix: str, ref: str) -> str:
@@ -134,8 +101,13 @@ async def delivery_challan_for_order(
     # Store-scope guard (mirrors GET /orders/{id}).
     validate_store_access(order.get("store_id"), current_user)
 
-    store = _load_store(order.get("store_id"))
-    entity = _load_entity_for_store(store)
+    store = load_store(order.get("store_id"))
+    entity = load_entity_for_store(store)
+    # Fail loudly rather than printing an identity-less challan.
+    assert_issuing_identity(store, entity=entity)
+    overrides = load_overrides(entity, "delivery_challan") or load_overrides(
+        entity, "tax_invoice"
+    )
 
     # Resolve customer for the consignee block (fail-soft for walk-ins).
     customer: Dict[str, Any] = {}
@@ -195,6 +167,7 @@ async def delivery_challan_for_order(
         notes="Against Order " + str(order.get("order_number") or order_id),
         copy_marker=copy,
         transport_reason="Outward delivery to customer",
+        overrides=overrides,
         auto_print=bool(auto_print),
     )
     return HTMLResponse(content=html)
@@ -219,8 +192,13 @@ async def delivery_challan_for_transfer(
     _assert_transfer_access(transfer, current_user, side="either")
 
     from_id = transfer.get("from_location_id")
-    store = _load_store(from_id)
-    entity = _load_entity_for_store(store)
+    store = load_store(from_id)
+    entity = load_entity_for_store(store)
+    # Fail loudly rather than printing an identity-less challan.
+    assert_issuing_identity(store, entity=entity)
+    overrides = load_overrides(entity, "delivery_challan") or load_overrides(
+        entity, "tax_invoice"
+    )
 
     items: List[Dict[str, Any]] = []
     for it in transfer.get("items", []) or []:
@@ -250,6 +228,7 @@ async def delivery_challan_for_transfer(
         notes=transfer.get("notes") or "",
         copy_marker=copy,
         transport_reason="Inter-store stock transfer",
+        overrides=overrides,
         auto_print=bool(auto_print),
     )
     return HTMLResponse(content=html)

@@ -3,6 +3,7 @@
 // ============================================================================
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 import { orderApi } from '../../services/api';
 import {
   IndianRupee, Phone,
@@ -29,6 +30,8 @@ type AgeBucket = '0-7' | '8-15' | '16-30' | '31-60' | '60+';
 
 export default function OutstandingPaymentsReport() {
   const { user } = useAuth();
+  // STORE-SPECIFIC: the printed report header carries the issuing store's name.
+  const printStore = useStorePrintInfo(user?.activeStoreId || user?.storeIds?.[0] || '');
   const [orders, setOrders] = useState<OutstandingOrder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -152,7 +155,7 @@ export default function OutstandingPaymentsReport() {
 
       {/* Print header */}
       <div className="hidden print:block text-center mb-4">
-        <h2 className="text-lg font-bold">Better Vision Opticals — Outstanding Payments Report</h2>
+        <h2 className="text-lg font-bold">{printStore?.storeName ? `${printStore.storeName} — ` : ''}Outstanding Payments Report</h2>
         <p className="text-sm text-gray-600">{new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}</p>
       </div>
 
