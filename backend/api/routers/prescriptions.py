@@ -139,23 +139,20 @@ def _audit_rx(
 # Prescription Value Validation Ranges — per IMS 2.0 business rules
 # (see CLAUDE.md and docs/reference/IMS2_Complete_App_Summary.docx §6.3).
 # ============================================================================
-# SPH (Sphere):  -20.00 to +20.00 diopters, 0.25 steps
-# CYL (Cylinder): -6.00 to +6.00 diopters, 0.25 steps
-# AXIS:           1 to 180 degrees (whole number) — enforced via Field(ge/le)
-# ADD (Addition): +0.75 to +3.50 diopters, 0.25 steps
-# PD (Pupillary Distance): 20 to 80 mm (wider than clinical ADD/CYL range
-#                                       because PD is a measurement, not Rx)
-#
-# These are the ONLY source of truth. Endpoint-level inline checks call the
-# same validator — don't duplicate ranges elsewhere. If you need to relax a
-# limit, update this dict AND the spec docs; don't add a second check.
-
-_RX_LIMITS = {
-    "sph": (-20.0, 20.0),
-    "cyl": (-6.0, 6.0),
-    "add": (0.75, 3.50),
-    "pd": (20.0, 80.0),
-}
+# The canonical Rx limits + value validators now live in the shared module
+# api.services.rx_validation so the POS / order-create path (orders.py) reuses
+# the EXACT same checks rather than re-deriving them. The names are re-exported
+# here so existing importers (e.g. clinical.py: `from .prescriptions import
+# _validate_rx_value`) and the EyeData / version validators below keep working
+# byte-for-byte. _RX_LIMITS / _validate_rx_value / _validate_rx_number are the
+# ONLY source of truth -- don't duplicate the ranges anywhere.
+#   SPH -20..+20 (0.25) · CYL -6..+6 (0.25) · AXIS 1-180 whole · ADD +0.75..+3.50 (0.25)
+#   PD 20-80 mm (a measurement, not Rx -> exempt from the 0.25 grid)
+from ..services.rx_validation import (  # noqa: E402
+    _RX_LIMITS,
+    _validate_rx_value,
+    _validate_rx_number,
+)
 
 # ============================================================================
 # Contact-lens (CL) prescription support (additive, May 2026)
@@ -183,62 +180,6 @@ _CL_LIMITS = {
     "base_curve": (7.0, 10.0),
     "diameter": (12.0, 16.0),
 }
-
-
-def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
-    """Validate that an Rx string value falls within acceptable clinical range."""
-    if value is None or value.strip() == "" or value.strip() == "0":
-        return value
-    try:
-        num = float(value)
-    except (ValueError, TypeError):
-        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
-    lo, hi = _RX_LIMITS.get(field_name, (-999, 999))
-    if num < lo or num > hi:
-        raise ValueError(
-            f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
-            f"Please double-check the prescription."
-        )
-    # SYSTEM_INTENT section 4: dioptric powers move in 0.25 steps. Reject
-    # off-step values (e.g. +1.30, +0.10) that no lens is ground to. AXIS is
-    # integer-checked elsewhere; linear measures (PD/base_curve/diameter) are
-    # exempt from the 0.25 grid.
-    if field_name in ("sph", "cyl", "add", "cl_power", "cl_cyl", "cl_add"):
-        if round(num * 100) % 25 != 0:
-            raise ValueError(
-                f"{field_name} value {num} must be in 0.25-diopter steps "
-                f"(e.g. -1.25, 0.00, +2.50)."
-            )
-    return value
-
-
-def _validate_rx_number(value, field_name: str):
-    """Numeric (float) variant of _validate_rx_value for the 4-version Rx model,
-    which stores sphere/cylinder/addition as floats. Applies the SAME ranges +
-    0.25-diopter grid, so the version-PATCH path can no longer be used to slip an
-    out-of-range power past the validation the POST/PUT paths enforce -- an
-    unvalidated version mirrors straight to top-level right_eye on finalize."""
-    if value is None:
-        return value
-    try:
-        num = float(value)
-    except (ValueError, TypeError):
-        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
-    if num == 0:  # plano / no-add -- mirror the string validator's "0" pass-through
-        return value
-    lo, hi = _RX_LIMITS.get(field_name, (-999, 999))
-    if num < lo or num > hi:
-        raise ValueError(
-            f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
-            f"Please double-check the prescription."
-        )
-    if field_name in ("sph", "cyl", "add", "cl_power", "cl_cyl", "cl_add"):
-        if round(num * 100) % 25 != 0:
-            raise ValueError(
-                f"{field_name} value {num} must be in 0.25-diopter steps "
-                f"(e.g. -1.25, 0.00, +2.50)."
-            )
-    return value
 
 
 # ============================================================================
