@@ -51,6 +51,9 @@ export interface ApprovalRequest {
   action_type: ApprovalActionType | string;
   status: ApprovalStatus | string;
   requested_by: string | null;
+  /** Resolved display name for requested_by (router enrichment); falls back to
+   *  the id when absent. */
+  requested_by_name?: string | null;
   requested_by_roles?: string[];
   store_id: string | null;
   entity_id?: string | null;
@@ -63,6 +66,8 @@ export interface ApprovalRequest {
   created_at: string | null;
   expires_at: string | null;
   reviewed_by?: string | null;
+  /** Resolved display name for reviewed_by (the approver). */
+  reviewed_by_name?: string | null;
   reviewed_at?: string | null;
   reject_reason?: string | null;
   /** Only present to the maker / consumer / HQ (ADMIN, SUPERADMIN). */
@@ -70,6 +75,8 @@ export interface ApprovalRequest {
   consumed?: boolean;
   consumed_at?: string | null;
   consumed_by?: string | null;
+  /** Resolved display name for consumed_by. */
+  consumed_by_name?: string | null;
 }
 
 export interface ApprovalListResponse {

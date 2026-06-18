@@ -127,7 +127,9 @@ export function ApprovalRequestCard({
           </div>
           <div className="mt-1 text-xs text-gray-500">
             Requested by{' '}
-            <span className="text-gray-700">{request.requested_by || '—'}</span>
+            <span className="text-gray-700">
+              {request.requested_by_name || request.requested_by || '—'}
+            </span>
             {request.store_id && (
               <>
                 {' · '}
@@ -137,6 +139,16 @@ export function ApprovalRequestCard({
             {' · '}
             {formatDateTimeIST(request.created_at)}
           </div>
+          {(request.status === 'APPROVED' || request.status === 'CONSUMED') &&
+            (request.reviewed_by_name || request.reviewed_by) && (
+              <div className="mt-0.5 text-xs text-green-700">
+                Approved by{' '}
+                <span className="font-medium">
+                  {request.reviewed_by_name || request.reviewed_by}
+                </span>
+                {request.reviewed_at && <> · {formatDateTimeIST(request.reviewed_at)}</>}
+              </div>
+            )}
         </div>
         <div className="text-right shrink-0">
           <div className="font-mono text-sm text-gray-900">

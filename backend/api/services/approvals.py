@@ -131,6 +131,20 @@ _DEFAULT_VALIDITY_MIN = 60
 _PIN_MIN_LEN = 4
 _PIN_MAX_LEN = 6
 
+# Human labels for the bell message (mirrors the FE ApprovalRequestCard map).
+_ACTION_LABELS: Dict[str, str] = {
+    "discount_override": "Discount Override",
+    "refund": "Refund",
+    "journal_entry": "Journal Entry",
+    "profile_merge": "Profile Merge",
+    "petty_cash": "Petty Cash",
+    "endless_aisle": "Endless Aisle",
+    "rtv": "Return to Vendor",
+    "RETURN_SERIAL_OVERRIDE": "Return Serial Override",
+    "REFUND_APPROVAL_MATRIX": "Refund Approval",
+    "leave_approval": "Leave Approval",
+}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -1089,34 +1103,147 @@ class ApprovalEngine:
             logger.warning("[APPROVALS] update failed for %s: %s", request_id, e)
 
     def _notify_approvers(self, doc: Dict[str, Any]) -> None:
-        """Best-effort in-app bell write for eligible approvers. Fail-soft; never
-        blocks the request. Outbound WhatsApp is MEGAPHONE's job (DISPATCH_MODE
-        gated) and is intentionally not done synchronously here."""
+        """Best-effort in-app bell for every eligible approver + a durable bus
+        event. Fail-soft; never blocks the request. Outbound WhatsApp is
+        MEGAPHONE's job (DISPATCH_MODE gated) and is intentionally not done
+        synchronously here.
+
+        The topbar bell queries the ``notifications`` collection strictly by
+        ``user_id`` (NOTIFICATION_SCHEMA), so a role-only doc would never reach a
+        person. We therefore fan OUT one user-targeted bell per eligible approver
+        (the request's required_roles, store-scoped for STORE/AREA managers,
+        global for HQ), skipping the requester (they cannot approve their own).
+        Deduped per (request_id, user_id) so a re-run never double-rings."""
         if self._db is None:
             return
+        # 1. Durable bus event (cross-worker + audit/activity-feed). Fail-soft.
+        self._emit_request_event(doc)
         try:
             ncoll = self._db.get_collection("notifications")
         except Exception:  # noqa: BLE001
             return
         if ncoll is None:
             return
+
         amount = doc.get("amount")
         msg_amt = ("Rs " + format(amount, ".2f")) if amount is not None else "review"
+        action = str(doc.get("action_type") or "")
+        # Refund-matrix approvals land on the refund-only queue; everything else
+        # on the generic approvals inbox.
+        action_url = (
+            "/returns/approvals"
+            if action == "REFUND_APPROVAL_MATRIX"
+            else "/approvals"
+        )
+        label = _ACTION_LABELS.get(action, action.replace("_", " ").title() or "Approval")
+        ctx = doc.get("context") or {}
+        # Surface human context the maker stamped (cashier / customer / order) so
+        # the bell reads in NAMES, not UUIDs.
+        who = ctx.get("requested_by_name") or ""
+        order_ref = ctx.get("order_number") or ctx.get("order_id") or ""
+        bits = [f"{label} for {msg_amt}"]
+        if order_ref:
+            bits.append(f"order {order_ref}")
+        if who:
+            bits.append(f"raised by {who}")
+        message = " - ".join(bits)
+
+        now = _now()
+        for uid in self._eligible_approver_ids(doc):
+            try:
+                ncoll.update_one(
+                    {"request_id": doc.get("request_id"), "user_id": uid},
+                    {
+                        "$setOnInsert": {
+                            "notification_id": f"NTF-APR-{uuid.uuid4().hex[:10]}",
+                            "notification_type": "approval_request",
+                            "user_id": uid,
+                            "title": "Approval required",
+                            "message": message,
+                            "entity_type": "approval_request",
+                            "entity_id": doc.get("request_id"),
+                            "request_id": doc.get("request_id"),
+                            "action_url": action_url,
+                            "for_roles": doc.get("required_roles"),
+                            "store_id": doc.get("store_id"),
+                            "priority": "HIGH",
+                            "status": "PENDING",
+                            "source": "APPROVALS",
+                            "created_at": now,
+                        }
+                    },
+                    upsert=True,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("[APPROVALS] bell write skipped for %s", uid, exc_info=True)
+
+    def _eligible_approver_ids(self, doc: Dict[str, Any]) -> List[str]:
+        """Active users who may approve this request: anyone holding one of the
+        required_roles, store-scoped for STORE/AREA managers (HQ roles see every
+        store). Excludes the requester (maker-checker / cannot-approve-own).
+        Fail-soft -> []."""
+        users = self._users()
+        if users is None:
+            return []
+        required = list(doc.get("required_roles") or [])
+        if not required:
+            return []
+        requester = doc.get("requested_by")
+        store_id = doc.get("store_id")
+        out: List[str] = []
+        seen = set()
+        for role in required:
+            q: Dict[str, Any] = {"roles": role, "is_active": True}
+            # STORE/AREA managers are store-scoped; HQ roles are global. A
+            # store-less request (org-wide) is visible to all of the role.
+            if role not in _HQ_ROLES and store_id:
+                q["store_ids"] = store_id
+            try:
+                rows = list(users.find(q))
+            except Exception:  # noqa: BLE001
+                continue
+            for u in rows:
+                uid = u.get("user_id") or u.get("_id")
+                if not uid:
+                    continue
+                uid = str(uid)
+                if uid == requester or uid in seen:
+                    continue
+                seen.add(uid)
+                out.append(uid)
+        return out
+
+    def _emit_request_event(self, doc: Dict[str, Any]) -> None:
+        """Publish an ``approval.requested`` event on the agent bus (cross-worker
+        + persisted to agent_events for the activity feed). Fail-soft: any error
+        (no bus, no loop, publish failure) is a silent no-op -- the bell + the
+        request itself never depend on it."""
         try:
-            ncoll.insert_one({
-                "notification_id": f"NTF-APR-{uuid.uuid4().hex[:10]}",
-                "kind": "approval_request",
-                "title": "Approval required",
-                "message": f"{doc.get('action_type')} for {msg_amt}",
-                "for_roles": doc.get("required_roles"),
-                "store_id": doc.get("store_id"),
+            import asyncio
+
+            from agents.event_bus import get_event_bus
+
+            bus = get_event_bus(db=self._db)
+            payload = {
                 "request_id": doc.get("request_id"),
-                "status": "PENDING",
-                "source": "APPROVALS",
-                "created_at": _now(),
-            })
+                "action_type": doc.get("action_type"),
+                "amount": doc.get("amount"),
+                "store_id": doc.get("store_id"),
+                "required_roles": doc.get("required_roles"),
+                "required_tier": doc.get("required_tier"),
+            }
+            coro = bus.publish("approval.requested", payload, source="approvals")
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and loop.is_running():
+                # Inside an event loop (the FastAPI request path): fire-and-forget.
+                loop.create_task(coro)
+            else:
+                asyncio.run(coro)
         except Exception:  # noqa: BLE001
-            logger.debug("[APPROVALS] bell write skipped", exc_info=True)
+            logger.debug("[APPROVALS] event emit skipped", exc_info=True)
 
     # --- audit -------------------------------------------------------------
 

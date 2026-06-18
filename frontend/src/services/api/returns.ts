@@ -48,6 +48,14 @@ export interface CreateReturnPayload {
   // Optional absolute Rs deduction for damaged / opened goods. 0 = full
   // refund. Net refund = gross - restocking_fee.
   restocking_fee?: number;
+  // F27 refund approval matrix: when the gate requires a tiered sign-off the
+  // server 403s with reason=REFUND_APPROVAL_REQUIRED; the till mints + PIN-gets
+  // an approval and re-submits with this token + request id bound to the refund.
+  refund_approval_token?: string;
+  refund_approval_request_id?: string;
+  // Overall refund reason that drives the matrix tier (DEFECTIVE / GOODWILL /
+  // PRICE_MATCH / CHANGE_OF_MIND). Optional; the server falls back to per-line.
+  refund_reason?: string;
 }
 
 export const returnsApi = {
