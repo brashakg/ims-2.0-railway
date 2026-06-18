@@ -17,6 +17,7 @@ from ..dependencies import (
     get_user_repository,
     get_db,
     get_order_repository,
+    user_store_scope,
     validate_store_access,
 )
 from ..utils.ist import ist_today
@@ -368,11 +369,35 @@ async def list_tasks(
         filters["assigned_to"] = assigned_to
     if task_type:
         filters["source"] = canon_source(task_type)
-    # BUG-062: authorise the requested store -- a store-scoped role passing
-    # another store's ?store_id is 403'd instead of served that store's tasks.
-    filters["store_id"] = validate_store_access(
-        store_id, current_user
-    ) or current_user.get("active_store_id")
+    # Store scope. Two cases, both kept CONSISTENT with the single-task open
+    # gate (_ensure_task_store_access -> can_access_store_scoped) so the Hub
+    # list never surfaces a task the SAME caller would 403 on opening:
+    #
+    # (a) explicit ?store_id  -> validate_store_access (a store-scoped role
+    #     asking for ANOTHER store is 403'd; admins/area-managers pass per reach).
+    # (b) omitted store_id    -> admins see ALL stores (no store filter); a
+    #     store-scoped caller is constrained to the caller's FULL reach
+    #     (store_ids UNION active_store_id) PLUS global/no-store tasks via $in.
+    #
+    # The previous code filtered by a SINGLE value (active_store_id only), which
+    # diverged from the open-gate's full-reach model: a multi-store caller (e.g.
+    # AREA_MANAGER) could be shown an other-store row whose store wasn't their
+    # active one yet open fine, or shown nothing for stores in their reach. We
+    # now mirror the gate exactly. (BUG-062 / Hub-task-403.)
+    if store_id:
+        filters["store_id"] = validate_store_access(store_id, current_user)
+    else:
+        is_cross, stores = user_store_scope(current_user)
+        if not is_cross:
+            # A store-scoped caller may see: any of THEIR OWN stores, plus
+            # GLOBAL (no-store) system/HQ tasks -- which the single-task open
+            # gate (_ensure_task_store_access) lets ANY caller open (a task
+            # with no store_id belongs to no store, so it cannot leak another
+            # store's data). $in includes None so a null/missing store_id row
+            # matches. Worst case (empty reach) -> only global tasks, no leak.
+            allowed = sorted(stores) + [None]
+            filters["store_id"] = {"$in": allowed}
+        # cross-store roles (SUPERADMIN/ADMIN): no store_id filter -> all stores.
 
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
