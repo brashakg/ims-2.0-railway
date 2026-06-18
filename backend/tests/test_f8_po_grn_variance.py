@@ -52,10 +52,15 @@ NOW = datetime(2026, 6, 9, 12, 0, 0)
 
 
 def _po(po_id="PO-1", product_id="P1", ordered=10, expected_offset_days=None,
-        status="PARTIALLY_RECEIVED", dismissed=None):
+        status="PARTIALLY_RECEIVED", dismissed=None, base=NOW):
+    # `base` anchors expected_date. Engine unit tests pass now=NOW to the engine
+    # so they keep base=NOW (clock-stable). Tests that exercise the PRODUCTION
+    # aging path (the variance-report endpoint + the TaskMaster sweep, which read
+    # the real wall clock) must pass base=datetime.now() so a -N-day offset lands
+    # in the intended aging bucket no matter what calendar date the suite runs.
     expected_date = None
     if expected_offset_days is not None:
-        expected_date = (NOW + timedelta(days=expected_offset_days)).isoformat()
+        expected_date = (base + timedelta(days=expected_offset_days)).isoformat()
     doc = {
         "po_id": po_id,
         "po_number": f"PO-NUM-{po_id}",
@@ -321,7 +326,9 @@ def _sweep(po_docs, grn_docs, task_docs):
 
 def test_taskmaster_sweep_creates_task():
     """A 5-day-overdue PO with 4 open units -> one P2 backorder task."""
-    po = _po(po_id="PO-1", ordered=10, expected_offset_days=-5)
+    # base=now(): the sweep reads the real clock, so anchor to today so the PO
+    # is exactly 5 days overdue (OVERDUE -> P2), not aged into the 14d+ band.
+    po = _po(po_id="PO-1", ordered=10, expected_offset_days=-5, base=datetime.now())
     actions, tasks = _sweep([po], [_grn(accepted=6)], [])
     created = [t for t in tasks.docs if t.get("source_ref") == "backorder:PO-1:P1"]
     assert len(created) == 1
@@ -576,8 +583,10 @@ def test_debit_note_not_suggested_when_no_invoice(monkeypatch):
 
 def test_variance_report_endpoint_omits_fully_received(monkeypatch):
     """The report endpoint surfaces a short line and omits a fully-received PO."""
-    po_short = _po(po_id="PO-SHORT", ordered=10, expected_offset_days=-5)
-    po_full = _po(po_id="PO-FULL", ordered=10, expected_offset_days=-2)
+    # base=now(): the variance-report endpoint computes aging off the real clock,
+    # so anchor to today -> PO-SHORT is exactly 5 days overdue (OVERDUE).
+    po_short = _po(po_id="PO-SHORT", ordered=10, expected_offset_days=-5, base=datetime.now())
+    po_full = _po(po_id="PO-FULL", ordered=10, expected_offset_days=-2, base=datetime.now())
     po_repo = _FakePoRepo([po_short, po_full])
     grn_repo = _FakeGrnRepo(grns_by_po={
         "PO-SHORT": [_grn(po_id="PO-SHORT", accepted=6)],
