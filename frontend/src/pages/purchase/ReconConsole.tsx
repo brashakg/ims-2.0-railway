@@ -497,7 +497,7 @@ function SchemeCnTable({
             return (
               <tr key={cn ?? i} className="border-b border-gray-50 hover:bg-gray-50">
                 <td className="py-2 pr-4 font-medium text-gray-800">{cn ?? '-'}</td>
-                <td className="py-2 pr-4 text-gray-600">{row.vendor_id ?? '-'}</td>
+                <td className="py-2 pr-4 text-gray-600">{row.vendor_name ?? row.vendor_id ?? '-'}</td>
                 <td className="py-2 pr-4 text-gray-500 text-xs">{row.rebate_id ?? '-'}</td>
                 <td className="py-2 pr-4 text-right text-green-700 font-medium">
                   {row.amount != null ? inr(row.amount) : row.amount_paise != null ? inr(row.amount_paise / 100) : '-'}
