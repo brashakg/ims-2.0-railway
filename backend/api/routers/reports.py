@@ -4863,12 +4863,14 @@ async def growth_blueprint(
 # idempotent event; a second close of the same day is rejected (409), not
 # silently re-written.
 
+# SALES_CASHIER merged into SALES_STAFF (backlog #12): this gate granted
+# SALES_CASHIER but not SALES_STAFF, so the access moves to the survivor.
 _DAY_END_CLOSE_ROLES = (
     "ADMIN",
     "AREA_MANAGER",
     "STORE_MANAGER",
     "ACCOUNTANT",
-    "SALES_CASHIER",
+    "SALES_STAFF",
     "CASHIER",
 )
 

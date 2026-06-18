@@ -5131,7 +5131,7 @@ POLICY: List[Dict[str, object]] = [
             "ADMIN",
             "AREA_MANAGER",
             "CASHIER",
-            "SALES_CASHIER",
+            "SALES_STAFF",
             "STORE_MANAGER",
         ],
         "store_scoped": True,
@@ -5144,7 +5144,7 @@ POLICY: List[Dict[str, object]] = [
             "ADMIN",
             "AREA_MANAGER",
             "CASHIER",
-            "SALES_CASHIER",
+            "SALES_STAFF",
             "STORE_MANAGER",
         ],
         "store_scoped": True,
@@ -5324,17 +5324,20 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # --- /api/v1/returns ---
+    # SALES_CASHIER merged into SALES_STAFF (backlog #12): the create/restock
+    # gate (_RETURN_ROLES) granted SALES_CASHIER but not SALES_STAFF, so the
+    # access moves to the survivor SALES_STAFF. Mirrors returns.py._RETURN_ROLES.
     {"method": "GET", "path": "/api/v1/returns", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
         "path": "/api/v1/returns",
-        "allowed": ["ADMIN", "CASHIER", "SALES_CASHIER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
     {"method": "GET", "path": "/api/v1/returns/", "allowed": "AUTHENTICATED"},
     {
         "method": "POST",
         "path": "/api/v1/returns/",
-        "allowed": ["ADMIN", "CASHIER", "SALES_CASHIER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
     {
         "method": "GET",
@@ -5344,7 +5347,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/returns/{return_id}/restock",
-        "allowed": ["ADMIN", "CASHIER", "SALES_CASHIER", "STORE_MANAGER"],
+        "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
     # --- /api/v1/settings ---
     {"method": "GET", "path": "/api/v1/settings", "allowed": "PUBLIC"},
@@ -5601,11 +5604,13 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/shipping/shipments",
+        # SALES_CASHIER merged into SALES_STAFF (backlog #12); mirrors
+        # shipping.py._FULFILMENT_ROLES.
         "allowed": [
             "ADMIN",
             "AREA_MANAGER",
             "CASHIER",
-            "SALES_CASHIER",
+            "SALES_STAFF",
             "STORE_MANAGER",
         ],
     },

@@ -20,6 +20,8 @@ from ..services.user_roles import (
     can_assign_roles,
     grantable_capabilities_for,
     highest_level,
+    normalize_role,
+    normalize_roles,
     password_within_bcrypt_limit,
     sanitize_module_access,
     sanitize_permissions,
@@ -169,7 +171,10 @@ class UserCreate(BaseModel):
         ok, invalid = validate_roles(v)
         if not ok:
             raise ValueError(f"Unknown role(s): {', '.join(invalid)}")
-        return v
+        # Merge deprecated role aliases into their survivor (SALES_CASHIER ->
+        # SALES_STAFF, backlog #12) so no NEW user is ever persisted with the
+        # retired role. Recognized-but-deprecated input is accepted, not rejected.
+        return normalize_roles(v)
 
 
 class UserUpdate(BaseModel):
@@ -227,7 +232,9 @@ class UserUpdate(BaseModel):
         ok, invalid = validate_roles(v)
         if not ok:
             raise ValueError(f"Unknown role(s): {', '.join(invalid)}")
-        return v
+        # Merge deprecated role aliases into their survivor (SALES_CASHIER ->
+        # SALES_STAFF, backlog #12) on update too.
+        return normalize_roles(v)
 
 
 class UserResponse(BaseModel):
@@ -818,6 +825,9 @@ async def add_role(
     ok, invalid = validate_roles([role])
     if not ok:
         raise HTTPException(status_code=400, detail=f"Unknown role: {role}")
+    # Merge deprecated role aliases into their survivor (SALES_CASHIER ->
+    # SALES_STAFF, backlog #12) so adding the retired role grants the survivor.
+    role = normalize_role(role)
     can, bad = can_assign_roles(current_user.get("roles", []), [role])
     if not can:
         raise HTTPException(
@@ -940,6 +950,8 @@ async def assign_store(
         ok, _ = validate_roles([body.role])
         if not ok:
             raise HTTPException(status_code=400, detail=f"Unknown role: {body.role}")
+        # Merge deprecated role aliases into their survivor (backlog #12).
+        body.role = normalize_role(body.role)
         can, bad = can_assign_roles(current_user.get("roles", []), [body.role])
         if not can:
             raise HTTPException(
