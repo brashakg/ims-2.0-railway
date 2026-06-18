@@ -204,6 +204,26 @@ def generate_return_id() -> str:
     return f"RET-{stamp}-{uuid.uuid4().hex[:6].upper()}"
 
 
+def _resolve_user_name(user_id: Optional[str]) -> Optional[str]:
+    """Best-effort display name (full_name -> username -> id) for a user id, so
+    the return doc records the approver in NAMES not UUIDs. Fail-soft -> the id
+    itself (or None when no id)."""
+    if not user_id:
+        return None
+    db = _get_db()
+    if db is None:
+        return user_id
+    try:
+        u = db.get_collection("users").find_one(
+            {"user_id": user_id}, {"_id": 0, "full_name": 1, "username": 1}
+        )
+    except Exception:  # noqa: BLE001
+        return user_id
+    if not u:
+        return user_id
+    return u.get("full_name") or u.get("username") or user_id
+
+
 def _resolve_order(create: ReturnCreate) -> Optional[Dict[str, Any]]:
     """Look up the original order by id or number. Fail-soft -> None."""
     repo = get_order_repository()
@@ -1039,8 +1059,11 @@ def _gate_refund_approval_matrix(
     duties (requester != approver) is enforced at approve-time by the E4 engine
     (REFUND_APPROVAL_MATRIX is a maker-checker action).
 
-    Returns the approver's user id when a token was consumed (for stamping the
-    return doc), or None when no approval was required (gate dark / below floor).
+    Returns a dict ``{"approval_by", "approval_request_id", "approval_status"}``
+    describing the consumed approval (for stamping the return doc), or None when
+    no approval was required (gate dark / below floor). ``approval_status`` is
+    always "APPROVED" here because the gate only proceeds past a SUCCESSFUL
+    consume; a missing / invalid token raises 403 above.
     """
     role = (current_user.get("activeRole")
             or (current_user.get("roles") or [None])[0])
@@ -1115,8 +1138,12 @@ def _gate_refund_approval_matrix(
                 ),
             },
         )
-    return ((res.get("request") or {}).get("reviewed_by")
-            or current_user.get("user_id"))
+    consumed = res.get("request") or {}
+    return {
+        "approval_by": (consumed.get("reviewed_by") or current_user.get("user_id")),
+        "approval_request_id": (consumed.get("request_id") or request_id),
+        "approval_status": "APPROVED",
+    }
 
 
 def _normalize_tender(method: Optional[str]) -> str:
@@ -1500,7 +1527,7 @@ async def create_return(
     # changes NO money math -- it only requires + verifies a consumed E4 approval
     # token bound to this refund when the matrix is enabled and the tier is > 0.
     # DARK by default (flag off) -> no-op, refund path byte-identical to today.
-    refund_approval_by = _gate_refund_approval_matrix(
+    _refund_approval = _gate_refund_approval_matrix(
         body,
         net_amount=net_amount,
         store_id=store_id,
@@ -1508,6 +1535,11 @@ async def create_return(
         resolved_order_id=resolved_order_id,
         current_user=current_user,
     )
+    refund_approval_by = (_refund_approval or {}).get("approval_by")
+    refund_approval_request_id = (_refund_approval or {}).get("approval_request_id")
+    refund_approval_status = (_refund_approval or {}).get("approval_status")
+    # Resolve the approver's display name (NAMES not UUIDs in history). Fail-soft.
+    refund_approval_by_name = _resolve_user_name(refund_approval_by)
 
     # Back the GST out of the gross for the credit note / GSTR-1 reversal. The
     # tax is INSIDE the gross (not added on top). Use the dominant rate across
@@ -1724,6 +1756,12 @@ async def create_return(
         # consumed E4 approval token cleared this refund (None when the gate was
         # dark or no approval was required) -- the approver for the audit trail.
         "refund_approval_by": refund_approval_by,
+        # The approver's display name + the approval request id + status, so the
+        # returns-history table can show an "Approved by <name>" pill without a
+        # second lookup. All None when no approval was required (gate dark).
+        "refund_approval_by_name": refund_approval_by_name,
+        "refund_approval_request_id": refund_approval_request_id,
+        "refund_approval_status": refund_approval_status,
         "created_by": current_user.get("user_id"),
         "created_by_name": current_user.get(
             "full_name", current_user.get("username", "")

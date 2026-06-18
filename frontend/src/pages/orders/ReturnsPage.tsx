@@ -232,6 +232,36 @@ export default function ReturnsPage() {
 
   const fc = (amount: number) => `₹${Math.round(amount).toLocaleString('en-IN')}`;
 
+  // Approval status pill for a return-history row. The return doc stamps the
+  // F27 refund-approval outcome (status + approver name + request id) only when
+  // the matrix gate cleared a tiered refund; a normal refund has none of these,
+  // so we show "Not required". Approved -> green with the approver's name;
+  // anything else (expired/rejected) -> amber/gray.
+  const ApprovalPill = ({ r }: { r: any }) => {
+    const status: string | undefined = r.refund_approval_status;
+    const by: string | undefined = r.refund_approval_by_name || r.refund_approval_by;
+    if (status === 'APPROVED') {
+      return (
+        <span
+          className="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200"
+          title={by ? `Approved by ${by}` : 'Approved'}
+        >
+          {by ? `Approved · ${by}` : 'Approved'}
+        </span>
+      );
+    }
+    if (status === 'EXPIRED') {
+      return <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">Expired</span>;
+    }
+    if (status === 'REQUESTED' || status === 'PENDING') {
+      return <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Approval pending</span>;
+    }
+    if (status === 'REJECTED') {
+      return <span className="text-xs px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">Rejected</span>;
+    }
+    return <span className="text-xs text-gray-400">Not required</span>;
+  };
+
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     try {
@@ -574,6 +604,7 @@ export default function ReturnsPage() {
                     <th className="py-2 pr-3">Customer</th>
                     <th className="py-2 pr-3">Order</th>
                     <th className="py-2 pr-3 text-right">Amount</th>
+                    <th className="py-2 pr-3">Approval</th>
                     <th className="py-2">Date</th>
                   </tr>
                 </thead>
@@ -590,6 +621,7 @@ export default function ReturnsPage() {
                         <td className="py-2 pr-3">{r.customer_name || '-'}</td>
                         <td className="py-2 pr-3 text-gray-500">{r.order_number || '-'}</td>
                         <td className="py-2 pr-3 text-right font-medium">{fc(amt)}</td>
+                        <td className="py-2 pr-3"><ApprovalPill r={r} /></td>
                         <td className="py-2 text-gray-500">{formatDateIST(r.created_at)}</td>
                       </tr>
                     );
