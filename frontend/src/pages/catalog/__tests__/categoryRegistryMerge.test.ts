@@ -53,13 +53,17 @@ const REGISTRY = {
       code: 'HEARING_AID',
       sku_prefix: 'HA',
       name: 'Hearing Aid',
-      required_fields: ['brand_name', 'model_no'],
+      // `vent_size` is a SYNTHETIC server-known field with NO local UI metadata
+      // under HA (CATEGORY_FIELDS.HA does not declare it) -> the merge must still
+      // surface it so a server-known field can never be invisible / unfillable.
+      // It is marked required here to lock the strongest case: a server-REQUIRED
+      // field absent locally is appended AND marked required.
+      required_fields: ['brand_name', 'model_no', 'vent_size'],
       optional_fields: ['subbrand', 'serial_no', 'machine_capacity', 'machine_type'],
-      // machine_capacity / machine_type have NO local UI metadata under HA -> the
-      // merge must still surface them (as optional text inputs here).
       fields: [
         { name: 'brand_name', label: 'Brand Name', required: true },
         { name: 'model_no', label: 'Model No', required: true },
+        { name: 'vent_size', label: 'Vent Size', required: true },
         { name: 'machine_capacity', label: 'Machine Capacity', required: false },
         { name: 'machine_type', label: 'Machine Type', required: false },
       ],
@@ -100,8 +104,10 @@ describe('canonical category registry merge', () => {
     const fr = registryRequiredFields('FR');
     expect(fr).not.toBeNull();
     expect(fr).toEqual(new Set(['brand_name', 'model_no', 'colour_code']));
-    // HA -> HEARING_AID.
-    expect(registryRequiredFields('HA')).toEqual(new Set(['brand_name', 'model_no']));
+    // HA -> HEARING_AID (incl. the synthetic registry-only required vent_size).
+    expect(registryRequiredFields('HA')).toEqual(
+      new Set(['brand_name', 'model_no', 'vent_size']),
+    );
   });
 
   it('overrides each local field required flag from the registry', () => {
@@ -128,14 +134,16 @@ describe('canonical category registry merge', () => {
   });
 
   it('appends a registry field the local metadata lacks (never hidden)', () => {
-    // HA local metadata has no machine_capacity / machine_type inputs; the merge
-    // must append them so a server-known field is always visible + collectible.
+    // HA local metadata has no `vent_size` input; the merge must append it so a
+    // server-known field is always visible + collectible. As a registry-REQUIRED
+    // field, the appended field must also carry required=true.
     const localNames = new Set((CATEGORY_FIELDS.HA || []).map((f) => f.name));
     const fields = getCategoryFields('HA');
-    const names = new Set(fields.map((f) => f.name));
-    expect(names.has('machine_capacity')).toBe(true);
+    const byName = Object.fromEntries(fields.map((f) => [f.name, f]));
+    expect(byName.vent_size).toBeDefined();
+    expect(byName.vent_size.required).toBe(true);
     // It was genuinely absent locally (so this proves the append path ran).
-    expect(localNames.has('machine_capacity')).toBe(false);
+    expect(localNames.has('vent_size')).toBe(false);
   });
 
   it('every registry-required field is present + marked required after merge', () => {
