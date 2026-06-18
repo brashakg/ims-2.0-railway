@@ -4,7 +4,10 @@ IMS 2.0 - Tasks, SOPs & Escalation System
 Complete task management with auto-escalation and SOP templates
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+import io
+
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
@@ -19,6 +22,11 @@ from ..dependencies import (
     get_order_repository,
     user_store_scope,
     validate_store_access,
+)
+from ..services.file_store import (
+    get_file_store,
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_SIZE_BYTES,
 )
 from ..utils.ist import ist_today
 from ..services.task_triggers import (
@@ -134,6 +142,13 @@ class TaskCreate(BaseModel):
     # accepted for backwards compat.
     type: Optional[str] = None
     source: Optional[str] = None
+    # Optional file attachment. The bytes are uploaded first via
+    # POST /tasks/upload-file (returns a file_id), then that id is passed here
+    # so sharing a file is just creating a task that carries it (owner item #5:
+    # file-sharing moved from the Hub "Send a file" handoff into the task flow).
+    attachment_file_id: Optional[str] = Field(default=None, max_length=128)
+    attachment_filename: Optional[str] = Field(default=None, max_length=255)
+    attachment_mime: Optional[str] = Field(default=None, max_length=128)
 
     @model_validator(mode="after")
     def _validate_fields(self) -> "TaskCreate":
@@ -164,6 +179,10 @@ class TaskUpdate(BaseModel):
     notes: Optional[str] = None
     assigned_to: Optional[str] = None
     due_at: Optional[datetime] = None
+    # Allow attaching (or replacing) a file on an existing task.
+    attachment_file_id: Optional[str] = Field(default=None, max_length=128)
+    attachment_filename: Optional[str] = Field(default=None, max_length=255)
+    attachment_mime: Optional[str] = Field(default=None, max_length=128)
 
     @model_validator(mode="after")
     def _validate_fields(self) -> "TaskUpdate":
@@ -427,6 +446,26 @@ async def create_task(
         raise HTTPException(status_code=422, detail="due_at (or due_date) is required")
     now = datetime.now()
 
+    # Optional attachment: validate the referenced file actually exists in the
+    # store BEFORE persisting (a forged/missing id -> 400, not a later 404 at
+    # download time -- mirrors the GRN attachment gate). Storage-down -> 503.
+    attachment = None
+    if task.attachment_file_id and str(task.attachment_file_id).strip():
+        fid = str(task.attachment_file_id).strip()
+        fs = get_file_store()
+        if fs is None:
+            raise HTTPException(status_code=503, detail="File storage unavailable")
+        if fs.get(fid) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="attachment_file_id does not reference a stored file",
+            )
+        attachment = {
+            "file_id": fid,
+            "filename": task.attachment_filename,
+            "mime_type": task.attachment_mime,
+        }
+
     task_data = {
         "task_id": generate_task_id(),
         "title": task.title,
@@ -439,6 +478,7 @@ async def create_task(
         "assigned_by": current_user.get("user_id"),
         "store_id": current_user.get("active_store_id"),
         "due_at": due_at,
+        "attachment": attachment,
         "created_at": now,
         "updated_at": now,
         "escalation_level": 0,
@@ -461,6 +501,111 @@ async def create_task(
         }
 
     raise HTTPException(status_code=500, detail="Failed to create task")
+
+
+# ============================================================================
+# ENDPOINTS: TASK ATTACHMENTS (owner item #5 — file-sharing via tasks)
+# ============================================================================
+# Sharing a file with a colleague is now "create a task assigned to them with
+# the file attached" (replaces the Hub "Send a file" handoff). The bytes are
+# stored in the same GridFS file store the handoffs / GRN / expense-bill flows
+# use. Upload returns a file_id; create/update persists it on the task doc;
+# download streams it with the same store-scope/role gate as opening the task.
+
+
+@router.post("/upload-file")
+async def upload_task_file(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload a file (image or PDF, <=25 MB) and get back a file_id to attach to
+    a task. Mirrors the GRN / expense-bill upload pattern: size + MIME
+    validation, then store.put(...). Persists the bytes durably (Railway disk is
+    ephemeral). 503 if storage is unavailable."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
+        )
+    mime = (file.content_type or "").lower()
+    if mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File type '{mime}' not allowed. Accepted: "
+                f"{sorted(ALLOWED_MIME_TYPES)}"
+            ),
+        )
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    file_id = store.put(
+        content=content,
+        filename=file.filename,
+        mime_type=mime,
+        metadata={
+            "kind": "task_attachment",
+            "store_id": current_user.get("active_store_id"),
+            "uploaded_by": current_user.get("user_id"),
+        },
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "mime": mime,
+        "size": len(content),
+        "persisted": True,
+    }
+
+
+@router.get("/{task_id}/file")
+async def download_task_file(
+    task_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream a task's attached file. Permission: anyone who can SEE the task
+    (same store-scope gate as opening it) may fetch its file."""
+    repo = get_task_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    task = repo.find_by_id(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Same gate as GET /{task_id}: a task with no store_id is global (any caller);
+    # a store-stamped task only for callers whose reach covers that store.
+    _ensure_task_store_access(task, current_user)
+
+    attachment = task.get("attachment") or {}
+    file_id = attachment.get("file_id")
+    if not file_id:
+        raise HTTPException(status_code=404, detail="No file attached to this task")
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    rec = store.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="File no longer available")
+
+    file_content, filename, file_mime = rec
+    return StreamingResponse(
+        io.BytesIO(file_content),
+        media_type=file_mime,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.get("/my-tasks")
@@ -636,6 +781,26 @@ async def update_task(
         update_data["assigned_to"] = update.assigned_to
     if update.due_at is not None:
         update_data["due_at"] = update.due_at
+    if update.attachment_file_id is not None:
+        fid = str(update.attachment_file_id).strip()
+        if fid:
+            # Validate the referenced file exists (forged/missing -> 400).
+            fs = get_file_store()
+            if fs is None:
+                raise HTTPException(status_code=503, detail="File storage unavailable")
+            if fs.get(fid) is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="attachment_file_id does not reference a stored file",
+                )
+            update_data["attachment"] = {
+                "file_id": fid,
+                "filename": update.attachment_filename,
+                "mime_type": update.attachment_mime,
+            }
+        else:
+            # Empty string clears the attachment (the blob is swept by NEXUS).
+            update_data["attachment"] = None
 
     if update_data:
         update_data["updated_at"] = datetime.now()
