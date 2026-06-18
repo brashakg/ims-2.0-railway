@@ -6,6 +6,24 @@ Self-contained context for any Claude session (local CLI or web) picking up this
 
 ## 👋 IF YOU ARE A FRESH SESSION TAKING OVER — READ THIS FIRST
 
+**Last session summary** (2026-06-18 — pre-launch QA + hardening, 8 fix PRs merged):
+
+A full-app QA + hardening pass (parallel multi-agent live-API + code-audit cycles, adversarial re-verification). 0 P0 code defects; ~12 P1 found and ALL fixed; key P2s fixed; rest deferred with reasons. Merged to main:
+- **#759** POS Rx validation: order-line sph/cyl/add/axis now validated against the canonical clinical limits (was unvalidated -> a clinically impossible power could be ordered); a SPECTACLE (Rx) lens line now REQUIRES a linked, customer-matching, non-expired prescription_id (Store-Manager+ may override an expired Rx). CONTACT LENSES are EXEMPT from the hard Rx-required gate (owner decision: "block Rx lenses, allow contacts") -- power validation still applies to every line. Shared validator: `backend/api/services/rx_validation.py`.
+- **#760** Inventory transfers/GRN: damaged received units now re-homed as QUARANTINED (not AVAILABLE/sellable); quantity_received capped to quantity_shipped; a receive mismatch raises a follow-up task; the dead-stub `/inventory/transfers/{id}/send|receive` endpoints (returned fake success, moved no stock) were REMOVED (use `/transfers/{id}/ship|receive`); the GRN mandatory-attachment gate now validates the file_id actually exists (a forged id -> 400, not a later 404).
+- **#761** CRM 360/lifecycle/prescriptions endpoints returned 500 for all customers (datetime/None passed to a string `.replace`); now tolerant.
+- **#762** GSTR-1 JSON export now includes the CDNR (credit/debit notes) section (was silently dropped -> overstated liability); product create now requires/auto-mints an HSN from the category.
+- **#763** Payroll `GET /payroll/config/{employee_id}` now store-scoped (was a cross-store salary/PII IDOR); task lifecycle actions (complete/start/ack/escalate/reassign) now require the actor to be the assignee/assigner/manager (was store-scope only); manual escalate capped at MAX_ESCALATION_LEVEL.
+- **#764** Analytics store-performance + customer-insights now exclude CANCELLED/DRAFT orders from revenue/LTV (were counting them); inventory category/value resolved from the product master (was mislabeled 'Other' / valued 0).
+- **#765** Customer dedup across mobile/phone (normalize-on-write so the unique index bites); loyalty EARN made atomic (partial-unique index) to stop a double-earn race; online-store orders list now store-scoped.
+- **#767** Payroll approve + lock now enforce the accounting period-lock (was the only financial write path that didn't) -> 423 when the month is locked.
+
+Verified clean (no fix needed): POS GST split / tenders / discount caps / lifecycle; both prior P0s (forged-webhook, cross-customer Rx IDOR) re-verified fixed; per-role write-matrix; payroll statutory math + balanced Tally JV; incentive double-lock race-safety; workshop QC gate (server-enforced) + vendor-portal token; all ~20 previously-untested routers auth-gated.
+
+Deferred (non-blocking, with reasons): report-query performance at scale (aggregation refactor risky to rush); CL-FEFO dispense + workshop pickup-name (small follow-up); error-message hygiene; multi-entity inter-state RCM. Owner gate for go-live: foundation data (entities/GSTINs/stores/vendors/products), confirm prod Mongo/GridFS health for GRN uploads, set CREDENTIAL_ENCRYPTION_KEY + reset seed passwords. Full report: `docs/reference/LAUNCH_TEST_REPORT_2026-06-18.md`.
+
+---
+
 **Last session summary** (2026-05-30 — QA-fleet hardening, 12 PRs):
 
 A QA + hardening session: stood up a local test stack, ran a fleet of parallel QA + code-audit agents, and fixed what they found. Shipped to `main`:
@@ -175,6 +193,10 @@ Source: [docs/reference/IMS2_Complete_App_Summary.docx](docs/reference/IMS2_Comp
 **GST**: 5% frames/optical lenses/contacts · 18% sunglasses/watches/accessories · intra-state = CGST+SGST, inter-state = IGST
 
 **Rx validation**: SPH -20.00 to +20.00 (0.25 step) · CYL -6.00 to +6.00 (0.25) · AXIS 1-180 whole · ADD +0.75 to +3.50 (0.25)
+- **Rx required at POS**: a spectacle (Rx) lens order line must carry a valid, customer-matching, non-expired prescription (Store-Manager+ overrides an expired Rx); contact-lens lines are exempt from the hard requirement, but every line's powers are range/0.25-step/axis validated.
+
+**Period lock**
+- **Period lock** blocks ALL financial writes incl. payroll approve + lock (423 when locked).
 
 **Geo-fenced login**: roles 4-7 must be within 500m of their store. Roles 1-3 exempt.
 

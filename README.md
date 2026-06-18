@@ -279,7 +279,9 @@ Source of truth: [`docs/SYSTEM_INTENT.md`](docs/SYSTEM_INTENT.md). Enforcement l
 - AXIS: whole number **1–180**
 - PD: 20.0–80.0
 
-Optical and contact lenses **require** a prescription; frame-only does not. Expired-Rx override requires Store Manager or above.
+**Rx required at POS** — a spectacle (Rx) lens order line must carry a valid, customer-matching, non-expired prescription (Store Manager or above overrides an expired Rx); contact-lens lines are exempt from the hard requirement, but every line's powers are range / 0.25-step / axis validated. Frame-only does not require a prescription.
+
+**Period lock** — blocks ALL financial writes including payroll approve + lock (returns **423** when the month is locked).
 
 **Geo-fenced login** — store staff (Store Manager and below, when flagged `geo_restricted`) must be within the store radius (default **500 m**, Haversine) to log in; HQ roles (Superadmin/Admin/Area Manager) are exempt.
 
