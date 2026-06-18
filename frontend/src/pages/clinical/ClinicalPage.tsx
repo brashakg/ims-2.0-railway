@@ -85,7 +85,7 @@ export function ClinicalPage() {
   const [completedTests, setCompletedTests] = useState<CompletedTest[]>([]);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<'queue' | 'completed' | 'abuse-alerts' | 'conversion'>('queue');
+  const [activeTab, setActiveTab] = useState<'queue' | 'completed' | 'prescriptions' | 'abuse-alerts' | 'conversion'>('queue');
   const [showEyeTestForm, setShowEyeTestForm] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState<{
     id: string;
@@ -136,6 +136,12 @@ export function ClinicalPage() {
   // F24 conversion tab: clinical-management + optometrists (server role-strips
   // revenue for optometrists and limits them to their own row).
   const canViewConversion = hasRole([
+    'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST',
+  ]);
+  // Dedicated Prescriptions search tab (backlog #3): look up any customer and
+  // view/edit/print their family Rx history. Gated to the clinical-write roles
+  // (same set that may create/edit a prescription).
+  const canViewPrescriptions = hasRole([
     'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST',
   ]);
 
@@ -504,6 +510,15 @@ export function ClinicalPage() {
           <CheckCircle className="w-4 h-4" />
           Completed today <span className="count">· {completedCount}</span>
         </button>
+        {canViewPrescriptions && (
+          <button
+            onClick={() => setActiveTab('prescriptions')}
+            className={activeTab === 'prescriptions' ? 'on' : ''}
+          >
+            <FileText className="w-4 h-4" />
+            Prescriptions
+          </button>
+        )}
         {canViewAbuseAlerts && (
           <button
             onClick={() => setActiveTab('abuse-alerts')}
@@ -815,6 +830,19 @@ export function ClinicalPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Prescriptions Tab (backlog #3) — full-panel customer search -> family
+          Rx history with the existing view / edit / new / print actions. Reuses
+          ClinicPrescriptionHistory in panel + search mode. */}
+      {activeTab === 'prescriptions' && canViewPrescriptions && (
+        <ClinicPrescriptionHistory
+          isOpen
+          mode="panel"
+          searchable
+          storeId={user?.activeStoreId}
+          onClose={() => setActiveTab('queue')}
+        />
       )}
 
       {/* Abuse Alerts Tab — self-fetching, scoped to the active store. */}

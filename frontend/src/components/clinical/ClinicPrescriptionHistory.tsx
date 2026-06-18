@@ -12,13 +12,13 @@
 // Reuses GET /prescriptions/family/{customer_id} (already grouped by patient)
 // and the shared PrescriptionForm for both create and edit.
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   X, Users, User, Eye, Calendar, Plus, Pencil, Printer,
-  Loader2, AlertTriangle, CheckCircle, Clock,
+  Loader2, AlertTriangle, CheckCircle, Clock, Search, Phone, ArrowLeft,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { prescriptionApi, clinicalApi } from '../../services/api';
+import { prescriptionApi, clinicalApi, customerApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionForm } from '../pos/PrescriptionForm';
@@ -35,10 +35,20 @@ interface FamilyMember {
 interface ClinicPrescriptionHistoryProps {
   isOpen: boolean;
   onClose: () => void;
-  customerId: string;
+  /** Preset customer to show. Optional in 'panel' + searchable mode, where the
+   *  user picks a customer via the built-in search box instead. */
+  customerId?: string;
   customerName?: string;
   /** The patient queued for this visit, pre-selected for a "New prescription". */
   defaultPatientId?: string;
+  /** 'modal' (default) renders the scrim+dialog overlay opened from a queue row.
+   *  'panel' renders inline (no scrim) for use as a full-page Prescriptions tab. */
+  mode?: 'modal' | 'panel';
+  /** When true (panel/search mode), show a customer search box so a customer can
+   *  be looked up by name/mobile, then their family Rx history is shown. */
+  searchable?: boolean;
+  /** Active store id — scopes the customer search in search mode. */
+  storeId?: string;
 }
 
 // Backend Rx doc (nested right_eye/left_eye, snake_case) -> the flat field
@@ -111,9 +121,27 @@ export function ClinicPrescriptionHistory({
   customerId,
   customerName,
   defaultPatientId,
+  mode = 'modal',
+  searchable = false,
+  storeId,
 }: ClinicPrescriptionHistoryProps) {
   const { user } = useAuth();
   const toast = useToast();
+
+  const isPanel = mode === 'panel';
+
+  // In search mode the customer is chosen via the built-in search box; otherwise
+  // the preset prop wins. `selected` holds the picked customer in search mode.
+  const [selected, setSelected] = useState<{ id: string; name?: string } | null>(null);
+  const effectiveCustomerId = customerId || selected?.id || '';
+  const effectiveCustomerName = customerName || selected?.name;
+
+  // Customer search state (search mode only).
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [members, setMembers] = useState<FamilyMember[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -127,11 +155,11 @@ export function ClinicPrescriptionHistory({
   const [formError, setFormError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!customerId) return;
+    if (!effectiveCustomerId) return;
     setIsLoading(true);
     setError(null);
     try {
-      const res = await prescriptionApi.getFamilyRx(customerId);
+      const res = await prescriptionApi.getFamilyRx(effectiveCustomerId);
       setMembers((res.members || []) as FamilyMember[]);
     } catch {
       setError('Failed to load prescriptions. Please try again.');
@@ -139,11 +167,55 @@ export function ClinicPrescriptionHistory({
     } finally {
       setIsLoading(false);
     }
-  }, [customerId]);
+  }, [effectiveCustomerId]);
 
   useEffect(() => {
-    if (isOpen) load();
-  }, [isOpen, load]);
+    if (isOpen && effectiveCustomerId) load();
+  }, [isOpen, effectiveCustomerId, load]);
+
+  // Debounced customer search (search mode). 3+ chars triggers a lookup.
+  useEffect(() => {
+    if (!isOpen || !searchable || effectiveCustomerId) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    const q = query.trim();
+    if (q.length < 3) {
+      setResults([]);
+      setIsSearching(false);
+      return;
+    }
+    setIsSearching(true);
+    setSearchErr(null);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const resp = await customerApi.getCustomers({ search: q, storeId, limit: 20 });
+        const list = (resp as any)?.customers || (resp as any) || [];
+        const normalized = (Array.isArray(list) ? list : []).map((c: any) => ({
+          ...c,
+          id: c.id || c.customer_id || c._id,
+          phone: c.phone || c.mobile || '',
+        }));
+        setResults(normalized);
+      } catch {
+        setSearchErr('Search failed. Try again.');
+        setResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 250);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [query, isOpen, searchable, effectiveCustomerId, storeId]);
+
+  // Reset the search-mode selection + query when the panel closes so it reopens
+  // on a clean search screen.
+  useEffect(() => {
+    if (!isOpen) {
+      setSelected(null);
+      setQuery('');
+      setResults([]);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -203,8 +275,8 @@ export function ClinicPrescriptionHistory({
         const source = isOptometrist ? 'TESTED_AT_STORE' : 'FROM_DOCTOR';
         await prescriptionApi.createPrescription({
           ...rxData,
-          patient_id: formPatientId || customerId,
-          customer_id: customerId,
+          patient_id: formPatientId || effectiveCustomerId,
+          customer_id: effectiveCustomerId,
           source,
           optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
           // Forward the logged-in user's NAME so the Rx card shows a name, not
@@ -229,26 +301,74 @@ export function ClinicPrescriptionHistory({
     }
   };
 
-  return (
-    <div className="scrim modal-overlay">
-      <div className="dialog modal w-full max-w-3xl max-h-[92vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 bg-teal-100 rounded-full flex items-center justify-center">
-              <Eye className="w-6 h-6 text-teal-600" />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">Prescriptions &amp; History</h2>
-              <p className="text-sm text-gray-500">{customerName || 'Customer'} · grouped by family member</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-colors" title="Close" aria-label="Close">
-            <X className="w-5 h-5 text-gray-500" />
-          </button>
-        </div>
+  // Whether we should show the customer-search screen instead of a history.
+  // Only in search mode and only until a customer is picked / preset.
+  const showSearchScreen = searchable && !effectiveCustomerId;
 
-        {/* Body */}
+  // ---- Customer search screen (panel/search mode) -------------------------
+  const searchScreen = (
+    <div className="flex-1 overflow-y-auto p-4">
+      <div className="relative mb-4">
+        <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+        <input
+          type="text"
+          autoFocus
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search a customer by name or mobile..."
+          className="input-field w-full pl-9"
+        />
+      </div>
+      {query.trim().length > 0 && query.trim().length < 3 && (
+        <p className="text-sm text-gray-500 px-1">Type at least 3 characters to search.</p>
+      )}
+      {isSearching ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-7 h-7 animate-spin text-teal-600" />
+        </div>
+      ) : searchErr ? (
+        <div className="flex flex-col items-center justify-center py-12 text-red-500">
+          <AlertTriangle className="w-9 h-9 mb-2 opacity-60" />
+          <p>{searchErr}</p>
+        </div>
+      ) : results.length > 0 ? (
+        <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+          {results.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => setSelected({ id: c.id, name: c.name || c.customer_name || c.full_name })}
+              className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+            >
+              <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
+                <User className="w-5 h-5 text-blue-600" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-medium text-gray-900 truncate">{c.name || c.customer_name || c.full_name || 'Customer'}</p>
+                <p className="text-xs text-gray-500 flex items-center gap-1">
+                  <Phone className="w-3 h-3" /> {c.phone || '—'}
+                </p>
+              </div>
+            </button>
+          ))}
+        </div>
+      ) : query.trim().length >= 3 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+          <Users className="w-10 h-10 mb-2 opacity-50" />
+          <p>No customers match "{query.trim()}".</p>
+        </div>
+      ) : (
+        <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+          <Eye className="w-10 h-10 mb-2 opacity-40" />
+          <p>Search a customer to view their family prescription history.</p>
+        </div>
+      )}
+    </div>
+  );
+
+  // ---- History body (shared by modal + panel) -----------------------------
+  const historyBody = (
+    <>
+      {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-5">
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
@@ -264,7 +384,7 @@ export function ClinicPrescriptionHistory({
             <div className="flex flex-col items-center justify-center py-12 text-gray-500">
               <Users className="w-10 h-10 mb-2 opacity-50" />
               <p>No family members on this account.</p>
-              <button onClick={() => openNew(defaultPatientId || customerId)} className="mt-3 btn-primary flex items-center gap-2">
+              <button onClick={() => openNew(defaultPatientId || effectiveCustomerId)} className="mt-3 btn-primary flex items-center gap-2">
                 <Plus className="w-4 h-4" /> New prescription
               </button>
             </div>
@@ -370,13 +490,58 @@ export function ClinicPrescriptionHistory({
             ))
           )}
         </div>
+    </>
+  );
 
-        {/* Footer */}
+  // Header — adapts the subtitle + a "Back to search" affordance for search mode.
+  const header = (
+    <div className="flex items-center justify-between p-4 border-b border-gray-200">
+      <div className="flex items-center gap-3">
+        {searchable && effectiveCustomerId && !customerId && (
+          <button
+            onClick={() => { setSelected(null); setMembers([]); }}
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            title="Back to search"
+            aria-label="Back to search"
+          >
+            <ArrowLeft className="w-5 h-5 text-gray-500" />
+          </button>
+        )}
+        <div className="w-11 h-11 bg-teal-100 rounded-full flex items-center justify-center">
+          <Eye className="w-6 h-6 text-teal-600" />
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-gray-900">Prescriptions &amp; History</h2>
+          <p className="text-sm text-gray-500">
+            {showSearchScreen
+              ? 'Search a customer to view their family Rx history'
+              : `${effectiveCustomerName || 'Customer'} · grouped by family member`}
+          </p>
+        </div>
+      </div>
+      {!isPanel && (
+        <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-colors" title="Close" aria-label="Close">
+          <X className="w-5 h-5 text-gray-500" />
+        </button>
+      )}
+    </div>
+  );
+
+  const innerContent = (
+    <>
+      {header}
+      {showSearchScreen ? searchScreen : historyBody}
+      {!isPanel && (
         <div className="flex items-center justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50">
           <button onClick={onClose} className="btn-outline">Close</button>
         </div>
-      </div>
+      )}
+    </>
+  );
 
+  // Form overlay shared by both modes.
+  const formOverlay = (
+    <>
       {/* Create / Edit form (shared PrescriptionForm). For a NEW Rx, initialData
           is undefined so the form opens BLANK — "new" is never "edit-last". */}
       {formOpen && (
@@ -402,6 +567,26 @@ export function ClinicPrescriptionHistory({
           />
         </div>
       )}
+    </>
+  );
+
+  // Panel mode: render inline (no scrim) so it can live inside a page tab.
+  if (isPanel) {
+    return (
+      <div className="card overflow-hidden flex flex-col max-h-[78vh]">
+        {innerContent}
+        {formOverlay}
+      </div>
+    );
+  }
+
+  // Modal mode (default): the scrim + dialog overlay opened from a queue row.
+  return (
+    <div className="scrim modal-overlay">
+      <div className="dialog modal w-full max-w-3xl max-h-[92vh] flex flex-col">
+        {innerContent}
+      </div>
+      {formOverlay}
     </div>
   );
 }
