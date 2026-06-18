@@ -32,11 +32,17 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { adminStoreApi, adminUserApi } from '../../services/api';
+// Direct import (not the api barrel): the barrel re-export of newly-added service
+// objects intermittently fails to resolve for consumers (TS2614) — the team's
+// established reliable pattern is to import the service straight from its module.
+import { employeeDocApi } from '../../services/api/hr';
+import type { EmployeeDocType } from '../../services/api/hr';
 import { validatePhone } from '../../utils/validators';
 import { ROLE_HIERARCHY } from './settingsTypes';
 import {
   Building, Users, Plus, Shield, X, ChevronRight, ChevronLeft, CheckCircle,
   AlertTriangle, Copy, RefreshCw, Lock, MapPin, UserPlus, Camera,
+  FileText, Upload, Trash2, Loader2, CreditCard, Eye,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -99,9 +105,75 @@ interface NewEmployee {
   primaryStore: string;
   username: string;
   tempPassword: string;
+  // Govt-ID + statutory numbers captured at onboarding (all optional).
+  aadhaarNo: string;
+  panNo: string;
+  uanNo: string;
+  esicNo: string;
 }
 
-const TOTAL_STEPS = 5;
+// A document staged in the wizard before the employee exists. The actual upload
+// (to GridFS, behind RBAC) happens AFTER the account is created, against the
+// new employee_id. `slot` ties a single-file category (Aadhaar/PAN/etc.) to its
+// picker; OTHER documents accumulate as multiple entries with slot 'OTHER'.
+type DocSlot = EmployeeDocType;
+interface StagedDoc {
+  key: string;        // local unique id for React + remove
+  slot: DocSlot;
+  docType: EmployeeDocType;
+  file: File;
+  status: 'staged' | 'uploading' | 'done' | 'error';
+  error?: string;
+}
+
+// Single-file ID/paperwork slots shown as labelled pickers (one file each).
+const DOC_SLOTS: { slot: DocSlot; label: string; hint: string }[] = [
+  { slot: 'AADHAAR', label: 'Aadhaar card', hint: 'PDF or photo' },
+  { slot: 'PAN', label: 'PAN card', hint: 'PDF or photo' },
+  { slot: 'UAN_PF', label: 'PF / UAN document', hint: 'PDF or photo' },
+  { slot: 'ESIC', label: 'ESIC document', hint: 'PDF or photo' },
+  { slot: 'RESUME', label: 'Resume / CV', hint: 'PDF or photo' },
+  { slot: 'PHOTO', label: 'Passport-size photo', hint: 'JPG / PNG' },
+];
+
+// Client-side validation of an upload before it is even staged. The server is
+// the authority (it re-checks MIME + 25 MB), but failing fast here is friendlier.
+const MAX_DOC_BYTES = 25 * 1024 * 1024;
+const ACCEPTED_DOC_MIME = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/heic', 'image/heif',
+  'image/webp', 'application/pdf',
+]);
+function validateDocFile(file: File): string | null {
+  if (file.size === 0) return 'That file is empty.';
+  if (file.size > MAX_DOC_BYTES) return 'File is larger than 25 MB.';
+  // Some browsers leave type blank for odd files; fall back to the extension.
+  const mime = (file.type || '').toLowerCase();
+  const okByMime = ACCEPTED_DOC_MIME.has(mime);
+  const okByExt = /\.(pdf|jpe?g|png|webp|heic|heif)$/i.test(file.name);
+  if (!okByMime && !okByExt) return 'Only PDF or image files are allowed.';
+  return null;
+}
+
+// Inline, fail-soft format hints (mirror the backend's light validators). These
+// only WARN — onboarding is never blocked by an ID-format quirk.
+function panWarning(v: string): string | null {
+  if (!v) return null;
+  return /^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/.test(v.trim())
+    ? null : 'PAN is usually 10 characters like AAAAA9999A.';
+}
+function aadhaarWarning(v: string): string | null {
+  if (!v) return null;
+  return /^\d{12}$/.test(v.replace(/[\s-]/g, ''))
+    ? null : 'Aadhaar is usually 12 digits.';
+}
+// Show only the last 4 digits of an Aadhaar number for display.
+function maskAadhaar(v: string): string {
+  const digits = v.replace(/\D/g, '');
+  if (digits.length < 4) return v;
+  return `XXXX XXXX ${digits.slice(-4)}`;
+}
+
+const TOTAL_STEPS = 6;
 
 // BUG-132: never ship a default credential ('admin123') in the frontend bundle.
 // Generate a strong random temp password per new-employee form -- a usable
@@ -119,6 +191,7 @@ function defaultEmployee(): NewEmployee {
     name: '', email: '', phone: '', photoDataUrl: '',
     roles: [], assignedStores: [], primaryStore: '',
     username: '', tempPassword: randomTempPassword(),
+    aadhaarNo: '', panNo: '', uanNo: '', esicNo: '',
   };
 }
 
@@ -245,6 +318,11 @@ function OnboardingWizard({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [copied, setCopied] = useState(false);
+  // Documents staged in the wizard, uploaded AFTER the account is created.
+  const [stagedDocs, setStagedDocs] = useState<StagedDoc[]>([]);
+  // Once the account is created we keep its id so a partial upload failure can be
+  // retried without re-creating the user (the account already exists).
+  const [createdUserId, setCreatedUserId] = useState<string>('');
   const [form, setForm] = useState<NewEmployee>(() => {
     const base = defaultEmployee();
     // Default to the admin's active store (council §5: store step defaults to
@@ -385,41 +463,96 @@ function OnboardingWizard({
     }
   };
 
+  // Upload the staged documents against an existing employee_id, one at a time so
+  // a slow/large file doesn't stall the rest and per-file status is visible.
+  // Returns the count that failed (0 = all good). Skips ones already 'done' so a
+  // retry only re-attempts the failures.
+  const uploadStagedDocs = async (employeeId: string): Promise<number> => {
+    let failed = 0;
+    for (const doc of stagedDocs) {
+      if (doc.status === 'done') continue;
+      setStagedDocs((prev) => prev.map((d) =>
+        d.key === doc.key ? { ...d, status: 'uploading', error: undefined } : d));
+      try {
+        await employeeDocApi.upload(employeeId, doc.file, doc.docType);
+        setStagedDocs((prev) => prev.map((d) =>
+          d.key === doc.key ? { ...d, status: 'done' } : d));
+      } catch (e: any) {
+        failed += 1;
+        const detail = e?.response?.data?.detail || e?.message || 'Upload failed.';
+        setStagedDocs((prev) => prev.map((d) =>
+          d.key === doc.key
+            ? { ...d, status: 'error', error: typeof detail === 'string' ? detail : 'Upload failed.' }
+            : d));
+      }
+    }
+    return failed;
+  };
+
   const submit = async () => {
+    // The credential step (5) carries the only hard requirements on the final
+    // submit; the documents step (6) is entirely optional.
     const err = stepValid(5);
     if (err) { onError(err); return; }
     setSubmitting(true);
     setSubmitError('');
     try {
-      // ONE canonical user path: POST /users via create_user. The endpoint
-      // enforces the escalation guard (can_assign_roles), sanitizes module
-      // access, and -- because mustChangePassword:true -- forces a password
-      // change on first login (BUG-027 preserved; no skip toggle exists).
-      const created = await adminUserApi.createUser({
-        name: form.name.trim(),
-        email: form.email.trim() || `${effectiveUsername}@staff.local`,
-        phone: form.phone || undefined,
-        roles: form.roles,
-        storeIds: form.assignedStores,
-        primaryStoreId: form.primaryStore || form.assignedStores[0] || undefined,
-        username: effectiveUsername,
-        password: form.tempPassword,
-        mustChangePassword: true,
-      });
+      // If the account already exists (a previous submit created it but a doc
+      // upload failed), DON'T re-create it -- just retry the remaining uploads.
+      let newUserId = createdUserId;
+      if (!newUserId) {
+        // ONE canonical user path: POST /users via create_user. The endpoint
+        // enforces the escalation guard (can_assign_roles), sanitizes module
+        // access, and -- because mustChangePassword:true -- forces a password
+        // change on first login (BUG-027 preserved; no skip toggle exists).
+        const created = await adminUserApi.createUser({
+          name: form.name.trim(),
+          email: form.email.trim() || `${effectiveUsername}@staff.local`,
+          phone: form.phone || undefined,
+          roles: form.roles,
+          storeIds: form.assignedStores,
+          primaryStoreId: form.primaryStore || form.assignedStores[0] || undefined,
+          username: effectiveUsername,
+          password: form.tempPassword,
+          mustChangePassword: true,
+          // Govt-ID + statutory numbers (optional; server fail-soft validates).
+          aadhaarNo: form.aadhaarNo.replace(/[\s-]/g, '') || undefined,
+          panNo: form.panNo.trim().toUpperCase() || undefined,
+          uanNo: form.uanNo.trim() || undefined,
+          esicNo: form.esicNo.trim() || undefined,
+        });
 
-      // Assign each store explicitly via the dedicated endpoint so a store grant
-      // is recorded even if create-time store_ids needs reinforcing. Best-effort:
-      // the account already exists, so a store-assign hiccup must not fail the
-      // whole onboarding -- surface a soft warning instead.
-      const newUserId = created?.user_id;
-      if (newUserId && form.assignedStores.length) {
-        const results = await Promise.allSettled(
-          form.assignedStores.map((sid) => adminUserApi.assignStore(newUserId, sid)),
-        );
-        if (results.some((r) => r.status === 'rejected')) {
-          onError('Account created, but one or more store assignments need to be re-applied under Users & Roles.');
+        newUserId = created?.user_id || '';
+        setCreatedUserId(newUserId);
+
+        // Assign each store explicitly via the dedicated endpoint so a store grant
+        // is recorded even if create-time store_ids needs reinforcing. Best-effort:
+        // the account already exists, so a store-assign hiccup must not fail the
+        // whole onboarding -- surface a soft warning instead.
+        if (newUserId && form.assignedStores.length) {
+          const results = await Promise.allSettled(
+            form.assignedStores.map((sid) => adminUserApi.assignStore(newUserId, sid)),
+          );
+          if (results.some((r) => r.status === 'rejected')) {
+            onError('Account created, but one or more store assignments need to be re-applied under Users & Roles.');
+          }
         }
       }
+
+      // Upload staged documents against the new employee_id. A doc failure must
+      // NOT discard the created account -- keep the wizard open so the admin can
+      // retry just the failed files (Create Account becomes "Retry uploads").
+      if (newUserId && stagedDocs.length) {
+        const failedCount = await uploadStagedDocs(newUserId);
+        if (failedCount > 0) {
+          setSubmitError(
+            `Account created for ${form.name.trim()}, but ${failedCount} document${failedCount > 1 ? 's' : ''} failed to upload. Fix and retry, or finish and add them later under HR.`,
+          );
+          setSubmitting(false);
+          return; // stay open so the admin can retry / finish
+        }
+      }
+
       onCreated(form.name.trim());
     } catch (e: any) {
       // Surface the backend reason cleanly -- notably the escalation 403
@@ -432,7 +565,29 @@ function OnboardingWizard({
     }
   };
 
-  const STEP_TITLES = ['Who', 'Role', 'Store', 'Permissions', 'Login'];
+  // ---- document staging handlers -------------------------------------------
+  // Single-file slots REPLACE any existing file in that slot; OTHER accumulates.
+  const stageSlotFile = (slot: DocSlot, file: File | undefined) => {
+    if (!file) return;
+    const vErr = validateDocFile(file);
+    if (vErr) { onError(vErr); return; }
+    setStagedDocs((prev) => {
+      const withoutSlot = slot === 'OTHER' ? prev : prev.filter((d) => d.slot !== slot);
+      return [
+        ...withoutSlot,
+        { key: `${slot}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          slot, docType: slot, file, status: 'staged' },
+      ];
+    });
+  };
+  const stageOtherFiles = (files: FileList | null) => {
+    if (!files) return;
+    Array.from(files).forEach((f) => stageSlotFile('OTHER', f));
+  };
+  const removeStaged = (key: string) =>
+    setStagedDocs((prev) => prev.filter((d) => d.key !== key));
+
+  const STEP_TITLES = ['Who', 'Role', 'Store', 'Permissions', 'Login', 'Documents'];
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
@@ -696,6 +851,127 @@ function OnboardingWizard({
                   <Row label="Temp password" value={form.tempPassword} mono />
                 </div>
               </div>
+            </>
+          )}
+
+          {/* ============ STEP 6: DOCUMENTS ============ */}
+          {step === 6 && (
+            <>
+              <h4 className="font-medium text-gray-900">ID numbers &amp; documents</h4>
+              <p className="text-xs text-gray-500">
+                Everything here is optional — you can finish now and add documents
+                later under HR. Files are stored securely and are only visible to
+                authorised HR roles.
+              </p>
+
+              {/* ID numbers */}
+              <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+                  <CreditCard className="w-4 h-4 text-gray-400" /> Government &amp; statutory numbers
+                </div>
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Aadhaar No.</label>
+                    <input value={form.aadhaarNo}
+                      onChange={(e) => set({ aadhaarNo: e.target.value.replace(/[^\d\s-]/g, '').slice(0, 14) })}
+                      inputMode="numeric" placeholder="12-digit Aadhaar"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400" />
+                    {aadhaarWarning(form.aadhaarNo) && (
+                      <p className="text-[11px] text-amber-600 mt-1">{aadhaarWarning(form.aadhaarNo)}</p>
+                    )}
+                    {!aadhaarWarning(form.aadhaarNo) && form.aadhaarNo && (
+                      <p className="text-[11px] text-gray-400 mt-1">Saved as {maskAadhaar(form.aadhaarNo)}</p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">PAN No.</label>
+                    <input value={form.panNo}
+                      onChange={(e) => set({ panNo: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10) })}
+                      placeholder="AAAAA9999A"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono outline-none focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400" />
+                    {panWarning(form.panNo) && (
+                      <p className="text-[11px] text-amber-600 mt-1">{panWarning(form.panNo)}</p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">PF / UAN No.</label>
+                    <input value={form.uanNo}
+                      onChange={(e) => set({ uanNo: e.target.value.replace(/[^\d]/g, '').slice(0, 12) })}
+                      inputMode="numeric" placeholder="12-digit UAN"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">ESIC No.</label>
+                    <input value={form.esicNo}
+                      onChange={(e) => set({ esicNo: e.target.value.replace(/[^\d]/g, '').slice(0, 17) })}
+                      inputMode="numeric" placeholder="ESIC insurance number"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-bv-red-200 focus:border-bv-red-400" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Single-file document slots */}
+              <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+                  <FileText className="w-4 h-4 text-gray-400" /> Documents
+                </div>
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
+                  {DOC_SLOTS.map((s) => {
+                    const staged = stagedDocs.find((d) => d.slot === s.slot);
+                    return (
+                      <div key={s.slot}
+                        className="border border-gray-200 rounded-lg p-2.5 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-800">{s.label}</p>
+                          {staged ? (
+                            <DocChip doc={staged} onRemove={() => removeStaged(staged.key)} />
+                          ) : (
+                            <p className="text-[11px] text-gray-400">{s.hint}</p>
+                          )}
+                        </div>
+                        <label className="flex-shrink-0 cursor-pointer text-xs flex items-center gap-1 px-2.5 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">
+                          <Upload className="w-3.5 h-3.5" /> {staged ? 'Replace' : 'Choose'}
+                          <input type="file" accept=".pdf,image/*" className="hidden"
+                            onChange={(e) => { stageSlotFile(s.slot, e.target.files?.[0]); e.target.value = ''; }} />
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Other documents (multi-file) */}
+                <div className="border border-dashed border-gray-300 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium text-gray-800">Other documents</p>
+                      <p className="text-[11px] text-gray-400">Add as many as you need — PDF or images.</p>
+                    </div>
+                    <label className="flex-shrink-0 cursor-pointer text-xs flex items-center gap-1 px-2.5 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">
+                      <Plus className="w-3.5 h-3.5" /> Add files
+                      <input type="file" accept=".pdf,image/*" multiple className="hidden"
+                        onChange={(e) => { stageOtherFiles(e.target.files); e.target.value = ''; }} />
+                    </label>
+                  </div>
+                  {stagedDocs.filter((d) => d.slot === 'OTHER').length > 0 && (
+                    <div className="mt-2 space-y-1.5">
+                      {stagedDocs.filter((d) => d.slot === 'OTHER').map((d) => (
+                        <div key={d.key} className="flex items-center justify-between gap-2">
+                          <DocChip doc={d} onRemove={() => removeStaged(d.key)} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800 flex gap-2">
+                <Lock className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <span>
+                  Aadhaar, PAN and the other documents are sensitive ID. They are
+                  stored securely behind access control and are never shared with
+                  store-floor staff.
+                </span>
+              </div>
 
               {submitError && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-700 flex gap-2">
@@ -719,10 +995,24 @@ function OnboardingWizard({
               Continue <ChevronRight className="w-4 h-4" />
             </button>
           ) : (
-            <button onClick={submit} disabled={submitting}
-              className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 flex items-center gap-1.5 disabled:opacity-60">
-              {submitting ? 'Creating…' : <><Plus className="w-4 h-4" /> Create Account</>}
-            </button>
+            <div className="flex items-center gap-2">
+              {/* Once the account exists, offer a clean exit even if some uploads
+                  failed — the account is already created. */}
+              {createdUserId && (
+                <button onClick={() => onCreated(form.name.trim())} disabled={submitting}
+                  className="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50">
+                  Finish anyway
+                </button>
+              )}
+              <button onClick={submit} disabled={submitting}
+                className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 flex items-center gap-1.5 disabled:opacity-60">
+                {submitting
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Working…</>
+                  : createdUserId
+                    ? <><RefreshCw className="w-4 h-4" /> Retry uploads</>
+                    : <><Plus className="w-4 h-4" /> Create Account</>}
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -735,6 +1025,41 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
     <div className="flex justify-between gap-3">
       <span className="text-gray-500">{label}</span>
       <span className={clsx('font-medium text-gray-900 text-right break-all', mono && 'font-mono')}>{value}</span>
+    </div>
+  );
+}
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// A single staged-document chip: filename + size + per-file upload status + a
+// remove button. Used in both the labelled slots and the OTHER list.
+function DocChip({ doc, onRemove }: { doc: StagedDoc; onRemove: () => void }) {
+  return (
+    <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+      {doc.status === 'uploading'
+        ? <Loader2 className="w-3.5 h-3.5 text-bv-red-500 animate-spin flex-shrink-0" />
+        : doc.status === 'done'
+          ? <CheckCircle className="w-3.5 h-3.5 text-green-600 flex-shrink-0" />
+          : doc.status === 'error'
+            ? <AlertTriangle className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
+            : <Eye className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />}
+      <span className="text-[11px] text-gray-600 truncate" title={doc.file.name}>
+        {doc.file.name}
+      </span>
+      <span className="text-[11px] text-gray-400 flex-shrink-0">· {humanSize(doc.file.size)}</span>
+      {doc.status === 'error' && doc.error && (
+        <span className="text-[11px] text-red-500 truncate" title={doc.error}>· {doc.error}</span>
+      )}
+      {doc.status !== 'uploading' && doc.status !== 'done' && (
+        <button type="button" onClick={onRemove}
+          className="ml-1 text-gray-400 hover:text-red-500 flex-shrink-0" aria-label="Remove file">
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }

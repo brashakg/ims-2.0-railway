@@ -69,7 +69,8 @@ export type {
 export { reportsApi, analyticsApi } from './reports';
 
 // HR / Payroll / Incentives / Tasks
-export { hrApi, tasksApi } from './hr';
+export { hrApi, tasksApi, employeeDocApi } from './hr';
+export type { EmployeeDocType, EmployeeDocument } from './hr';
 
 // Clinical / Eye Tests
 export { clinicalApi } from './clinical';

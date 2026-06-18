@@ -4,7 +4,9 @@ IMS 2.0 - HR Router
 Real database queries for attendance, leaves, and payroll
 """
 
-from fastapi import APIRouter, Depends, Query, HTTPException
+import io
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 from datetime import date, datetime
@@ -19,8 +21,14 @@ from ..dependencies import (
     get_payroll_repository,
     get_user_repository,
     validate_store_access,
+    user_store_scope,
 )
 from ..services import attendance_engine
+from ..services.file_store import (
+    get_file_store,
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_SIZE_BYTES,
+)
 
 # Roles allowed to view HR reporting screens. Mirrors the router-level gate in
 # main.py (_FINANCE_ROLES) and how payroll.py gates its read endpoints.
@@ -78,6 +86,17 @@ _FAST_PATH_LEAVE_TYPES = frozenset({"CASUAL", "SICK"})
 # flagged fast_path. The live value is read from the E2 policy key
 # "approval.leave_fastpath_days"; this is the no-E2 code default (packet sec 7).
 _FAST_PATH_DAYS_DEFAULT = 2
+
+# ----------------------------------------------------------------------------
+# Employee onboarding documents (govt-ID + HR paperwork).
+# ----------------------------------------------------------------------------
+# Canonical document categories the onboarding wizard collects. AADHAAR / PAN /
+# UAN_PF / ESIC are SENSITIVE PII (govt IDs). Bytes are stored in the
+# access-controlled GridFS file store (NOT public URLs); both upload and download
+# are gated by the HR router-level role gate plus a per-employee store-scope check.
+_VALID_DOC_TYPES = frozenset(
+    {"AADHAAR", "PAN", "UAN_PF", "ESIC", "RESUME", "PHOTO", "OTHER"}
+)
 
 
 # ============================================================================
@@ -2382,3 +2401,331 @@ async def lwp_report(
         "total_lwp_days": round(total, 1),
         "note": "Report only. Enter LWP days manually into the payroll run; not auto-applied.",
     }
+
+
+# ============================================================================
+# EMPLOYEE DOCUMENTS (govt-ID + HR paperwork)
+# ============================================================================
+# An employee IS a user (employee_id == user_id). Document metadata lives in a
+# `documents` array on the user record; the bytes live in GridFS via the
+# access-controlled file_store (NEVER a public URL -- these are PII). The whole
+# HR router is already behind require_roles(*_FINANCE_ROLES) in main.py, so floor
+# staff (sales/cashier/optometrist/workshop) are 403'd at the router gate and
+# never reach these handlers. On top of that, every handler runs a per-employee
+# store-scope check so a store-level manager can only touch an employee who works
+# at one of THEIR stores. The download path -- the most sensitive -- streams the
+# bytes only after that same check passes.
+
+
+def _employee_store_ids(employee: dict) -> set:
+    """Resolve the set of store_ids an employee belongs to (store_ids + the
+    primary). Used for the per-employee store-scope authorization check."""
+    ids = set(employee.get("store_ids") or [])
+    primary = employee.get("primary_store_id")
+    if primary:
+        ids.add(primary)
+    return ids
+
+
+def _assert_employee_doc_access(employee: dict, current_user: dict) -> None:
+    """Authorize the caller to read/write THIS employee's documents.
+
+    Cross-store roles (SUPERADMIN/ADMIN) always pass. A store-level manager only
+    passes when the employee shares at least one store with the caller's reach.
+    An employee with NO store (e.g. an admin account) is reachable only by the
+    cross-store roles -- so an unattributed record can never leak to a store
+    manager. Mirrors can_access_store_scoped, but for the union of an employee's
+    stores rather than a single store_id.
+    """
+    is_cross, caller_stores = user_store_scope(current_user)
+    if is_cross:
+        return
+    emp_stores = _employee_store_ids(employee)
+    if not emp_stores or emp_stores.isdisjoint(caller_stores):
+        raise HTTPException(
+            status_code=403,
+            detail="No access to this employee's records",
+        )
+
+
+def _public_doc(doc: dict) -> dict:
+    """Project a stored document record to the metadata clients may see.
+
+    Deliberately omits nothing sensitive (a file_id is an opaque GridFS handle,
+    not a public URL -- the bytes are only reachable through the RBAC-gated
+    download endpoint), but NEVER includes the raw bytes."""
+    return {
+        "doc_id": doc.get("doc_id"),
+        "doc_type": doc.get("doc_type"),
+        "filename": doc.get("filename"),
+        "content_type": doc.get("content_type"),
+        "size": doc.get("size"),
+        "file_id": doc.get("file_id"),
+        "uploaded_at": doc.get("uploaded_at"),
+        "uploaded_by": doc.get("uploaded_by"),
+    }
+
+
+@router.post("/employees/{employee_id}/documents", status_code=201)
+async def upload_employee_document(
+    employee_id: str,
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload an onboarding document (Aadhaar / PAN / UAN-PF / ESIC / resume /
+    photo / other) for an employee.
+
+    SECURITY: bytes are persisted in the GridFS-backed file store (durable across
+    Railway redeploys), never on a public URL. MIME + size are validated server
+    side before anything is stored. Fail-loud: a 503 (not a false 200) when the
+    store is unavailable, so a failed write is never reported as success.
+    """
+    user_repo = get_user_repository()
+    if user_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    employee = user_repo.find_by_id(employee_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    _assert_employee_doc_access(employee, current_user)
+
+    doc_type_norm = (doc_type or "").strip().upper()
+    if doc_type_norm not in _VALID_DOC_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"doc_type must be one of: {', '.join(sorted(_VALID_DOC_TYPES))}",
+        )
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Read + validate before persisting anything (mirrors expenses.upload_bill).
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
+        )
+    mime = (file.content_type or "").lower()
+    if mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{mime}' not allowed. Accepted: {sorted(ALLOWED_MIME_TYPES)}",
+        )
+
+    store = get_file_store()
+    if store is None:
+        # Storage unavailable: raise 503 (not a false 200) so a failed write is
+        # never reported as success (SYSTEM_INTENT: Fail Loudly).
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    file_id = store.put(
+        content=content,
+        filename=file.filename,
+        mime_type=mime,
+        metadata={"employee_id": employee_id, "doc_type": doc_type_norm},
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    doc_record = {
+        "doc_id": str(uuid.uuid4()),
+        "doc_type": doc_type_norm,
+        "file_id": file_id,
+        "filename": file.filename,
+        "content_type": mime,
+        "size": len(content),
+        "uploaded_at": now_ist().isoformat(),
+        "uploaded_by": current_user.get("user_id"),
+    }
+
+    # Append to the employee's documents array. Use a raw $push (BaseRepository
+    # .update is $set-only and would clobber the whole array).
+    try:
+        db = _get_db()
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        result = db.users.update_one(
+            {"user_id": employee_id},
+            {
+                "$push": {"documents": doc_record},
+                "$set": {"updated_at": datetime.now()},
+            },
+        )
+        if result.matched_count == 0:
+            # The employee vanished between find and push: roll back the blob so
+            # we don't orphan it, then surface a 404.
+            store.delete(file_id)
+            raise HTTPException(status_code=404, detail="Employee not found")
+    except HTTPException:
+        raise
+    except Exception:
+        # Persisting the metadata failed: roll back the blob and fail loudly.
+        try:
+            store.delete(file_id)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=503, detail="Could not record document; please retry."
+        )
+
+    # NOTE: never log the filename/doc_type with any ID number -- the document
+    # record carries no raw Aadhaar/PAN value, only an opaque file handle.
+    return {"message": "Document uploaded", **_public_doc(doc_record)}
+
+
+@router.get("/employees/{employee_id}/documents")
+async def list_employee_documents(
+    employee_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List an employee's document metadata (NO bytes). RBAC + store-scoped."""
+    user_repo = get_user_repository()
+    if user_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    employee = user_repo.find_by_id(employee_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    _assert_employee_doc_access(employee, current_user)
+
+    docs = employee.get("documents") or []
+    return {
+        "employee_id": employee_id,
+        "documents": [_public_doc(d) for d in docs if isinstance(d, dict)],
+    }
+
+
+@router.get("/employees/{employee_id}/documents/{doc_id}")
+async def download_employee_document(
+    employee_id: str,
+    doc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream the bytes of one employee document from GridFS.
+
+    This is the most sensitive path (it returns the actual PII document), so the
+    same RBAC + per-employee store-scope check runs before any bytes leave the
+    server. The bytes come from the access-controlled file store, never a public
+    URL.
+    """
+    user_repo = get_user_repository()
+    if user_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    employee = user_repo.find_by_id(employee_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    _assert_employee_doc_access(employee, current_user)
+
+    docs = employee.get("documents") or []
+    doc = next(
+        (d for d in docs if isinstance(d, dict) and d.get("doc_id") == doc_id),
+        None,
+    )
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_id = doc.get("file_id")
+    if not file_id:
+        raise HTTPException(status_code=404, detail="Document has no stored file")
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    rec = store.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Document file no longer available")
+
+    content, filename, mime = rec
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=mime or doc.get("content_type") or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename or doc.get("filename") or doc_id}"'
+        },
+    )
+
+
+@router.delete("/employees/{employee_id}/documents/{doc_id}")
+async def delete_employee_document(
+    employee_id: str,
+    doc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Remove a document from an employee + best-effort delete the GridFS blob.
+
+    RBAC + store-scoped. Audit-logged (SYSTEM_INTENT: Audit Everything) without
+    recording any PII value -- only the doc_type + opaque file handle.
+    """
+    user_repo = get_user_repository()
+    if user_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    employee = user_repo.find_by_id(employee_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    _assert_employee_doc_access(employee, current_user)
+
+    docs = employee.get("documents") or []
+    doc = next(
+        (d for d in docs if isinstance(d, dict) and d.get("doc_id") == doc_id),
+        None,
+    )
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    db.users.update_one(
+        {"user_id": employee_id},
+        {
+            "$pull": {"documents": {"doc_id": doc_id}},
+            "$set": {"updated_at": datetime.now()},
+        },
+    )
+
+    # Best-effort blob removal (the metadata is already gone; a stray blob is
+    # swept by the file-store orphan cleanup).
+    file_id = doc.get("file_id")
+    if file_id:
+        store = get_file_store()
+        if store is not None:
+            try:
+                store.delete(file_id)
+            except Exception:
+                pass
+
+    # Audit, fail-soft -- the delete must not 500 because the audit write hiccuped.
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is not None:
+            audit_repo.create(
+                {
+                    "action": "EMPLOYEE_DOCUMENT_DELETE",
+                    "entity_type": "USER",
+                    "entity_id": employee_id,
+                    "store_id": (employee.get("primary_store_id")
+                                 or next(iter(_employee_store_ids(employee)), None)),
+                    "user_id": current_user.get("user_id"),
+                    "user_name": current_user.get("full_name")
+                    or current_user.get("username"),
+                    "timestamp": datetime.utcnow(),
+                    "severity": "INFO",
+                    "source": "domain",
+                    "detail": {"doc_id": doc_id, "doc_type": doc.get("doc_type")},
+                }
+            )
+    except Exception:  # noqa: BLE001 - audit must never break the delete
+        pass
+
+    return {"message": "Document deleted", "doc_id": doc_id}

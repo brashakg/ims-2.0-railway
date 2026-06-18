@@ -3026,6 +3026,33 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/hr/employee/{employee_id}/salary-slip",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # Employee onboarding documents (govt-ID + HR paperwork). Behind the HR
+    # router-level _FINANCE_ROLES gate (floor staff are 403'd there); each
+    # handler additionally restricts to the employee's own store(s).
+    {
+        "method": "POST",
+        "path": "/api/v1/hr/employees/{employee_id}/documents",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/employees/{employee_id}/documents",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/hr/employees/{employee_id}/documents/{doc_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/hr/employees/{employee_id}/documents/{doc_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/hr/leaves",

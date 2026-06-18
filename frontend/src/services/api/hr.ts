@@ -288,6 +288,80 @@ export const hrApi = {
   },
 };
 
+// ============================================================================
+// Employee documents (govt-ID + HR paperwork) — PII, RBAC + store-scoped.
+// ============================================================================
+// Bytes are stored server-side in the access-controlled GridFS file store; the
+// download path streams them only after the same RBAC + store-scope check. We
+// never expose a public URL.
+export type EmployeeDocType =
+  | 'AADHAAR' | 'PAN' | 'UAN_PF' | 'ESIC' | 'RESUME' | 'PHOTO' | 'OTHER';
+
+export interface EmployeeDocument {
+  doc_id: string;
+  doc_type: EmployeeDocType;
+  filename: string;
+  content_type: string;
+  size: number;
+  file_id: string;
+  uploaded_at: string;
+  uploaded_by: string;
+}
+
+export const employeeDocApi = {
+  /** Upload one document for an employee. Multipart; bytes go to GridFS. */
+  upload: async (
+    employeeId: string,
+    file: File,
+    docType: EmployeeDocType,
+  ): Promise<EmployeeDocument> => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('doc_type', docType);
+    const response = await api.post<EmployeeDocument>(
+      `/hr/employees/${employeeId}/documents`,
+      form,
+      {
+        // axios sets the multipart boundary itself; clear the JSON default.
+        headers: { 'Content-Type': 'multipart/form-data' },
+        // 25 MB on a slow line needs more than the shared 10 s default.
+        timeout: 60000,
+      },
+    );
+    return response.data;
+  },
+
+  /** List an employee's document metadata (no bytes). */
+  list: async (
+    employeeId: string,
+  ): Promise<{ employee_id: string; documents: EmployeeDocument[] }> => {
+    const response = await api.get(`/hr/employees/${employeeId}/documents`);
+    return response.data;
+  },
+
+  /** Fetch one document's bytes as a Blob (for inline preview / download). */
+  downloadBlob: async (
+    employeeId: string,
+    docId: string,
+  ): Promise<{ blob: Blob; mime_type: string }> => {
+    const response = await api.get<Blob>(
+      `/hr/employees/${employeeId}/documents/${docId}`,
+      { responseType: 'blob' },
+    );
+    const mime_type =
+      (response.headers['content-type'] as string) || 'application/octet-stream';
+    return { blob: response.data, mime_type };
+  },
+
+  /** Remove a document (also best-effort deletes the GridFS blob). */
+  remove: async (employeeId: string, docId: string) => {
+    const response = await api.delete(
+      `/hr/employees/${employeeId}/documents/${docId}`,
+    );
+    return response.data;
+  },
+};
+
 // --- Employee self-service response shapes (/hr/me/*) ----------------------
 
 export interface MyAttendanceSummary {

@@ -44,6 +44,46 @@ def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     return normalize_indian_mobile(phone)
 
 
+# Govt-ID number normalizers. These are LIGHT, fail-SOFT validators: onboarding
+# must not be hard-blocked by an ID-format quirk (the owner directive). An empty
+# value clears the field; a present value is stripped/upper-cased and only
+# format-checked for PAN (a fixed 10-char pattern) and Aadhaar (12 digits). We
+# never log the raw value anywhere.
+_PAN_NUM_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+_AADHAAR_RE = re.compile(r"^\d{12}$")
+
+
+def _norm_id_optional(v: Optional[str]) -> Optional[str]:
+    """Strip + upper-case an optional ID field; '' -> None."""
+    if v is None:
+        return None
+    s = str(v).strip().upper()
+    return s or None
+
+
+def _norm_pan(v: Optional[str]) -> Optional[str]:
+    """PAN: AAAAA9999A. Fail-soft -- reject only an obviously malformed value so
+    we don't store junk, but the field stays optional (None when blank)."""
+    s = _norm_id_optional(v)
+    if s is None:
+        return None
+    if not _PAN_NUM_RE.match(s):
+        raise ValueError("PAN must be 10 characters in the form AAAAA9999A")
+    return s
+
+
+def _norm_aadhaar(v: Optional[str]) -> Optional[str]:
+    """Aadhaar: 12 digits. Strips spaces/hyphens commonly typed in groups of 4."""
+    if v is None:
+        return None
+    s = re.sub(r"[\s-]", "", str(v).strip())
+    if not s:
+        return None
+    if not _AADHAAR_RE.match(s):
+        raise ValueError("Aadhaar number must be 12 digits")
+    return s
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -89,11 +129,34 @@ class UserCreate(BaseModel):
     # endpoint where the actor's roles are known. None/absent -> DARK (today's
     # behaviour exactly).
     permissions: Optional[Dict[str, Dict[str, bool]]] = None
+    # Govt-ID + statutory numbers captured at onboarding. All OPTIONAL and
+    # fail-soft validated (PAN format / Aadhaar 12-digit) so an ID quirk never
+    # blocks creating the account. NEVER logged in raw form.
+    aadhaar_no: Optional[str] = None
+    pan_no: Optional[str] = None
+    uan_no: Optional[str] = None  # PF/UAN
+    pf_no: Optional[str] = None
+    esic_no: Optional[str] = None
 
     @field_validator("phone")
     @classmethod
     def _v_phone(cls, v):
         return _normalize_phone(v)
+
+    @field_validator("aadhaar_no")
+    @classmethod
+    def _v_aadhaar(cls, v):
+        return _norm_aadhaar(v)
+
+    @field_validator("pan_no")
+    @classmethod
+    def _v_pan(cls, v):
+        return _norm_pan(v)
+
+    @field_validator("uan_no", "pf_no", "esic_no")
+    @classmethod
+    def _v_id_optional(cls, v):
+        return _norm_id_optional(v)
 
     @field_validator("roles")
     @classmethod
@@ -124,11 +187,33 @@ class UserUpdate(BaseModel):
     # Two-sided capability override (see UserCreate.permissions). Only persisted
     # when explicitly sent (exclude_unset) so an unrelated edit never wipes it.
     permissions: Optional[Dict[str, Dict[str, bool]]] = None
+    # Govt-ID + statutory numbers (see UserCreate). Only persisted when sent
+    # (exclude_unset) so an unrelated edit never wipes them.
+    aadhaar_no: Optional[str] = None
+    pan_no: Optional[str] = None
+    uan_no: Optional[str] = None
+    pf_no: Optional[str] = None
+    esic_no: Optional[str] = None
 
     @field_validator("phone")
     @classmethod
     def _v_phone(cls, v):
         return _normalize_phone(v)
+
+    @field_validator("aadhaar_no")
+    @classmethod
+    def _v_aadhaar(cls, v):
+        return _norm_aadhaar(v)
+
+    @field_validator("pan_no")
+    @classmethod
+    def _v_pan(cls, v):
+        return _norm_pan(v)
+
+    @field_validator("uan_no", "pf_no", "esic_no")
+    @classmethod
+    def _v_id_optional(cls, v):
+        return _norm_id_optional(v)
 
     @field_validator("roles")
     @classmethod
@@ -501,6 +586,14 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             # none -> DARK (the resolver returns the role decision unchanged).
             "permissions": _clean_perms or {},
         }
+
+        # Govt-ID + statutory numbers (all optional, already format-normalized by
+        # the schema validators). Only persist a field when a value was supplied
+        # so the stored doc isn't littered with nulls. NEVER logged in raw form.
+        for _id_field in ("aadhaar_no", "pan_no", "uan_no", "pf_no", "esic_no"):
+            _val = getattr(user, _id_field, None)
+            if _val:
+                user_data[_id_field] = _val
 
         created = repo.create(user_data)
         if created:
