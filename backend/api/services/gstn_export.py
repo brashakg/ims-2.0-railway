@@ -11,10 +11,13 @@ scope). They produce the offline-utility JSON the accountant uploads on
 gst.gov.in -> Returns -> Offline Tool -> Import.
 
 Schema references (public GSTN offline-tool format):
-- GSTR-1: top-level {gstin, fp, version, hash, b2b, b2cl, b2cs, hsn}
+- GSTR-1: top-level {gstin, fp, version, hash, b2b, b2cl, b2cs, cdnr, hsn}
     * b2b  : grouped by counterparty GSTIN  -> [{ctin, inv:[...]}]
     * b2cl : grouped by place-of-supply code -> [{pos, inv:[...]}]
     * b2cs : flat rows                       -> [{sply_ty, pos, typ, rt, txval, ...}]
+    * cdnr : credit/debit notes to registered persons, grouped by
+             counterparty GSTIN -> [{ctin, nt:[{ntty, nt_num, nt_dt, val,
+             pos, rchrg, inv_typ, itms:[{num, itm_det:{...}}]}]}]
     * hsn  : {data:[{num, hsn_sc, desc, uqc, qty, txval, rt, iamt, camt, samt, csamt}]}
 - GSTR-3B: top-level {gstin, ret_period, sup_details, inter_sup, itc_elg, intr_ltax}
 
@@ -157,9 +160,9 @@ def to_gstr1_json(
     `period` override the header; when blank they fall back to the values
     inside `data` ("gstin" / "period").
 
-    Returns a dict with keys: gstin, fp, version, hash, b2b, b2cl, b2cs, hsn.
-    Sections with no rows are omitted-as-empty-lists (the offline tool
-    accepts empty arrays and simply imports nothing for that section).
+    Returns a dict with keys: gstin, fp, version, hash, b2b, b2cl, b2cs,
+    cdnr, hsn. Sections with no rows are emitted as empty lists (the offline
+    tool accepts empty arrays and simply imports nothing for that section).
     """
     data = data or {}
 
@@ -177,6 +180,11 @@ def to_gstr1_json(
         "b2b": _build_b2b(data.get("b2b") or [], store_state),
         "b2cl": _build_b2cl(data.get("b2cl") or [], store_state),
         "b2cs": _build_b2cs(data.get("b2cs") or [], store_state),
+        # CDNR -- credit/debit notes to REGISTERED persons. Omitting this
+        # dropped every credit note from the filed return, overstating the
+        # tax liability and mismatching GSTR-2B (Rule 47(1) breach). Built
+        # from the `cdnr` list reports.py::_compute_gstr1 produces.
+        "cdnr": _build_cdnr(data.get("cdnr") or [], store_state),
         "hsn": _build_hsn(data),
     }
     return out
@@ -275,6 +283,77 @@ def _build_b2cs(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
             }
         )
     return out
+
+
+def _build_cdnr(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
+    """Build the CDNR section: credit/debit notes issued to REGISTERED persons,
+    grouped by counterparty GSTIN (ctin).
+
+    Maps from the cdnr items reports.py::_compute_gstr1 produces. Each IMS
+    cdnr item carries: refReference, creditNoteDate, customerGSTIN,
+    placeOfSupply/customerState, grossValue, taxableValue, cgst, sgst, igst,
+    hsnCode, gstRate.
+
+    Portal schema (offline-tool):
+        [{ctin, nt:[{ntty, nt_num, nt_dt, val, pos, rchrg, inv_typ,
+                     itms:[{num, itm_det:{rt, txval, iamt, camt, samt, csamt}}]}]}]
+
+    `ntty` is "C" (credit note) or "D" (debit note). IMS only issues CREDIT
+    notes today (returns / refunds), so we default to "C" and honour an
+    explicit `noteType`/`ntty` override when a debit note is ever produced.
+
+    Notes WITHOUT a counterparty GSTIN cannot sit in CDNR -- a credit note to
+    an UNREGISTERED consumer belongs in CDNUR, which IMS does not yet compute
+    (see PR limitation note). Such rows are skipped here rather than emitted
+    with an empty ctin, mirroring the B2B handling.
+    """
+    by_ctin: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ctin = str(r.get("customerGSTIN") or r.get("ctin") or "").strip()
+        if not ctin:
+            # Credit note to an unregistered person -> CDNUR, not CDNR. IMS
+            # does not compute CDNUR yet, so skip rather than misfile it.
+            continue
+        ntty = str(r.get("noteType") or r.get("ntty") or "C").strip().upper()
+        if ntty not in ("C", "D"):
+            ntty = "C"
+        pos = _state_code(
+            str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
+        )
+        nt = {
+            "ntty": ntty,
+            "nt_num": str(
+                r.get("refReference")
+                or r.get("noteNumber")
+                or r.get("nt_num")
+                or ""
+            ),
+            "nt_dt": _fmt_date(
+                r.get("creditNoteDate") or r.get("noteDate") or r.get("nt_dt") or ""
+            ),
+            "val": _num(r.get("grossValue") or r.get("val")),
+            "pos": pos,
+            "rchrg": "N",
+            "inv_typ": "R",  # Regular
+            "itms": [
+                {
+                    "num": 1,
+                    "itm_det": _itm(
+                        r.get("gstRate") or r.get("rt"),
+                        r.get("taxableValue") or r.get("txval"),
+                        r.get("igst") or r.get("iamt"),
+                        r.get("cgst") or r.get("camt"),
+                        r.get("sgst") or r.get("samt"),
+                        r.get("cess") or r.get("csamt"),
+                    ),
+                }
+            ],
+        }
+        bucket = by_ctin.setdefault(ctin, {"ctin": ctin, "nt": []})
+        bucket["nt"].append(nt)
+    return list(by_ctin.values())
 
 
 def _build_hsn(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -433,8 +512,25 @@ def to_gstr3b_json(
         "ret_period": ret_period,
         "sup_details": sup_details,
         "inter_sup": {
-            # 3.2 — inter-state supplies to unregistered/composition/UIN.
-            # We don't break these out in IMS, so emit empty placeholders.
+            # 3.2 -- inter-state supplies broken out by counterparty type
+            # (unregistered / composition dealer / UIN holder), keyed by
+            # place-of-supply.
+            #
+            # KNOWN LIMITATION (upstream gap, not wired): reports.py
+            # ::_compute_gstr3b only computes the AGGREGATE inter-state output
+            # tax (out_igst, already reported in 3.1(a) via osup_det.iamt). It
+            # does NOT segregate inter-state supplies by counterparty
+            # registration type, nor key them by place-of-supply. IMS also does
+            # not record whether a customer is a composition dealer or a UIN
+            # holder at all. Populating 3.2 correctly therefore requires an
+            # upstream change to _compute_gstr3b (a place-of-supply-keyed
+            # inter-state B2C aggregation, plus capturing comp/UIN status).
+            #
+            # Per the fix brief we do the SAFE thing: emit empty lists rather
+            # than fabricate a split. 3.2 is a memorandum disclosure that does
+            # NOT change the net tax payable (driven by 3.1 + Table 4), so an
+            # empty 3.2 understates a disclosure but never the liability. The
+            # accountant fills 3.2 in the offline tool before filing.
             "unreg_details": [],
             "comp_details": [],
             "uin_details": [],
