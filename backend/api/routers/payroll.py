@@ -1636,6 +1636,12 @@ async def approve_payroll(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # Financial control: approving payroll is a posting into the run's month.
+    # Block it if that accounting period is locked (mirrors orders/returns/
+    # vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
+    from .finance import check_period_locked
+
+    check_period_locked(db, date(req.year, req.month, 1))
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "DRAFT"}
         if req.store_id:
@@ -1671,6 +1677,12 @@ async def lock_payroll(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # Financial control: locking payroll as PAID is a posting into the run's
+    # month. Block it if that accounting period is locked (mirrors orders/
+    # returns/vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
+    from .finance import check_period_locked
+
+    check_period_locked(db, date(req.year, req.month, 1))
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "APPROVED"}
         if req.store_id:
