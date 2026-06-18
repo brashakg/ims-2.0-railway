@@ -16,7 +16,7 @@
 // Lens (LS) rows can't be saved here (lenses go through the Power Grid); such
 // rows show a note + a link and are reported as skipped.
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import {
   Plus,
@@ -38,7 +38,8 @@ import { productApi } from '../../services/api/products';
 import type { CreateProductPayload } from '../../services/api/products';
 import {
   CATEGORIES,
-  CATEGORY_FIELDS,
+  getCategoryFields,
+  loadCategoryRegistry,
   validateProductForm,
   buildProductPayload,
   resolveHsnGst,
@@ -171,6 +172,25 @@ export function RapidGridPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [isSaving, setIsSaving] = useState(false);
   const [lastRun, setLastRun] = useState<{ created: number; failed: number; skipped: number } | null>(null);
+  // Bump on canonical-registry load so the drawer field list + per-row
+  // validation pick up the server-sourced required flags (getCategoryFields /
+  // validateProductForm both read the registry). Fail-soft: a fetch error leaves
+  // the local CATEGORY_FIELDS fallback flags in place.
+  const [registryReady, setRegistryReady] = useState(false);
+
+  // Load the canonical category field registry once (shared module cache) so the
+  // Rapid Grid validates each row against the SAME required-field set the server
+  // create gate enforces -- the third door is now in lockstep with Quick Add +
+  // the Guided wizard. Without this the grid validated against the local-only
+  // fallback flags and could let a server-required-but-locally-optional field
+  // through (rejected later per-row at /products/bulk-create instead of inline).
+  useEffect(() => {
+    let alive = true;
+    loadCategoryRegistry()
+      .then(() => { if (alive) setRegistryReady(true); })
+      .catch(() => { /* fall back to local required flags */ });
+    return () => { alive = false; };
+  }, []);
 
   // -------- row mutation helpers -------------------------------------------
   const patchRow = useCallback((id: string, patch: Partial<GridRow>) => {
@@ -285,7 +305,10 @@ export function RapidGridPage() {
       out.push({ row: r, payload: buildProductPayload(rowToFormValues(r)) });
     });
     return out;
-  }, [rows]);
+    // registryReady is a dependency so the valid-row count recomputes once the
+    // canonical registry loads and validateRow starts using the server flags.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, registryReady]);
 
   const counts = useMemo(() => {
     let nonEmpty = 0;
@@ -462,6 +485,7 @@ export function RapidGridPage() {
                   index={idx}
                   open={open}
                   lens={lens}
+                  registryReady={registryReady}
                   onToggle={() => toggleExpand(row.id)}
                   onPatch={(patch) => patchRow(row.id, patch)}
                   onPatchAttr={(name, value) => patchAttr(row.id, name, value)}
@@ -492,6 +516,7 @@ interface RowViewProps {
   index: number;
   open: boolean;
   lens: boolean;
+  registryReady: boolean;
   onToggle: () => void;
   onPatch: (patch: Partial<GridRow>) => void;
   onPatchAttr: (name: string, value: string) => void;
@@ -500,17 +525,24 @@ interface RowViewProps {
 }
 
 function RowView({
-  row, index, open, lens, onToggle, onPatch, onPatchAttr, onRemove, onPaste,
+  row, index, open, lens, registryReady, onToggle, onPatch, onPatchAttr, onRemove, onPaste,
 }: RowViewProps) {
   const drawerFields: CategoryField[] = useMemo(() => {
     if (!row.category) return [];
-    const fields = CATEGORY_FIELDS[row.category] || [];
+    // Source the field list (and its required flags) from the canonical registry
+    // via getCategoryFields -- the SAME helper Quick Add + Guided use -- so a
+    // server-required field with no local UI metadata is still rendered (and
+    // marked required) here and can never be silently un-fillable.
+    const fields = getCategoryFields(row.category);
     return fields.filter((f) => {
       if (CORE_ATTR_NAMES.has(f.name)) return false; // shown as core cells
       if (lens && LENS_POWER_FIELDS.has(f.name)) return false; // Power Grid
       return true;
     });
-  }, [row.category, lens]);
+    // registryReady is a dependency so the drawer re-derives its fields (with the
+    // server required flags) once the registry loads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row.category, lens, registryReady]);
 
   return (
     <>
