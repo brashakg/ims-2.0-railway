@@ -100,6 +100,28 @@ def _sample_gstr1() -> dict:
     }
 
 
+def _sample_cdnr_entry() -> dict:
+    """One credit note to a REGISTERED person, shaped exactly as
+    reports.py::_compute_gstr1 emits in its `cdnr` list."""
+    return {
+        "refReference": "RET-260415-ABC123",
+        "creditNoteDate": "2026-04-20",
+        "customerId": "cust-1",
+        "customerName": "ACME Ltd",
+        "customerGSTIN": "07AAAAA0000A1ZZ",
+        "customerState": "Delhi",
+        "placeOfSupply": "Delhi",
+        "grossValue": 1180.0,
+        "taxableValue": 1000.0,
+        "cgst": 90.0,
+        "sgst": 90.0,
+        "igst": 0.0,
+        "taxValue": 180.0,
+        "hsnCode": "9004",
+        "gstRate": 18,
+    }
+
+
 def _sample_gstr3b() -> dict:
     return {
         "period": "2026-04",
@@ -176,7 +198,7 @@ class TestPeriodAndStateHelpers:
 class TestToGstr1Json:
     def test_top_level_keys(self):
         out = to_gstr1_json(_sample_gstr1())
-        for key in ("gstin", "fp", "b2b", "b2cl", "b2cs", "hsn"):
+        for key in ("gstin", "fp", "b2b", "b2cl", "b2cs", "cdnr", "hsn"):
             assert key in out
 
     def test_period_format_mmyyyy(self):
@@ -269,12 +291,103 @@ class TestToGstr1Json:
         assert out["b2b"] == []
         assert out["b2cl"] == []
         assert out["b2cs"] == []
+        # CDNR present but empty (never missing) when there are no credit notes.
+        assert out["cdnr"] == []
         assert out["hsn"] == {"data": []}
 
     def test_none_data_fails_soft(self):
         out = to_gstr1_json(None)
         assert out["b2b"] == []
+        assert out["cdnr"] == []
         assert out["hsn"] == {"data": []}
+
+    def test_cdnr_empty_when_no_credit_notes(self):
+        # The sample has no `cdnr` key at all -> emit [], not a missing key.
+        out = to_gstr1_json(_sample_gstr1())
+        assert out["cdnr"] == []
+
+
+# ============================================================================
+# to_gstr1_json -- CDNR (credit/debit notes to registered persons)
+# ============================================================================
+
+
+class TestToGstr1Cdnr:
+    def _out_with_cdnr(self, *entries):
+        data = _sample_gstr1()
+        data["cdnr"] = list(entries) if entries else [_sample_cdnr_entry()]
+        return to_gstr1_json(data)
+
+    def test_cdnr_section_present_and_grouped_by_ctin(self):
+        out = self._out_with_cdnr()
+        assert len(out["cdnr"]) == 1
+        grp = out["cdnr"][0]
+        # Grouped by counterparty GSTIN.
+        assert grp["ctin"] == "07AAAAA0000A1ZZ"
+        assert len(grp["nt"]) == 1
+
+    def test_cdnr_note_fields_and_credit_type(self):
+        nt = self._out_with_cdnr()["cdnr"][0]["nt"][0]
+        assert nt["ntty"] == "C"  # IMS returns/refunds are credit notes
+        assert nt["nt_num"] == "RET-260415-ABC123"
+        # ISO date -> DD-MM-YYYY portal format
+        assert nt["nt_dt"] == "20-04-2026"
+        # `val` is the GROSS note value, not the taxable value.
+        assert nt["val"] == 1180.0
+        assert nt["pos"] == "07"  # Delhi
+        assert nt["rchrg"] == "N"
+        assert nt["inv_typ"] == "R"
+
+    def test_cdnr_item_tax_mapped(self):
+        itm = self._out_with_cdnr()["cdnr"][0]["nt"][0]["itms"][0]["itm_det"]
+        assert itm["txval"] == 1000.0
+        assert itm["rt"] == 18.0
+        assert itm["camt"] == 90.0
+        assert itm["samt"] == 90.0
+        assert itm["iamt"] == 0.0
+
+    def test_cdnr_inter_state_uses_igst(self):
+        entry = _sample_cdnr_entry()
+        # Inter-state credit note: tax sits under IGST, pos differs from store.
+        entry.update(
+            {
+                "customerGSTIN": "27BBBBB0000B1ZZ",
+                "customerState": "Maharashtra",
+                "placeOfSupply": "Maharashtra",
+                "cgst": 0.0,
+                "sgst": 0.0,
+                "igst": 180.0,
+            }
+        )
+        out = self._out_with_cdnr(entry)
+        grp = out["cdnr"][0]
+        assert grp["ctin"] == "27BBBBB0000B1ZZ"
+        nt = grp["nt"][0]
+        assert nt["pos"] == "27"
+        itm = nt["itms"][0]["itm_det"]
+        assert itm["iamt"] == 180.0
+        assert itm["camt"] == 0.0
+
+    def test_cdnr_debit_note_type_honoured(self):
+        entry = _sample_cdnr_entry()
+        entry["noteType"] = "D"
+        nt = self._out_with_cdnr(entry)["cdnr"][0]["nt"][0]
+        assert nt["ntty"] == "D"
+
+    def test_cdnr_multiple_notes_same_ctin_grouped(self):
+        e1 = _sample_cdnr_entry()
+        e2 = _sample_cdnr_entry()
+        e2["refReference"] = "RET-260418-XYZ789"
+        out = self._out_with_cdnr(e1, e2)
+        assert len(out["cdnr"]) == 1  # same ctin -> one group
+        assert len(out["cdnr"][0]["nt"]) == 2
+
+    def test_cdnr_without_gstin_skipped(self):
+        # A credit note to an unregistered consumer belongs in CDNUR, not CDNR.
+        entry = _sample_cdnr_entry()
+        entry.pop("customerGSTIN")
+        out = self._out_with_cdnr(entry)
+        assert out["cdnr"] == []
 
 
 # ============================================================================

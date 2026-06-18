@@ -156,6 +156,41 @@ def _validate_category_or_422(category) -> str:
     return norm
 
 
+def _resolve_hsn_or_400(category: str, hsn_code) -> str:
+    """Guarantee a product is never persisted with a blank HSN.
+
+    STATUTORY GAP (P3): a product created without an hsn_code still resolved a
+    gst_rate via the category fallback, but persisted a blank HSN -- so the
+    invoice and the GSTR-1 HSN summary (and the Tally export) showed no HSN for
+    that line. The GST law requires an HSN on every taxable line.
+
+    Behaviour:
+      - an explicit non-blank hsn_code always wins (returned trimmed),
+      - otherwise AUTO-MINT the canonical HSN from the category via the single
+        source of truth (services/gst_rates.py::hsn_for_category), which is the
+        same table POS billing reads, so master == billing,
+      - if the category has NO canonical HSN, reject with a clear 400 asking for
+        an explicit hsn_code (never silently save a blank one).
+
+    Assumes `category` has already been normalized by _validate_category_or_422.
+    Returns the resolved HSN string.
+    """
+    explicit = str(hsn_code).strip() if hsn_code is not None else ""
+    if explicit:
+        return explicit
+    minted = hsn_for_category(category)
+    if minted:
+        return str(minted)
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"HSN code is required: category '{category}' has no canonical HSN "
+            "to auto-fill. Please provide an explicit hsn_code so the invoice "
+            "and GSTR-1 export carry a valid HSN."
+        ),
+    )
+
+
 def _assert_mrp_ge_offer(mrp, offer_price) -> None:
     """Enforce the non-negotiable MRP >= offer_price rule via the SHARED
     pricing_caps validator -- the single source of truth also used by the
@@ -755,6 +790,11 @@ async def create_product(
     # default GST rate). Normalizes the category to the validated value.
     product.category = _validate_category_or_422(product.category)
 
+    # Statutory P3: a product must never persist a blank HSN. Auto-mint it from
+    # the category when not supplied, or 400 if the category has no canonical
+    # HSN. Stamp the resolved value so the canonical door + GSTR-1/Tally carry it.
+    product.hsn_code = _resolve_hsn_or_400(product.category, product.hsn_code)
+
     # Validate MRP >= Offer Price via the shared pricing_caps validator.
     _assert_mrp_ge_offer(product.mrp, product.offer_price)
 
@@ -834,10 +874,22 @@ def _validate_bulk_row(
     errors: List[str] = []
 
     # Category (reuse the single-create validator; capture its 422 message).
+    category_ok = True
     try:
         product.category = _validate_category_or_422(product.category)
     except HTTPException as exc:
+        category_ok = False
         errors.append(str(exc.detail))
+
+    # Statutory P3: never persist a blank HSN. Auto-mint from category (or
+    # capture the 400 when the category has no canonical HSN). Only attempt this
+    # once the category resolved, and stamp the resolved value so the persist
+    # step carries a valid HSN. Mirrors the single-create FORM door.
+    if category_ok:
+        try:
+            product.hsn_code = _resolve_hsn_or_400(product.category, product.hsn_code)
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
 
     # Registry required-field gate (step-9). Build the canonical payload the same
     # way the FORM door does so a missing colour_code / power / expiry / cost is
@@ -1532,6 +1584,25 @@ async def update_product(
     # unaffected.
     if "category" in product.model_fields_set:
         product.category = _validate_category_or_422(product.category)
+
+    # Statutory P3 (conservative): you may not CLEAR a product's HSN via update
+    # -- an explicit blank hsn_code would leave the invoice / GSTR-1 line with no
+    # HSN. Reject only an explicit blank value; omitting hsn_code (the common
+    # case) is untouched, and a non-blank edit passes through unchanged. (A
+    # null/omitted hsn_code is already stripped downstream, so this guards only
+    # the explicit empty-string clear.)
+    if (
+        "hsn_code" in product.model_fields_set
+        and product.hsn_code is not None
+        and not str(product.hsn_code).strip()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "HSN code cannot be cleared. Every taxable product line needs a "
+                "valid HSN for the invoice and GSTR-1 export."
+            ),
+        )
 
     repo = get_product_repository()
 
