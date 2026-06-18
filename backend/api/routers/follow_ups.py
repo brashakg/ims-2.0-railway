@@ -386,7 +386,9 @@ async def auto_generate_follow_ups(
 
     try:
         # Generate frame replacement reminders (2 years from order date)
-        if orders_collection:
+        # NOTE: PyMongo Collection.__bool__ raises NotImplementedError, so a
+        # bare `if orders_collection:` would crash (HTTP 500). Use `is not None`.
+        if orders_collection is not None:
             orders = list(orders_collection.find({"store_id": store_id}))
             for order in orders:
                 if order.get("created_at"):
@@ -425,7 +427,7 @@ async def auto_generate_follow_ups(
                             generated_count += 1
 
         # Generate eye test reminders (yearly)
-        if tests_collection:
+        if tests_collection is not None:
             tests = list(tests_collection.find({"store_id": store_id}))
             for test in tests:
                 if test.get("created_at"):
@@ -463,7 +465,7 @@ async def auto_generate_follow_ups(
                             generated_count += 1
 
         # Generate prescription expiry reminders (1 year)
-        if prescriptions_collection:
+        if prescriptions_collection is not None:
             prescriptions = list(prescriptions_collection.find({"store_id": store_id}))
             for prescription in prescriptions:
                 if prescription.get("issue_date"):

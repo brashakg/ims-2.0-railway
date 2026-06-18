@@ -212,3 +212,89 @@ def test_summary_returns_200_not_bool_db_500(fu_client):
         "pending_total",
     }
     assert all(isinstance(v, int) for v in body.values())
+
+
+# ============================================================================
+# 4. POST /follow-ups/auto-generate must NOT 500 on `bool(collection)`
+#    Regression for BUGCLASS-1 (launch-hardening batch 1): the handler did
+#    `if orders_collection:` / `if tests_collection:` / `if prescriptions_collection:`
+#    on PyMongo Collection objects whose __bool__ raises NotImplementedError,
+#    crashing the endpoint 100% of the time when the DB was up (zero follow-ups
+#    generated). Fix = `is not None`. This fake mimics that PyMongo trap.
+# ============================================================================
+
+
+class _BoolRaisesColl:
+    """Mimics a PyMongo Collection: bool(coll) raises (the original bug), but
+    find/find_one/insert_one work so the generator can actually run."""
+
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+        self.inserted = []
+
+    def __bool__(self):
+        raise NotImplementedError(
+            "Collection objects do not implement truth value testing"
+        )
+
+    def find(self, query=None, projection=None):
+        return list(self.docs)
+
+    def find_one(self, query=None, projection=None):
+        return None  # nothing pre-exists -> every reminder is fresh
+
+    def insert_one(self, doc):
+        self.inserted.append(doc)
+        return type("_R", (), {"inserted_id": "x"})()
+
+
+class _AutoGenWrapper:
+    is_connected = True
+
+    def __init__(self, collections):
+        self._collections = collections
+
+    def get_collection(self, name):
+        return self._collections[name]
+
+
+def test_auto_generate_returns_200_not_bool_collection_500(monkeypatch):
+    """POST /follow-ups/auto-generate must return 200 and generate reminders.
+
+    With a PyMongo-like Collection whose __bool__ raises, the old
+    `if orders_collection:` guard 500'd before any work. The `is not None`
+    fix means it generates a frame-replacement reminder from a recent order."""
+    app = FastAPI()
+    app.include_router(fu_mod.router, prefix="/api/v1/follow-ups")
+
+    # An order created "today" -> a frame-replacement reminder 2y out is in the
+    # future, so it is generated.
+    recent_order = {
+        "order_id": "ORD-1",
+        "customer_id": "C1",
+        "customer_name": "Test Customer",
+        "customer_phone": "9000000001",
+        "store_id": "BV-PUN-01",
+        "created_at": datetime.now().isoformat(),
+    }
+    fu_coll = _BoolRaisesColl()
+    collections = {
+        "follow_ups": fu_coll,
+        "orders": _BoolRaisesColl([recent_order]),
+        "eye_tests": _BoolRaisesColl(),
+        "prescriptions": _BoolRaisesColl(),
+    }
+    wrapper = _AutoGenWrapper(collections)
+    monkeypatch.setattr(fu_mod, "_get_db", lambda: wrapper)
+
+    tok = _staff_token()
+    r = TestClient(app).post(
+        "/api/v1/follow-ups/auto-generate?store_id=BV-PUN-01",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "success"
+    assert body["generated_count"] == 1  # one frame-replacement reminder
+    assert len(fu_coll.inserted) == 1
+    assert fu_coll.inserted[0]["type"] == "frame_replacement"

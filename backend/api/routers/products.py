@@ -46,16 +46,20 @@ def _get_categories_from_db() -> List[str]:
 
         db = get_db()
         if db and db.is_connected:
-            # Get categories collection or distinct from products
+            # Get categories collection or distinct from products.
+            # NOTE: PyMongo Collection.__bool__ raises NotImplementedError, so
+            # a bare `if categories_collection:` raises -- it was swallowed by
+            # the surrounding try/except and silently returned [] every time,
+            # so DB-backed categories never loaded. Use `is not None`.
             categories_collection = db.db.get_collection("product_categories")
-            if categories_collection:
+            if categories_collection is not None:
                 cats = list(categories_collection.find({}, {"name": 1}))
                 if cats:
                     return [c.get("name") for c in cats if c.get("name")]
 
             # Fallback: get distinct categories from products collection
             products_collection = db.db.get_collection("products")
-            if products_collection:
+            if products_collection is not None:
                 categories = products_collection.distinct("category")
                 if categories:
                     return categories
