@@ -600,14 +600,116 @@ def test_task_admin_cross_store_bypass(monkeypatch):
 
 
 def test_task_global_no_store_allowed_for_any_caller(monkeypatch):
-    """A task with NO store_id is global (system/HQ) -> store staff may act."""
+    """A task with NO store_id is global (system/HQ) -> the STORE gate does not
+    block store staff. (The ASSIGNEE actor-guard is exercised separately; here
+    the caller IS the assignee so both gates pass.)"""
     client, repo = _tasks_client(
-        monkeypatch, _seed_task(store_id=None), ["SALES_STAFF"], OWN_STORE
+        monkeypatch,
+        _seed_task(store_id=None, assigned_to="u-test"),
+        ["SALES_STAFF"],
+        OWN_STORE,
     )
     assert client.get("/api/v1/tasks/T1").status_code == 200
     r = client.patch("/api/v1/tasks/T1/complete", json={"completion_notes": "done it"})
     assert r.status_code == 200
     assert repo.task["status"] == "COMPLETED"
+
+
+def test_task_lifecycle_non_assignee_lowrole_403(monkeypatch):
+    """Object-level guard: a SALES_STAFF who is NOT the assignee (and not the
+    assigner/creator, nor a manager) is 403'd on EVERY mutating lifecycle
+    action -- the bug a non-owner SALES_STAFF completing a manager's task.
+    Same store, so the store gate passes; the actor gate is what blocks."""
+    client, repo = _tasks_client(
+        monkeypatch,
+        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="mgr-1"),
+        ["SALES_STAFF"],
+        OWN_STORE,
+    )
+    calls = [
+        ("patch", "/api/v1/tasks/T1/complete", {"json": {"completion_notes": "done"}}),
+        ("post", "/api/v1/tasks/T1/start", {}),
+        ("post", "/api/v1/tasks/T1/acknowledge", {}),
+        ("post", "/api/v1/tasks/T1/escalate", {}),
+        ("post", "/api/v1/tasks/T1/reassign", {"json": {"assigned_to": "u9"}}),
+    ]
+    for method, url, kw in calls:
+        r = getattr(client, method)(url, **kw)
+        assert r.status_code == 403, f"{method.upper()} {url} -> {r.status_code}"
+        assert "assignee" in r.json()["detail"].lower()
+    # Nothing was written.
+    assert repo.updates == []
+    assert repo.task["status"] == "OPEN"
+
+
+def test_task_complete_assignee_lowrole_ok(monkeypatch):
+    """The ASSIGNEE may act on their own task even as a low role (SALES_STAFF)."""
+    client, repo = _tasks_client(
+        monkeypatch,
+        _seed_task(store_id=OWN_STORE, assigned_to="u-test"),
+        ["SALES_STAFF"],
+        OWN_STORE,
+    )
+    r = client.patch(
+        "/api/v1/tasks/T1/complete", json={"completion_notes": "my own task"}
+    )
+    assert r.status_code == 200
+    assert repo.task["status"] == "COMPLETED"
+    assert repo.task["completed_by"] == "u-test"
+
+
+def test_task_complete_assigner_lowrole_ok(monkeypatch):
+    """The ASSIGNER/creator may act on a task they handed out (assigned_by)."""
+    client, repo = _tasks_client(
+        monkeypatch,
+        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-test"),
+        ["SALES_STAFF"],
+        OWN_STORE,
+    )
+    r = client.post("/api/v1/tasks/T1/start")
+    assert r.status_code == 200
+    assert repo.task["status"] == "IN_PROGRESS"
+
+
+def test_task_complete_manager_non_assignee_ok(monkeypatch):
+    """A STORE_MANAGER (manager-tier) may act on any task in their store even
+    when they are not the assignee -- legitimate management flow preserved."""
+    client, repo = _tasks_client(
+        monkeypatch,
+        _seed_task(store_id=OWN_STORE, assigned_to="some-staffer"),
+        ["STORE_MANAGER"],
+        OWN_STORE,
+    )
+    r = client.patch(
+        "/api/v1/tasks/T1/complete", json={"completion_notes": "mgr closeout"}
+    )
+    assert r.status_code == 200
+    assert repo.task["status"] == "COMPLETED"
+
+
+def test_manual_escalate_capped_at_top_of_ladder(monkeypatch):
+    """P3 storm guard: a manual escalate on a task already at MAX_ESCALATION_LEVEL
+    is a no-op (200) -- it must NOT bump escalation_level or append history,
+    matching the auto path's cap."""
+    from api.services.task_sla import MAX_ESCALATION_LEVEL
+
+    task = _seed_task(
+        store_id=OWN_STORE,
+        status="ESCALATED",
+        escalation_level=MAX_ESCALATION_LEVEL,
+        escalated_to="boss-1",
+        history=[{"action": "escalated", "level": MAX_ESCALATION_LEVEL}],
+    )
+    client, repo = _tasks_client(monkeypatch, task, ["STORE_MANAGER"], OWN_STORE)
+    r = client.post("/api/v1/tasks/T1/escalate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["escalation_level"] == MAX_ESCALATION_LEVEL
+    assert "top of the escalation ladder" in body["message"].lower()
+    # No write at all -- level + history untouched.
+    assert repo.updates == []
+    assert repo.task["escalation_level"] == MAX_ESCALATION_LEVEL
+    assert len(repo.task["history"]) == 1
 
 
 def test_my_tasks_and_overdue_pass_unbounded_limit(monkeypatch):

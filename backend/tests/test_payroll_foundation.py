@@ -221,3 +221,85 @@ def test_pt_slabs_seed_then_get(client, auth_headers):
     r2 = client.get("/api/v1/payroll/pt-slabs/JH", headers=auth_headers)
     assert r2.status_code == 200
     assert r2.json()["pt_slab"]["basis"] == "ANNUAL"
+
+
+# ---------------------------------------------------------------------------
+# Salary config single-GET store scope (cross-store PII / IDOR — BUG sibling
+# of BUG-062). The single-record GET carries bank/PAN/UAN PII; a store-scoped
+# role must not read an employee belonging to ANOTHER store by id.
+# ---------------------------------------------------------------------------
+
+
+def _store_manager_headers(store_id):
+    """JWT for a STORE_MANAGER scoped to a single store."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": f"sm-{store_id}",
+            "username": f"sm_{store_id}",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": [store_id],
+            "active_store_id": store_id,
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_salary_config_get_store_scoped_blocks_foreign_store(client, auth_headers):
+    """A STORE_MANAGER of store A gets 404 (existence-hide) reading an employee
+    whose salary config belongs to store B -- the PII leak this fix closes."""
+    emp = f"EMP-{uuid.uuid4().hex[:8]}"
+    payload = {
+        "employee_id": emp,
+        "store_id": "BV-STORE-B",
+        "basic": 20000,
+        "bank_account_no": "1234567890",
+        "pan": "ABCDE1234F",
+    }
+    # Create as SUPERADMIN (cross-store; write is admin-only anyway).
+    assert (
+        client.post(
+            "/api/v1/payroll/config", json=payload, headers=auth_headers
+        ).status_code
+        == 201
+    )
+
+    # STORE_MANAGER of a DIFFERENT store must be 404'd.
+    r = client.get(
+        f"/api/v1/payroll/config/{emp}", headers=_store_manager_headers("BV-STORE-A")
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_salary_config_get_same_store_manager_ok(client, auth_headers):
+    """A STORE_MANAGER of the employee's OWN store can read the config (200)."""
+    emp = f"EMP-{uuid.uuid4().hex[:8]}"
+    payload = {"employee_id": emp, "store_id": "BV-STORE-A", "basic": 18000}
+    assert (
+        client.post(
+            "/api/v1/payroll/config", json=payload, headers=auth_headers
+        ).status_code
+        == 201
+    )
+    r = client.get(
+        f"/api/v1/payroll/config/{emp}", headers=_store_manager_headers("BV-STORE-A")
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["config"]["basic"] == 18000
+
+
+def test_salary_config_get_admin_cross_store_ok(client, auth_headers):
+    """SUPERADMIN/ADMIN keep unrestricted cross-store read."""
+    emp = f"EMP-{uuid.uuid4().hex[:8]}"
+    payload = {"employee_id": emp, "store_id": "BV-STORE-B", "basic": 30000}
+    assert (
+        client.post(
+            "/api/v1/payroll/config", json=payload, headers=auth_headers
+        ).status_code
+        == 201
+    )
+    # auth_headers is SUPERADMIN active on BV-TEST-01 -> still reads store-B emp.
+    r = client.get(f"/api/v1/payroll/config/{emp}", headers=auth_headers)
+    assert r.status_code == 200
+    assert r.json()["config"]["basic"] == 30000
