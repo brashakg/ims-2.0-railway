@@ -1515,6 +1515,30 @@ async def list_brands(
     return {"brands": []}
 
 
+@router.get("/categories")
+async def get_category_registry(current_user: dict = Depends(get_current_user)):
+    """THE canonical per-category field registry -- the single source of truth.
+
+    Returns, for every canonical product category, the field list with
+    required/optional flags sourced from the backend product_master CATEGORY_SPECS
+    registry (the SAME registry the create/update enforcement uses). The three
+    product-entry doors (Quick Add / Guided / Rapid Grid) read this so they all
+    render -- and client-side validate -- the IDENTICAL required-field set the
+    server enforces at create. There is NO second copy of the required-ness rule
+    on the frontend: it derives from this endpoint.
+
+    Shape: {"categories": [{code, sku_prefix, name, required_fields,
+    optional_fields, fields:[{name,label,required}], forced_discount_category}]}.
+
+    cost_price is intentionally NOT a required field here: it is GRN-deferred
+    (required to make a product ACTIVE/sellable, not to save it).
+
+    Available to any authenticated user (read-only metadata; the create gate is
+    role-protected separately).
+    """
+    return {"categories": _pm.all_category_specs()}
+
+
 @router.get("/categories/list")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories"""

@@ -266,10 +266,83 @@ def category_spec(category: Any) -> Optional[CategorySpec]:
     return _CATEGORY_SPECS[canonical]
 
 
+# Human-friendly labels for the canonical attribute keys, so the GET
+# /products/categories endpoint can hand the FE a complete, render-ready field
+# spec (label + required flag) from this ONE registry -- the FE no longer has to
+# maintain its own label table for the required-ness contract. A key with no
+# entry here falls back to a title-cased version of the key.
+_FIELD_LABELS: Dict[str, str] = {
+    "brand_name": "Brand Name",
+    "subbrand": "Sub Brand",
+    "model_no": "Model No",
+    "model_name": "Model Name",
+    "name": "Name",
+    "description": "Description",
+    "colour_code": "Colour Code",
+    "colour_name": "Colour Name",
+    "size": "Size",
+    "lens_size": "Lens Size (mm)",
+    "frame_material": "Frame Material",
+    "frame_type": "Frame Type",
+    "polarization": "Polarization",
+    "uv_protection": "UV Protection",
+    "tint": "Tint",
+    "index": "Index",
+    "coating": "Coating",
+    "lens_type": "Lens Type",
+    "material": "Material",
+    "power": "Power",
+    "pack": "Pack Size",
+    "modality": "Modality",
+    "expiry_date": "Expiry Date",
+    "dial_color": "Dial Colour",
+    "strap_material": "Strap Material",
+    "serial_no": "Serial No",
+    "machine_capacity": "Machine Capacity",
+    "machine_type": "Machine Type",
+}
+
+
+def field_label(key: Any) -> str:
+    """Human label for an attribute key (registry source for the FE forms)."""
+    k = str(key or "").strip()
+    if not k:
+        return ""
+    return _FIELD_LABELS.get(k, k.replace("_", " ").title())
+
+
 def all_category_specs() -> List[Dict[str, Any]]:
-    """All canonical category specs, for the GET /products/categories endpoint."""
+    """All canonical category specs, for the GET /products/categories endpoint.
+
+    THE single source of truth the three product-entry doors (Quick Add /
+    Guided / Rapid Grid) read to know, per category, which attribute fields are
+    REQUIRED vs optional. Each spec carries:
+      * code          -- canonical long-form category (e.g. "FRAME"),
+      * sku_prefix    -- the short SKU-prefix code the FE category picker keys on
+                         (e.g. "FR"); the FE maps its picker codes via this,
+      * name          -- human label,
+      * required_fields / optional_fields -- bare attribute-key lists, AND
+      * fields        -- render-ready [{name,label,required}] for every required
+                         + optional attribute, so a door can drive required
+                         markers + block-submit straight from this payload.
+      * forced_discount_category -- the locked discount tier (HA/SERVICES) or
+                         None when the operator must choose.
+    cost_price is deliberately NOT listed as a required field: it is GRN-deferred
+    (a product is created without a cost and lands DRAFT; cost is filled at
+    receiving). It blocks ACTIVE/sellable, never the create -- see
+    compute_catalog_status.
+    """
     out: List[Dict[str, Any]] = []
     for spec in _CATEGORY_SPECS.values():
+        fields: List[Dict[str, Any]] = []
+        for key in spec.required:
+            fields.append(
+                {"name": key, "label": field_label(key), "required": True}
+            )
+        for key in spec.optional:
+            fields.append(
+                {"name": key, "label": field_label(key), "required": False}
+            )
         out.append(
             {
                 "code": spec.canonical,
@@ -277,6 +350,8 @@ def all_category_specs() -> List[Dict[str, Any]]:
                 "name": spec.display,
                 "required_fields": list(spec.required),
                 "optional_fields": list(spec.optional),
+                "fields": fields,
+                "forced_discount_category": spec.forced_discount_category,
             }
         )
     return out

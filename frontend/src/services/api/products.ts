@@ -4,6 +4,34 @@
 
 import api from './client';
 
+// ---------------------------------------------------------------------------
+// Canonical category field registry (GET /products/categories).
+// The single source of truth for which attribute fields are required vs
+// optional per product category, sourced from the backend product_master
+// CATEGORY_SPECS the create/update gate enforces. The three product-entry doors
+// derive their required-ness from this so the FE can never drift from the
+// server enforcement.
+// ---------------------------------------------------------------------------
+export interface CategoryRegistryField {
+  name: string;
+  label: string;
+  required: boolean;
+}
+
+export interface CategoryRegistryEntry {
+  code: string; // canonical long-form (e.g. "FRAME")
+  sku_prefix: string; // short SKU-prefix code the FE picker keys on (e.g. "FR")
+  name: string;
+  required_fields: string[];
+  optional_fields: string[];
+  fields: CategoryRegistryField[];
+  forced_discount_category: string | null;
+}
+
+export interface CategoryRegistryResponse {
+  categories: CategoryRegistryEntry[];
+}
+
 export interface CreateProductPayload {
   category: string;
   // Required by the backend ProductCreate (top-level, NOT inside attributes).
@@ -145,6 +173,15 @@ export const productApi = {
 
   getCategories: async () => {
     const response = await api.get('/products/categories/list');
+    return response.data;
+  },
+
+  // THE canonical per-category field registry (single source of truth). Drives
+  // the required/optional fields all three product-entry doors render + validate,
+  // sourced from the backend product_master CATEGORY_SPECS the create gate
+  // enforces. See productAddShared.ts loadCategoryRegistry (cached once).
+  getCategoryRegistry: async (): Promise<CategoryRegistryResponse> => {
+    const response = await api.get('/products/categories');
     return response.data;
   },
 
