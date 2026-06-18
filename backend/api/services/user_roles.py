@@ -108,7 +108,12 @@ ROLE_LEVEL: Dict[str, int] = {
     "ACCOUNTANT": 50,
     "CATALOG_MANAGER": 50,
     "OPTOMETRIST": 40,
-    "SALES_CASHIER": 30,
+    # SALES_CASHIER is deprecated (merged into SALES_STAFF, backlog #12). Roles are
+    # normalized to the survivor BEFORE every level lookup, so this entry is never
+    # reached in normal flow -- but it is pinned to SALES_STAFF's level (20), NOT
+    # its historical 30, so any future DIRECT (un-normalized) ROLE_LEVEL lookup
+    # can't misclassify the alias as more privileged than its survivor.
+    "SALES_CASHIER": 20,
     "CASHIER": 25,
     "SALES_STAFF": 20,
     "WORKSHOP_STAFF": 20,
