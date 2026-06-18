@@ -382,6 +382,74 @@ def _ledger_transfer_event(event_type_name: str, stock_id, from_state, to_state,
         logger.warning("[TRANSFER] item-event ledger emit skipped: %s", exc)
 
 
+def _create_receive_mismatch_task(transfer: Dict, discrepancy: Dict) -> Optional[str]:
+    """BUG-019: raise a follow-up task when a receive does not match the shipment.
+
+    A mismatch (damaged units, OR a short receive where received < shipped, OR a
+    surplus delta) used to advance the transfer to RECEIVED/PARTIALLY_RECEIVED
+    silently, so a real discrepancy never surfaced for follow-up. We now insert a
+    store-scoped task into the canonical `tasks` collection (the same collection
+    the Tasks module + escalation engine read), scoped to the DESTINATION store
+    so the receiving manager owns the reconciliation.
+
+    Reuses the existing `tasks`-insert pattern (mirrors reminder_rail's
+    _create_followup_task). Fail-soft: no DB / any error -> None, never blocks the
+    receive that already happened."""
+    db = _get_db()
+    if db is None:
+        return None
+    short = int(discrepancy.get("short", 0) or 0)
+    surplus = int(discrepancy.get("surplus", 0) or 0)
+    damaged = int(discrepancy.get("damaged", 0) or 0)
+    # A short or damaged shipment is more urgent (stock loss / vendor claim) than
+    # a pure surplus reconciliation.
+    priority = "P2" if (short > 0 or damaged > 0) else "P3"
+    bits = []
+    if short > 0:
+        bits.append(f"{short} short")
+    if surplus > 0:
+        bits.append(f"{surplus} surplus")
+    if damaged > 0:
+        bits.append(f"{damaged} damaged (quarantined)")
+    detail = ", ".join(bits) if bits else "quantity mismatch"
+    task_id = f"TSK-{uuid.uuid4().hex[:10].upper()}"
+    try:
+        db.get_collection("tasks").insert_one(
+            {
+                "task_id": task_id,
+                "task_type": "transfer_discrepancy",
+                "title": (
+                    f"Transfer receive discrepancy: "
+                    f"{transfer.get('transfer_number', transfer.get('id'))}"
+                ),
+                "description": (
+                    f"Transfer {transfer.get('transfer_number', transfer.get('id'))} "
+                    f"from {transfer.get('from_location_name', transfer.get('from_location_id'))} "
+                    f"was received with a discrepancy: {detail}. "
+                    f"Reconcile against the shipment and raise a vendor/transit "
+                    f"claim if needed."
+                ),
+                "status": "PENDING",
+                "priority": priority,
+                "store_id": transfer.get("to_location_id"),
+                "source": "TRANSFER_RECEIVE",
+                "transfer_id": transfer.get("id"),
+                "transfer_number": transfer.get("transfer_number"),
+                "discrepancy": {
+                    "short": short,
+                    "surplus": surplus,
+                    "damaged": damaged,
+                },
+                "created_at": datetime.now().isoformat(),
+                "created_by": "system:transfer_receive",
+            }
+        )
+        return task_id
+    except Exception as exc:  # noqa: BLE001 - task is a side-channel, fail-soft
+        logger.warning("[TRANSFER] receive-mismatch task create skipped: %s", exc)
+        return None
+
+
 def _apply_ship_stock_move(transfer: Dict) -> Dict:
     """Move source on-hand OUT when a transfer ships.
 
@@ -535,16 +603,27 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
 
     A transfer never creates stock. For each line, the SAME physical units that
     SHIP marked TRANSFERRED (recorded per line in `shipped_stock_ids`) are
-    flipped back to AVAILABLE and re-homed to the destination store, keeping
-    their ORIGINAL barcode for life (a transfer is not a purchase -> no new
-    barcode is minted). The destination's on-hand rises by exactly the number of
-    units that physically arrived.
+    flipped back and re-homed to the destination store, keeping their ORIGINAL
+    barcode for life (a transfer is not a purchase -> no new barcode is minted).
+
+    BUG-009: units that arrived DAMAGED must NOT land on the sellable floor.
+    The moved pool for a line is split into two:
+      * good    = quantity_received - quantity_damaged -> STOCK_STATUS_AVAILABLE
+                  (counts toward destination on-hand / POS).
+      * damaged = quantity_damaged                     -> STOCK_STATUS_QUARANTINED
+                  (re-homed to the destination store but NEVER AVAILABLE, so it
+                  drops out of on-hand and POS until an explicit disposition).
+    So the destination's sellable on-hand rises by exactly the number of GOOD
+    units that physically arrived; damaged units are tracked distinctly.
 
     Per line we re-home at most `quantity_received` units, bounded by the pool of
     units actually shipped (so a receive can never exceed what left the source).
     `received_qty_committed` tracks how many of the line's shipped units have
     already been re-homed, so a repeated or partial receive only ever moves the
     DELTA - never double-counts and never fabricates stock the source never sent.
+    The damaged slice is taken from the TAIL of the delta so a partial receive
+    re-homes good units first and the damaged ones settle once the full
+    quantity_received is committed.
 
     Fail-soft: no stock repo -> transfer returned unchanged (lifecycle still
     advances, as before).
@@ -558,16 +637,37 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
         return transfer
 
     moved_total = 0
+    damaged_total = 0
     for line in transfer.get("items", []):
         product_id = line.get("product_id")
         try:
             received = int(float(line.get("quantity_received", 0) or 0))
         except (TypeError, ValueError):
             received = 0
+        try:
+            damaged = int(float(line.get("quantity_damaged", 0) or 0))
+        except (TypeError, ValueError):
+            damaged = 0
+        # Defensive clamp: damaged can never exceed received (the endpoint also
+        # rejects this with a 400, but the move helper must stay self-consistent
+        # if called directly).
+        if damaged < 0:
+            damaged = 0
+        if damaged > received:
+            damaged = received
         already = int(line.get("received_qty_committed", 0) or 0)
         want = received - already
         if not product_id or want <= 0:
             continue
+
+        # How many of the units we are about to re-home in THIS pass are damaged.
+        # The damaged units sit at the tail of the full received quantity, so the
+        # number landing in quarantine this pass is the overlap between the
+        # delta window [already, received) and the damaged tail [received-damaged,
+        # received). Good units are re-homed first; damaged ones settle last.
+        damaged_start = received - damaged
+        damaged_in_pass = max(0, min(received, already + want) - max(already, damaged_start))
+        good_in_pass = want - damaged_in_pass
 
         # The units to re-home are exactly those SHIP marked TRANSFERRED for this
         # transfer (stable, ordered pool); never mint new ones.
@@ -575,26 +675,37 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
             stock_repo, transfer, product_id, line.get("shipped_stock_ids")
         )
         movable = pool[already : already + want]
+        # The first `good_in_pass` go AVAILABLE; the trailing `damaged_in_pass`
+        # go to QUARANTINE.
+        good_ids = movable[:good_in_pass]
+        damaged_ids = movable[good_in_pass:]
 
         received_ids: List[str] = list(line.get("received_stock_ids", []))
+        damaged_unit_ids: List[str] = list(line.get("damaged_stock_ids", []))
         moved_here = 0
-        for sid in movable:
-            ok = stock_repo.update(
-                sid,
-                {
-                    "status": STOCK_STATUS_AVAILABLE,
-                    "store_id": to_store,
-                    "received_at": datetime.now().isoformat(),
-                    "source_type": "TRANSFER",
-                    "source_id": transfer.get("id"),
-                    "transfer_number": transfer.get("transfer_number"),
-                    "from_store_id": transfer.get("from_location_id"),
-                    # No longer held against the (now-completed) transfer.
-                    "transfer_id": None,
-                    "transfer_to_store_id": None,
-                },
-            )
-            if ok:
+
+        def _rehome(sid, new_status):
+            patch = {
+                "status": new_status,
+                "store_id": to_store,
+                "received_at": datetime.now().isoformat(),
+                "source_type": "TRANSFER",
+                "source_id": transfer.get("id"),
+                "transfer_number": transfer.get("transfer_number"),
+                "from_store_id": transfer.get("from_location_id"),
+                # No longer held against the (now-completed) transfer.
+                "transfer_id": None,
+                "transfer_to_store_id": None,
+            }
+            if new_status == STOCK_STATUS_QUARANTINED:
+                # Flag WHY the unit is parked so the quarantine console can
+                # surface it and an explicit disposition is required to release.
+                patch["quarantine_reason"] = "TRANSFER_DAMAGED"
+                patch["quarantined_at"] = datetime.now().isoformat()
+            return stock_repo.update(sid, patch)
+
+        for sid in good_ids:
+            if _rehome(sid, STOCK_STATUS_AVAILABLE):
                 received_ids.append(str(sid))
                 moved_here += 1
                 moved_total += 1
@@ -616,11 +727,45 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
                     transfer,
                 )
 
+        for sid in damaged_ids:
+            if _rehome(sid, STOCK_STATUS_QUARANTINED):
+                damaged_unit_ids.append(str(sid))
+                moved_here += 1
+                damaged_total += 1
+                _audit_stock_move(
+                    STOCK_STATUS_TRANSFERRED,
+                    STOCK_STATUS_QUARANTINED,
+                    str(sid),
+                    transfer,
+                    {
+                        "product_id": product_id,
+                        "moved_to": to_store,
+                        "reason": "TRANSFER_DAMAGED",
+                    },
+                )
+                _ledger_transfer_event(
+                    "TRANSFER_RECEIVE",
+                    str(sid),
+                    STOCK_STATUS_TRANSFERRED,
+                    STOCK_STATUS_QUARANTINED,
+                    product_id,
+                    to_store,
+                    None,
+                    transfer,
+                )
+
         line["received_stock_ids"] = received_ids
+        if damaged_unit_ids:
+            line["damaged_stock_ids"] = damaged_unit_ids
+        # received_qty_committed counts ALL re-homed units (good + damaged) so a
+        # repeat/partial receive never re-moves the same physical unit.
         line["received_qty_committed"] = already + moved_here
 
     transfer["stock_units_moved_in"] = (
         int(transfer.get("stock_units_moved_in", 0) or 0) + moved_total
+    )
+    transfer["stock_units_quarantined"] = (
+        int(transfer.get("stock_units_quarantined", 0) or 0) + damaged_total
     )
     return transfer
 
@@ -1246,6 +1391,37 @@ async def receive_transfer(
     total_received = 0
     total_damaged = 0
 
+    # BUG-011: a line's quantity_received must never exceed what was shipped.
+    # The pool-slice in _apply_receive_stock_move already physically caps the
+    # move, but the RECORDED number must be truthful -- otherwise the doc/summary
+    # math inflates and a partial transfer can be falsely marked RECEIVED. Reject
+    # an over-receive LOUDLY before storing anything. quantity_shipped falls back
+    # to quantity_requested for legacy docs that never stamped a shipped qty.
+    for received in items_received:
+        item = _resolve_item(received.transfer_item_id)
+        if item is None:
+            continue
+        try:
+            shipped_cap = int(float(
+                item.get("quantity_shipped")
+                if item.get("quantity_shipped") is not None
+                else item.get("quantity_requested", 0) or 0
+            ))
+        except (TypeError, ValueError):
+            shipped_cap = 0
+        if received.quantity_received > shipped_cap:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "RECEIVE_EXCEEDS_SHIPPED",
+                    "message": (
+                        f"quantity_received ({received.quantity_received}) cannot "
+                        f"exceed quantity_shipped ({shipped_cap}) for item "
+                        f"{received.transfer_item_id}."
+                    ),
+                },
+            )
+
     for received in items_received:
         item = _resolve_item(received.transfer_item_id)
         if item is not None:
@@ -1290,6 +1466,19 @@ async def receive_transfer(
         },
     )
 
+    # BUG-019: surface any receive mismatch as a follow-up task so a short /
+    # surplus / damaged shipment is reconciled instead of silently closed.
+    short = max(0, total_expected - total_received)
+    surplus = max(0, total_received - total_expected)
+    discrepancy_task_id = None
+    if short > 0 or surplus > 0 or total_damaged > 0:
+        discrepancy_task_id = _create_receive_mismatch_task(
+            transfer,
+            {"short": short, "surplus": surplus, "damaged": total_damaged},
+        )
+        if discrepancy_task_id:
+            transfer["discrepancy_task_id"] = discrepancy_task_id
+
     _save_transfer(transfer)
     return {
         "transfer": transfer,
@@ -1298,6 +1487,9 @@ async def receive_transfer(
             "expected": total_expected,
             "received": total_received,
             "damaged": total_damaged,
+            "short": short,
+            "surplus": surplus,
+            "discrepancy_task_id": discrepancy_task_id,
         },
     }
 

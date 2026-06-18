@@ -1701,6 +1701,33 @@ async def create_grn(
             },
         )
 
+    # BUG-010: the presence check above only proves a NON-EMPTY id was sent -- a
+    # forged / stale id would pass the gate and persist, only 404'ing later at
+    # download time, defeating the mandatory-attachment guarantee. Verify the
+    # file actually exists in the store BEFORE persisting. Only STANDARD GRNs are
+    # gated (a DC has no receipt-time attachment to verify).
+    # Storage-down vs forged-id: get_file_store() returning None means storage
+    # itself is unavailable -> 503 (do NOT mask the existing fail-loud behavior
+    # by 400'ing). A live store whose get() finds nothing == a forged/stale id
+    # -> 400 ATTACHMENT_INVALID.
+    if not is_dc:
+        store = get_file_store()
+        if store is None:
+            raise HTTPException(
+                status_code=503, detail="File storage unavailable"
+            )
+        if store.get(str(grn.attachment_file_id).strip()) is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ATTACHMENT_INVALID",
+                    "message": (
+                        "The attached file is no longer available or invalid. "
+                        "Please re-upload."
+                    ),
+                },
+            )
+
     # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
     # no pre-logged PO) -- only validate when one was supplied.
     po = None

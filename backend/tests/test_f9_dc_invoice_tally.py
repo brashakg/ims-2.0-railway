@@ -523,11 +523,20 @@ class TestDcLogging:
         # A different dc_number -> 201.
         assert _log_dc(c, "DC-OTHER", [_grn_item("L1", 5)]).status_code == 201
 
-    def test_legacy_grn_without_subtype_reads_as_standard(self):
+    def test_legacy_grn_without_subtype_reads_as_standard(self, monkeypatch):
         # Acceptance #12: a GRN with no grn_subtype + a PO + invoice books as a
         # STANDARD GRN (backward-compatible). P1/S3: a STANDARD GRN now also
         # requires the receipt document (attachment_file_id) -- the ops user
-        # attaches the vendor invoice/challan before creating it.
+        # attaches the vendor invoice/challan before creating it. BUG-010: that
+        # id must resolve to a REAL stored file, so seed one and reference it.
+        from api.services.file_store import InMemoryFileStore
+
+        store = InMemoryFileStore()
+        fid = store.put(
+            content=b"%PDF-1.4 invoice", filename="inv.pdf",
+            mime_type="application/pdf",
+        )
+        monkeypatch.setattr(vendors_router, "get_file_store", lambda: store)
         db = _FakeDB()
         po = {
             "po_id": "PO1",
@@ -545,7 +554,7 @@ class TestDcLogging:
                 "vendor_invoice_no": "INV-1",
                 "vendor_invoice_date": "2026-05-01",
                 "items": [_grn_item("L1", 5)],
-                "attachment_file_id": "file-test-1",
+                "attachment_file_id": fid,
             },
         )
         assert r.status_code == 201, r.text

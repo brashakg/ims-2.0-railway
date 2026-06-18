@@ -127,11 +127,18 @@ def test_standard_grn_without_attachment_is_rejected(monkeypatch):
 def test_standard_grn_with_attachment_is_created(monkeypatch):
     grn_repo = _FakeGRNRepo()
     _patch_grn(monkeypatch, grn_repo, _FakePORepo())
+    # BUG-010: the attachment file must ACTUALLY exist in the store, so put a
+    # real file and reference its id (a forged id is now rejected -- see below).
+    store = InMemoryFileStore()
+    fid = store.put(
+        content=b"%PDF-1.4 real", filename="invoice.pdf", mime_type="application/pdf"
+    )
+    monkeypatch.setattr(v, "get_file_store", lambda: store)
     grn = GRNCreate(
         po_id="PO1",
         vendor_invoice_no="INV-9",
         items=_std_items(),
-        attachment_file_id="file-123",
+        attachment_file_id=fid,
         attachment_filename="invoice.pdf",
         attachment_mime="application/pdf",
     )
@@ -140,9 +147,75 @@ def test_standard_grn_with_attachment_is_created(monkeypatch):
     # Persisted with the attachment metadata so the accountant console can link
     # back to the source document.
     assert grn_repo.created is not None
-    assert grn_repo.created["attachment_file_id"] == "file-123"
+    assert grn_repo.created["attachment_file_id"] == fid
     assert grn_repo.created["attachment_filename"] == "invoice.pdf"
     assert grn_repo.created["attachment_mime"] == "application/pdf"
+
+
+def test_standard_grn_with_forged_attachment_is_rejected(monkeypatch):
+    """BUG-010: a non-empty but non-existent attachment_file_id must be rejected
+    with a 400 ATTACHMENT_INVALID BEFORE persisting -- a forged id can no longer
+    pass the gate and only 404 later at download time."""
+    grn_repo = _FakeGRNRepo()
+    _patch_grn(monkeypatch, grn_repo, _FakePORepo())
+    # An EMPTY store -> the forged id resolves to nothing.
+    store = InMemoryFileStore()
+    monkeypatch.setattr(v, "get_file_store", lambda: store)
+    grn = GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-9",
+        items=_std_items(),
+        attachment_file_id="forged-does-not-exist",
+        attachment_filename="invoice.pdf",
+        attachment_mime="application/pdf",
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(create_grn(grn, current_user=_user()))
+    assert exc.value.status_code == 400
+    assert isinstance(exc.value.detail, dict)
+    assert exc.value.detail.get("code") == "ATTACHMENT_INVALID"
+    # Nothing persisted -- the validation fires before any save.
+    assert grn_repo.created is None
+
+
+def test_standard_grn_attachment_storage_down_is_503(monkeypatch):
+    """BUG-010 boundary: when file storage itself is unavailable (get_file_store
+    returns None) the create must 503 (fail-loud, existing behavior), NOT 400 --
+    a storage outage must not be misreported as a forged attachment."""
+    grn_repo = _FakeGRNRepo()
+    _patch_grn(monkeypatch, grn_repo, _FakePORepo())
+    monkeypatch.setattr(v, "get_file_store", lambda: None)
+    grn = GRNCreate(
+        po_id="PO1",
+        vendor_invoice_no="INV-9",
+        items=_std_items(),
+        attachment_file_id="some-id",
+        attachment_filename="invoice.pdf",
+        attachment_mime="application/pdf",
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(create_grn(grn, current_user=_user()))
+    assert exc.value.status_code == 503
+    assert grn_repo.created is None
+
+
+def test_delivery_challan_skips_attachment_existence_check(monkeypatch):
+    """A DC is exempt from BOTH the presence gate and the existence check -- it
+    must log even with no attachment and no file store configured."""
+    grn_repo = _FakeGRNRepo()
+    _patch_grn(monkeypatch, grn_repo, _FakePORepo())
+    # No file store at all -> a STANDARD GRN would 503, but a DC must still log.
+    monkeypatch.setattr(v, "get_file_store", lambda: None)
+    grn = GRNCreate(
+        grn_subtype="DELIVERY_CHALLAN",
+        vendor_id="V1",
+        dc_number="DC-88",
+        dc_date="2026-06-16",
+        items=_std_items(),
+    )
+    res = asyncio.run(create_grn(grn, current_user=_user()))
+    assert res["grn_subtype"] == "DELIVERY_CHALLAN"
+    assert grn_repo.created is not None
 
 
 def test_delivery_challan_without_attachment_is_exempt(monkeypatch):
