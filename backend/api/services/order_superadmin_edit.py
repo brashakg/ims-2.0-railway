@@ -231,6 +231,71 @@ def generate_note_number(note_type: str) -> str:
     return f"{prefix}-{stamp}-{uuid.uuid4().hex[:6].upper()}"
 
 
+def build_money_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    """A small, human-readable change summary for the audit row.
+
+    Only the money-relevant top-level fields are diffed (the full item arrays
+    live in ``before_state`` / ``after_state`` on the audit row); this gives a
+    quick "what moved" view at the head of an audit entry. Pure.
+    """
+    keys = (
+        "subtotal",
+        "cart_discount_percent",
+        "cart_discount_amount",
+        "total_discount",
+        "tax_amount",
+        "grand_total",
+        "customer_id",
+        "customer_name",
+        "invoice_number",
+        "item_count",
+    )
+    diff: Dict[str, Any] = {}
+    for k in keys:
+        b = before.get(k)
+        a = after.get(k)
+        if b != a:
+            diff[k] = {"from": b, "to": a}
+    return diff
+
+
+def build_revised_invoice_doc(
+    *,
+    order: Dict[str, Any],
+    new_invoice_number: str,
+    before: Dict[str, Any],
+    after: Dict[str, Any],
+    reason: str,
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Build the revised-invoice link/record persisted to ``revised_invoices``.
+
+    A REVISED invoice is a fresh GST tax invoice (its own serial) that
+    SUPERSEDES the original. The original is marked superseded/void with a
+    pointer to the new serial; this record is the bidirectional link + the
+    money snapshot at the moment of revision. Pure: the router allocates the
+    serial and persists; this only shapes the document. Never raises.
+    """
+    now = datetime.now().isoformat()
+    return {
+        "revision_id": str(uuid.uuid4()),
+        "order_id": order.get("order_id"),
+        "order_number": order.get("order_number"),
+        "original_invoice_number": before.get("invoice_number"),
+        "revised_invoice_number": new_invoice_number,
+        "customer_id": order.get("customer_id"),
+        "customer_name": order.get("customer_name"),
+        "store_id": order.get("store_id"),
+        "old_grand_total": round(_f(before.get("grand_total")), 2),
+        "new_grand_total": round(_f(after.get("grand_total")), 2),
+        "reason": reason,
+        "issued_by": user_id,
+        "status": "ISSUED",
+        "created_at": now,
+        "source": "SUPERADMIN_ORDER_EDIT",
+    }
+
+
 def build_credit_note_doc(
     *,
     order: Dict[str, Any],
