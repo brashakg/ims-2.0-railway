@@ -215,7 +215,8 @@ def test_lens_fractional_axis_rejected(client, staff_headers, rx_orders):
 
 
 # ---------------------------------------------------------------------------
-# BUG-006 -- Rx-required on lens / contact-lens lines
+# BUG-006 -- Rx-required on SPECTACLE lens lines (contact lenses EXEMPT)
+# Owner policy 2026-06-18: "block Rx lenses, allow contacts".
 # ---------------------------------------------------------------------------
 def test_optical_lens_without_prescription_rejected(client, staff_headers,
                                                     rx_orders):
@@ -228,14 +229,28 @@ def test_optical_lens_without_prescription_rejected(client, staff_headers,
     assert "prescription" in r.text.lower()
 
 
-def test_contact_lens_without_prescription_rejected(client, staff_headers,
+def test_contact_lens_without_prescription_allowed(client, staff_headers,
                                                     rx_orders):
+    """Owner policy 2026-06-18 ("block Rx lenses, allow contacts"): a contact-
+    lens line is EXEMPT from the hard Rx-required gate, so a repeat daily-
+    disposable / colored-contact sale is NOT blocked for a missing Rx."""
     pid = _seed_product(rx_orders, pid="CL-NORX", category="CONTACT_LENS",
                         item_type="CONTACT_LENS")
     r = _post(client, staff_headers,
               [_item(pid, item_type="CONTACT_LENS", category="CONTACT_LENS")])
+    assert r.status_code in (200, 201), r.text
+
+
+def test_contact_lens_bad_power_still_rejected(client, staff_headers, rx_orders):
+    """Power-range validation is UNIVERSAL (BUG-005): even though a CL needs no
+    linked Rx, a clinically impossible power on the line is still rejected."""
+    pid = _seed_product(rx_orders, pid="CL-BADPWR", category="CONTACT_LENS",
+                        item_type="CONTACT_LENS")
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="CONTACT_LENS", category="CONTACT_LENS",
+                     cyl=-8.0, axis=90)])  # cyl outside -6..+6
     assert r.status_code == 422, r.text
-    assert "prescription" in r.text.lower()
+    assert "cyl" in r.text.lower()
 
 
 def test_prescription_for_other_customer_rejected(client, staff_headers,

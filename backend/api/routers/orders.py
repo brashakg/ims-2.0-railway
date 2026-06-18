@@ -577,10 +577,12 @@ def _validate_order_line_rx(item, customer_id: str, current_user: dict) -> None:
 
     BUG-005: range / 0.25-step / whole-axis / cyl-requires-axis check on the
              line's sph/cyl/add/axis via the SAME canonical clinical validators.
-    BUG-006: a spectacle-Rx-lens or contact-lens line must carry a prescription_id
-             that resolves to a real prescription for THIS customer; an expired Rx
-             is allowed only for Store-Manager+.
-    Frame-only / non-Rx lines (no powers, not a lens type) are unaffected.
+    BUG-006: a SPECTACLE (Rx) lens line must carry a prescription_id that
+             resolves to a real prescription for THIS customer; an expired Rx is
+             allowed only for Store-Manager+. CONTACT LENSES are EXEMPT from this
+             hard gate (owner policy 2026-06-18 "block Rx lenses, allow contacts").
+    Frame-only / contact-lens / non-Rx lines are not Rx-gated -- but their
+    powers (if any) are STILL range-checked above (BUG-005 is universal).
     """
     name = getattr(item, "product_name", None) or getattr(item, "product_id", "") or "item"
 
@@ -601,11 +603,11 @@ def _validate_order_line_rx(item, customer_id: str, current_user: dict) -> None:
             detail=f"Invalid prescription power on '{name}': {exc}",
         )
 
-    # --- BUG-006: Rx-required for spectacle-lens / contact-lens lines ----------
+    # --- BUG-006: Rx-required for SPECTACLE-lens lines (contacts EXEMPT) -------
     item_type = getattr(item, "item_type", None)
     category = getattr(item, "category", None)
     if not _is_rx_required_line(item_type, category):
-        return  # frame-only / sunglass / accessory / service -> no Rx needed
+        return  # frame / sunglass / accessory / service / CONTACT-LENS -> no Rx needed
 
     rx_id = (getattr(item, "prescription_id", None) or "").strip()
     if not rx_id:

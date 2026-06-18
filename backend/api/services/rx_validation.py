@@ -123,13 +123,16 @@ def _validate_axis(value, *, cyl=None) -> None:
 # ---------------------------------------------------------------------------
 # Rx-required classification (which order lines must carry a prescription)
 # ---------------------------------------------------------------------------
-# Spectacle (Rx) lenses and contact lenses dispense a prescription power, so an
-# order line for one MUST be backed by a real prescription. Frames, sunglasses,
-# accessories, services, plano/zero-power readers etc. are non-Rx and exempt.
+# Owner decision 2026-06-18 ("block Rx lenses, allow contacts"): a SPECTACLE
+# (optical / single-vision / bifocal / progressive) lens dispenses a ground
+# prescription power, so an order line for one MUST be backed by a real
+# prescription. CONTACT LENSES are EXEMPT from the hard Rx-required gate so a
+# repeat daily-disposable / colored-contact sale is never blocked at POS.
+# Frames, sunglasses, accessories, services, plano readers are non-Rx and exempt.
 #
 # We classify on the normalised item_type / category token. Kept permissive
-# (substring match on lens/spectacle/contact) so the many catalog spellings all
-# resolve, while FRAME / SUNGLASS / ACCESSORY / SERVICE stay exempt.
+# (substring match on lens/contact) so the many catalog spellings resolve, while
+# FRAME / SUNGLASS / WATCH / ACCESSORY / SERVICE stay exempt.
 
 # Explicit canonical Rx-lens / contact-lens item types.
 _RX_LENS_TYPES = {
@@ -148,22 +151,33 @@ _CONTACT_LENS_TYPES = {
 
 
 def is_rx_required_line(item_type=None, category=None) -> bool:
-    """True when an order line dispenses a prescription power (spectacle Rx lens
-    or contact lens) and therefore REQUIRES a prescription_id. Frame-only /
-    sunglass / accessory / service lines return False.
+    """True when an order line is a SPECTACLE / prescription LENS that MUST be
+    backed by a prescription_id at POS. Frame / sunglass / accessory / service
+    AND contact-lens lines return False.
+
+    Owner decision 2026-06-18 ("block Rx lenses, allow contacts"): contact
+    lenses are EXEMPT from the hard Rx-required gate (a repeat daily-disposable
+    or colored-contact sale must not be blocked). NOTE: clinical power-range
+    validation (sph/cyl/add/axis) still runs on EVERY line upstream of this
+    check -- this gate is ONLY about *requiring a linked prescription*.
 
     Resolution: item_type is the line's true nature at POS; category is a
-    fallback. Both are matched case-insensitively against the canonical sets,
-    then by a permissive substring check so catalog spelling variants resolve."""
+    fallback. Both are matched case-insensitively; contact takes precedence so a
+    CL is never mis-classified as a required spectacle lens."""
+    tokens = []
     for raw in (item_type, category):
-        if not raw:
-            continue
-        token = str(raw).strip().upper().replace("-", "_").replace(" ", "_")
-        if token in _RX_LENS_TYPES or token in _CONTACT_LENS_TYPES:
-            return True
-        # Permissive substring: "OPTICAL LENS", "SINGLE_VISION_LENS",
-        # "CONTACT LENSES", "SPECTACLE LENS" all resolve. FRAME / SUNGLASS /
-        # ACCESSORY / SERVICE never contain these tokens.
-        if "CONTACT_LENS" in token or token.endswith("_LENS") or token == "LENS":
+        if raw:
+            tokens.append(str(raw).strip().upper().replace("-", "_").replace(" ", "_"))
+    # Contact lenses are EXEMPT: if EITHER field says contact, the line is a CL
+    # and carries no hard prescription requirement.
+    for token in tokens:
+        if token in _CONTACT_LENS_TYPES or "CONTACT" in token:
+            return False
+    # Spectacle / prescription lens -> prescription_id mandatory. After the CL
+    # exemption above, any remaining "LENS" token is a spectacle Rx lens
+    # (OPTICAL_LENS / SPECTACLE_LENS / RX_LENS(ES) / *_LENS / LENS). FRAME /
+    # SUNGLASS / WATCH / ACCESSORY / SERVICE contain no "LENS" token.
+    for token in tokens:
+        if token in _RX_LENS_TYPES or "LENS" in token:
             return True
     return False
