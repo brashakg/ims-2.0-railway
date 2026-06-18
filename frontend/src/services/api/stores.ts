@@ -183,6 +183,12 @@ export const adminUserApi = {
     status?: string;
     moduleAccess?: Record<string, boolean>;
     permissions?: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
+    // Govt-ID + statutory numbers (optional; server fail-soft validates format).
+    aadhaarNo?: string;
+    panNo?: string;
+    uanNo?: string;
+    pfNo?: string;
+    esicNo?: string;
   }) => {
     // Map the UI shape onto the backend UserCreate contract
     // (full_name/roles[]/store_ids[]/discount_cap). Accepts the multi-select
@@ -223,6 +229,13 @@ export const adminUserApi = {
       payload.primary_store_id = data.primaryStoreId || storeIds[0];
     }
     if (data.discountCap != null) payload.discount_cap = data.discountCap;
+    // Govt-ID + statutory numbers. Only sent when non-empty so the stored doc
+    // isn't littered with nulls; the server format-validates fail-soft.
+    if (data.aadhaarNo) payload.aadhaar_no = data.aadhaarNo;
+    if (data.panNo) payload.pan_no = data.panNo;
+    if (data.uanNo) payload.uan_no = data.uanNo;
+    if (data.pfNo) payload.pf_no = data.pfNo;
+    if (data.esicNo) payload.esic_no = data.esicNo;
     // Deny-only per-user module override (canonical key -> bool). Only sent when
     // provided so create defaults to {} server-side (all role defaults apply).
     if (data.moduleAccess != null) payload.module_access = data.moduleAccess;
