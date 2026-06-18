@@ -92,6 +92,19 @@ function fmtPower(v: any): string {
   return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
 }
 
+// Optometrist display NAME for an Rx card (backlog #2). The backend stores
+// optometrist_name on new Rx and backfills it from the users collection on
+// read-back. We show a name only — never a raw id (a UUID-looking value with
+// no spaces is treated as an unresolved id and hidden).
+function optometristName(rx: any): string | null {
+  const name = rx?.optometrist_name || rx?.optometristName;
+  if (!name || typeof name !== 'string') return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  const looksLikeId = /^[0-9a-f-]{16,}$/i.test(trimmed) && !trimmed.includes(' ');
+  return looksLikeId ? null : trimmed;
+}
+
 export function ClinicPrescriptionHistory({
   isOpen,
   onClose,
@@ -194,6 +207,9 @@ export function ClinicPrescriptionHistory({
           customer_id: customerId,
           source,
           optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
+          // Forward the logged-in user's NAME so the Rx card shows a name, not
+          // a raw id (backlog #2). Backend persists + resolves it on read-back.
+          optometrist_name: user?.name || undefined,
           validity_months: 12,
           ipd: rxData.ipd || undefined,
           lens_recommendation: rxData.lens_type || undefined,
@@ -321,6 +337,14 @@ export function ClinicPrescriptionHistory({
                               <span className="font-medium">{fmtPower(le.sph ?? le.sphere)} / {fmtPower(le.cyl ?? le.cylinder)} / {le.axis ?? '-'}</span>
                             </div>
                           </div>
+
+                          {/* Optometrist NAME (backlog #2 — never a raw id) */}
+                          {optometristName(rx) && (
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-2">
+                              <User className="w-3.5 h-3.5" />
+                              <span>By {optometristName(rx)}</span>
+                            </div>
+                          )}
 
                           {/* Per-Rx actions */}
                           <div className="flex items-center gap-3">

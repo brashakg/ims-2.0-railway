@@ -16,6 +16,7 @@ from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
     get_audit_repository,
+    get_user_repository,
     can_access_store_scoped,
     filter_docs_by_store,
 )
@@ -279,6 +280,12 @@ class PrescriptionCreate(BaseModel):
     rx_kind: Literal["SPECTACLE", "CONTACT_LENS"] = "SPECTACLE"
     source: str = "TESTED_AT_STORE"  # TESTED_AT_STORE, FROM_DOCTOR
     optometrist_id: Optional[str] = None
+    # Human-readable name of the optometrist who recorded this Rx. The owner saw
+    # a raw optometrist_id on Rx cards, so the create-door now captures the
+    # logged-in user's NAME alongside the id and persists it. Optional: when the
+    # caller omits it, the endpoint derives it from the JWT (full_name/username),
+    # and read-back resolves it from the users collection for older docs.
+    optometrist_name: Optional[str] = None
     validity_months: Optional[int] = Field(default=None, ge=6, le=24)
     # Optional back-date: when supplied the prescription is stamped with this
     # date instead of utcnow(), and expiry_date is derived from it. Must not be
@@ -604,6 +611,10 @@ async def list_prescriptions(
         # for every branch.
         total = len(prescriptions)
         paged = prescriptions[skip : skip + limit]
+        # Backfill optometrist_name (older docs only stored optometrist_id) so
+        # the Prescriptions library never shows a raw id. Cached per request.
+        _opt_name_cache: dict = {}
+        paged = [_enrich_optometrist_name(p, _opt_name_cache) for p in paged]
         return {"prescriptions": paged, "total": total}
 
     return {"prescriptions": [], "total": 0}
@@ -634,6 +645,53 @@ def _add_months(dt: datetime, months: int) -> datetime:
     leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
     dim = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
     return dt.replace(year=year, month=month, day=min(dt.day, dim))
+
+
+def _resolve_optometrist_name(optometrist_id):
+    """Best-effort lookup of an optometrist's display name by user id.
+
+    Used both on create (when the caller didn't supply a name) and on read-back
+    (to backfill the name on older docs that only stored optometrist_id, so the
+    owner never sees a raw id on an Rx card). FAIL-SOFT: any error or missing
+    user returns None and the caller falls back gracefully."""
+    if not optometrist_id:
+        return None
+    try:
+        user_repo = get_user_repository()
+        if user_repo is None:
+            return None
+        user = user_repo.find_by_id(optometrist_id)
+        if not user:
+            return None
+        return user.get("full_name") or user.get("name") or user.get("username")
+    except Exception:  # noqa: BLE001 - name resolution must never break a read
+        return None
+
+
+def _enrich_optometrist_name(rx: dict, cache: Optional[dict] = None) -> dict:
+    """Return a copy of an Rx doc guaranteed to carry a human-readable
+    optometrist_name. Honours a stored name; otherwise resolves it from the
+    users collection by optometrist_id (cached per-request to avoid N lookups
+    when enriching a whole list/family). Never raises."""
+    if not isinstance(rx, dict):
+        return rx
+    name = (rx.get("optometrist_name") or "").strip()
+    if name:
+        return rx
+    opt_id = rx.get("optometrist_id")
+    if not opt_id:
+        return rx
+    if cache is not None and opt_id in cache:
+        resolved = cache[opt_id]
+    else:
+        resolved = _resolve_optometrist_name(opt_id)
+        if cache is not None:
+            cache[opt_id] = resolved
+    if resolved:
+        out = dict(rx)
+        out["optometrist_name"] = resolved
+        return out
+    return rx
 
 
 def _rx_validity(rx: dict):
@@ -707,6 +765,10 @@ async def family_prescriptions(
     for rx in all_rx:
         by_patient.setdefault(rx.get("patient_id"), []).append(rx)
 
+    # Per-request cache so backfilling optometrist names across the whole
+    # household never hits the users collection more than once per id.
+    _opt_name_cache: dict = {}
+
     def _enrich(rx_list):
         rows, valid_count, latest = [], 0, None
         ordered = sorted(
@@ -722,7 +784,9 @@ async def family_prescriptions(
         )
         for rx in ordered:
             expiry, is_valid = _rx_validity(rx)
-            row = dict(rx)
+            # Backfill optometrist_name from the users collection for older docs
+            # that only stored optometrist_id (owner saw a raw id on the card).
+            row = dict(_enrich_optometrist_name(rx, _opt_name_cache))
             row["expiry_date"] = expiry.isoformat() if expiry else None
             row["is_valid"] = bool(is_valid) if is_valid is not None else None
             rows.append(row)
@@ -803,6 +867,24 @@ async def create_prescription(
     # If FROM_DOCTOR, optometrist_id is optional
     if rx.source == "FROM_DOCTOR" and not rx.optometrist_id:
         rx.optometrist_id = current_user.get("user_id", "external-doctor")
+
+    # Capture the optometrist's NAME so the Rx card never shows a raw id.
+    # Priority: explicit name from the caller -> the logged-in user's name from
+    # the JWT (when the optometrist is the current user) -> a lookup on the
+    # users collection by optometrist_id. Stored on the doc so reads are cheap.
+    optometrist_name = (rx.optometrist_name or "").strip() or None
+    if not optometrist_name:
+        if rx.optometrist_id and rx.optometrist_id == current_user.get("user_id"):
+            optometrist_name = (
+                current_user.get("full_name") or current_user.get("username")
+            )
+        elif rx.optometrist_id:
+            optometrist_name = _resolve_optometrist_name(rx.optometrist_id)
+        if not optometrist_name:
+            # Final fallback: the person creating the record.
+            optometrist_name = (
+                current_user.get("full_name") or current_user.get("username")
+            )
 
     # Validate prescription power ranges
     def _validate_power(eye_label: str, eye: EyeData):
@@ -899,6 +981,7 @@ async def create_prescription(
             "store_id": current_user.get("active_store_id"),
             "source": rx.source,
             "optometrist_id": rx.optometrist_id,
+            "optometrist_name": optometrist_name,
             "prescription_date": prescription_date.isoformat(),
             # test_date mirrors prescription_date so legacy readers (clinical
             # report queries, _rx_validity, family-view sort) that look for
@@ -946,6 +1029,7 @@ async def create_prescription(
                     "patient_id": rx.patient_id,
                     "source": rx.source,
                     "optometrist_id": rx.optometrist_id,
+                    "optometrist_name": optometrist_name,
                 },
             )
             return {
@@ -1084,7 +1168,8 @@ async def get_prescription(
                 prescription.get("store_id"), current_user
             ):
                 raise HTTPException(status_code=404, detail="Prescription not found")
-            return prescription
+            # Backfill optometrist_name for older docs that only stored the id.
+            return _enrich_optometrist_name(prescription)
         raise HTTPException(status_code=404, detail="Prescription not found")
 
     return {"prescription_id": prescription_id}
