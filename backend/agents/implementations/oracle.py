@@ -344,10 +344,14 @@ class OracleAgent(JarvisAgent):
         if is_claude_available():
             for _score, cid, name, _store, sub, _ltv in scored[:10]:
                 try:
+                    # SEC-1: never embed the raw customer name in the LLM-bound
+                    # summary -- it is free text and is not key-scrubbed at the
+                    # "customer" level. Reference the customer_id only; the UI
+                    # resolves the display name from customer_id locally.
                     narrative, _rec = await self._enrich_with_claude({
                         "kind": "vip_churn",
                         "severity": "HIGH" if sub["risk_label"] == "HIGH" else "MEDIUM",
-                        "summary": (f"VIP '{name}' overdue by {sub['overdue_by_days']}d "
+                        "summary": (f"VIP customer {cid} overdue by {sub['overdue_by_days']}d "
                                     f"(usual interval {sub['usual_interval_days']}d)"),
                     })
                     if narrative:
@@ -379,9 +383,12 @@ class OracleAgent(JarvisAgent):
         high_anomalies: List[Dict[str, Any]] = []
         for _score, cid, name, store, sub, _ltv in scored:
             if sub["risk_label"] == "HIGH":
+                # SEC-1: keep the customer name OUT of the persisted/LLM-bound
+                # summary free text (it is not key-scrubbed). customer_id is
+                # carried alongside; the UI resolves the display name locally.
                 high_anomalies.append({
                     "kind": "vip_churn", "severity": "HIGH",
-                    "summary": (f"VIP '{name}' overdue by {sub['overdue_by_days']} days "
+                    "summary": (f"VIP customer {cid} overdue by {sub['overdue_by_days']} days "
                                 f"(usual interval {sub['usual_interval_days']}d)"),
                     "customer_id": cid, "store_id": store,
                     "overdue_by_days": sub["overdue_by_days"],
@@ -833,15 +840,27 @@ class OracleAgent(JarvisAgent):
         for a single anomaly. Returns (narrative, recommendation), either
         of which may be None on failure.
         """
+        # SEC-1: the anomaly doc can embed real customer names (e.g. the
+        # VIP-churn scan writes "VIP '<name>' overdue ..."). Pass it via
+        # business_data so scrub_pii (scrub_level="customer") strips
+        # customer/patient PII BEFORE it reaches the Anthropic API, instead
+        # of json.dumps-ing the raw doc into the prompt string (which is
+        # never scrubbed).
         prompt = (
-            "Here is an anomaly detected by our hourly scan. Explain in "
-            "ONE paragraph what likely happened and give ONE concrete "
-            "recommendation a store manager can act on this shift.\n\n"
-            "Anomaly JSON:\n" + json.dumps(anomaly, default=str, indent=2) + "\n\n"
+            "An anomaly was detected by our hourly scan; it is provided in "
+            "the BUSINESS DATA block. Explain in ONE paragraph what likely "
+            "happened and give ONE concrete recommendation a store manager "
+            "can act on this shift.\n\n"
             "Respond with this JSON shape:\n"
             '{"narrative": "<one paragraph>", "recommendation": "<one imperative sentence>"}'
         )
-        result = await call_claude_json(_ANOMALY_NARRATIVE_SYSTEM, prompt, max_tokens=400)
+        result = await call_claude_json(
+            _ANOMALY_NARRATIVE_SYSTEM,
+            prompt,
+            max_tokens=400,
+            business_data={"anomaly": anomaly},
+            scrub_level="customer",
+        )
         if not result or not isinstance(result, dict):
             return None, None
         return result.get("narrative"), result.get("recommendation")
@@ -919,16 +938,26 @@ class OracleAgent(JarvisAgent):
                 message=f"ORACLE: {len(recent)} unresolved anomaly/ies (deterministic)",
             )
 
-        # Claude path — assemble context and ask
+        # Claude path — assemble context and ask.
+        # SEC-1: the context bundles recent anomaly/order docs that can carry
+        # customer names/phone/email. Pass it via business_data so scrub_pii
+        # (scrub_level="customer") redacts customer PII before the API call,
+        # instead of json.dumps-ing the raw context into the prompt string.
         ctx = await self._build_context_for_query(query)
         user_prompt = (
             f"Question: {query}\n\n"
-            f"Context (JSON):\n{json.dumps(ctx, default=str, indent=2)}\n\n"
-            "Using only the data above, produce a grounded answer. Cite "
-            "specific numbers. If the data doesn't answer the question, "
-            "say which collection would need to be checked and stop."
+            "The data you may reason over is in the BUSINESS DATA block.\n"
+            "Using only that data, produce a grounded answer. Cite specific "
+            "numbers. If the data doesn't answer the question, say which "
+            "collection would need to be checked and stop."
         )
-        answer = await call_claude(_ON_DEMAND_SYSTEM, user_prompt, max_tokens=800)
+        answer = await call_claude(
+            _ON_DEMAND_SYSTEM,
+            user_prompt,
+            max_tokens=800,
+            business_data=ctx,
+            scrub_level="customer",
+        )
 
         if not answer:
             # Soft fallback — Claude failed, still return the list
