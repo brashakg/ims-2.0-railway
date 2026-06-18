@@ -27,6 +27,16 @@ from ..dependencies import (
     validate_store_access,
 )
 
+# BUG-005 / BUG-006 (patient-safety): the POS / order-create path must run the
+# SAME clinical Rx-power validation the clinical paths use, and must not let a
+# spectacle-lens / contact-lens line be ordered without a prescription. Reuse
+# the canonical shared validators (NOT a re-derivation of the limits).
+from ..services.rx_validation import (
+    _validate_rx_number as _validate_rx_power,
+    _validate_axis as _validate_rx_axis,
+    is_rx_required_line as _is_rx_required_line,
+)
+
 
 def _get_db():
     """Raw MongoDB handle, or None when unavailable (mock / no-DB mode)."""
@@ -435,6 +445,11 @@ class OrderItemCreate(BaseModel):
     sph: Optional[float] = None
     cyl: Optional[float] = None
     add: Optional[float] = None
+    # BUG-005: cylinder axis (whole degree 1-180). Required when cyl is non-zero
+    # (a toric lens is un-grindable without an axis). Optional so a sphere-only /
+    # frame-only line is unaffected. Enforced by _validate_order_line_rx, not a
+    # field_validator, because the cyl-requires-axis rule is cross-field.
+    axis: Optional[int] = None
 
     @field_validator("unit_price")
     @classmethod
@@ -540,6 +555,121 @@ class OrderCreate(BaseModel):
 class OrderUpdate(BaseModel):
     notes: Optional[str] = None
     expected_delivery: Optional[date] = None
+
+
+# ============================================================================
+# Rx validation for order lines (BUG-005 patient-safety + BUG-006 Rx-required)
+# ============================================================================
+# Roles permitted to override an EXPIRED prescription (Store-Manager and up).
+# A SALES_STAFF / SALES_CASHIER must escalate; HQ roles + the store manager may
+# proceed on an expired Rx (a deliberate, audited clinical decision).
+_RX_EXPIRY_OVERRIDE_ROLES = (
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+)
+
+
+def _validate_order_line_rx(item, customer_id: str, current_user: dict) -> None:
+    """Validate ONE order line's clinical Rx data. Raises HTTPException(422) on a
+    bad/missing value -- never 500s. Pure validation; touches no pricing/GST math.
+
+    BUG-005: range / 0.25-step / whole-axis / cyl-requires-axis check on the
+             line's sph/cyl/add/axis via the SAME canonical clinical validators.
+    BUG-006: a SPECTACLE (Rx) lens line must carry a prescription_id that
+             resolves to a real prescription for THIS customer; an expired Rx is
+             allowed only for Store-Manager+. CONTACT LENSES are EXEMPT from this
+             hard gate (owner policy 2026-06-18 "block Rx lenses, allow contacts").
+    Frame-only / contact-lens / non-Rx lines are not Rx-gated -- but their
+    powers (if any) are STILL range-checked above (BUG-005 is universal).
+    """
+    name = getattr(item, "product_name", None) or getattr(item, "product_id", "") or "item"
+
+    # --- BUG-005: power-value validation (range + 0.25 grid + axis rules) ------
+    sph = getattr(item, "sph", None)
+    cyl = getattr(item, "cyl", None)
+    add = getattr(item, "add", None)
+    axis = getattr(item, "axis", None)
+    try:
+        _validate_rx_power(sph, "sph")
+        _validate_rx_power(cyl, "cyl")
+        _validate_rx_power(add, "add")
+        # AXIS: whole 1-180, and MANDATORY when cyl is non-zero.
+        _validate_rx_axis(axis, cyl=cyl)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid prescription power on '{name}': {exc}",
+        )
+
+    # --- BUG-006: Rx-required for SPECTACLE-lens lines (contacts EXEMPT) -------
+    item_type = getattr(item, "item_type", None)
+    category = getattr(item, "category", None)
+    if not _is_rx_required_line(item_type, category):
+        return  # frame / sunglass / accessory / service / CONTACT-LENS -> no Rx needed
+
+    rx_id = (getattr(item, "prescription_id", None) or "").strip()
+    if not rx_id:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"'{name}' is a prescription lens and requires a linked "
+                f"prescription. Select the customer's Rx before billing."
+            ),
+        )
+
+    # Resolve the Rx and confirm it belongs to THIS customer. Fail-SOFT on a
+    # missing/unavailable prescription repo (do not 500 / do not block billing
+    # when the clinical store is down) -- the prescription_id presence check
+    # above already enforces the core BUG-006 requirement.
+    try:
+        from ..dependencies import get_prescription_repository
+
+        rx_repo = get_prescription_repository()
+    except Exception:  # noqa: BLE001
+        rx_repo = None
+    if rx_repo is None:
+        return
+
+    try:
+        rx = rx_repo.find_by_id(rx_id)
+    except Exception:  # noqa: BLE001
+        return  # repo error -> fail-soft, don't block the sale
+
+    if rx is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Prescription '{rx_id}' for '{name}' was not found.",
+        )
+    # The Rx must belong to the order's customer (no cross-customer Rx).
+    rx_customer = rx.get("customer_id") or rx.get("customerId")
+    if customer_id and rx_customer and str(rx_customer) != str(customer_id):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Prescription '{rx_id}' does not belong to this customer; "
+                f"select a prescription for the billed customer."
+            ),
+        )
+
+    # Expiry: an expired Rx may only be dispensed by Store-Manager+ (override).
+    try:
+        from .prescriptions import _rx_validity
+
+        _expiry, is_valid = _rx_validity(rx)
+    except Exception:  # noqa: BLE001
+        is_valid = None  # can't compute -> don't block (fail-soft)
+    if is_valid is False:
+        roles = current_user.get("roles", []) or []
+        if not any(r in roles for r in _RX_EXPIRY_OVERRIDE_ROLES):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Prescription '{rx_id}' for '{name}' has EXPIRED. A Store "
+                    f"Manager or higher must approve dispensing on an expired Rx."
+                ),
+            )
 
 
 # ============================================================================
@@ -1227,6 +1357,15 @@ async def create_order(
                     ),
                 )
 
+    # BUG-005 / BUG-006 (patient-safety): validate every line's clinical Rx
+    # powers (range / 0.25 grid / whole-axis / cyl-requires-axis) and require a
+    # valid prescription on spectacle-lens / contact-lens lines. Runs BEFORE any
+    # money math (validation only -- it never touches pricing/GST/payment) so a
+    # clinically impossible lens power or a lens line with no Rx is rejected with
+    # a clear 422 before it can be persisted and sent to the lab.
+    for item in order.items:
+        _validate_order_line_rx(item, order.customer_id, current_user)
+
     # BUG-119/BUG-118: the real server-side price ceiling / cost floor / discount
     # validation runs in the totals loop below (AFTER the idempotency check, using
     # the catalog MRP/offer/cost snapshot). The OrderItemCreate model carries no
@@ -1628,6 +1767,9 @@ async def create_order(
                     "sph": getattr(item, "sph", None),
                     "cyl": getattr(item, "cyl", None),
                     "add": getattr(item, "add", None),
+                    # BUG-005: persist the validated cylinder axis alongside the
+                    # power so the lab gets the full grind spec.
+                    "axis": getattr(item, "axis", None),
                     # POS-10: per-line staff note (e.g. "tight frame — be careful
                     # tightening screws"). Carried from posStore CartLineItem.
                     "item_note": getattr(item, "item_note", None) or None,
@@ -2287,6 +2429,14 @@ async def add_order_item(
             raise HTTPException(
                 status_code=400, detail="Can only add items to DRAFT orders"
             )
+
+        # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
+        # Rx-required check the create path runs, for a line appended to a DRAFT
+        # order. Validation only -- no pricing/GST change. Uses the order's
+        # customer so an expired / cross-customer / missing Rx is caught here too.
+        _validate_order_line_rx(
+            item, order.get("customer_id") or order.get("customerId") or "", current_user
+        )
 
         # Enforce role + category + luxury-brand discount cap on items added to a
         # DRAFT order. This path previously checked ONLY the role cap (a bypass of

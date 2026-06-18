@@ -31,18 +31,30 @@ def _setup(monkeypatch, catalog_docs):
     from database.repositories.order_repository import OrderRepository
     from database.repositories.customer_repository import CustomerRepository
     from database.repositories.audit_repository import AuditRepository
+    from database.repositories.prescription_repository import PrescriptionRepository
+    from datetime import datetime
 
     fake_db = FakeDB()
     order_repo = OrderRepository(fake_db.get_collection("orders"))
     customer_repo = CustomerRepository(fake_db.get_collection("customers"))
     audit_repo = AuditRepository(fake_db.get_collection("audit_logs"))
+    rx_repo = PrescriptionRepository(fake_db.get_collection("prescriptions"))
     monkeypatch.setattr(om, "get_order_repository", lambda: order_repo)
     monkeypatch.setattr(om, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(om, "get_product_repository", lambda: None)  # live catalog path
     monkeypatch.setattr(om, "get_walkin_counter_repository", lambda: None)
     monkeypatch.setattr(deps, "get_audit_repository", lambda: audit_repo)
+    # BUG-006 (PR #759): spectacle-lens order lines now require a valid linked Rx.
+    # Seed one for the test customer so the product-id-stamping assertions can still
+    # exercise a lens line (this test is about id stamping, not the Rx gate).
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: rx_repo)
     monkeypatch.setattr(om, "_get_catalog_collection", lambda: _CatalogColl(catalog_docs))
     customer_repo.create({"customer_id": "cust-test", "name": "Test", "mobile": "9100000099"})
+    rx_repo.create({
+        "prescription_id": "rx-stamp-1", "customer_id": "cust-test", "patient_id": "cust-test",
+        "store_id": "BV-TEST-01", "prescription_date": datetime.now().isoformat(),
+        "validity_months": 24, "right_eye": {"sph": "-1.00"}, "left_eye": {"sph": "-1.00"},
+    })
     return fake_db
 
 
@@ -81,7 +93,8 @@ def test_order_create_virtual_product_ids_unaffected(client, auth_headers, monke
                 {"product_id": "custom-frame-1", "product_name": "Custom", "item_type": "FRAME",
                  "category": "FRAME", "quantity": 1, "unit_price": 3000.0},
                 {"product_id": "lens-1.5-zeiss", "product_name": "1.5 ZEISS", "item_type": "LENS",
-                 "category": "LENS", "quantity": 2, "unit_price": 4000.0},
+                 "category": "LENS", "quantity": 2, "unit_price": 4000.0,
+                 "prescription_id": "rx-stamp-1"},
             ],
         },
         headers=auth_headers,
