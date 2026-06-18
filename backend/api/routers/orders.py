@@ -2485,7 +2485,7 @@ async def update_order(
 
 
 # ============================================================================
-# Build item #16 — SUPERADMIN post-creation order edit (revenue/GST/audit)
+# Build item #16 - SUPERADMIN post-creation order edit (revenue/GST/audit)
 # ============================================================================
 def _require_superadmin(current_user: dict) -> None:
     """Gate an endpoint to SUPERADMIN only (build item #16 is SUPERADMIN-only by
