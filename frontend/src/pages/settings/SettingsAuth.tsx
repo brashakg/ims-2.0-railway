@@ -2,21 +2,22 @@
 // IMS 2.0 - Settings: User Management & Auth
 // ============================================================================
 
-import { useState, useEffect } from 'react';
-import type { Dispatch, SetStateAction } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
-  Plus, Edit2, Trash2, X,
+  Plus, Edit2, Trash2, X, Search, ShieldCheck, Building2, Mail, Phone, BadgeCheck,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { validatePhone } from '../../utils/validators';
 import { adminUserApi, adminStoreApi } from '../../services/api';
-import { MODULE_ACCESS_OPTIONS } from '../../context/ModuleContext';
+import { PermissionDeltaEditor } from '../../components/permissions/PermissionDeltaEditor';
+import { UserPermissionsPanel } from '../../components/permissions/UserPermissionsPanel';
 import type { StoreData, UserData } from './settingsTypes';
 import {
   ROLE_HIERARCHY,
   ASSIGNABLE_ROLES,
+  AVAILABLE_ROLES,
   getHighestRoleLevel,
   CATEGORY_DEFINITIONS,
 } from './settingsTypes';
@@ -82,6 +83,13 @@ export function UserManagementSection() {
   const [stores, setStores] = useState<StoreData[]>([]);
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
+  // Per-user permissions panel (slide-over) -- backlog #14 discoverability.
+  const [permUser, setPermUser] = useState<UserData | null>(null);
+  // Search + filters (backlog #14).
+  const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
+  const [storeFilter, setStoreFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
 
   useEffect(() => {
     loadData();
@@ -172,8 +180,8 @@ export function UserManagementSection() {
   // Get current user's role level
   const currentUserRoleLevel = ROLE_HIERARCHY[user?.activeRole || ''] || 0;
 
-  // Filter users based on current user's role
-  const filteredUsers = users.filter(u => {
+  // Filter users based on current user's role (RBAC visibility ceiling)
+  const visibleUsers = users.filter(u => {
     if (user?.activeRole === 'SUPERADMIN') return true;
     if (user?.activeRole === 'ADMIN') {
       return !u.roles.includes('SUPERADMIN');
@@ -186,6 +194,23 @@ export function UserManagementSection() {
     }
     return false;
   });
+
+  // Apply the search box + role/store/status filters (backlog #14) on top of the
+  // RBAC-visible set, so the on-screen filters never widen who an actor can see.
+  const filteredUsers = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return visibleUsers.filter(u => {
+      if (q) {
+        const hay = `${u.fullName} ${u.username} ${u.email} ${u.phone}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (roleFilter && !u.roles.includes(roleFilter)) return false;
+      if (storeFilter && !(u.accessibleStores || []).includes(storeFilter)) return false;
+      if (statusFilter === 'active' && !u.isActive) return false;
+      if (statusFilter === 'inactive' && u.isActive) return false;
+      return true;
+    });
+  }, [visibleUsers, search, roleFilter, storeFilter, statusFilter]);
 
   const canManageUser = (targetUser: UserData) => {
     const targetRoleLevel = getHighestRoleLevel(targetUser.roles);
@@ -220,6 +245,53 @@ export function UserManagementSection() {
             ? 'Create and manage store staff. You can assign: Optometrist, Sales Staff, Workshop Staff roles.'
             : 'Create users and assign roles. Users can have multiple roles and access to multiple stores.'}
         </p>
+
+        {/* ---- Search + filters (backlog #14) ----------------------------- */}
+        <div className="flex flex-col tablet:flex-row tablet:items-center gap-3 mb-4">
+          <div className="relative flex-1 min-w-[180px]">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search name, username, email or phone"
+              className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
+            />
+          </div>
+          <select
+            value={roleFilter}
+            onChange={e => setRoleFilter(e.target.value)}
+            className="px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
+          >
+            <option value="">All roles</option>
+            {AVAILABLE_ROLES.map(r => (
+              <option key={r} value={r}>{r.replace(/_/g, ' ')}</option>
+            ))}
+          </select>
+          <select
+            value={storeFilter}
+            onChange={e => setStoreFilter(e.target.value)}
+            className="px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
+          >
+            <option value="">All stores</option>
+            {stores.map(s => (
+              <option key={s.id} value={s.id}>{s.storeCode || s.storeName}</option>
+            ))}
+          </select>
+          <select
+            value={statusFilter}
+            onChange={e => setStatusFilter(e.target.value as 'all' | 'active' | 'inactive')}
+            className="px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
+          >
+            <option value="all">All statuses</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+
+        <div className="text-xs text-gray-500 mb-2">
+          Showing {filteredUsers.length} of {visibleUsers.length} users
+        </div>
 
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -316,6 +388,19 @@ export function UserManagementSection() {
                               <Edit2 className="w-4 h-4" />
                             </span>
                           )}
+                          {canEdit ? (
+                            <button
+                              onClick={() => setPermUser(u)}
+                              className="text-gray-500 hover:text-bv-red-600"
+                              title="Customize permissions"
+                            >
+                              <ShieldCheck className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span className="text-gray-200" title="Cannot manage permissions for higher-level users">
+                              <ShieldCheck className="w-4 h-4" />
+                            </span>
+                          )}
                           {canDelete ? (
                             <button
                               onClick={() => handleDeleteUser(u.id)}
@@ -368,7 +453,87 @@ export function UserManagementSection() {
           currentUserStores={user?.storeIds || []}
         />
       )}
+
+      {/* Per-user Permissions slide-over (backlog #14) */}
+      {permUser && (
+        <UserPermissionsSlideOver
+          user={permUser}
+          stores={stores}
+          onClose={() => setPermUser(null)}
+        />
+      )}
     </>
+  );
+}
+
+// ============================================================================
+// Per-user Permissions slide-over (detail view + editor + history + revert)
+// ============================================================================
+// Surfaces the existing /users/{id}/permissions editor for an individual user,
+// with a header summary card (roles, stores, status). Uses the shared
+// UserPermissionsPanel so all 4 locked dimensions + the audit timeline + revert
+// are in one discoverable place.
+
+function UserPermissionsSlideOver({
+  user,
+  stores,
+  onClose,
+}: {
+  user: UserData;
+  stores: StoreData[];
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white w-full max-w-2xl h-full shadow-xl flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-bv-red-600" />
+            <h2 className="text-lg font-semibold text-gray-900">Permissions</h2>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-5">
+          {/* User summary card */}
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+            <p className="font-medium text-gray-900">{user.fullName}</p>
+            <div className="mt-2 grid grid-cols-1 tablet:grid-cols-2 gap-y-1 gap-x-4 text-sm text-gray-600">
+              {user.email && (
+                <span className="flex items-center gap-1.5"><Mail className="w-3.5 h-3.5 text-gray-400" />{user.email}</span>
+              )}
+              {user.phone && (
+                <span className="flex items-center gap-1.5"><Phone className="w-3.5 h-3.5 text-gray-400" />{user.phone}</span>
+              )}
+              <span className="flex items-center gap-1.5">
+                <BadgeCheck className="w-3.5 h-3.5 text-gray-400" />
+                {(user.roles || []).map(r => r.replace(/_/g, ' ')).join(', ') || 'No role'}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Building2 className="w-3.5 h-3.5 text-gray-400" />
+                {(user.accessibleStores || [])
+                  .map(sId => stores.find(s => s.id === sId)?.storeCode || sId)
+                  .join(', ') || 'No stores'}
+              </span>
+            </div>
+            <div className="mt-2">
+              {user.isActive
+                ? <span className="badge-success">Active</span>
+                : <span className="badge-error">Inactive</span>}
+            </div>
+          </div>
+
+          <UserPermissionsPanel userId={user.id} roles={user.roles} userName={user.fullName} />
+        </div>
+
+        <div className="p-4 border-t border-gray-200 flex justify-end">
+          <button onClick={onClose} className="btn-outline">Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -564,45 +729,22 @@ function UserModal({
             </div>
           </div>
 
-          {/* User-wise Module Access -- deny-only override on top of the role.
-              Keys come from MODULE_ACCESS_OPTIONS (the single canonical source
-              shared with the Rail nav + ProtectedRoute), so an unchecked box
-              maps to exactly the module key the gate enforces. Unchecking only
-              RESTRICTS -- it can never grant a module the role forbids. */}
-          <div>
-            <label className="block text-sm font-medium text-gray-600 mb-2">Module Access</label>
-            <p className="text-xs text-gray-500 mb-2">Uncheck to hide a module from this user (only restricts within their role; cannot grant access their role lacks)</p>
-            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
-              {MODULE_ACCESS_OPTIONS.map(({ key: moduleKey, label }) => {
-                const userModules = formData.moduleAccess || {};
-                const isEnabled = userModules[moduleKey] !== false;
-                return (
-                  <label key={moduleKey} className={clsx('flex items-center gap-2 p-2 rounded cursor-pointer', isEnabled ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200')}>
-                    <input
-                      type="checkbox"
-                      checked={isEnabled}
-                      onChange={e => {
-                        const current = formData.moduleAccess || {};
-                        setFormData(prev => ({ ...prev, moduleAccess: { ...current, [moduleKey]: e.target.checked } }));
-                      }}
-                      className="rounded border-gray-300"
-                    />
-                    <span className="text-sm text-gray-600">{label}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* User-wise Permissions -- PRESET-DRIVEN per-user override editor.
-              Council ruling sec.2: the owner sees SENTENCES (from the role's
-              delta toggles), never raw capability keys. Each toggle ON/OFF
-              writes a grant/deny capability on the user; the discount field
-              edits discount_cap. Hard-floor items are shown grayed-with-reason.
-              "Reset to standard role" clears all overrides. PRESETS-ONLY-FIRST:
-              this is a CLIENT-SIDE template that expands to capability keys
-              written on the user -- no "preset" reference is ever persisted. */}
-          <PermissionDeltaEditor formData={formData} setFormData={setFormData} />
+          {/* User-wise Permissions + Module Access -- the SHARED preset-driven
+              per-user override editor (council ruling sec.2). Covers all 4 locked
+              dimensions: discount-cap override, module/screen access (deny-only),
+              the returns/refund-approval capability toggle, and per-role extra
+              abilities. Owner sees SENTENCES, never raw capability keys; items
+              above the actor's level are shown grayed-with-reason. The SAME
+              component is reused on the onboarding wizard step 4. */}
+          <PermissionDeltaEditor
+            roles={formData.roles || []}
+            permissions={formData.permissions || {}}
+            onPermissionsChange={(next) => setFormData(prev => ({ ...prev, permissions: next }))}
+            discountCap={formData.discountCap}
+            onDiscountCapChange={(next) => setFormData(prev => ({ ...prev, discountCap: next }))}
+            moduleAccess={formData.moduleAccess || {}}
+            onModuleAccessChange={(next) => setFormData(prev => ({ ...prev, moduleAccess: next }))}
+          />
         </div>
 
         <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
@@ -613,180 +755,6 @@ function UserModal({
             {user ? 'Update User' : 'Create User'}
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// Preset-driven per-user permission delta editor (council ruling sec.2)
-// ============================================================================
-// Owner sees SENTENCES, never raw capability keys. The role's curated delta
-// toggles + the discount field; hard-floor items grayed-with-reason; a
-// "Reset to standard role" button. PRESETS-ONLY-FIRST: a preset is a CLIENT-SIDE
-// template that expands to capability keys written on the user -- we NEVER
-// persist a "preset" reference. The raw all-capabilities matrix is deliberately
-// deferred (not built here).
-
-interface DeltaRow {
-  key: string;
-  label: string;
-  type: 'toggle' | 'number';
-  default: boolean | number;
-  hard_floor_note: string | null;
-}
-interface PermissionOptions {
-  schema_version: number;
-  discount_cap_field: string;
-  role_deltas: Record<string, { defaults: string[]; commonOverrides: DeltaRow[] }>;
-  grantable: string[];
-}
-
-function PermissionDeltaEditor({
-  formData,
-  setFormData,
-}: {
-  formData: Partial<UserData>;
-  setFormData: Dispatch<SetStateAction<Partial<UserData>>>;
-}) {
-  const [options, setOptions] = useState<PermissionOptions | null>(null);
-  const [loadError, setLoadError] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    adminUserApi
-      .getPermissionOptions()
-      .then(o => { if (alive) setOptions(o as PermissionOptions); })
-      .catch(() => { if (alive) setLoadError(true); });
-    return () => { alive = false; };
-  }, []);
-
-  // The delta rows for the user's HIGHEST role (the one that drives the preset).
-  const roles = formData.roles || [];
-  const highestRole = [...roles].sort(
-    (a, b) => (ROLE_HIERARCHY[b] || 0) - (ROLE_HIERARCHY[a] || 0),
-  )[0];
-  const discountField = options?.discount_cap_field || '__discount_cap__';
-  const rows: DeltaRow[] = (highestRole && options?.role_deltas[highestRole]?.commonOverrides) || [];
-
-  const perms = formData.permissions || {};
-  const grants = perms.grant || {};
-  const denies = perms.deny || {};
-
-  // The on/off state of a capability toggle, given its role-baseline default:
-  // explicit deny -> off; explicit grant -> on; otherwise the role default.
-  const toggleState = (row: DeltaRow): boolean => {
-    if (denies[row.key]) return false;
-    if (grants[row.key]) return true;
-    return Boolean(row.default);
-  };
-
-  const setToggle = (row: DeltaRow, on: boolean) => {
-    const nextGrant = { ...grants };
-    const nextDeny = { ...denies };
-    delete nextGrant[row.key];
-    delete nextDeny[row.key];
-    // Only record an OVERRIDE when it DIFFERS from the role default (so the
-    // stored map stays minimal + the preset stays the source of truth).
-    if (on && !row.default) nextGrant[row.key] = true;
-    if (!on && row.default) nextDeny[row.key] = true;
-    setFormData(prev => ({
-      ...prev,
-      permissions: { grant: nextGrant, deny: nextDeny },
-    }));
-  };
-
-  const resetToStandard = () => {
-    setFormData(prev => ({ ...prev, permissions: { grant: {}, deny: {} } }));
-  };
-
-  const isGrantable = (key: string) =>
-    !options || options.grantable.includes(key);
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-2">
-        <label className="block text-sm font-medium text-gray-600">
-          Permissions {highestRole ? `(beyond standard ${highestRole.replace(/_/g, ' ')})` : ''}
-        </label>
-        <button
-          type="button"
-          onClick={resetToStandard}
-          className="text-xs text-bv-red-600 hover:underline"
-        >
-          Reset to standard role
-        </button>
-      </div>
-      <p className="text-xs text-gray-500 mb-2">
-        Turn extra abilities on or off for this person. Limits like discount caps,
-        GST and prescription ranges are always enforced and can't be lifted here.
-      </p>
-
-      {loadError && (
-        <p className="text-xs text-amber-600">
-          Could not load permission options; this person will use their standard role.
-        </p>
-      )}
-
-      {!loadError && rows.length === 0 && (
-        <p className="text-xs text-gray-500">
-          {highestRole
-            ? 'No extra permission toggles for this role; they use the standard role.'
-            : 'Choose a role first to customise permissions.'}
-        </p>
-      )}
-
-      <div className="space-y-2">
-        {rows.map(row => {
-          if (row.type === 'number' || row.key === discountField) {
-            return (
-              <div key={row.key} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded">
-                <span className="text-sm text-gray-700 flex-1">{row.label}</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={formData.discountCap ?? (row.default as number) ?? 0}
-                  onChange={e =>
-                    setFormData(prev => ({ ...prev, discountCap: parseInt(e.target.value || '0', 10) }))
-                  }
-                  className="w-20 px-2 py-1 border border-gray-300 rounded text-sm"
-                />
-                <span className="text-sm text-gray-500">%</span>
-              </div>
-            );
-          }
-          const grantable = isGrantable(row.key);
-          const checked = toggleState(row);
-          const disabled = !grantable; // above the actor's level -> shown grayed
-          return (
-            <label
-              key={row.key}
-              className={clsx(
-                'flex items-start gap-2 p-2 rounded border',
-                disabled ? 'bg-gray-100 border-gray-200 opacity-70 cursor-not-allowed'
-                  : checked ? 'bg-green-50 border-green-200 cursor-pointer'
-                  : 'bg-gray-50 border-gray-200 cursor-pointer',
-              )}
-              title={disabled ? 'This permission is above your level and cannot be granted.' : undefined}
-            >
-              <input
-                type="checkbox"
-                checked={checked}
-                disabled={disabled}
-                onChange={e => setToggle(row, e.target.checked)}
-                className="mt-0.5 rounded border-gray-300"
-              />
-              <span className="text-sm text-gray-700">
-                {row.label}
-                {disabled && <span className="block text-xs text-gray-400">Above your level — cannot grant</span>}
-                {row.hard_floor_note && (
-                  <span className="block text-xs text-gray-400">{row.hard_floor_note}</span>
-                )}
-              </span>
-            </label>
-          );
-        })}
       </div>
     </div>
   );
