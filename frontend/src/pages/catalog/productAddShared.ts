@@ -8,7 +8,12 @@
 // what fields they collect and what payload they POST. Do NOT redefine these
 // fields elsewhere — extend them here.
 
-import type { CreateProductPayload } from '../../services/api/products';
+import type {
+  CreateProductPayload,
+  CategoryRegistryEntry,
+  CategoryRegistryField,
+} from '../../services/api/products';
+import { productApi } from '../../services/api/products';
 import type { AutopilotCandidate } from '../../services/api/catalogAutopilot';
 import { getHSNByCategory, getGSTRateByCategory } from '../../constants/gst';
 
@@ -37,8 +42,15 @@ export interface CategoryField {
   placeholder?: string;
 }
 
-// Category-specific fields configuration. Identical to the original wizard's
-// CATEGORY_FIELDS — reused verbatim so no field is lost in either mode.
+// Category-specific fields configuration. This is now UI METADATA ONLY (labels,
+// input types, select options, placeholders). The authoritative REQUIRED/optional
+// flag for each field comes from the backend canonical registry
+// (GET /products/categories -> product_master CATEGORY_SPECS) at runtime via
+// getCategoryFields(); the `required` booleans hard-coded below are the offline
+// fallback used only until the registry has loaded (or if the fetch fails). This
+// keeps the three entry doors in lockstep with the server's create-time
+// enforcement and removes the drift that previously let the FE and backend
+// disagree on which fields a category requires. Do NOT redefine these elsewhere.
 export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
   SG: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Oakley', 'Vogue', 'Prada', 'Gucci', 'Titan', 'Fastrack', 'Lenskart', 'Vincent Chase'] },
@@ -177,6 +189,126 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
 export const categoryName = (code: string | null | undefined): string =>
   CATEGORIES.find((c) => c.code === code)?.name ?? '';
 
+// ============================================================================
+// Canonical category registry — single source of truth for required fields.
+// ----------------------------------------------------------------------------
+// The backend GET /products/categories endpoint returns, per canonical category,
+// the required/optional attribute fields the create gate enforces. We fetch it
+// ONCE (module-level promise cache) and let all three product-entry doors derive
+// their required-ness from it, so the FE markers + block-submit always match the
+// server. Field UI metadata (labels, input types, options) still comes from the
+// local CATEGORY_FIELDS; only the `required` flag is overridden by the registry,
+// and any registry-required field absent from the local metadata is appended as a
+// text input (so a server-required field can never be invisible / unfilled).
+
+// Maps a CATEGORIES picker code (SG/FR/CL/...) to the registry entry. The
+// registry keys on `sku_prefix` (FR, SG, ...). A few FE codes need explicit
+// aliasing: CL -> CONTACT_LENS, SMTSG (smart sunglass) -> SMARTGLASSES.
+const FE_CODE_TO_CANONICAL: Record<string, string> = {
+  SG: 'SUNGLASS',
+  FR: 'FRAME',
+  CL: 'CONTACT_LENS',
+  LS: 'OPTICAL_LENS',
+  RG: 'READING_GLASSES',
+  WT: 'WATCH',
+  CK: 'WALL_CLOCK',
+  HA: 'HEARING_AID',
+  ACC: 'ACCESSORIES',
+  SMTSG: 'SMARTGLASSES',
+  SMTFR: 'SMARTGLASSES',
+  SMTWT: 'SMARTWATCH',
+};
+
+let _registryPromise: Promise<CategoryRegistryEntry[]> | null = null;
+let _registryByCanonical: Record<string, CategoryRegistryEntry> = {};
+
+// Resolve a CATEGORIES picker code to its registry entry (once loaded).
+function registryEntryForCode(code: string | null | undefined): CategoryRegistryEntry | undefined {
+  if (!code) return undefined;
+  const canonical = FE_CODE_TO_CANONICAL[code] || code;
+  return _registryByCanonical[canonical] || _registryByCanonical[code];
+}
+
+// Load + cache the canonical category registry. Idempotent: concurrent callers
+// share the same in-flight promise; a successful load is cached for the session.
+// On failure the promise cache is cleared so a later call can retry, and the
+// caller falls back to the local CATEGORY_FIELDS `required` flags.
+export async function loadCategoryRegistry(): Promise<CategoryRegistryEntry[]> {
+  if (_registryPromise) return _registryPromise;
+  _registryPromise = productApi
+    .getCategoryRegistry()
+    .then((res) => {
+      const cats = res?.categories ?? [];
+      const byCanonical: Record<string, CategoryRegistryEntry> = {};
+      cats.forEach((c) => {
+        if (c?.code) byCanonical[c.code] = c;
+      });
+      _registryByCanonical = byCanonical;
+      return cats;
+    })
+    .catch((err) => {
+      // Clear so a later mount can retry; doors fall back to local required flags.
+      _registryPromise = null;
+      throw err;
+    });
+  return _registryPromise;
+}
+
+// True once the registry has loaded (entries cached). Doors can render either
+// way — this just decides whether required-ness comes from the server or the
+// local fallback flags.
+export function isCategoryRegistryLoaded(): boolean {
+  return Object.keys(_registryByCanonical).length > 0;
+}
+
+// The registry's required-field key SET for a picker code, or null when the
+// registry hasn't loaded / doesn't know the code (caller then uses local flags).
+export function registryRequiredFields(code: string | null | undefined): Set<string> | null {
+  const entry = registryEntryForCode(code);
+  if (!entry) return null;
+  return new Set(entry.required_fields || []);
+}
+
+// The render-ready field list for a category, with `required` flags sourced from
+// the canonical registry when loaded (else the local fallback flags). Any
+// registry-required field with no local UI metadata is appended as a text input
+// so a server-required field is always visible + collectible.
+export function getCategoryFields(code: string | null | undefined): CategoryField[] {
+  if (!code) return [];
+  const local = CATEGORY_FIELDS[code] || [];
+  const entry = registryEntryForCode(code);
+  if (!entry) return local; // registry not loaded — use local metadata as-is.
+
+  const requiredSet = new Set(entry.required_fields || []);
+  const optionalSet = new Set(entry.optional_fields || []);
+  const known = new Set(local.map((f) => f.name));
+
+  // 1) Override the required flag on every local field from the registry. A field
+  // the registry lists (required OR optional) keeps its local UI metadata; a
+  // local field the registry does not mention keeps its own `required` flag
+  // (e.g. extra UI-only fields like lens_size that the spine doesn't gate on).
+  const merged: CategoryField[] = local.map((f) => {
+    if (requiredSet.has(f.name)) return { ...f, required: true };
+    if (optionalSet.has(f.name)) return { ...f, required: false };
+    return f;
+  });
+
+  // 2) Append any registry field (required first) the local metadata lacks, so
+  // it can never be hidden. Build a minimal text field using the registry label.
+  (entry.fields || []).forEach((rf: CategoryRegistryField) => {
+    if (!known.has(rf.name)) {
+      merged.push({
+        name: rf.name,
+        label: rf.label || rf.name,
+        type: 'text',
+        required: !!rf.required,
+      });
+    }
+  });
+
+  return merged;
+}
+
 // Number coercion shared by the CL/LS field mapping. Returns undefined for
 // blank / non-numeric so the backend treats the field as absent.
 const num = (v: unknown): number | undefined => {
@@ -214,12 +346,27 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
   }
 
   if (values.category) {
-    const fields = CATEGORY_FIELDS[values.category] || [];
+    // Required-ness comes from the canonical registry when loaded (getCategoryFields
+    // overrides each field's `required` flag from the server), else the local
+    // CATEGORY_FIELDS fallback flags — so this mirrors the server create gate.
+    const fields = getCategoryFields(values.category);
     fields.forEach((field) => {
       if (field.required && !values.attributes[field.name]) {
         errors[field.name] = `${field.label} is required`;
       }
     });
+    // Belt-and-braces: enforce every registry-required key even if it had no UI
+    // metadata to render (getCategoryFields appends those, but a defensive check
+    // here guarantees a 422-causing gap is surfaced inline rather than at POST).
+    const reqSet = registryRequiredFields(values.category);
+    if (reqSet) {
+      reqSet.forEach((name) => {
+        if (!values.attributes[name] && !errors[name]) {
+          const label = fields.find((f) => f.name === name)?.label || name;
+          errors[name] = `${label} is required`;
+        }
+      });
+    }
   }
 
   const mrpNum = parseFloat(values.mrp);

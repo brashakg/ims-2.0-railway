@@ -38,7 +38,8 @@ import { productTemplatesApi, type ProductTemplate } from '../../services/api/pr
 import { getHSNOptions } from '../../constants/gst';
 import {
   CATEGORIES,
-  CATEGORY_FIELDS,
+  getCategoryFields,
+  loadCategoryRegistry,
   categoryName,
   validateProductForm,
   buildProductPayload,
@@ -109,6 +110,22 @@ export function QuickAddPage() {
   const [cloning, setCloning] = useState(false);
 
   const firstFieldRef = useRef<HTMLSelectElement | HTMLInputElement | null>(null);
+  // Bump on registry load so the field list (required markers sourced from the
+  // canonical server registry) re-renders once it arrives.
+  const [registryReady, setRegistryReady] = useState(false);
+
+  // Load the canonical category field registry once (shared module cache). The
+  // required/optional flags the form renders + validates derive from it so they
+  // match the server create gate. Fail-soft: a fetch error leaves the local
+  // CATEGORY_FIELDS fallback flags in place.
+  useEffect(() => {
+    let alive = true;
+    loadCategoryRegistry()
+      .then(() => { if (alive) setRegistryReady(true); })
+      .catch(() => { /* fall back to local required flags */ });
+    return () => { alive = false; };
+  }, []);
+
   // When a template/clone is loaded we set category AND an explicit HSN/GST.
   // This flag tells the category-change autofill below to skip exactly one
   // cycle so the loaded HSN/GST (which may be a 6-digit / overridden value)
@@ -450,7 +467,10 @@ export function QuickAddPage() {
     );
   }
 
-  const fields: CategoryField[] = selectedCategory ? CATEGORY_FIELDS[selectedCategory] || [] : [];
+  // Field list with required flags from the canonical registry (registryReady
+  // is a render dependency so the markers update when the registry arrives).
+  void registryReady;
+  const fields: CategoryField[] = selectedCategory ? getCategoryFields(selectedCategory) : [];
   const isLens = selectedCategory === 'LS';
   // The lens stock-power fields are entered via the Power Grid, not here.
   const lensPowerFields = new Set(['sph', 'cyl', 'axis', 'add']);

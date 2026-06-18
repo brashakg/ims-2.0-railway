@@ -24,7 +24,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { productApi } from '../../services/api/products';
 import { getHSNByCategory, getHSNOptions, getGSTRateByCategory } from '../../constants/gst';
-import { CATEGORIES, CATEGORY_FIELDS, buildProductPayload } from './productAddShared';
+import { CATEGORIES, getCategoryFields, loadCategoryRegistry, buildProductPayload } from './productAddShared';
 import clsx from 'clsx';
 
 type Step = 'category' | 'details' | 'pricing' | 'inventory' | 'shopify' | 'review';
@@ -72,6 +72,9 @@ export function GuidedAddProduct() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [useAdvancedHSN, setUseAdvancedHSN] = useState(false);
+  // Bump on canonical-registry load so the Details step re-renders with the
+  // server-sourced required markers.
+  const [registryReady, setRegistryReady] = useState(false);
 
   // Auto-populate HSN code and GST rate when category changes. The HSN CODE
   // comes from getHSNByCategory, but the RATE comes from getGSTRateByCategory
@@ -87,6 +90,16 @@ export function GuidedAddProduct() {
       setGstRate(getGSTRateByCategory(selectedCategory).toString());
     }
   }, [selectedCategory, useAdvancedHSN]);
+
+  // Load the canonical category field registry once so the Details step's
+  // required markers + step validation match the server create gate. Fail-soft.
+  useEffect(() => {
+    let alive = true;
+    loadCategoryRegistry()
+      .then(() => { if (alive) setRegistryReady(true); })
+      .catch(() => { /* fall back to local required flags */ });
+    return () => { alive = false; };
+  }, []);
 
   // Permissions check
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
@@ -122,7 +135,7 @@ export function GuidedAddProduct() {
     }
 
     if (currentStep === 'details' && selectedCategory) {
-      const fields = CATEGORY_FIELDS[selectedCategory] || [];
+      const fields = getCategoryFields(selectedCategory);
       fields.forEach((field) => {
         if (field.required && !attributes[field.name]) {
           newErrors[field.name] = `${field.label} is required`;
@@ -237,7 +250,10 @@ export function GuidedAddProduct() {
   );
 
   const renderDetailsStep = () => {
-    const fields = selectedCategory ? CATEGORY_FIELDS[selectedCategory] || [] : [];
+    // registryReady is read here so the details step re-renders when the
+    // canonical registry loads (required markers come from getCategoryFields).
+    void registryReady;
+    const fields = selectedCategory ? getCategoryFields(selectedCategory) : [];
 
     return (
       <div className="space-y-6">
