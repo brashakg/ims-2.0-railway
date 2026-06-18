@@ -18,6 +18,7 @@ import {
   RefreshCw,
   AlertTriangle,
   TrendingUp,
+  X,
 } from 'lucide-react';
 import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -199,6 +200,26 @@ export function ClinicalPage() {
     } catch {
       setError('Failed to start test.');
       return null;
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // CLI-1: remove (cancel) a patient from the queue. Backend
+  // DELETE /clinical/queue/{id} is store-scoped + audited. Confirm first, then
+  // reload so the row disappears. Gated to the same clinical roles as Start.
+  const handleRemoveFromQueue = async (item: QueueItem) => {
+    const ok = window.confirm(
+      `Remove ${item.patientName} (token ${item.tokenNumber}) from the queue?`,
+    );
+    if (!ok) return;
+    setActionLoading(item.id);
+    try {
+      await clinicalApi.removeFromQueue(item.id);
+      toast.success(`${item.patientName} removed from queue`);
+      await loadData();
+    } catch {
+      toast.error('Could not remove from queue. Try again.');
     } finally {
       setActionLoading(null);
     }
@@ -668,6 +689,23 @@ export function ClinicalPage() {
                       >
                         <Eye className="w-4 h-4" />
                         Continue
+                      </button>
+                    )}
+                    {/* CLI-1: remove / cancel a patient from the queue. Hidden
+                        once a test is COMPLETED (nothing to cancel). */}
+                    {item.status !== 'COMPLETED' && canStartTest && (
+                      <button
+                        onClick={() => handleRemoveFromQueue(item)}
+                        disabled={isActionLoading}
+                        className="btn sm disabled:opacity-50"
+                        title="Remove from queue"
+                      >
+                        {isActionLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <X className="w-4 h-4" />
+                        )}
+                        Remove
                       </button>
                     )}
                   </div>
