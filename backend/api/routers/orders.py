@@ -558,6 +558,85 @@ class OrderUpdate(BaseModel):
 
 
 # ============================================================================
+# Build item #16 — SUPERADMIN post-creation order edit (revenue/GST/audit)
+# ============================================================================
+class SuperadminEditLine(BaseModel):
+    """One line in a SUPERADMIN order edit. Mirrors the persisted order-line
+    shape (so an existing line can be edited in place by keeping its item_id,
+    or a new line added by omitting it). GST is resolved server-side from
+    item_type / category / hsn_code -- the client never sets the rate."""
+
+    item_id: Optional[str] = None
+    item_type: str
+    product_id: Optional[str] = None
+    product_name: Optional[str] = Field(None, max_length=200)
+    sku: Optional[str] = None
+    brand: Optional[str] = None
+    subbrand: Optional[str] = None
+    category: Optional[str] = None
+    hsn_code: Optional[str] = None
+    quantity: int = Field(default=1, ge=1, le=1000)
+    unit_price: float = Field(..., ge=0, le=10_000_000)
+    discount_percent: float = Field(default=0, ge=0, le=100)
+    cost_at_sale: Optional[float] = None
+    prescription_id: Optional[str] = None
+    lens_options: Optional[dict] = None
+    lens_details: Optional[dict] = None
+    item_note: Optional[str] = Field(None, max_length=200)
+    sph: Optional[float] = None
+    cyl: Optional[float] = None
+    add: Optional[float] = None
+    axis: Optional[int] = None
+
+    @field_validator("unit_price")
+    @classmethod
+    def _unit_price_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("unit_price must be a finite number")
+        return v
+
+
+class SuperadminOrderEdit(BaseModel):
+    """Pre-invoice SUPERADMIN edit payload. A non-empty ``reason`` is mandatory
+    (the edit writes an immutable audit row). ``items`` replaces the whole line
+    set when provided; ``customer_id`` / ``customer_name`` reassign the order's
+    customer when provided; ``cart_discount_percent`` re-applies the order-level
+    discount."""
+
+    reason: str = Field(..., min_length=4, max_length=500)
+    items: Optional[List[SuperadminEditLine]] = None
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = Field(None, max_length=200)
+    cart_discount_percent: Optional[float] = Field(None, ge=0.0, le=100.0)
+    cart_discount_reason: Optional[str] = Field(None, max_length=200)
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+class SuperadminInvoiceChange(BaseModel):
+    """Post-issue SUPERADMIN correction. ``mode`` chooses between a REVISED
+    invoice (new serial; original marked superseded/void) and a CREDIT/DEBIT
+    note (delta linked to the original invoice, original left intact). The
+    SUPERADMIN supplies the corrected lines / customer / cart discount exactly
+    as in the pre-invoice edit; the delta is derived server-side."""
+
+    mode: str  # REVISED_INVOICE | CREDIT_NOTE
+    reason: str = Field(..., min_length=4, max_length=500)
+    items: Optional[List[SuperadminEditLine]] = None
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = Field(None, max_length=200)
+    cart_discount_percent: Optional[float] = Field(None, ge=0.0, le=100.0)
+    cart_discount_reason: Optional[str] = Field(None, max_length=200)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        upper = str(v or "").strip().upper()
+        if upper not in ("REVISED_INVOICE", "CREDIT_NOTE"):
+            raise ValueError("mode must be REVISED_INVOICE or CREDIT_NOTE")
+        return upper
+
+
+# ============================================================================
 # Rx validation for order lines (BUG-005 patient-safety + BUG-006 Rx-required)
 # ============================================================================
 # Roles permitted to override an EXPIRED prescription (Store-Manager and up).
