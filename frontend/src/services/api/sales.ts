@@ -78,6 +78,48 @@ export const orderApi = {
     });
     return response.data;
   },
+
+  // Build item #16 (SUPERADMIN-only): edit an order AFTER creation.
+  // Pre-invoice (CONFIRMED/PROCESSING/READY, no invoice) -- recomputes GST +
+  // grand_total, mandatory reason, writes an immutable audit row.
+  superadminEditOrder: async (
+    orderId: string,
+    body: {
+      reason: string;
+      items?: Array<Record<string, unknown>>;
+      customer_id?: string;
+      customer_name?: string;
+      cart_discount_percent?: number;
+      cart_discount_reason?: string;
+      notes?: string;
+    },
+  ) => {
+    const response = await api.put(`/orders/${orderId}/superadmin-edit`, body);
+    return response.data;
+  },
+
+  // Build item #16 (SUPERADMIN-only): correct an order AFTER its tax invoice
+  // was issued. mode REVISED_INVOICE allocates a new serial + supersedes the
+  // original; mode CREDIT_NOTE issues a credit/debit note for the delta linked
+  // to the original invoice (original left intact). Mandatory reason; audited.
+  superadminInvoiceChange: async (
+    orderId: string,
+    body: {
+      mode: 'REVISED_INVOICE' | 'CREDIT_NOTE';
+      reason: string;
+      items?: Array<Record<string, unknown>>;
+      customer_id?: string;
+      customer_name?: string;
+      cart_discount_percent?: number;
+      cart_discount_reason?: string;
+    },
+  ) => {
+    const response = await api.put(
+      `/orders/${orderId}/superadmin-invoice-change`,
+      body,
+    );
+    return response.data;
+  },
 };
 
 // ============================================================================

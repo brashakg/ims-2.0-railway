@@ -558,6 +558,85 @@ class OrderUpdate(BaseModel):
 
 
 # ============================================================================
+# Build item #16 — SUPERADMIN post-creation order edit (revenue/GST/audit)
+# ============================================================================
+class SuperadminEditLine(BaseModel):
+    """One line in a SUPERADMIN order edit. Mirrors the persisted order-line
+    shape (so an existing line can be edited in place by keeping its item_id,
+    or a new line added by omitting it). GST is resolved server-side from
+    item_type / category / hsn_code -- the client never sets the rate."""
+
+    item_id: Optional[str] = None
+    item_type: str
+    product_id: Optional[str] = None
+    product_name: Optional[str] = Field(None, max_length=200)
+    sku: Optional[str] = None
+    brand: Optional[str] = None
+    subbrand: Optional[str] = None
+    category: Optional[str] = None
+    hsn_code: Optional[str] = None
+    quantity: int = Field(default=1, ge=1, le=1000)
+    unit_price: float = Field(..., ge=0, le=10_000_000)
+    discount_percent: float = Field(default=0, ge=0, le=100)
+    cost_at_sale: Optional[float] = None
+    prescription_id: Optional[str] = None
+    lens_options: Optional[dict] = None
+    lens_details: Optional[dict] = None
+    item_note: Optional[str] = Field(None, max_length=200)
+    sph: Optional[float] = None
+    cyl: Optional[float] = None
+    add: Optional[float] = None
+    axis: Optional[int] = None
+
+    @field_validator("unit_price")
+    @classmethod
+    def _unit_price_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("unit_price must be a finite number")
+        return v
+
+
+class SuperadminOrderEdit(BaseModel):
+    """Pre-invoice SUPERADMIN edit payload. A non-empty ``reason`` is mandatory
+    (the edit writes an immutable audit row). ``items`` replaces the whole line
+    set when provided; ``customer_id`` / ``customer_name`` reassign the order's
+    customer when provided; ``cart_discount_percent`` re-applies the order-level
+    discount."""
+
+    reason: str = Field(..., min_length=4, max_length=500)
+    items: Optional[List[SuperadminEditLine]] = None
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = Field(None, max_length=200)
+    cart_discount_percent: Optional[float] = Field(None, ge=0.0, le=100.0)
+    cart_discount_reason: Optional[str] = Field(None, max_length=200)
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+class SuperadminInvoiceChange(BaseModel):
+    """Post-issue SUPERADMIN correction. ``mode`` chooses between a REVISED
+    invoice (new serial; original marked superseded/void) and a CREDIT/DEBIT
+    note (delta linked to the original invoice, original left intact). The
+    SUPERADMIN supplies the corrected lines / customer / cart discount exactly
+    as in the pre-invoice edit; the delta is derived server-side."""
+
+    mode: str  # REVISED_INVOICE | CREDIT_NOTE
+    reason: str = Field(..., min_length=4, max_length=500)
+    items: Optional[List[SuperadminEditLine]] = None
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = Field(None, max_length=200)
+    cart_discount_percent: Optional[float] = Field(None, ge=0.0, le=100.0)
+    cart_discount_reason: Optional[str] = Field(None, max_length=200)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        upper = str(v or "").strip().upper()
+        if upper not in ("REVISED_INVOICE", "CREDIT_NOTE"):
+            raise ValueError("mode must be REVISED_INVOICE or CREDIT_NOTE")
+        return upper
+
+
+# ============================================================================
 # Rx validation for order lines (BUG-005 patient-safety + BUG-006 Rx-required)
 # ============================================================================
 # Roles permitted to override an EXPIRED prescription (Store-Manager and up).
@@ -2403,6 +2482,505 @@ async def update_order(
         raise HTTPException(status_code=500, detail="Failed to update order")
 
     return {"order_id": order_id, "message": "Order updated"}
+
+
+# ============================================================================
+# Build item #16 - SUPERADMIN post-creation order edit (revenue/GST/audit)
+# ============================================================================
+def _require_superadmin(current_user: dict) -> None:
+    """Gate an endpoint to SUPERADMIN only (build item #16 is SUPERADMIN-only by
+    owner decision -- a post-creation order/invoice change is a privileged,
+    audited override). Raises 403 for every other role."""
+    if "SUPERADMIN" not in (current_user.get("roles") or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a SUPERADMIN may edit an order after it is created.",
+        )
+
+
+def _write_order_edit_audit(
+    *,
+    action: str,
+    order: dict,
+    before: dict,
+    after: dict,
+    reason: str,
+    user_id: Optional[str],
+    extra: Optional[dict] = None,
+) -> bool:
+    """Write the SYNCHRONOUS, immutable hash-chained audit row for a
+    SUPERADMIN order/invoice change BEFORE the endpoint returns.
+
+    Unlike the fire-and-forget alert on the DRAFT PUT path, this is a blocking
+    write (revenue/GST/audit-critical, SYSTEM_INTENT 10 "Audit Everything"):
+    the before/after snapshots + the human reason are committed to the
+    append-only ``audit_logs`` chain (audit_chain.append_audit_entry) so the
+    change is tamper-evident at GET /api/v1/audit/verify. We use the chained
+    fields the hash commits to: before_state / after_state / diff / detail.
+    Returns True on a chained write; False if no audit repo (DB-less).
+    """
+    from ..dependencies import get_audit_repository
+    from ..services.order_superadmin_edit import build_money_diff
+
+    audit = get_audit_repository()
+    if audit is None:
+        return False
+    row = {
+        "action": action,
+        "entity_type": "order",
+        "entity_id": order.get("order_id"),
+        "store_id": order.get("store_id"),
+        "user_id": user_id,
+        "severity": "WARNING",
+        "detail": reason,
+        "before_state": before,
+        "after_state": after,
+        "diff": build_money_diff(before, after),
+        "timestamp": datetime.now().isoformat(),
+        "created_at": datetime.now().isoformat(),
+    }
+    if extra:
+        row["context"] = extra
+    audit.create(row)
+    return True
+
+
+def _rebuilt_items_or_existing(
+    body_items, existing_items: list
+) -> list:
+    """Resolve the corrected line set for an edit. When the caller supplies
+    ``items`` it REPLACES the whole set (each normalised via rebuild_edited_line
+    so item_total/discount are recomputed server-side); when omitted, the
+    existing lines are kept (a customer-only / cart-discount-only edit)."""
+    from ..services.order_superadmin_edit import rebuild_edited_line
+
+    if body_items is None:
+        return [dict(it) for it in (existing_items or [])]
+    rebuilt = []
+    for line in body_items:
+        payload = line.model_dump() if hasattr(line, "model_dump") else dict(line)
+        rebuilt.append(rebuild_edited_line(payload))
+    if not rebuilt:
+        raise HTTPException(
+            status_code=400, detail="An edited order must keep at least one item."
+        )
+    return rebuilt
+
+
+@router.put("/{order_id}/superadmin-edit")
+async def superadmin_edit_order(
+    order_id: str,
+    body: SuperadminOrderEdit,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only PRE-INVOICE order edit (build item #16, part 1).
+
+    Allowed when the order is CONFIRMED / PROCESSING / READY and NO tax invoice
+    has been issued yet. Edits the item set (qty / unit_price / discount /
+    add / remove), the order-level cart discount, and/or the customer, then
+    RECOMPUTES per-category GST + grand_total via the canonical
+    ``_compute_per_category_gst`` (so the edit bills EXACTLY like create/add/
+    remove). A non-empty ``reason`` is mandatory and a synchronous immutable
+    audit row (before/after/diff) is written BEFORE returning. Guards:
+      * RBAC -> 403 non-SUPERADMIN;
+      * period lock -> 423 (cannot edit into a closed accounting month);
+      * an already-invoiced order -> 409 (use /superadmin-invoice-change);
+      * DRAFT -> 400 (use the ordinary PUT /{order_id} edit);
+      * terminal DELIVERED / CANCELLED -> 400.
+    """
+    _require_superadmin(current_user)
+    repo = get_order_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Order store unavailable")
+
+    from ..services.order_superadmin_edit import (
+        PRE_INVOICE_EDITABLE_STATUSES,
+        recompute_totals,
+        order_money_snapshot,
+    )
+
+    order = repo.find_by_id(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    validate_store_access(order.get("store_id"), current_user)
+
+    status = str(order.get("status") or "").upper()
+    if status == "DRAFT":
+        raise HTTPException(
+            status_code=400,
+            detail="A DRAFT order is edited via PUT /orders/{id}, not this endpoint.",
+        )
+    if order.get("invoice_number"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A tax invoice has been issued for this order. Use "
+                "/orders/{id}/superadmin-invoice-change (revised invoice or "
+                "credit/debit note) -- an issued invoice must never be mutated."
+            ),
+        )
+    if status not in PRE_INVOICE_EDITABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Order status {status or 'UNKNOWN'} is not editable. Only "
+                f"{', '.join(PRE_INVOICE_EDITABLE_STATUSES)} orders without an "
+                f"invoice can be edited."
+            ),
+        )
+
+    # Period lock: cannot edit money into a closed accounting month (423).
+    db = _get_db()
+    if db is not None:
+        from .finance import check_period_locked
+        from ..utils.ist import ist_today
+
+        check_period_locked(db, ist_today())
+
+    before = order_money_snapshot(order)
+
+    # Resolve corrected lines + cart discount + customer.
+    new_items = _rebuilt_items_or_existing(body.items, order.get("items"))
+    cart_discount_pct = (
+        body.cart_discount_percent
+        if body.cart_discount_percent is not None
+        else float(order.get("cart_discount_percent") or 0.0)
+    )
+    gst = recompute_totals(new_items, cart_discount_pct, _compute_per_category_gst)
+
+    update_data: Dict[str, Any] = {
+        "items": new_items,
+        "subtotal": gst["subtotal"],
+        "cart_discount_percent": max(0.0, min(100.0, cart_discount_pct or 0.0)),
+        "cart_discount_amount": gst["cart_discount_amount"],
+        "tax_rate": gst["dominant_rate"],
+        "tax_amount": gst["tax"],
+        "total_discount": gst["total_discount"],
+        "grand_total": gst["grand_total"],
+        "pricing_model": gst.get("pricing_model", "inclusive"),
+        "updated_by": current_user.get("user_id"),
+        "superadmin_edited": True,
+        "superadmin_edit_reason": body.reason,
+        "superadmin_edited_at": datetime.now().isoformat(),
+    }
+    if body.cart_discount_reason is not None:
+        update_data["cart_discount_reason"] = body.cart_discount_reason
+    if body.notes is not None:
+        update_data["notes"] = body.notes
+    if body.customer_id is not None:
+        update_data["customer_id"] = body.customer_id
+    if body.customer_name is not None:
+        update_data["customer_name"] = body.customer_name
+
+    # Recompute the receivable so a changed grand_total flows to balance_due /
+    # payment_status (a SUPERADMIN edit can raise or lower what is owed).
+    amount_paid = float(order.get("amount_paid") or 0.0)
+    balance_due = round(gst["grand_total"] - amount_paid, 2)
+    update_data["balance_due"] = max(0.0, balance_due)
+    if balance_due <= 0.01:
+        update_data["payment_status"] = "PAID"
+    elif amount_paid > 0:
+        update_data["payment_status"] = "PARTIAL"
+    else:
+        update_data["payment_status"] = "UNPAID"
+
+    after_order = dict(order)
+    after_order.update(update_data)
+    after = order_money_snapshot(after_order)
+
+    # SYNCHRONOUS immutable audit BEFORE persisting/returning.
+    _write_order_edit_audit(
+        action="ORDER_SUPERADMIN_EDIT",
+        order=order,
+        before=before,
+        after=after,
+        reason=body.reason,
+        user_id=current_user.get("user_id"),
+    )
+
+    if not repo.update(order_id, update_data):
+        raise HTTPException(status_code=500, detail="Failed to save order edit")
+
+    return {
+        "order_id": order_id,
+        "message": "Order edited",
+        "grand_total": gst["grand_total"],
+        "tax_amount": gst["tax"],
+        "balance_due": update_data["balance_due"],
+        "before": before,
+        "after": after,
+        "audit_note": (
+            "An immutable audit entry recording this change was written."
+        ),
+    }
+
+
+@router.put("/{order_id}/superadmin-invoice-change")
+async def superadmin_invoice_change(
+    order_id: str,
+    body: SuperadminInvoiceChange,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only POST-INVOICE correction (build item #16, part 2).
+
+    For an order that ALREADY carries a GST tax invoice. An issued tax invoice
+    is immutable (Rule 46) -- it is NEVER silently mutated. The SUPERADMIN
+    chooses ``mode`` (owner decision = support BOTH):
+
+      * REVISED_INVOICE -- allocate a NEW invoice serial for the corrected
+        order, mark the ORIGINAL superseded/void with a pointer to the new
+        serial, persist the corrected lines/totals, and link original<->revised
+        (``revised_invoices``).
+      * CREDIT_NOTE -- compute the money delta (grand_total down -> CREDIT note,
+        up -> DEBIT note), issue a note for the DELTA linked to the original
+        invoice (the customer-facing credit-note ledger so POS-redeem / the
+        customer card see it), and leave the ORIGINAL invoice + order totals
+        intact.
+
+    Both paths: RBAC 403 non-SUPERADMIN, mandatory reason, period-lock 423, and
+    a synchronous immutable before/after/diff audit row.
+    """
+    _require_superadmin(current_user)
+    repo = get_order_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Order store unavailable")
+
+    from ..services.order_superadmin_edit import (
+        recompute_totals,
+        order_money_snapshot,
+        compute_invoice_delta,
+        build_credit_note_doc,
+        build_revised_invoice_doc,
+    )
+
+    order = repo.find_by_id(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    validate_store_access(order.get("store_id"), current_user)
+
+    original_invoice = order.get("invoice_number")
+    if not original_invoice:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No tax invoice has been issued for this order yet. Use "
+                "/orders/{id}/superadmin-edit for a pre-invoice edit."
+            ),
+        )
+
+    # Period lock: a post-issue correction is a financial posting (423).
+    db = _get_db()
+    if db is not None:
+        from .finance import check_period_locked
+        from ..utils.ist import ist_today
+
+        check_period_locked(db, ist_today())
+
+    before = order_money_snapshot(order)
+    new_items = _rebuilt_items_or_existing(body.items, order.get("items"))
+    cart_discount_pct = (
+        body.cart_discount_percent
+        if body.cart_discount_percent is not None
+        else float(order.get("cart_discount_percent") or 0.0)
+    )
+    gst = recompute_totals(new_items, cart_discount_pct, _compute_per_category_gst)
+
+    # The "after" money picture the correction targets.
+    corrected = dict(order)
+    corrected.update(
+        {
+            "items": new_items,
+            "subtotal": gst["subtotal"],
+            "cart_discount_percent": max(0.0, min(100.0, cart_discount_pct or 0.0)),
+            "cart_discount_amount": gst["cart_discount_amount"],
+            "tax_rate": gst["dominant_rate"],
+            "tax_amount": gst["tax"],
+            "total_discount": gst["total_discount"],
+            "grand_total": gst["grand_total"],
+        }
+    )
+    if body.customer_id is not None:
+        corrected["customer_id"] = body.customer_id
+    if body.customer_name is not None:
+        corrected["customer_name"] = body.customer_name
+    after = order_money_snapshot(corrected)
+
+    store_doc = None
+    try:
+        if db is not None:
+            store_doc = db.get_collection("stores").find_one(
+                {"store_id": order.get("store_id")}
+            )
+    except Exception:  # noqa: BLE001
+        store_doc = None
+
+    if body.mode == "REVISED_INVOICE":
+        # Allocate a fresh GST serial for the revised invoice.
+        new_invoice_number = repo.next_invoice_number(
+            order.get("store_id"), store_doc=store_doc
+        )
+        revised_doc = build_revised_invoice_doc(
+            order=order,
+            new_invoice_number=new_invoice_number,
+            before=before,
+            after=after,
+            reason=body.reason,
+            user_id=current_user.get("user_id"),
+        )
+        # Persist corrected order under the NEW serial; the OLD serial is kept
+        # on the doc for traceability + marked superseded.
+        update_data: Dict[str, Any] = {
+            "items": new_items,
+            "subtotal": gst["subtotal"],
+            "cart_discount_percent": corrected["cart_discount_percent"],
+            "cart_discount_amount": gst["cart_discount_amount"],
+            "tax_rate": gst["dominant_rate"],
+            "tax_amount": gst["tax"],
+            "total_discount": gst["total_discount"],
+            "grand_total": gst["grand_total"],
+            "pricing_model": gst.get("pricing_model", "inclusive"),
+            "invoice_number": new_invoice_number,
+            "invoice_date": datetime.now(),
+            "superseded_invoice_number": original_invoice,
+            "invoice_revision_id": revised_doc["revision_id"],
+            "superadmin_edited": True,
+            "superadmin_edit_reason": body.reason,
+            "superadmin_edited_at": datetime.now().isoformat(),
+            "updated_by": current_user.get("user_id"),
+        }
+        if body.customer_id is not None:
+            update_data["customer_id"] = body.customer_id
+        if body.customer_name is not None:
+            update_data["customer_name"] = body.customer_name
+        # Recompute the receivable against the revised grand_total.
+        amount_paid = float(order.get("amount_paid") or 0.0)
+        balance_due = round(gst["grand_total"] - amount_paid, 2)
+        update_data["balance_due"] = max(0.0, balance_due)
+        update_data["payment_status"] = (
+            "PAID"
+            if balance_due <= 0.01
+            else ("PARTIAL" if amount_paid > 0 else "UNPAID")
+        )
+
+        # SYNCHRONOUS immutable audit BEFORE persisting.
+        _write_order_edit_audit(
+            action="ORDER_INVOICE_REVISED",
+            order=order,
+            before=before,
+            after=after,
+            reason=body.reason,
+            user_id=current_user.get("user_id"),
+            extra={
+                "original_invoice_number": original_invoice,
+                "revised_invoice_number": new_invoice_number,
+                "revision_id": revised_doc["revision_id"],
+            },
+        )
+
+        # Persist the revised-invoice link record (best-effort, fail-soft).
+        if db is not None:
+            try:
+                db.get_collection("revised_invoices").insert_one(dict(revised_doc))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[ORDERS] revised_invoices insert failed: %s", exc)
+
+        if not repo.update(order_id, update_data):
+            raise HTTPException(
+                status_code=500, detail="Failed to issue revised invoice"
+            )
+
+        return {
+            "order_id": order_id,
+            "mode": "REVISED_INVOICE",
+            "message": "Revised invoice issued; original invoice superseded.",
+            "original_invoice_number": original_invoice,
+            "revised_invoice_number": new_invoice_number,
+            "revision_id": revised_doc["revision_id"],
+            "grand_total": gst["grand_total"],
+            "balance_due": update_data["balance_due"],
+            "audit_note": "An immutable audit entry recording this change was written.",
+        }
+
+    # mode == CREDIT_NOTE  -> issue a credit (reduction) / debit (increase) note
+    # for the DELTA, linked to the ORIGINAL invoice. The original invoice +
+    # order totals are LEFT INTACT.
+    delta = compute_invoice_delta(before, after)
+    if delta["direction"] == "NONE":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The corrected order has the same grand total as the original; "
+                "there is no delta to issue a credit/debit note for."
+            ),
+        )
+
+    note_doc = build_credit_note_doc(
+        order=order,
+        delta=delta,
+        reason=body.reason,
+        user_id=current_user.get("user_id"),
+    )
+
+    # SYNCHRONOUS immutable audit BEFORE issuing the note.
+    _write_order_edit_audit(
+        action="ORDER_INVOICE_CREDIT_NOTE",
+        order=order,
+        before=before,
+        after=after,
+        reason=body.reason,
+        user_id=current_user.get("user_id"),
+        extra={
+            "note_number": note_doc["note_number"],
+            "note_type": note_doc["note_type"],
+            "amount": note_doc["amount"],
+            "original_invoice_number": original_invoice,
+        },
+    )
+
+    # Persist the note. A CREDIT note also bumps the customer's store-credit
+    # ledger balance (reuse returns.py machinery) so POS-redeem / the customer
+    # card see the credit; a DEBIT note (customer owes more) is recorded for the
+    # accountant but is NOT store credit. Both fail-soft.
+    if db is not None:
+        try:
+            coll_name = (
+                "credit_note_ledger"
+                if note_doc["note_type"] == "CREDIT_NOTE"
+                else "debit_note_ledger"
+            )
+            db.get_collection(coll_name).insert_one(dict(note_doc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ORDERS] note ledger insert failed: %s", exc)
+
+    if note_doc["note_type"] == "CREDIT_NOTE":
+        try:
+            from .returns import _issue_store_credit
+
+            _issue_store_credit(
+                order.get("customer_id"),
+                note_doc["amount"],
+                reason=f"Credit note {note_doc['note_number']} "
+                f"(order edit on invoice {original_invoice})",
+                ref=note_doc["note_number"],
+                current_user=current_user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ORDERS] store-credit bump skipped: %s", exc)
+
+    return {
+        "order_id": order_id,
+        "mode": "CREDIT_NOTE",
+        "message": (
+            f"{note_doc['note_type']} {note_doc['note_number']} issued for the "
+            f"delta; original invoice {original_invoice} left intact."
+        ),
+        "note_number": note_doc["note_number"],
+        "note_type": note_doc["note_type"],
+        "amount": note_doc["amount"],
+        "original_invoice_number": original_invoice,
+        "delta": delta,
+        "audit_note": "An immutable audit entry recording this change was written.",
+    }
 
 
 @router.post("/{order_id}/items")

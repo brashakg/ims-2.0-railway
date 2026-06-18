@@ -21,6 +21,7 @@ import {
   Loader2,
   AlertCircle,
   CheckCheck,
+  Pencil,
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi, storeApi } from '../../services/api';
@@ -35,6 +36,7 @@ import { OrderNotificationTracker } from '../../components/orders/OrderNotificat
 import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline';
 import { OrderShippingCard } from '../../components/orders/OrderShippingCard';
 import { OrderTrackingQR } from '../../components/orders/OrderTrackingQR';
+import { SuperadminOrderEditModal } from '../../components/orders/SuperadminOrderEditModal';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -112,6 +114,10 @@ export function OrdersPage() {
   const [showDeliverModal, setShowDeliverModal] = useState(false);
   const [deliverOrder, setDeliverOrder] = useState<Order | null>(null);
   const [isDeliveringOrder, setIsDeliveringOrder] = useState(false);
+
+  // Build item #16 — SUPERADMIN post-creation order edit modal state.
+  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
+  const [showSuperadminEdit, setShowSuperadminEdit] = useState(false);
 
   // Reset page when filters change
   useEffect(() => {
@@ -725,6 +731,17 @@ export function OrdersPage() {
                 />
 
                 <div className="flex gap-2 pt-4 flex-wrap">
+                  {/* Build item #16: SUPERADMIN-only post-creation edit. Hidden
+                      for terminal CANCELLED orders (nothing to correct). */}
+                  {isSuperadmin && selectedOrder.orderStatus !== 'CANCELLED' && (
+                    <button
+                      onClick={() => setShowSuperadminEdit(true)}
+                      className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[120px]"
+                    >
+                      <Pencil className="w-4 h-4" />
+                      Edit order
+                    </button>
+                  )}
                   <button
                     onClick={() => printOrder(selectedOrder)}
                     className="btn-primary flex-1 flex items-center justify-center gap-2 min-w-[120px]"
@@ -762,6 +779,19 @@ export function OrdersPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Build item #16 — SUPERADMIN post-creation order edit modal */}
+      {showSuperadminEdit && selectedOrder && isSuperadmin && (
+        <SuperadminOrderEditModal
+          order={selectedOrder}
+          onClose={() => setShowSuperadminEdit(false)}
+          onSaved={async () => {
+            setShowSuperadminEdit(false);
+            setSelectedOrder(null);
+            await loadOrders();
+          }}
+        />
       )}
 
       {/* Payment Collection Modal */}
