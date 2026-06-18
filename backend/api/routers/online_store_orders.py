@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .auth import require_roles
+from ..dependencies import user_store_scope
 
 router = APIRouter()
 
@@ -111,6 +112,19 @@ async def list_online_orders(
         }
 
     query: Dict[str, Any] = {"channel": "ONLINE"}
+
+    # Store scope (IDOR fix): SUPERADMIN/ADMIN are cross-store and see every
+    # store's online orders; a store-scoped ACCOUNTANT (or any non-HQ role) must
+    # only see the online orders of the store(s) they actually manage -- without
+    # this filter the role gate alone let them read ALL stores' online orders
+    # (customer PII + revenue). Bound the query to the caller's store_ids.
+    is_cross, allowed_stores = user_store_scope(current_user)
+    if not is_cross:
+        # An empty store set means a store-scoped caller with no resolvable
+        # store: {$in: []} matches nothing, so they see an empty book (fail
+        # closed) rather than leaking the all-store list.
+        query["store_id"] = {"$in": sorted(allowed_stores)}
+
     if status:
         query["status"] = status
     created: Dict[str, Any] = {}

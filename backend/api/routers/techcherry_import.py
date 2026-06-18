@@ -230,6 +230,14 @@ def _map_customer(
         "customer_id": phone or name.replace(" ", "_").lower()[:40],
         "name": name,
         "phone": phone,
+        # Normalize-on-write: the number is the customer's IDENTITY. TechCherry
+        # legacy rows only carry it under `phone`, but the UNIQUE (sparse) index
+        # is on `mobile`, so an import that left `mobile` absent would be exempt
+        # from the index and could create duplicate accounts (split AR). Mirror
+        # the number into `mobile` so the existing unique index actually enforces
+        # one account per number across both natively-created + imported docs.
+        # `None` (no phone) stays absent so the sparse index still exempts it.
+        "mobile": phone or None,
         "email": (row.get("email") or row.get("Email") or "").strip(),
         "address": (row.get("address") or row.get("Address") or "").strip(),
         "city": (row.get("city") or row.get("City") or "").strip(),
@@ -351,7 +359,15 @@ async def import_batch(
 
             # Customers also need scoping: phone is global. Products + orders
             # scope by store_id.
-            query: Dict[str, Any] = {dedup_field: key_value}
+            query: Dict[str, Any]
+            if req.type == "customers":
+                # The number is the identity but lives under `phone` (imported)
+                # OR `mobile` (natively-created). Dedup against BOTH so a
+                # re-import, or an import of a number that already exists as a
+                # native customer, updates/skips instead of creating a duplicate.
+                query = {"$or": [{"phone": key_value}, {"mobile": key_value}]}
+            else:
+                query = {dedup_field: key_value}
             if req.type in ("products", "orders"):
                 query["store_id"] = req.store_id
 

@@ -422,6 +422,31 @@ class DatabaseConnection:
             background=True,
         )
 
+        # Loyalty ledger. The per-customer history scan filters {customer_id}
+        # (+ optional type), newest-first.
+        _idx(
+            "loyalty_transactions",
+            [("customer_id", 1), ("created_at", -1)],
+            background=True,
+        )
+        # Idempotent EARN: exactly one EARN row per (customer, order). This is the
+        # DB-level backstop behind LoyaltyTransactionRepository.claim_earn_for_order
+        # (the atomic upsert) -- two concurrent earns for the same order can never
+        # both insert -> no double points. PARTIAL on type=EARN + a string
+        # order_id so REDEEM/EXPIRE/ADJUST rows (which can share an order_id) and
+        # manual earns (no order_id) are exempt and never collide. Fail-soft build.
+        _idx(
+            "loyalty_transactions",
+            [("customer_id", 1), ("order_id", 1), ("type", 1)],
+            unique=True,
+            partialFilterExpression={
+                "type": "EARN",
+                "order_id": {"$type": "string"},
+            },
+            name="uniq_loyalty_earn_customer_order",
+            background=True,
+        )
+
         # Audit logs (SYSTEM_INTENT 10 -- immutable, hash-chained trail). UNIQUE
         # sparse `seq` is the belt-and-braces against a forked tamper-evident
         # chain; sparse excludes the fail-soft UNCHAINED (seq-less) rows.
