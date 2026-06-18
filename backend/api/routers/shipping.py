@@ -41,12 +41,14 @@ router = APIRouter()
 
 # Roles allowed to BOOK a shipment - fulfilment-capable roles, mirrors the
 # returns router gate (SUPERADMIN always passes via require_roles).
+# SALES_CASHIER merged into SALES_STAFF (backlog #12): granted SALES_CASHIER but
+# not SALES_STAFF, so the access moves to the survivor.
 _FULFILMENT_ROLES = (
     "ADMIN",
     "AREA_MANAGER",
     "STORE_MANAGER",
     "CASHIER",
-    "SALES_CASHIER",
+    "SALES_STAFF",
 )
 
 _HQ_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER")

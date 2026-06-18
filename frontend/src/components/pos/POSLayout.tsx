@@ -1226,7 +1226,7 @@ function SalespersonPicker() {
     // future role we'll add by request.
     adminStoreApi
       .getStoreUsers(sid, {
-        roles: ['STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTICIAN', 'CASHIER'],
+        roles: ['STORE_MANAGER', 'SALES_STAFF', 'OPTICIAN', 'CASHIER'],
         activeOnly: true,
       })
       .then((r: any) => {

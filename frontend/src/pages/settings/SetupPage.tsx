@@ -75,8 +75,9 @@ interface RoleOption {
 }
 
 const ROLE_CATALOGUE: RoleOption[] = [
-  { id: 'SALES_STAFF', label: 'Sales Staff', desc: 'Rings up sales and searches the catalogue. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_STAFF, geoFenced: true },
-  { id: 'SALES_CASHIER', label: 'Sales Cashier', desc: 'Rings up sales, takes payments, opens the cash drawer. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_CASHIER, geoFenced: true },
+  // Sales Cashier was merged into Sales Staff (backlog #12) -- one floor-sales
+  // role now: rings up sales, takes payments, opens the drawer, discount up to 10%.
+  { id: 'SALES_STAFF', label: 'Sales Staff', desc: 'Rings up sales, takes payments, opens the cash drawer, and searches the catalogue. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_STAFF, geoFenced: true },
   { id: 'CASHIER', label: 'Cashier', desc: 'Takes payments only — no selling, no discounts.', level: ROLE_HIERARCHY.CASHIER ?? 3, geoFenced: true },
   { id: 'OPTOMETRIST', label: 'Optometrist', desc: 'Runs eye tests and writes prescriptions. No selling.', level: ROLE_HIERARCHY.OPTOMETRIST, geoFenced: true },
   { id: 'WORKSHOP_STAFF', label: 'Workshop / Fitting', desc: 'Updates job status — frame fitting, lens mounting. No selling.', level: ROLE_HIERARCHY.WORKSHOP_STAFF, geoFenced: true },

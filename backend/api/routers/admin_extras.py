@@ -116,7 +116,7 @@ async def get_role_discount_caps():
         "ADMIN": 100,
         "AREA_MANAGER": 25,
         "STORE_MANAGER": 20,
-        "SALES_CASHIER": 10,
+        # SALES_CASHIER merged into SALES_STAFF (backlog #12); both were 10%.
         "SALES_STAFF": 10,
     }
     coll = _coll("role_discount_caps")

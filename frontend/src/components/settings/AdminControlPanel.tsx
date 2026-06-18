@@ -80,7 +80,7 @@ const ROLES = [
   { id: 'ACCOUNTANT', name: 'Accountant' },
   { id: 'CATALOG_MANAGER', name: 'Catalog Manager' },
   { id: 'OPTOMETRIST', name: 'Optometrist' },
-  { id: 'SALES_CASHIER', name: 'Sales/Cashier' },
+  // SALES_CASHIER merged into SALES_STAFF (backlog #12).
   { id: 'SALES_STAFF', name: 'Sales Staff' },
   { id: 'WORKSHOP_STAFF', name: 'Workshop Staff' },
 ];
@@ -92,8 +92,8 @@ const DEFAULT_DISCOUNT_LIMITS: DiscountLimit[] = [
   { roleId: 'SUPERADMIN', roleName: 'Superadmin', maxDiscountPercent: 100, requiresApproval: false, approvalThreshold: 0 },
   { roleId: 'ADMIN', roleName: 'Admin', maxDiscountPercent: 50, requiresApproval: false, approvalThreshold: 0 },
   { roleId: 'STORE_MANAGER', roleName: 'Store Manager', maxDiscountPercent: 25, requiresApproval: false, approvalThreshold: 0 },
-  { roleId: 'SALES_CASHIER', roleName: 'Sales/Cashier', maxDiscountPercent: 10, requiresApproval: true, approvalThreshold: 5 },
-  { roleId: 'SALES_STAFF', roleName: 'Sales Staff', maxDiscountPercent: 5, requiresApproval: true, approvalThreshold: 3 },
+  // SALES_CASHIER merged into SALES_STAFF (backlog #12); survivor cap is 10%.
+  { roleId: 'SALES_STAFF', roleName: 'Sales Staff', maxDiscountPercent: 10, requiresApproval: true, approvalThreshold: 5 },
   { roleId: 'OPTOMETRIST', roleName: 'Optometrist', maxDiscountPercent: 0, requiresApproval: false, approvalThreshold: 0 },
   { roleId: 'WORKSHOP_STAFF', roleName: 'Workshop Staff', maxDiscountPercent: 0, requiresApproval: false, approvalThreshold: 0 },
 ];

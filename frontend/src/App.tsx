@@ -270,7 +270,7 @@ function App() {
                     path="pos"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
                       >
                         <POSPage />
                       </ProtectedRoute>
@@ -282,7 +282,7 @@ function App() {
                     path="pos/footfall"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}
                       >
                         <FootfallPage />
                       </ProtectedRoute>
@@ -294,7 +294,7 @@ function App() {
                     path="customers"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
                       >
                         <CustomersPage />
                       </ProtectedRoute>
@@ -306,7 +306,7 @@ function App() {
                     path="customers/360"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
                       >
                         <Customer360Dashboard />
                       </ProtectedRoute>
@@ -317,7 +317,7 @@ function App() {
                     path="customers/:customerId/360"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
                       >
                         <Customer360Dashboard />
                       </ProtectedRoute>
@@ -353,7 +353,7 @@ function App() {
                     path="customers/nba"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF']}
                       >
                         <NBADashboardPage />
                       </ProtectedRoute>
@@ -367,7 +367,7 @@ function App() {
                     path="customers/reactivation"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF']}
                       >
                         <LapsedReactivationPage />
                       </ProtectedRoute>
@@ -381,7 +381,7 @@ function App() {
                     path="customers/family-wallet"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER']}
                       >
                         <FamilyWalletPage />
                       </ProtectedRoute>
@@ -395,7 +395,7 @@ function App() {
                     path="customers/cl-refill"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'OPTOMETRIST']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'OPTOMETRIST']}
                       >
                         <CLRefillWorklistPage />
                       </ProtectedRoute>
@@ -419,7 +419,7 @@ function App() {
                     path="customers/:customerId/loyalty"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF']}
                       >
                         <LoyaltyLedger />
                       </ProtectedRoute>
@@ -646,7 +646,7 @@ function App() {
                     path="orders"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
                       >
                         <OrdersPage />
                       </ProtectedRoute>
@@ -658,7 +658,7 @@ function App() {
                     path="estimates"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF']}
                       >
                         <EstimatesPage />
                       </ProtectedRoute>
@@ -670,7 +670,7 @@ function App() {
                     path="walkouts"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER']}
                       >
                         <WalkoutsPage />
                       </ProtectedRoute>
@@ -690,7 +690,7 @@ function App() {
                     path="walkouts/:walkoutId"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER']}
                       >
                         <WalkoutDetailPage />
                       </ProtectedRoute>
@@ -702,7 +702,7 @@ function App() {
                     path="incentive"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER']}
                       >
                         <DailyScorecardPage />
                       </ProtectedRoute>
@@ -769,7 +769,7 @@ function App() {
                     path="returns"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF']}
                       >
                         <ReturnsPage />
                       </ProtectedRoute>
@@ -1023,7 +1023,7 @@ function App() {
                     path="my-work"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF']}
                       >
                         <EmployeeSelfServicePage />
                       </ProtectedRoute>
@@ -1038,7 +1038,7 @@ function App() {
                     path="attendance"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF']}
                       >
                         <AttendancePage />
                       </ProtectedRoute>
@@ -1109,7 +1109,7 @@ function App() {
                     path="reports/day-end"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF']}
                       >
                         <DayEndReport />
                       </ProtectedRoute>
@@ -1133,7 +1133,7 @@ function App() {
                     path="print"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF']}
                       >
                         <PrintPage />
                       </ProtectedRoute>
@@ -1317,7 +1317,7 @@ function App() {
                   <Route
                     path="finance/blind-eod"
                     element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF']}>
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF']}>
                         <BlindEodTallyPage />
                       </ProtectedRoute>
                     }

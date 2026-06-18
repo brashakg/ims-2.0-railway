@@ -174,6 +174,80 @@ def test_role_set_matches_rbac_policy():
     assert set(rbac_policy.ALL_ROLES) | {"INVESTOR"} == set(user_roles.VALID_ROLES)
 
 
+# ---------------------------------------------------------------------------
+# SALES_CASHIER -> SALES_STAFF merge (backlog #12)
+# ---------------------------------------------------------------------------
+
+
+def test_sales_cashier_is_a_recognized_but_deprecated_alias():
+    # Still recognized (an existing user/token carrying it is NOT rejected) ...
+    assert "SALES_CASHIER" in user_roles.VALID_ROLES
+    assert user_roles.validate_roles(["SALES_CASHIER"])[0] is True
+    # ... but it maps to the survivor and is NOT assignable to new users.
+    assert user_roles.DEPRECATED_ROLE_ALIASES["SALES_CASHIER"] == "SALES_STAFF"
+    assert "SALES_CASHIER" not in user_roles.ASSIGNABLE_ROLES
+    assert "SALES_STAFF" in user_roles.ASSIGNABLE_ROLES
+
+
+def test_normalize_role_maps_cashier_to_staff():
+    assert user_roles.normalize_role("SALES_CASHIER") == "SALES_STAFF"
+    # Non-deprecated roles pass through untouched.
+    assert user_roles.normalize_role("STORE_MANAGER") == "STORE_MANAGER"
+    assert user_roles.normalize_role("SALES_STAFF") == "SALES_STAFF"
+
+
+def test_normalize_roles_dedupes_after_merge():
+    # A user holding BOTH the alias and the survivor collapses to one SALES_STAFF.
+    assert user_roles.normalize_roles(["SALES_CASHIER", "SALES_STAFF"]) == ["SALES_STAFF"]
+    assert user_roles.normalize_roles(["SALES_CASHIER"]) == ["SALES_STAFF"]
+    assert user_roles.normalize_roles(
+        ["STORE_MANAGER", "SALES_CASHIER"]
+    ) == ["STORE_MANAGER", "SALES_STAFF"]
+    assert user_roles.normalize_roles([]) == []
+    assert user_roles.normalize_roles(None) == []
+
+
+def test_decode_token_normalizes_sales_cashier_to_sales_staff():
+    # An existing JWT still carrying SALES_CASHIER must be treated as SALES_STAFF
+    # by every consumer (require_roles, middleware) so the user is NOT locked out.
+    import jwt as _jwt
+    from datetime import datetime, timedelta
+    from api.routers.auth import decode_token, SECRET_KEY, ALGORITHM
+
+    token = _jwt.encode(
+        {
+            "user_id": "legacy-1",
+            "username": "legacy",
+            "roles": ["SALES_CASHIER"],
+            "exp": datetime.utcnow() + timedelta(hours=1),
+        },
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
+    payload = decode_token(token)
+    assert payload["roles"] == ["SALES_STAFF"]
+
+
+def test_create_user_with_sales_cashier_persists_sales_staff(monkeypatch):
+    # Passing the deprecated role to user-create is accepted (not rejected) but
+    # silently stored as the survivor -- no NEW user ends up with SALES_CASHIER.
+    repo = _FakeUserRepo()
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["SALES_CASHIER"]))
+    assert r.status_code == 201, r.text
+    assert repo.find_by_username("newbie")["roles"] == ["SALES_STAFF"]
+
+
+def test_add_sales_cashier_role_grants_sales_staff(monkeypatch):
+    repo = _seed_one(["OPTOMETRIST"])
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users/u1/roles/SALES_CASHIER")
+    assert r.status_code == 200, r.text
+    roles = repo.find_by_id("u1")["roles"]
+    assert "SALES_STAFF" in roles
+    assert "SALES_CASHIER" not in roles
+
+
 def test_can_assign_blocks_escalation():
     ok, bad = user_roles.can_assign_roles(["ADMIN"], ["SUPERADMIN"])
     assert ok is False and bad == "SUPERADMIN"

@@ -61,11 +61,14 @@ router = APIRouter()
 
 # Roles allowed to CREATE a return - mirrors the Returns nav item guard in
 # frontend/src/components/shell/Rail.tsx. SUPERADMIN auto-passes.
+# SALES_CASHIER was merged into SALES_STAFF (backlog #12); this list previously
+# granted SALES_CASHIER but NOT SALES_STAFF, so the access moves to the survivor
+# SALES_STAFF to preserve it under the merged role.
 _RETURN_ROLES = (
     "ADMIN",
     "STORE_MANAGER",
     "CASHIER",
-    "SALES_CASHIER",
+    "SALES_STAFF",
 )
 
 ReturnType = Literal["RETURN", "EXCHANGE", "CREDIT_NOTE"]

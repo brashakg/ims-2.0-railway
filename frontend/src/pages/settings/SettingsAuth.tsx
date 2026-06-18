@@ -217,7 +217,7 @@ export function UserManagementSection() {
 
         <p className="text-sm text-gray-500 mb-4">
           {user?.activeRole === 'STORE_MANAGER'
-            ? 'Create and manage store staff. You can assign: Optometrist, Sales Cashier, Sales Staff, Workshop Staff roles.'
+            ? 'Create and manage store staff. You can assign: Optometrist, Sales Staff, Workshop Staff roles.'
             : 'Create users and assign roles. Users can have multiple roles and access to multiple stores.'}
         </p>
 

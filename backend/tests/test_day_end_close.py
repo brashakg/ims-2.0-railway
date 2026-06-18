@@ -9,7 +9,10 @@ flag (no persistence, no audit). These tests cover the new persisted endpoints:
   GET  /api/v1/reports/day-end-close  -- close status for a store+date
 
 Gating: store-financial roles only (ACCOUNTANT/ADMIN/AREA_MANAGER/STORE_MANAGER/
-SALES_CASHIER/CASHIER; SUPERADMIN auto-passes). POS/clinical-only roles are 403.
+SALES_STAFF/CASHIER; SUPERADMIN auto-passes). OPTOMETRIST/WORKSHOP-only roles are
+403. SALES_CASHIER was merged into SALES_STAFF (backlog #12): the access it held
+on this endpoint now lives on the survivor SALES_STAFF, and a SALES_CASHIER token
+is normalized to SALES_STAFF, so both reach the endpoint.
 
 These run against the CI mongo:7.0; when no DB is connected (local), the POST
 returns 503 and the test asserts that branch instead of the persisted flow.
@@ -47,13 +50,13 @@ def _headers(roles, store_id=STORE):
 # RBAC gating
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("roles", [["OPTOMETRIST"], ["SALES_STAFF"], ["WORKSHOP_STAFF"]])
+@pytest.mark.parametrize("roles", [["OPTOMETRIST"], ["CATALOG_MANAGER"], ["WORKSHOP_STAFF"]])
 def test_get_blocked_for_non_finance_roles(client, roles):
     r = client.get(GET_URL, params={"date": DATE, "store_id": STORE}, headers=_headers(roles))
     assert r.status_code == 403
 
 
-@pytest.mark.parametrize("roles", [["OPTOMETRIST"], ["SALES_STAFF"], ["WORKSHOP_STAFF"]])
+@pytest.mark.parametrize("roles", [["OPTOMETRIST"], ["CATALOG_MANAGER"], ["WORKSHOP_STAFF"]])
 def test_post_blocked_for_non_finance_roles(client, roles):
     r = client.post(
         POST_URL,
@@ -63,7 +66,12 @@ def test_post_blocked_for_non_finance_roles(client, roles):
     assert r.status_code == 403
 
 
-@pytest.mark.parametrize("roles", [["STORE_MANAGER"], ["ACCOUNTANT"], ["SALES_CASHIER"]])
+# SALES_STAFF is the survivor of the SALES_CASHIER merge (backlog #12), so it is
+# now allowed here; a SALES_CASHIER token is normalized to SALES_STAFF and also
+# reaches the endpoint -- both asserted.
+@pytest.mark.parametrize(
+    "roles", [["STORE_MANAGER"], ["ACCOUNTANT"], ["SALES_STAFF"], ["SALES_CASHIER"]]
+)
 def test_get_allowed_for_finance_roles(client, roles):
     # Not 403 (200 with closed:false when nothing recorded yet).
     r = client.get(GET_URL, params={"date": DATE, "store_id": STORE}, headers=_headers(roles))

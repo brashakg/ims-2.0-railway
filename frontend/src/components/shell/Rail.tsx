@@ -68,14 +68,14 @@ const RAIL_GROUPS: NavGroup[] = [
     // requireRoles on each item MIRRORS the route's ProtectedRoute allowedRoles
     // in App.tsx, so a role never sees a nav link that lands it on /unauthorized.
     items: [
-      { id: 'pos', label: 'POS', to: '/pos', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
-      { id: 'customers', label: 'Customers', to: '/customers', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      { id: 'pos', label: 'POS', to: '/pos', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
+      { id: 'customers', label: 'Customers', to: '/customers', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
       // F39: NBA daily call list — ranked customers to phone today (in-app only).
-      { id: 'daily-calls', label: 'Daily Calls', to: '/customers/nba', icon: 'phone', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER'] },
-      { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
-      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
-      { id: 'estimates', label: 'Estimates', to: '/estimates', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF'] },
-      { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
+      { id: 'daily-calls', label: 'Daily Calls', to: '/customers/nba', icon: 'phone', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
+      { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
+      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
+      { id: 'estimates', label: 'Estimates', to: '/estimates', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
+      { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'] },
       // F27: refund-approval queue (the refund-only slice of the E4 inbox).
       // requireRoles mirrors the /returns/approvals ProtectedRoute gate.
       { id: 'refund-approvals', label: 'Refund Approvals', to: '/returns/approvals', icon: 'shield', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
@@ -113,11 +113,11 @@ const RAIL_GROUPS: NavGroup[] = [
       // Attendance is its OWN top-level item (was buried in HR tabs). Managers
       // see the full monthly grid + admin edit; staff (roles 5-7) get their
       // self check-in card. requireRoles mirrors the /attendance route gate.
-      { id: 'attendance', label: 'Attendance', to: '/attendance', icon: 'calendarCheck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'] },
+      { id: 'attendance', label: 'Attendance', to: '/attendance', icon: 'calendarCheck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'] },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'payslip', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'calculator', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-      { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
+      { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
     ],
   },
   {
@@ -128,7 +128,7 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Till / Day-close',
     items: [
       { id: 'cash-register', label: 'Cash Register', to: '/finance/cash-register', icon: 'cashRegister', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-      { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'lock', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF'] },
+      { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'lock', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF'] },
       // #7 Manager-facing reconciliation console across BOTH day-close flows.
       { id: 'cash-reconciliation', label: 'Cash Reconciliation', to: '/finance/cash-reconciliation', icon: 'calculator', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
     ],
@@ -191,7 +191,7 @@ const RAIL_GROUPS: NavGroup[] = [
   {
     title: 'System',
     items: [
-      { id: 'print', label: 'Print', to: '/print', icon: 'printer', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      { id: 'print', label: 'Print', to: '/print', icon: 'printer', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF'] },
       // Three items used to share the `settings` cog glyph (indistinguishable).
       // Now: Settings keeps the cog; Staff Onboarding gets a user-plus mark and
       // sits next to the people-admin tools; Organization gets a building mark.

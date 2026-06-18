@@ -99,9 +99,10 @@ def int_to_e4_tier(tier: int) -> Optional[str]:
 DEFAULT_MATRIX: Dict[str, Any] = {
     "currency": "INR",
     "role_floor_paise": {
-        "SALES_CASHIER": 0,         # any refund needs approval per the bands
+        # SALES_CASHIER merged into SALES_STAFF (backlog #12); the survivor key
+        # below carries the identical floor.
         "CASHIER": 0,
-        "SALES_STAFF": 0,
+        "SALES_STAFF": 0,           # any refund needs approval per the bands
         "STORE_MANAGER": 500000,    # auto-cleared up to Rs 5,000
         "AREA_MANAGER": 2000000,    # auto-cleared up to Rs 20,000
         "ADMIN": None,              # HQ -- never needs a refund approval

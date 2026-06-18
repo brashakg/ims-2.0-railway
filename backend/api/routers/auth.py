@@ -287,9 +287,25 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
 
 
 def decode_token(token: str) -> dict:
-    """Decode and validate JWT token"""
+    """Decode and validate JWT token.
+
+    Roles carried in the token are normalized through the deprecated-alias map
+    (SALES_CASHIER -> SALES_STAFF, backlog #12) at this single chokepoint, so
+    every downstream consumer -- require_roles, get_current_user, and both the
+    RBAC-enforcement + audit middlewares (all of which route through this
+    function) -- sees the merged survivor role. An existing JWT still carrying
+    the old role therefore keeps full SALES_STAFF access and is never locked out.
+    """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        roles = payload.get("roles")
+        if roles:
+            try:
+                from api.services.user_roles import normalize_roles
+
+                payload["roles"] = normalize_roles(roles)
+            except Exception:  # noqa: BLE001 - normalization must never break auth
+                pass
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
@@ -685,11 +701,19 @@ async def login(request: LoginRequest, req: Request = None):
     # read by the frontend to HIDE/route-block modules, never to grant one.
     module_access = user.get("module_access") or {}
 
+    # Normalize deprecated role aliases (SALES_CASHIER -> SALES_STAFF, backlog
+    # #12) so both the freshly-issued JWT and the user object returned to the
+    # frontend carry the merged survivor role even for a legacy DB user that was
+    # never migrated. decode_token applies the same map on every subsequent read.
+    from api.services.user_roles import normalize_roles
+
+    user_roles_normalized = normalize_roles(user.get("roles", []))
+
     # Create token
     token_data = {
         "user_id": user.get("user_id", user.get("_id", "")),
         "username": user.get("username", ""),
-        "roles": user.get("roles", []),
+        "roles": user_roles_normalized,
         "store_ids": user_store_ids,
         "active_store_id": (
             active_store
@@ -718,7 +742,7 @@ async def login(request: LoginRequest, req: Request = None):
     from api.services.role_caps import effective_discount_cap
 
     eff_cap = effective_discount_cap(
-        user.get("roles", []),
+        user_roles_normalized,
         user.get("discount_cap"),
     )
 
@@ -729,7 +753,7 @@ async def login(request: LoginRequest, req: Request = None):
             "user_id": token_data["user_id"],
             "username": user.get("username", ""),
             "full_name": user.get("full_name", ""),
-            "roles": user.get("roles", []),
+            "roles": user_roles_normalized,
             "store_ids": user_store_ids,
             "active_store_id": token_data["active_store_id"],
             "discount_cap": eff_cap,
@@ -930,6 +954,13 @@ async def refresh_token(request: RefreshTokenRequest):
         store_ids = payload.get("store_ids", [])
         module_access = payload.get("module_access") or {}
         must_change = bool(payload.get("must_change_password", False))
+
+    # Normalize deprecated role aliases on the LIVE-record roles too (the DB doc
+    # may still carry SALES_CASHIER pre-migration); the token claims were already
+    # normalized by decode_token above. backlog #12.
+    from api.services.user_roles import normalize_roles
+
+    roles = normalize_roles(roles)
 
     # Keep the active store only if it is still one of the user's stores (a
     # reassigned store-level user falls back to their first remaining store).

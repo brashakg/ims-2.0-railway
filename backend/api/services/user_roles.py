@@ -29,9 +29,15 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Tuple
 
-# Canonical assignable roles. The 11 operational roles + the read-only INVESTOR
+# Canonical recognized roles. The 11 operational roles + the read-only INVESTOR
 # role. SUPERADMIN is the top of the ladder. Keep in sync with
 # rbac_policy.ALL_ROLES (asserted by test_user_role_guards.py).
+#
+# NOTE on SALES_CASHIER: it remains RECOGNIZED here (so an existing user/JWT that
+# still carries it is NOT rejected at validation time) but it is DEPRECATED and
+# merged into SALES_STAFF -- see DEPRECATED_ROLE_ALIASES + normalize_roles()
+# below. It is NOT in ASSIGNABLE_ROLES, so no NEW user can be given it; any write
+# that passes it is silently rewritten to the survivor SALES_STAFF.
 VALID_ROLES = frozenset(
     {
         "SUPERADMIN",
@@ -52,6 +58,46 @@ VALID_ROLES = frozenset(
     }
 )
 
+# Deprecated role -> survivor mapping (owner decision, backlog item #12). Sales
+# Cashier and Sales Staff were functionally identical (same 10% cap, same POS /
+# module gating, same geo-fence), so Sales Cashier is merged into Sales Staff.
+# These aliases are still RECOGNIZED (existing tokens/users keep working) but are
+# transparently normalized to the survivor everywhere roles are read or written.
+DEPRECATED_ROLE_ALIASES: Dict[str, str] = {
+    "SALES_CASHIER": "SALES_STAFF",
+}
+
+# The roles an admin may actually ASSIGN to a user. This is VALID_ROLES minus the
+# read-only INVESTOR sentinel and minus every deprecated alias -- so a brand-new
+# user can only ever receive the survivor (SALES_STAFF), never SALES_CASHIER.
+ASSIGNABLE_ROLES = frozenset(
+    r
+    for r in VALID_ROLES
+    if r not in DEPRECATED_ROLE_ALIASES
+)
+
+
+def normalize_role(role: str) -> str:
+    """Map a single deprecated role alias to its survivor; pass through unknown /
+    current roles unchanged. SALES_CASHIER -> SALES_STAFF."""
+    return DEPRECATED_ROLE_ALIASES.get(role, role)
+
+
+def normalize_roles(roles: Iterable[str]) -> List[str]:
+    """Normalize a roles list: rewrite every deprecated alias to its survivor and
+    de-duplicate while preserving order. None/empty -> []. This is the single
+    helper used at the auth/read layer (decode_token) and on the user-write paths
+    so SALES_CASHIER is treated as SALES_STAFF system-wide without locking out a
+    user/token that still carries the old role."""
+    out: List[str] = []
+    seen = set()
+    for r in roles or []:
+        nr = normalize_role(r)
+        if nr not in seen:
+            out.append(nr)
+            seen.add(nr)
+    return out
+
 # Numeric privilege ladder. Higher == more powerful. Mirrors the frontend
 # ROLE_HIERARCHY; an actor can only assign roles at or below their own level.
 ROLE_LEVEL: Dict[str, int] = {
@@ -62,7 +108,12 @@ ROLE_LEVEL: Dict[str, int] = {
     "ACCOUNTANT": 50,
     "CATALOG_MANAGER": 50,
     "OPTOMETRIST": 40,
-    "SALES_CASHIER": 30,
+    # SALES_CASHIER is deprecated (merged into SALES_STAFF, backlog #12). Roles are
+    # normalized to the survivor BEFORE every level lookup, so this entry is never
+    # reached in normal flow -- but it is pinned to SALES_STAFF's level (20), NOT
+    # its historical 30, so any future DIRECT (un-normalized) ROLE_LEVEL lookup
+    # can't misclassify the alias as more privileged than its survivor.
+    "SALES_CASHIER": 20,
     "CASHIER": 25,
     "SALES_STAFF": 20,
     "WORKSHOP_STAFF": 20,

@@ -131,7 +131,7 @@ export function ClinicalPage() {
 
   // Role-based permissions
   const canStartTest = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']);
-  const canAddPatient = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']);
+  const canAddPatient = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_STAFF']);
   const canViewAbuseAlerts = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
   // F24 conversion tab: clinical-management + optometrists (server role-strips
   // revenue for optometrists and limits them to their own row).

@@ -130,7 +130,9 @@ export interface LensAddon {
   price: number;
 }
 
-// Available roles
+// Available (assignable) roles. SALES_CASHIER was merged into SALES_STAFF
+// (backlog #12) and is no longer assignable to new users -- the backend
+// normalizes any lingering SALES_CASHIER to SALES_STAFF.
 export const AVAILABLE_ROLES = [
   'SUPERADMIN',
   'ADMIN',
@@ -139,12 +141,13 @@ export const AVAILABLE_ROLES = [
   'ACCOUNTANT',
   'CATALOG_MANAGER',
   'OPTOMETRIST',
-  'SALES_CASHIER',
   'SALES_STAFF',
   'WORKSHOP_STAFF',
 ];
 
-// Role hierarchy - higher index = higher privilege
+// Role hierarchy - higher index = higher privilege. SALES_CASHIER is retained
+// here (with the same level it always had) only so a legacy user still carrying
+// the deprecated role renders/levels correctly; it is not in AVAILABLE_ROLES.
 export const ROLE_HIERARCHY: Record<string, number> = {
   'SUPERADMIN': 10,
   'ADMIN': 9,
@@ -153,7 +156,7 @@ export const ROLE_HIERARCHY: Record<string, number> = {
   'ACCOUNTANT': 5,
   'CATALOG_MANAGER': 5,
   'OPTOMETRIST': 4,
-  'SALES_CASHIER': 3,
+  'SALES_CASHIER': 2, // deprecated alias of SALES_STAFF (same effective level)
   'SALES_STAFF': 2,
   'WORKSHOP_STAFF': 2,
 };
@@ -162,7 +165,7 @@ export const ROLE_HIERARCHY: Record<string, number> = {
 export const ASSIGNABLE_ROLES: Record<string, string[]> = {
   'SUPERADMIN': AVAILABLE_ROLES,
   'ADMIN': AVAILABLE_ROLES.filter(r => r !== 'SUPERADMIN'),
-  'STORE_MANAGER': ['OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF', 'WORKSHOP_STAFF'],
+  'STORE_MANAGER': ['OPTOMETRIST', 'SALES_STAFF', 'WORKSHOP_STAFF'],
 };
 
 // Get the highest role level from a list of roles

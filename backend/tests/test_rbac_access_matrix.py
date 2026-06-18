@@ -1249,9 +1249,16 @@ class TestVendorFinanceRoutes:
 # ===========================================================================
 
 class TestReturnsRoutes:
-    """POST /returns requires ADMIN, CASHIER, SALES_CASHIER, STORE_MANAGER."""
+    """POST /returns requires ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER.
 
-    _RETURNS_ALLOWED = {"ADMIN", "CASHIER", "SALES_CASHIER", "STORE_MANAGER", "SUPERADMIN"}
+    SALES_CASHIER was merged into SALES_STAFF (backlog #12): the route gate
+    previously granted SALES_CASHIER (not SALES_STAFF); the access now lives on
+    the survivor SALES_STAFF, and a SALES_CASHIER token is normalized to
+    SALES_STAFF at decode_token -- so BOTH role strings are allowed here."""
+
+    _RETURNS_ALLOWED = {
+        "ADMIN", "CASHIER", "SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER", "SUPERADMIN",
+    }
     _RETURNS_DENIED = set(ALL_ROLES) - _RETURNS_ALLOWED
 
     @pytest.mark.parametrize("role", sorted(_RETURNS_DENIED))
@@ -1472,6 +1479,43 @@ class TestPolicyConsistencyWithLiveApp:
                     f"on {method} {path}, expected 403, got {status}. "
                     f"Body: {r.text[:200]}"
                 )
+
+
+class TestSalesCashierAliasBackwardCompat:
+    """backlog #12: a JWT still carrying the retired SALES_CASHIER role must be
+    treated as the survivor SALES_STAFF everywhere -- it keeps SALES_STAFF access
+    and is never locked out. decode_token normalizes the claim at one chokepoint.
+
+    We assert the alias token reaches every SALES_STAFF-allowed endpoint AND is
+    denied on the same endpoints a plain SALES_STAFF token is denied on (so the
+    merge granted nothing extra)."""
+
+    # (method, path, body) endpoints SALES_STAFF (the survivor) is allowed on.
+    _STAFF_ALLOWED = [
+        ("POST", "/api/v1/orders", {"items": [], "customer_id": "CUST-001"}),
+        ("POST", "/api/v1/returns", {"order_id": "ORD-1", "items": [], "reason": "defect"}),
+        ("GET", "/api/v1/reports/day-end-close", None),
+    ]
+
+    # Endpoints a SALES_STAFF token is denied on -> the alias must be too.
+    _STAFF_DENIED = [
+        ("GET", "/api/v1/payroll/config", None),
+        ("POST", "/api/v1/marketing/notifications/send", {"message": "x", "customer_ids": []}),
+        ("GET", "/api/v1/reports/inventory/valuation", None),
+    ]
+
+    @pytest.mark.parametrize("method,path,body", _STAFF_ALLOWED)
+    def test_alias_token_allowed_where_survivor_is(self, matrix_client, method, path, body):
+        r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS["SALES_CASHIER"], json=body)
+        assert_route_allowed(r, "SALES_CASHIER(alias)", method, path)
+        # The survivor token reaches the same endpoint (parity).
+        r2 = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS["SALES_STAFF"], json=body)
+        assert_route_allowed(r2, "SALES_STAFF", method, path)
+
+    @pytest.mark.parametrize("method,path,body", _STAFF_DENIED)
+    def test_alias_token_denied_where_survivor_is(self, client, method, path, body):
+        r = client.request(method, path, headers=ALL_ROLE_HEADERS["SALES_CASHIER"], json=body)
+        assert_middleware_403(r, method, path)
 
 
 class TestCrossStoreListIDOR:
