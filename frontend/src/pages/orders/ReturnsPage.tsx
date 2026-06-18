@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { orderApi, productApi } from '../../services/api';
 import { returnsApi, type CreateReturnPayload } from '../../services/api/returns';
+import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
 import { formatDateIST } from '../../utils/datetime';
 import {
   Search, RotateCcw, ArrowLeftRight, Receipt,
@@ -50,6 +51,19 @@ const RETURN_REASONS: Record<ReturnReason, string> = {
   OTHER: 'Other (see notes)',
 };
 
+// Map a per-line return reason to the F27 matrix reason code (DEFECTIVE /
+// CHANGE_OF_MIND / PRICE_MATCH / GOODWILL drive the tier bump). Anything not a
+// clear defect is treated as a change-of-mind for the matrix.
+const MATRIX_REASON: Record<ReturnReason, string> = {
+  WRONG_PRODUCT: 'DEFECTIVE',
+  DEFECTIVE: 'DEFECTIVE',
+  POWER_MISMATCH: 'DEFECTIVE',
+  SIZE_ISSUE: 'CHANGE_OF_MIND',
+  CUSTOMER_CHANGED_MIND: 'CHANGE_OF_MIND',
+  DAMAGED_IN_STORE: 'CHANGE_OF_MIND',
+  OTHER: 'CHANGE_OF_MIND',
+};
+
 export default function ReturnsPage() {
   const { user } = useAuth();
   const [step, setStep] = useState<'search' | 'select' | 'review' | 'complete'>('search');
@@ -75,6 +89,14 @@ export default function ReturnsPage() {
   const [mode, setMode] = useState<'new' | 'history'>('new');
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  // F27 refund-approval gate: when the server demands a tiered sign-off this
+  // holds the context for the request+poll modal.
+  const [approvalGate, setApprovalGate] = useState<{
+    amount: number;
+    reason?: string;
+    requiredTier?: string;
+  } | null>(null);
 
   const searchOrders = async () => {
     if (!searchQuery.trim()) return;
@@ -183,48 +205,94 @@ export default function ReturnsPage() {
     setReplacementItems(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Dominant matrix reason across the returned lines (drives the F27 tier).
+  const dominantMatrixReason = (): string => {
+    const first = activeReturns[0]?.reason as ReturnReason | undefined;
+    return (first && MATRIX_REASON[first]) || 'CHANGE_OF_MIND';
+  };
+
+  // Core submit. `approval` carries the F27 token + request id when re-submitting
+  // after a manager approved a gated refund. Returns true on success.
+  const submitReturn = async (
+    approval?: { requestId: string; approvalToken?: string },
+  ): Promise<boolean> => {
+    const payload: CreateReturnPayload = {
+      order_id: selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId,
+      order_number: selectedOrder?.orderNumber || selectedOrder?.order_number,
+      customer_id: selectedOrder?.customerId || selectedOrder?.customer_id,
+      store_id: user?.activeStoreId,
+      return_type: returnType,
+      items: activeReturns.map(i => ({
+        order_item_id: i.orderItemId,
+        product_name: i.productName,
+        sku: i.sku,
+        return_qty: i.returnQty,
+        unit_price: i.unitPrice,
+        gst_rate: i.gstRate,
+        reason: i.reason,
+        condition: i.condition,
+        notes: i.notes,
+      })),
+      replacement_items:
+        returnType === 'EXCHANGE'
+          ? replacementItems.map(r => ({
+              product_id: r.productId,
+              name: r.name,
+              sku: r.sku,
+              quantity: r.quantity,
+              unit_price: r.unitPrice,
+            }))
+          : undefined,
+      approval_note: approvalNote || undefined,
+      // Restocking fee is a refund-path concept only (EXCHANGE is settled on
+      // the difference). Send it for RETURN / CREDIT_NOTE.
+      restocking_fee: returnType === 'EXCHANGE' ? undefined : safeFee || undefined,
+      refund_reason: returnType === 'EXCHANGE' ? undefined : dominantMatrixReason(),
+      refund_approval_request_id: approval?.requestId,
+      refund_approval_token: approval?.approvalToken,
+    };
+    const result = await returnsApi.create(payload);
+    setResultId(result.return_id || null);
+    setStep('complete');
+    return true;
+  };
+
   const handleSubmit = async () => {
     if (activeReturns.length === 0) { setError('Select at least one item to return'); return; }
     setError(null);
     setIsSubmitting(true);
     try {
-      const payload: CreateReturnPayload = {
-        order_id: selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId,
-        order_number: selectedOrder?.orderNumber || selectedOrder?.order_number,
-        customer_id: selectedOrder?.customerId || selectedOrder?.customer_id,
-        store_id: user?.activeStoreId,
-        return_type: returnType,
-        items: activeReturns.map(i => ({
-          order_item_id: i.orderItemId,
-          product_name: i.productName,
-          sku: i.sku,
-          return_qty: i.returnQty,
-          unit_price: i.unitPrice,
-          gst_rate: i.gstRate,
-          reason: i.reason,
-          condition: i.condition,
-          notes: i.notes,
-        })),
-        replacement_items:
-          returnType === 'EXCHANGE'
-            ? replacementItems.map(r => ({
-                product_id: r.productId,
-                name: r.name,
-                sku: r.sku,
-                quantity: r.quantity,
-                unit_price: r.unitPrice,
-              }))
-            : undefined,
-        approval_note: approvalNote || undefined,
-        // Restocking fee is a refund-path concept only (EXCHANGE is settled on
-        // the difference). Send it for RETURN / CREDIT_NOTE.
-        restocking_fee: returnType === 'EXCHANGE' ? undefined : safeFee || undefined,
-      };
-      const result = await returnsApi.create(payload);
-      setResultId(result.return_id || null);
-      setStep('complete');
+      await submitReturn();
     } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Failed to process return. Please try again.');
+      // F27: the server gates a tiered refund with 403 reason=REFUND_APPROVAL_REQUIRED.
+      // Open the request+poll modal instead of surfacing a raw error.
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
+        setApprovalGate({
+          amount: netRefund,
+          reason: dominantMatrixReason(),
+          requiredTier: detail?.required_tier,
+        });
+        return;
+      }
+      const msg = typeof detail === 'string' ? detail : detail?.message;
+      setError(msg || 'Failed to process return. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // After a manager approves the gated refund, re-submit with the token.
+  const onRefundApproved = async (approval: { requestId: string; approvalToken?: string }) => {
+    setApprovalGate(null);
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      await submitReturn(approval);
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : detail?.message;
+      setError(msg || 'The refund could not be finalised after approval. Please retry.');
     } finally {
       setIsSubmitting(false);
     }
@@ -631,6 +699,21 @@ export default function ReturnsPage() {
             </div>
           )}
         </div>
+      )}
+
+      {approvalGate && (
+        <RefundApprovalModal
+          amount={approvalGate.amount}
+          storeId={user?.activeStoreId}
+          orderId={selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId}
+          orderNumber={selectedOrder?.orderNumber || selectedOrder?.order_number}
+          customerName={selectedOrder?.customerName || selectedOrder?.customer_name}
+          reason={approvalGate.reason}
+          requiredTier={approvalGate.requiredTier}
+          requestedByName={user?.name}
+          onClose={() => setApprovalGate(null)}
+          onApproved={onRefundApproved}
+        />
       )}
     </div>
   );
