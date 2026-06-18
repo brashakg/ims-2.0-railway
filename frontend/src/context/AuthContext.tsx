@@ -415,7 +415,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
       DESIGN_MANAGER: ['products.view', 'online_store.view', 'design.*'],
       OPTOMETRIST: ['clinical.*', 'pos.create'],
       CASHIER: ['pos.*', 'till.*'],
-      SALES_CASHIER: ['pos.*', 'till.*'],
+      // SALES_CASHIER merged into SALES_STAFF (backlog #12). Kept as a recognized
+      // alias (UserRole union member) so a legacy user object still type-checks;
+      // mirrors the survivor's client permissions until the next login re-issues
+      // the token as SALES_STAFF (the backend normalizes the role either way).
+      SALES_CASHIER: ['pos.create', 'pos.discount'],
       SALES_STAFF: ['pos.create', 'pos.discount'],
       WORKSHOP_STAFF: ['inventory.view', 'workshop.*'],
       // INVESTOR is read-only — explicitly enumerate the .view permissions

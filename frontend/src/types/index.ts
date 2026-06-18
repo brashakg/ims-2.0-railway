@@ -18,7 +18,9 @@ export type UserRole =
                       // module; backend RBAC matrix gains it in a later phase.
   | 'OPTOMETRIST'
   | 'CASHIER'
-  | 'SALES_CASHIER'
+  | 'SALES_CASHIER'  // DEPRECATED: merged into SALES_STAFF (backlog #12). Kept
+                     // in the union so a legacy user object still type-checks;
+                     // the backend normalizes it to SALES_STAFF. Not assignable.
   | 'SALES_STAFF'
   | 'WORKSHOP_STAFF'
   | 'INVESTOR';  // 12th canonical role (May 2026): silent investor /

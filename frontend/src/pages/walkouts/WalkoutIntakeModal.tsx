@@ -106,7 +106,7 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
   // and accepts the same role + active-only filters POS uses.
   const SALES_ATTRIBUTABLE_ROLES = [
     'STORE_MANAGER',
-    'SALES_CASHIER',
+    // SALES_CASHIER merged into SALES_STAFF (backlog #12).
     'SALES_STAFF',
     'OPTICIAN',
     'CASHIER',
