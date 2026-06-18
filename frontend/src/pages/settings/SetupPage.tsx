@@ -366,8 +366,14 @@ function OnboardingWizard({
 
   // ---- per-step validation -------------------------------------------------
   const phoneError = form.phone ? validatePhone(form.phone) : 'A mobile number is required.';
-  const emailError = form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)
-    ? 'Enter a valid email or leave it blank.' : null;
+  // Email is REQUIRED: the backend UserCreate needs a real EmailStr, and we no
+  // longer auto-fill a fake .local address. So an empty or malformed value is an
+  // error (was previously "optional / leave blank").
+  const emailError = !form.email.trim()
+    ? 'An email address is required.'
+    : !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())
+      ? 'Enter a valid email address.'
+      : null;
 
   const stepValid = (s: number): string | null => {
     if (s === 1) {
@@ -507,7 +513,7 @@ function OnboardingWizard({
         // change on first login (BUG-027 preserved; no skip toggle exists).
         const created = await adminUserApi.createUser({
           name: form.name.trim(),
-          email: form.email.trim() || `${effectiveUsername}@staff.local`,
+          email: form.email.trim(),
           phone: form.phone || undefined,
           roles: form.roles,
           storeIds: form.assignedStores,
@@ -654,12 +660,12 @@ function OnboardingWizard({
                 </div>
               </div>
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Email (optional)</label>
+                <label className="text-xs text-gray-500 block mb-1">Email *</label>
                 <input type="email" value={form.email} onChange={(e) => set({ email: e.target.value })}
                   placeholder="name@example.com"
                   className={clsx('w-full px-3 py-2 border rounded-lg text-sm outline-none focus:ring-2',
-                    emailError ? 'border-red-400 focus:ring-red-200' : 'border-gray-300 focus:ring-bv-red-200 focus:border-bv-red-400')} />
-                {emailError && <p className="text-[11px] text-red-600 mt-1">{emailError}</p>}
+                    form.email && emailError ? 'border-red-400 focus:ring-red-200' : 'border-gray-300 focus:ring-bv-red-200 focus:border-bv-red-400')} />
+                {form.email && emailError && <p className="text-[11px] text-red-600 mt-1">{emailError}</p>}
               </div>
             </>
           )}

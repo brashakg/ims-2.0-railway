@@ -498,10 +498,14 @@ def test_get_return_admin_ok(monkeypatch):
 
 
 class _TaskRepo:
-    def __init__(self, task=None):
+    def __init__(self, task=None, all_tasks=None):
         self.task = task
         self.updates = []
         self.find_many_calls = []
+        # Optional multi-task corpus for the list-scope tests. Each test seeds
+        # tasks across stores; find_many applies the router's store_id filter so
+        # the cross-store-exclusion proof is end-to-end (not just filter shape).
+        self.all_tasks = list(all_tasks or ([] if task is None else [task]))
 
     def find_by_id(self, tid):
         if self.task and self.task.get("task_id") == tid:
@@ -515,9 +519,23 @@ class _TaskRepo:
             return True
         return False
 
+    @staticmethod
+    def _matches(doc, filt):
+        for key, cond in (filt or {}).items():
+            val = doc.get(key)
+            if isinstance(cond, dict) and "$in" in cond:
+                if val not in cond["$in"]:
+                    return False
+            elif val != cond:
+                return False
+        return True
+
     def find_many(self, filter=None, sort=None, skip=0, limit=100):
         self.find_many_calls.append({"filter": filter, "limit": limit})
-        return []
+        return [dict(t) for t in self.all_tasks if self._matches(t, filter)]
+
+    def count(self, filter=None):
+        return len([t for t in self.all_tasks if self._matches(t, filter)])
 
     def create(self, data):
         return data
@@ -722,6 +740,93 @@ def test_my_tasks_and_overdue_pass_unbounded_limit(monkeypatch):
     assert len(repo.find_many_calls) == 2
     for call in repo.find_many_calls:
         assert call["limit"] == 0
+
+
+# ---- GET /tasks list store-scope (Hub-task-403 fix) -----------------------
+# The single-task open gate 403s another store's task, but the LIST used to
+# filter only by active_store_id (a single value) which diverged from the
+# gate's full-reach model. These prove the LIST now never returns a task the
+# same caller would 403 on opening.
+
+
+def _tasks_list_client(monkeypatch, all_tasks, roles, store, store_ids=None):
+    app = FastAPI()
+    app.include_router(tasks_mod.router, prefix="/api/v1/tasks")
+    repo = _TaskRepo(all_tasks=all_tasks)
+    monkeypatch.setattr(tasks_mod, "get_task_repository", lambda: repo)
+    monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: None)
+
+    async def _u():
+        return {
+            "user_id": "u-test",
+            "roles": roles,
+            "active_store_id": store,
+            "store_ids": store_ids if store_ids is not None else [store],
+        }
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app), repo
+
+
+def test_list_tasks_store_manager_excludes_other_store(monkeypatch):
+    """A STORE_MANAGER's GET /tasks (no ?store_id, the Hub default) must return
+    THEIR store's task + global no-store tasks, but NOT another store's task."""
+    own = _seed_task(task_id="T-own", store_id=OWN_STORE)
+    other = _seed_task(task_id="T-other", store_id=OTHER_STORE)
+    glob = _seed_task(task_id="T-glob", store_id=None)
+    client, _ = _tasks_list_client(
+        monkeypatch, [own, other, glob], ["STORE_MANAGER"], OWN_STORE
+    )
+    r = client.get("/api/v1/tasks")
+    assert r.status_code == 200
+    ids = {t["task_id"] for t in r.json()["tasks"]}
+    assert "T-own" in ids
+    assert "T-glob" in ids  # global/no-store task is openable by anyone
+    assert "T-other" not in ids  # the bug: another store's task must not show
+    assert r.json()["total"] == 2
+
+
+def test_list_tasks_area_manager_sees_full_reach(monkeypatch):
+    """An AREA_MANAGER reaches several stores (store_ids), only one of which is
+    active. The LIST must surface tasks for ALL reachable stores (matching the
+    open gate's full-reach model), not just the active one -- and still exclude
+    a store outside the reach."""
+    a = _seed_task(task_id="T-a", store_id="BV-PUN-01")
+    b = _seed_task(task_id="T-b", store_id="BV-BOK-01")
+    outside = _seed_task(task_id="T-out", store_id="WZ-XYZ-99")
+    client, _ = _tasks_list_client(
+        monkeypatch,
+        [a, b, outside],
+        ["AREA_MANAGER"],
+        "BV-PUN-01",
+        store_ids=["BV-PUN-01", "BV-BOK-01"],
+    )
+    r = client.get("/api/v1/tasks")
+    assert r.status_code == 200
+    ids = {t["task_id"] for t in r.json()["tasks"]}
+    assert ids == {"T-a", "T-b"}  # both reachable stores; outside excluded
+
+
+def test_list_tasks_explicit_other_store_403(monkeypatch):
+    """Passing another store's ?store_id is still 403'd (BUG-062 preserved)."""
+    client, _ = _tasks_list_client(
+        monkeypatch, [_seed_task(store_id=OTHER_STORE)], ["STORE_MANAGER"], OWN_STORE
+    )
+    r = client.get("/api/v1/tasks", params={"store_id": OTHER_STORE})
+    assert r.status_code == 403
+
+
+def test_list_tasks_admin_sees_all_stores(monkeypatch):
+    """SUPERADMIN/ADMIN keep cross-store reach: no store filter, all tasks."""
+    tasks = [
+        _seed_task(task_id="T-1", store_id=OWN_STORE),
+        _seed_task(task_id="T-2", store_id=OTHER_STORE),
+        _seed_task(task_id="T-3", store_id=None),
+    ]
+    client, _ = _tasks_list_client(monkeypatch, tasks, ["ADMIN"], "BV-HQ", store_ids=[])
+    r = client.get("/api/v1/tasks")
+    assert r.status_code == 200
+    assert r.json()["total"] == 3
 
 
 # ===========================================================================
