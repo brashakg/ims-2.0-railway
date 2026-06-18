@@ -216,20 +216,35 @@ export function CustomersPage() {
   );
 
   const handleSelectCustomer = (customer: Customer) => {
-    setSelectedCustomer(customer);
-    setSelectedPatient(customer.patients?.[0] || null);
+    // API rows come back keyed by customer_id/_id, NOT `id`. Using the raw
+    // `customer.id` (undefined) fired GET /loyalty/account/undefined and made
+    // getOrders/getPrescriptions drop their filter -> chain-wide data leak that
+    // also pulled in foreign Rx rows. Normalise to a real id (same pattern as
+    // the search onSelect + Customer360Dashboard) so every loader is scoped.
+    const c = customer as any;
+    const cid = c.customer_id || c._id || c.id;
+    const firstPatient = customer.patients?.[0];
+    const pid = firstPatient ? ((firstPatient as any).patient_id || (firstPatient as any).id) : undefined;
+    setSelectedCustomer({ ...customer, id: cid } as Customer);
+    setSelectedPatient(firstPatient || null);
     setViewMode('detail');
     setLoyaltyAccount(null);
-    loadPurchaseHistory(customer.id);
-    loadLoyalty(customer.id);
-    if (customer.patients?.[0]) {
-      loadPrescriptions(customer.patients[0].id);
+    if (cid) {
+      loadPurchaseHistory(cid);
+      loadLoyalty(cid);
+    }
+    if (pid) {
+      loadPrescriptions(pid);
     }
   };
 
   const handleSelectPatient = (patient: Patient) => {
     setSelectedPatient(patient);
-    loadPrescriptions(patient.id);
+    // Patient rows are keyed patient_id/_id, not `id` — same normalisation as
+    // the customer selection so the Rx fetch is scoped, not chain-wide.
+    const pid = (patient as any).patient_id || (patient as any).id || (patient as any)._id;
+    if (pid) loadPrescriptions(pid);
+    else setPrescriptions([]);
   };
 
   const handleBack = () => {
@@ -249,9 +264,16 @@ export function CustomersPage() {
     });
   };
 
-  const formatPower = (value: number | null | undefined) => {
-    if (value === null || value === undefined) return '-';
-    return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
+  const formatPower = (value: number | string | null | undefined) => {
+    // Rx power fields ship from the backend as STRINGS ("-2.00"), not numbers
+    // (see sales.ts mapEye / PrescriptionCreate). The old `value.toFixed(2)`
+    // assumed a number and threw "value.toFixed is not a function" on every
+    // prescription card -> tripped the app-wide error boundary. Coerce first
+    // and guard NaN/empty so a string or junk value can never crash the page.
+    if (value === null || value === undefined || value === '') return '-';
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) return '-';
+    return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
   };
 
   const formatCurrency = (amount: number) => {
@@ -806,13 +828,21 @@ export function CustomersPage() {
             )}
           </div>
           <div className="space-y-2">
-            {selectedCustomer?.patients?.map(patient => (
+            {selectedCustomer?.patients?.map((patient, pIdx) => {
+              // Patient rows are keyed patient_id/_id (not `id`); derive a stable
+              // id so the React key is unique and the "selected" highlight is
+              // accurate (was undefined===undefined -> every row highlighted).
+              const patientKey = (patient as any).patient_id || (patient as any).id || (patient as any)._id;
+              const selectedKey = selectedPatient
+                ? ((selectedPatient as any).patient_id || (selectedPatient as any).id || (selectedPatient as any)._id)
+                : undefined;
+              return (
               <button
-                key={patient.id}
+                key={patientKey || pIdx}
                 onClick={() => handleSelectPatient(patient)}
                 className={clsx(
                   'w-full p-3 rounded-lg text-left transition-colors',
-                  selectedPatient?.id === patient.id
+                  patientKey && selectedKey === patientKey
                     ? 'bg-bv-red-50 border border-bv-red-200'
                     : 'bg-gray-50 hover:bg-gray-100'
                 )}
@@ -823,7 +853,8 @@ export function CustomersPage() {
                   {patient.dateOfBirth && ` • Born ${formatDate(patient.dateOfBirth)}`}
                 </p>
               </button>
-            ))}
+              );
+            })}
             {(!selectedCustomer?.patients || selectedCustomer.patients.length === 0) && (
               <p className="text-sm text-gray-500 text-center py-4">No patients added</p>
             )}
