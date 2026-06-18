@@ -130,7 +130,7 @@ export function ApprovalWorkflow({
             </p>
             {request.amount && (
               <p className="text-lg font-semibold text-gray-900 mt-2">
-                ₹{request.amount.toLocaleString()}
+                ₹{request.amount.toLocaleString('en-IN')}
               </p>
             )}
           </div>

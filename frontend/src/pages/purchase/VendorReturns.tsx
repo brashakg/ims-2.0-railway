@@ -8,7 +8,7 @@ import {
   Plus,
   X as XIcon,
   Package,
-  DollarSign,
+  IndianRupee,
   Calendar,
   ChevronDown,
   Clock,
@@ -310,10 +310,10 @@ export function VendorReturns() {
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">Credit Value</p>
-            <DollarSign className="w-5 h-5 text-green-500" />
+            <IndianRupee className="w-5 h-5 text-green-500" />
           </div>
           <p className="text-2xl font-bold text-green-600">
-            ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString()}
+            ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString('en-IN')}
           </p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -384,7 +384,7 @@ export function VendorReturns() {
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-gray-900">₹{ret.total_value.toLocaleString()}</p>
+                    <p className="text-lg font-bold text-gray-900">₹{ret.total_value.toLocaleString('en-IN')}</p>
                     <p className="text-gray-500 text-sm">{ret.items.length} item(s)</p>
                   </div>
                 </div>
@@ -407,10 +407,10 @@ export function VendorReturns() {
                         <div key={idx} className="flex justify-between items-center text-sm">
                           <div>
                             <p className="text-gray-600">{item.product_name}</p>
-                            <p className="text-gray-500 text-xs">Qty: {item.quantity} @ ₹{item.unit_price}</p>
+                            <p className="text-gray-500 text-xs">Qty: {item.quantity} @ ₹{item.unit_price.toLocaleString('en-IN')}</p>
                           </div>
                           <div className="text-right">
-                            <p className="text-gray-600 font-medium">₹{item.quantity * item.unit_price}</p>
+                            <p className="text-gray-600 font-medium">₹{(item.quantity * item.unit_price).toLocaleString('en-IN')}</p>
                             <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
                           </div>
                         </div>
@@ -446,7 +446,7 @@ export function VendorReturns() {
                               ₹
                               {(
                                 debitNotes[ret.return_id].totals_rupees?.grand_total ?? 0
-                              ).toLocaleString()}
+                              ).toLocaleString('en-IN')}
                               {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
                             </span>
                           </p>
@@ -694,7 +694,7 @@ export function VendorReturns() {
               <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                 <div className="flex justify-between items-center">
                   <p className="text-gray-600 font-medium">Total Return Value</p>
-                  <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString()}</p>
+                  <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString('en-IN')}</p>
                 </div>
               </div>
             </div>

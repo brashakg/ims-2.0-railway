@@ -32,7 +32,7 @@ const MONTH_NAMES = [
 ];
 
 function rupee(n: number | undefined | null): string {
-  return `Rs ${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  return `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
 export function EmployeeSelfService() {

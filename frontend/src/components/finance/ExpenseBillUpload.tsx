@@ -221,7 +221,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
                   <strong>Existing Expense:</strong> {duplicate.expenseId}
                 </p>
                 <p className="text-gray-600">
-                  <strong>Amount:</strong> ₹{duplicate.amount.toLocaleString()}
+                  <strong>Amount:</strong> ₹{duplicate.amount.toLocaleString('en-IN')}
                 </p>
                 <p className="text-gray-600">
                   <strong>Date:</strong> {duplicate.date}
