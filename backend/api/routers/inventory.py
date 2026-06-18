@@ -2148,22 +2148,14 @@ async def create_transfer(
     }
 
 
-@router.post("/transfers/{transfer_id}/send")
-async def send_transfer(
-    transfer_id: str, current_user: dict = Depends(require_roles(*_INVENTORY_ROLES))
-):
-    """Mark transfer as sent"""
-    return {"message": "Transfer sent", "transfer_id": transfer_id}
-
-
-@router.post("/transfers/{transfer_id}/receive")
-async def receive_transfer(
-    transfer_id: str,
-    items: List[dict],
-    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
-):
-    """Receive a stock transfer"""
-    return {"message": "Transfer received", "transfer_id": transfer_id}
+# BUG-018: the legacy POST /inventory/transfers/{id}/send and
+# /inventory/transfers/{id}/receive endpoints were DEAD STUBS -- they returned a
+# hardcoded success message and moved NO stock. A caller could "send" or
+# "receive" a transfer and get a 200 while both stores' on-hand stayed wrong.
+# They were REMOVED (verified no caller: the frontend uses the REAL workflow at
+# POST /api/v1/transfers/{id}/ship and /api/v1/transfers/{id}/receive in
+# transfers.py, which actually move serialized stock_units). Callers must use the
+# real /transfers/* router -- a success response now always means stock moved.
 
 
 # ============================================================================

@@ -609,8 +609,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/inventory/transfer-recommendations` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
 | `GET` | `/api/v1/inventory/transfers` | AUTH |  |
 | `POST` | `/api/v1/inventory/transfers` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/inventory/transfers/{transfer_id}/receive` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/inventory/transfers/{transfer_id}/send` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
 
 ### `/api/v1/jarvis`
 
