@@ -1792,6 +1792,20 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     {
+        # #7: manager-facing cash reconciliation (close-by-denomination + blind-EOD).
+        # In-function gate _CASH_RECON_ROLES; store-scoped roles see only their store.
+        "method": "GET",
+        "path": "/api/v1/finance/cash-reconciliation-summary",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/cash-reconciliation-signoff",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
         "method": "GET",
         "path": "/api/v1/finance/gst-status",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
