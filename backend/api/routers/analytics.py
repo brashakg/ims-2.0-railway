@@ -17,6 +17,7 @@ from ..dependencies import (
     get_stock_repository,
     get_customer_repository,
     get_task_repository,
+    get_product_repository,
     validate_store_access,
     user_store_scope,
     get_store_repository,
@@ -134,6 +135,81 @@ def _fetch_orders_in_window(
             return _norm_orders(order_repo.find_many(flt, limit=0))
         except Exception:
             return []
+
+
+# ============================================================================
+# Inventory enrichment (product master join)
+# ============================================================================
+# Serialized stock rows (the `stock` / stock_units collection) carry only
+# product_id / store_id / barcode / quantity / status — NOT category, sku,
+# name, or cost_price. Those live on the `products` master. /reports already
+# joins the master (which is why /reports/inventory/valuation values a unit at
+# its cost_price and labels it FRAME); inventory-intelligence read them straight
+# off the stock doc and therefore reported value 0.0 and blank sku/name.
+# This builds a product_id -> {sku, name, category, cost_price, mrp} map in one
+# pass so each stock row can be enriched the same way /reports does.
+
+
+def _build_product_master_map(stock_rows: list) -> dict:
+    """Return {product_id: {sku, name, category, cost_price, mrp}} for every
+    product_id present in `stock_rows`, sourced from the product master.
+
+    Falls back to catalog_products for catalog-only products (the convergence
+    spine) using the same helper the inventory/orders paths use, so a Cartier
+    that only exists in the catalog still resolves. Fail-soft: a product that
+    cannot be resolved simply yields an empty dict for that id."""
+    pids = {
+        str(r.get("product_id"))
+        for r in (stock_rows or [])
+        if r.get("product_id") is not None
+    }
+    out: dict = {}
+    if not pids:
+        return out
+
+    product_repo = get_product_repository()
+    catalog_resolver = None
+    try:
+        from .orders import _resolve_catalog_product_doc as catalog_resolver
+    except Exception:  # noqa: BLE001
+        catalog_resolver = None
+
+    for pid in pids:
+        product = None
+        if product_repo is not None:
+            try:
+                product = product_repo.find_by_id(pid)
+            except Exception:  # noqa: BLE001
+                product = None
+        if not product and catalog_resolver is not None:
+            try:
+                product = catalog_resolver(pid)
+            except Exception:  # noqa: BLE001
+                product = None
+        if not product:
+            continue
+        out[pid] = {
+            "sku": product.get("sku") or "",
+            "name": product.get("name") or product.get("model") or "",
+            "category": product.get("category") or "Other",
+            "cost_price": _safe_float(product.get("cost_price")),
+            "mrp": _safe_float(product.get("mrp")),
+        }
+    return out
+
+
+def _stock_unit_value(row: dict, master: dict) -> float:
+    """Per-row inventory value = quantity * cost_price. cost_price is resolved
+    from the product master (authoritative, mirrors /reports). Falls back to a
+    cost_price stamped on the stock row itself for any legacy doc that carries
+    one, then to unit_price, so the value is never silently 0 when a cost is
+    known somewhere."""
+    qty = _safe_int(row.get("quantity"))
+    pid = str(row.get("product_id")) if row.get("product_id") is not None else ""
+    cost = _safe_float((master.get(pid) or {}).get("cost_price"))
+    if cost <= 0:
+        cost = _safe_float(row.get("cost_price")) or _safe_float(row.get("unit_price"))
+    return qty * cost
 
 
 # ============================================================================
@@ -552,13 +628,28 @@ async def get_store_performance(
         # Date-bounded, all-store fetch pushed into Mongo (no 100/500 cap).
         # The previous find_many({}) capped at 100 arbitrary recent rows AND
         # carried no date filter, so store totals dropped most orders.
+        #
+        # [RPT-1] Exclude CANCELLED / DRAFT here at the source so every
+        # downstream loop (store grouping, revenue, order count, AOV, prev
+        # comparison) sees only billable revenue. The sibling endpoints
+        # (dashboard-summary / revenue-trends / enterprise-kpis) already do
+        # this; store-performance previously summed every status and reported
+        # cancelled grandTotals as revenue (e.g. 8 CANCELLED summing 7570).
         prev_start = start_date - (end_date - start_date)
-        window_orders = _fetch_orders_in_window(
-            order_repo, store_id=None, start=start_date, end=end_date
-        )
-        prev_window_orders = _fetch_orders_in_window(
-            order_repo, store_id=None, start=prev_start, end=start_date
-        )
+        window_orders = [
+            o
+            for o in _fetch_orders_in_window(
+                order_repo, store_id=None, start=start_date, end=end_date
+            )
+            if _is_billable(o)
+        ]
+        prev_window_orders = [
+            o
+            for o in _fetch_orders_in_window(
+                order_repo, store_id=None, start=prev_start, end=start_date
+            )
+            if _is_billable(o)
+        ]
 
         # RPT-6: build a store_id -> real store_name lookup so the response
         # never emits synthetic "Store store-001" labels.
@@ -707,6 +798,22 @@ async def get_inventory_intelligence(
             else []
         )
 
+        # [RPT-2] sku / name / value live on the product master, not the stock
+        # doc. Build the join once so every item + every total below reads real
+        # values instead of "" / 0.0. Mirrors /reports/inventory/valuation.
+        master = _build_product_master_map(inventory)
+
+        def _sku(row: dict) -> str:
+            pid = str(row.get("product_id")) if row.get("product_id") is not None else ""
+            return (master.get(pid) or {}).get("sku") or row.get("sku") or ""
+
+        def _name(row: dict) -> str:
+            pid = str(row.get("product_id")) if row.get("product_id") is not None else ""
+            return (master.get(pid) or {}).get("name") or row.get("name") or ""
+
+        def _value(row: dict) -> float:
+            return _stock_unit_value(row, master)
+
         # Categorize items
         # Low stock: quantity at or below reorder point
         low_stock = [
@@ -758,41 +865,34 @@ async def get_inventory_intelligence(
                 "count": len(low_stock),
                 "items": [
                     {
-                        "sku": i.get("sku", ""),
-                        "name": i.get("name", ""),
+                        "sku": _sku(i),
+                        "name": _name(i),
                         "quantity": i.get("quantity", 0),
                         "reorder_point": i.get("reorder_point", 0),
                     }
                     for i in low_stock[:10]
                 ],
-                "total_value": sum(
-                    _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
-                    for i in low_stock
-                ),
+                "total_value": sum(_value(i) for i in low_stock),
             },
             "dead_stock": {
                 "count": len(dead_stock),
                 "items": [
                     {
-                        "sku": i.get("sku", ""),
-                        "name": i.get("name", ""),
+                        "sku": _sku(i),
+                        "name": _name(i),
                         "quantity": i.get("quantity", 0),
-                        "value": _safe_int(i.get("quantity"))
-                        * _safe_float(i.get("unit_price")),
+                        "value": _value(i),
                     }
                     for i in dead_stock[:10]
                 ],
-                "total_value": sum(
-                    _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
-                    for i in dead_stock
-                ),
+                "total_value": sum(_value(i) for i in dead_stock),
             },
             "fast_moving": {
                 "count": len(fast_moving),
                 "items": [
                     {
-                        "sku": i.get("sku", ""),
-                        "name": i.get("name", ""),
+                        "sku": _sku(i),
+                        "name": _name(i),
                         "quantity": i.get("quantity", 0),
                         "velocity": "high",
                     }
@@ -801,10 +901,7 @@ async def get_inventory_intelligence(
             },
             "total_inventory": {
                 "items": len(inventory),
-                "value": sum(
-                    _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
-                    for i in inventory
-                ),
+                "value": sum(_value(i) for i in inventory),
             },
         }
 
@@ -873,10 +970,19 @@ async def get_customer_insights(
 
         # Top customers by spend — use the unbounded date-pushed helper
         # (not the 500-row-capped find_by_store with BSON-Date mismatch).
+        #
+        # [RPT-1] Exclude CANCELLED / DRAFT so a cancelled order never inflates
+        # a customer's spend / order count (and therefore the top-customer
+        # ranking + avg_customer_lifetime_value). Mirrors the sibling
+        # revenue endpoints; matches /reports which already $nin's these.
         orders = (
-            _fetch_orders_in_window(
-                order_repo, store_id=store_id, start=start_date, end=end_date
-            )
+            [
+                o
+                for o in _fetch_orders_in_window(
+                    order_repo, store_id=store_id, start=start_date, end=end_date
+                )
+                if _is_billable(o)
+            ]
             if order_repo is not None
             else []
         )
