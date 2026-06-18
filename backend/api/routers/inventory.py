@@ -2116,8 +2116,20 @@ async def accountability_shrinkage(
             )
             if c.get("store_id")
         }
+        rows = shrinkage_by_custodian(counts, custodians)
+        # backlog #4: show the store NAME beside (or instead of) the store id.
+        try:
+            from ..services.name_resolver import store_name_map
+
+            smap = store_name_map(db, [r.get("store_id") for r in rows])
+            for r in rows:
+                sid = r.get("store_id")
+                if sid and str(sid) in smap:
+                    r["store_name"] = smap[str(sid)]
+        except Exception:  # noqa: BLE001
+            pass
         return {
-            "rows": shrinkage_by_custodian(counts, custodians),
+            "rows": rows,
             "count": len(counts),
         }
     except Exception as e:  # noqa: BLE001

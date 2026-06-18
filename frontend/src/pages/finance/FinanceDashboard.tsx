@@ -171,7 +171,7 @@ export default function FinanceDashboard() {
   const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
-  const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
+  const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
   // own sort) but every column header is clickable to re-sort.
   const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
@@ -420,7 +420,7 @@ export default function FinanceDashboard() {
                     <tbody>
                       {pnlStoreRows.map((s) => (
                         <tr key={s.store_id} className="border-t border-gray-100">
-                          <td className="px-3 py-2">{s.store_id}</td>
+                          <td className="px-3 py-2">{s.store_name || s.store_id}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(s.revenue).toLocaleString('en-IN')}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(s.cogs).toLocaleString('en-IN')}</td>
                           <td className={clsx('px-3 py-2 text-right font-medium', s.gross_profit < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.gross_profit).toLocaleString('en-IN')}</td>

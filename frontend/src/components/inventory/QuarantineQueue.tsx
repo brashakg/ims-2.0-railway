@@ -233,7 +233,7 @@ export function QuarantineQueue() {
                   </td>
                   <td className="px-4 py-3 text-sm">
                     {u.rtv_vendor_id ? (
-                      <span className="text-gray-700">{u.rtv_vendor_id}</span>
+                      <span className="text-gray-700">{u.rtv_vendor_name || u.rtv_vendor_id}</span>
                     ) : (
                       <span className="text-gray-400">&mdash;</span>
                     )}

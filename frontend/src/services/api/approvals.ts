@@ -56,6 +56,8 @@ export interface ApprovalRequest {
   requested_by_name?: string | null;
   requested_by_roles?: string[];
   store_id: string | null;
+  /** Resolved store name (router enrichment); falls back to store_id when absent. */
+  store_name?: string | null;
   entity_id?: string | null;
   amount: number | null;
   required_tier?: ApprovalTier | string;

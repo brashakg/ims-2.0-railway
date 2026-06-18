@@ -182,7 +182,7 @@ export function WeekOffSwap() {
                     </div>
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="font-medium text-gray-900">{swap.employee_id}</span>
+                        <span className="font-medium text-gray-900">{swap.employee_name || swap.employee_id}</span>
                         <span className={STATUS_BADGE[swap.status]}>{swap.status}</span>
                       </div>
                       <p className="text-sm text-gray-700">

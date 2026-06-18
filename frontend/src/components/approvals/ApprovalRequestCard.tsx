@@ -133,7 +133,7 @@ export function ApprovalRequestCard({
             {request.store_id && (
               <>
                 {' · '}
-                <span className="text-gray-700">{request.store_id}</span>
+                <span className="text-gray-700">{request.store_name || request.store_id}</span>
               </>
             )}
             {' · '}

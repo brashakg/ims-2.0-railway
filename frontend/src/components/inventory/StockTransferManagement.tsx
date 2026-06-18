@@ -52,6 +52,8 @@ interface Transfer {
   items: TransferItem[];
   notes?: string;
   created_by: string;
+  /** Resolved creator display name (backend stamps username at create). */
+  created_by_name?: string;
   created_at: string;
   sent_at?: string;
   received_at?: string;
@@ -404,7 +406,7 @@ export function StockTransferManagement() {
                 <div className="space-y-4">
                   <div>
                     <p className="text-sm text-gray-600 mb-1">Created By</p>
-                    <p className="font-medium text-gray-900">{selectedTransfer.created_by}</p>
+                    <p className="font-medium text-gray-900">{selectedTransfer.created_by_name || selectedTransfer.created_by}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-600 mb-1">Total Items</p>

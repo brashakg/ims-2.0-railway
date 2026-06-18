@@ -12,6 +12,8 @@ export interface OtherAllowance {
 export interface SalaryConfig {
   config_id?: string;
   employee_id: string;
+  /** Resolved employee display name (router enrichment); falls back to id. */
+  employee_name?: string;
   entity_id?: string | null;
   store_id?: string | null;
   designation?: string;

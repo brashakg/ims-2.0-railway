@@ -271,6 +271,8 @@ export interface QuarantineUnit {
   quarantine_notes?: string;
   quarantine_label_printed?: boolean;
   rtv_vendor_id?: string;
+  /** Resolved RTV vendor display name (router enrichment); falls back to id. */
+  rtv_vendor_name?: string;
 }
 
 export interface QuarantineQueueResponse {

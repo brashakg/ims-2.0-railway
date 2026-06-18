@@ -28,7 +28,7 @@ export interface OwnerDigestMtd {
 }
 
 export interface OwnerDigestExpanded {
-  by_store: Array<{ store_id: string; sales: number; orders: number }>;
+  by_store: Array<{ store_id: string; store_name?: string; sales: number; orders: number }>;
   payment_modes: Record<string, number>;
   low_stock_items: Array<{
     name?: string | null;
