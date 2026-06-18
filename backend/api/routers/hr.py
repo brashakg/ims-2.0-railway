@@ -2471,7 +2471,7 @@ async def upload_employee_document(
     employee_id: str,
     file: UploadFile = File(...),
     doc_type: str = Form(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
     """Upload an onboarding document (Aadhaar / PAN / UAN-PF / ESIC / resume /
     photo / other) for an employee.
@@ -2581,7 +2581,7 @@ async def upload_employee_document(
 @router.get("/employees/{employee_id}/documents")
 async def list_employee_documents(
     employee_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
     """List an employee's document metadata (NO bytes). RBAC + store-scoped."""
     user_repo = get_user_repository()
@@ -2605,7 +2605,7 @@ async def list_employee_documents(
 async def download_employee_document(
     employee_id: str,
     doc_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
     """Stream the bytes of one employee document from GridFS.
 
@@ -2658,7 +2658,7 @@ async def download_employee_document(
 async def delete_employee_document(
     employee_id: str,
     doc_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
     """Remove a document from an employee + best-effort delete the GridFS blob.
 

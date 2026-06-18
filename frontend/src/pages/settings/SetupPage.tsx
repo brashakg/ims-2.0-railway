@@ -587,7 +587,14 @@ function OnboardingWizard({
   const removeStaged = (key: string) =>
     setStagedDocs((prev) => prev.filter((d) => d.key !== key));
 
-  const STEP_TITLES = ['Who', 'Role', 'Store', 'Permissions', 'Login', 'Documents'];
+  // Owner directive: ID-numbers + documents are SUPERADMIN/ADMIN ONLY (sensitive
+  // govt-ID PII). actorLevel >= ADMIN means the actor is ADMIN or SUPERADMIN; a
+  // lower actor (STORE_MANAGER/AREA_MANAGER) never sees the Documents step, and the
+  // backend also 403s them on the document endpoints.
+  const canManageDocs = actorLevel >= ROLE_HIERARCHY.ADMIN;
+  const STEP_TITLES = canManageDocs
+    ? ['Who', 'Role', 'Store', 'Permissions', 'Login', 'Documents']
+    : ['Who', 'Role', 'Store', 'Permissions', 'Login'];
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
@@ -854,8 +861,8 @@ function OnboardingWizard({
             </>
           )}
 
-          {/* ============ STEP 6: DOCUMENTS ============ */}
-          {step === 6 && (
+          {/* ============ STEP 6: DOCUMENTS (SUPERADMIN/ADMIN only) ============ */}
+          {step === 6 && canManageDocs && (
             <>
               <h4 className="font-medium text-gray-900">ID numbers &amp; documents</h4>
               <p className="text-xs text-gray-500">
