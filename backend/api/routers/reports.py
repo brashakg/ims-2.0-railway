@@ -20,6 +20,7 @@ from ..dependencies import (
     get_attendance_repository,
     get_audit_repository,
     get_eye_test_repository,
+    get_product_repository,
     get_db,
     validate_store_access,
 )
@@ -190,6 +191,64 @@ def _category_breakdown(orders: list) -> list:
         s["sales"] = round(s["sales"], 2)
         s["percentage"] = round(100.0 * s["sales"] / total, 2) if total else 0.0
     return sorted(out, key=lambda x: -x["sales"])
+
+
+# ============================================================================
+# Inventory enrichment (product master join)
+# ============================================================================
+# Serialized stock rows carry only product_id / store_id / barcode / quantity /
+# status — NOT `category` (that lives on the `products` master; see
+# inventory.py INV-6). The valuation + daily-stock-count loops read
+# `item.get("category", "Other")` straight off the stock doc, so EVERY unit
+# bucketed under "Other" (the grand total was right because cost_price is the
+# same per unit, but the per-category split was meaningless). non-moving-stock
+# and the inventory ledger already join the master; this gives the two laggards
+# the same join.
+
+
+def _stock_category_map(stock_rows: list) -> dict:
+    """Return {product_id: category} for every product_id in `stock_rows`,
+    sourced from the product master (with a catalog_products fallback for
+    catalog-only products). Fail-soft: unresolved ids are simply absent, so the
+    caller falls back to "Other"."""
+    pids = {
+        str(r.get("product_id"))
+        for r in (stock_rows or [])
+        if r.get("product_id") is not None
+    }
+    out: dict = {}
+    if not pids:
+        return out
+
+    product_repo = get_product_repository()
+    catalog_resolver = None
+    try:
+        from .orders import _resolve_catalog_product_doc as catalog_resolver
+    except Exception:  # noqa: BLE001
+        catalog_resolver = None
+
+    for pid in pids:
+        product = None
+        if product_repo is not None:
+            try:
+                product = product_repo.find_by_id(pid)
+            except Exception:  # noqa: BLE001
+                product = None
+        if not product and catalog_resolver is not None:
+            try:
+                product = catalog_resolver(pid)
+            except Exception:  # noqa: BLE001
+                product = None
+        if product and product.get("category"):
+            out[pid] = product.get("category")
+    return out
+
+
+def _row_category(row: dict, cat_map: dict) -> str:
+    """Resolve a stock row's category: product master first (authoritative),
+    then any category stamped on the row itself, then 'Other'."""
+    pid = str(row.get("product_id")) if row.get("product_id") is not None else ""
+    return cat_map.get(pid) or row.get("category") or "Other"
 
 
 @router.get("")
@@ -572,10 +631,14 @@ async def inventory_valuation(
 
     all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
 
+    # category lives on the product master, not the stock doc -> join it so the
+    # by-category split is real (FRAME etc.) instead of everything in "Other".
+    cat_map = _stock_category_map(all_stock)
+
     # Group by category
     by_category = {}
     for item in all_stock:
-        category = item.get("category", "Other")
+        category = _row_category(item, cat_map)
         if category not in by_category:
             by_category[category] = {"category": category, "quantity": 0, "value": 0}
         by_category[category]["quantity"] += item.get("quantity", 0)
@@ -1921,12 +1984,16 @@ async def daily_stock_count(
 
     all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
 
+    # category is on the product master, not the stock doc -> join it so the
+    # per-category rows are real (FRAME etc.) instead of all under "Other".
+    cat_map = _stock_category_map(all_stock)
+
     by_category = {}
     total_items = 0
     total_value = 0
 
     for item in all_stock:
-        category = item.get("category", "Other")
+        category = _row_category(item, cat_map)
         if category not in by_category:
             by_category[category] = {
                 "category": category,

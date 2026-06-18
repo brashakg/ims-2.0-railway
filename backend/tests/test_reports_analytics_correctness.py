@@ -337,3 +337,224 @@ def test_enterprise_kpis_net_margin_is_none():
     assert "total_revenue * 0.10" not in src, (
         "Fabricated 10% opex placeholder must be removed (RPT-3)"
     )
+
+
+# ===========================================================================
+# [RPT-1b] store-performance + customer-insights exclude CANCELLED/DRAFT
+# ===========================================================================
+# LIVE prod proof: a store with 8 CANCELLED orders (sum grandTotal 7570) read
+# 0 revenue on /reports but 7570 on /analytics/store-performance because that
+# endpoint summed every status. After the fix both endpoints read 0.
+
+
+class FakeStockRepo:
+    """In-memory stock repo: honours a {'store_id': X} equality filter."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def find_many(self, flt=None, sort=None, skip=0, limit=100):
+        flt = flt or {}
+        want_store = flt.get("store_id")
+        out = [
+            r
+            for r in self._rows
+            if want_store is None or r.get("store_id") == want_store
+        ]
+        if limit:
+            out = out[:limit]
+        return out
+
+
+class FakeProductRepo:
+    """In-memory product master keyed by product_id (mirrors find_by_id)."""
+
+    def __init__(self, products_by_id):
+        self._by_id = products_by_id
+
+    def find_by_id(self, pid):
+        return self._by_id.get(str(pid))
+
+
+class FakeCustomerRepo:
+    """Minimal customer repo for customer-insights: find_many returns whatever
+    list it was seeded with (filtering is irrelevant to the spend assertion)."""
+
+    def __init__(self, customers):
+        self._customers = customers
+
+    def find_many(self, flt=None, sort=None, skip=0, limit=100):
+        return list(self._customers)
+
+
+def _admin_user():
+    # ADMIN is cross-store (user_store_scope -> True) so store-performance
+    # returns every store and validate_store_access returns the active store.
+    return {"user_id": "u1", "roles": ["ADMIN"], "active_store_id": "S1"}
+
+
+def test_store_performance_excludes_cancelled(monkeypatch):
+    """A CANCELLED order's grandTotal must NOT appear in store revenue/orders;
+    a CONFIRMED one must. Reconciles to /reports (0 for an all-cancelled store)."""
+    import asyncio
+
+    now = datetime.now()
+    orders = [
+        {"store_id": "S1", "created_at": now, "grand_total": 1000, "status": "CONFIRMED"},
+        {"store_id": "S1", "created_at": now, "grand_total": 7570, "status": "CANCELLED"},
+        {"store_id": "S1", "created_at": now, "grand_total": 250, "status": "DRAFT"},
+    ]
+    monkeypatch.setattr(an, "get_order_repository", lambda: FakeOrderRepo(orders))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: FakeStockRepo([]))
+    monkeypatch.setattr(an, "get_store_repository", lambda: None)
+
+    res = asyncio.run(an.get_store_performance(current_user=_admin_user(), period="month"))
+    s1 = next(s for s in res["stores"] if s["store_id"] == "S1")
+    # Only the CONFIRMED 1000 counts -- the 7570 cancelled + 250 draft drop out.
+    assert s1["revenue"] == 1000.0
+    assert s1["orders"] == 1
+    assert res["summary"]["total_revenue"] == 1000.0
+
+
+def test_store_performance_all_cancelled_reads_zero(monkeypatch):
+    """The exact prod scenario: 8 CANCELLED orders summing 7570 -> 0 revenue,
+    0 orders (matching /reports), not 7570 (the bug)."""
+    import asyncio
+
+    now = datetime.now()
+    orders = [
+        {"store_id": "4dc49c44", "created_at": now, "grand_total": 946.25, "status": "CANCELLED"}
+        for _ in range(8)
+    ]
+    # 8 * 946.25 = 7570 -- mirror the live total.
+    monkeypatch.setattr(an, "get_order_repository", lambda: FakeOrderRepo(orders))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: FakeStockRepo([]))
+    monkeypatch.setattr(an, "get_store_repository", lambda: None)
+
+    res = asyncio.run(an.get_store_performance(current_user=_admin_user(), period="month"))
+    # No billable orders -> the cancelled-only store contributes nothing.
+    assert res["summary"]["total_revenue"] == 0.0
+    for s in res["stores"]:
+        assert s["revenue"] == 0.0
+        assert s["orders"] == 0
+
+
+def test_customer_insights_excludes_cancelled_spend(monkeypatch):
+    """A cancelled order must not inflate a customer's spend/order count or the
+    avg_customer_lifetime_value."""
+    import asyncio
+
+    now = datetime.now()
+    orders = [
+        {"store_id": "S1", "customer_id": "C1", "created_at": now, "grand_total": 2000, "status": "CONFIRMED"},
+        {"store_id": "S1", "customer_id": "C1", "created_at": now, "grand_total": 5000, "status": "CANCELLED"},
+    ]
+    monkeypatch.setattr(an, "get_order_repository", lambda: FakeOrderRepo(orders))
+    monkeypatch.setattr(
+        an,
+        "get_customer_repository",
+        lambda: FakeCustomerRepo([{"customer_id": "C1", "name": "Ravi"}]),
+    )
+
+    res = asyncio.run(
+        an.get_customer_insights(current_user=_admin_user(), period="month", store_id="S1")
+    )
+    top = {c["customer_id"]: c for c in res["top_customers"]}
+    assert top["C1"]["spend"] == 2000.0  # cancelled 5000 excluded
+    assert top["C1"]["orders"] == 1
+    # LTV is the mean of top-customer spend -> only the 2000 counts.
+    assert res["avg_customer_lifetime_value"] == 2000.0
+
+
+# ===========================================================================
+# [RPT-2] inventory category + value resolved from the product master
+# ===========================================================================
+
+
+def test_inventory_valuation_category_from_master(monkeypatch):
+    """A FRAME stock unit must bucket under FRAME (joined from the master), not
+    'Other' (the stock doc carries no category)."""
+    import asyncio
+
+    stock = [
+        {"product_id": "P-FRAME", "store_id": "S1", "quantity": 1, "cost_price": 2500},
+    ]
+    products = {"P-FRAME": {"product_id": "P-FRAME", "category": "FRAME", "sku": "F-1", "name": "Ray-Ban", "cost_price": 2500}}
+    monkeypatch.setattr(rep, "get_stock_repository", lambda: FakeStockRepo(stock))
+    monkeypatch.setattr(rep, "get_product_repository", lambda: FakeProductRepo(products))
+
+    res = asyncio.run(
+        rep.inventory_valuation(store_id="S1", current_user=_admin_user())
+    )
+    cats = {c["category"]: c for c in res["valuation"]["by_category"]}
+    assert "FRAME" in cats
+    assert "Other" not in cats
+    assert cats["FRAME"]["value"] == 2500
+    assert res["valuation"]["total"] == 2500
+
+
+def test_daily_stock_count_category_from_master(monkeypatch):
+    """daily_stock_count must also resolve category from the master."""
+    import asyncio
+    from datetime import date as _date
+
+    stock = [
+        {"product_id": "P-FRAME", "store_id": "S1", "quantity": 1, "cost_price": 2500},
+    ]
+    products = {"P-FRAME": {"product_id": "P-FRAME", "category": "FRAME", "cost_price": 2500}}
+    monkeypatch.setattr(rep, "get_stock_repository", lambda: FakeStockRepo(stock))
+    monkeypatch.setattr(rep, "get_product_repository", lambda: FakeProductRepo(products))
+
+    res = asyncio.run(
+        rep.daily_stock_count(
+            store_id="S1",
+            from_date=_date(2026, 1, 1),
+            to_date=_date(2026, 12, 31),
+            current_user=_admin_user(),
+        )
+    )
+    cats = {c["category"]: c for c in res["data"]}
+    assert "FRAME" in cats
+    assert "Other" not in cats
+
+
+def test_inventory_intelligence_value_sku_name_from_master(monkeypatch):
+    """/analytics/inventory-intelligence value/sku/name must come from the
+    product master -> non-zero value (matching /reports = 2500), real sku/name,
+    not 0.0 / '' / ''."""
+    import asyncio
+
+    # A frame unit with NO category/cost_price/sku/name on the stock doc, and
+    # a zero sales velocity so it lands in dead_stock.
+    stock = [
+        {"product_id": "P-FRAME", "store_id": "S1", "quantity": 1, "sales_velocity": 0},
+    ]
+    products = {
+        "P-FRAME": {
+            "product_id": "P-FRAME",
+            "category": "FRAME",
+            "sku": "F-1",
+            "name": "Ray-Ban Aviator",
+            "cost_price": 2500,
+        }
+    }
+    monkeypatch.setattr(an, "get_stock_repository", lambda: FakeStockRepo(stock))
+    monkeypatch.setattr(an, "get_product_repository", lambda: FakeProductRepo(products))
+
+    res = asyncio.run(
+        an.get_inventory_intelligence(current_user=_admin_user(), store_id="S1")
+    )
+    assert res["total_inventory"]["value"] == 2500  # was 0.0
+    dead = res["dead_stock"]["items"][0]
+    assert dead["sku"] == "F-1"  # was ""
+    assert dead["name"] == "Ray-Ban Aviator"  # was ""
+    assert dead["value"] == 2500  # was 0.0
+
+
+def test_build_product_master_map_falls_back_softly(monkeypatch):
+    """_build_product_master_map is fail-soft: a None product_repo (and no
+    catalog match) yields an empty map, no crash -- the caller then defaults
+    sku/name to '' and value to whatever the stock row carries."""
+    monkeypatch.setattr(an, "get_product_repository", lambda: None)
+    out = an._build_product_master_map([{"product_id": "X", "quantity": 1}])
+    assert out == {}
