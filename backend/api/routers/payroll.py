@@ -548,6 +548,17 @@ async def list_salary_configs(
             # legacy docs may lack is_active; treat absent as active
             query["is_active"] = {"$ne": False}
         configs = [_strip_id(c) for c in db.get_collection("salary_config").find(query)]
+        # backlog #4: show the employee NAME, not the raw employee id.
+        try:
+            from ..services.name_resolver import employee_name_map
+
+            nmap = employee_name_map(db, [c.get("employee_id") for c in configs])
+            for c in configs:
+                eid = c.get("employee_id")
+                if eid and not c.get("employee_name") and str(eid) in nmap:
+                    c["employee_name"] = nmap[str(eid)]
+        except Exception:  # noqa: BLE001
+            pass
         return {"configs": configs, "total": len(configs)}
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)

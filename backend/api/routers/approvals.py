@@ -92,6 +92,20 @@ def _resolve_names(rows: List[Dict[str, Any]]) -> None:
             if v and v in name_by_id:
                 r[dst] = name_by_id[v]
 
+    # backlog #4: the card also shows store_id -- add store_name beside it.
+    try:
+        from ..services.name_resolver import store_name_map
+
+        db = _get_db()
+        sids = [r.get("store_id") for r in rows if r.get("store_id")]
+        smap = store_name_map(db, sids)
+        for r in rows:
+            sid = r.get("store_id")
+            if sid and str(sid) in smap:
+                r["store_name"] = smap[str(sid)]
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # ============================================================================
 # Schemas

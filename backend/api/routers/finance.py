@@ -2952,6 +2952,9 @@ async def get_pnl_by_store(
 
     pay_by_store = _payroll_by_store(db, from_date, to_date)
 
+    # backlog #4: show the store NAME, not the raw store id, on the P&L table.
+    store_names = _store_name_map(db)
+
     rows = []
     for sid in (
         set(rev_by_store) | set(cogs_by_store) | set(exp_by_store) | set(pay_by_store)
@@ -2964,6 +2967,7 @@ async def get_pnl_by_store(
         rows.append(
             {
                 "store_id": sid,
+                "store_name": store_names.get(sid, sid),
                 "entity_id": s2e.get(sid),
                 "revenue": r,
                 "cogs": c,

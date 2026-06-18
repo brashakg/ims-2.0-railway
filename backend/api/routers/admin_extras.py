@@ -366,7 +366,26 @@ async def get_system_audit_logs(
             rng["$lte"] = endDate
         q["created_at"] = rng
     docs = list(coll.find(q).sort("created_at", -1).limit(200))
-    return {"logs": [_scrub(d) for d in docs if d], "total": len(docs)}
+    logs = [_scrub(d) for d in docs if d]
+    # backlog #4: resolve user_id / store_id -> names so the activity log reads
+    # in human names, not raw UUIDs / store codes. Batched + fail-soft.
+    try:
+        from database.connection import get_db
+        from ..services.name_resolver import store_name_map, user_name_map
+
+        db = get_db()
+        umap = user_name_map(db, [r.get("user_id") for r in logs])
+        smap = store_name_map(db, [r.get("store_id") for r in logs])
+        for r in logs:
+            uid = r.get("user_id")
+            if uid and not (r.get("user_name") or r.get("username")) and str(uid) in umap:
+                r["user_name"] = umap[str(uid)]
+            sid = r.get("store_id")
+            if sid and not r.get("store_name") and str(sid) in smap:
+                r["store_name"] = smap[str(sid)]
+    except Exception:
+        pass
+    return {"logs": logs, "total": len(docs)}
 
 
 @router.get("/system/backups")

@@ -1551,7 +1551,32 @@ async def list_grns(
 
     grns = grn_repo.find_many(filter_dict, skip=skip, limit=limit)
 
+    _enrich_grn_names(grns or [])
+
     return {"grns": grns or [], "total": len(grns) if grns else 0}
+
+
+def _enrich_grn_names(grns: list) -> None:
+    """backlog #4: add created_by_name / vendor_name beside the raw ids on GRN
+    rows so the UI shows who received the goods (a name, not a UUID). In-place,
+    batched, fail-soft."""
+    if not grns:
+        return
+    try:
+        from ..services.name_resolver import user_name_map, vendor_name_map
+
+        db = _get_db()
+        umap = user_name_map(db, [g.get("created_by") for g in grns])
+        vmap = vendor_name_map(db, [g.get("vendor_id") for g in grns])
+        for g in grns:
+            cb = g.get("created_by")
+            if cb and not g.get("created_by_name") and str(cb) in umap:
+                g["created_by_name"] = umap[str(cb)]
+            vid = g.get("vendor_id")
+            if vid and not g.get("vendor_name") and str(vid) in vmap:
+                g["vendor_name"] = vmap[str(vid)]
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.post("/grn/upload-doc")
@@ -1983,6 +2008,8 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
     grn = grn_repo.find_by_id(grn_id)
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
+
+    _enrich_grn_names([grn])
 
     return grn
 

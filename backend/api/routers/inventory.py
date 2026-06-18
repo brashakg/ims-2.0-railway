@@ -2010,6 +2010,16 @@ async def cross_store_stock(
                 continue
             stores.append({"store_id": sid, "available_qty": qty})
 
+        # backlog #4: add a human store_name beside each store_id.
+        try:
+            from ..services.name_resolver import store_name_map
+
+            smap = store_name_map(_get_db(), [s["store_id"] for s in stores])
+            for s in stores:
+                s["store_name"] = smap.get(str(s["store_id"]), s["store_id"])
+        except Exception:  # noqa: BLE001
+            pass
+
         stores.sort(key=lambda x: x["available_qty"], reverse=True)
 
         return {
@@ -3950,5 +3960,17 @@ async def list_quarantined_stock(
     except Exception as e:  # noqa: BLE001
         logger.warning("[INVENTORY] quarantine queue read failed: %s", e)
         return {"items": [], "total": 0, "unlabeled_count": 0}
+
+    # backlog #4: resolve the RTV vendor id -> vendor name for display.
+    try:
+        from ..services.name_resolver import vendor_name_map
+
+        vmap = vendor_name_map(db, [it.get("rtv_vendor_id") for it in items])
+        for it in items:
+            vid = it.get("rtv_vendor_id")
+            if vid and str(vid) in vmap:
+                it["rtv_vendor_name"] = vmap[str(vid)]
+    except Exception:  # noqa: BLE001
+        pass
 
     return {"items": items, "total": len(items), "unlabeled_count": unlabeled}

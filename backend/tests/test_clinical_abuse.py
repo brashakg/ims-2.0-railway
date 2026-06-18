@@ -381,6 +381,78 @@ class TestBuildAbuseAlerts:
 
 
 # ============================================================================
+# 1g. OPTOMETRIST NAME RESOLUTION (backlog #4 -- no bare UUIDs on the card)
+# ============================================================================
+
+
+class TestOptometristNameResolution:
+    """The owner saw 'Optometrist: 97d2a24c-...' -- when the Rx only stored an
+    optometrist_id (or stuffed a UUID into the name field), the alert must show
+    the resolved human name from the name_map."""
+
+    _UUID = "97d2a24c-e5d8-4a1b-9c3d-0011223344ff"
+
+    def _rxs_with_redos(self, opto_id, opto_name=None, n=10, redos=4):
+        rxs = []
+        for i in range(n):
+            r = {
+                "prescription_id": f"rx{i}",
+                "optometrist_id": opto_id,
+                "customer_id": f"c{i}",
+                "test_date": f"2026-05-{(i % 28) + 1:02d}T10:0{i % 9}:00",
+                "right_eye": {"sph": "-1.00"},
+                "left_eye": {"sph": "-1.00"},
+            }
+            if opto_name is not None:
+                r["optometrist_name"] = opto_name
+            if i < redos:
+                r["redo_count"] = 1
+            rxs.append(r)
+        return rxs
+
+    def test_id_only_rx_resolves_to_name(self):
+        # Rx rows carry ONLY a UUID optometrist_id (no name stored).
+        rxs = self._rxs_with_redos(self._UUID, opto_name=None)
+        name_map = {self._UUID: "Dr. Asha Verma"}
+        alerts = clinical._build_abuse_alerts(rxs, datetime(2026, 5, 30), name_map)
+        redo = [a for a in alerts if a["id"].startswith("redo-")]
+        assert redo
+        assert redo[0]["optometristName"] == "Dr. Asha Verma"
+
+    def test_uuid_stuffed_into_name_field_is_overridden(self):
+        # Backend bug variant: optometrist_name was populated with the UUID.
+        rxs = self._rxs_with_redos(self._UUID, opto_name=self._UUID)
+        name_map = {self._UUID: "Dr. Asha Verma"}
+        alerts = clinical._build_abuse_alerts(rxs, datetime(2026, 5, 30), name_map)
+        redo = [a for a in alerts if a["id"].startswith("redo-")]
+        assert redo
+        assert redo[0]["optometristName"] == "Dr. Asha Verma"
+
+    def test_no_map_falls_back_to_id_not_crash(self):
+        # Absent map -> previous behaviour (id shown), never a crash.
+        rxs = self._rxs_with_redos(self._UUID, opto_name=None)
+        alerts = clinical._build_abuse_alerts(rxs, datetime(2026, 5, 30))
+        redo = [a for a in alerts if a["id"].startswith("redo-")]
+        assert redo
+        assert redo[0]["optometristName"] == self._UUID
+
+    def test_real_name_kept_when_no_map_entry(self):
+        # A genuine stored name (not id-shaped) is preserved even if not mapped.
+        rxs = self._rxs_with_redos("opt-1", opto_name="Dr. Real Name")
+        alerts = clinical._build_abuse_alerts(rxs, datetime(2026, 5, 30), {})
+        redo = [a for a in alerts if a["id"].startswith("redo-")]
+        assert redo
+        assert redo[0]["optometristName"] == "Dr. Real Name"
+
+    def test_looks_like_id_helper(self):
+        assert clinical._looks_like_id(self._UUID) is True
+        assert clinical._looks_like_id("97d2a24ce5d84a1b9c3d0011223344ff") is True
+        assert clinical._looks_like_id("Dr. Asha Verma") is False
+        assert clinical._looks_like_id("Asha") is False
+        assert clinical._looks_like_id("") is False
+
+
+# ============================================================================
 # 2. ENDPOINT ROLE GATING
 # ============================================================================
 
