@@ -118,6 +118,7 @@ const CashFlowPage = lazy(() => import('./pages/finance/CashFlowPage'));
 const ItcReconcilePage = lazy(() => import('./pages/finance/ItcReconcilePage'));
 const CashRegisterPage = lazy(() => import('./pages/finance/CashRegisterPage'));
 const BlindEodTallyPage = lazy(() => import('./pages/finance/BlindEodTallyPage'));
+const CashReconciliationPage = lazy(() => import('./pages/finance/CashReconciliationPage'));
 const BudgetingPage = lazy(() => import('./pages/finance/BudgetingPage'));
 const B2BTallyExport = lazy(() => import('./pages/finance/B2BTallyExport'));
 const B2BTallyWorklist = lazy(() => import('./pages/finance/B2BTallyWorklist'));
@@ -1318,6 +1319,19 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF']}>
                         <BlindEodTallyPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  {/* #7 Manager-facing cash-register vs blind-EOD reconciliation
+                      console -- READ-ONLY view across both day-close flows so an
+                      owner / store-manager can spot a cash disparity. Store
+                      Manager sees own store; HQ roles see all (store-scoped on the
+                      backend via resolve_store_scope). */}
+                  <Route
+                    path="finance/cash-reconciliation"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <CashReconciliationPage />
                       </ProtectedRoute>
                     }
                   />

@@ -4,15 +4,16 @@
 // (tasks + SOP checklists) + notifications + handoff inbox + module grid.
 // ============================================================================
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Send, AlertTriangle, ListChecks, Clock, CheckCircle2, ChevronRight } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import ClinicalHandoverCard from '../../components/handoffs/ClinicalHandoverCard';
-import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
+import { NewTaskModal } from '../../components/tasks/NewTaskModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
 import TickerCard from '../../components/hub/TickerCard';
@@ -94,6 +95,7 @@ interface ModuleCard {
 export default function HubPage() {
   const { user, hasRole } = useAuth();
   const navigate = useNavigate();
+  const toast = useToast();
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -108,10 +110,35 @@ export default function HubPage() {
   const [sopTemplates, setSopTemplates] = useState<SopTemplate[]>([]);
   const [loadingWork, setLoadingWork] = useState(true);
 
-  // Handoff feature state — modal visibility + a tick that the inbox
-  // card listens to for a fresh refetch after a successful send.
-  const [showSendFile, setShowSendFile] = useState(false);
+  // "Send a file" now routes through the TASK flow (owner item #5): sharing a
+  // file = creating a task assigned to someone with the file attached. The
+  // button opens a file picker, then NewTaskModal pre-seeded with that file.
+  const [showShareFile, setShowShareFile] = useState(false);
+  const [shareFile, setShareFile] = useState<File | null>(null);
+  const shareFileInputRef = useRef<HTMLInputElement>(null);
+  // Kept for the handoff INBOX card (existing received-file cards still render);
+  // bumped to refetch it.
   const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
+
+  const MAX_SHARE_BYTES = 25 * 1024 * 1024; // 25 MB — matches backend cap
+
+  const onPickShareFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null;
+    // Allow re-picking the same file next time.
+    e.target.value = '';
+    if (!f) return;
+    const okType = f.type.startsWith('image/') || f.type === 'application/pdf';
+    if (!okType) {
+      toast.error('Only images or PDF files can be shared.');
+      return;
+    }
+    if (f.size > MAX_SHARE_BYTES) {
+      toast.error('File exceeds the 25 MB cap.');
+      return;
+    }
+    setShareFile(f);
+    setShowShareFile(true);
+  };
 
   // Fire-and-forget — resilient to 404/500; show placeholders on failure.
   useEffect(() => {
@@ -325,11 +352,19 @@ export default function HubPage() {
           </h1>
           <p className="hub-sub">Here's what needs you today.</p>
           <div style={{ marginTop: 14 }}>
+            <input
+              ref={shareFileInputRef}
+              type="file"
+              accept="image/*,application/pdf"
+              style={{ display: 'none' }}
+              onChange={onPickShareFile}
+            />
             <button
               type="button"
-              onClick={() => setShowSendFile(true)}
+              onClick={() => shareFileInputRef.current?.click()}
               className="btn sm"
               style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              title="Share a file as a task assigned to a colleague"
             >
               <Send className="w-3.5 h-3.5" />
               Send a file
@@ -492,13 +527,22 @@ export default function HubPage() {
         })}
       </section>
 
-      {/* Send-file (handoff upload) modal — owned by the Hub so it
-          remains accessible from a single, predictable entry point. */}
-      <HandoffUploadModal
-        isOpen={showSendFile}
-        onClose={() => setShowSendFile(false)}
-        onSent={() => {
-          // Bumping the refresh key triggers a refetch in the inbox card.
+      {/* "Send a file" now creates a TASK that carries the file (owner item
+          #5). The picked file is pre-attached; the user assigns an owner and
+          the colleague gets it as a task they can download. */}
+      <NewTaskModal
+        isOpen={showShareFile}
+        initialFile={shareFile}
+        heading="Share a file"
+        subheading="Sharing a file creates a task for a colleague with the file attached."
+        onClose={() => {
+          setShowShareFile(false);
+          setShareFile(null);
+        }}
+        onCreated={() => {
+          setShowShareFile(false);
+          setShareFile(null);
+          // Refresh the work row so the new task shows up.
           setInboxRefreshKey((k) => k + 1);
         }}
       />

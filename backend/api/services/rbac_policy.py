@@ -1792,6 +1792,20 @@ POLICY: List[Dict[str, object]] = [
         "store_scoped": True,
     },
     {
+        # #7: manager-facing cash reconciliation (close-by-denomination + blind-EOD).
+        # In-function gate _CASH_RECON_ROLES; store-scoped roles see only their store.
+        "method": "GET",
+        "path": "/api/v1/finance/cash-reconciliation-summary",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/cash-reconciliation-signoff",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "store_scoped": True,
+    },
+    {
         "method": "GET",
         "path": "/api/v1/finance/gst-status",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
@@ -5780,6 +5794,12 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
     },
     {"method": "GET", "path": "/api/v1/tasks/summary", "allowed": "AUTHENTICATED"},
+    # #5: upload a task attachment (image/PDF <=25MB); any authenticated user.
+    {
+        "method": "POST",
+        "path": "/api/v1/tasks/upload-file",
+        "allowed": "AUTHENTICATED",
+    },
     {"method": "GET", "path": "/api/v1/tasks/{task_id}", "allowed": "AUTHENTICATED"},
     {"method": "PATCH", "path": "/api/v1/tasks/{task_id}", "allowed": "AUTHENTICATED"},
     {"method": "PUT", "path": "/api/v1/tasks/{task_id}", "allowed": "AUTHENTICATED"},
@@ -5796,6 +5816,12 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/tasks/{task_id}/escalate",
+        "allowed": "AUTHENTICATED",
+    },
+    # #5: download a task's attachment; in-function store-scope (anyone who can see the task).
+    {
+        "method": "GET",
+        "path": "/api/v1/tasks/{task_id}/file",
         "allowed": "AUTHENTICATED",
     },
     {

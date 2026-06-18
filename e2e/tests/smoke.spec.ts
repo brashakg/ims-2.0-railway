@@ -3,8 +3,11 @@
  *
  *  - Activity Log (/admin/activity-log) renders for SUPERADMIN (PR #325).
  *  - Tasks "New task" CTA opens a real create path, not a circular dead-end
- *    (PR #329 / QA F14): the modal links to the working form on
- *    /tasks/dashboard.
+ *    (QA F14 / owner #8). The earlier placeholder that merely linked to
+ *    "Open Tasks Dashboard" was REPLACED by a full inline create form
+ *    (components/tasks/NewTaskModal.tsx), so this asserts the live create
+ *    surface (the "New task" dialog with a Title field + a Create-task
+ *    button), not the retired link.
  *  - Notifications page renders.
  *
  * @smoke
@@ -33,18 +36,17 @@ test.describe('Smoke @smoke', () => {
 
     await page.getByRole('button', { name: /New task/ }).click();
 
-    // The modal acknowledges the action and routes to the WORKING form on the
-    // Tasks Dashboard (F14: was href="/tasks" — this same page — a dead-end).
+    // The "New task" dialog is a real inline create form (not the old
+    // "Open Tasks Dashboard" link dead-end): it carries a Title field and a
+    // Create-task button wired to tasksApi.createTask.
+    const dialog = page.getByRole('dialog', { name: 'New task' });
+    await expect(dialog).toBeVisible();
     await expect(
-      page.getByRole('heading', { name: 'Create a task' })
+      dialog.getByPlaceholder(/Reconcile Vision-Express/)
     ).toBeVisible();
-    const link = page.getByRole('link', { name: 'Open Tasks Dashboard' });
-    await expect(link).toBeVisible();
-    await expect(link).toHaveAttribute('href', '/tasks/dashboard');
-
-    // Following it lands on the real dashboard create surface.
-    await link.click();
-    await expect(page).toHaveURL(/\/tasks\/dashboard/);
+    await expect(
+      dialog.getByRole('button', { name: /Create task/ })
+    ).toBeVisible();
   });
 
   test('Notifications page renders', async ({ page }) => {

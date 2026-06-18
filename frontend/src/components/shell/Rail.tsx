@@ -129,6 +129,8 @@ const RAIL_GROUPS: NavGroup[] = [
     items: [
       { id: 'cash-register', label: 'Cash Register', to: '/finance/cash-register', icon: 'cashRegister', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'blind-eod', label: 'Blind EOD Tally', to: '/finance/blind-eod', icon: 'lock', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF'] },
+      // #7 Manager-facing reconciliation console across BOTH day-close flows.
+      { id: 'cash-reconciliation', label: 'Cash Reconciliation', to: '/finance/cash-reconciliation', icon: 'calculator', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
     ],
   },
   {
