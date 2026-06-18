@@ -81,12 +81,40 @@ class _FakeCursor:
         return iter([dict(r) for r in self._rows])
 
 
+# Seeded issuing store + entity for the render endpoint. #754 added a fail-loud
+# guard (print_identity.assert_issuing_identity raises HTTPException(404) when the
+# store has no name), so the estimate render can no longer resolve the store
+# fail-soft to {} -- it must see a real issuing store. The names are imported into
+# the estimates module namespace, so we patch them there.
+_TEST_STORE = {
+    "store_id": "BV-TEST-01",
+    "store_name": "ZZ Test Store Bokaro",
+    "store_code": "BV-TEST-01",
+    "state": "Jharkhand",
+    "state_code": "20",
+    "city": "Bokaro",
+    "address": "Test Road",
+    "phone": "9000000000",
+    "entity_id": "ent-zz-test",
+}
+_TEST_ENTITY = {
+    "entity_id": "ent-zz-test",
+    "legal_name": "ZZ Test Optical Pvt Ltd",
+    "trade_name": "ZZ Test",
+    "gstins": [{"state_code": "20", "gstin": "20ABCDE1234F1Z5"}],
+    "invoice": {},
+}
+
+
 @pytest.fixture()
 def coll(monkeypatch):
     fake = _FakeColl()
     monkeypatch.setattr(estimates, "_coll", lambda: fake)
-    # No raw db (render endpoint resolves store/entity fail-soft to {}).
     monkeypatch.setattr(estimates, "_get_db", lambda: None)
+    # #754 fail-loud guard: the render endpoint requires a resolvable issuing
+    # store + entity (was previously allowed to resolve fail-soft to {}).
+    monkeypatch.setattr(estimates, "load_store", lambda sid: dict(_TEST_STORE) if sid else {})
+    monkeypatch.setattr(estimates, "load_entity_for_store", lambda store: dict(_TEST_ENTITY) if store else {})
     return fake
 
 

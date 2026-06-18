@@ -86,13 +86,52 @@ def _order():
     }
 
 
+# Seeded issuing store + entity. #754 added a fail-loud guard
+# (print_identity.assert_issuing_identity raises HTTPException(404) when the
+# store has no name), so the render endpoints can no longer resolve the store
+# fail-soft to {} -- they must see a real issuing store. We patch the imported
+# names in the print_documents module namespace so a document renders its header.
+_TEST_STORE = {
+    "store_id": "BV-TEST-01",
+    "store_name": "ZZ Test Store Bokaro",
+    "store_code": "BV-TEST-01",
+    "state": "Jharkhand",
+    "state_code": "20",
+    "city": "Bokaro",
+    "address": "Test Road",
+    "phone": "9000000000",
+    "entity_id": "ent-zz-test",
+}
+_TEST_ENTITY = {
+    "entity_id": "ent-zz-test",
+    "legal_name": "ZZ Test Optical Pvt Ltd",
+    "trade_name": "ZZ Test",
+    "gstins": [{"state_code": "20", "gstin": "20ABCDE1234F1Z5"}],
+    "invoice": {},
+}
+
+
+def _seed_print_identity(monkeypatch):
+    """Make the #754 issuing-store guard resolve a real store + entity."""
+    monkeypatch.setattr(
+        print_documents, "load_store",
+        lambda sid: dict(_TEST_STORE) if sid else {},
+    )
+    monkeypatch.setattr(
+        print_documents, "load_entity_for_store",
+        lambda store: dict(_TEST_ENTITY) if store else {},
+    )
+
+
 @pytest.fixture()
 def order_env(monkeypatch):
-    """Repo with one order; no raw db (store/entity resolve fail-soft to {})."""
+    """Repo with one order + a seeded issuing store/entity (#754 fail-loud guard)."""
     repo = _FakeOrderRepo(_order())
     monkeypatch.setattr(print_documents, "get_order_repository", lambda: repo)
-    monkeypatch.setattr(print_documents, "_get_db", lambda: None)
     monkeypatch.setattr(print_documents, "get_customer_repository", lambda: None)
+    # #754 removed print_documents._get_db; store/entity now resolve via the
+    # print_identity helpers, which _seed_print_identity patches.
+    _seed_print_identity(monkeypatch)
     return repo
 
 
@@ -121,10 +160,11 @@ def transfer_env(monkeypatch):
         "notes": "Stock rebalance",
         "created_at": "2026-06-15T09:00:00",
     }
-    # The transfer endpoint resolves the source store via print_documents._get_db.
-    monkeypatch.setattr(print_documents, "_get_db", lambda: None)
     # Force the in-memory fallback in transfers persistence (no Mongo).
     monkeypatch.setattr(transfers_router, "_transfers_coll", lambda: None)
+    # #754 fail-loud guard: the transfer challan resolves the source store via
+    # the print_identity helpers (not the removed _get_db); seed them.
+    _seed_print_identity(monkeypatch)
     return tid
 
 
