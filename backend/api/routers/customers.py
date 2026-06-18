@@ -595,7 +595,12 @@ async def create_customer(
     repo = get_customer_repository()
 
     if repo is not None:
-        # Check if mobile already exists
+        # Duplicate-number guard. find_by_mobile matches an existing active
+        # customer whose `mobile` OR `phone` equals the new number (the number
+        # is the customer's identity; TechCherry-imported docs carry it under
+        # `phone`, natively-created docs under `mobile`). Checking both fields
+        # here -- and writing BOTH `mobile` and `phone` below -- prevents the
+        # split-AR duplicate accounts the UNIQUE `mobile` index alone could miss.
         existing = repo.find_by_mobile(customer.mobile)
         if existing is not None:
             raise HTTPException(

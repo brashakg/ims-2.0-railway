@@ -220,6 +220,43 @@ class LoyaltyTransactionRepository(BaseRepository):
         except Exception:
             return False
 
+    def claim_earn_for_order(
+        self, customer_id: str, order_id: str, doc: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Idempotently write the EARN row for (customer, order) iff none exists.
+
+        Earn was a check-then-insert (has_earn_for_order + create), so two
+        concurrent earn calls for the same (customer, order) could BOTH pass the
+        check and BOTH insert -> duplicate EARN rows -> double points. This makes
+        the WRITE itself the guard, exactly like create_product's race-safe arm:
+        a fast-path pre-check, then an insert whose DuplicateKeyError (raised by
+        the UNIQUE (customer_id, order_id, type=EARN) index) means a concurrent
+        caller already wrote the row. Only the FIRST insert wins; the loser gets
+        None. This works on real Mongo (the index is the backstop) AND on test /
+        legacy collections that lack atomic upsert (they just insert).
+
+        Returns:
+          - the inserted doc (with our txn_id)  -> THIS call won; caller must do
+                                                   the balance bump
+          - None                                -> already earned (a prior row
+                                                   exists); caller skips the bump
+        """
+        if not order_id:
+            return None
+        # Fast-path pre-check (advisory; the unique index is the real guard).
+        if self.has_earn_for_order(customer_id, order_id):
+            return None
+        try:
+            created = self.create(dict(doc), raise_on_duplicate=True)
+            return created
+        except Exception as exc:  # noqa: BLE001
+            # DuplicateKeyError: a concurrent caller won the (customer, order)
+            # race on the unique index -> treat as already-earned (no double
+            # award). Any other error: also fail closed, don't double-award.
+            if exc.__class__.__name__ == "DuplicateKeyError":
+                return None
+            return None
+
     def find_expired_unprocessed(self, now: datetime) -> List[Dict[str, Any]]:
         """All EARN rows whose expires_at <= now AND that haven't already
         been swept (we mark with `expired: True` on the EARN row after

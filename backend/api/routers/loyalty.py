@@ -315,7 +315,10 @@ async def earn(
         value_clamped = client_value > order_basis
         rupee_value = min(client_value, order_basis)
 
-    # Idempotency
+    # Idempotency fast-path: an already-earned order returns its prior row
+    # without recomputing. The AUTHORITATIVE guard against a concurrent
+    # double-earn is the atomic claim_earn_for_order below (this read alone is
+    # racy -- two callers can both see "not earned").
     if txns.has_earn_for_order(body.customer_id, body.order_id):
         existing = txns.find_for_customer(body.customer_id, limit=20)
         for t in existing:
@@ -340,7 +343,14 @@ async def earn(
         return {"awarded": 0, "skipped_reason": earn_result.get("skipped_reason")}
 
     txn_id = str(uuid.uuid4())
-    txns.create(
+    # ATOMIC IDEMPOTENT EARN (no double-earn). A single guarded upsert writes
+    # the EARN row only if (customer, order) has none; a racing second caller
+    # gets None and we return the existing row WITHOUT bumping the balance, so
+    # the points math runs exactly once per (customer, order) even under
+    # concurrency. Mirrors the atomic guard redeem uses for the debit.
+    claimed = txns.claim_earn_for_order(
+        body.customer_id,
+        body.order_id,
         {
             "txn_id": txn_id,
             "customer_id": body.customer_id,
@@ -355,8 +365,19 @@ async def earn(
             "tier_multiplier": earn_result.get("tier_multiplier"),
             "created_by": current_user.get("user_id"),
             "created_at": datetime.now(),
-        }
+        },
     )
+    if claimed is None:
+        # A concurrent earn won the race -> already earned. Return its row; do
+        # NOT bump the balance (it was bumped by the winner).
+        for t in txns.find_for_customer(body.customer_id, limit=20):
+            if t.get("order_id") == body.order_id and t.get("type") == "EARN":
+                return {
+                    "awarded": int(t.get("points") or 0),
+                    "txn_id": t.get("txn_id"),
+                    "deduped": True,
+                }
+        return {"awarded": 0, "deduped": True}
 
     new_lifetime = int(account.get("lifetime_earned", 0)) + points
     new_tier = compute_tier(new_lifetime, settings)
@@ -985,6 +1006,7 @@ def earn_for_order_internal(
         if not settings.get("enabled", True):
             return {"awarded": 0, "skipped_reason": "loyalty_disabled"}
 
+        # Fast-path idempotency read (the atomic claim below is the real guard).
         if order_id and txns.has_earn_for_order(customer_id, order_id):
             return {"awarded": 0, "skipped_reason": "already_earned"}
 
@@ -1000,7 +1022,13 @@ def earn_for_order_internal(
             return {"awarded": 0, "skipped_reason": result.get("skipped_reason")}
 
         txn_id = str(uuid.uuid4())
-        txns.create(
+        # ATOMIC IDEMPOTENT EARN: write the EARN row only if (customer, order)
+        # has none; a racing caller gets None and we skip the balance bump, so
+        # the order earns exactly once even under concurrency (same guard as the
+        # POST /earn endpoint + redeem's atomic debit).
+        claimed = txns.claim_earn_for_order(
+            customer_id,
+            order_id,
             {
                 "txn_id": txn_id,
                 "customer_id": customer_id,
@@ -1015,8 +1043,10 @@ def earn_for_order_internal(
                 "store_id": store_id,
                 "created_by": user_id,
                 "created_at": datetime.now(),
-            }
+            },
         )
+        if claimed is None:
+            return {"awarded": 0, "skipped_reason": "already_earned"}
         new_lifetime = int(account.get("lifetime_earned", 0)) + points
         new_tier = compute_tier(new_lifetime, settings)
         accounts.adjust_balance(
