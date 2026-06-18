@@ -8,7 +8,7 @@ lifecycle management, and customer intelligence
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import re
 import uuid
 import logging
@@ -160,11 +160,16 @@ class AddLoyaltyPointsRequest(BaseModel):
 
 
 class PrescriptionWithStatusResponse(BaseModel):
-    """Prescription with renewal status"""
+    """Prescription with renewal status.
 
-    id: str
-    customer_id: str
-    issue_date: str
+    id / issue_date are Optional and renewal_status allows "unknown" so a
+    legacy prescription with a null id or missing issue_date is returned
+    gracefully (status "unknown") rather than 500'ing the whole 360 view.
+    """
+
+    id: Optional[str] = None
+    customer_id: Optional[str] = None
+    issue_date: Optional[str] = None
     expiry_date: Optional[str] = None
     sph_od: Optional[float] = None
     cyl_od: Optional[float] = None
@@ -177,7 +182,7 @@ class PrescriptionWithStatusResponse(BaseModel):
     add_os: Optional[float] = None
     pd_os: Optional[float] = None
     doctor_name: Optional[str] = None
-    renewal_status: Literal["current", "upcoming", "expired"]
+    renewal_status: Literal["current", "upcoming", "expired", "unknown"]
     days_until_renewal: Optional[int] = None
 
 
@@ -258,8 +263,11 @@ async def get_customer_360(
 
         # Calculate loyalty tier — pass customer_id so we read the real points
         # balance from loyalty_accounts, and customer for birthday_month from DOB.
+        # member_since must be a string for the response model -- coerce a
+        # datetime created_at to ISO so it never 422s.
+        created_at_iso = _to_iso(customer.get("created_at")) or ""
         loyalty_data = _calculate_loyalty_tier(
-            stats["total_lifetime_value"], customer["created_at"],
+            stats["total_lifetime_value"], created_at_iso,
             customer_id=customer_id, customer_doc=customer,
         )
 
@@ -274,11 +282,11 @@ async def get_customer_360(
 
         return {
             "id": customer_id,
-            "name": customer["name"],
-            "phone": customer["phone"],
+            "name": customer.get("name", ""),
+            "phone": customer.get("phone", ""),
             "email": customer.get("email"),
             "address": customer.get("address"),
-            "created_at": customer["created_at"],
+            "created_at": created_at_iso,
             "stats": stats,
             "loyalty_data": loyalty_data,
             "prescriptions": prescriptions_with_status,
@@ -1635,6 +1643,55 @@ async def add_loyalty_points(
 # ============================================================================
 
 
+def _to_dt(value) -> Optional[datetime]:
+    """Tolerant date coercion -- the single safe entry point for any value that
+    might be a datetime, an ISO string, or None/empty.
+
+    Mongo stores created_at / order_date / issue_date as native datetime
+    objects, but legacy/imported rows (or other code paths) may carry ISO
+    strings, naive datetimes, None, or even garbage. The old code blindly
+    called value.replace("Z","+00:00") -- a str method -- on these, which
+    raised AttributeError on a datetime/None and got masked by the generic
+    except as a 500. This coerces ALL of those to an aware UTC datetime (or
+    None), and never calls .replace on a non-str.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        # Attach UTC if naive, matching the aware-datetime convention elsewhere.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, date):
+        # Plain date -> midnight UTC.
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _to_iso(value) -> Optional[str]:
+    """Coerce a datetime/str/None to an ISO-8601 string for response bodies.
+
+    The Customer360 / stats / loyalty response models declare created_at /
+    member_since / customer_since_date as required `str`; Mongo hands us a
+    datetime, which pydantic will NOT auto-coerce to str -> 422 -> 500. This
+    normalises both shapes to a string (and falls back to str() rather than
+    crashing on an odd type)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _calculate_customer_stats(customer: dict, orders: list) -> dict:
     """Calculate customer engagement and value statistics"""
     total_lifetime_value = sum(order.get("total_amount", 0) for order in orders)
@@ -1642,20 +1699,22 @@ def _calculate_customer_stats(customer: dict, orders: list) -> dict:
     avg_order_value = total_lifetime_value / total_orders if total_orders > 0 else 0
 
     last_order = orders[0] if orders else None
-    customer_since = datetime.fromisoformat(
-        customer["created_at"].replace("Z", "+00:00")
-    )
-    months_as_customer = (
-        datetime.now(customer_since.tzinfo) - customer_since
-    ).days / 30
-    visit_frequency = total_orders / max(1, months_as_customer)
+    customer_since = _to_dt(customer.get("created_at"))
+    if customer_since is not None:
+        months_as_customer = (
+            datetime.now(customer_since.tzinfo) - customer_since
+        ).days / 30
+        visit_frequency = total_orders / max(1, months_as_customer)
+    else:
+        # Unknown signup date -> avoid dividing by an unknown tenure.
+        visit_frequency = float(total_orders)
 
     return {
         "total_lifetime_value": round(total_lifetime_value, 2),
         "total_orders": total_orders,
-        "last_order_date": last_order.get("order_date") if last_order else None,
+        "last_order_date": _to_iso(last_order.get("order_date")) if last_order else None,
         "last_order_amount": (last_order.get("total_amount") if last_order else None),
-        "customer_since_date": customer["created_at"],
+        "customer_since_date": _to_iso(customer.get("created_at")) or "",
         "preferred_store": customer.get("store_id", "Main Store"),
         "average_order_value": round(avg_order_value, 2),
         "visit_frequency": round(visit_frequency, 1),
@@ -1742,20 +1801,21 @@ def _calculate_loyalty_tier(lifetime_value: float, created_at: str,
 
 
 def _add_prescription_status(prescription: dict) -> dict:
-    """Add renewal status to prescription data"""
-    issue_date = datetime.fromisoformat(
-        prescription.get("issue_date", "").replace("Z", "+00:00")
-    )
-    expiry_date_str = prescription.get("expiry_date")
-    expiry_date = None
-    if expiry_date_str:
-        expiry_date = datetime.fromisoformat(expiry_date_str.replace("Z", "+00:00"))
+    """Add renewal status to prescription data.
 
-    today = datetime.now(issue_date.tzinfo)
-    renewal_status = "current"
+    Tolerates a None / datetime / missing issue_date (legacy rows) and a
+    legacy null id by falling back to prescription_id / id / _id. When the
+    issue date is unknown we return status "unknown" rather than crashing.
+    issue_date / expiry_date are normalised to ISO strings for the response
+    model (which declares them as str)."""
+    issue_date = _to_dt(prescription.get("issue_date"))
+    expiry_date = _to_dt(prescription.get("expiry_date"))
+
+    renewal_status = "unknown" if issue_date is None else "current"
     days_until_renewal = None
 
-    if expiry_date:
+    if expiry_date is not None:
+        today = datetime.now(expiry_date.tzinfo)
         days_until = (expiry_date - today).days
         days_until_renewal = max(0, days_until)
 
@@ -1763,9 +1823,21 @@ def _add_prescription_status(prescription: dict) -> dict:
             renewal_status = "expired"
         elif days_until <= 30:
             renewal_status = "upcoming"
+        elif issue_date is not None:
+            renewal_status = "current"
+
+    # Resolve an id even for legacy docs that never stored one.
+    resolved_id = (
+        prescription.get("id")
+        or prescription.get("prescription_id")
+        or prescription.get("_id")
+    )
 
     return {
         **prescription,
+        "id": str(resolved_id) if resolved_id is not None else None,
+        "issue_date": _to_iso(prescription.get("issue_date")),
+        "expiry_date": _to_iso(prescription.get("expiry_date")),
         "renewal_status": renewal_status,
         "days_until_renewal": days_until_renewal,
     }
@@ -1780,22 +1852,24 @@ def _determine_lifecycle_phase(customer: dict, orders: list) -> dict:
             "recommended_action": "Send welcome offer and introduction email",
         }
 
-    customer_since = datetime.fromisoformat(
-        customer["created_at"].replace("Z", "+00:00")
-    )
-    days_since_signup = (datetime.now(customer_since.tzinfo) - customer_since).days
+    customer_since = _to_dt(customer.get("created_at"))
+    if customer_since is not None:
+        days_since_signup = (
+            datetime.now(customer_since.tzinfo) - customer_since
+        ).days
+        if days_since_signup <= 90:
+            return {
+                "phase": "new",
+                "reason": "First purchase within 90 days",
+                "recommended_action": "Send product recommendations and loyalty program details",
+            }
 
-    if days_since_signup <= 90:
-        return {
-            "phase": "new",
-            "reason": "First purchase within 90 days",
-            "recommended_action": "Send product recommendations and loyalty program details",
-        }
-
-    last_order_date = datetime.fromisoformat(
-        orders[0]["order_date"].replace("Z", "+00:00")
+    last_order_date = _to_dt(orders[0].get("order_date"))
+    days_since_purchase = (
+        (datetime.now(last_order_date.tzinfo) - last_order_date).days
+        if last_order_date is not None
+        else None
     )
-    days_since_purchase = (datetime.now(last_order_date.tzinfo) - last_order_date).days
     total_lifetime_value = sum(order.get("total_amount", 0) for order in orders)
 
     if total_lifetime_value >= 100000 or len(orders) >= 20:
@@ -1805,23 +1879,28 @@ def _determine_lifecycle_phase(customer: dict, orders: list) -> dict:
             "recommended_action": "Exclusive offers, priority support, VIP events",
         }
 
-    if days_since_purchase > 365:
+    if days_since_purchase is not None and days_since_purchase > 365:
         return {
             "phase": "inactive",
             "reason": f"No purchases in {days_since_purchase} days",
             "recommended_action": "Win-back campaign with special discounts",
         }
 
-    if days_since_purchase > 180:
+    if days_since_purchase is not None and days_since_purchase > 180:
         return {
             "phase": "at_risk",
             "reason": f"No purchases in {days_since_purchase} days",
             "recommended_action": "Re-engagement email with personalized offers",
         }
 
+    recency = (
+        f"last order {days_since_purchase} days ago"
+        if days_since_purchase is not None
+        else "purchase history on file"
+    )
     return {
         "phase": "active",
-        "reason": f"Regular purchases, last order {days_since_purchase} days ago",
+        "reason": f"Regular purchases, {recency}",
         "recommended_action": "Continue regular engagement and loyalty rewards",
     }
 
