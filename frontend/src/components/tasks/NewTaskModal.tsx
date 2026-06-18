@@ -16,8 +16,8 @@
 //
 // No backend / API shape change: the only network call is tasksApi.createTask.
 
-import { useEffect, useMemo, useState } from 'react';
-import { X, Plus } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { X, Plus, Paperclip, FileText, Image as ImageIcon, Loader2 } from 'lucide-react';
 import { tasksApi } from '../../services/api';
 import { adminStoreApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -65,6 +65,16 @@ interface StaffOption {
   role?: string;
 }
 
+// File attachment limits — must match the backend file_store contract.
+const ACCEPT_ATTR = 'image/*,application/pdf';
+const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 const fmtDue = (m: number): string =>
   m < 60 ? `${m}m` : m < 60 * 24 ? `${Math.round(m / 60)}h` : `${Math.round(m / (60 * 24))}d`;
 
@@ -82,11 +92,27 @@ export interface NewTaskModalProps {
   onClose: () => void;
   /** Called after a successful create so the parent can reload the list. */
   onCreated: () => void;
+  /**
+   * Pre-attach a file when the modal opens. Used by the Hub "Send a file"
+   * action: sharing a file is now creating a task that carries it.
+   */
+  initialFile?: File | null;
+  /** Custom heading + subtitle (e.g. the "Share a file" entry point). */
+  heading?: string;
+  subheading?: string;
 }
 
-export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) {
+export function NewTaskModal({
+  isOpen,
+  onClose,
+  onCreated,
+  initialFile = null,
+  heading,
+  subheading,
+}: NewTaskModalProps) {
   const { user } = useAuth();
   const toast = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
@@ -97,6 +123,8 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
   const [escalate, setEscalate] = useState(true);
   const [staff, setStaff] = useState<StaffOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
 
   // Load the active store's users for the owner / watcher pickers.
   useEffect(() => {
@@ -153,8 +181,28 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
       setDue(120);
       setWatchers([]);
       setEscalate(true);
+      setFile(initialFile);
+      setFileError(null);
     }
-  }, [isOpen]);
+  }, [isOpen, initialFile]);
+
+  const validateAndSetFile = (f: File | null) => {
+    setFileError(null);
+    if (!f) {
+      setFile(null);
+      return;
+    }
+    const okType = f.type.startsWith('image/') || f.type === 'application/pdf';
+    if (!okType) {
+      setFileError('Only images or PDF files are allowed.');
+      return;
+    }
+    if (f.size > MAX_FILE_BYTES) {
+      setFileError(`File exceeds the ${MAX_FILE_BYTES / (1024 * 1024)} MB cap.`);
+      return;
+    }
+    setFile(f);
+  };
 
   const priMeta = useMemo(() => PRI_META.find((p) => p.id === pri)!, [pri]);
   const ownerName = useMemo(
@@ -174,8 +222,27 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
       toast.error('Pick an owner for this task');
       return;
     }
+    if (fileError) {
+      toast.error(fileError);
+      return;
+    }
     setSubmitting(true);
     try {
+      // If a file is attached, upload it first to get a file_id. A failed
+      // upload aborts the create (the task should not silently lose its file).
+      let attachment: {
+        attachment_file_id?: string;
+        attachment_filename?: string;
+        attachment_mime?: string;
+      } = {};
+      if (file) {
+        const up = await tasksApi.uploadTaskFile(file);
+        attachment = {
+          attachment_file_id: up.file_id,
+          attachment_filename: up.filename,
+          attachment_mime: up.mime,
+        };
+      }
       // Compute a real future due_at from the "due in N minutes" selection.
       // +30s padding so the backend's 5-minute past-guard never trips on a
       // tiny preset (e.g. 15m) due to request latency.
@@ -187,8 +254,9 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
         assigned_to: owner,
         due_date: dueAt,
         type: 'manual',
+        ...attachment,
       });
-      toast.success('Task created');
+      toast.success(file ? 'Task created with file attached' : 'Task created');
       onClose();
       onCreated();
     } catch (e) {
@@ -209,7 +277,7 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, title, desc, pri, due, owner]);
+  }, [isOpen, title, desc, pri, due, owner, file]);
 
   if (!isOpen) return null;
 
@@ -223,8 +291,11 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
       <div className="nt-modal" role="dialog" aria-modal="true" aria-label="New task">
         <div className="nt-head">
           <div>
-            <h2>New task</h2>
-            <div className="sub">Tied to an SOP, assigned to an owner, auto-escalated when overdue.</div>
+            <h2>{heading || 'New task'}</h2>
+            <div className="sub">
+              {subheading ||
+                'Tied to an SOP, assigned to an owner, auto-escalated when overdue.'}
+            </div>
           </div>
           <button className="nt-close" onClick={onClose} aria-label="Close">
             <X className="w-4 h-4" />
@@ -256,6 +327,69 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
                 placeholder="What needs to happen, in one or two lines."
                 style={{ minHeight: 68, resize: 'vertical' }}
               />
+            </div>
+
+            {/* Optional file attachment — sharing a file = a task carrying it. */}
+            <div className="nt-field">
+              <label>Attach a file</label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPT_ATTR}
+                style={{ display: 'none' }}
+                onChange={(e) => validateAndSetFile(e.target.files?.[0] ?? null)}
+              />
+              {!file ? (
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  <Paperclip className="w-3.5 h-3.5" /> Choose image or PDF
+                </button>
+              ) : (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 10px',
+                    border: '1px solid var(--line)',
+                    borderRadius: 8,
+                    fontSize: 12.5,
+                  }}
+                >
+                  {file.type === 'application/pdf' ? (
+                    <FileText className="w-4 h-4" />
+                  ) : (
+                    <ImageIcon className="w-4 h-4" />
+                  )}
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {file.name}
+                  </span>
+                  <span style={{ color: 'var(--ink-4)' }}>{humanSize(file.size)}</span>
+                  <button
+                    type="button"
+                    className="nt-close"
+                    aria-label="Remove file"
+                    onClick={() => {
+                      validateAndSetFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+              {fileError && (
+                <div className="nt-hint" style={{ color: 'var(--err)', fontStyle: 'normal' }}>
+                  {fileError}
+                </div>
+              )}
+              <div className="nt-hint" style={{ fontStyle: 'normal', color: 'var(--ink-3)' }}>
+                Image or PDF, up to 25 MB. The assignee can download it from the task.
+              </div>
             </div>
 
             <div className="nt-field">
@@ -521,10 +655,18 @@ export function NewTaskModal({ isOpen, onClose, onCreated }: NewTaskModalProps) 
             Cancel
           </button>
           <button type="button" className="btn primary" onClick={submit} disabled={!canSubmit}>
-            <Plus className="w-4 h-4" /> Create task
-            <span style={{ opacity: 0.7, marginLeft: 6, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-              · {pri} · {fmtDue(due)}
-            </span>
+            {submitting ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> {file ? 'Uploading…' : 'Creating…'}
+              </>
+            ) : (
+              <>
+                <Plus className="w-4 h-4" /> Create task
+                <span style={{ opacity: 0.7, marginLeft: 6, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                  · {pri} · {fmtDue(due)}
+                </span>
+              </>
+            )}
           </button>
         </div>
       </div>

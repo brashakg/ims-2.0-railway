@@ -18,6 +18,8 @@ import {
   Edit,
   Zap,
   ArrowLeft,
+  Paperclip,
+  Download,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -64,6 +66,8 @@ interface Task {
   category: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'ADHOC' | 'SOP';
   checklistItems?: ChecklistItem[];
   completionNotes?: string;
+  /** Optional file attachment (owner item #5 — file-sharing via tasks). */
+  attachment?: { file_id?: string; filename?: string; mime_type?: string } | null;
 }
 
 interface ChecklistItem {
@@ -196,6 +200,7 @@ export function TaskManagementPage() {
         category: t.category || 'ADHOC',
         checklistItems: t.checklist_items,
         completionNotes: t.completion_notes,
+        attachment: t.attachment || null,
       }));
       setTasks(apiTasks);
 
@@ -1121,6 +1126,20 @@ function TaskDetailPanel({ task, onClose, onChanged }: { task: Task; onClose: ()
       toast.error(typeof msg === 'string' ? msg : 'Failed to reassign task');
     }
   };
+  // Download the task's attachment. The endpoint is auth-gated, so we fetch
+  // the bytes as a blob and open them in a new tab (mirrors the handoffs flow).
+  const handleDownloadAttachment = async () => {
+    try {
+      const blob = await tasksApi.getTaskFile(task.id);
+      const url = window.URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      // Revoke a little later so the new tab has time to read it.
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      toast.error(_errMsg(e, 'Could not download the file'));
+    }
+  };
+
   const dueSane = isSaneDue(task.dueInMin);
   const minLeft = dueSane ? Math.max(0, task.dueInMin) : 0;
   const minLeftLabel = dueSane ? humanizeMinutes(minLeft) : '—';
@@ -1205,6 +1224,22 @@ function TaskDetailPanel({ task, onClose, onChanged }: { task: Task; onClose: ()
             <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
               {task.description}
             </p>
+          </div>
+        )}
+
+        {task.attachment?.file_id && (
+          <div className="d-sec">
+            <h4>Attachment</h4>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={handleDownloadAttachment}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Paperclip className="w-3.5 h-3.5" />
+              {task.attachment.filename || 'Download file'}
+              <Download className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 

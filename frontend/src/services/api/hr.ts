@@ -685,6 +685,10 @@ export const tasksApi = {
     assigned_to: string;
     due_date: Date | string;
     type?: string;
+    // Optional file attachment (file_id returned by uploadTaskFile).
+    attachment_file_id?: string;
+    attachment_filename?: string;
+    attachment_mime?: string;
   }) => {
     const payload = {
       title: task.title,
@@ -693,8 +697,38 @@ export const tasksApi = {
       assigned_to: task.assigned_to,
       due_date: typeof task.due_date === 'string' ? task.due_date : task.due_date.toISOString(),
       type: task.type || 'manual',
+      attachment_file_id: task.attachment_file_id,
+      attachment_filename: task.attachment_filename,
+      attachment_mime: task.attachment_mime,
     };
     const response = await api.post('/tasks', payload);
+    return response.data;
+  },
+
+  // Upload a file (image/PDF, <=25MB) for a task. Returns a file_id to pass to
+  // createTask/updateTask as attachment_file_id. Sharing a file with a
+  // colleague = creating a task assigned to them with the file attached.
+  uploadTaskFile: async (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await api.post('/tasks/upload-file', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data as {
+      file_id: string;
+      filename: string;
+      mime: string;
+      size: number;
+      persisted: boolean;
+    };
+  },
+
+  // Fetch a task's attachment bytes as a Blob (the download endpoint is
+  // auth-gated, so we cannot use a naked href -- mirrors the handoffs pattern).
+  getTaskFile: async (taskId: string) => {
+    const response = await api.get<Blob>(`/tasks/${taskId}/file`, {
+      responseType: 'blob',
+    });
     return response.data;
   },
 
