@@ -24,6 +24,17 @@ from .auth import get_current_user, require_roles
 # simply get an empty card.
 _WIDGET_ADMIN_ROLES = ("ADMIN",)
 
+# RBAC-1: the finance/* and hr/* Hub widgets surface store revenue/order counts
+# and staff headcount/attendance. This router (finance_ticker_router) is mounted
+# at bare /api/v1 and at /api/v1/finance WITHOUT the _FINANCE_ROLES gate, so the
+# handlers below were protected ONLY by the request-time RBAC middleware + the
+# frontend hiding the cards -- frontend-hiding is not protection. Gate each
+# handler with its own require_roles (defense-in-depth) so floor roles
+# (SALES_STAFF, CASHIER, WORKSHOP_STAFF, OPTOMETRIST) get a hard 403 even if the
+# middleware is ever disabled/reordered. Mirrors the policy registry rows for
+# these routes and the owner-digest route above. SUPERADMIN auto-passes.
+_WIDGET_FINANCE_HR_ROLES = ("ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
 router = APIRouter()
 
 
@@ -168,7 +179,7 @@ async def clinical_redo_rate(
 @router.get("/finance/summary-month")
 async def finance_summary_month(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     orders = _coll("orders")
     sid = _store(current_user, store_id)
@@ -188,7 +199,7 @@ async def finance_summary_month(
 @router.get("/finance/gst-status")
 async def finance_gst_status(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     return {
         "filed": False,
@@ -200,7 +211,7 @@ async def finance_gst_status(
 @router.get("/finance/pending-reconciliations")
 async def finance_pending_reconciliations(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     return {"pending": 0, "items": []}
 
@@ -211,7 +222,7 @@ async def finance_pending_reconciliations(
 @router.get("/hr/summary-today")
 async def hr_summary_today(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     users = _coll("users")
     sid = _store(current_user, store_id)
@@ -242,7 +253,7 @@ async def hr_summary_today(
 @router.get("/hr/attendance-compliance")
 async def hr_attendance_compliance(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     return {"compliance_rate": 0, "late_arrivals": 0, "absent": 0}
 
