@@ -92,6 +92,8 @@ async def call_claude(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: float = DEFAULT_TIMEOUT,
     history: Optional[List[Dict[str, str]]] = None,
+    business_data: Optional[Dict[str, Any]] = None,
+    scrub_level: Optional[str] = None,
 ) -> Optional[str]:
     """
     Call Claude with a system prompt + user message. Returns the text
@@ -110,13 +112,37 @@ async def call_claude(
       timeout: Per-request timeout.
       history: Optional prior messages [{"role": "user"|"assistant", "content": ...}]
                appended in order before the user message.
+      business_data: Optional structured data (dicts/lists pulled from Mongo).
+               Routed through scrub_pii BEFORE the API call so customer PII
+               (names/phone/email) never reaches the prompt payload. ALWAYS
+               pass record data here rather than json.dumps-ing it into the
+               `user` string -- the user/system strings are NOT scrubbed.
+      scrub_level: PII scrub level applied to business_data ("all" |
+               "customer" | "none"). Defaults to the safe "all" when
+               business_data is supplied so a caller that forgets to set it
+               still cannot leak customer PII.
     """
     # Delegate to the pluggable provider so agents use whichever model is
     # configured (local OSS and/or Claude). Backwards-compatible: returns
     # the text or None on any failure.
+    #
+    # SEC-1: when structured records are passed via business_data they are
+    # scrubbed by llm_provider._context_block. We default scrub_level to
+    # "all" (full PII strip) whenever business_data is present so the
+    # default is fail-safe; callers reasoning over owner data pass
+    # "customer" to let staff/vendor names through. The legacy text-only
+    # path (no business_data) keeps scrub=False since there is no
+    # structured payload to redact.
     from . import llm_provider
+    effective_level = scrub_level if scrub_level else ("all" if business_data else "none")
     return await llm_provider.complete(
-        system, user, history=history, max_tokens=max_tokens, timeout=timeout, scrub=False
+        system,
+        user,
+        history=history,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        business_data=business_data,
+        scrub_level=effective_level,
     )
 
 
