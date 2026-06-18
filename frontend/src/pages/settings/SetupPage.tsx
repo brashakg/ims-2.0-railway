@@ -39,6 +39,7 @@ import { employeeDocApi } from '../../services/api/hr';
 import type { EmployeeDocType } from '../../services/api/hr';
 import { validatePhone } from '../../utils/validators';
 import { ROLE_HIERARCHY } from './settingsTypes';
+import { PermissionDeltaEditor } from '../../components/permissions/PermissionDeltaEditor';
 import {
   Building, Users, Plus, Shield, X, ChevronRight, ChevronLeft, CheckCircle,
   AlertTriangle, Copy, RefreshCw, Lock, MapPin, UserPlus, Camera,
@@ -111,6 +112,14 @@ interface NewEmployee {
   panNo: string;
   uanNo: string;
   esicNo: string;
+  // Per-user permission overrides set during onboarding (backlog #13). All
+  // OPTIONAL: by default the person uses their standard role (empty = DARK).
+  //  - permissions: two-sided capability override { grant, deny }
+  //  - moduleAccess: deny-only module/screen map { moduleKey: bool }
+  //  - discountCap: per-user discount-cap override (undefined = role baseline)
+  permissions: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
+  moduleAccess: Record<string, boolean>;
+  discountCap?: number;
 }
 
 // A document staged in the wizard before the employee exists. The actual upload
@@ -193,6 +202,8 @@ function defaultEmployee(): NewEmployee {
     roles: [], assignedStores: [], primaryStore: '',
     username: '', tempPassword: randomTempPassword(),
     aadhaarNo: '', panNo: '', uanNo: '', esicNo: '',
+    // Default: standard role (no overrides) -> empty maps / undefined cap.
+    permissions: {}, moduleAccess: {}, discountCap: undefined,
   };
 }
 
@@ -316,6 +327,8 @@ function OnboardingWizard({
 }) {
   const [step, setStep] = useState(1);
   const [advancedRoles, setAdvancedRoles] = useState(false);
+  // Step-4: opt-in to editing per-user overrides (default off = standard role).
+  const [customizePerms, setCustomizePerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [copied, setCopied] = useState(false);
@@ -512,6 +525,17 @@ function OnboardingWizard({
         // enforces the escalation guard (can_assign_roles), sanitizes module
         // access, and -- because mustChangePassword:true -- forces a password
         // change on first login (BUG-027 preserved; no skip toggle exists).
+        // Per-user overrides (backlog #13): only sent when the admin actually
+        // customised them (toggle on AND a non-empty map / a set cap), so the
+        // common onboarding stays DARK (standard role) server-side.
+        const hasPermOverride =
+          customizePerms &&
+          ((form.permissions.grant && Object.keys(form.permissions.grant).length > 0) ||
+            (form.permissions.deny && Object.keys(form.permissions.deny).length > 0));
+        const hasModuleOverride =
+          customizePerms && Object.keys(form.moduleAccess).length > 0;
+        const hasCapOverride = customizePerms && form.discountCap != null;
+
         const created = await adminUserApi.createUser({
           name: form.name.trim(),
           email: form.email.trim(),
@@ -527,6 +551,10 @@ function OnboardingWizard({
           panNo: form.panNo.trim().toUpperCase() || undefined,
           uanNo: form.uanNo.trim() || undefined,
           esicNo: form.esicNo.trim() || undefined,
+          // Per-user permission overrides set in step 4 (omitted when DARK).
+          permissions: hasPermOverride ? form.permissions : undefined,
+          moduleAccess: hasModuleOverride ? form.moduleAccess : undefined,
+          discountCap: hasCapOverride ? form.discountCap : undefined,
         });
 
         newUserId = created?.user_id || '';
@@ -774,10 +802,11 @@ function OnboardingWizard({
             </>
           )}
 
-          {/* ============ STEP 4: PERMISSIONS (PLACEHOLDER ONLY) ============ */}
-          {/* The editable per-user override is PR2.x, gated on the permission */}
-          {/* layer. For now this is a READ-ONLY confirmation that the account   */}
-          {/* uses the standard permissions for its role.                        */}
+          {/* ============ STEP 4: PERMISSIONS (EDITABLE) ============ */}
+          {/* Backlog #13: the per-user override editor is now LIVE here, reusing */}
+          {/* the SAME PermissionDeltaEditor as Settings > Users. Default is the   */}
+          {/* standard role; the admin opts in to customise (discount cap, module  */}
+          {/* access, returns/refund approval, extra abilities). Sent on create.   */}
           {step === 4 && (
             <>
               <h4 className="font-medium text-gray-900">Permissions</h4>
@@ -795,23 +824,46 @@ function OnboardingWizard({
                   </p>
                 </div>
               </div>
-              <div
-                aria-disabled="true"
-                className="border border-gray-200 rounded-lg p-4 opacity-60 cursor-not-allowed select-none"
-                title="Per-user permission customisation is coming soon"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-gray-400" />
-                    <span className="text-sm font-medium text-gray-600">Customize permissions</span>
-                  </div>
-                  <span className="text-[10px] uppercase tracking-wide bg-gray-100 text-gray-500 px-2 py-0.5 rounded">Coming soon</span>
+
+              {/* Opt-in toggle: keep onboarding fast for the common case, reveal */}
+              {/* the full editor only when the admin wants to fine-tune. */}
+              <label className="flex items-center justify-between gap-3 border border-gray-200 rounded-lg p-4 cursor-pointer hover:bg-gray-50">
+                <span className="flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-bv-red-600" />
+                  <span className="text-sm font-medium text-gray-700">Customize permissions for this person</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={customizePerms}
+                  onChange={(e) => {
+                    setCustomizePerms(e.target.checked);
+                    // Clearing the toggle resets to the standard role so a half-
+                    // edited override is never silently persisted.
+                    if (!e.target.checked) {
+                      set({ permissions: {}, moduleAccess: {}, discountCap: undefined });
+                    }
+                  }}
+                  className="rounded border-gray-300 text-bv-red-600 focus:ring-bv-red-500"
+                />
+              </label>
+
+              {customizePerms && (
+                <div className="border border-gray-200 rounded-lg p-4">
+                  {form.roles.length === 0 ? (
+                    <p className="text-xs text-gray-500">Pick a role first to customise permissions.</p>
+                  ) : (
+                    <PermissionDeltaEditor
+                      roles={form.roles}
+                      permissions={form.permissions}
+                      onPermissionsChange={(next) => set({ permissions: next })}
+                      discountCap={form.discountCap}
+                      onDiscountCapChange={(next) => set({ discountCap: next })}
+                      moduleAccess={form.moduleAccess}
+                      onModuleAccessChange={(next) => set({ moduleAccess: next })}
+                    />
+                  )}
                 </div>
-                <p className="text-xs text-gray-400 mt-2">
-                  Soon you&apos;ll be able to fine-tune what an individual can do — e.g. allow a
-                  slightly higher discount or hide a module — without changing their role.
-                </p>
-              </div>
+              )}
             </>
           )}
 
