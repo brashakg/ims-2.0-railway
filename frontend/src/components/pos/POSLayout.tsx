@@ -1197,7 +1197,25 @@ function SalespersonPicker() {
   const [people, setPeople] = useState<Array<{ id: string; name: string }>>([]);
   const [loading, setLoading] = useState(false);
 
+  // Only manager-tier (Store Manager and up) may attribute a sale to ANOTHER
+  // salesperson. Everyone below Store Manager (sales staff / cashier /
+  // optometrist / workshop) is auto-attributed to themselves -- no picker.
+  const MANAGER_TIER = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+  const canPick = (user?.roles || []).some((r: string) => MANAGER_TIER.includes(r));
+  const selfId = user?.id || (user as any)?.user_id || '';
+  const selfName =
+    (user as any)?.name || (user as any)?.full_name || (user as any)?.username || 'You';
+
+  // Below-manager: lock the salesperson to the logged-in user (no choice).
   useEffect(() => {
+    if (!canPick && selfId && store.salesperson_id !== selfId) {
+      store.setSalesperson(selfId, selfName);
+    }
+  }, [canPick, selfId, selfName, store.salesperson_id]);
+
+  // Manager-tier only: load the store's sales-floor users for the dropdown.
+  useEffect(() => {
+    if (!canPick) return;
     const sid = store.store_id || user?.activeStoreId;
     if (!sid) return;
     let cancelled = false;
@@ -1225,7 +1243,20 @@ function SalespersonPicker() {
       .catch(() => setPeople([]))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [store.store_id, user?.activeStoreId]);
+  }, [canPick, store.store_id, user?.activeStoreId]);
+
+  // Below Store Manager: no picker -- the sale is auto-attributed to the
+  // logged-in user (set by the effect above). Read-only display.
+  if (!canPick) {
+    return (
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Salesperson</label>
+        <div className="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm bg-gray-50 text-gray-700">
+          {selfName} <span className="text-gray-400">(you)</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
