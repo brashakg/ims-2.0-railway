@@ -95,6 +95,13 @@ class TaskmasterAgent(JarvisAgent):
         except Exception as e:  # noqa: BLE001
             logger.debug("[TASKMASTER] approval expire_stale skipped: %s", e)
 
+        # 3b. F27: a refund that needed manager sign-off but whose approval
+        # request EXPIRED unactioned is a dropped refund. Raise a P1 task to the
+        # next escalation rung (the cashier's manager, climbing the ladder) so a
+        # human picks it up. Tier 1 auto-act (a task is fully reversible). Deduped
+        # so a repeated tick never re-files the same expired approval. Fail-soft.
+        actions.extend(await self._escalate_expired_refund_approvals())
+
         # 4. F29: optometrist-coverage breach sweep. Every PUBLISHED roster slot
         # (today or later) with no optometrist rostered raises ONE deduped in-app
         # bell to the store + area managers. Tier 1 (a notification is fully
@@ -375,6 +382,152 @@ class TaskmasterAgent(JarvisAgent):
                     )
         except Exception as e:
             logger.debug(f"[TASKMASTER] Overdue scan error: {e}")
+        return actions
+
+    async def _escalate_expired_refund_approvals(self) -> List[Dict[str, Any]]:
+        """F27: turn EXPIRED refund-approval requests into accountable P1 tasks.
+
+        A REFUND_APPROVAL_MATRIX request that timed out (REQUESTED -> EXPIRED via
+        expire_stale) is a refund a cashier could not get signed off. For each
+        such request that has not already been escalated, resolve the next
+        escalation rung from the requesting cashier (store -> area -> admin ->
+        super via the SHARED resolve_escalation_target, so this picks the same
+        owner the SLA ladder would) and create ONE deduped P1 task naming the
+        order, amount and cashier. Tier 1 auto-act -- task creation is fully
+        reversible. Every accessor is fail-soft so a missing DB / module never
+        breaks the tick. WhatsApp is MEGAPHONE's job (DARK / DISPATCH_MODE) and
+        is intentionally not done here."""
+        appr_coll = self.get_collection("approval_requests")
+        tasks_coll = self.get_collection("tasks")
+        if appr_coll is None or tasks_coll is None:
+            return []
+        users_coll = self.get_collection("users")
+
+        try:
+            from api.services.task_escalation import resolve_escalation_target
+            from api.services.task_triggers import create_system_task
+            from database.repositories.task_repository import TaskRepository
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] refund-escalation imports failed: %s", e)
+            return []
+
+        def _find_by_role(role, sid):
+            if users_coll is None:
+                return []
+            q = {"roles": role, "is_active": True}
+            if sid:
+                q["store_ids"] = sid
+            try:
+                return list(users_coll.find(q))
+            except Exception:  # noqa: BLE001
+                return []
+
+        def _name(user_id):
+            if not user_id or users_coll is None:
+                return user_id
+            try:
+                u = users_coll.find_one({"user_id": user_id})
+            except Exception:  # noqa: BLE001
+                return user_id
+            if not u:
+                return user_id
+            return u.get("full_name") or u.get("username") or user_id
+
+        task_repo = TaskRepository(tasks_coll)
+        actions: List[Dict[str, Any]] = []
+        try:
+            expired = list(
+                appr_coll.find(
+                    {
+                        "status": "EXPIRED",
+                        "action_type": "REFUND_APPROVAL_MATRIX",
+                    }
+                ).limit(100)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] expired refund-approval scan error: %s", e)
+            return []
+
+        for req in expired:
+            request_id = req.get("request_id")
+            if not request_id:
+                continue
+            ref = f"refund_approval_expired:{request_id}"
+            # Dedupe: skip if a task for this expired approval already exists in
+            # ANY state (we never re-file the same one, even if it was resolved).
+            try:
+                if tasks_coll.find_one({"source_ref": ref}) is not None:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+
+            store_id = req.get("store_id")
+            cashier_id = req.get("requested_by")
+            cashier_user = None
+            if cashier_id and users_coll is not None:
+                try:
+                    cashier_user = users_coll.find_one({"user_id": cashier_id})
+                except Exception:  # noqa: BLE001
+                    cashier_user = None
+            target = resolve_escalation_target(
+                _find_by_role,
+                store_id,
+                cashier_user or {"user_id": cashier_id},
+            )
+
+            amount = req.get("amount")
+            amt_txt = ("Rs " + format(amount, ".2f")) if amount is not None else "n/a"
+            ctx = req.get("context") or {}
+            order_ref = ctx.get("order_number") or ctx.get("order_id") or "(unknown order)"
+            cashier_name = _name(cashier_id) or "(unknown)"
+
+            title = f"Expired refund approval: {amt_txt} on {order_ref}"
+            description = (
+                f"A refund of {amt_txt} on order {order_ref} raised by "
+                f"{cashier_name} needed a tiered sign-off but its approval "
+                f"request expired unactioned. Review and re-approve or reject the "
+                f"refund. (approval request {request_id})"
+            )
+            created = None
+            try:
+                created = create_system_task(
+                    task_repo,
+                    title=title,
+                    description=description,
+                    priority="P1",
+                    category="Finance",
+                    store_id=store_id,
+                    assigned_to=(target or {}).get("user_id"),
+                    dedupe_ref=ref,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[TASKMASTER] expired-refund task create failed for %s: %s",
+                    request_id, e,
+                )
+            if created:
+                await self._audit_log(
+                    action="refund_approval_expired_escalation",
+                    target=request_id,
+                    before={"approval_status": "EXPIRED", "amount": amount},
+                    after={
+                        "task_id": created.get("task_id"),
+                        "assigned_to": (target or {}).get("user_id"),
+                    },
+                    tier=1,
+                )
+                actions.append(
+                    {
+                        "action": "refund_approval_escalated",
+                        "request_id": request_id,
+                        "task_id": created.get("task_id"),
+                        "to": (target or {}).get("user_id"),
+                    }
+                )
+        if actions:
+            logger.info(
+                "[TASKMASTER] escalated %d expired refund approval(s)", len(actions)
+            )
         return actions
 
     async def _draft_reorders(self) -> List[Dict[str, Any]]:

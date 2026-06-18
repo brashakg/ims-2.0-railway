@@ -178,10 +178,13 @@ def test_gate_consumes_refund_bound_token(monkeypatch):
             return {"ok": True, "request": {"reviewed_by": "mgr-9"}}
 
     monkeypatch.setattr("api.services.approvals.ApprovalEngine", _FakeEngine)
+    monkeypatch.setattr(r, "_resolve_user_name", lambda uid: uid)
     body = _Body()
     body.refund_approval_request_id = "AR-1"
     out = r._gate_refund_approval_matrix(**_gate_args(body))
-    assert out == "mgr-9"                                   # approver stamped
+    # The gate now returns a dict {approval_by, approval_request_id, status}.
+    assert out["approval_by"] == "mgr-9"                    # approver stamped
+    assert out["approval_status"] == "APPROVED"
     assert captured.get("action_type") == "REFUND_APPROVAL_MATRIX"
     # bound to THIS refund: the store + order ride into consume so a foreign
     # token (different store/order) would be rejected by the E4 engine.

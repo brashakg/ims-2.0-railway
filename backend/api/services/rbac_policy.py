@@ -4650,6 +4650,19 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/orders/{order_id}/invoice",
         "allowed": "AUTHENTICATED",
     },
+    # #16: SUPERADMIN-only post-creation order/invoice edit. Catalogued
+    # AUTHENTICATED here; the real gate is the in-function _require_superadmin
+    # in orders.py (same pattern as cancel_order) -- keep the two in sync.
+    {
+        "method": "PUT",
+        "path": "/api/v1/orders/{order_id}/superadmin-edit",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/orders/{order_id}/superadmin-invoice-change",
+        "allowed": "AUTHENTICATED",
+    },
     # POS-7: BOPIS ship-from-store transfer creation
     {
         "method": "POST",

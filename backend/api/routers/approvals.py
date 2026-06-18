@@ -53,6 +53,46 @@ def _store_ids(user: Dict[str, Any]) -> List[str]:
     return list(user.get("store_ids", []) or [])
 
 
+def _resolve_names(rows: List[Dict[str, Any]]) -> None:
+    """Enrich each approval row IN PLACE with human names for the actor ids
+    (requested_by / reviewed_by / consumed_by) so the UI reads in NAMES, not raw
+    UUIDs. One batched users lookup for the whole page. Fail-soft: any error
+    leaves the rows unchanged (the UI falls back to the id)."""
+    if not rows:
+        return
+    ids = set()
+    for r in rows:
+        for k in ("requested_by", "reviewed_by", "consumed_by"):
+            v = r.get(k)
+            if v:
+                ids.add(v)
+    if not ids:
+        return
+    name_by_id: Dict[str, str] = {}
+    try:
+        db = _get_db()
+        coll = db.get_collection("users") if db is not None else None
+        if coll is not None:
+            for u in coll.find(
+                {"user_id": {"$in": list(ids)}},
+                {"_id": 0, "user_id": 1, "full_name": 1, "username": 1},
+            ):
+                uid = u.get("user_id")
+                if uid:
+                    name_by_id[uid] = u.get("full_name") or u.get("username") or uid
+    except Exception:  # noqa: BLE001
+        return
+    for r in rows:
+        for src, dst in (
+            ("requested_by", "requested_by_name"),
+            ("reviewed_by", "reviewed_by_name"),
+            ("consumed_by", "consumed_by_name"),
+        ):
+            v = r.get(src)
+            if v and v in name_by_id:
+                r[dst] = name_by_id[v]
+
+
 # ============================================================================
 # Schemas
 # ============================================================================
@@ -133,6 +173,7 @@ async def get_inbox(
         status=status or "REQUESTED",
         limit=200,
     )
+    _resolve_names(rows)
     return {"requests": rows, "total": len(rows)}
 
 
@@ -142,6 +183,7 @@ async def get_my_requests(
 ):
     """A maker's own requests + their status (and approval_token once approved)."""
     rows = _engine().list_mine(requested_by=current_user.get("user_id"), limit=200)
+    _resolve_names(rows)
     return {"requests": rows, "total": len(rows)}
 
 
@@ -165,6 +207,7 @@ async def get_request(
     out = dict(doc)
     if not can_see_token:
         out.pop("approval_token", None)
+    _resolve_names([out])
     return out
 
 
