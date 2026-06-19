@@ -387,22 +387,55 @@ def test_anthropic_models_fallback_when_no_key(app, monkeypatch):
 
 
 def test_anthropic_models_uses_live_list(app, monkeypatch):
-    """When the live call returns models, the endpoint normalizes + caches them."""
+    """When the live call returns models, the endpoint normalizes + serves them.
+
+    Order-robust: mocks the stable httpx transport (which _fetch_anthropic_models
+    resolves via `import httpx` at CALL time) instead of patching the settings-
+    module function attribute. A prior test in the full suite can reload
+    api.routers.settings, leaving the registered route bound to a stale module
+    dict that a `setattr(settings_mod, "_fetch_anthropic_models", ...)` patch
+    never reaches -- which is why the attribute-patch version passed in isolation
+    but failed in the full suite. The httpx + get_anthropic_config patches are
+    resolved at call time, so they hold regardless of any reload.
+    """
     from fastapi.testclient import TestClient
+    import httpx
     import api.routers.settings as settings_mod
+    import api.services.integration_config as ic
+
+    # Build the client BEFORE patching httpx so the TestClient transport is
+    # unaffected (it binds httpx at import time; this patch only hits _fetch).
+    client = TestClient(app)
 
     settings_mod._ANTHROPIC_MODELS_CACHE["models"] = None
     settings_mod._ANTHROPIC_MODELS_CACHE["at"] = 0.0
-    monkeypatch.setattr(
-        settings_mod,
-        "_fetch_anthropic_models",
-        lambda _key: [{"id": "claude-future-9", "display_name": "Claude Future 9"}],
-    )
-    # Provide a key so the endpoint attempts the (mocked) live call.
-    import api.services.integration_config as ic
-    monkeypatch.setattr(ic, "_load_db_config", lambda _type: {"api_key": "sk-ant-x"})
 
-    client = TestClient(app)
+    # Endpoint gates the live call on a configured key; provide one. The route
+    # does `from ..services.integration_config import get_anthropic_config` at
+    # call time, so patching the current module is reload-proof.
+    monkeypatch.setattr(ic, "get_anthropic_config", lambda: {"api_key": "sk-ant-x"})
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "claude-future-9", "display_name": "Claude Future 9"}]}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+
     resp = client.get(
         "/api/v1/settings/integrations/anthropic/models",
         headers={"Authorization": f"Bearer {_make_token(['SUPERADMIN'])}"},
