@@ -33,7 +33,12 @@ import type { IntegrationCatalogEntry, IntegrationFieldDef } from '../../service
 import { IntegrationSettings } from './IntegrationSettings';
 // New service modules must be imported DIRECTLY (not via the api barrel) -
 // TS2614 issue with re-exported types from newly-added services.
-import { getIntegrationStatus, type IntegrationStatusReport } from '../../services/api/integrations';
+import {
+  getIntegrationStatus,
+  getAnthropicModels,
+  type IntegrationStatusReport,
+  type AnthropicModel,
+} from '../../services/api/integrations';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -434,6 +439,39 @@ function ConfigureModal({
   const [showField, setShowField] = useState<Record<string, boolean>>({});
   const [isSaving, setIsSaving] = useState(false);
 
+  // Anthropic/Claude model dropdown: fetch the live list of currently-available
+  // models so the owner picks from a dropdown instead of typing a model id that
+  // may silently retire. Fail-soft -- if the fetch fails or returns empty, the
+  // model field falls back to a free-text input (modelOptions stays null), so
+  // the field is never unusable.
+  const isAnthropic = entry.type === 'anthropic';
+  const [modelOptions, setModelOptions] = useState<AnthropicModel[] | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isAnthropic) {
+      setModelOptions(null);
+      return;
+    }
+    let cancelled = false;
+    setModelsLoading(true);
+    getAnthropicModels()
+      .then((res) => {
+        if (cancelled) return;
+        const list = res?.models ?? [];
+        setModelOptions(list.length > 0 ? list : null);
+      })
+      .catch(() => {
+        if (!cancelled) setModelOptions(null); // fall back to free-text input
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAnthropic, entry.type]);
+
   // Initialise form: non-secret fields pre-filled, secret fields always blank.
   useEffect(() => {
     const init: Record<string, string> = {};
@@ -575,6 +613,10 @@ function ConfigureModal({
               setShowField((prev: Record<string, boolean>) => ({ ...prev, [field.key]: !prev[field.key] }));
             };
             const handleChange = (v: string): void => { update(field.key, v); };
+            // For the Anthropic "model" field, offer a live dropdown of the
+            // currently-available Claude models. null options -> free-text.
+            const selectOptions =
+              isAnthropic && field.key === 'model' ? modelOptions : null;
             return (
               <FieldRow
                 key={field.key}
@@ -588,6 +630,8 @@ function ConfigureModal({
                 showValue={!!showField[field.key]}
                 onToggleShow={handleToggle}
                 onChange={handleChange}
+                selectOptions={selectOptions}
+                selectLoading={isAnthropic && field.key === 'model' && modelsLoading}
               />
             );
           })}
@@ -656,9 +700,25 @@ interface FieldRowProps {
   showValue: boolean;
   onToggleShow: () => void;
   onChange: (v: string) => void;
+  // When provided (Anthropic model field, live list fetched), render a
+  // dropdown instead of a free-text input. null -> free-text fallback.
+  selectOptions?: AnthropicModel[] | null;
+  selectLoading?: boolean;
 }
 
-function FieldRow({ field, value, hasStored, showValue, onToggleShow, onChange }: FieldRowProps) {
+function FieldRow({
+  field, value, hasStored, showValue, onToggleShow, onChange, selectOptions, selectLoading,
+}: FieldRowProps) {
+  const useSelect = !!selectOptions && selectOptions.length > 0;
+
+  // If the currently-saved model isn't in the live list (e.g. a retired snapshot
+  // still configured), keep it selectable so we pre-select it and don't silently
+  // drop the saved value.
+  const optionList: AnthropicModel[] = useSelect ? [...selectOptions!] : [];
+  if (useSelect && value && !optionList.some((o) => o.id === value)) {
+    optionList.unshift({ id: value, display_name: `${value} (saved)` });
+  }
+
   return (
     <div>
       <label className="text-xs font-medium text-gray-700 block mb-1">
@@ -666,32 +726,53 @@ function FieldRow({ field, value, hasStored, showValue, onToggleShow, onChange }
         {field.optional && (
           <span className="text-gray-400 font-normal ml-1">(optional)</span>
         )}
-      </label>
-      <div className="flex gap-2">
-        <input
-          type={field.secret && !showValue ? 'password' : 'text'}
-          value={value}
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
-          placeholder={
-            hasStored && field.secret
-              ? 'Configured - type a new value to replace'
-              : (field.placeholder ?? '')
-          }
-          autoComplete={field.secret ? 'new-password' : 'off'}
-          spellCheck={false}
-          className="flex-1 px-3 py-2 border border-gray-300 rounded text-sm text-gray-900 font-mono focus:outline-none focus:ring-1 focus:ring-bv"
-        />
-        {field.secret && (
-          <button
-            type="button"
-            onClick={onToggleShow}
-            className="p-2 bg-gray-100 hover:bg-gray-200 rounded text-gray-500 transition"
-            title={showValue ? 'Hide' : 'Show'}
-          >
-            {showValue ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
+        {selectLoading && (
+          <span className="text-gray-400 font-normal ml-2 inline-flex items-center gap-1">
+            <Loader2 className="w-3 h-3 animate-spin" /> loading models...
+          </span>
         )}
-      </div>
+      </label>
+      {useSelect ? (
+        <select
+          value={value}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange(e.target.value)}
+          className="w-full px-3 py-2 border border-gray-300 rounded text-sm text-gray-900 bg-white focus:outline-none focus:ring-1 focus:ring-bv"
+        >
+          {/* Allow clearing back to the backend default */}
+          <option value="">Use default</option>
+          {optionList.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.display_name}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <div className="flex gap-2">
+          <input
+            type={field.secret && !showValue ? 'password' : 'text'}
+            value={value}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+            placeholder={
+              hasStored && field.secret
+                ? 'Configured - type a new value to replace'
+                : (field.placeholder ?? '')
+            }
+            autoComplete={field.secret ? 'new-password' : 'off'}
+            spellCheck={false}
+            className="flex-1 px-3 py-2 border border-gray-300 rounded text-sm text-gray-900 font-mono focus:outline-none focus:ring-1 focus:ring-bv"
+          />
+          {field.secret && (
+            <button
+              type="button"
+              onClick={onToggleShow}
+              className="p-2 bg-gray-100 hover:bg-gray-200 rounded text-gray-500 transition"
+              title={showValue ? 'Hide' : 'Show'}
+            >
+              {showValue ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          )}
+        </div>
+      )}
       {field.help && (
         <p className="text-[11px] text-gray-400 mt-1">{field.help}</p>
       )}
