@@ -2285,6 +2285,64 @@
 .kpi .r .dlt.up { background: var(--ok-50); color: var(--ok); }
 .kpi .r .dlt.dn { background: var(--err-50); color: var(--err); }
 .kpi .r .vs { color: var(--ink-4); }
+.kpi { transition: border-color .12s, background .12s; }
+.kpi:hover { border-color: var(--line-strong); background: var(--surface-2); }
+
+/* Chart / section cards — ported from docs/design/reports.html.
+   Additive: new selectors only, no existing rule overridden. */
+.chart-row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 18px; }
+.chart-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+}
+.chart-head {
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px;
+}
+.chart-head h3 {
+  margin: 0; font: 600 13px/1 var(--font-sans); color: var(--ink);
+  display: flex; align-items: center; gap: 8px;
+}
+.chart-head h3::before { content: ''; width: 4px; height: 12px; background: var(--ink); border-radius: 1px; }
+.chart-head .spacer { flex: 1; }
+.chart-head .legend { display: flex; gap: 10px; font-size: 11px; color: var(--ink-3); }
+.chart-head .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.chart-body { padding: 18px; }
+
+/* Horizontal bar chart */
+.bars {
+  display: grid; grid-template-columns: 80px 1fr; gap: 12px 16px;
+  align-items: center; font-size: 12px;
+}
+.bars .bar { transition: opacity .15s; }
+.bars:hover .bar:not(:hover) { opacity: .6; }
+.bars .label { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+.bars .track {
+  height: 20px; background: var(--bg-sunk); border-radius: 4px; position: relative; overflow: hidden;
+  display: flex; align-items: center;
+}
+.bars .fill { height: 100%; background: var(--ink); border-radius: 4px; }
+.bars .fill.bv { background: var(--bv); }
+.bars .val {
+  position: absolute; right: 8px;
+  font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums;
+  font-size: 11px; color: #fff;
+}
+.bars .val.out { color: var(--ink-2); right: unset; left: calc(100% + 6px); }
+
+/* Sell-through / report table */
+.st-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.st-table th, .st-table td { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); }
+.st-table th {
+  text-align: left; font: 500 10.5px/1 var(--font-mono); color: var(--ink-4);
+  text-transform: uppercase; letter-spacing: .08em; background: var(--surface-2);
+}
+.st-table .right { text-align: right; }
+.st-table tr:last-child td { border-bottom: 0; }
+.st-bar {
+  height: 6px; border-radius: 3px; background: var(--bg-sunk); overflow: hidden;
+  width: 120px; display: inline-block; vertical-align: middle;
+}
+.st-bar > div { height: 100%; background: var(--ink); }
 
 /* ============================================================================
    POS — 2-col grid (220px vertical stepper + work surface), sticky footer.
