@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 # Anthropic Claude Configuration
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = os.getenv(
-    "JARVIS_MODEL", "claude-sonnet-4-20250514"
-)  # Default to Claude 3.5 Sonnet
+    "JARVIS_MODEL", "claude-sonnet-4-6"
+)  # Default to the current Claude Sonnet (4.6); old 4-20250514 snapshot retired 2026-06-15
 
 router = APIRouter()
 

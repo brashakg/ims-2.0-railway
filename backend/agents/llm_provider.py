@@ -147,9 +147,9 @@ def _registry() -> Dict[str, Dict[str, Any]]:
         if os.getenv("LLM_OPUS_ENABLED", "true").lower() == "true":
             models["claude-opus"] = {
                 "id": "claude-opus",
-                "label": os.getenv("LLM_OPUS_LABEL", "Claude Opus 4.7 (premium)"),
+                "label": os.getenv("LLM_OPUS_LABEL", "Claude Opus 4.8 (premium)"),
                 "provider": "anthropic",
-                "model": os.getenv("LLM_OPUS_MODEL", "claude-opus-4-7"),
+                "model": os.getenv("LLM_OPUS_MODEL", "claude-opus-4-8"),
                 "api_key": os.getenv("ANTHROPIC_API_KEY"),
                 "api_url": os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
                 "tier": "premium",

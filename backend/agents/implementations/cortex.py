@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Claude API config
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = os.getenv("JARVIS_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_MODEL = os.getenv("JARVIS_MODEL", "claude-sonnet-4-6")
 
 
 # Intent classification result
