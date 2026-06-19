@@ -1,13 +1,15 @@
 // ============================================================================
-// IMS 2.0 - Unified SUPERADMIN Integrations Hub
+// IMS 2.0 - Unified Integrations Hub
 // ============================================================================
 // Renders the full catalog of every integration (fetched from the backend)
 // grouped by category. Each card shows configured/not-configured status,
-// all fields with masked secrets, and a Save button.
+// all fields with masked secrets, a Test Connection button, and a Save button.
 //
-// This supersedes the hardcoded DEFAULT_INTEGRATIONS list in IntegrationSettings.
-// The legacy IntegrationSettings component (Tally export panel + status card)
-// is still rendered below the hub as a supplementary panel.
+// This is the SINGLE integration card grid. The legacy IntegrationSettings
+// component below it is now a pure supplementary panel (Tally per-store export
+// table + the SUPERADMIN-only read-only status card) -- its duplicate hardcoded
+// 6-card grid was removed when this hub absorbed Test Connection + the
+// per-integration banners + the env-present callout + read-only handling.
 //
 // Security contract (mirrors the backend):
 //   - Sensitive fields start blank; placeholder text tells the user a value is
@@ -15,16 +17,23 @@
 //   - Saved values are NEVER shown in toasts, console logs, or copied to URLs.
 //   - Non-sensitive fields are pre-filled from the backend masked response for
 //     editing convenience.
+//   - Test Connection reports configured/dispatch_mode honestly; it treats a
+//     result as a PASS only when status === 'configured' || live === true
+//     (NOT result.success -- there is no such key; a naive truthy check was the
+//     old placebo-success bug).
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Save, Eye, EyeOff, Loader2, CheckCircle, Circle, Info, RefreshCw,
+  Save, Eye, EyeOff, Loader2, CheckCircle, Circle, Info, RefreshCw, Zap, Check,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api/settings';
 import type { IntegrationCatalogEntry, IntegrationFieldDef } from '../../services/api/settings';
 import { IntegrationSettings } from './IntegrationSettings';
+// New service modules must be imported DIRECTLY (not via the api barrel) -
+// TS2614 issue with re-exported types from newly-added services.
+import { getIntegrationStatus, type IntegrationStatusReport } from '../../services/api/integrations';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,6 +50,63 @@ interface StoredIntegration {
 function looksMasked(v: unknown): boolean {
   if (typeof v !== 'string') return false;
   return v.includes('*') && v.length >= 4;
+}
+
+// ---------------------------------------------------------------------------
+// Per-integration UI metadata (FRONTEND lookup, keyed by catalog `type`).
+// The backend catalog supplies the fields; this map adds the human context:
+//   banner    -- contextual note shown at the top of the configure modal
+//   statusId  -- id in GET /jarvis/integrations/status, used to surface the
+//                "already set via Railway env vars" callout
+//   readOnly  -- nothing to save (informational only) -> hide Save, show "Close"
+// Ported verbatim from the legacy IntegrationSettings INTEGRATION_SCHEMAS so no
+// help/banner text is lost in the merge.
+// ---------------------------------------------------------------------------
+
+interface IntegrationMeta {
+  banner?: { kind: 'info' | 'warn'; text: string };
+  statusId?: string;
+  readOnly?: boolean;
+}
+
+const INTEGRATION_META: Record<string, IntegrationMeta> = {
+  tally: {
+    banner: {
+      kind: 'info',
+      text: 'Tally integration is export-only today (per-store voucher XML downloads in the supplementary panel below). Live push is not yet wired - these fields are saved for when it lands.',
+    },
+  },
+  shopify: {
+    banner: {
+      kind: 'warn',
+      text: 'Shopify via NEXUS is currently dormant - the bettervision-inventory (BVI) app now owns Shopify writes. Saving values here is for future re-activation only.',
+    },
+  },
+  shiprocket: {
+    statusId: 'shiprocket',
+    banner: {
+      kind: 'info',
+      text: 'Railway env vars (SHIPROCKET_EMAIL / SHIPROCKET_PASSWORD) also work - if set, the env values take precedence over what you save here. Bookings only go live when DISPATCH_MODE=live.',
+    },
+  },
+  whatsapp: {
+    statusId: 'msg91_whatsapp',
+    banner: {
+      kind: 'info',
+      text: 'Maps to MSG91 (WhatsApp + SMS). Railway env vars (MSG91_*) also work - if set, the env values take precedence over what you save here.',
+    },
+  },
+  'gst-portal': {
+    readOnly: true,
+    banner: {
+      kind: 'info',
+      text: 'GST filing already works end-to-end via the offline-tool workflow: download GSTR-1 / GSTR-3B JSON from Reports -> GST, import on gst.gov.in -> Returns -> Offline Tool. A GSP integration (one-click portal push from inside IMS) only becomes necessary once any single legal entity crosses the Rs 5 Cr aggregate-turnover e-invoicing mandate. Until then, the manual JSON workflow is the standard practice for small + mid Indian businesses and is the supported path here.',
+    },
+  },
+};
+
+function metaFor(type: string): IntegrationMeta {
+  return INTEGRATION_META[type] ?? {};
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +136,10 @@ export function IntegrationsHub() {
   const [stored, setStored] = useState<StoredIntegration[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
   const [configuringType, setConfiguringType] = useState<string | null>(null);
+  const [testingType, setTestingType] = useState<string | null>(null);
+  // Env-present hints (KEY presence only). SUPERADMIN-only endpoint; fail-soft
+  // to null for ADMIN so the hub still works without it.
+  const [statusReport, setStatusReport] = useState<IntegrationStatusReport | null>(null);
 
   const loadCatalog = useCallback(async () => {
     setLoadingCatalog(true);
@@ -87,14 +157,53 @@ export function IntegrationsHub() {
     }
   }, []);
 
+  const loadStatusReport = useCallback(async () => {
+    try {
+      const report = await getIntegrationStatus();
+      setStatusReport(report);
+    } catch {
+      // SUPERADMIN-only endpoint; ADMIN gets 403/404 -> no env callouts (fine).
+      setStatusReport(null);
+    }
+  }, []);
+
   useEffect(() => {
     loadCatalog();
-  }, [loadCatalog]);
+    loadStatusReport();
+  }, [loadCatalog, loadStatusReport]);
 
   const handleSaved = useCallback(async () => {
     await loadCatalog();
+    await loadStatusReport();
     setConfiguringType(null);
-  }, [loadCatalog]);
+  }, [loadCatalog, loadStatusReport]);
+
+  // Test Connection -- ported verbatim from IntegrationSettings (POST-bugfix
+  // logic). Calls POST /settings/integrations/{type}/test which returns
+  //   { status: "configured" | "not_configured", live: boolean, message, ... }
+  // There is NO `success` key; treat only configured/live as a pass.
+  const handleTest = useCallback(async (type: string, name: string) => {
+    setTestingType(type);
+    try {
+      const result = await settingsApi.testIntegration(type);
+      const isConfigured = result?.status === 'configured' || result?.live === true;
+      const detail = [
+        result?.dispatch_mode ? `DISPATCH_MODE=${result.dispatch_mode}` : null,
+      ].filter(Boolean).join(' · ');
+      if (isConfigured) {
+        toast.success(result?.message ?? `${name} is configured${detail ? ` (${detail})` : ''}`);
+      } else {
+        toast.error(result?.message ?? `${name} is not configured`);
+      }
+    } catch (err: unknown) {
+      const message =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        `Failed to test ${name} connection`;
+      toast.error(message);
+    } finally {
+      setTestingType(null);
+    }
+  }, [toast]);
 
   // Group catalog by category, preserving the canonical order
   const byCategory = CATEGORY_ORDER
@@ -120,6 +229,16 @@ export function IntegrationsHub() {
 
   return (
     <div className="space-y-8">
+      {/* "Locked at HQ level" governance note (kept from the legacy panel). */}
+      <div className="flex items-start gap-2 px-4 py-3 rounded-lg border border-blue-200 bg-blue-50 text-sm text-blue-800">
+        <Info className="w-4 h-4 mt-0.5 shrink-0" />
+        <span>
+          Integration credentials are locked at the HQ level and require superadmin
+          approval. The backend masks stored secrets when displayed - re-enter a value
+          to replace it. Every change is recorded in the audit log.
+        </span>
+      </div>
+
       {/* Catalog sections */}
       {byCategory.map(({ category, entries }) => (
         <section key={category}>
@@ -138,13 +257,18 @@ export function IntegrationsHub() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {entries.map((entry: IntegrationCatalogEntry) => {
               const s = getStored(entry.type);
+              const meta = metaFor(entry.type);
               const handleConfigure = (): void => { setConfiguringType(entry.type); };
+              const handleTestClick = (): void => { void handleTest(entry.type, entry.name); };
               return (
                 <IntegrationCard
                   key={entry.type}
                   entry={entry}
                   stored={s}
+                  readOnly={!!meta.readOnly}
+                  testing={testingType === entry.type}
                   onConfigure={handleConfigure}
+                  onTest={handleTestClick}
                 />
               );
             })}
@@ -152,7 +276,8 @@ export function IntegrationsHub() {
         </section>
       ))}
 
-      {/* Legacy Tally export panel + status card (supplementary) */}
+      {/* Supplementary panel: Tally per-store export table + (SUPERADMIN-only)
+          read-only status card. No second integration grid lives here anymore. */}
       <section>
         <div className="flex items-center gap-3 mb-4">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
@@ -167,6 +292,10 @@ export function IntegrationsHub() {
         <ConfigureModal
           entry={activeEntry}
           stored={getStored(activeEntry.type)}
+          meta={metaFor(activeEntry.type)}
+          statusReport={statusReport}
+          testing={testingType === activeEntry.type}
+          onTest={() => { void handleTest(activeEntry.type, activeEntry.name); }}
           onClose={() => setConfiguringType(null)}
           onSaved={handleSaved}
           toast={toast}
@@ -183,10 +312,13 @@ export function IntegrationsHub() {
 interface CardProps {
   entry: IntegrationCatalogEntry;
   stored: StoredIntegration;
+  readOnly: boolean;
+  testing: boolean;
   onConfigure: () => void;
+  onTest: () => void;
 }
 
-function IntegrationCard({ entry, stored, onConfigure }: CardProps) {
+function IntegrationCard({ entry, stored, readOnly, testing, onConfigure, onTest }: CardProps) {
   const configured = stored.is_configured;
   const enabled = stored.is_enabled;
 
@@ -214,7 +346,11 @@ function IntegrationCard({ entry, stored, onConfigure }: CardProps) {
           <h3 className="font-semibold text-gray-900 text-sm leading-tight truncate">{entry.name}</h3>
           <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{entry.description}</p>
         </div>
-        {configured ? (
+        {readOnly ? (
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full shrink-0">
+            <Info className="w-3 h-3" /> Info
+          </span>
+        ) : configured ? (
           enabled ? (
             <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full shrink-0">
               <CheckCircle className="w-3 h-3" /> Active
@@ -237,18 +373,38 @@ function IntegrationCard({ entry, stored, onConfigure }: CardProps) {
           {previewField.label}: {String(stored.config[previewField.key])}
         </div>
       )}
-      {configured && !previewField && (
+      {configured && !previewField && !readOnly && (
         <div className="text-xs text-gray-400 italic">Credentials stored (masked)</div>
       )}
 
-      {/* Configure button */}
-      <button
-        type="button"
-        onClick={onConfigure}
-        className="mt-auto w-full text-sm font-medium px-3 py-1.5 rounded bg-bv text-white hover:bg-bv-600 transition"
-      >
-        Configure
-      </button>
+      {/* Actions */}
+      <div className="mt-auto flex gap-2">
+        {/* Test Connection -- not shown for read-only (nothing to test) */}
+        {!readOnly && (
+          <button
+            type="button"
+            onClick={onTest}
+            disabled={testing}
+            className={clsx(
+              'flex-1 flex items-center justify-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded transition',
+              testing
+                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                : 'bg-gray-100 hover:bg-gray-200 text-gray-700',
+            )}
+            title="Report whether credentials are present + the current DISPATCH_MODE"
+          >
+            {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+            {testing ? 'Testing...' : 'Test'}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onConfigure}
+          className="flex-1 text-sm font-medium px-3 py-1.5 rounded bg-bv text-white hover:bg-bv-600 transition"
+        >
+          {readOnly ? 'View' : 'Configure'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -260,12 +416,19 @@ function IntegrationCard({ entry, stored, onConfigure }: CardProps) {
 interface ModalProps {
   entry: IntegrationCatalogEntry;
   stored: StoredIntegration;
+  meta: IntegrationMeta;
+  statusReport: IntegrationStatusReport | null;
+  testing: boolean;
+  onTest: () => void;
   onClose: () => void;
   onSaved: () => Promise<void>;
   toast: ReturnType<typeof useToast>;
 }
 
-function ConfigureModal({ entry, stored, onClose, onSaved, toast }: ModalProps) {
+function ConfigureModal({
+  entry, stored, meta, statusReport, testing, onTest, onClose, onSaved, toast,
+}: ModalProps) {
+  const readOnly = !!meta.readOnly;
   const [enabled, setEnabled] = useState(stored.is_enabled);
   const [form, setForm] = useState<Record<string, string>>({});
   const [showField, setShowField] = useState<Record<string, boolean>>({});
@@ -285,10 +448,20 @@ function ConfigureModal({ entry, stored, onClose, onSaved, toast }: ModalProps) 
     setForm(init);
   }, [entry, stored]);
 
+  // Look up env-present hints for this integration from the status report.
+  const statusItem = meta.statusId
+    ? statusReport?.integrations.find((i) => i.id === meta.statusId)
+    : undefined;
+  const envPresentKeys = (statusItem?.env_keys ?? []).filter((k) => k.present);
+
   const update = (key: string, value: string) =>
     setForm((prev: Record<string, string>) => ({ ...prev, [key]: value }));
 
   const handleSave = async () => {
+    if (readOnly) {
+      onClose();
+      return;
+    }
     setIsSaving(true);
     try {
       const config: Record<string, unknown> = {};
@@ -313,6 +486,11 @@ function ConfigureModal({ entry, stored, onClose, onSaved, toast }: ModalProps) 
       setIsSaving(false);
     }
   };
+
+  const bannerKindCls = (kind: 'info' | 'warn') =>
+    kind === 'warn'
+      ? 'bg-amber-50 border-amber-200 text-amber-800'
+      : 'bg-blue-50 border-blue-200 text-blue-800';
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -345,31 +523,54 @@ function ConfigureModal({ entry, stored, onClose, onSaved, toast }: ModalProps) 
             {entry.category}
           </span>
 
-          {/* Enabled toggle */}
-          <label className="flex items-center justify-between px-3 py-2 rounded border border-gray-200 bg-gray-50 cursor-pointer">
-            <div>
-              <div className="text-sm font-medium text-gray-900">Enabled</div>
-              <div className="text-xs text-gray-500">
-                Stage credentials, then flip this on to activate.
-              </div>
+          {/* Per-integration banner (Tally export-only / Shopify dormant /
+              Shiprocket+WhatsApp env-precedence / GST-portal read-only info). */}
+          {meta.banner && (
+            <div className={clsx('flex items-start gap-2 px-3 py-2 rounded border text-xs', bannerKindCls(meta.banner.kind))}>
+              <Info className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{meta.banner.text}</span>
             </div>
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEnabled(e.target.checked)}
-              className="w-5 h-5 accent-bv"
-            />
-          </label>
+          )}
+
+          {/* Env-present callout (Railway env vars already set) */}
+          {envPresentKeys.length > 0 && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded border bg-green-50 border-green-200 text-green-800 text-xs">
+              <Check className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>
+                Already configured via Railway env vars:{' '}
+                <span className="font-mono">{envPresentKeys.map((k) => k.key).join(', ')}</span>
+                . Values entered here are saved to the DB and used as a fallback when env vars are missing.
+              </span>
+            </div>
+          )}
+
+          {/* Enabled toggle (skipped for read-only integrations) */}
+          {!readOnly && (
+            <label className="flex items-center justify-between px-3 py-2 rounded border border-gray-200 bg-gray-50 cursor-pointer">
+              <div>
+                <div className="text-sm font-medium text-gray-900">Enabled</div>
+                <div className="text-xs text-gray-500">
+                  Stage credentials, then flip this on to activate.
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEnabled(e.target.checked)}
+                className="w-5 h-5 accent-bv"
+              />
+            </label>
+          )}
 
           {/* Fields */}
-          {entry.fields.length === 0 && (
+          {!readOnly && entry.fields.length === 0 && (
             <div className="flex items-start gap-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-3 py-2">
               <Info className="w-4 h-4 mt-0.5 shrink-0" />
               <span>No credentials required for this integration.</span>
             </div>
           )}
 
-          {entry.fields.map((field: IntegrationFieldDef) => {
+          {!readOnly && entry.fields.map((field: IntegrationFieldDef) => {
             const handleToggle = (): void => {
               setShowField((prev: Record<string, boolean>) => ({ ...prev, [field.key]: !prev[field.key] }));
             };
@@ -393,27 +594,51 @@ function ConfigureModal({ entry, stored, onClose, onSaved, toast }: ModalProps) 
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-gray-200">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={isSaving}
-            className="px-4 py-2 rounded text-sm font-medium bg-gray-100 hover:bg-gray-200 text-gray-700 transition disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={isSaving}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white transition',
-              isSaving ? 'bg-bv/60 cursor-not-allowed' : 'bg-bv hover:bg-bv-600',
+        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-gray-200">
+          {/* Test Connection inside the modal (left), not for read-only. */}
+          <div>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={onTest}
+                disabled={testing || isSaving}
+                className={clsx(
+                  'flex items-center gap-2 px-4 py-2 rounded text-sm font-medium transition',
+                  testing || isSaving
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-gray-100 hover:bg-gray-200 text-gray-700',
+                )}
+              >
+                {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                {testing ? 'Testing...' : 'Test Connection'}
+              </button>
             )}
-          >
-            {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {isSaving ? 'Saving...' : 'Save'}
-          </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isSaving}
+              className="px-4 py-2 rounded text-sm font-medium bg-gray-100 hover:bg-gray-200 text-gray-700 transition disabled:opacity-50"
+            >
+              {readOnly ? 'Close' : 'Cancel'}
+            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={isSaving}
+                className={clsx(
+                  'flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white transition',
+                  isSaving ? 'bg-bv/60 cursor-not-allowed' : 'bg-bv hover:bg-bv-600',
+                )}
+              >
+                {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                {isSaving ? 'Saving...' : 'Save'}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

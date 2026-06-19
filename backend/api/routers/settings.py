@@ -502,6 +502,17 @@ _INTEGRATION_CATALOG = [
              "placeholder": "Your GSP portal password"},
         ],
     },
+    {
+        # Informational / read-only: there is nothing to configure. GST filing
+        # works today via the offline-tool JSON workflow (Reports -> GST). The
+        # FE renders this with no Save (driven by the INTEGRATION_META read_only
+        # flag) -- it exists in the catalog so the Hub surfaces the workflow.
+        "type": "gst-portal",
+        "name": "GST Portal",
+        "description": "File GST returns (manual GSTR-1 / GSTR-3B JSON workflow)",
+        "category": "Compliance",
+        "fields": [],
+    },
     # ---- Storage -----------------------------------------------------------
     {
         "type": "storage",
@@ -1511,9 +1522,16 @@ async def set_discount_rule(
 
 @router.get("/integrations/catalog")
 async def get_integrations_catalog(
-    current_user: dict = Depends(require_roles("SUPERADMIN")),
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Return the full integration catalog (SUPERADMIN only).
+    """Return the full integration catalog (ADMIN/SUPERADMIN only).
+
+    Opened to ADMIN (was SUPERADMIN-only) so the unified IntegrationsHub renders
+    for ADMIN too -- ADMIN already may GET/PUT integration configs, so gating the
+    catalog (just the field definitions, no secrets) tighter than the configs it
+    describes left ADMIN with no integrations UI. Matches the GET/PUT
+    /settings/integrations gating. The sensitive status surfaces
+    (IntegrationStatusCard / GET /jarvis/integrations/status) stay SUPERADMIN-only.
 
     The catalog is the authoritative list of every integration type IMS
     supports. The frontend renders it generically -- adding a new integration
@@ -1620,6 +1638,32 @@ async def update_integration(
             },
             upsert=True,
         )
+
+    # Immutable audit trail (SYSTEM_INTENT 'Audit Everything'): record WHO
+    # changed WHICH integration, WHICH config keys were submitted, and the
+    # enabled flag. NEVER log the values themselves (they may be secrets) --
+    # only the set of changed key NAMES + the enabled boolean. Fail-soft: a
+    # missing/erroring audit write must never undo the config save.
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is not None:
+            audit_repo.create(
+                {
+                    "action": "INTEGRATION_CONFIG_CHANGE",
+                    "entity_type": "integration",
+                    "entity_id": integration_type.lower(),
+                    "target": integration_type.lower(),
+                    "user_id": current_user.get("user_id"),
+                    "after": {
+                        # key NAMES only -- never the values (secret-safe)
+                        "changed_keys": sorted(cfg.keys()) if isinstance(cfg, dict) else [],
+                        "enabled": bool(payload.get("enabled")),
+                    },
+                    "timestamp": datetime.now(),
+                }
+            )
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "message": f"{integration_type} integration updated",

@@ -236,8 +236,13 @@ def test_get_storage_config_db_wins_over_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4. SUPERADMIN gate on catalog endpoint
+# 4. ADMIN+SUPERADMIN gate on catalog endpoint
 # ---------------------------------------------------------------------------
+# The catalog endpoint was opened from SUPERADMIN-only to ADMIN+SUPERADMIN so
+# the unified IntegrationsHub renders for ADMIN (who already may GET/PUT the
+# integration configs the catalog merely describes). A role BELOW admin must
+# still be denied. The sensitive status surfaces (IntegrationStatusCard /
+# GET /jarvis/integrations/status) stay SUPERADMIN-only -- not tested here.
 
 def _make_token(roles: list) -> str:
     """Build a signed JWT without touching the DB."""
@@ -254,8 +259,23 @@ def _make_token(roles: list) -> str:
     )
 
 
-def test_catalog_endpoint_requires_superadmin(app):
-    """Non-superadmin (ADMIN role) must get 403 on GET /integrations/catalog."""
+def test_catalog_endpoint_denied_below_admin(app):
+    """A role below ADMIN (SALES_STAFF) must get 403 on GET /integrations/catalog."""
+    from fastapi.testclient import TestClient
+
+    staff_token = _make_token(["SALES_STAFF"])
+    client = TestClient(app)
+    response = client.get(
+        "/api/v1/settings/integrations/catalog",
+        headers={"Authorization": f"Bearer {staff_token}"},
+    )
+    assert response.status_code in (403, 401), (
+        f"Expected 403/401 for SALES_STAFF on catalog endpoint, got {response.status_code}"
+    )
+
+
+def test_catalog_endpoint_allows_admin(app):
+    """ADMIN must be able to fetch the catalog (opened from SUPERADMIN-only)."""
     from fastapi.testclient import TestClient
 
     admin_token = _make_token(["ADMIN"])
@@ -264,10 +284,11 @@ def test_catalog_endpoint_requires_superadmin(app):
         "/api/v1/settings/integrations/catalog",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
-    # ADMIN should be denied; SUPERADMIN is required
-    assert response.status_code in (403, 401), (
-        f"Expected 403/401 for ADMIN on catalog endpoint, got {response.status_code}"
+    assert response.status_code == 200, (
+        f"Expected 200 for ADMIN on catalog endpoint, got {response.status_code}"
     )
+    body = response.json()
+    assert "catalog" in body
 
 
 def test_catalog_endpoint_allows_superadmin(app):
@@ -287,3 +308,5 @@ def test_catalog_endpoint_allows_superadmin(app):
     assert "shopify" in catalog_types
     assert "anthropic" in catalog_types
     assert "storage" in catalog_types
+    # gst-portal read-only info entry surfaces the manual GSTR-1/3B workflow.
+    assert "gst-portal" in catalog_types

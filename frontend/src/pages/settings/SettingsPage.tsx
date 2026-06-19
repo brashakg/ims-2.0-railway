@@ -449,12 +449,13 @@ export function SettingsPage() {
           {/* ---- Existing component delegates ---- */}
           {activeTab === 'integrations' && (
             <div>
-              {/* COUNCIL RULING §3: IntegrationsHub is the ONLY integrations UI.
-                  The Hub already embeds the legacy 5-type panel (IntegrationSettings)
-                  as its "Supplementary tools" section, so ADMIN keeps the legacy
-                  types as a filtered view INSIDE the Hub — no second parallel UI.
-                  (The catalog grid is SUPERADMIN-gated server-side and fails soft
-                  to empty for ADMIN; gating is unchanged.) */}
+              {/* IntegrationsHub is the ONLY integrations UI: one catalog-driven
+                  card grid (per-card Test Connection + Configure), plus a
+                  "Supplementary tools" section (Tally per-store export table +
+                  the SUPERADMIN-only read-only status card). The duplicate
+                  hardcoded 6-card grid that IntegrationSettings used to render
+                  was removed. The catalog endpoint is ADMIN+SUPERADMIN, matching
+                  the GET/PUT integration-config gating. */}
               <IntegrationsHub />
             </div>
           )}
