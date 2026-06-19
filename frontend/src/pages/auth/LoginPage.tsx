@@ -8,6 +8,8 @@ import AuthContext from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Eye, EyeOff, AlertCircle, RefreshCw } from 'lucide-react';
 import { getBrandAssets } from '../../utils/brandAssets';
+import { storeApi } from '../../services/api';
+import { userSeesAllStores } from '../../utils/storeAccess';
 
 export function LoginPage() {
   const authContext = useContext(AuthContext);
@@ -88,7 +90,34 @@ export function LoginPage() {
       });
 
       if (response.success) {
-        navigate(from, { replace: true });
+        // Post-login store selection (multi-store roles only). A user who can
+        // operate as more than one store picks the active store on a dedicated
+        // interstitial BEFORE the dashboard; single-store users go straight
+        // through (their active store is already set by the login response).
+        //   - SUPERADMIN / ADMIN see EVERY active store -> need the org count.
+        //   - Everyone else (incl. AREA_MANAGER) -> their assigned store_ids.
+        const u = response.user;
+        let needsSelection = false;
+        if (u) {
+          if (userSeesAllStores(u.roles)) {
+            try {
+              const res = await storeApi.getStores();
+              const list = (res?.stores ?? res ?? []) as unknown[];
+              needsSelection = Array.isArray(list) && list.length > 1;
+            } catch {
+              // Couldn't enumerate stores -> don't block login. The AppLayout
+              // guard still routes an admin with no active store to /select-store.
+              needsSelection = false;
+            }
+          } else {
+            needsSelection = (u.storeIds?.length ?? 0) > 1;
+          }
+        }
+        if (needsSelection) {
+          navigate('/select-store', { state: { from }, replace: true });
+        } else {
+          navigate(from, { replace: true });
+        }
       } else {
         const errorMsg = response.message || 'Login failed. Please check your username and password.';
         setError(errorMsg);
