@@ -906,17 +906,147 @@
 /* ============================================================================
    Shell chrome — 64px Rail + 52px Topbar (ported from shell/shell.css)
    ============================================================================ */
+/* App shell — TOP horizontal menu (row 1) over the topbar + full-width content
+   (row 2). The left rail was retired on tablet+desktop; it survives only as the
+   phone bottom-bar / hamburger drawer (see mobile.css + the ≤767 block below).
+   .rail-expanded is kept as a harmless class (no longer drives desktop layout). */
 .app-shell {
-  --rail-width: 64px;
   display: grid;
-  grid-template-columns: var(--rail-width) 1fr;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
   background: var(--bg);
-  transition: grid-template-columns .15s ease;
 }
-.app-shell.rail-expanded { --rail-width: 224px; }
 
-/* Left rail */
+/* ============================================================================
+   Top horizontal menu bar (tablet + desktop) — replaces the left rail.
+   Dark chrome (matches the old rail + brand identity) with light dropdown
+   panels (matches the topbar store/role popovers). Each titled nav group is a
+   trigger that opens a dropdown of its links; Hub / Notifications are direct.
+   ============================================================================ */
+.top-nav {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 52px;
+  padding: 0 12px;
+  background: #141413;
+  color: #e9e9e4;
+  position: relative;
+  z-index: 40;
+}
+.top-nav-brand {
+  display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0;
+  padding-right: 14px; margin-right: 4px;
+  border-right: 1px solid #2a2a28;
+}
+.top-nav-brand img { width: 26px; height: 26px; }
+.top-nav-wordmark {
+  font-family: var(--font-display);
+  font-size: 16px; font-weight: 600; color: #fff;
+  letter-spacing: -0.01em; white-space: nowrap;
+}
+/* Menu list — flexes to fill; scrolls horizontally only when a role's menu is
+   wider than the viewport (brand + user menu stay pinned). */
+.top-nav-menu {
+  display: flex; align-items: stretch; gap: 2px;
+  list-style: none; margin: 0; padding: 0;
+  flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; overflow-y: visible;
+  scrollbar-width: none;
+}
+.top-nav-menu::-webkit-scrollbar { display: none; }
+.top-nav-li { display: flex; align-items: stretch; position: relative; }
+
+.top-nav-direct,
+.top-nav-trigger {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 36px; margin: auto 0; padding: 0 12px;
+  border: 0; background: transparent;
+  color: #b9b9b2; cursor: pointer;
+  font: 500 13px/1 var(--font-sans);
+  border-radius: 8px; white-space: nowrap;
+  text-decoration: none;
+  transition: background .12s, color .12s;
+}
+.top-nav-direct svg { width: 17px; height: 17px; flex-shrink: 0; }
+.top-nav-direct:hover,
+.top-nav-trigger:hover { background: #222220; color: #fff; }
+.top-nav-direct.active,
+.top-nav-trigger.active { background: #2e2e2b; color: #fff; }
+.top-nav-group.open > .top-nav-trigger { background: #222220; color: #fff; }
+.top-nav-direct:focus-visible,
+.top-nav-trigger:focus-visible,
+.top-nav-avatar-btn:focus-visible {
+  outline: 2px solid var(--bv); outline-offset: -2px;
+}
+.top-nav-caret { opacity: .7; flex-shrink: 0; }
+
+/* Dropdown panel — light surface card (mirrors the topbar dropdowns). */
+.top-nav-dropdown {
+  position: absolute;
+  top: 100%; left: 0;
+  margin-top: 2px;
+  min-width: 220px; max-width: min(320px, calc(100vw - 24px));
+  max-height: min(72vh, 560px); overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 12px);
+  box-shadow: var(--sh-md);
+  padding: 5px;
+  z-index: 70;
+}
+.top-nav-dd-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 9px 10px; min-height: 38px;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--ink-2); cursor: pointer; text-align: left;
+  font: 500 13px var(--font-sans); text-decoration: none;
+  white-space: nowrap;
+}
+.top-nav-dd-item svg { width: 17px; height: 17px; flex-shrink: 0; color: var(--ink-4); }
+.top-nav-dd-item:hover { background: var(--bg-sunk); color: var(--ink); }
+.top-nav-dd-item:hover svg { color: var(--ink-2); }
+.top-nav-dd-item.active { background: var(--bv-50); color: var(--bv); }
+.top-nav-dd-item.active svg { color: var(--bv); }
+.top-nav-dd-item:focus-visible { outline: 2px solid var(--bv); outline-offset: -2px; }
+
+/* Account / sign-out menu, pinned right. */
+.top-nav-user {
+  display: flex; align-items: center; flex-shrink: 0; position: relative;
+  margin-left: 4px; padding-left: 8px; border-left: 1px solid #2a2a28;
+}
+.top-nav-avatar-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 8px 0 6px; border: 0; border-radius: 8px;
+  background: transparent; color: #e9e9e4; cursor: pointer;
+  font: 500 13px var(--font-sans);
+}
+.top-nav-avatar-btn:hover { background: #222220; }
+.top-nav-avatar-initials {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: #2e2e2b; color: #fff;
+  display: inline-grid; place-items: center;
+  font-size: 11px; font-weight: 600; flex-shrink: 0;
+}
+.top-nav-avatar-name { white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.top-nav-user-pop { right: 0; left: auto; min-width: 200px; }
+.top-nav-user-head {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 5px;
+}
+.top-nav-user-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.top-nav-user-role { font-size: 11px; color: var(--ink-4); text-transform: capitalize; }
+.top-nav-signout {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 9px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--bv); cursor: pointer; text-align: left;
+  font: 600 13px var(--font-sans);
+}
+.top-nav-signout:hover { background: var(--bv-50); }
+
+/* Left rail (phone bottom-bar / hamburger drawer only; hidden ≥768 below) */
 .rail {
   background: #141413;
   color: #e9e9e4;
@@ -2716,7 +2846,7 @@
 /* Print only */
 @media print {
   .no-print { display: none !important; }
-  .rail, .topbar { display: none !important; }
+  .top-nav, .rail, .topbar { display: none !important; }
   .app-shell { display: block; }
 }
 
@@ -3248,5 +3378,26 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 @media (max-width: 389px) {
   .store-pill { max-width: 80px; }
   .role-pill .k { display: none; }   /* hide "Role" label */
+}
+
+/* ============================================================================
+   Nav-surface swap at the tablet boundary (sourced LAST so it wins ties).
+   ≥ 768px  → TOP horizontal menu; the left rail + the topbar hamburger are
+              hidden, and the shell is forced back to the stacked grid even if a
+              short-landscape phone matched the ≤767 drawer block above.
+   ≤ 767px  → top menu hidden; the rail (bottom-bar / hamburger drawer) takes
+              over exactly as before (see mobile.css + the ≤767 block above).
+   ============================================================================ */
+@media (min-width: 768px) {
+  .app-shell,
+  .app-shell.rail-expanded {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .rail { display: none; }
+  .topbar-hamburger { display: none; }
+}
+@media (max-width: 767px) {
+  .top-nav { display: none; }
 }
 

@@ -1,9 +1,15 @@
-// Shell wrapper — Rail + Topbar + page body.
+// Shell wrapper — TopNav (tablet+desktop) / Rail (phone) + Topbar + page body.
+// ---------------------------------------------------------------------------
+// Tablet+desktop: a vertical stack — [TopNav horizontal menu] over [Topbar row]
+// over [full-width page body]. The Rail is hidden here.
+// Phone (≤767): the TopNav is hidden; the Rail reflows to a bottom tab bar and
+// the topbar hamburger opens it as a left drawer (unchanged behaviour).
 // Used by AppLayout; also usable directly if a page needs custom crumbs/actions.
 
 import { type ReactNode, useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Rail } from './Rail';
+import { TopNav } from './TopNav';
 import { Topbar, type Crumb } from './Topbar';
 import { useAppearance } from '../../context/AppearanceContext';
 
@@ -17,6 +23,7 @@ interface ShellProps {
 export function Shell({ crumbs, actions, brand, children }: ShellProps) {
   const { railExpanded } = useAppearance();
   const location = useLocation();
+  // navOpen drives the PHONE drawer only (the Rail rendered as a left overlay).
   const [navOpen, setNavOpen] = useState(false);
   // Track last path so we only close on an actual navigation, not initial mount.
   const lastPath = useRef(location.pathname);
@@ -57,7 +64,7 @@ export function Shell({ crumbs, actions, brand, children }: ShellProps) {
         Skip to main content
       </a>
 
-      {/* Mobile nav backdrop — click to close, hidden on desktop */}
+      {/* Mobile nav backdrop — click to close the phone drawer; hidden ≥768 */}
       {navOpen && (
         <div
           className="mobile-nav-backdrop"
@@ -66,6 +73,10 @@ export function Shell({ crumbs, actions, brand, children }: ShellProps) {
         />
       )}
 
+      {/* Tablet + desktop primary nav (hidden on phones via CSS). */}
+      <TopNav brand={brand} />
+
+      {/* Phone bottom tab bar + hamburger drawer (hidden ≥768 via CSS). */}
       <Rail brand={brand} mobileOpen={navOpen} />
 
       <div className="app-main">

@@ -8,50 +8,36 @@
    All overrides are scoped to media queries; no cascade impact above 1024.
 */
 
-/* ─────────────────────────── TABLET (≤ 1023) ─────────────────────────── */
-@media (max-width: 1023px) {
-  .app-shell { grid-template-columns: 56px 1fr; }
-  .rail { padding: 8px 0; }
-  .rail .brand { width: 36px; height: 36px; font-size: 18px; margin-bottom: 12px; }
-  .rail .rail-item { width: 44px; height: 40px; }
-  .rail .rail-item svg { width: 18px; height: 18px; }
-  .rail .rail-avatar { width: 32px; height: 32px; font-size: 11px; }
-  .rail .rail-label { display: none; } /* tooltips off — too cramped */
-
+/* ─────────────────────────── TABLET (768–1023) ─────────────────────────── */
+/* The left rail is RETIRED on tablet — the TOP horizontal menu (.top-nav) now
+   serves tablet + desktop, so the old "icon-only rail" rules are obsolete and
+   removed. Only the topbar text tweaks remain, plus a tighter top menu so more
+   groups fit before the menu scrolls horizontally. The rail itself is hidden at
+   ≥768 by index.css (it only reappears as the phone drawer ≤767). */
+@media (min-width: 768px) and (max-width: 1023px) {
   .topbar { padding: 0 12px; gap: 8px; }
   .cmdk { width: 200px; }
   .crumbs { font-size: 12.5px; }
   .crumbs .sep, .crumbs span:not(.cur):not(:last-child) { display: none; } /* show only current */
 
-  /* Force a TRUE icon-only rail on tablet even when the expand toggle is on.
-     The rail column is pinned to 56px here, but .rail.expanded content (inline
-     labels, group titles, the avatar name pill) still rendered — so labels
-     wrapped ("STOCK & SUPPLY" -> 2 lines) and the avatar pill (width:auto,
-     nowrap) grew past the narrow rail (overflow:visible) and spilled into the
-     page. Neutralise expanded-mode geometry + hide text bits. */
-  .app-shell.rail-expanded { grid-template-columns: 56px 1fr; }
-  .rail.expanded .rail-label,
-  .rail .rail-group-title,
-  .rail .rail-wordmark,
-  .rail.expanded .rail-avatar-name,
-  .rail.expanded .rail-avatar-caret { display: none; }
-  .rail.expanded .rail-item {
-    width: 44px; margin: 2px auto; padding: 0; gap: 0; justify-content: center;
-  }
-  .rail.expanded .rail-avatar {
-    width: 32px; height: 32px; margin: 4px auto 0; padding: 0;
-    border-radius: 50%; justify-content: center; background: #2e2e2b;
-  }
-  .rail.expanded .rail-avatar-initials { width: 28px; height: 28px; }
-  .rail.expanded .rail-avatar-btn,
-  .rail:not(.expanded) .rail-avatar-btn { width: 36px; }
-  .rail.expanded .rail-header { justify-content: center; padding: 0 0 12px; }
+  /* Tighter top menu — mark only (drop the wordmark + the avatar first name) so
+     more group triggers fit on an iPad-portrait width before scrolling. */
+  .top-nav { padding: 0 8px; gap: 2px; }
+  .top-nav-direct,
+  .top-nav-trigger { padding: 0 9px; gap: 5px; font-size: 12.5px; }
+  .top-nav-wordmark,
+  .top-nav-avatar-name { display: none; }
 }
 
 /* ─────────────────────────── PHONE (≤ 767) ─────────────────────────── */
 @media (max-width: 767px) {
+  /* Top horizontal menu is desktop/tablet only — phones keep the rail
+     (bottom-bar / hamburger drawer) untouched. */
+  .top-nav { display: none; }
+
   /* Rail → bottom tab bar */
   .app-shell {
+    display: grid;
     grid-template-columns: 1fr;
     grid-template-rows: 1fr auto;
     height: 100vh; height: 100dvh;
