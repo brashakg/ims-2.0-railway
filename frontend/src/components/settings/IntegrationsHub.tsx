@@ -706,7 +706,8 @@ interface FieldRowProps {
   selectLoading?: boolean;
 }
 
-function FieldRow({
+// Exported for unit testing the model-dropdown / free-text fallback behavior.
+export function FieldRow({
   field, value, hasStored, showValue, onToggleShow, onChange, selectOptions, selectLoading,
 }: FieldRowProps) {
   const useSelect = !!selectOptions && selectOptions.length > 0;
