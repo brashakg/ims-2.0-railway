@@ -886,56 +886,57 @@ export function POSLayout() {
               condensed mode merged groups simply stack the same components on
               one scrollable surface (Rx above Products; Review above Payment). */}
           <div className="pos-scroll">
-            {/* Customer (its own group in both flows) */}
-            {currentGroup?.members.includes('customer') && <StepCustomer />}
-
-            {/* Merged "Products & Rx" group renders the Prescription surface
-                ABOVE the Products catalog in one scroll. The Rx surface only
-                shows for prescription orders (StepPrescription is gated). */}
-            {currentGroup?.members.includes('prescription') && store.sale_type === 'prescription_order' && (
-              <section className={currentGroup.members.includes('products') ? 'pos-merge-sec' : undefined}>
-                {currentGroup.members.includes('products') && (
-                  <div className="pos-merge-cap">Prescription</div>
-                )}
-                <StepPrescription
-                  onShowModal={() => setShowPrescriptionModal(true)}
-                  onShowNew={() => setShowNewPrescription(true)}
-                />
-              </section>
-            )}
-            {currentGroup?.members.includes('products') && (
-              <section className={currentGroup.members.includes('prescription') && store.sale_type === 'prescription_order' ? 'pos-merge-sec' : undefined}>
-                {currentGroup.members.includes('prescription') && store.sale_type === 'prescription_order' && (
-                  <div className="pos-merge-cap">Products</div>
-                )}
-                <StepProducts onOpenLensModal={() => setShowLensModal(true)} />
-              </section>
-            )}
-
-            {/* Merged "Pay & Review" group: Review + Payment side by side on
-                desktop (stacked on narrow). In classic each is its own group. */}
-            {currentGroup && currentGroup.members.includes('review') && currentGroup.members.includes('payment') ? (
-              <div className="pos-payreview">
-                <section className="pos-merge-sec">
-                  <div className="pos-merge-cap">Review</div>
-                  <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />
-                </section>
-                <section className="pos-merge-sec">
-                  <div className="pos-merge-cap">Payment</div>
-                  <StepPayment />
-                </section>
-              </div>
-            ) : (
-              <>
-                {currentGroup?.members.includes('review') && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
-                {currentGroup?.members.includes('payment') && <StepPayment />}
-              </>
-            )}
-
-            {/* Complete — the done state (not a navigable group) */}
-            {isComplete && (
+            {/* Complete — the done state (not a navigable group). Rendered
+                exclusively; no input steps show alongside the receipt. */}
+            {isComplete ? (
               <StepComplete onPrint={() => setShowReceipt(true)} onReset={handleFullReset} />
-            )}
+            ) : (<>
+              {/* Customer (its own group in both flows) */}
+              {currentGroup?.members.includes('customer') && <StepCustomer />}
+
+              {/* Merged "Products & Rx" group renders the Prescription surface
+                  ABOVE the Products catalog in one scroll. The Rx surface only
+                  shows for prescription orders (StepPrescription is gated). */}
+              {currentGroup?.members.includes('prescription') && store.sale_type === 'prescription_order' && (
+                <section className={currentGroup.members.includes('products') ? 'pos-merge-sec' : undefined}>
+                  {currentGroup.members.includes('products') && (
+                    <div className="pos-merge-cap">Prescription</div>
+                  )}
+                  <StepPrescription
+                    onShowModal={() => setShowPrescriptionModal(true)}
+                    onShowNew={() => setShowNewPrescription(true)}
+                  />
+                </section>
+              )}
+              {currentGroup?.members.includes('products') && (
+                <section className={currentGroup.members.includes('prescription') && store.sale_type === 'prescription_order' ? 'pos-merge-sec' : undefined}>
+                  {currentGroup.members.includes('prescription') && store.sale_type === 'prescription_order' && (
+                    <div className="pos-merge-cap">Products</div>
+                  )}
+                  <StepProducts onOpenLensModal={() => setShowLensModal(true)} />
+                </section>
+              )}
+
+              {/* Merged "Pay & Review" group: Review + Payment side by side on
+                  desktop (stacked on narrow). In classic each is its own group. */}
+              {currentGroup && currentGroup.members.includes('review') && currentGroup.members.includes('payment') ? (
+                <div className="pos-payreview">
+                  <section className="pos-merge-sec">
+                    <div className="pos-merge-cap">Review</div>
+                    <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />
+                  </section>
+                  <section className="pos-merge-sec">
+                    <div className="pos-merge-cap">Payment</div>
+                    <StepPayment />
+                  </section>
+                </div>
+              ) : (
+                <>
+                  {currentGroup?.members.includes('review') && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
+                  {currentGroup?.members.includes('payment') && <StepPayment />}
+                </>
+              )}
+            </>)}
           </div>
 
           {/* Bottom action bar — flex:0 0 auto, pinned to the bottom of the
