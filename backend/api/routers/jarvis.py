@@ -31,9 +31,20 @@ logger = logging.getLogger(__name__)
 
 # Anthropic Claude Configuration
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = os.getenv(
-    "JARVIS_MODEL", "claude-sonnet-4-6"
-)  # Default to the current Claude Sonnet (4.6); old 4-20250514 snapshot retired 2026-06-15
+
+
+def _configured_claude_model() -> str:
+    """Resolve the active JARVIS/agent model FRESH at call time so a model
+    selected in Settings -> Integrations (or set via env) is reflected without
+    a redeploy. Routes through the single resolver in integration_config
+    (DB config -> AGENT_CLAUDE_MODEL/JARVIS_MODEL env -> current default).
+    """
+    try:
+        from api.services.integration_config import get_configured_agent_model
+
+        return get_configured_agent_model()
+    except Exception:  # noqa: BLE001
+        return os.getenv("JARVIS_MODEL", "claude-sonnet-4-6")
 
 router = APIRouter()
 
@@ -2685,7 +2696,7 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
         "name": "JARVIS",
         "ai_engine": {
             "provider": "Anthropic",
-            "model": CLAUDE_MODEL,
+            "model": _configured_claude_model(),
             "enabled": jarvis_instance.claude_enabled,
             "status": "active" if jarvis_instance.claude_enabled else "fallback_mode",
         },

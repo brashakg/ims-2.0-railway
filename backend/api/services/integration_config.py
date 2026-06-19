@@ -113,6 +113,42 @@ def get_anthropic_config() -> Dict[str, Any]:
     return {}
 
 
+# Default model used when nothing is configured. Kept as a single constant so
+# the resolver, the live-models fallback list, and any caller agree on one
+# current, non-retired model id.
+DEFAULT_AGENT_MODEL = "claude-sonnet-4-6"
+
+
+def get_configured_agent_model() -> str:
+    """Single source of truth for the main agent (JARVIS/CORTEX/ORACLE) model.
+
+    Resolution order (read FRESH at call time so a UI selection in
+    Settings -> Integrations takes effect WITHOUT a redeploy):
+      1. DB integration config `model` (Settings -> Integrations -> Anthropic).
+      2. Env override AGENT_CLAUDE_MODEL, then JARVIS_MODEL (legacy).
+      3. Curated current default DEFAULT_AGENT_MODEL.
+
+    The DB read goes through get_anthropic_config(), which only returns a
+    config when an api_key is present; we therefore read the raw DB doc
+    directly here so a model picked in the UI is honoured even before the key
+    is saved in the same doc. Fail-soft: any error -> env/default.
+    """
+    # 1. DB-configured model (does not require an api_key to be set).
+    try:
+        cfg = _load_db_config("anthropic")
+        model = cfg.get("model")
+        if model:
+            return str(model).strip()
+    except Exception:  # noqa: BLE001 - never block an agent on config read
+        pass
+    # 2. Env override (AGENT_CLAUDE_MODEL preferred; JARVIS_MODEL legacy).
+    env_model = os.getenv("AGENT_CLAUDE_MODEL") or os.getenv("JARVIS_MODEL")
+    if env_model:
+        return env_model.strip()
+    # 3. Curated current default.
+    return DEFAULT_AGENT_MODEL
+
+
 def get_whatsapp_config() -> Dict[str, Any]:
     """Return inbound-WhatsApp (Meta WABA) config.
 

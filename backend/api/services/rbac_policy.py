@@ -5518,6 +5518,15 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
+        # Live Claude model list for the Anthropic integration's model picker.
+        # Read-only listing of available models (no secrets returned). Literal
+        # path -- must beat the {integration_type} template below. ADMIN/
+        # SUPERADMIN only, matching the integration config GET/PUT gating.
+        "method": "GET",
+        "path": "/api/v1/settings/integrations/anthropic/models",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/settings/integrations/{integration_type}",
         "allowed": "AUTHENTICATED",

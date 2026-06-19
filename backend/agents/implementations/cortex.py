@@ -23,7 +23,22 @@ logger = logging.getLogger(__name__)
 
 # Claude API config
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = os.getenv("JARVIS_MODEL", "claude-sonnet-4-6")
+
+
+def _resolve_claude_model() -> str:
+    """Return the configured agent model, read FRESH at call time so a model
+    picked in Settings -> Integrations takes effect without a redeploy.
+
+    Routes through the single resolver in api.services.integration_config
+    (DB integration config -> AGENT_CLAUDE_MODEL/JARVIS_MODEL env -> default).
+    Fail-soft to the legacy env if the resolver import fails.
+    """
+    try:
+        from api.services.integration_config import get_configured_agent_model
+
+        return get_configured_agent_model()
+    except Exception:  # noqa: BLE001
+        return os.getenv("JARVIS_MODEL", "claude-sonnet-4-6")
 
 
 # Intent classification result

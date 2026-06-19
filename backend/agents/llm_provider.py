@@ -130,13 +130,30 @@ def _registry() -> Dict[str, Dict[str, Any]]:
     code change."""
     models: Dict[str, Dict[str, Any]] = {}
 
-    if os.getenv("ANTHROPIC_API_KEY"):
+    # Resolve the Anthropic api_key + main model FRESH from the same single
+    # resolver the agents use, so a model/key picked in Settings -> Integrations
+    # drives the registry (and therefore JARVIS/CORTEX/ORACLE) without a
+    # redeploy. Fail-soft: if the resolver import fails (isolated test), fall
+    # back to the legacy env-only path.
+    try:
+        from api.services.integration_config import (
+            get_anthropic_config,
+            get_configured_agent_model,
+        )
+        _anthropic_cfg = get_anthropic_config()
+        _anthropic_key = _anthropic_cfg.get("api_key") or os.getenv("ANTHROPIC_API_KEY")
+        _anthropic_model = get_configured_agent_model()
+    except Exception:  # noqa: BLE001
+        _anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        _anthropic_model = os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
+
+    if _anthropic_key:
         models["claude"] = {
             "id": "claude",
             "label": os.getenv("LLM_CLAUDE_LABEL", "Claude (deep analysis)"),
             "provider": "anthropic",
-            "model": os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5"),
-            "api_key": os.getenv("ANTHROPIC_API_KEY"),
+            "model": _anthropic_model,
+            "api_key": _anthropic_key,
             "api_url": os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
             "tier": "standard",
         }
@@ -149,8 +166,11 @@ def _registry() -> Dict[str, Dict[str, Any]]:
                 "id": "claude-opus",
                 "label": os.getenv("LLM_OPUS_LABEL", "Claude Opus 4.8 (premium)"),
                 "provider": "anthropic",
+                # Follow-up: the premium/opus tier stays env-driven for now
+                # (LLM_OPUS_MODEL). The live UI selector drives the main
+                # standard-tier model above.
                 "model": os.getenv("LLM_OPUS_MODEL", "claude-opus-4-8"),
-                "api_key": os.getenv("ANTHROPIC_API_KEY"),
+                "api_key": _anthropic_key,
                 "api_url": os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
                 "tier": "premium",
             }
