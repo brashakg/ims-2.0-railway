@@ -22,10 +22,13 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
 
-  // Clear any stale auth data when login page mounts
+  // Only clear auth data when arriving here due to an explicit logout (flagged in sessionStorage).
+  // Navigating directly to /login while still authenticated must not destroy a valid session —
+  // ProtectedRoute already redirects authenticated users away before this fires in practice.
   useEffect(() => {
-    const token = localStorage.getItem('ims_token');
-    if (token) {
+    const fromLogout = sessionStorage.getItem('ims_logout');
+    if (fromLogout) {
+      sessionStorage.removeItem('ims_logout');
       localStorage.removeItem('ims_token');
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_active_module');

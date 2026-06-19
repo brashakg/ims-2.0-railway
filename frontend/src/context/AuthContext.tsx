@@ -288,6 +288,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } catch {
       // Ignore logout errors
     } finally {
+      sessionStorage.setItem('ims_logout', '1');
       localStorage.removeItem('ims_token');
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_login_time');
@@ -345,7 +346,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const setActiveStore = (storeId: string) => {
     if (
       !(
-        state.user?.storeIds.includes(storeId) ||
+        (state.user?.storeIds ?? []).includes(storeId) ||
         hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])
       )
     ) {

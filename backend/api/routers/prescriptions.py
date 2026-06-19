@@ -1657,7 +1657,7 @@ async def get_prescription_progression(
         return {"customer_id": customer_id, "deltas": []}
     # BUG-088: scope the progression history to the caller's stores.
     history = filter_docs_by_store(
-        repo.find_many({"customer_id": customer_id}) or [], current_user
+        repo.find_many({"customer_id": customer_id}, limit=0) or [], current_user
     )
     deltas = progression_diffs(history)
     return {"customer_id": customer_id, "deltas": deltas, "visits": len(history)}

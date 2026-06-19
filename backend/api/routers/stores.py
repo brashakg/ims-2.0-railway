@@ -465,7 +465,7 @@ async def list_stores(
         if active_only:
             stores = repo.find_active(filter_dict if filter_dict else None)
         else:
-            stores = repo.find_many(filter_dict, sort=[("brand", 1), ("store_name", 1)])
+            stores = repo.find_many(filter_dict, sort=[("brand", 1), ("store_name", 1)], limit=0)
 
         return {"stores": stores, "total": len(stores)}
 

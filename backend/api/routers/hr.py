@@ -1417,7 +1417,7 @@ async def list_leaves(
     if status:
         filter_dict["status"] = status
 
-    leaves = leave_repo.find_many(filter_dict)
+    leaves = leave_repo.find_many(filter_dict, limit=0)
 
     return {"leaves": leaves or [], "total": len(leaves) if leaves else 0}
 
@@ -1445,7 +1445,8 @@ async def apply_leave(
                 {
                     "employee_id": employee_id,
                     "status": {"$in": ["APPROVED", "PENDING"]},
-                }
+                },
+                limit=0,
             )
             or []
         )
@@ -1750,7 +1751,7 @@ async def list_payroll(
         return {"payroll": [], "total": 0}
 
     records = payroll_repo.find_many(
-        {"store_id": active_store, "year": year, "month": month}
+        {"store_id": active_store, "year": year, "month": month}, limit=0
     )
 
     return {"payroll": records or [], "total": len(records) if records else 0}
@@ -1772,8 +1773,9 @@ async def generate_payroll(
     if not payroll_repo or not user_repo:
         return {"message": "Payroll generation initiated", "count": 0}
 
-    # Get all employees for the store
-    employees = user_repo.find_many({"store_ids": active_store})
+    # Get all employees for the store (limit=0 to avoid the default 100-row cap
+    # silently skipping payroll generation for employees #101+)
+    employees = user_repo.find_many({"store_ids": active_store}, limit=0)
 
     generated_count = 0
     for employee in employees or []:

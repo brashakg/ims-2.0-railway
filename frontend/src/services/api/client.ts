@@ -75,7 +75,8 @@ api.interceptors.request.use(
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
   if (error.response?.status === 401) {
-    // Clear auth state on unauthorized
+    // Clear auth state on unauthorized and redirect to login
+    sessionStorage.setItem('ims_logout', '1');
     localStorage.removeItem('ims_token');
     localStorage.removeItem('ims_user');
     window.location.href = '/login';

@@ -9,7 +9,7 @@ import api from './client';
 // ============================================================================
 
 export const orderApi = {
-  getOrders: async (params?: { storeId?: string; status?: string; date?: string; from_date?: string; to_date?: string; customerId?: string; limit?: number; skip?: number }) => {
+  getOrders: async (params?: { storeId?: string; status?: string; date?: string; from_date?: string; to_date?: string; customerId?: string; limit?: number; skip?: number; search?: string }) => {
     // Convert camelCase storeId/customerId → snake_case for the FastAPI Query
     // params. Without this the backend silently ignored ?storeId and fell
     // back to the user's token store, so the topbar store-switch never

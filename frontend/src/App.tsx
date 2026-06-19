@@ -270,7 +270,7 @@ function App() {
                     path="pos"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF', 'SALES_CASHIER']}
                       >
                         <POSPage />
                       </ProtectedRoute>

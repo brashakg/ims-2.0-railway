@@ -586,7 +586,8 @@ def _transferred_pool(stock_repo, transfer, product_id, prefer):
                 "transfer_id": transfer.get("id"),
                 "product_id": product_id,
                 "status": STOCK_STATUS_TRANSFERRED,
-            }
+            },
+            limit=0,
         )
     except Exception as exc:  # noqa: BLE001 - fail-soft
         logger.warning("[TRANSFER] receive pool lookup failed: %s", exc)

@@ -417,4 +417,3 @@ def get_vendor_portal_token_repository():
         except Exception:
             return VendorPortalTokenRepository(db.vendor_portal_tokens)
     return None
-    return None

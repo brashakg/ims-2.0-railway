@@ -103,14 +103,13 @@ export default function ReturnsPage() {
     setIsLoading(true);
     setError(null);
     try {
-      const response = await orderApi.getOrders({ storeId: user?.activeStoreId });
+      const response = await orderApi.getOrders({
+        storeId: user?.activeStoreId,
+        search: searchQuery.trim(),
+        limit: 20,
+      });
       const allOrders = response.orders || response || [];
-      const filtered = allOrders.filter((o: any) =>
-        o.orderNumber?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        o.customerName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        o.customerPhone?.includes(searchQuery)
-      );
-      setOrders(filtered);
+      setOrders(allOrders);
     } catch {
       setError('Failed to search orders');
     } finally {
