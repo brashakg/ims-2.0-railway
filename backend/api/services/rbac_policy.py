@@ -5508,6 +5508,16 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
     },
     {
+        # Integration catalog = the field definitions the IntegrationsHub renders
+        # (no secrets). ADMIN/SUPERADMIN only, matching the GET/PUT integration
+        # config gating. Literal path -- must beat the {integration_type} template
+        # below (policy_for prefers the exact-literal match + the most specific
+        # row, and the route gate is require_roles("ADMIN")).
+        "method": "GET",
+        "path": "/api/v1/settings/integrations/catalog",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/settings/integrations/{integration_type}",
         "allowed": "AUTHENTICATED",
