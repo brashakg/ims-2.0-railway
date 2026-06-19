@@ -1528,9 +1528,7 @@ function SalespersonPicker() {
           const p = people.find((x) => x.id === e.target.value);
           store.setSalesperson(e.target.value, p?.name || '');
         }}
-        className={`w-full px-3 py-2.5 border-2 rounded-xl text-sm bg-white ${
-          store.salesperson_id ? 'border-gray-200' : 'border-amber-300'
-        }`}
+        className="w-full px-3 py-2.5 border-2 border-gray-300 rounded-xl text-sm bg-white"
       >
         <option value="">{loading ? 'Loading staff…' : '— Select salesperson —'}</option>
         {people.map((p) => (
@@ -1538,7 +1536,7 @@ function SalespersonPicker() {
         ))}
       </select>
       {!store.salesperson_id && (
-        <p className="text-xs text-amber-600 mt-1">Required — pick who is handling this sale.</p>
+        <p className="text-xs text-gray-500 mt-1">Required — pick who is handling this sale.</p>
       )}
     </div>
   );
@@ -1660,20 +1658,54 @@ function StepCustomer() {
               }}
               maxResults={10}
               renderItem={(hit) => {
-                const isPatient = hit.kind === 'patient';
+                // Hierarchy: a hit.kind === 'account' is the master record (the
+                // ACCOUNT); a hit.kind === 'patient' is a family-member record
+                // nested UNDER it. Per owner terminology, outside the clinical
+                // module those members are "Customer" (not "Patient") \u2014 the
+                // internal 'patient' discriminator stays (shared with clinical),
+                // only the POS label + indent change. buildCustomerSearchHits
+                // already emits the account immediately before its members, so
+                // indenting members renders the account -> customer tree.
+                const isMember = hit.kind === 'patient';
+                const c: any = hit.customer || {};
                 const initial = (hit.displayName || '?').charAt(0).toUpperCase();
+                // Cleaner card chips (design pos.jsx CustomerPicker) \u2014 rendered
+                // ONLY from data actually present on the search doc; no mock /
+                // placeholder values, no extra API calls.
+                const createdRaw = c.created_at || c.createdAt || c.registered_at;
+                let since: string | null = null;
+                if (createdRaw) {
+                  const d = new Date(createdRaw);
+                  if (!isNaN(d.getTime())) since = d.toLocaleDateString('en-IN', { year: 'numeric', month: 'short' });
+                }
+                const tier = c.loyalty_tier || c.tier;
+                const pts = c.loyalty_points ?? c.loyaltyPoints;
+                const wallet = c.store_credit_balance ?? c.store_credit ?? c.wallet_balance ?? c.credit_balance;
+                const isB2B = (c.customer_type || c.customerType) === 'B2B';
+                const hasPts = typeof pts === 'number' && pts > 0;
+                const hasWallet = typeof wallet === 'number' && wallet > 0;
+                const hasChips = !!(tier || since || hasWallet || isB2B || hasPts);
                 return (
-                  <div className="flex items-center gap-3">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white ${isPatient ? 'bg-blue-600' : 'bg-bv-red-700'}`}>{initial}</div>
+                  <div className={`flex items-start gap-3 ${isMember ? 'pl-3.5 ml-1.5 border-l-2 border-gray-200' : ''}`}>
+                    <div className={`rounded-full flex items-center justify-center font-bold text-white flex-shrink-0 ${isMember ? 'w-7 h-7 text-xs bg-blue-600' : 'w-9 h-9 text-sm bg-bv-red-700'}`}>{initial}</div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900 truncate">
                         {hit.displayName}
-                        <span className={`ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${isPatient ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{isPatient ? 'Patient' : 'Account'}</span>
+                        <span className={`ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${isMember ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{isMember ? 'Customer' : 'Account'}</span>
                       </p>
-                      <p className="text-xs text-gray-500 truncate">
+                      <p className="text-xs text-gray-500 truncate font-mono">
                         {hit.phone || 'No phone'}
-                        {isPatient ? ` \u00B7 under ${hit.accountName}` : (hit.customer?.city ? ` \u00B7 ${hit.customer.city}` : '')}
+                        {isMember ? ` \u00B7 under ${hit.accountName}` : (c.city ? ` \u00B7 ${c.city}` : '')}
                       </p>
+                      {hasChips && (
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                          {isB2B && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">B2B</span>}
+                          {tier && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">{String(tier)}</span>}
+                          {!tier && hasPts && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">{pts.toLocaleString('en-IN')} pts</span>}
+                          {since && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">Since {since}</span>}
+                          {hasWallet && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700">Wallet {'\u20B9'}{Math.round(wallet).toLocaleString('en-IN')}</span>}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
