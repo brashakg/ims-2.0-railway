@@ -2363,6 +2363,13 @@
 .pos-body {
   display: grid;
   grid-template-columns: 220px 1fr;
+  /* Single full-height content row. Explicit minmax(0,1fr) (instead of relying
+     on the grid's default align-content:stretch) GUARANTEES the row — and thus
+     .pos-main / .pos-work — fills the fixed body height on every browser. This
+     is the top of the footer-pin chain: a short Customer step no longer lets
+     the work area shrink to its content and leave the action bar floating
+     mid-page with empty space below it. */
+  grid-template-rows: minmax(0, 1fr);
   height: calc(100vh - 52px);
   /* dvh keeps the footer + last product row reachable under mobile browser
      chrome (the old 100vh got clipped by the phone URL bar). */
