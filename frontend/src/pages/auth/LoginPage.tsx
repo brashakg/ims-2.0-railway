@@ -115,8 +115,15 @@ export function LoginPage() {
             style={{ objectFit: 'contain' }}
           />
           <div
-            className="text-2xl sm:text-3xl font-bold tracking-tight leading-none"
-            style={{ color: getBrandAssets('bv').color }}
+            className="text-3xl sm:text-4xl tracking-tight leading-none"
+            style={{
+              // Better Vision house wordmark: Cooper Black in BV red (#CD201A).
+              // Cooper Black ships with Windows/Office, so it renders natively on
+              // store terminals; falls back to a heavy serif elsewhere.
+              fontFamily: "'Cooper Black', 'Cooper Std', 'Big Caslon', Georgia, serif",
+              fontWeight: 400,
+              color: '#CD201A',
+            }}
           >
             {getBrandAssets('bv').name}
           </div>
