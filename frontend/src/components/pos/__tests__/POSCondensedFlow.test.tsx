@@ -1,20 +1,23 @@
 // ============================================================================
-// POS condensed-flow redesign — render + flow tests
+// POS condensed-flow — render + flow tests
 // ============================================================================
-// Verifies the condensed (default) 3-step grouping, the classic 6-step toggle,
-// and the additive Rx source-gating empty-state, WITHOUT a backend. The heavy
-// data deps (auth, react-query product/customer hooks, API services) are mocked
-// so POSLayout mounts in jsdom; the real posStore (Zustand) drives navigation.
+// The condensed 3-step grouping is the SOLE checkout flow (the classic
+// alternative + toggle were removed). These verify that grouping, the
+// quick-sale review-skip parity, and the additive Rx source-gating empty-state,
+// WITHOUT a backend. The heavy data deps (auth, react-query product/customer
+// hooks, API services) are mocked so POSLayout mounts in jsdom; the real
+// posStore (Zustand) drives navigation.
 //
-// These guard the redesign's two hard rules: condensed is default + classic
-// stays toggleable, and the Rx surface is gated behind a source pick (without
-// losing the existing Rx UI, which appears once a source is chosen).
+// These guard the flow's hard rules: condensed grouping (Customer · Products &
+// Rx · Pay & Review), quick sales skip Review, and the Rx surface is gated
+// behind a source pick (without losing the existing Rx UI, which appears once a
+// source is chosen).
 
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // This Node/jsdom combo ships a partial localStorage (no clear/setItem). Replace
-// it with a complete Map-backed stub so persist + usePOSWorkflow behave.
+// it with a complete Map-backed stub so the posStore persist middleware behaves.
 (() => {
   const m = new Map<string, string>();
   const ls = {
@@ -82,7 +85,6 @@ vi.mock('../../../services/api/walkouts', () => ({
 import { POSLayout } from '../POSLayout';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
-import { POS_WORKFLOW_KEY } from '../usePOSWorkflow';
 
 function renderPOS() {
   return render(
@@ -111,8 +113,8 @@ beforeEach(() => {
   act(() => usePOSStore.getState().resetTransaction());
 });
 
-describe('POS condensed flow (default)', () => {
-  it('defaults to the 3-step condensed rail', () => {
+describe('POS condensed flow (the only flow)', () => {
+  it('renders the 3-step condensed rail', () => {
     seedSale('prescription_order');
     renderPOS();
     // The condensed rail groups: Customer · Products & Rx · Pay & Review.
@@ -123,28 +125,16 @@ describe('POS condensed flow (default)', () => {
     expect(screen.getByText(/Checkout · 3 steps/)).toBeInTheDocument();
   });
 
-  it('toggles to the classic 6-step flow and back', () => {
+  it('has no classic/condensed toggle in the rail', () => {
     seedSale('prescription_order');
     renderPOS();
-    // Flip to classic → the standalone Prescription / Review / Payment groups appear.
-    fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
-    expect(screen.getByTitle('Prescription')).toBeInTheDocument();
-    expect(screen.getByTitle('Review')).toBeInTheDocument();
-    expect(screen.getByTitle('Payment')).toBeInTheDocument();
-    expect(localStorage.getItem(POS_WORKFLOW_KEY)).toBe('classic');
-    // The merged condensed group is gone in classic.
-    expect(screen.queryByTitle('Products & Rx')).not.toBeInTheDocument();
-    // Flip back.
-    fireEvent.click(screen.getByRole('button', { name: 'Condensed' }));
-    expect(screen.getByTitle('Products & Rx')).toBeInTheDocument();
-    expect(localStorage.getItem(POS_WORKFLOW_KEY)).toBe('condensed');
-  });
-
-  it('persists the workflow preference across remounts', () => {
-    localStorage.setItem(POS_WORKFLOW_KEY, 'classic');
-    seedSale('prescription_order');
-    renderPOS();
-    expect(screen.getByText(/Checkout · 5 steps/)).toBeInTheDocument();
+    // The old segmented control is gone — condensed is always-on.
+    expect(screen.queryByRole('button', { name: 'Classic' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Condensed' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Checkout flow' })).not.toBeInTheDocument();
+    // The standalone classic-only groups never appear.
+    expect(screen.queryByTitle('Prescription')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Review')).not.toBeInTheDocument();
   });
 });
 
@@ -222,22 +212,6 @@ describe('quick sale excludes the Review step (origin/main QUICK_STEPS parity)',
     renderPOS();
     // The two-column Review+Payment merge must NOT exist for a quick sale.
     expect(document.querySelector('.pos-payreview')).toBeNull();
-  });
-
-  it('classic quick sale: rail has no Review (or Prescription) step', () => {
-    seedSale('quick_sale');
-    renderPOS();
-    fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
-    expect(screen.getByText(/Checkout · 3 steps/)).toBeInTheDocument();
-    expect(screen.queryByTitle('Review')).not.toBeInTheDocument();
-    expect(screen.queryByTitle('Prescription')).not.toBeInTheDocument();
-  });
-
-  it('classic prescription order DOES keep the Review step', () => {
-    seedSale('prescription_order');
-    renderPOS();
-    fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
-    expect(screen.getByTitle('Review')).toBeInTheDocument();
   });
 });
 
