@@ -443,7 +443,7 @@ _INTEGRATION_CATALOG = [
              "placeholder": "sk-ant-..."},
             {"key": "model", "label": "Default Model", "secret": False,
              "placeholder": "claude-haiku-4-5", "optional": True,
-             "help": "e.g. claude-haiku-4-5 (cheap) or claude-sonnet-4-5 (capable)"},
+             "help": "e.g. claude-haiku-4-5 (cheap) or claude-sonnet-4-6 (capable)"},
         ],
     },
     {
