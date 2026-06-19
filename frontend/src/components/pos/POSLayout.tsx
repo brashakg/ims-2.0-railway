@@ -79,21 +79,70 @@ import { CartSidebar } from './POSCart';
 import { StepPayment } from './POSPayment';
 import { POSReceipt } from './POSReceipt';
 import { StepComplete } from './POSInvoice';
+import { usePOSWorkflow, type POSWorkflow } from './usePOSWorkflow';
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-const STEPS: { id: POSStep; label: string; icon: typeof User }[] = [
-  { id: 'customer', label: 'Customer', icon: User },
-  { id: 'prescription', label: 'Prescription', icon: Eye },
-  { id: 'products', label: 'Products', icon: Package },
-  { id: 'review', label: 'Review', icon: ShoppingCart },
-  { id: 'payment', label: 'Payment', icon: CreditCard },
-  { id: 'complete', label: 'Complete', icon: CheckCircle },
+// ----------------------------------------------------------------------------
+// Checkout-flow grouping (condensed vs classic) — PRESENTATION ONLY.
+// ----------------------------------------------------------------------------
+// The canonical step machine in posStore (customer/prescription/products/
+// review/payment/complete) is UNCHANGED. A "flow group" is one rail entry that
+// may render one or more of those canonical steps merged onto a single
+// scrollable surface. `anchor` is the canonical step the store sits on while
+// the group is active (so persistence, restoreHeldSale -> 'review', held-bill
+// recall, and getter math all keep working). `members` lists every canonical
+// step rendered inside the group (used for completion/active highlighting).
+//
+//   - condensed (DEFAULT): Customer -> [Prescription+Products] -> [Review+Payment]
+//   - classic: the original one-step-per-screen 6-step wizard.
+//
+// `complete` is never a navigable group — it is the done state, reached only by
+// finishing the order (handleCreateOrder) and exited via New Sale.
+interface FlowGroup {
+  key: string;
+  label: string;
+  sub: string;
+  icon: typeof User;
+  anchor: POSStep;     // canonical step the store rests on for this group
+  members: POSStep[];  // canonical steps rendered within this group
+}
+
+// Condensed: 3 input groups. In a Quick Sale the prescription member is simply
+// not rendered (StepPrescription is gated to prescription_order), so the same
+// group definition serves both sale types — Products & Rx degrades to Products.
+const CONDENSED_GROUPS: FlowGroup[] = [
+  { key: 'customer', label: 'Customer', sub: 'Pick customer', icon: User, anchor: 'customer', members: ['customer'] },
+  { key: 'products', label: 'Products & Rx', sub: 'Rx + cart', icon: Package, anchor: 'products', members: ['prescription', 'products'] },
+  { key: 'payment', label: 'Pay & Review', sub: 'Discount, GST & tender', icon: CreditCard, anchor: 'payment', members: ['review', 'payment'] },
 ];
 
-const QUICK_STEPS: POSStep[] = ['customer', 'products', 'payment', 'complete'];
+// Classic: one group per canonical input step (matches the original wizard).
+function buildClassicGroups(saleType: SaleType): FlowGroup[] {
+  const order: POSStep[] = saleType === 'quick_sale'
+    ? ['customer', 'products', 'review', 'payment']
+    : ['customer', 'prescription', 'products', 'review', 'payment'];
+  const META: Record<POSStep, { label: string; sub: string; icon: typeof User }> = {
+    customer: { label: 'Customer', sub: 'Pick customer', icon: User },
+    prescription: { label: 'Prescription', sub: 'Optional', icon: Eye },
+    products: { label: 'Products', sub: 'Cart', icon: Package },
+    review: { label: 'Review', sub: 'Discount & GST', icon: ShoppingCart },
+    payment: { label: 'Payment', sub: 'Split tender', icon: CreditCard },
+    complete: { label: 'Complete', sub: 'Print receipt', icon: CheckCircle },
+  };
+  return order.map((id) => ({
+    key: id, label: META[id].label, sub: META[id].sub, icon: META[id].icon,
+    anchor: id, members: [id],
+  }));
+}
+
+/** Build the active flow's input-step groups for the chosen workflow + sale type. */
+function buildFlowGroups(workflow: POSWorkflow, saleType: SaleType): FlowGroup[] {
+  if (workflow === 'classic') return buildClassicGroups(saleType);
+  return CONDENSED_GROUPS;
+}
 
 /** Safe currency format — never crashes on null/undefined/NaN */
 function fc(amount: number | undefined | null): string {
@@ -138,6 +187,9 @@ export function POSLayout() {
   const [showWalkoutModal, setShowWalkoutModal] = useState(false);
   const [walkinBusy, setWalkinBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Off-canvas cart drawer (tablet/phone <=1024px). Desktop keeps the inline
+  // cart column; this only governs the slide-over + scrim on narrow widths.
+  const [cartOpen, setCartOpen] = useState(false);
   const toast = useToast();
 
   // C-5 (DELTA 3): order-create idempotency key for the current submit attempt.
@@ -266,41 +318,103 @@ export function POSLayout() {
     }
   }, [user]);
 
-  const activeSteps = store.sale_type === 'quick_sale' ? QUICK_STEPS : STEPS.map(s => s.id);
-  const currentStepIndex = activeSteps.indexOf(store.current_step);
-  const visibleSteps = STEPS.filter(s => activeSteps.includes(s.id));
+  // Persisted checkout-flow preference (condensed default, classic toggle).
+  const [workflow, setWorkflow] = usePOSWorkflow();
 
-  const canProceed = useMemo(() => {
-    switch (store.current_step) {
+  // Active flow's input groups (each maps to one rail entry; a condensed group
+  // may render several canonical steps). The 'complete' done-state is handled
+  // separately and is never part of this navigable sequence.
+  const flowGroups = useMemo(
+    () => buildFlowGroups(workflow, store.sale_type),
+    [workflow, store.sale_type],
+  );
+
+  // Which group is the store's current canonical step inside? Falls back to the
+  // first group (e.g. if a persisted step isn't a member of the active flow —
+  // a held-bill restored onto 'review' lands in the Pay & Review group in
+  // condensed mode and the Review group in classic).
+  const isComplete = store.current_step === 'complete';
+  const currentGroupIndex = useMemo(() => {
+    const i = flowGroups.findIndex((g) => g.members.includes(store.current_step));
+    return i >= 0 ? i : 0;
+  }, [flowGroups, store.current_step]);
+  const currentGroup = flowGroups[currentGroupIndex];
+
+  // Per-canonical-step completion check (reused for group validation + the
+  // condensed merged-step guard). Unchanged business rules — just factored out.
+  const stepReady = useCallback((s: POSStep): boolean => {
+    switch (s) {
       case 'customer': return !!store.customer && !!store.salesperson_id;
-      case 'prescription': return !!store.prescription;
+      case 'prescription':
+        // Rx is only mandatory for prescription orders; Quick sales pass.
+        return store.sale_type === 'quick_sale' ? true : !!store.prescription;
       case 'products': return (store.cart || []).length > 0;
       case 'review': return (store.cart || []).length > 0;
-      case 'payment': {
+      case 'payment':
         if (store.is_advance_payment) return store.getTotalPaid() > 0;
         return store.getBalance() <= 0.01;
-      }
       default: return true;
     }
-  }, [store.current_step, store.customer, store.salesperson_id, store.prescription, store.cart, store.payments, store.is_advance_payment]);
+  }, [store.customer, store.salesperson_id, store.prescription, store.sale_type, store.cart, store.payments, store.is_advance_payment]);
+
+  // A group is satisfied only when EVERY canonical step it renders is ready —
+  // so the merged condensed "Products & Rx" still enforces the Rx-attached gate
+  // for prescription orders AND cart-not-empty, and "Pay & Review" still
+  // enforces the payment-balance guard. Nothing relaxes.
+  const canProceed = useMemo(
+    () => (currentGroup ? currentGroup.members.every(stepReady) : true),
+    [currentGroup, stepReady],
+  );
+
+  // Whether the current group is the final INPUT group (its primary action is
+  // "Complete order", i.e. it renders the payment step).
+  const isFinalInputGroup = !!currentGroup && currentGroup.members.includes('payment');
+
+  // Flow-aware navigation. We drive the canonical store step directly to each
+  // group's anchor rather than store.nextStep/prevStep (whose linear 6-step
+  // walk doesn't know about condensed grouping).
+  const goToGroup = useCallback((idx: number) => {
+    const g = flowGroups[idx];
+    if (g) startTransition(() => store.setStep(g.anchor));
+  }, [flowGroups, store]);
+
+  const goNext = useCallback(() => {
+    if (currentGroupIndex < flowGroups.length - 1) goToGroup(currentGroupIndex + 1);
+  }, [currentGroupIndex, flowGroups.length, goToGroup]);
+
+  const goBack = useCallback(() => {
+    if (currentGroupIndex > 0) goToGroup(currentGroupIndex - 1);
+  }, [currentGroupIndex, goToGroup]);
 
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'F2') { e.preventDefault(); startTransition(() => store.setStep('products')); }
-      if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); startTransition(() => store.setStep('payment')); }
-      if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); startTransition(() => store.prevStep()); }
-      if (e.key === 'F4' && (store.cart || []).length > 0) { e.preventDefault(); setHoldConfirm(true); }
-      if (e.key === 'Enter' && e.ctrlKey && store.current_step === 'payment') { e.preventDefault(); handleCreateOrder(); }
-      if (e.key === 'Enter' && !e.ctrlKey && store.current_step !== 'complete' && store.current_step !== 'payment') {
+      // F2 jumps to the group that renders the products catalog; F9 to the
+      // group that renders the payment surface — works in both flows.
+      if (e.key === 'F2') {
         e.preventDefault();
-        if (canProceed) startTransition(() => store.nextStep());
+        const i = flowGroups.findIndex((g) => g.members.includes('products'));
+        if (i >= 0) goToGroup(i);
+      }
+      if (e.key === 'F9' && (store.cart || []).length > 0) {
+        e.preventDefault();
+        const i = flowGroups.findIndex((g) => g.members.includes('payment'));
+        if (i >= 0) goToGroup(i);
+      }
+      if (e.key === 'Escape' && !isComplete && currentGroupIndex > 0) { e.preventDefault(); goBack(); }
+      if (e.key === 'F4' && (store.cart || []).length > 0) { e.preventDefault(); setHoldConfirm(true); }
+      // Ctrl+Enter submits when the final input group (payment) is showing.
+      if (e.key === 'Enter' && e.ctrlKey && isFinalInputGroup) { e.preventDefault(); handleCreateOrder(); }
+      // Plain Enter advances on non-final, non-complete groups.
+      if (e.key === 'Enter' && !e.ctrlKey && !isComplete && !isFinalInputGroup) {
+        e.preventDefault();
+        if (canProceed) goNext();
       }
     };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
-  }, [(store.cart || []).length, store.current_step, canProceed]);
+  }, [(store.cart || []).length, isComplete, isFinalInputGroup, currentGroupIndex, flowGroups, goToGroup, goNext, goBack, canProceed]);
 
   async function handleCreateOrder() {
     if (store.is_processing) return;
@@ -492,8 +606,7 @@ export function POSLayout() {
     }
   }
 
-  // Editorial title + subtitle for each wizard step — rendered in the work
-  // surface header so step components themselves don't need to know about it.
+  // Editorial title + subtitle for each canonical step.
   const STEP_HEADERS: Record<POSStep, { title: string; sub: string }> = {
     customer: { title: "Who's buying?", sub: 'Search an existing customer or create a walk-in. Phone lookup picks up family members automatically.' },
     prescription: { title: 'Capture Rx', sub: "Pull the customer's active prescription or enter a new one. Optometrist role required for tested-at-store Rx." },
@@ -502,9 +615,26 @@ export function POSLayout() {
     payment: { title: 'Tender', sub: 'Single or split tender across Cash / UPI / Card / EMI / Advance. Round-off at 50p if enabled.' },
     complete: { title: 'Done.', sub: 'Order placed. Receipt printed. Workshop job card auto-created for Rx orders.' },
   };
-  const header = STEP_HEADERS[store.current_step];
+  // Editorial header for the active GROUP. For single-member groups (classic,
+  // and the condensed Customer group) reuse the per-step header; for merged
+  // condensed groups give a combined title.
+  const GROUP_HEADERS: Record<string, { title: string; sub: string }> = {
+    'condensed:products': { title: 'Products & prescription', sub: 'Capture or attach the Rx, then add frames, lenses, contacts and accessories.' },
+    'condensed:payment': { title: 'Pay & review', sub: 'Final check — discount, GST and delivery on one side, tender on the other.' },
+  };
+  const header = isComplete
+    ? STEP_HEADERS.complete
+    : (workflow === 'condensed' && GROUP_HEADERS[`condensed:${currentGroup?.key}`])
+      || STEP_HEADERS[currentGroup?.anchor ?? 'customer'];
+
+  // Cart column shows on any input group that renders products/review/
+  // prescription — in condensed that's the merged Products & Rx and Pay &
+  // Review groups; in classic the original product/review/prescription steps.
+  const cartRelevantSteps: POSStep[] = ['products', 'review', 'prescription'];
   const showCartCol =
-    (['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) &&
+    !isComplete &&
+    !!currentGroup &&
+    currentGroup.members.some((m) => cartRelevantSteps.includes(m)) &&
     (store.cart || []).length > 0;
 
   // Hooks-rule-safe early return: every useState / useEffect / useMemo /
@@ -531,37 +661,68 @@ export function POSLayout() {
     <div className="pos-body">
       {/* ── Left rail: vertical stepper + actions + held bills ── */}
       <aside className="steps-rail">
-        <span className="eyebrow">Checkout</span>
+        <span className="eyebrow">Checkout · {flowGroups.length} steps</span>
 
-        {visibleSteps.map((step) => {
-          const stepIdx = activeSteps.indexOf(step.id);
-          const isActive = step.id === store.current_step;
-          const isComplete = stepIdx < currentStepIndex;
-          const Icon = step.icon;
+        {/* Workflow toggle — condensed (default) vs classic. Inline in the POS
+            shell so a cashier can switch at the terminal; persisted to
+            localStorage (ims_pos_workflow). Disabled once an order is complete
+            so the rail can't reshuffle mid-receipt. */}
+        <div className="pos-flow-toggle" role="group" aria-label="Checkout flow">
+          <button
+            type="button"
+            className={workflow === 'condensed' ? 'on' : ''}
+            onClick={() => setWorkflow('condensed')}
+            disabled={isComplete}
+            title="Condensed 3-step checkout (faster)"
+          >
+            Condensed
+          </button>
+          <button
+            type="button"
+            className={workflow === 'classic' ? 'on' : ''}
+            onClick={() => setWorkflow('classic')}
+            disabled={isComplete}
+            title="Classic 6-step wizard"
+          >
+            Classic
+          </button>
+        </div>
+
+        {flowGroups.map((group, idx) => {
+          const isActive = !isComplete && idx === currentGroupIndex;
+          const isDone = isComplete || idx < currentGroupIndex;
+          const Icon = group.icon;
+          // Sub-label reflects the merged group's live state.
+          let sub = group.sub;
+          if (group.key === 'customer') sub = store.customer?.name ?? 'Pick customer';
+          else if (group.members.includes('products')) {
+            const n = (store.cart || []).length;
+            const rx = store.sale_type === 'prescription_order'
+              ? (store.prescription ? 'Rx ✓' : 'Rx needed') + ' · '
+              : '';
+            sub = `${rx}${n} ${n === 1 ? 'item' : 'items'}`;
+          } else if (group.members.includes('payment')) {
+            sub = store.getBalance() <= 0.01 ? 'Paid in full' : 'Discount, GST & tender';
+          }
           return (
             <button
-              key={step.id}
+              key={group.key}
               type="button"
-              className={'step' + (isActive ? ' active' : '') + (isComplete ? ' done' : '')}
+              className={'step' + (isActive ? ' active' : '') + (isDone ? ' done' : '')}
               onClick={() => {
-                if (isComplete) startTransition(() => store.setStep(step.id));
+                // Allow jumping back to a completed group (same guard as before:
+                // only completed/active groups are clickable).
+                if (isDone && !isComplete) goToGroup(idx);
               }}
-              disabled={!isComplete && !isActive}
-              title={step.label}
+              disabled={(!isDone && !isActive) || isComplete}
+              title={group.label}
             >
               <div className="step-num">
-                {isComplete ? '' : <Icon className="w-3 h-3" />}
+                {isDone && !isActive ? '' : <Icon className="w-3 h-3" />}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="step-title">{step.label}</div>
-                <div className="step-sub">
-                  {step.id === 'customer' && (store.customer?.name ?? 'Pick customer')}
-                  {step.id === 'prescription' && (store.prescription ? 'Rx attached' : 'Optional')}
-                  {step.id === 'products' && `${(store.cart || []).length} items`}
-                  {step.id === 'review' && 'Discount & GST'}
-                  {step.id === 'payment' && 'Split tender OK'}
-                  {step.id === 'complete' && 'Print receipt'}
-                </div>
+                <div className="step-title">{group.label}</div>
+                <div className="step-sub">{sub}</div>
               </div>
             </button>
           );
@@ -690,10 +851,9 @@ export function POSLayout() {
           {/* Editorial header */}
           <div className="work-head">
             <div className="eyebrow mb-1.5">
-              {/* DELTAS Critical #5: showed "Step 0/4" when
-                  store.current_step wasn't in activeSteps yet (indexOf
-                  returns -1 → 0 with the +1). Clamp to 1. */}
-              Step {Math.max(1, currentStepIndex + 1)} / {visibleSteps.length} · {visibleSteps.find((s) => s.id === store.current_step)?.label}
+              {isComplete
+                ? 'Complete'
+                : `Step ${Math.max(1, currentGroupIndex + 1)} / ${flowGroups.length} · ${currentGroup?.label ?? ''}`}
             </div>
             <h2>{header.title}</h2>
             <p className="sub">{header.sub}</p>
@@ -719,58 +879,98 @@ export function POSLayout() {
             </div>
           )}
 
-          {/* Step content (unchanged components).
-              Audit 2026-04-21 flagged sticky-footer overlapping row-3
-              products on Step 2 at 900px viewport. paddingBottom below
-              gives the last row scroll clearance past the footer. */}
-          <div className="flex-1 min-h-0 pb-20 overflow-y-auto">
-            {store.current_step === 'customer' && <StepCustomer />}
-            {store.current_step === 'prescription' && (
-              <StepPrescription
-                onShowModal={() => setShowPrescriptionModal(true)}
-                onShowNew={() => setShowNewPrescription(true)}
-              />
+          {/* Step content — renders every canonical step in the active group.
+              The work area is a flex column with THIS region scrolling and the
+              footer pinned (flex:0 0 auto) below; pb gives the last row scroll
+              clearance. Components are REUSED verbatim across both flows — in
+              condensed mode merged groups simply stack the same components on
+              one scrollable surface (Rx above Products; Review above Payment). */}
+          <div className="pos-scroll">
+            {/* Customer (its own group in both flows) */}
+            {currentGroup?.members.includes('customer') && <StepCustomer />}
+
+            {/* Merged "Products & Rx" group renders the Prescription surface
+                ABOVE the Products catalog in one scroll. The Rx surface only
+                shows for prescription orders (StepPrescription is gated). */}
+            {currentGroup?.members.includes('prescription') && store.sale_type === 'prescription_order' && (
+              <section className={currentGroup.members.includes('products') ? 'pos-merge-sec' : undefined}>
+                {currentGroup.members.includes('products') && (
+                  <div className="pos-merge-cap">Prescription</div>
+                )}
+                <StepPrescription
+                  onShowModal={() => setShowPrescriptionModal(true)}
+                  onShowNew={() => setShowNewPrescription(true)}
+                />
+              </section>
             )}
-            {store.current_step === 'products' && <StepProducts onOpenLensModal={() => setShowLensModal(true)} />}
-            {store.current_step === 'review' && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
-            {store.current_step === 'payment' && <StepPayment />}
-            {store.current_step === 'complete' && (
+            {currentGroup?.members.includes('products') && (
+              <section className={currentGroup.members.includes('prescription') && store.sale_type === 'prescription_order' ? 'pos-merge-sec' : undefined}>
+                {currentGroup.members.includes('prescription') && store.sale_type === 'prescription_order' && (
+                  <div className="pos-merge-cap">Products</div>
+                )}
+                <StepProducts onOpenLensModal={() => setShowLensModal(true)} />
+              </section>
+            )}
+
+            {/* Merged "Pay & Review" group: Review + Payment side by side on
+                desktop (stacked on narrow). In classic each is its own group. */}
+            {currentGroup && currentGroup.members.includes('review') && currentGroup.members.includes('payment') ? (
+              <div className="pos-payreview">
+                <section className="pos-merge-sec">
+                  <div className="pos-merge-cap">Review</div>
+                  <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />
+                </section>
+                <section className="pos-merge-sec">
+                  <div className="pos-merge-cap">Payment</div>
+                  <StepPayment />
+                </section>
+              </div>
+            ) : (
+              <>
+                {currentGroup?.members.includes('review') && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
+                {currentGroup?.members.includes('payment') && <StepPayment />}
+              </>
+            )}
+
+            {/* Complete — the done state (not a navigable group) */}
+            {isComplete && (
               <StepComplete onPrint={() => setShowReceipt(true)} onReset={handleFullReset} />
             )}
           </div>
 
-          {/* Sticky footer: Back + cart hint + Continue/Complete */}
-          <div className="pos-footer">
-            <div className="left">
-              {currentStepIndex > 0 && store.current_step !== 'complete' && (
-                <button
-                  type="button"
-                  onClick={() => startTransition(() => store.prevStep())}
-                  className="btn sm"
-                >
-                  <ChevronLeft className="w-4 h-4" /> Back
-                </button>
-              )}
-              {(store.cart || []).length > 0 && (
-                <span className="cart-hint">
-                  <strong>{(store.cart || []).length}</strong>{' '}
-                  {(store.cart || []).length === 1 ? 'item' : 'items'} · <strong>₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</strong>
-                </span>
-              )}
-            </div>
-            {store.current_step !== 'complete' && (
+          {/* Bottom action bar — flex:0 0 auto, pinned to the bottom of the
+              work area (the content region above scrolls independently). */}
+          {!isComplete && (
+            <div className="pos-footer">
+              <div className="left">
+                {currentGroupIndex > 0 && (
+                  <button
+                    type="button"
+                    onClick={goBack}
+                    className="btn sm"
+                  >
+                    <ChevronLeft className="w-4 h-4" /> Back
+                  </button>
+                )}
+                {(store.cart || []).length > 0 && (
+                  <span className="cart-hint">
+                    <strong>{(store.cart || []).length}</strong>{' '}
+                    {(store.cart || []).length === 1 ? 'item' : 'items'} · <strong>₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</strong>
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => {
                   setErrorMsg(null);
-                  if (store.current_step === 'payment') {
+                  if (isFinalInputGroup) {
                     handleCreateOrder();
                   } else {
-                    startTransition(() => store.nextStep());
+                    goNext();
                   }
                 }}
                 disabled={!canProceed || store.is_processing}
-                className={'btn sm ' + (store.current_step === 'payment' ? 'accent' : 'primary')}
+                className={'btn sm ' + (isFinalInputGroup ? 'accent' : 'primary')}
               >
                 {store.is_processing ? (
                   <>
@@ -785,20 +985,39 @@ export function POSLayout() {
                   </>
                 ) : (
                   <>
-                    {store.current_step === 'payment' ? 'Complete order' : 'Continue'}
+                    {isFinalInputGroup ? 'Complete order' : 'Continue'}
                     <ChevronRight className="w-4 h-4" />
                   </>
                 )}
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
-        {/* Right cart column — only during cart-relevant steps */}
+        {/* Right cart column — inline on desktop; an off-canvas drawer on
+            tablet/phone (<=1024px) toggled by the FAB / topbar control with a
+            scrim. `open` only affects the narrow-width slide-over; desktop
+            ignores it. Rendered only during cart-relevant groups. */}
         {showCartCol && (
-          <aside className="pos-cart-col">
-            <CartSidebar />
-          </aside>
+          <>
+            <aside className={'pos-cart-col' + (cartOpen ? ' open' : '')}>
+              <button
+                type="button"
+                className="pos-cart-close btn sm ghost"
+                onClick={() => setCartOpen(false)}
+                aria-label="Close cart"
+                title="Close cart"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <CartSidebar />
+            </aside>
+            <div
+              className={'pos-cart-scrim' + (cartOpen ? ' on' : '')}
+              onClick={() => setCartOpen(false)}
+              aria-hidden="true"
+            />
+          </>
         )}
       </div>
 
@@ -812,14 +1031,16 @@ export function POSLayout() {
         }}
       />
 
-      {/* Mobile floating cart FAB — unchanged behavior */}
+      {/* Floating cart FAB (tablet/phone). Opens the off-canvas cart drawer
+          rather than jumping the wizard to the review step — so it works the
+          same in both flows and never disrupts the current step. */}
       {showCartCol && (
-        <div className="tablet:hidden fixed bottom-20 right-4 z-30">
+        <div className="pos-cart-fab fixed bottom-20 right-4 z-30">
           <button
-            onClick={() => store.setStep('review')}
+            onClick={() => setCartOpen(true)}
             className="w-14 h-14 rounded-full shadow-lg flex items-center justify-center relative touch-manipulation"
             style={{ background: 'var(--bv)', color: '#fff' }}
-            aria-label={`Review cart (${(store.cart || []).length} items)`}
+            aria-label={`Open cart (${(store.cart || []).length} items)`}
           >
             <ShoppingCart className="w-6 h-6" />
             <span
@@ -1478,10 +1699,18 @@ function StepCustomer() {
 // ============================================================================
 // STEP 2: Prescription
 // ============================================================================
+type RxSource = 'last' | 'fresh' | 'external' | 'none';
+
 function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void; onShowNew: () => void }) {
   const store = usePOSStore();
   const [recentRx, setRecentRx] = useState<any[]>([]);
   const [rxLoading, setRxLoading] = useState(false);
+  // Rx source-gating (additive): the existing Rx UI (recent list / browse-all /
+  // new-Rx / validation / expiry gate / CL exemption) stays exactly as-is, but
+  // it is now revealed only AFTER the operator picks a source — so the matrix /
+  // flags don't appear cold. This is purely an initial empty-state in front of
+  // the existing surface; it removes nothing.
+  const [rxSource, setRxSource] = useState<RxSource | null>(null);
 
   const lookupId = store.patient?.id || store.customer?.id;
   useEffect(() => {
@@ -1564,6 +1793,8 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
     return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
   };
 
+  // An already-attached Rx always shows the selected panel (source-gating is
+  // only an entry empty-state; it never hides an attached Rx).
   if (store.prescription) {
     return (
       <div className="w-full max-w-5xl mx-auto space-y-4">
@@ -1578,10 +1809,68 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
       </div>
     );
   }
+
+  // Pick a source. fresh/external route straight into the existing new-Rx form
+  // (external = an Rx from an outside doctor, transcribed/uploaded via the same
+  // form; the form's source defaults to FROM_DOCTOR for non-optometrists).
+  const pickSource = (s: RxSource) => {
+    setRxSource(s);
+    if (s === 'fresh' || s === 'external') onShowNew();
+  };
+  const srcBtn = (id: RxSource, label: string) => (
+    <button
+      type="button"
+      onClick={() => pickSource(id)}
+      aria-pressed={rxSource === id}
+      className={'btn sm' + (rxSource === id ? ' primary' : '')}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <div className="w-full max-w-5xl mx-auto space-y-6">
-      <div><h3 className="font-semibold text-gray-900 mb-1">Prescription Required</h3><p className="text-sm text-gray-500">Select existing or enter a new prescription.</p></div>
+      <div><h3 className="font-semibold text-gray-900 mb-1">Prescription</h3><p className="text-sm text-gray-500">Pick a source to begin — the Rx surface fills in below.</p></div>
 
+      {/* Source picker — always visible. */}
+      <div className="flex flex-wrap gap-2">
+        {srcBtn('last', 'Use last exam')}
+        {srcBtn('fresh', '+ Fresh Rx')}
+        {srcBtn('external', 'External (upload)')}
+        {srcBtn('none', 'No Rx · accessory')}
+      </div>
+
+      {/* Empty state — before a source is chosen, nothing else shows. */}
+      {rxSource === null && (
+        <div className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center">
+          <div className="w-12 h-12 rounded-full bg-gray-100 text-gray-400 flex items-center justify-center mx-auto mb-3 font-mono text-sm">Rx</div>
+          <p className="font-semibold text-gray-700">No prescription selected yet</p>
+          <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
+            Pick a source above — last exam, a fresh Rx, an uploaded external Rx, or skip for accessories — and the prescription surface fills in here.
+          </p>
+        </div>
+      )}
+
+      {/* Accessory-only — no Rx required. The operator can still pick another
+          source to attach one; the products step does not require a lens. */}
+      {rxSource === 'none' && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-gray-700">
+          <strong className="text-gray-900">Accessory-only sale.</strong> No prescription required for this order — add frames or accessories in the next step. Pick another source above if the customer does need lenses.
+        </div>
+      )}
+
+      {/* External-Rx context note. The new-Rx form (opened on selection) is the
+          capture surface; this just frames it. */}
+      {rxSource === 'external' && (
+        <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 text-xs text-amber-700">
+          External prescription from an outside doctor — transcribe the values in the New Prescription form so the order can be reconciled against stock.
+        </div>
+      )}
+
+      {/* Existing Rx surface — revealed once a non-accessory source is picked.
+          Everything below is the original UI (recent valid Rx list, Browse All,
+          New Prescription, no-Rx-found notice). Untouched behaviour. */}
+      {(rxSource === 'last' || rxSource === 'fresh' || rxSource === 'external') && (<>
       {rxLoading && (
         <div className="text-sm text-gray-500 animate-pulse">Checking for prescriptions...</div>
       )}
@@ -1635,6 +1924,7 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
           <AlertTriangle className="w-4 h-4 flex-shrink-0" /> No prescriptions found. Enter manually or send customer for an eye test first.
         </div>
       )}
+      </>)}
     </div>
   );
 }
