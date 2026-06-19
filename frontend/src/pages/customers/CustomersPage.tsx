@@ -44,6 +44,7 @@ import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHi
 import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
 import { PrescriptionForm } from '../../components/pos/PrescriptionForm';
 import { AutoSearch } from '../../components/common/AutoSearch';
+import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
@@ -365,7 +366,7 @@ export function CustomersPage() {
   // Handle adding a patient to the selected customer
   const handleAddPatient = async () => {
     if (!selectedCustomer || !patientForm.name.trim()) {
-      toast.error('Patient name is required');
+      toast.error('Customer name is required');
       return;
     }
     setIsAddingPatient(true);
@@ -378,7 +379,7 @@ export function CustomersPage() {
         dob: patientForm.dateOfBirth || undefined,
         relation: patientForm.relation || 'Self',
       } as any);
-      toast.success('Patient added successfully');
+      toast.success('Customer added successfully');
       setShowAddPatientModal(false);
       setPatientForm({ name: '', mobile: '', dateOfBirth: '', relation: 'Self' });
       // Reload the customer to get updated patient list
@@ -389,7 +390,7 @@ export function CustomersPage() {
         setSelectedCustomer(updated);
       }
     } catch {
-      toast.error('Failed to add patient');
+      toast.error('Failed to add customer');
     } finally {
       setIsAddingPatient(false);
     }
@@ -420,32 +421,64 @@ export function CustomersPage() {
         <div className="card">
           <div className="flex flex-col tablet:flex-row gap-4">
             <div className="flex-1">
-              <AutoSearch<any>
+              {/* Account -> member search. The account holder (the `customers`
+                  master record) is the parent row; matched family members are
+                  shown indented beneath, labelled "Customer" (only the clinical
+                  module calls them "Patient"). buildCustomerSearchHits keeps the
+                  shared kind/patient discriminator unchanged. */}
+              <AutoSearch<CustomerSearchHit>
                 fetchResults={async (q, storeId) => {
                   try {
                     const res = await customerApi.getCustomers({ search: q, storeId, limit: 8 });
-                    return res?.customers || res || [];
+                    const list = (res as any)?.customers || (res as any) || [];
+                    return buildCustomerSearchHits(list, q);
                   } catch {
-                    return customers.filter(c =>
+                    const fallback = customers.filter(c =>
                       c.name?.toLowerCase().includes(q.toLowerCase()) ||
                       c.phone?.includes(q) ||
                       c.email?.toLowerCase().includes(q.toLowerCase())
                     );
+                    return buildCustomerSearchHits(fallback, q);
                   }
                 }}
-                renderItem={(cust) => (
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-sm font-bold text-gray-500">{cust.name?.charAt(0)}</div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{cust.name}</p>
-                      <p className="text-xs text-gray-500">{cust.phone} {cust.email ? `· ${cust.email}` : ''}</p>
+                renderItem={(hit) => {
+                  const isMember = hit.kind === 'patient';
+                  const initial = (hit.displayName || '?').charAt(0).toUpperCase();
+                  return (
+                    <div className={clsx('flex items-center gap-3', isMember && 'pl-5')}>
+                      <div className={clsx(
+                        'w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white',
+                        isMember ? 'bg-blue-600' : 'bg-bv-red-700'
+                      )}>{initial}</div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">
+                          {hit.displayName}
+                          <span className={clsx(
+                            'ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded',
+                            isMember ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                          )}>{isMember ? 'Customer' : 'Account'}</span>
+                        </p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {hit.phone || 'No phone'}
+                          {isMember ? ` · under ${hit.accountName}` : (hit.customer?.email ? ` · ${hit.customer.email}` : '')}
+                        </p>
+                      </div>
+                      {!isMember && (
+                        <span className="text-[10px] px-2 py-0.5 bg-gray-100 rounded-full text-gray-500">{hit.customer?.customerType || hit.customer?.customer_type || 'B2C'}</span>
+                      )}
                     </div>
-                    <span className="text-[10px] px-2 py-0.5 bg-gray-100 rounded-full text-gray-500">{cust.customerType || 'B2C'}</span>
-                  </div>
-                )}
-                onSelect={(cust) => { setSelectedCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any); }}
+                  );
+                }}
+                onSelect={(hit) => {
+                  // Selecting an account or a member opens the same Customer 360
+                  // detail (account-scoped), with the chosen member pre-selected.
+                  handleSelectCustomer(hit.customer as Customer);
+                  if (hit.kind === 'patient' && hit.patient) {
+                    handleSelectPatient(hit.patient as Patient);
+                  }
+                }}
                 onInputChange={(val) => setSearchQuery(val)}
-                getKey={(cust) => cust.customer_id || cust._id || cust.id || cust.phone || cust.name || 'unknown'}
+                getKey={(hit) => hit.key}
                 placeholder="Search by name, phone, or email..."
                 emptyMessage="No customers found"
               />
@@ -503,10 +536,17 @@ export function CustomersPage() {
             </div>
           ) : (
             <>
+            {/* Account -> member hierarchy. Each `customers` master record is the
+                parent ("Account"); its family members render indented beneath it
+                and are labelled "Customer" (the clinical module is the only place
+                they stay "Patient"). Selecting either opens the same detail view;
+                a member is pre-selected when its row is clicked. */}
             <div className="divide-y divide-gray-200">
-              {paginatedCustomers.map((customer, idx) => (
+              {paginatedCustomers.map((customer, idx) => {
+                const members = customer.patients || [];
+                return (
+                <div key={customer.id || idx}>
                 <button
-                  key={customer.id || idx}
                   onClick={() => handleSelectCustomer(customer)}
                   className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-colors text-left"
                 >
@@ -522,7 +562,10 @@ export function CustomersPage() {
                       )}
                     </div>
                     <div>
-                      <p className="font-medium text-gray-900">{customer.name}</p>
+                      <p className="font-medium text-gray-900">
+                        {customer.name}
+                        <span className="ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">Account</span>
+                      </p>
                       <div className="flex items-center gap-3 text-sm text-gray-500">
                         <span className="flex items-center gap-1">
                           <Phone className="w-3 h-3" />
@@ -540,7 +583,7 @@ export function CustomersPage() {
                   <div className="flex items-center gap-4">
                     <div className="text-right">
                       <p className="text-sm text-gray-500">
-                        {customer.patients?.length || 0} patient{(customer.patients?.length || 0) !== 1 ? 's' : ''}
+                        {members.length} member{members.length !== 1 ? 's' : ''}
                       </p>
                       {customer.customerType === 'B2B' && customer.gstNumber && (
                         <p className="text-xs text-gray-500">GST: {customer.gstNumber}</p>
@@ -549,7 +592,37 @@ export function CustomersPage() {
                     <ChevronRight className="w-5 h-5 text-gray-500" />
                   </div>
                 </button>
-              ))}
+                {/* Members (Customers), indented beneath their account */}
+                {members.map((member, mIdx) => {
+                  const memberKey = (member as any).patient_id || (member as any).id || (member as any)._id || mIdx;
+                  return (
+                    <button
+                      key={`m-${memberKey}`}
+                      onClick={() => { handleSelectCustomer(customer); handleSelectPatient(member); }}
+                      className="w-full flex items-center justify-between py-2.5 pr-4 pl-14 hover:bg-gray-50 transition-colors text-left border-t border-gray-100"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
+                          <User className="w-4 h-4 text-blue-600" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {member.name}
+                            <span className="ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">Customer</span>
+                          </p>
+                          <p className="text-xs text-gray-500 truncate">
+                            {member.relation || 'Member'}
+                            {((member as any).mobile || (member as any).phone) ? ` · ${(member as any).mobile || (member as any).phone}` : ''}
+                          </p>
+                        </div>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    </button>
+                  );
+                })}
+                </div>
+                );
+              })}
             </div>
             <Pagination
               currentPage={currentPage}
@@ -805,10 +878,11 @@ export function CustomersPage() {
           </div>
         </div>
 
-        {/* Patients */}
+        {/* Customers (the account's family members). Clinical screens call them
+            "Patients"; here in CRM they are "Customers" under the Account. */}
         <div className="card">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="font-semibold text-gray-900">Patients</h2>
+            <h2 className="font-semibold text-gray-900">Customers</h2>
             {canAddCustomer && (
               <button
                 onClick={() => {
@@ -847,7 +921,10 @@ export function CustomersPage() {
                     : 'bg-gray-50 hover:bg-gray-100'
                 )}
               >
-                <p className="font-medium text-gray-900">{patient.name}</p>
+                <p className="font-medium text-gray-900">
+                  {patient.name}
+                  <span className="ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">Customer</span>
+                </p>
                 <p className="text-sm text-gray-500">
                   {patient.relation}
                   {patient.dateOfBirth && ` • Born ${formatDate(patient.dateOfBirth)}`}
@@ -856,7 +933,7 @@ export function CustomersPage() {
               );
             })}
             {(!selectedCustomer?.patients || selectedCustomer.patients.length === 0) && (
-              <p className="text-sm text-gray-500 text-center py-4">No patients added</p>
+              <p className="text-sm text-gray-500 text-center py-4">No customers added</p>
             )}
           </div>
         </div>
@@ -1009,14 +1086,14 @@ export function CustomersPage() {
           <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-gray-900">Add Patient</h2>
+                <h2 className="text-xl font-bold text-gray-900">Add Customer</h2>
                 <button onClick={() => setShowAddPatientModal(false)} className="p-2 hover:bg-gray-100 rounded-lg" aria-label="Close" title="Close">
                   <X className="w-5 h-5" />
                 </button>
               </div>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Patient Name *</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name *</label>
                   <input
                     type="text"
                     value={patientForm.name}
