@@ -4,7 +4,7 @@
 // Pages render inside <Outlet /> within the Shell's page-body.
 // ============================================================================
 
-import { Outlet, useLocation } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useEffect, useMemo } from 'react';
 import { Eye } from 'lucide-react';
 import { Shell, type Crumb } from '../shell';
@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { loadHsnRates, loadPricingMode } from '../../constants/gstRuntime';
 import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
 import { IdleLogoutWatcher } from '../auth/IdleLogoutWatcher';
+import { hasNoActiveStore, isMultiStoreCapable } from '../../utils/storeAccess';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
 const SEGMENT_LABELS: Record<string, string> = {
@@ -100,6 +101,16 @@ export function AppLayout() {
   // for /auth/change-password's verify step — this is the UX enforcement.
   if (user?.mustChangePassword) {
     return <ForcePasswordChange />;
+  }
+
+  // Safety net for the post-login store selector: a multi-store user who lands
+  // anywhere in the app with NO active store chosen (fresh login that skipped
+  // the picker, or a cleared selection) is sent to /select-store first. Single-
+  // store users are never multi-store-capable, so they're untouched. /select-
+  // store lives OUTSIDE this layout, so there's no redirect loop; and it auto-
+  // proceeds when there's <=1 store, so even a degenerate case can't trap.
+  if (user && isMultiStoreCapable(user) && hasNoActiveStore(user)) {
+    return <Navigate to="/select-store" replace />;
   }
 
   return (

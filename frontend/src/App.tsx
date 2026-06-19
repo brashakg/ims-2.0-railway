@@ -19,6 +19,7 @@ import { Analytics } from '@vercel/analytics/react';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
+const StoreSelectPage = lazy(() => import('./pages/auth/StoreSelectPage').then(m => ({ default: m.StoreSelectPage })));
 const VendorPortalPage = lazy(() => import('./pages/vendor-portal/VendorPortalPage'));
 const OrderTrackingPage = lazy(() => import('./pages/portal/OrderTrackingPage'));
 const RxPortalPage = lazy(() => import('./pages/portal/RxPortalPage'));
@@ -202,6 +203,20 @@ function App() {
                       OTP-gated (medical data). See pages/portal/. */}
                   <Route path="/track/:token" element={<OrderTrackingPage />} />
                   <Route path="/rx-portal" element={<RxPortalPage />} />
+
+                {/* Post-login store selector — auth-gated but rendered FULL-SCREEN
+                    (no AppLayout shell). Multi-store roles land here after login to
+                    pick the active store; single-store users auto-proceed. Kept
+                    OUTSIDE the AppLayout route so its guard can redirect here
+                    without a loop. */}
+                <Route
+                  path="/select-store"
+                  element={
+                    <ProtectedRoute>
+                      <StoreSelectPage />
+                    </ProtectedRoute>
+                  }
+                />
 
                 {/* Protected routes with layout */}
                 <Route
