@@ -107,9 +107,9 @@ const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => (
 const OpeningStockImport = lazy(() => import('./pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const ActivityLogPage = lazy(() => import('./pages/admin/ActivityLogPage'));
-// /catalog/add — mode-switching shell: defaults to fast Quick Add (Single);
-// ?mode=guided renders the step-by-step wizard (Guided Add).
-const ProductAddShell = lazy(() => import('./pages/catalog/ProductAddShell'));
+// /catalog/add — the single product-add door (Quick Add). Guided + Bulk modes
+// were removed; Quick Add absorbed every field/section Guided had.
+const QuickAddPage = lazy(() => import('./pages/catalog/QuickAddPage'));
 const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
 const BuyDeskPage = lazy(() => import('./pages/catalog/BuyDeskPage'));
 const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
@@ -1221,12 +1221,12 @@ function App() {
                     }
                   />
 
-                  {/* Catalog / Add Product — Quick Add (default) + Guided wizard */}
+                  {/* Catalog / Add Product — single door (Quick Add) */}
                   <Route
                     path="catalog/add"
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
-                        <ProductAddShell />
+                        <QuickAddPage />
                       </ProtectedRoute>
                     }
                   />

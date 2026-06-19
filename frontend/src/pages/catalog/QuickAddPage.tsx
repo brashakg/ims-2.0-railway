@@ -1,14 +1,19 @@
 // ============================================================================
-// IMS 2.0 - Quick Add (fast, one-screen product create)
+// IMS 2.0 - Quick Add (the single product-add door)
 // ============================================================================
-// Phase A of the product-add redesign. Collapses the 6-step Guided wizard into
-// ONE scrollable, keyboard-first screen WITHOUT dropping any field:
+// The SOLE product-add screen at /catalog/add. The older "Guided" (6-step
+// wizard) and "Bulk" (Rapid Grid) modes + the Single|Guided|Bulk toggle were
+// removed; this one-screen form absorbed EVERY field, section, button and
+// validation Guided had, so nothing was lost:
 //   - Accordion sections: Identity / Pricing / Inventory / Online
 //   - Smart defaults (category -> HSN/GST auto) collapsed under "Advanced"
-//   - Live Review summary rail on the right
+//     (incl. HSN-required marker + GST-compliance note carried over from Guided)
+//   - Cost price + margin are role-gated (F35), as in Guided
+//   - Product Images placeholder section (parity with Guided)
+//   - Live Review summary rail (lists every filled attribute, like Guided's review)
 //   - Ctrl+Enter = Save ; Ctrl+Shift+Enter = Save + New (keeps category + brand)
-// Shares CATEGORY_FIELDS + the create payload mapping with the wizard via
-// productAddShared.ts so the two modes are field- and contract-identical.
+// Shares CATEGORY_FIELDS + the create payload mapping via productAddShared.ts so
+// the create contract + per-category required-field enforcement are unchanged.
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
@@ -28,6 +33,8 @@ import {
   Copy,
   Trash2,
   Search,
+  Upload,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -155,6 +162,9 @@ export function QuickAddPage() {
   }, [selectedCategory]);
 
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
+  // F35: cost price + margin are visible only to cost-authorised roles (matches
+  // the Guided wizard). CATALOG_MANAGER may set cost on this product form.
+  const canSeeCost = hasRole(['SUPERADMIN', 'ADMIN', 'ACCOUNTANT', 'CATALOG_MANAGER']);
 
   const currentValues = useCallback(
     (): ProductFormValues => ({
@@ -514,6 +524,15 @@ export function QuickAddPage() {
             <option key={opt} value={opt}>{opt}</option>
           ))}
         </select>
+      ) : field.type === 'date' ? (
+        <input
+          ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
+          type="date"
+          title={field.label}
+          value={attributes[field.name] || ''}
+          onChange={(e) => setAttr(field.name, e.target.value)}
+          className="input-field w-full"
+        />
       ) : (
         <input
           ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
@@ -818,7 +837,9 @@ export function QuickAddPage() {
                       </label>
                       <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">HSN Code</label>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            HSN Code <span className="text-red-500">*</span>
+                          </label>
                           <select
                             title="HSN Code"
                             value={hsnCode}
@@ -834,6 +855,7 @@ export function QuickAddPage() {
                               <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                           </select>
+                          <p className="text-xs text-gray-500 mt-1">Auto-selected based on category</p>
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">GST Rate (%)</label>
@@ -844,6 +866,7 @@ export function QuickAddPage() {
                             readOnly
                             className="input-field w-full bg-gray-50 cursor-not-allowed"
                           />
+                          <p className="text-xs text-gray-500 mt-1">Auto-filled from HSN code</p>
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">Weight (g)</label>
@@ -855,6 +878,14 @@ export function QuickAddPage() {
                             placeholder="e.g. 50"
                           />
                         </div>
+                      </div>
+
+                      {/* GST-compliance note (parity with the Guided wizard). */}
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-700">
+                        <p>
+                          <strong>Note:</strong> {useAdvancedHSN ? '6-digit' : '4-digit'} HSN code is mandatory for GST compliance.
+                          {!useAdvancedHSN && ' Use 6-digit HSN if your annual turnover exceeds ₹5 Cr.'}
+                        </p>
                       </div>
                     </div>
                   )}
@@ -906,22 +937,24 @@ export function QuickAddPage() {
                 )}
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Cost Price</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
-                  <input
-                    type="number"
-                    value={costPrice}
-                    onChange={(e) => setCostPrice(e.target.value)}
-                    className="input-field w-full pl-8"
-                    placeholder="Your purchase cost"
-                  />
+              {canSeeCost && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Cost Price</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
+                    <input
+                      type="number"
+                      value={costPrice}
+                      onChange={(e) => setCostPrice(e.target.value)}
+                      className="input-field w-full pl-8"
+                      placeholder="Your purchase cost"
+                    />
+                  </div>
+                  {marginPct !== null && (
+                    <p className="text-bv text-xs mt-1">Margin: {marginPct}%</p>
+                  )}
                 </div>
-                {marginPct !== null && (
-                  <p className="text-bv text-xs mt-1">Margin: {marginPct}%</p>
-                )}
-              </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -990,8 +1023,23 @@ export function QuickAddPage() {
               </div>
             </div>
             <p className="text-xs text-gray-500 mt-2">
-              Stock is created via GRN, not at product-create time. Barcode &amp; reorder level are saved with the SKU.
+              Stock is created via GRN, not at product-create time. Barcode &amp; reorder level are saved with the SKU —
+              you&apos;ll be alerted when stock falls below the reorder level.
             </p>
+
+            {/* Product images (parity with the Guided wizard). Upload wiring is a
+                future enhancement; the create payload sends images: [] today. */}
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Product Images</label>
+              <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+                <ImageIcon className="w-12 h-12 mx-auto text-gray-400 mb-2" />
+                <p className="text-gray-500">Drag and drop images here, or click to browse</p>
+                <button type="button" className="btn-outline mt-4 inline-flex items-center">
+                  <Upload className="w-4 h-4 mr-2" />
+                  Upload Images
+                </button>
+              </div>
+            </div>
           </Section>
 
           {/* ONLINE (collapsed by default) */}
@@ -1114,13 +1162,24 @@ export function QuickAddPage() {
                 label="Model"
                 value={attributes.model_no || attributes.model_name || '—'}
               />
+              {/* Remaining filled category attributes (parity with the Guided
+                  wizard's review, which listed every filled attribute). */}
+              {Object.entries(attributes)
+                .filter(([k, v]) => v && !['brand_name', 'model_no', 'model_name'].includes(k))
+                .map(([k, v]) => (
+                  <ReviewRow key={k} label={k.replace(/_/g, ' ')} value={v} />
+                ))}
               <ReviewRow label="MRP" value={mrp ? `₹${mrp}` : '—'} />
               <ReviewRow
                 label="Offer"
                 value={offerPrice ? `₹${offerPrice}` : mrp ? `₹${mrp} (= MRP)` : '—'}
               />
+              {canSeeCost && costPrice && <ReviewRow label="Cost" value={`₹${costPrice}`} />}
+              {weight && <ReviewRow label="Weight" value={`${weight} g`} />}
               <ReviewRow label="HSN / GST" value={selectedCategory ? `${hsnCode || '—'} · ${gstRate}%` : '—'} />
               <ReviewRow label="Discount band" value={discountCategory || '—'} />
+              <ReviewRow label="Initial qty" value={initialQuantity || '0'} />
+              <ReviewRow label="Reorder level" value={reorderLevel || '—'} />
               {syncToShopify && <ReviewRow label="Shopify" value="Will sync" />}
             </dl>
 
