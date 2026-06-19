@@ -178,9 +178,9 @@ describe('Rx source-gating (additive)', () => {
   });
 });
 
-describe('condensed Pay & Review merges Review + Payment', () => {
+describe('condensed Pay & Review merges Review + Payment (prescription order)', () => {
   it('renders both the Review and Payment captions on the final group', () => {
-    seedSale('quick_sale');
+    seedSale('prescription_order');
     act(() => {
       usePOSStore.getState().addToCart({
         product_id: 'p1', name: 'Frame A', sku: 'FR-1', category: 'FRAMES',
@@ -193,5 +193,71 @@ describe('condensed Pay & Review merges Review + Payment', () => {
     expect(scroll).toBeTruthy();
     const caps = within(scroll as HTMLElement).getAllByText(/Review|Payment/);
     expect(caps.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('quick sale excludes the Review step (origin/main QUICK_STEPS parity)', () => {
+  it('condensed quick sale: no Review/Pay-&-Review/Products-&-Rx rail entries', () => {
+    seedSale('quick_sale');
+    renderPOS();
+    // 3 steps: Customer · Products · Payment. No review anywhere.
+    expect(screen.getByText(/Checkout · 3 steps/)).toBeInTheDocument();
+    expect(screen.getByTitle('Customer')).toBeInTheDocument();
+    expect(screen.getByTitle('Products')).toBeInTheDocument();
+    expect(screen.getByTitle('Payment')).toBeInTheDocument();
+    expect(screen.queryByTitle('Review')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Pay & Review')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Products & Rx')).not.toBeInTheDocument();
+  });
+
+  it('condensed quick sale: payment step does NOT render the merged review panel', () => {
+    seedSale('quick_sale');
+    act(() => {
+      usePOSStore.getState().addToCart({
+        product_id: 'p1', name: 'Frame A', sku: 'FR-1', category: 'FRAMES',
+        unit_price: 1000, mrp: 1000, quantity: 1, is_optical: true,
+      } as any);
+      usePOSStore.getState().setStep('payment');
+    });
+    renderPOS();
+    // The two-column Review+Payment merge must NOT exist for a quick sale.
+    expect(document.querySelector('.pos-payreview')).toBeNull();
+  });
+
+  it('classic quick sale: rail has no Review (or Prescription) step', () => {
+    seedSale('quick_sale');
+    renderPOS();
+    fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
+    expect(screen.getByText(/Checkout · 3 steps/)).toBeInTheDocument();
+    expect(screen.queryByTitle('Review')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Prescription')).not.toBeInTheDocument();
+  });
+
+  it('classic prescription order DOES keep the Review step', () => {
+    seedSale('prescription_order');
+    renderPOS();
+    fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
+    expect(screen.getByTitle('Review')).toBeInTheDocument();
+  });
+});
+
+describe("Rx 'No Rx · accessory' source unblocks Continue on a prescription order", () => {
+  it('lets the prescription step proceed without an Rx once accessory is picked', () => {
+    seedSale('prescription_order');
+    act(() => {
+      usePOSStore.getState().addToCart({
+        product_id: 'a1', name: 'Lens Cloth', sku: 'ACC-1', category: 'ACCESSORIES',
+        unit_price: 100, mrp: 100, quantity: 1, is_optical: false,
+      } as any);
+      usePOSStore.getState().setStep('products');
+    });
+    renderPOS();
+    // The Continue button sits in the action bar. Before picking a source, the
+    // merged Products & Rx group is not satisfied (no Rx) → Continue disabled.
+    const continueBtn = () => screen.getByRole('button', { name: /Continue/i });
+    expect(continueBtn()).toBeDisabled();
+    // Pick the accessory/no-Rx source → step is allowed to proceed.
+    fireEvent.click(screen.getByRole('button', { name: 'No Rx · accessory' }));
+    expect(continueBtn()).toBeEnabled();
   });
 });

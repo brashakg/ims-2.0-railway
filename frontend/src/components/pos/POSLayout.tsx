@@ -97,7 +97,14 @@ import { usePOSWorkflow, type POSWorkflow } from './usePOSWorkflow';
 // step rendered inside the group (used for completion/active highlighting).
 //
 //   - condensed (DEFAULT): Customer -> [Prescription+Products] -> [Review+Payment]
-//   - classic: the original one-step-per-screen 6-step wizard.
+//   - classic: the original one-step-per-screen wizard.
+//
+// QUICK SALE PARITY: the original quick-sale flow (origin/main QUICK_STEPS) was
+// customer -> products -> payment — the REVIEW step was excluded for quick
+// sales. Both flows below honour that: a quick_sale never renders the
+// review/cart-discount/delivery/notes panel (it stays available in prescription
+// orders, both flows). prescription_order keeps customer -> [Rx] -> products ->
+// review -> payment.
 //
 // `complete` is never a navigable group — it is the done state, reached only by
 // finishing the order (handleCreateOrder) and exited via New Sale.
@@ -110,19 +117,26 @@ interface FlowGroup {
   members: POSStep[];  // canonical steps rendered within this group
 }
 
-// Condensed: 3 input groups. In a Quick Sale the prescription member is simply
-// not rendered (StepPrescription is gated to prescription_order), so the same
-// group definition serves both sale types — Products & Rx degrades to Products.
-const CONDENSED_GROUPS: FlowGroup[] = [
-  { key: 'customer', label: 'Customer', sub: 'Pick customer', icon: User, anchor: 'customer', members: ['customer'] },
-  { key: 'products', label: 'Products & Rx', sub: 'Rx + cart', icon: Package, anchor: 'products', members: ['prescription', 'products'] },
-  { key: 'payment', label: 'Pay & Review', sub: 'Discount, GST & tender', icon: CreditCard, anchor: 'payment', members: ['review', 'payment'] },
-];
+// Condensed: 3 input groups for an Rx order; 3 for a quick sale but the merged
+// final group is PAYMENT ONLY (no review panel), matching the old QUICK_STEPS.
+function buildCondensedGroups(saleType: SaleType): FlowGroup[] {
+  const isRx = saleType === 'prescription_order';
+  return [
+    { key: 'customer', label: 'Customer', sub: 'Pick customer', icon: User, anchor: 'customer', members: ['customer'] },
+    isRx
+      ? { key: 'products', label: 'Products & Rx', sub: 'Rx + cart', icon: Package, anchor: 'products', members: ['prescription', 'products'] }
+      : { key: 'products', label: 'Products', sub: 'Cart', icon: Package, anchor: 'products', members: ['products'] },
+    isRx
+      ? { key: 'payment', label: 'Pay & Review', sub: 'Discount, GST & tender', icon: CreditCard, anchor: 'payment', members: ['review', 'payment'] }
+      : { key: 'payment', label: 'Payment', sub: 'Split tender', icon: CreditCard, anchor: 'payment', members: ['payment'] },
+  ];
+}
 
-// Classic: one group per canonical input step (matches the original wizard).
+// Classic: one group per canonical input step. Quick sale excludes review
+// (and prescription); prescription_order keeps the full wizard.
 function buildClassicGroups(saleType: SaleType): FlowGroup[] {
   const order: POSStep[] = saleType === 'quick_sale'
-    ? ['customer', 'products', 'review', 'payment']
+    ? ['customer', 'products', 'payment']
     : ['customer', 'prescription', 'products', 'review', 'payment'];
   const META: Record<POSStep, { label: string; sub: string; icon: typeof User }> = {
     customer: { label: 'Customer', sub: 'Pick customer', icon: User },
@@ -141,7 +155,7 @@ function buildClassicGroups(saleType: SaleType): FlowGroup[] {
 /** Build the active flow's input-step groups for the chosen workflow + sale type. */
 function buildFlowGroups(workflow: POSWorkflow, saleType: SaleType): FlowGroup[] {
   if (workflow === 'classic') return buildClassicGroups(saleType);
-  return CONDENSED_GROUPS;
+  return buildCondensedGroups(saleType);
 }
 
 /** Safe currency format — never crashes on null/undefined/NaN */
@@ -329,16 +343,34 @@ export function POSLayout() {
     [workflow, store.sale_type],
   );
 
-  // Which group is the store's current canonical step inside? Falls back to the
-  // first group (e.g. if a persisted step isn't a member of the active flow —
-  // a held-bill restored onto 'review' lands in the Pay & Review group in
-  // condensed mode and the Review group in classic).
+  // Which group is the store's current canonical step inside? Direct member
+  // match first. If the step isn't a member of any group in the active flow
+  // (e.g. a quick-sale held bill restored onto 'review', which quick sales fold
+  // into payment), project it onto the canonical order and pick the first group
+  // whose anchor is at/after it — so 'review' lands on the payment group rather
+  // than snapping back to Customer.
   const isComplete = store.current_step === 'complete';
   const currentGroupIndex = useMemo(() => {
-    const i = flowGroups.findIndex((g) => g.members.includes(store.current_step));
-    return i >= 0 ? i : 0;
+    const direct = flowGroups.findIndex((g) => g.members.includes(store.current_step));
+    if (direct >= 0) return direct;
+    const CANON: POSStep[] = ['customer', 'prescription', 'products', 'review', 'payment', 'complete'];
+    const stepRank = CANON.indexOf(store.current_step);
+    const fwd = flowGroups.findIndex((g) => CANON.indexOf(g.anchor) >= stepRank);
+    return fwd >= 0 ? fwd : Math.max(0, flowGroups.length - 1);
   }, [flowGroups, store.current_step]);
   const currentGroup = flowGroups[currentGroupIndex];
+
+  // Rx accessory override (Issue: 'No Rx · accessory' source). When the operator
+  // explicitly picks the accessory/no-Rx source on the prescription step, that
+  // step is allowed to proceed even on a prescription order (mirrors the
+  // quick-sale exemption) — WITHOUT weakening the server-side spectacle-Rx
+  // requirement (order-create still validates every line; a spectacle lens with
+  // no Rx is still rejected by the backend). Resets when the customer or sale
+  // type changes (a fresh context must re-decide).
+  const [rxAccessory, setRxAccessory] = useState(false);
+  useEffect(() => {
+    setRxAccessory(false);
+  }, [store.customer?.id, store.sale_type]);
 
   // Per-canonical-step completion check (reused for group validation + the
   // condensed merged-step guard). Unchanged business rules — just factored out.
@@ -346,8 +378,11 @@ export function POSLayout() {
     switch (s) {
       case 'customer': return !!store.customer && !!store.salesperson_id;
       case 'prescription':
-        // Rx is only mandatory for prescription orders; Quick sales pass.
-        return store.sale_type === 'quick_sale' ? true : !!store.prescription;
+        // Rx is mandatory for prescription orders UNLESS the operator picked the
+        // accessory/no-Rx source (rxAccessory) — quick sales always pass. The
+        // server still enforces the per-line spectacle-Rx requirement at
+        // order-create regardless, so this only ungates step navigation.
+        return store.sale_type === 'quick_sale' || !!store.prescription || rxAccessory;
       case 'products': return (store.cart || []).length > 0;
       case 'review': return (store.cart || []).length > 0;
       case 'payment':
@@ -355,7 +390,7 @@ export function POSLayout() {
         return store.getBalance() <= 0.01;
       default: return true;
     }
-  }, [store.customer, store.salesperson_id, store.prescription, store.sale_type, store.cart, store.payments, store.is_advance_payment]);
+  }, [store.customer, store.salesperson_id, store.prescription, store.sale_type, store.cart, store.payments, store.is_advance_payment, rxAccessory]);
 
   // A group is satisfied only when EVERY canonical step it renders is ready —
   // so the merged condensed "Products & Rx" still enforces the Rx-attached gate
@@ -905,6 +940,7 @@ export function POSLayout() {
                   <StepPrescription
                     onShowModal={() => setShowPrescriptionModal(true)}
                     onShowNew={() => setShowNewPrescription(true)}
+                    onAccessoryOnlyChange={setRxAccessory}
                   />
                 </section>
               )}
@@ -1702,7 +1738,7 @@ function StepCustomer() {
 // ============================================================================
 type RxSource = 'last' | 'fresh' | 'external' | 'none';
 
-function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void; onShowNew: () => void }) {
+function StepPrescription({ onShowModal, onShowNew, onAccessoryOnlyChange }: { onShowModal: () => void; onShowNew: () => void; onAccessoryOnlyChange?: (v: boolean) => void }) {
   const store = usePOSStore();
   const [recentRx, setRecentRx] = useState<any[]>([]);
   const [rxLoading, setRxLoading] = useState(false);
@@ -1714,6 +1750,15 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
   const [rxSource, setRxSource] = useState<RxSource | null>(null);
 
   const lookupId = store.patient?.id || store.customer?.id;
+  // Reset the picked source back to the empty-state when the customer/patient
+  // changes, so the accessory note can't linger for a different customer while
+  // the parent's nav guard has already reset.
+  useEffect(() => {
+    setRxSource(null);
+    onAccessoryOnlyChange?.(false);
+    // onAccessoryOnlyChange is a stable setState dispatcher from the parent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookupId]);
   useEffect(() => {
     if (!lookupId || store.prescription) return;
     let cancelled = false;
@@ -1816,6 +1861,10 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
   // form; the form's source defaults to FROM_DOCTOR for non-optometrists).
   const pickSource = (s: RxSource) => {
     setRxSource(s);
+    // 'none' = accessory/no-Rx path → let the step proceed (parent ungates the
+    // nav guard). Any real Rx source clears the override so the Rx-attached gate
+    // applies again. Server-side per-line Rx validation is unaffected.
+    onAccessoryOnlyChange?.(s === 'none');
     if (s === 'fresh' || s === 'external') onShowNew();
   };
   const srcBtn = (id: RxSource, label: string) => (
