@@ -2748,32 +2748,6 @@
   .pos-payreview { grid-template-columns: 1fr; gap: 24px; }
 }
 
-/* Workflow toggle (condensed / classic) in the rail. */
-.pos-flow-toggle {
-  display: inline-flex;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  overflow: hidden;
-  margin-bottom: 14px;
-  background: var(--surface);
-}
-.pos-flow-toggle button {
-  flex: 1;
-  border: 0;
-  background: transparent;
-  padding: 6px 10px;
-  font: 600 11.5px/1 var(--font-sans);
-  color: var(--ink-3);
-  cursor: pointer;
-  transition: background .12s, color .12s;
-}
-.pos-flow-toggle button + button { border-left: 1px solid var(--line); }
-.pos-flow-toggle button.on { background: var(--ink); color: #fff; }
-.pos-flow-toggle button:disabled { opacity: .5; cursor: default; }
-@media (max-width: 768px), (max-height: 500px) and (orientation: landscape) {
-  /* keep the toggle compact + inline in the mobile rail strip */
-  .pos-flow-toggle { margin-bottom: 0; flex-shrink: 0; }
-}
 .pos-work .work-head h2 {
   margin: 0 0 4px;
   font-family: var(--font-display) !important;
@@ -3201,53 +3175,8 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 }
 
 /* =========================================================================
-   Quick Add (one-screen product create) — mode switch + kbd chips
+   Quick Add (one-screen product create) — kbd chips
    ========================================================================= */
-.qa-shell { position: relative; }
-
-/* Floating toolbar holding the Single | Guided | Bulk switch. Sits over the
-   page header's top-right. On small screens it falls back to static flow. */
-.qa-shell-toolbar {
-  position: absolute;
-  top: 24px;
-  right: 28px;
-  z-index: 5;
-}
-@media (max-width: 900px) {
-  .qa-shell-toolbar { position: static; padding: 16px 16px 0; display: flex; justify-content: flex-end; }
-}
-
-.qa-modeswitch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--line, #e5e7eb);
-  border-radius: 999px;
-}
-.qa-modeswitch-btn {
-  display: inline-flex;
-  align-items: center;
-  padding: 5px 14px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--ink-4, #6b7280);
-  border-radius: 999px;
-  text-decoration: none;
-  transition: background .15s, color .15s;
-}
-.qa-modeswitch-btn:hover { color: var(--ink, #111827); }
-.qa-modeswitch-btn.is-active {
-  background: var(--bv, #CD201A);
-  color: #fff;
-}
-.qa-modeswitch-btn.is-disabled {
-  color: var(--ink-4, #9ca3af);
-  cursor: not-allowed;
-  opacity: .6;
-}
-
 /* Keyboard chips in the header hint + shortcuts card. */
 .qa-kbd {
   display: inline-block;

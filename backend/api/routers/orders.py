@@ -2488,13 +2488,15 @@ async def update_order(
 # Build item #16 - SUPERADMIN post-creation order edit (revenue/GST/audit)
 # ============================================================================
 def _require_superadmin(current_user: dict) -> None:
-    """Gate an endpoint to SUPERADMIN only (build item #16 is SUPERADMIN-only by
-    owner decision -- a post-creation order/invoice change is a privileged,
-    audited override). Raises 403 for every other role."""
-    if "SUPERADMIN" not in (current_user.get("roles") or []):
+    """Gate the post-creation order/invoice edit (build item #16) to SUPERADMIN
+    OR ADMIN (owner decision 2026-06-19: admins may also edit a created
+    order/invoice -- still a privileged, fully-audited override). Raises 403 for
+    every other role. (Name kept for call-site stability; it now allows ADMIN.)"""
+    roles = current_user.get("roles") or []
+    if "SUPERADMIN" not in roles and "ADMIN" not in roles:
         raise HTTPException(
             status_code=403,
-            detail="Only a SUPERADMIN may edit an order after it is created.",
+            detail="Only an ADMIN or SUPERADMIN may edit an order after it is created.",
         )
 
 

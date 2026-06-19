@@ -323,6 +323,30 @@ def test_pre_invoice_edit_non_superadmin_403(client, staff_headers, wired):
     assert resp.status_code == 403, resp.text
 
 
+def test_pre_invoice_edit_admin_allowed(client, wired):
+    """ADMIN (not only SUPERADMIN) may edit a created order/invoice -- owner
+    decision 2026-06-19. Confirms the gate broadening didn't stay superadmin-only."""
+    from api.routers.auth import create_access_token
+
+    _seed_order(wired["order_repo"])
+    admin_token = create_access_token(
+        {
+            "user_id": "test-admin-002",
+            "username": "testadmin2",
+            "roles": ["ADMIN"],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+        }
+    )
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-edit",
+        json={"reason": "admin correction", "items": [_edit_item(unit_price=2000.0)]},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert wired["order_repo"].find_by_id("ord-16")["superadmin_edited"] is True
+
+
 def test_pre_invoice_edit_locked_period_423(client, auth_headers, wired):
     _seed_order(wired["order_repo"])
     # Lock the current IST month so check_period_locked raises 423.

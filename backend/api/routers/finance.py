@@ -25,6 +25,7 @@ from ..services.cost_mask import can_see_cost
 from ..services.cache import cache
 from ..services import ticker_service, policy_engine
 from ..services import je_service
+from ..services import name_resolver
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
@@ -4360,16 +4361,12 @@ def _ticker_stores_for(
       stores (AREA_MANAGER limited to their own store_ids).
     - any other role -> their single active store.
     """
-    name_by_id: Dict[str, str] = {}
-    try:
-        for s in db.get_collection("stores").find(
-            {}, {"_id": 0, "store_id": 1, "name": 1, "is_active": 1}
-        ):
-            sid = s.get("store_id")
-            if sid:
-                name_by_id[sid] = s.get("name") or sid
-    except Exception:  # noqa: BLE001
-        name_by_id = {}
+    # Resolve store_id -> human store name via the shared, fail-soft resolver
+    # (owner backlog #4 / #780). The stores collection keys its display name on
+    # ``store_name`` (then ``store_code``); the earlier inline lookup read a
+    # non-existent ``name`` field, so the Hub "Monthly target" rows fell back to
+    # the raw store_id (a UUID). store_name_map reads the correct fields.
+    name_by_id: Dict[str, str] = name_resolver.store_name_map(db)
 
     def _entry(sid: str) -> Dict[str, str]:
         return {"store_id": sid, "store_name": name_by_id.get(sid, sid)}

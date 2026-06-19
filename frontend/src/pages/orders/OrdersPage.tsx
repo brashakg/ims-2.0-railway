@@ -115,8 +115,9 @@ export function OrdersPage() {
   const [deliverOrder, setDeliverOrder] = useState<Order | null>(null);
   const [isDeliveringOrder, setIsDeliveringOrder] = useState(false);
 
-  // Build item #16 — SUPERADMIN post-creation order edit modal state.
-  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
+  // Build item #16 — post-creation order/invoice edit. Owner decision 2026-06-19:
+  // available to SUPERADMIN and ADMIN (still a privileged, audited override).
+  const canEditOrder = (user?.roles || []).some((r) => r === 'SUPERADMIN' || r === 'ADMIN');
   const [showSuperadminEdit, setShowSuperadminEdit] = useState(false);
 
   // Reset page when filters change
@@ -733,7 +734,7 @@ export function OrdersPage() {
                 <div className="flex gap-2 pt-4 flex-wrap">
                   {/* Build item #16: SUPERADMIN-only post-creation edit. Hidden
                       for terminal CANCELLED orders (nothing to correct). */}
-                  {isSuperadmin && selectedOrder.orderStatus !== 'CANCELLED' && (
+                  {canEditOrder && selectedOrder.orderStatus !== 'CANCELLED' && (
                     <button
                       onClick={() => setShowSuperadminEdit(true)}
                       className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[120px]"
@@ -782,7 +783,7 @@ export function OrdersPage() {
       )}
 
       {/* Build item #16 — SUPERADMIN post-creation order edit modal */}
-      {showSuperadminEdit && selectedOrder && isSuperadmin && (
+      {showSuperadminEdit && selectedOrder && canEditOrder && (
         <SuperadminOrderEditModal
           order={selectedOrder}
           onClose={() => setShowSuperadminEdit(false)}
