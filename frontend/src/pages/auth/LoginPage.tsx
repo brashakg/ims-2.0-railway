@@ -102,17 +102,25 @@ export function LoginPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Real brand lockup — Better Vision (house brand). Hi-res source so it
-            stays crisp at a prominent size; ~h-24 fills the card better than the
-            old h-14 which left the page looking empty. */}
+        {/* Stacked brand lockup — Better Vision (house brand): the square BV mark
+            centered on top, the "Better Vision" wordmark below it, then the
+            product tagline. (We only ship a combined horizontal lockup + a
+            standalone mark, so the wordmark is rendered as brand-red text.) */}
         <div className="text-center mb-8">
           <img
-            src={getBrandAssets('bv').lockupHiRes}
-            alt="Better Vision"
-            className="h-20 sm:h-24 w-auto max-w-[280px] mx-auto mb-4"
+            src={getBrandAssets('bv').mark}
+            alt=""
+            aria-hidden="true"
+            className="h-16 sm:h-20 w-auto mx-auto mb-3"
             style={{ objectFit: 'contain' }}
           />
-          <p className="text-gray-500 text-sm tracking-wide">Retail Operating System</p>
+          <div
+            className="text-2xl sm:text-3xl font-bold tracking-tight leading-none"
+            style={{ color: getBrandAssets('bv').color }}
+          >
+            {getBrandAssets('bv').name}
+          </div>
+          <p className="text-gray-500 text-sm tracking-wide mt-2">Retail Operating System</p>
         </div>
 
         {/* Login Card */}
