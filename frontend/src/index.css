@@ -3,10 +3,21 @@
 /* Dark mode disabled — override dark: variant to never match */
 @variant dark (&:where(.force-dark-mode-disabled));
 
+/* Better Vision house wordmark face — bundled so it renders identically on
+   every device (not only Windows/Office where Cooper Black is installed). */
+@font-face {
+  font-family: 'Cooper Black';
+  src: url('./assets/fonts/cooper-black.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ============================================================================
    IMS 2.0 Design Tokens — ported from design_handoff_ims_2_0/shell/tokens.css
    Operational, light-modern. BV red as rare accent. Typography: Inter (UI +
-   display — Instrument Serif retired for one consistent typeface), JetBrains Mono (codes).
+   numbers), Instrument Serif (editorial display headers, per Claude Design),
+   JetBrains Mono (codes), Cooper Black (BV wordmark only).
    ============================================================================ */
 :root {
   /* Surfaces */
