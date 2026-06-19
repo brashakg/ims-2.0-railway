@@ -79,14 +79,13 @@ import { CartSidebar } from './POSCart';
 import { StepPayment } from './POSPayment';
 import { POSReceipt } from './POSReceipt';
 import { StepComplete } from './POSInvoice';
-import { usePOSWorkflow, type POSWorkflow } from './usePOSWorkflow';
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// Checkout-flow grouping (condensed vs classic) — PRESENTATION ONLY.
+// Checkout-flow grouping (condensed — the ONLY flow) — PRESENTATION ONLY.
 // ----------------------------------------------------------------------------
 // The canonical step machine in posStore (customer/prescription/products/
 // review/payment/complete) is UNCHANGED. A "flow group" is one rail entry that
@@ -96,15 +95,15 @@ import { usePOSWorkflow, type POSWorkflow } from './usePOSWorkflow';
 // recall, and getter math all keep working). `members` lists every canonical
 // step rendered inside the group (used for completion/active highlighting).
 //
-//   - condensed (DEFAULT): Customer -> [Prescription+Products] -> [Review+Payment]
-//   - classic: the original one-step-per-screen wizard.
+// The condensed flow is the sole checkout flow (the old classic/condensed
+// toggle was removed): Customer -> [Prescription+Products] -> [Review+Payment].
 //
 // QUICK SALE PARITY: the original quick-sale flow (origin/main QUICK_STEPS) was
 // customer -> products -> payment — the REVIEW step was excluded for quick
-// sales. Both flows below honour that: a quick_sale never renders the
+// sales. The condensed grouping honours that: a quick_sale never renders the
 // review/cart-discount/delivery/notes panel (it stays available in prescription
-// orders, both flows). prescription_order keeps customer -> [Rx] -> products ->
-// review -> payment.
+// orders). prescription_order keeps customer -> [Rx] -> products -> review ->
+// payment.
 //
 // `complete` is never a navigable group — it is the done state, reached only by
 // finishing the order (handleCreateOrder) and exited via New Sale.
@@ -130,32 +129,6 @@ function buildCondensedGroups(saleType: SaleType): FlowGroup[] {
       ? { key: 'payment', label: 'Pay & Review', sub: 'Discount, GST & tender', icon: CreditCard, anchor: 'payment', members: ['review', 'payment'] }
       : { key: 'payment', label: 'Payment', sub: 'Split tender', icon: CreditCard, anchor: 'payment', members: ['payment'] },
   ];
-}
-
-// Classic: one group per canonical input step. Quick sale excludes review
-// (and prescription); prescription_order keeps the full wizard.
-function buildClassicGroups(saleType: SaleType): FlowGroup[] {
-  const order: POSStep[] = saleType === 'quick_sale'
-    ? ['customer', 'products', 'payment']
-    : ['customer', 'prescription', 'products', 'review', 'payment'];
-  const META: Record<POSStep, { label: string; sub: string; icon: typeof User }> = {
-    customer: { label: 'Customer', sub: 'Pick customer', icon: User },
-    prescription: { label: 'Prescription', sub: 'Optional', icon: Eye },
-    products: { label: 'Products', sub: 'Cart', icon: Package },
-    review: { label: 'Review', sub: 'Discount & GST', icon: ShoppingCart },
-    payment: { label: 'Payment', sub: 'Split tender', icon: CreditCard },
-    complete: { label: 'Complete', sub: 'Print receipt', icon: CheckCircle },
-  };
-  return order.map((id) => ({
-    key: id, label: META[id].label, sub: META[id].sub, icon: META[id].icon,
-    anchor: id, members: [id],
-  }));
-}
-
-/** Build the active flow's input-step groups for the chosen workflow + sale type. */
-function buildFlowGroups(workflow: POSWorkflow, saleType: SaleType): FlowGroup[] {
-  if (workflow === 'classic') return buildClassicGroups(saleType);
-  return buildCondensedGroups(saleType);
 }
 
 /** Safe currency format — never crashes on null/undefined/NaN */
@@ -332,15 +305,14 @@ export function POSLayout() {
     }
   }, [user]);
 
-  // Persisted checkout-flow preference (condensed default, classic toggle).
-  const [workflow, setWorkflow] = usePOSWorkflow();
-
-  // Active flow's input groups (each maps to one rail entry; a condensed group
-  // may render several canonical steps). The 'complete' done-state is handled
-  // separately and is never part of this navigable sequence.
+  // Condensed is the sole checkout flow (the classic alternative + toggle were
+  // removed). The input groups (each maps to one rail entry; a condensed group
+  // may render several canonical steps) come straight from the condensed
+  // grouping. The 'complete' done-state is handled separately and is never part
+  // of this navigable sequence.
   const flowGroups = useMemo(
-    () => buildFlowGroups(workflow, store.sale_type),
-    [workflow, store.sale_type],
+    () => buildCondensedGroups(store.sale_type),
+    [store.sale_type],
   );
 
   // Which group is the store's current canonical step inside? Direct member
@@ -426,7 +398,7 @@ export function POSLayout() {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       // F2 jumps to the group that renders the products catalog; F9 to the
-      // group that renders the payment surface — works in both flows.
+      // group that renders the payment surface.
       if (e.key === 'F2') {
         e.preventDefault();
         const i = flowGroups.findIndex((g) => g.members.includes('products'));
@@ -650,21 +622,21 @@ export function POSLayout() {
     payment: { title: 'Tender', sub: 'Single or split tender across Cash / UPI / Card / EMI / Advance. Round-off at 50p if enabled.' },
     complete: { title: 'Done.', sub: 'Order placed. Receipt printed. Workshop job card auto-created for Rx orders.' },
   };
-  // Editorial header for the active GROUP. For single-member groups (classic,
-  // and the condensed Customer group) reuse the per-step header; for merged
-  // condensed groups give a combined title.
+  // Editorial header for the active GROUP. For the single-member Customer group
+  // reuse the per-step header; for the merged condensed groups give a combined
+  // title.
   const GROUP_HEADERS: Record<string, { title: string; sub: string }> = {
     'condensed:products': { title: 'Products & prescription', sub: 'Capture or attach the Rx, then add frames, lenses, contacts and accessories.' },
     'condensed:payment': { title: 'Pay & review', sub: 'Final check — discount, GST and delivery on one side, tender on the other.' },
   };
   const header = isComplete
     ? STEP_HEADERS.complete
-    : (workflow === 'condensed' && GROUP_HEADERS[`condensed:${currentGroup?.key}`])
+    : GROUP_HEADERS[`condensed:${currentGroup?.key}`]
       || STEP_HEADERS[currentGroup?.anchor ?? 'customer'];
 
   // Cart column shows on any input group that renders products/review/
-  // prescription — in condensed that's the merged Products & Rx and Pay &
-  // Review groups; in classic the original product/review/prescription steps.
+  // prescription — that's the merged Products & Rx and Pay & Review groups
+  // (the Customer group renders none of them).
   const cartRelevantSteps: POSStep[] = ['products', 'review', 'prescription'];
   const showCartCol =
     !isComplete &&
@@ -697,31 +669,6 @@ export function POSLayout() {
       {/* ── Left rail: vertical stepper + actions + held bills ── */}
       <aside className="steps-rail">
         <span className="eyebrow">Checkout · {flowGroups.length} steps</span>
-
-        {/* Workflow toggle — condensed (default) vs classic. Inline in the POS
-            shell so a cashier can switch at the terminal; persisted to
-            localStorage (ims_pos_workflow). Disabled once an order is complete
-            so the rail can't reshuffle mid-receipt. */}
-        <div className="pos-flow-toggle" role="group" aria-label="Checkout flow">
-          <button
-            type="button"
-            className={workflow === 'condensed' ? 'on' : ''}
-            onClick={() => setWorkflow('condensed')}
-            disabled={isComplete}
-            title="Condensed 3-step checkout (faster)"
-          >
-            Condensed
-          </button>
-          <button
-            type="button"
-            className={workflow === 'classic' ? 'on' : ''}
-            onClick={() => setWorkflow('classic')}
-            disabled={isComplete}
-            title="Classic 6-step wizard"
-          >
-            Classic
-          </button>
-        </div>
 
         {flowGroups.map((group, idx) => {
           const isActive = !isComplete && idx === currentGroupIndex;
@@ -917,16 +864,16 @@ export function POSLayout() {
           {/* Step content — renders every canonical step in the active group.
               The work area is a flex column with THIS region scrolling and the
               footer pinned (flex:0 0 auto) below; pb gives the last row scroll
-              clearance. Components are REUSED verbatim across both flows — in
-              condensed mode merged groups simply stack the same components on
-              one scrollable surface (Rx above Products; Review above Payment). */}
+              clearance. The condensed flow simply stacks the same step
+              components on one scrollable surface for merged groups (Rx above
+              Products; Review above Payment). */}
           <div className="pos-scroll">
             {/* Complete — the done state (not a navigable group). Rendered
                 exclusively; no input steps show alongside the receipt. */}
             {isComplete ? (
               <StepComplete onPrint={() => setShowReceipt(true)} onReset={handleFullReset} />
             ) : (<>
-              {/* Customer (its own group in both flows) */}
+              {/* Customer (its own group) */}
               {currentGroup?.members.includes('customer') && <StepCustomer />}
 
               {/* Merged "Products & Rx" group renders the Prescription surface
@@ -954,7 +901,7 @@ export function POSLayout() {
               )}
 
               {/* Merged "Pay & Review" group: Review + Payment side by side on
-                  desktop (stacked on narrow). In classic each is its own group. */}
+                  desktop (stacked on narrow). Quick sales render Payment only. */}
               {currentGroup && currentGroup.members.includes('review') && currentGroup.members.includes('payment') ? (
                 <div className="pos-payreview">
                   <section className="pos-merge-sec">
@@ -1069,8 +1016,8 @@ export function POSLayout() {
       />
 
       {/* Floating cart FAB (tablet/phone). Opens the off-canvas cart drawer
-          rather than jumping the wizard to the review step — so it works the
-          same in both flows and never disrupts the current step. */}
+          rather than jumping the wizard to the review step — so it never
+          disrupts the current step. */}
       {showCartCol && (
         <div className="pos-cart-fab fixed bottom-20 right-4 z-30">
           <button
