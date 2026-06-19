@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import type { Customer } from '../../types';
 import { customerApi, orderApi, prescriptionApi } from '../../services/api';
+import { buildCustomerSearchHits } from '../../utils/customerSearchHits';
 import { loyaltyApi } from '../../services/api/loyalty';
 import { marketingApi } from '../../services/api/marketing';
 import StoreCreditLedgerCard from '../../components/customers/StoreCreditLedgerCard';
@@ -163,21 +164,33 @@ export function Customer360Dashboard() {
             </button>
           </div>
           {searchResults.length > 0 && (
+            // Account -> member hierarchy. The account holder is the parent row;
+            // matched family members render indented beneath and are labelled
+            // "Customer" (clinical screens are the only place they stay "Patient").
+            // Both open the same account-scoped 360 view.
             <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
-              {searchResults.map((c: any) => {
+              {buildCustomerSearchHits(searchResults as any[], searchQuery).map((hit) => {
+                const c: any = hit.customer;
                 const cid = c.customer_id || c._id || c.id;
+                const isMember = hit.kind === 'patient';
                 return (
                   <button
-                    key={cid}
+                    key={hit.key}
                     onClick={() => navigate(`/customers/${cid}/360`)}
-                    className="w-full px-4 py-3 flex items-center gap-3 hover:bg-amber-50 transition-colors text-left"
+                    className={`w-full px-4 py-3 flex items-center gap-3 hover:bg-amber-50 transition-colors text-left ${isMember ? 'pl-10' : ''}`}
                   >
-                    <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
-                      <User className="w-4 h-4 text-amber-700" />
+                    <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${isMember ? 'bg-blue-100' : 'bg-amber-100'}`}>
+                      <User className={`w-4 h-4 ${isMember ? 'text-blue-700' : 'text-amber-700'}`} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim()}</p>
-                      <p className="text-xs text-gray-500">{c.mobile || c.phone || ''} {c.email ? ` · ${c.email}` : ''}</p>
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {hit.displayName}
+                        <span className={`ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${isMember ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{isMember ? 'Customer' : 'Account'}</span>
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">
+                        {hit.phone || ''}
+                        {isMember ? ` · under ${hit.accountName}` : (c.email ? ` · ${c.email}` : '')}
+                      </p>
                     </div>
                   </button>
                 );
