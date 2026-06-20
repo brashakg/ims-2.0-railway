@@ -31,7 +31,9 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
     get_audit_repository,
+    get_customer_repository,
     get_loyalty_account_repository,
     get_loyalty_settings_repository,
     get_loyalty_transaction_repository,
@@ -181,12 +183,24 @@ def _audit(
 # ============================================================================
 
 
+def _check_customer_store_access(customer_id: str, current_user: Dict[str, Any]) -> None:
+    """Raise 404 if the caller has no access to the customer's store."""
+    customer_repo = get_customer_repository()
+    if customer_repo is not None:
+        customer = customer_repo.find_by_id(customer_id)
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        if not can_access_store_scoped(customer.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Customer not found")
+
+
 @router.get("/account/{customer_id}")
 async def get_account(
     customer_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Account snapshot + last 20 ledger rows."""
+    _check_customer_store_access(customer_id, current_user)
     accounts = get_loyalty_account_repository()
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
@@ -238,6 +252,7 @@ async def get_ledger(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Paginated ledger for one customer, newest-first."""
+    _check_customer_store_access(customer_id, current_user)
     txns = get_loyalty_transaction_repository()
     if txns is None:
         return {"items": [], "total": 0, "limit": limit, "skip": skip}

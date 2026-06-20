@@ -117,6 +117,7 @@ export function EmployeeSelfService() {
       : '';
     const w = window.open('', '_blank', 'noopener,noreferrer');
     if (!w) return;
+    const esc = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     w.document.write(`<!doctype html><html><head><meta charset="utf-8">
       <title>Payslip ${monthLabel}</title>
       <style>
@@ -129,8 +130,8 @@ export function EmployeeSelfService() {
         .net td{font-weight:bold;border-top:2px solid #111;border-bottom:none;font-size:16px;padding-top:10px;}
         @media print{button{display:none;}}
       </style></head><body>
-      <h1>${(payslip.employee_name as string) || 'Payslip'}</h1>
-      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + payslip.employee_id : ''}</div>
+      <h1>${esc((payslip.employee_name as string) || 'Payslip')}</h1>
+      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + esc(String(payslip.employee_id)) : ''}</div>
       <table>
         <tr><td>Gross Salary</td><td class="r">${rupee(bd.gross_salary)}</td></tr>
         <tr><td>Total Deductions</td><td class="r">${rupee(bd.total_deductions)}</td></tr>

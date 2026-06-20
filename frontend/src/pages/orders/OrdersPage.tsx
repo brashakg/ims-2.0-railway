@@ -273,10 +273,10 @@ export function OrdersPage() {
     }
     const headerName = storeName || 'Tax Invoice';
     const items = (order.items || []).map((item: any, i: number) =>
-      `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
+      `<tr><td>${i + 1}</td><td>${escapeHtml(item.productName || item.product_name || item.name || 'Item')}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
     ).join('');
     const payments = (order.payments || []).map((p: any) =>
-      `<div>${p.mode || p.method}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${p.reference})` : ''}</div>`
+      `<div>${escapeHtml(p.mode || p.method || '')}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${escapeHtml(p.reference)})` : ''}</div>`
     ).join('');
     const html = `<!DOCTYPE html><html><head><title>Invoice ${order.orderNumber || 'N/A'}</title>
       <style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto}
@@ -284,8 +284,8 @@ export function OrdersPage() {
       th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
       .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button,.no-print{display:none}}</style></head><body>
       <div class="header"><h2>${escapeHtml(headerName)}</h2>${storeAddress ? `<p style="color:#555;font-size:13px;margin:2px 0">${escapeHtml(storeAddress)}</p>` : ''}${storeGstin ? `<p style="color:#555;font-size:13px;margin:2px 0">GSTIN: ${escapeHtml(storeGstin)}</p>` : ''}<p>Tax Invoice</p></div>
-      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
-      <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
+      <div class="row"><div><strong>Invoice:</strong> ${escapeHtml(order.orderNumber || 'N/A')}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
+      <div class="row"><div><strong>Customer:</strong> ${escapeHtml(order.customerName || 'Walk-in')}</div><div><strong>Phone:</strong> ${escapeHtml(order.customerPhone || '-')}</div></div>
       <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
       <div style="text-align:right;margin-top:10px">
       <div class="row"><span>Subtotal:</span><span>₹${Math.round(order.subtotal || 0).toLocaleString('en-IN')}</span></div>

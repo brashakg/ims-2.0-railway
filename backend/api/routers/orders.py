@@ -7,7 +7,7 @@ Sales order management endpoints
 from fastapi import APIRouter, HTTPException, Depends, Query, Header
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any, Dict, List, Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from enum import Enum
 import math
 import uuid
@@ -946,7 +946,7 @@ def generate_order_number(store_id: str) -> str:
         prefix = "IMS"
     # Sanitize: alnum only, upper, non-empty.
     prefix = "".join(c for c in prefix if c.isalnum()) or "IMS"
-    year = datetime.now().year
+    year = (datetime.now(timezone(timedelta(hours=5, minutes=30)))).year
     short_uuid = str(uuid.uuid4())[:6].upper()
     return f"ORD-{prefix}-{year}-{short_uuid}"
 

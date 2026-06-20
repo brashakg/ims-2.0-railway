@@ -70,8 +70,7 @@ export function LoyaltyRedeemControl() {
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerId]);
+  }, [customerId, orderTotal]);
 
   const minRedeem = settings?.min_redeem_points ?? 100;
   const balance = account?.balance_points ?? 0;

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import time
 import jwt
@@ -279,7 +279,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     """Create JWT access token"""
     to_encode = data.copy()
-    expire = datetime.utcnow() + (
+    expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire})
@@ -436,7 +436,7 @@ def _audit_auth_event(
                 "ip_address": ip_address,
                 "severity": severity,
                 "detail": detail,
-                "timestamp": datetime.utcnow(),
+                "timestamp": datetime.now(timezone.utc),
             }
         )
     except Exception as e:  # noqa: BLE001 - auth must never break on audit

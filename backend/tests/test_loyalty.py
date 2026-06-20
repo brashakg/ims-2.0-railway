@@ -188,6 +188,15 @@ class FakeOrderRepo:
         return self._orders.get(order_id)
 
 
+class FakeCustomerRepo:
+    """Stub customer repo for loyalty tests — all customer IDs are treated as
+    valid and belonging to the test store so SUPERADMIN/store-scoped callers
+    both pass the store-access gate added to the loyalty read endpoints."""
+
+    def find_by_id(self, customer_id):
+        return {"_id": customer_id, "store_id": "BV-TEST-01"}
+
+
 # ============================================================================
 # Fixture
 # ============================================================================
@@ -217,11 +226,14 @@ def patched_loyalty(monkeypatch):
 
     orders = FakeOrderRepo()
 
+    customers = FakeCustomerRepo()
+
     monkeypatch.setattr(loyalty_module, "get_loyalty_account_repository", lambda: accounts)
     monkeypatch.setattr(loyalty_module, "get_loyalty_transaction_repository", lambda: txns)
     monkeypatch.setattr(loyalty_module, "get_loyalty_settings_repository", lambda: settings)
     monkeypatch.setattr(loyalty_module, "get_audit_repository", lambda: audit)
     monkeypatch.setattr(loyalty_module, "get_order_repository", lambda: orders)
+    monkeypatch.setattr(loyalty_module, "get_customer_repository", lambda: customers)
 
     return {
         "db": fake_db,
