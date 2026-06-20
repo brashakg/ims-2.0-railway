@@ -310,3 +310,152 @@ def test_catalog_endpoint_allows_superadmin(app):
     assert "storage" in catalog_types
     # gst-portal read-only info entry surfaces the manual GSTR-1/3B workflow.
     assert "gst-portal" in catalog_types
+
+
+# ---------------------------------------------------------------------------
+# 5. get_configured_agent_model resolver (DB -> env -> default)
+# ---------------------------------------------------------------------------
+
+def test_configured_agent_model_db_wins(monkeypatch):
+    """A model picked in the UI (DB integration config) takes precedence."""
+    monkeypatch.setenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
+    import api.services.integration_config as ic
+    monkeypatch.setattr(ic, "_load_db_config", lambda _type: {"model": "claude-opus-4-8"})
+    assert ic.get_configured_agent_model() == "claude-opus-4-8"
+
+
+def test_configured_agent_model_db_without_key(monkeypatch):
+    """DB model is honoured even when no api_key is in the doc (resolver reads
+    the raw DB doc, not get_anthropic_config which requires a key)."""
+    monkeypatch.delenv("AGENT_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("JARVIS_MODEL", raising=False)
+    import api.services.integration_config as ic
+    monkeypatch.setattr(ic, "_load_db_config", lambda _type: {"model": "claude-sonnet-4-6"})
+    assert ic.get_configured_agent_model() == "claude-sonnet-4-6"
+
+
+def test_configured_agent_model_env_fallback(monkeypatch):
+    """No DB model -> AGENT_CLAUDE_MODEL env, then JARVIS_MODEL legacy."""
+    import api.services.integration_config as ic
+    monkeypatch.setattr(ic, "_load_db_config", lambda _type: {})
+    monkeypatch.delenv("AGENT_CLAUDE_MODEL", raising=False)
+    monkeypatch.setenv("JARVIS_MODEL", "claude-legacy-x")
+    assert ic.get_configured_agent_model() == "claude-legacy-x"
+    monkeypatch.setenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5")
+    assert ic.get_configured_agent_model() == "claude-haiku-4-5"
+
+
+def test_configured_agent_model_default(monkeypatch):
+    """No DB, no env -> curated current default."""
+    import api.services.integration_config as ic
+    monkeypatch.setattr(ic, "_load_db_config", lambda _type: {})
+    monkeypatch.delenv("AGENT_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("JARVIS_MODEL", raising=False)
+    assert ic.get_configured_agent_model() == ic.DEFAULT_AGENT_MODEL == "claude-sonnet-4-6"
+
+
+# ---------------------------------------------------------------------------
+# 6. Live Anthropic models endpoint (fail-soft fallback + RBAC gate)
+# ---------------------------------------------------------------------------
+
+def test_anthropic_models_fallback_when_no_key(app, monkeypatch):
+    """No api_key + no live call -> curated fallback list, never a 500."""
+    from fastapi.testclient import TestClient
+    import api.routers.settings as settings_mod
+    import api.services.integration_config as ic
+
+    # No key configured (DB doc has no key, env empty) -> _fetch returns None
+    # -> fallback path.
+    monkeypatch.setattr(ic, "_load_db_config", lambda _type: {})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    # Reset the in-process cache so this test is deterministic.
+    settings_mod._ANTHROPIC_MODELS_CACHE["models"] = None
+    settings_mod._ANTHROPIC_MODELS_CACHE["at"] = 0.0
+
+    client = TestClient(app)
+    resp = client.get(
+        "/api/v1/settings/integrations/anthropic/models",
+        headers={"Authorization": f"Bearer {_make_token(['ADMIN'])}"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source"] == "fallback"
+    ids = {m["id"] for m in body["models"]}
+    assert {"claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"} <= ids
+    for m in body["models"]:
+        assert m.get("id") and m.get("display_name")
+
+
+def test_anthropic_models_uses_live_list(app, monkeypatch):
+    """When the live call returns models, the endpoint normalizes + serves them.
+
+    Order-robust: mocks the stable httpx transport (which _fetch_anthropic_models
+    resolves via `import httpx` at CALL time) instead of patching the settings-
+    module function attribute. A prior test in the full suite can reload
+    api.routers.settings, leaving the registered route bound to a stale module
+    dict that a `setattr(settings_mod, "_fetch_anthropic_models", ...)` patch
+    never reaches -- which is why the attribute-patch version passed in isolation
+    but failed in the full suite. The httpx + get_anthropic_config patches are
+    resolved at call time, so they hold regardless of any reload.
+    """
+    from fastapi.testclient import TestClient
+    import httpx
+    import api.routers.settings as settings_mod
+    import api.services.integration_config as ic
+
+    # Build the client BEFORE patching httpx so the TestClient transport is
+    # unaffected (it binds httpx at import time; this patch only hits _fetch).
+    client = TestClient(app)
+
+    settings_mod._ANTHROPIC_MODELS_CACHE["models"] = None
+    settings_mod._ANTHROPIC_MODELS_CACHE["at"] = 0.0
+
+    # Endpoint gates the live call on a configured key; provide one. The route
+    # does `from ..services.integration_config import get_anthropic_config` at
+    # call time, so patching the current module is reload-proof.
+    monkeypatch.setattr(ic, "get_anthropic_config", lambda: {"api_key": "sk-ant-x"})
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "claude-future-9", "display_name": "Claude Future 9"}]}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+
+    resp = client.get(
+        "/api/v1/settings/integrations/anthropic/models",
+        headers={"Authorization": f"Bearer {_make_token(['SUPERADMIN'])}"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source"] in ("live", "cache")
+    assert any(m["id"] == "claude-future-9" for m in body["models"])
+    # Clean up the cache so other tests aren't affected.
+    settings_mod._ANTHROPIC_MODELS_CACHE["models"] = None
+    settings_mod._ANTHROPIC_MODELS_CACHE["at"] = 0.0
+
+
+def test_anthropic_models_denied_below_admin(app):
+    """A role below ADMIN must be blocked from the model list."""
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    resp = client.get(
+        "/api/v1/settings/integrations/anthropic/models",
+        headers={"Authorization": f"Bearer {_make_token(['SALES_STAFF'])}"},
+    )
+    assert resp.status_code in (401, 403), resp.status_code

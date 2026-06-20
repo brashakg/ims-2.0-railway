@@ -19,6 +19,7 @@ import hashlib
 import os
 import base64
 import re
+import time
 import logging
 from .auth import get_current_user, hash_password, verify_password, require_roles
 from ..dependencies import get_audit_repository, get_store_repository
@@ -1547,6 +1548,111 @@ async def get_integrations_catalog(
       fields      -- list of {key, label, secret, placeholder, help?, optional?}
     """
     return {"catalog": _INTEGRATION_CATALOG}
+
+
+# ---------------------------------------------------------------------------
+# Live Claude model list (for the Anthropic integration's model dropdown)
+# ---------------------------------------------------------------------------
+# Curated current fallback list. Used when no key is set or the live call
+# fails, so the Settings screen can NEVER break. Keep these aligned with the
+# models the chain actually uses; this is purely a fallback, the live call
+# returns the authoritative set when reachable.
+_ANTHROPIC_MODEL_FALLBACK = [
+    {"id": "claude-opus-4-8", "display_name": "Claude Opus 4.8"},
+    {"id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6"},
+    {"id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5"},
+]
+
+# In-process cache of the live model list: {"at": epoch_seconds, "models": [...]}.
+# ~1h TTL so we never hammer the Anthropic Models API. Per-worker is fine.
+_ANTHROPIC_MODELS_CACHE: Dict[str, Any] = {"at": 0.0, "models": None}
+_ANTHROPIC_MODELS_TTL = 3600.0
+
+
+def _fetch_anthropic_models(api_key: str) -> Optional[List[Dict[str, str]]]:
+    """Call the Anthropic Models API and return [{id, display_name}], or None
+    on any error. Read-only listing call (NOT a message/dispatch). The api_key
+    is never logged.
+    """
+    if not api_key:
+        return None
+    try:
+        import httpx
+
+        url = os.getenv(
+            "ANTHROPIC_MODELS_API_URL", "https://api.anthropic.com/v1/models"
+        )
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                url,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                params={"limit": 100},
+            )
+        if resp.status_code != 200:
+            # Never log the key; log only the status + a short non-secret body.
+            logger.warning(
+                "[settings] Anthropic models list returned %s", resp.status_code
+            )
+            return None
+        data = resp.json().get("data") or []
+        out: List[Dict[str, str]] = []
+        for m in data:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id")
+            if not mid:
+                continue
+            out.append(
+                {
+                    "id": str(mid),
+                    "display_name": str(m.get("display_name") or mid),
+                }
+            )
+        return out or None
+    except Exception as exc:  # noqa: BLE001 - fail soft, never 500
+        logger.warning("[settings] Anthropic models list failed: %s", type(exc).__name__)
+        return None
+
+
+@router.get("/integrations/anthropic/models")
+async def list_anthropic_models(
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Live list of currently-available Claude models for the model dropdown.
+
+    ADMIN/SUPERADMIN only. Calls the Anthropic Models API
+    (GET /v1/models) with the configured ANTHROPIC_API_KEY (DB integration
+    config or env), normalizes to [{id, display_name}], and caches the result
+    in-process for ~1h.
+
+    FAIL-SOFT: if no key is configured or the call errors, returns a curated
+    current fallback list so the model picker is never empty / the Settings
+    screen never breaks. The API key is never logged or returned.
+    """
+    now = time.time()
+    cached = _ANTHROPIC_MODELS_CACHE.get("models")
+    if cached and (now - float(_ANTHROPIC_MODELS_CACHE.get("at", 0.0))) < _ANTHROPIC_MODELS_TTL:
+        return {"models": cached, "source": "cache"}
+
+    api_key = ""
+    try:
+        from ..services.integration_config import get_anthropic_config
+
+        api_key = (get_anthropic_config() or {}).get("api_key", "")
+    except Exception:  # noqa: BLE001
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+
+    live = _fetch_anthropic_models(api_key)
+    if live:
+        _ANTHROPIC_MODELS_CACHE["models"] = live
+        _ANTHROPIC_MODELS_CACHE["at"] = now
+        return {"models": live, "source": "live"}
+
+    # Fail-soft: curated fallback (not cached so we retry the live call sooner).
+    return {"models": _ANTHROPIC_MODEL_FALLBACK, "source": "fallback"}
 
 
 @router.get("/integrations")

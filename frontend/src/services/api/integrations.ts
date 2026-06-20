@@ -55,4 +55,28 @@ export async function getIntegrationStatus(): Promise<IntegrationStatusReport> {
   return data;
 }
 
-export const integrationsApi = { getIntegrationStatus };
+// ---------------------------------------------------------------------------
+// Live Claude model list (for the Anthropic integration's model dropdown)
+// ---------------------------------------------------------------------------
+// Backed by GET /settings/integrations/anthropic/models, which lists the
+// currently-available Claude models from the Anthropic Models API and
+// FAIL-SOFTs to a curated current fallback list. ADMIN/SUPERADMIN only.
+
+export interface AnthropicModel {
+  id: string;
+  display_name: string;
+}
+
+export interface AnthropicModelsResponse {
+  models: AnthropicModel[];
+  source: 'live' | 'cache' | 'fallback';
+}
+
+export async function getAnthropicModels(): Promise<AnthropicModelsResponse> {
+  const { data } = await api.get<AnthropicModelsResponse>(
+    '/settings/integrations/anthropic/models',
+  );
+  return data;
+}
+
+export const integrationsApi = { getIntegrationStatus, getAnthropicModels };
