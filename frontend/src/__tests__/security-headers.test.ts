@@ -76,6 +76,35 @@ describe('vercel.json security headers', () => {
     expect(header.value).toContain("'wasm-unsafe-eval'");
   });
 
+  // Regression guard for the #785 prod font outage: index.html loaded Google
+  // Fonts but the CSP allowed neither host, so Instrument Serif + Inter silently
+  // fell back to system fonts in production. The CSP MUST permit whatever fonts
+  // index.html actually loads.
+  it('CSP permits the web fonts that index.html actually loads', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const csp = rootRoute.headers.find((h: any) => h.key === 'Content-Security-Policy').value as string;
+    const indexHtml = fs.readFileSync(path.join(__dirname, '../..', 'index.html'), 'utf-8');
+    const styleSrc = (csp.match(/style-src ([^;]+)/) || [])[1] || '';
+    const fontSrc = (csp.match(/font-src ([^;]+)/) || [])[1] || '';
+    if (indexHtml.includes('fonts.googleapis.com')) {
+      // the stylesheet host
+      expect(styleSrc).toContain('https://fonts.googleapis.com');
+      // Google Fonts CSS @font-face fetches the actual font files from gstatic
+      expect(fontSrc).toContain('https://fonts.gstatic.com');
+    }
+  });
+
+  // index.html must not carry an inline <script> body (it would be CSP-blocked
+  // since script-src has no 'unsafe-inline'); boot flags are externalized.
+  it('has no CSP-blocked inline script in index.html', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === '/(.*)');
+    const csp = rootRoute.headers.find((h: any) => h.key === 'Content-Security-Policy').value as string;
+    const scriptSrc = (csp.match(/script-src ([^;]+)/) || [])[1] || '';
+    const indexHtml = fs.readFileSync(path.join(__dirname, '../..', 'index.html'), 'utf-8');
+    expect(/<script>[\s\S]*?<\/script>/.test(indexHtml)).toBe(false);
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+  });
+
   it('preserves existing rewrites for SPA routing', () => {
     expect(Array.isArray(vercelConfig.rewrites)).toBe(true);
     const spaRewrite = vercelConfig.rewrites.find((r: any) => r.source === '/(.*)');
