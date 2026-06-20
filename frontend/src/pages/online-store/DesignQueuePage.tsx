@@ -24,6 +24,7 @@
 // CATALOG_MANAGER / DESIGN_MANAGER at the route (App.tsx). Light theme only.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Image as ImageIcon,
@@ -244,6 +245,25 @@ export default function DesignQueuePage() {
     runMutation(img.id, () => imagesApi.attachEdited(img.id, trimmed), 'Edited image attached — now in review');
   };
 
+  // Upload the edited image FILE (multipart) to durable storage, then attach the
+  // returned URL exactly where a pasted URL is consumed (-> In review). This is
+  // the real file-upload path the queue previously lacked; the paste-URL flow
+  // above stays as a fallback. Errors (bad type / too big / storage down) toast.
+  const uploadEdited = (img: EcomProductImage, file: File) => {
+    runMutation(
+      img.id,
+      async () => {
+        const { url } = await imagesApi.upload(file, {
+          product_id: img.product_id,
+          variant_id: img.variant_sku || undefined,
+          kind: 'EDITED',
+        });
+        return imagesApi.attachEdited(img.id, url);
+      },
+      'Edited image uploaded — now in review',
+    );
+  };
+
   const approve = (img: EcomProductImage) =>
     runMutation(img.id, () => imagesApi.setStatus(img.id, 'APPROVED'), 'Approved');
 
@@ -412,6 +432,7 @@ export default function DesignQueuePage() {
               onAssignToMe={() => assignToMe(img)}
               onStart={() => start(img)}
               onAttachEdited={() => attachEdited(img)}
+              onUploadEdited={(file) => uploadEdited(img, file)}
               onApprove={() => approve(img)}
               onReject={() => reject(img)}
               onRemove={() => remove(img)}
@@ -480,6 +501,7 @@ function ImageCard({
   onAssignToMe,
   onStart,
   onAttachEdited,
+  onUploadEdited,
   onApprove,
   onReject,
   onRemove,
@@ -494,11 +516,20 @@ function ImageCard({
   onAssignToMe: () => void;
   onStart: () => void;
   onAttachEdited: () => void;
+  onUploadEdited: (file: File) => void;
   onApprove: () => void;
   onReject: () => void;
   onRemove: () => void;
   onPublish: () => void;
 }) {
+  // Hidden file input driving the "Upload" button (real multipart upload).
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const onPickFile = (e: ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    // Reset so picking the same file again still fires onChange.
+    e.target.value = '';
+    if (f) onUploadEdited(f);
+  };
   const meta = STATUS_META[img.design_status] ?? STATUS_META.QUEUED;
   const rawUrl = img.raw_url || (img.role === 'RAW' ? img.url : null) || img.original_url || null;
   const editedUrl = img.edited_url || (img.role === 'EDITED' ? img.url : null) || null;
@@ -579,11 +610,28 @@ function ImageCard({
           <ActionButton onClick={onStart} disabled={busy} icon={Play} label="Start" />
         )}
 
-        {/* Attach edited URL -> REVIEW. Allowed while being worked or queued. */}
+        {/* Upload / Attach the edited image -> REVIEW. Allowed while being worked
+            or queued. "Upload" sends a real file to durable storage (Phase 4a);
+            "Attach edited" stays as the paste-a-URL fallback. */}
         {(img.design_status === 'IN_PROGRESS' ||
           img.design_status === 'QUEUED' ||
           img.design_status === 'REJECTED') && (
-          <ActionButton onClick={onAttachEdited} disabled={busy} icon={Upload} label="Attach edited" />
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/avif"
+              className="hidden"
+              onChange={onPickFile}
+            />
+            <ActionButton
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+              icon={UploadCloud}
+              label="Upload"
+            />
+            <ActionButton onClick={onAttachEdited} disabled={busy} icon={Upload} label="Paste URL" />
+          </>
         )}
 
         {/* Approve / Reject — only in REVIEW, only for approver roles */}

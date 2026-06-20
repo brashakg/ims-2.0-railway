@@ -4456,6 +4456,14 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
     {
+        # Phase 4a: durable multipart image UPLOAD -> object_storage (S3 seam,
+        # fail-soft to local in dev). Literal /upload out-ranks the {image_id}
+        # param route in the policy matcher. Audit-logged action IMAGE_UPLOAD.
+        "method": "POST",
+        "path": "/api/v1/online-store/images/upload",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/online-store/images/{image_id}",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],

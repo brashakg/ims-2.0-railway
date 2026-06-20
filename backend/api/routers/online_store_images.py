@@ -40,14 +40,32 @@ Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 
 from __future__ import annotations
 
+import uuid
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from .auth import require_roles
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Upload security guards (Phase 4a -- durable multipart image upload)
+# ---------------------------------------------------------------------------
+# Allowlist of accepted image content-types -> the canonical file extension we
+# mint the storage key with. NEVER trust the client filename (path traversal):
+# we generate a safe uuid-based key and pick the extension from the (validated)
+# content-type, not the upload name.
+_ALLOWED_IMAGE_TYPES: Dict[str, str] = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/avif": "avif",
+}
+# Hard cap on a single upload (10 MB) -> 413 on violation. Storefront product
+# photos are well under this; the cap stops a memory-DoS / accidental huge file.
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 # Roles allowed into the Image Design Queue. SUPERADMIN is auto-granted by
 # require_roles, so it is not repeated in the tuple but IS listed in the POLICY
@@ -141,6 +159,29 @@ def _write_audit(image: Dict, current_user: dict) -> None:
                         "edited_url": image.get("edited_url"),
                         "reviewed_by": image.get("reviewed_by"),
                     },
+                }
+            )
+    except Exception:  # noqa: BLE001 -- audit must never break the business write
+        pass
+
+
+def _write_upload_audit(current_user: dict, details: Dict) -> None:
+    """Write a chained audit row for an IMAGE_UPLOAD (Audit Everything). Records
+    WHO uploaded WHAT (product/kind/storage_backend/size/content_type) -- never
+    the bytes. Fail-soft: any audit error is swallowed so it can never undo the
+    upload that triggered it (mirrors the approval audit pattern above)."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "IMAGE_UPLOAD",
+                    "entity_type": "product_image",
+                    "entity_id": details.get("product_id"),
+                    "user_id": current_user.get("user_id"),
+                    "details": details,
                 }
             )
     except Exception:  # noqa: BLE001 -- audit must never break the business write
@@ -294,6 +335,104 @@ async def create_image(
     if created is None:
         raise HTTPException(status_code=500, detail="Failed to create image")
     return {"image": _with_id(created)}
+
+
+@router.post("/upload")
+async def upload_image(
+    file: UploadFile = File(...),
+    product_id: Optional[str] = Form(None),
+    variant_id: Optional[str] = Form(None),
+    kind: Optional[str] = Form(None),
+    current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
+) -> Dict:
+    """Upload a real image FILE (multipart) to durable storage and return its URL.
+
+    The design queue previously had NO file-upload path -- a designer could only
+    paste an already-hosted URL. This accepts the bytes directly and persists them
+    via the configured object_storage backend (S3/R2 in prod via
+    IMAGE_STORAGE_PROVIDER=s3 + IMAGE_S3_*, fail-soft to local disk in dev), then
+    hands the durable URL back so the caller can attach it (Attach edited / queue).
+
+    PUSH-DARK: this does NOT touch Shopify -- shopify_image_id stays null until the
+    Phase-5 push. It only writes bytes + an audit row; it does not create an image
+    record (the FE consumes the returned url exactly where a pasted url is used).
+
+    SECURITY:
+      * content-type allowlist (png / jpeg / webp / avif) -> 415 otherwise.
+      * 10 MB size cap -> 413 otherwise; an empty body -> 400.
+      * the storage KEY is generated (uuid + content-type-derived extension); the
+        client filename is NEVER used in the path, so there is no path traversal.
+
+    Returns {url, storage_backend, kind, content_type, size}. Audit-logs the
+    upload (actor / product / kind / backend / size / content_type -- NOT bytes).
+    """
+    kind_v = _validate_enum(kind, _KINDS, "kind") or "RAW"
+
+    # 1. Validate the content-type BEFORE reading the body (cheap reject).
+    content_type = (file.content_type or "").strip().lower()
+    ext = _ALLOWED_IMAGE_TYPES.get(content_type)
+    if ext is None:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "Unsupported image type "
+                f"'{content_type or 'unknown'}'. Allowed: "
+                f"{sorted(_ALLOWED_IMAGE_TYPES)}"
+            ),
+        )
+
+    # 2. Read + size-guard the bytes.
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cap",
+        )
+
+    # 3. Generate a SAFE storage key -- never trust the client filename. The path
+    # is product-scoped (when given) + a uuid + the validated extension, so two
+    # uploads never collide and there is no traversal vector.
+    safe_product = "".join(
+        ch for ch in (product_id or "product") if ch.isalnum() or ch in ("-", "_")
+    ) or "product"
+    key = f"{safe_product}/{uuid.uuid4().hex}.{ext}"
+
+    # 4. Persist via the configured object-storage backend (fail-soft to local).
+    try:
+        from ..services.object_storage import get_object_storage
+
+        storage = get_object_storage()
+        url = storage.put(key, data, content_type)
+        backend = getattr(storage, "name", "unknown")
+    except Exception as e:  # noqa: BLE001 -- a storage failure is a clear 503
+        raise HTTPException(
+            status_code=503,
+            detail=f"Image storage unavailable: {str(e)[:200]}",
+        )
+
+    # 5. Audit the upload (metadata only -- never the bytes). Fail-soft.
+    _write_upload_audit(
+        current_user,
+        {
+            "product_id": product_id,
+            "variant_id": variant_id,
+            "kind": kind_v,
+            "storage_backend": backend,
+            "size": len(data),
+            "content_type": content_type,
+            "key": key,
+        },
+    )
+
+    return {
+        "url": url,
+        "storage_backend": backend,
+        "kind": kind_v,
+        "content_type": content_type,
+        "size": len(data),
+    }
 
 
 @router.get("/{image_id}")
