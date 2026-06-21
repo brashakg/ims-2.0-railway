@@ -80,11 +80,11 @@ export function DayEndReport({ storeId, onClose, entity, store, overrides }: Day
     setLoading(true);
     try {
       const result = await orderApi.getOrders({
-        store_id: storeId,
-        date_from: date,
-        date_to: date,
-        page_size: 500,
-      } as any);
+        storeId,
+        from_date: date,
+        to_date: date,
+        limit: 500,
+      });
       setOrders(result?.orders || result || []);
     } catch {
       setOrders([]);

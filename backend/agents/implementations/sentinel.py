@@ -85,6 +85,7 @@ class SentinelAgent(JarvisAgent):
     def __init__(self, db=None):
         super().__init__(db=db)
         self._health_score = 100
+        self._last_reported_health_score = 100
         self._last_health_data: Dict[str, Any] = {}
         self._alerts: List[Dict] = []
 
@@ -124,10 +125,9 @@ class SentinelAgent(JarvisAgent):
         self._last_health_data = results
         await self._store_health_check(results)
 
-        # Auto-alert state transitions — first time we drop below 70,
-        # file a HIGH alert with the failing components so the UI/Slack
-        # surface it. Above 70 stays quiet.
-        if self._health_score < 70:
+        # Auto-alert only on the downward transition (healthy -> degraded).
+        # Prevents alert/event spam every 60s when the system stays below 70.
+        if self._health_score < 70 and self._last_reported_health_score >= 70:
             failing = []
             for domain in ("database", "api", "frontend", "agents"):
                 d = results.get(domain) or {}
@@ -148,6 +148,8 @@ class SentinelAgent(JarvisAgent):
                 "details": results,
             })
             logger.warning(f"[SENTINEL] System health DEGRADED: {self._health_score}/100 — {failing}")
+
+        self._last_reported_health_score = self._health_score
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """Handle on-demand health queries from CORTEX."""

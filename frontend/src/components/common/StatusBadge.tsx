@@ -251,7 +251,7 @@ export function StatusBadge({
         className
       )}
       onClick={onClick}
-      role={interactive ? "button" : undefined}
+      role={interactive ? "button" : "status"}
       aria-label={ariaLabel || `Status: ${status}`}
       tabIndex={interactive ? 0 : -1}
     >

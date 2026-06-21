@@ -305,12 +305,14 @@ def _calculate_tds(gross_salary: float, month: int, year: int) -> float:
     """
     annual_salary = gross_salary * 12
 
-    # Simplified TDS slab (varies by regime, FY, etc.)
+    # Old-regime slab rates (simplified, no cess/surcharge)
     if annual_salary <= 250000:
         return 0
     elif annual_salary <= 500000:
         taxable = annual_salary - 250000
         tax = taxable * 0.05
+        # Sec 87A full rebate: income <= 5L, tax is fully rebated
+        tax = 0.0
     elif annual_salary <= 1000000:
         tax = 250000 * 0.05 + (annual_salary - 500000) * 0.20
     else:
@@ -773,7 +775,11 @@ async def get_employee_salary(
             )
             record = records[0] if records else None
 
+        if record and not can_access_store_scoped(record.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Salary record not found")
         return {"salary": record or {}}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -937,11 +943,17 @@ async def get_salary_advances(
 
         advances = list(salary_advances_coll.find(query))
 
+        # IDOR guard: infer store from first advance doc
+        if advances and not can_access_store_scoped(advances[0].get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Advances not found")
+
         return {
             "employee_id": employee_id,
             "advances": advances or [],
             "total": len(advances) if advances else 0,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -963,14 +975,9 @@ async def settle_salary_advance(
     try:
         salary_advances_coll = db.get_collection("salary_advances")
 
-        # Get advance
-        advance = salary_advances_coll.find_one({"advance_id": advance_id})
-        if not advance:
-            raise HTTPException(status_code=404, detail="Advance not found")
-
-        # Update advance status
-        salary_advances_coll.update_one(
-            {"advance_id": advance_id},
+        # Atomic settle: only matches unsettled advances to prevent double-settle
+        result = salary_advances_coll.update_one(
+            {"advance_id": advance_id, "status": {"$ne": "settled"}},
             {
                 "$set": {
                     "status": "settled",
@@ -981,6 +988,12 @@ async def settle_salary_advance(
                 }
             },
         )
+
+        if result.matched_count == 0:
+            existing = salary_advances_coll.find_one({"advance_id": advance_id})
+            if not existing:
+                raise HTTPException(status_code=404, detail="Advance not found")
+            raise HTTPException(status_code=409, detail="Advance already settled")
 
         return {
             "status": "success",
@@ -1052,9 +1065,13 @@ async def get_payslip(
             {"employee_id": employee_id, "month": month, "year": year}
         )
         if payslip:
+            if not can_access_store_scoped(payslip.get("store_id"), current_user):
+                raise HTTPException(status_code=404, detail="Payslip not found")
             return {"payslip": _strip_id(payslip)}
 
         employee = _get_employee_details(db, employee_id)
+        if employee and not can_access_store_scoped(employee.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Payslip not found")
 
         # Try the run-engine ``payroll`` collection first.
         run_row = db.get_collection("payroll").find_one(
@@ -1120,6 +1137,8 @@ async def get_latest_payslip(
             .limit(1)
         )
         if cached:
+            if not can_access_store_scoped(cached[0].get("store_id"), current_user):
+                raise HTTPException(status_code=404, detail="Payslip not found")
             return {"payslip": _strip_id(cached[0])}
 
         # Fall through to the run collection and synthesise a payslip.
@@ -1135,11 +1154,16 @@ async def get_latest_payslip(
         if not run_row:
             return {"payslip": None}
 
+        if not can_access_store_scoped(run_row.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Payslip not found")
+
         employee = _get_employee_details(db, employee_id)
         payslip = _build_payslip_from_run_row(run_row, employee, db)
         # Persist so the next call is instant.
         payslips_coll.insert_one({**payslip})
         return {"payslip": _strip_id(payslip)}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(

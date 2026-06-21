@@ -47,7 +47,8 @@ ticker_router = APIRouter(tags=["finance"])
 def _get_db():
     from database.connection import get_db
 
-    return get_db().db
+    d = get_db()
+    return d.db if d is not None else None
 
 
 # ── Field/status tolerance ────────────────────────────────────────────────
