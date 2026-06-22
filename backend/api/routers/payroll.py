@@ -246,20 +246,25 @@ def _get_db():
     Prefer the shared ``dependencies.get_db`` (which falls back to the SEEDED
     mock DB when no live Mongo is connected) so payroll config / PT-slab / salary
     endpoints work in a mock / test / fresh environment like every other router.
-    The old code returned ``database.connection.get_db()`` directly, a
-    NOT-connected handle whose ``get_collection()`` is None -> 500 with
-    "'NoneType' object has no attribute 'find'" whenever Mongo was absent."""
+    Returns None when not connected (production Mongo down) so the 28
+    ``if not db:`` guards throughout this module correctly fire instead of
+    proceeding to call get_collection() on a disconnected wrapper."""
     try:
         from ..dependencies import get_db as _dep_get_db
 
-        db = _dep_get_db()
-        if db is not None:
-            return db
+        conn = _dep_get_db()
+        if conn is None:
+            return None
+        # is_connected is False in production when Mongo is unreachable;
+        # the SeededDatabaseConnection object is always truthy so we must
+        # check is_connected explicitly before returning it.
+        return conn if conn.is_connected else None
     except Exception:  # noqa: BLE001
         pass
     if not DATABASE_AVAILABLE:
         return None
-    return get_db()
+    conn = get_db()
+    return conn if (conn is not None and conn.is_connected) else None
 
 
 def _get_employee_details(db, employee_id: str) -> dict:
@@ -826,7 +831,7 @@ async def calculate_salary(
             "store_id": current_user.get("active_store_id"),
             "month": calc_request.month,
             "year": calc_request.year,
-            "breakdown": breakdown.dict(),
+            "breakdown": breakdown.model_dump(),
             "working_days": calc_request.working_days,
             "leave_without_pay_days": calc_request.leave_without_pay_days,
             "status": "calculated",

@@ -184,7 +184,7 @@ async def open_request(
     try:
         req = svc.open_request(
             _get_db(),
-            body.dict(),
+            body.model_dump(),
             actor=current_user,
             on_hand_resolver=_on_hand_resolver,
         )

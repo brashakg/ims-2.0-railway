@@ -197,7 +197,7 @@ async def submit_count(session_id: str, body: SubmitBody, current_user: Dict[str
         raise HTTPException(status_code=404, detail="count session not found")
     validate_store_access(sess.get("store_id"), current_user)
     try:
-        updated = _engine().submit_count(session_id, [c.dict() for c in body.counts],
+        updated = _engine().submit_count(session_id, [c.model_dump() for c in body.counts],
                                          store_id=sess.get("store_id"), actor=current_user)
     except svc.BlindStockTakeError as exc:
         _raise(exc)

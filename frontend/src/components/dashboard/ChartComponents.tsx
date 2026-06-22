@@ -44,9 +44,9 @@ interface KPICardProps {
 
 // Simple SVG-based Line Chart
 export function LineChart({ data, title, color = '#dc2626', height = 200 }: LineChartProps) {
-  const maxValue = useMemo(() => Math.max(...data.map(d => d.value)), [data]);
-  const minValue = useMemo(() => Math.min(...data.map(d => d.value)), [data]);
-  const range = maxValue - minValue || maxValue;
+  const maxValue = useMemo(() => data.length === 0 ? 0 : Math.max(...data.map(d => d.value)), [data]);
+  const minValue = useMemo(() => data.length === 0 ? 0 : Math.min(...data.map(d => d.value)), [data]);
+  const range = maxValue - minValue || maxValue || 1;
 
   const points = useMemo(() => {
     const width = 600;
@@ -105,8 +105,8 @@ export function LineChart({ data, title, color = '#dc2626', height = 200 }: Line
 
 // Simple SVG-based Bar Chart
 export function BarChart({ data, title, color = '#2563eb', height = 200 }: BarChartProps) {
-  const maxValue = useMemo(() => Math.max(...data.map(d => d.value)), [data]);
-  const barWidth = useMemo(() => Math.max(20, 600 / (data.length * 2)), [data]);
+  const maxValue = useMemo(() => data.length === 0 ? 0 : Math.max(...data.map(d => d.value)), [data]);
+  const barWidth = useMemo(() => Math.max(20, 600 / (data.length * 2 || 1)), [data]);
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4">

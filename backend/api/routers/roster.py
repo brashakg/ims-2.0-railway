@@ -123,6 +123,10 @@ async def get_staff_skill(
 ):
     _require(current_user, _READ_ROLES, "view staff skills")
     rec = svc.get_staff_skill(_get_db(), employee_id)
+    if rec:
+        store_id = rec.get("store_id")
+        if store_id:
+            validate_store_access(store_id, current_user)
     return rec or {"employee_id": employee_id, "is_optometrist": False, "skills": []}
 
 
@@ -138,7 +142,7 @@ async def put_staff_skill(
         validate_store_access(body.store_id, current_user)
     try:
         return svc.upsert_staff_skill(
-            _get_db(), employee_id, body.dict(), actor=current_user
+            _get_db(), employee_id, body.model_dump(), actor=current_user
         )
     except svc.RosterError as exc:
         _raise(exc)
@@ -157,9 +161,9 @@ async def create_roster(
     _require(current_user, _MANAGE_ROLES, "manage a roster")
     validate_store_access(body.store_id, current_user)
     try:
-        payload = body.dict()
+        payload = body.model_dump()
         payload["entries"] = [
-            e.dict() if hasattr(e, "dict") else e for e in body.entries
+            e.model_dump() if hasattr(e, "model_dump") else e for e in body.entries
         ]
         return svc.create_or_replace_roster(_get_db(), payload, actor=current_user)
     except svc.RosterError as exc:
@@ -198,7 +202,7 @@ async def update_roster(
     if body.status is not None:
         payload["status"] = body.status
     if body.entries is not None:
-        payload["entries"] = [e.dict() for e in body.entries]
+        payload["entries"] = [e.model_dump() for e in body.entries]
     try:
         return svc.update_roster(db, roster_id, payload, actor=current_user)
     except svc.RosterError as exc:

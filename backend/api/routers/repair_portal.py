@@ -22,7 +22,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user
 from ..dependencies import validate_store_access
@@ -152,8 +154,16 @@ class JobIntakeBody(BaseModel):
     customer_id: Optional[str] = None
     walkin_name: Optional[str] = None
     walkin_mobile: Optional[str] = None
-    quoted_price_paise: Optional[int] = None
+    # Cap at INR 1 lakh (10,000,000 paise) to prevent absurd quoted amounts.
+    quoted_price_paise: Optional[int] = Field(None, ge=0, le=10_000_000)
     quoted_price: Optional[float] = None
+
+    @field_validator("walkin_mobile")
+    @classmethod
+    def validate_mobile(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not re.fullmatch(r"[6-9]\d{9}", v):
+            raise ValueError("walkin_mobile must be a valid 10-digit Indian mobile number starting with 6-9")
+        return v
 
 
 class TransitionBody(BaseModel):
@@ -183,7 +193,9 @@ async def create_service(
 ):
     """Create a catalog service (CATALOG_MANAGER+)."""
     _require(current_user, _CATALOG_ROLES, "manage the repair catalog")
-    payload = body.dict()
+    for sid in body.enabled_store_ids:
+        validate_store_access(sid, current_user)
+    payload = body.model_dump()
     payload["service_id"] = None  # POST always creates
     try:
         return svc.upsert_service(_get_db(), payload, actor=current_user)
@@ -199,7 +211,9 @@ async def update_service(
 ):
     """Replace a catalog service (CATALOG_MANAGER+)."""
     _require(current_user, _CATALOG_ROLES, "manage the repair catalog")
-    payload = body.dict()
+    for sid in body.enabled_store_ids:
+        validate_store_access(sid, current_user)
+    payload = body.model_dump()
     payload["service_id"] = service_id
     try:
         return svc.upsert_service(_get_db(), payload, actor=current_user)
@@ -220,7 +234,7 @@ async def open_job(
     _require(current_user, _JOB_ROLES, "open a repair job")
     validate_store_access(body.store_id, current_user)
     try:
-        job = svc.open_job(_get_db(), body.store_id, body.dict(), actor=current_user)
+        job = svc.open_job(_get_db(), body.store_id, body.model_dump(), actor=current_user)
     except svc.RepairError as exc:
         _raise(exc)
     _audit(

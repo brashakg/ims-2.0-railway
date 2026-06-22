@@ -406,7 +406,7 @@ async def create_customer_interaction(
         interaction_data = {
             "id": interaction_id,
             "customer_id": customer_id,
-            **interaction.dict(),
+            **interaction.model_dump(),
         }
         db.create_customer_interaction(interaction_data)
         return interaction_data

@@ -91,7 +91,7 @@ async def create_agreement(
     """Create a rebate agreement (validates the tier ladder up front)."""
     _require(current_user, "manage vendor rebates")
     try:
-        return svc.create_agreement(_get_db(), body.dict(), actor=current_user)
+        return svc.create_agreement(_get_db(), body.model_dump(), actor=current_user)
     except svc.RebateError as exc:
         _raise(exc)
 
@@ -112,7 +112,7 @@ async def update_agreement(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     _require(current_user, "manage vendor rebates")
-    payload = {k: v for k, v in body.dict().items() if v is not None}
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
         return svc.update_agreement(
             _get_db(), agreement_id, payload, actor=current_user
