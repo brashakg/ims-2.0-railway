@@ -2611,9 +2611,10 @@ class Jarvis:
             from database.connection import get_seeded_db
 
             db = get_seeded_db()
-            if db:
+            tasks_coll = db.get_collection("tasks")
+            if tasks_coll is not None:
                 task_id = f"TSK-{uuid.uuid4().hex[:8].upper()}"
-                db.get_collection("tasks").insert_one(
+                tasks_coll.insert_one(
                     {
                         "task_id": task_id,
                         "title": params.get("title", "JARVIS-created task"),

@@ -3627,8 +3627,9 @@ async def add_payment(
                 from ..dependencies import get_seeded_db
 
                 db = get_seeded_db()
-                if db:
-                    store_settings = db.get_collection("settings").find_one(
+                settings_coll = db.get_collection("settings")
+                if settings_coll is not None:
+                    store_settings = settings_coll.find_one(
                         {
                             "store_id": current_user.get("active_store_id"),
                             "key": "emi_config",

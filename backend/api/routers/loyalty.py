@@ -184,7 +184,7 @@ def _audit(
 @router.get("/account/{customer_id}")
 async def get_account(
     customer_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_roles(*_POS_ROLES)),
 ):
     """Account snapshot + last 20 ledger rows."""
     accounts = get_loyalty_account_repository()
@@ -235,7 +235,7 @@ async def get_ledger(
     limit: int = Query(50, ge=1, le=500),
     skip: int = Query(0, ge=0),
     type: Optional[str] = Query(None),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_roles(*_POS_ROLES)),
 ):
     """Paginated ledger for one customer, newest-first."""
     txns = get_loyalty_transaction_repository()
