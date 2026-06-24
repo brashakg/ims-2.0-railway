@@ -378,7 +378,7 @@ def _already_returned_qty(
         return 0.0
     total = 0.0
     try:
-        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+        for doc in coll.find({"order_id": order_id, "status": "COMPLETED"}, {"_id": 0}):
             for prior in doc.get("items") or []:
                 if not isinstance(prior, dict):
                     continue

@@ -524,7 +524,14 @@ export const usePOSStore = create<POSState>()(
         appliedVoucher: { code, discountAmount }
       }),
 
-      removeVoucher: () => set({ appliedVoucher: undefined }),
+      removeVoucher: () => set((state: POSState) => ({
+        appliedVoucher: undefined,
+        // Also remove the corresponding GIFT_VOUCHER payment entry so no
+        // phantom tender is forwarded to the backend.
+        payments: (state.payments || []).filter(
+          (p: PaymentEntry) => p.method !== 'GIFT_VOUCHER'
+        ),
+      })),
 
       redeemLoyaltyPoints: (pointsToRedeem: number) => set({
         loyaltyPointsRedeemed: pointsToRedeem

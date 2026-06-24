@@ -345,7 +345,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const setActiveStore = (storeId: string) => {
     if (
       !(
-        state.user?.storeIds.includes(storeId) ||
+        (state.user?.storeIds ?? []).includes(storeId) ||
         hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])
       )
     ) {

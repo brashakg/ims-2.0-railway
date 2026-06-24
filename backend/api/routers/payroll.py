@@ -935,6 +935,13 @@ async def get_salary_advances(
         if status:
             query["status"] = status
 
+        # Store-scope guard (mirrors BUG-062 fix on GET /config/{employee_id}):
+        # SUPERADMIN/ADMIN can read across all stores; store-scoped roles are
+        # limited to advances recorded for their own store.
+        scoped_store = resolve_store_scope(None, current_user)
+        if scoped_store is not None:
+            query["store_id"] = scoped_store
+
         advances = list(salary_advances_coll.find(query))
 
         return {

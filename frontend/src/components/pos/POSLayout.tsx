@@ -1269,7 +1269,7 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
     store.setSaleType('prescription_order');
     if (latestRx) {
       const rx: Prescription = {
-        prescriptionId: latestRx.prescriptionId || latestRx.prescription_id || latestRx._id,
+        id: latestRx.id || latestRx.prescriptionId || latestRx.prescription_id || latestRx._id,
         prescriptionNumber: latestRx.prescriptionNumber || latestRx.prescription_number || '',
         patientId: latestRx.patientId || latestRx.patient_id || customerId,
         source: latestRx.source || 'TESTED_AT_STORE',
@@ -1431,7 +1431,7 @@ function SalespersonPicker() {
     // future role we'll add by request.
     adminStoreApi
       .getStoreUsers(sid, {
-        roles: ['STORE_MANAGER', 'SALES_STAFF', 'OPTICIAN', 'CASHIER'],
+        roles: ['STORE_MANAGER', 'SALES_STAFF', 'OPTOMETRIST', 'CASHIER'],
         activeOnly: true,
       })
       .then((r: any) => {
@@ -1769,7 +1769,7 @@ function StepPrescription({ onShowModal, onShowNew, onAccessoryOnlyChange }: { o
 
   const attachRx = (rx: any) => {
     const mapped: Prescription = {
-      prescriptionId: rx.prescriptionId || rx.prescription_id || rx._id,
+      id: rx.id || rx.prescriptionId || rx.prescription_id || rx._id,
       prescriptionNumber: rx.prescriptionNumber || rx.prescription_number || '',
       patientId: rx.patientId || rx.patient_id || lookupId || '',
       source: rx.source || 'TESTED_AT_STORE',

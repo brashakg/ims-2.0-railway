@@ -2611,7 +2611,7 @@ class Jarvis:
             from database.connection import get_seeded_db
 
             db = get_seeded_db()
-            if db:
+            if db is not None:
                 task_id = f"TSK-{uuid.uuid4().hex[:8].upper()}"
                 db.get_collection("tasks").insert_one(
                     {

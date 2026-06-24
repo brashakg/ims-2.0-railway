@@ -216,7 +216,7 @@ export function StepPayment() {
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
                 <div className="flex justify-between"><span className="text-gray-700">Loan Amount:</span><span className="font-semibold text-gray-900">{'₹'}{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
                 <div className="flex justify-between"><span className="text-gray-700">Processing Fee (2%):</span><span className="font-semibold text-gray-900">{'₹'}{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), ((store as any).emiAnnualRate ?? 0.12) / 12, emiTenure) * 100) / 100}</span></div>
               </div>
             )}
             <div className="flex gap-2">
