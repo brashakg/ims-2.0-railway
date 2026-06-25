@@ -325,6 +325,8 @@ def _calculate_salary(
     working_days: int = 26,
     leave_without_pay_days: int = 0,
     advance_deduction: float = 0.0,
+    month: int = 0,
+    year: int = 0,
 ) -> SalaryBreakdown:
     """
     Calculate complete salary with all components.
@@ -366,8 +368,10 @@ def _calculate_salary(
     esi_pct = salary_config.get("esi_percentage", 0.75) if esi_applicable else 0
     esi = (gross_salary * esi_pct) / 100 if esi_applicable else 0
 
-    # TDS calculation
-    tds = _calculate_tds(gross_salary, 1, 2026)  # Simplified
+    # TDS calculation — pass actual pay period so the slab lookup is correct
+    import datetime as _dt
+    _now = _dt.datetime.now()
+    tds = _calculate_tds(gross_salary, month or _now.month, year or _now.year)
 
     # LWP Deduction: (Basic + DA) / 30 * days_absent
     # In Indian salaries, DA is typically part of allowances or fixed
@@ -814,6 +818,8 @@ async def calculate_salary(
             working_days=calc_request.working_days,
             leave_without_pay_days=calc_request.leave_without_pay_days,
             advance_deduction=calc_request.advance_deduction,
+            month=calc_request.month,
+            year=calc_request.year,
         )
 
         # Create salary record

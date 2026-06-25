@@ -2246,7 +2246,7 @@ async def get_targets(
     # Fetch from targets collection in database if available
     try:
         db = get_db()
-        if db:
+        if db is not None and db.is_connected:
             targets_coll = db.get_collection("targets")
             stored = targets_coll.find_one({"store_id": active_store})
             if stored:

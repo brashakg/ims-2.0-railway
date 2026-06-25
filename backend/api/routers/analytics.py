@@ -131,10 +131,7 @@ def _fetch_orders_in_window(
         return _norm_orders(order_repo.find_many(flt, limit=0))
     except Exception:
         # Defensive: never 500 a dashboard on a query hiccup.
-        try:
-            return _norm_orders(order_repo.find_many(flt, limit=0))
-        except Exception:
-            return []
+        return []
 
 
 # ============================================================================

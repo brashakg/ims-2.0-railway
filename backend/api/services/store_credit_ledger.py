@@ -16,6 +16,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from api.utils.ist import now_ist_naive
+
 ISSUED = "ISSUED"
 REDEEMED = "REDEEMED"
 ADJUSTED = "ADJUSTED"
@@ -82,5 +84,5 @@ def make_entry(
         "ref": ref,
         "store_id": store_id,
         "created_by": user_id,
-        "created_at": datetime.now().isoformat(),
+        "created_at": now_ist_naive().isoformat(),
     }
