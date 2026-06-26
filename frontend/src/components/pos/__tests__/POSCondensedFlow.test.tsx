@@ -102,9 +102,11 @@ function seedSale(saleType: 'quick_sale' | 'prescription_order') {
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
     s.setSaleType(saleType);
-    (s as any).setCustomer
-      ? (s as any).setCustomer({ id: 'c1', name: 'Asha', phone: '9000000001' })
-      : usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
+    if ((s as any).setCustomer) {
+      (s as any).setCustomer({ id: 'c1', name: 'Asha', phone: '9000000001' });
+    } else {
+      usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
+    }
   });
 }
 

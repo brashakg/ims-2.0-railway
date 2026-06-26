@@ -236,8 +236,7 @@ class SoapDxCode(BaseModel):
     description: Optional[str] = None
     system: str = Field("ICD-10")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SoapNote(BaseModel):
@@ -320,8 +319,7 @@ class SoapNote(BaseModel):
             raise ValueError("dominant_eye must be RIGHT or LEFT")
         return "RIGHT" if up in ("RIGHT", "R") else "LEFT"
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class EyeTestData(BaseModel):
@@ -2320,8 +2318,7 @@ class LensPowerComboCreate(BaseModel):
     pd: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=500)
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 def _get_lens_power_combos_col():
@@ -2452,8 +2449,7 @@ class ManufacturabilityRequest(BaseModel):
     frame_b_size: Optional[str] = None  # vertical frame measurement (mm)
     segment_height: Optional[str] = None  # requested seg height (mm)
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 def _parse_float_safe(v) -> Optional[float]:
