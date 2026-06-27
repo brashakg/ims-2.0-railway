@@ -749,7 +749,7 @@ async def get_employee_salary(
     employee_id: str,
     month: Optional[int] = Query(None, ge=1, le=12),
     year: Optional[int] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT", "STORE_MANAGER")),
 ):
     """Get individual employee salary breakdown for a specific month or latest"""
     db = _get_db()
@@ -757,6 +757,10 @@ async def get_employee_salary(
         return {"salary": None}
 
     try:
+        config = _get_salary_config(db, employee_id)
+        if config and not can_access_store_scoped(config.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Salary record not found")
+
         salary_records_coll = db.get_collection("salary_records")
 
         if month and year:
@@ -788,7 +792,8 @@ async def get_employee_salary(
 
 @router.post("/salary/calculate", status_code=201)
 async def calculate_salary(
-    calc_request: MonthSalaryCalculation, current_user: dict = Depends(get_current_user)
+    calc_request: MonthSalaryCalculation,
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
 ):
     """Calculate salary for a month with all deductions"""
     db = _get_db()
@@ -802,6 +807,8 @@ async def calculate_salary(
             raise HTTPException(
                 status_code=404, detail="Salary configuration not found"
             )
+        if not can_access_store_scoped(salary_config.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Salary configuration not found")
 
         # Get employee details
         employee = _get_employee_details(db, calc_request.employee_id)
@@ -875,7 +882,8 @@ async def calculate_salary(
 
 @router.post("/advances", status_code=201)
 async def record_salary_advance(
-    advance: SalaryAdvance, current_user: dict = Depends(get_current_user)
+    advance: SalaryAdvance,
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT", "STORE_MANAGER")),
 ):
     """Record a salary advance"""
     db = _get_db()
@@ -887,6 +895,8 @@ async def record_salary_advance(
 
         employee = _get_employee_details(db, advance.employee_id)
         if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        if not can_access_store_scoped(employee.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Employee not found")
 
         advance_doc = {
@@ -921,7 +931,7 @@ async def record_salary_advance(
 async def get_salary_advances(
     employee_id: str,
     status: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT", "STORE_MANAGER")),
 ):
     """Get salary advance history for an employee"""
     db = _get_db()
@@ -930,6 +940,10 @@ async def get_salary_advances(
 
     try:
         salary_advances_coll = db.get_collection("salary_advances")
+
+        employee = _get_employee_details(db, employee_id)
+        if employee and not can_access_store_scoped(employee.get("store_id"), current_user):
+            return {"employee_id": employee_id, "advances": [], "total": 0}
 
         query = {"employee_id": employee_id}
         if status:
@@ -953,7 +967,7 @@ async def get_salary_advances(
 async def settle_salary_advance(
     advance_id: str,
     settlement: AdvanceSettlement = Body(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT")),
 ):
     """Settle advance against salary"""
     db = _get_db()
@@ -966,6 +980,8 @@ async def settle_salary_advance(
         # Get advance
         advance = salary_advances_coll.find_one({"advance_id": advance_id})
         if not advance:
+            raise HTTPException(status_code=404, detail="Advance not found")
+        if not can_access_store_scoped(advance.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Advance not found")
 
         # Update advance status
@@ -1031,7 +1047,7 @@ async def get_payslip(
     employee_id: str,
     month: int,
     year: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT", "STORE_MANAGER")),
 ):
     """Generate or retrieve payslip for an employee.
 
@@ -1045,6 +1061,11 @@ async def get_payslip(
         return {"payslip": None}
 
     try:
+        # Store-scope guard: verify caller can access this employee's store.
+        cfg = _get_salary_config(db, employee_id)
+        if cfg and not can_access_store_scoped(cfg.get("store_id"), current_user):
+            raise HTTPException(status_code=404, detail="Payslip not found")
+
         payslips_coll = db.get_collection("payslips")
 
         # Return cached payslip if one already exists.
@@ -1099,7 +1120,8 @@ async def get_payslip(
 
 @router.get("/payslip/{employee_id}")
 async def get_latest_payslip(
-    employee_id: str, current_user: dict = Depends(get_current_user)
+    employee_id: str,
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT", "STORE_MANAGER")),
 ):
     """Get the most recent payslip for an employee.
 
@@ -1111,6 +1133,11 @@ async def get_latest_payslip(
         return {"payslip": None}
 
     try:
+        # Store-scope guard: verify caller can access this employee's store.
+        cfg = _get_salary_config(db, employee_id)
+        if cfg and not can_access_store_scoped(cfg.get("store_id"), current_user):
+            return {"payslip": None}
+
         payslips_coll = db.get_collection("payslips")
 
         # Cached payslips (newest first).
@@ -1157,11 +1184,14 @@ async def get_incentive_summary(
     employee_id: str,
     month: int,
     year: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles("ADMIN", "ACCOUNTANT", "STORE_MANAGER")),
 ):
     """Get incentive earned for a month (integrated from incentives module)"""
     db = _get_db()
     if not db:
+        return {"incentive": None}
+    cfg = _get_salary_config(db, employee_id)
+    if cfg and not can_access_store_scoped(cfg.get("store_id"), current_user):
         return {"incentive": None}
 
     try:
