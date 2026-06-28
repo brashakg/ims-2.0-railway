@@ -185,6 +185,9 @@ export function POSLayout() {
   // of duplicating), and cleared on success / when a new order starts so a
   // genuinely new order always gets a fresh key.
   const idempotencyKeyRef = useRef<string | null>(null);
+  // Ref so the keydown handler always calls the latest version of
+  // handleCreateOrder without it being in the useEffect dependency array.
+  const handleCreateOrderRef = useRef<() => Promise<void>>(async () => {});
 
   // POS "+1 walk-in" — attributes footfall to the chosen salesperson.
   // Requires a salesperson to be picked first (the conversion engine
@@ -412,7 +415,7 @@ export function POSLayout() {
       if (e.key === 'Escape' && !isComplete && currentGroupIndex > 0) { e.preventDefault(); goBack(); }
       if (e.key === 'F4' && (store.cart || []).length > 0) { e.preventDefault(); setHoldConfirm(true); }
       // Ctrl+Enter submits when the final input group (payment) is showing.
-      if (e.key === 'Enter' && e.ctrlKey && isFinalInputGroup) { e.preventDefault(); handleCreateOrder(); }
+      if (e.key === 'Enter' && e.ctrlKey && isFinalInputGroup) { e.preventDefault(); handleCreateOrderRef.current(); }
       // Plain Enter advances on non-final, non-complete groups.
       if (e.key === 'Enter' && !e.ctrlKey && !isComplete && !isFinalInputGroup) {
         e.preventDefault();
@@ -511,6 +514,7 @@ export function POSLayout() {
           store.clearPendingLoyaltyRedeem();
         }
 
+        const failedPayments: string[] = [];
         for (const p of (store.payments || [])) {
           // Skip the LOYALTY tender — it is a UI-only line that tracks the
           // rupee value of the deferred redeem; the actual ledger entry was
@@ -537,8 +541,13 @@ export function POSLayout() {
             }
             await orderApi.addPayment(result.order_id, body as any);
           } catch {
-            // Don't block order — payment can be recorded later
+            failedPayments.push(`${p.method} ₹${p.amount}`);
           }
+        }
+        if (failedPayments.length > 0) {
+          toast.warning(
+            `Order saved but ${failedPayments.length} payment(s) failed to record: ${failedPayments.join(', ')}. Re-enter in Order Details.`
+          );
         }
         store.setOrderResult(result.order_id, result.order_number);
 
@@ -612,6 +621,9 @@ export function POSLayout() {
       store.setProcessing(false);
     }
   }
+  // Keep the ref in sync so the Ctrl+Enter keydown handler always calls
+  // the current closure without needing to be in the useEffect deps array.
+  handleCreateOrderRef.current = handleCreateOrder;
 
   // Editorial title + subtitle for each canonical step.
   const STEP_HEADERS: Record<POSStep, { title: string; sub: string }> = {
@@ -1536,7 +1548,7 @@ function StepCustomer() {
     if (isWalkin && store.sale_type === 'prescription_order') {
       store.setSaleType('quick_sale');
     }
-  }, [isWalkin]);
+  }, [isWalkin, store.sale_type]);
 
   return (
     <div className="w-full max-w-5xl mx-auto space-y-6">

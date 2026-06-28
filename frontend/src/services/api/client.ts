@@ -75,10 +75,10 @@ api.interceptors.request.use(
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
   if (error.response?.status === 401) {
-    // Clear auth state on unauthorized
-    localStorage.removeItem('ims_token');
-    localStorage.removeItem('ims_user');
-    window.location.href = '/login';
+    // Dispatch a custom event so AuthContext can run its full logout flow
+    // (React dispatch + POS cart clear) before navigating. Using a DOM event
+    // avoids a circular import between this module and AuthContext.
+    window.dispatchEvent(new CustomEvent('ims:unauthorized'));
   }
 
   // Build user-friendly error message

@@ -1417,7 +1417,7 @@ async def list_leaves(
     if status:
         filter_dict["status"] = status
 
-    leaves = leave_repo.find_many(filter_dict)
+    leaves = leave_repo.find_many(filter_dict, limit=0)
 
     return {"leaves": leaves or [], "total": len(leaves) if leaves else 0}
 
@@ -1772,8 +1772,8 @@ async def generate_payroll(
     if not payroll_repo or not user_repo:
         return {"message": "Payroll generation initiated", "count": 0}
 
-    # Get all employees for the store
-    employees = user_repo.find_many({"store_ids": active_store})
+    # Get all employees for the store (limit=0 avoids the default 100-doc cap)
+    employees = user_repo.find_many({"store_ids": active_store}, limit=0)
 
     generated_count = 0
     for employee in employees or []:
@@ -1807,12 +1807,45 @@ async def generate_payroll(
                 [a for a in (attendance or []) if a.get("status") == "PRESENT"]
             )
 
-        # Basic payroll calculation
-        base_salary = employee.get("salary", 0) or 25000
-        daily_rate = base_salary / 26
-        gross = daily_rate * present_days
-        deductions = gross * 0.1  # 10% deductions
-        net = gross - deductions
+        # Payroll calculation using salary config when available.
+        # Fall back to a best-effort estimate for employees without a
+        # configured salary master (missing salary_config doc).
+        db = _get_db()
+        salary_cfg = None
+        if db is not None:
+            try:
+                salary_cfg = db.get_collection("salary_config").find_one(
+                    {"employee_id": employee.get("user_id"), "is_active": True}
+                )
+            except Exception:
+                pass
+
+        if salary_cfg:
+            basic = salary_cfg.get("basic") or salary_cfg.get("basic_salary", 0)
+            hra_pct = salary_cfg.get("hra_percentage", 40)
+            hra = salary_cfg.get("hra") if salary_cfg.get("hra") is not None else (basic * hra_pct / 100)
+            conveyance = salary_cfg.get("conveyance") or salary_cfg.get("conveyance_allowance", 0)
+            medical = salary_cfg.get("medical") or salary_cfg.get("medical_allowance", 0)
+            special = salary_cfg.get("special_allowance", 0)
+            gross = basic + hra + conveyance + medical + special
+            lwp_days = working_days - present_days if working_days > present_days else 0
+            lwp_deduction = (basic / 26) * lwp_days if lwp_days > 0 else 0
+            pf_employee = round(basic * salary_cfg.get("pf_employee_percentage", 12) / 100, 2)
+            professional_tax = salary_cfg.get("professional_tax", 200)
+            esi_pct = salary_cfg.get("esi_percentage", 0.75) if salary_cfg.get("esi_applicable", True) else 0
+            esi = round(gross * esi_pct / 100, 2)
+            deductions = round(pf_employee + professional_tax + esi + lwp_deduction, 2)
+            gross = round(gross, 2)
+        else:
+            # No salary master configured for this employee; use a simplified
+            # model based on whatever salary field exists on the user record.
+            base_salary = employee.get("salary", 0) or 25000
+            daily_rate = base_salary / 26
+            gross = round(daily_rate * present_days, 2)
+            # Statutory minimum: 12% EPF + Rs200 PT (no ESI for estimated gross)
+            pf_employee = round(gross * 0.12, 2)
+            deductions = round(pf_employee + 200, 2)
+        net = round(gross - deductions, 2)
 
         payroll_repo.create(
             {

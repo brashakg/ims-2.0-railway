@@ -210,12 +210,23 @@ async def _ingest(
 
     secret = _load_secret(vendor)
     if not secret:
-        # Vendor's perspective: 200 OK, don't retry. Operator's perspective:
-        # plain log line they'll grep for.
-        logger.info(
-            f"[WEBHOOKS] {vendor}: no webhook_secret configured — skipping verification"
+        # Reject unauthenticated requests when no secret is configured.
+        # Returning 401 (not 200) prevents silent event injection from
+        # unconfigured endpoints while signalling to vendors that the
+        # integration is not ready.  503 would work too but vendors typically
+        # retry 503 indefinitely; 401 is unambiguous "configure the secret".
+        logger.warning(
+            "[WEBHOOKS] %s: no webhook_secret configured — rejecting unauthenticated webhook",
+            vendor,
         )
-        return {"status": "skipped", "reason": "secret_not_configured"}
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                f"Webhook integration for '{vendor}' is not yet configured. "
+                "Set the webhook_secret in Settings → Integrations before "
+                "enabling the webhook on the vendor's dashboard."
+            ),
+        )
 
     if not sig:
         raise HTTPException(status_code=401, detail="invalid signature")

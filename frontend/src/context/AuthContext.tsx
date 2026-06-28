@@ -242,6 +242,19 @@ export function AuthProvider({ children }: AuthProviderProps) {
     };
 
     initializeAuth();
+
+    // Listen for 401 responses from the API client (dispatched as a DOM event
+    // to avoid a circular import between client.ts and this context).
+    // Triggers the full logout flow: React dispatch + POS cart clear.
+    const handleUnauthorized = () => {
+      localStorage.removeItem('ims_token');
+      localStorage.removeItem('ims_user');
+      localStorage.removeItem('ims_login_time');
+      try { usePOSStore.getState().clearAllOnLogout(); } catch { /* ignore */ }
+      dispatch({ type: 'LOGOUT' });
+    };
+    window.addEventListener('ims:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('ims:unauthorized', handleUnauthorized);
   }, []);
 
   // Login function

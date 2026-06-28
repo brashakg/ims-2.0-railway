@@ -597,12 +597,17 @@ async def get_store_stats(
         "staff_count": 0,
     }
     try:
-        if order_repo is not None:
-            orders = order_repo.find_many({"store_id": store_id}, limit=0) or []
-            stats["total_orders"] = len(orders)
-            stats["total_revenue"] = round(
-                sum(float(o.get("grand_total") or 0) for o in orders), 2
-            )
+        db = _get_db()
+        if db is not None:
+            # Aggregation avoids loading every order document into Python memory
+            pipeline = [
+                {"$match": {"store_id": store_id}},
+                {"$group": {"_id": None, "count": {"$sum": 1}, "revenue": {"$sum": "$grand_total"}}},
+            ]
+            agg = list(db.get_collection("orders").aggregate(pipeline))
+            if agg:
+                stats["total_orders"] = agg[0].get("count", 0)
+                stats["total_revenue"] = round(float(agg[0].get("revenue") or 0), 2)
     except Exception:
         pass
     try:
