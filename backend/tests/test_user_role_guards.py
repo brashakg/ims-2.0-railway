@@ -608,3 +608,169 @@ def test_reset_password_ok(monkeypatch):
     )
     assert r.status_code == 200, r.text
     assert repo.find_by_id("u1")["must_change_password"] is True
+
+
+# ===========================================================================
+# reset-to-TEMPORARY-password (server-generated, shown once, force-change)
+# ===========================================================================
+
+
+class _FakeAuditRepo:
+    """Captures the rows written by audit_repo.create so a test can assert the
+    PASSWORD_RESET row was written WITHOUT any plaintext temp value."""
+
+    def __init__(self):
+        self.rows = []
+
+    def create(self, row):
+        self.rows.append(dict(row))
+        return dict(row)
+
+
+def _client_with_audit(repo, actor, monkeypatch, audit_repo=None):
+    """Like _client, but also wires a capturing audit repo so the audit row can
+    be asserted. Returns (TestClient, audit_repo)."""
+    audit_repo = audit_repo or _FakeAuditRepo()
+    monkeypatch.setattr(users, "get_user_repository", lambda: repo)
+    monkeypatch.setattr(users, "get_audit_repository", lambda: audit_repo)
+    app = FastAPI()
+    app.include_router(users.router, prefix="/api/v1/users")
+
+    async def _u():
+        return dict(actor)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app), audit_repo
+
+
+def test_generate_temp_password_is_strong_and_readable():
+    # Pure helper: length floor, unambiguous alphabet, high uniqueness.
+    p = user_roles.generate_temp_password()
+    assert len(p) == 12
+    # No visually-ambiguous chars (0/O, 1/l/I) -- safe to dictate over the phone.
+    assert not (set(p) & set("0O1lI"))
+    assert len(p.encode("utf-8")) <= user_roles.BCRYPT_MAX_BYTES
+    # The floor is enforced even when a smaller length is requested.
+    assert len(user_roles.generate_temp_password(4)) == 8
+    # Two draws virtually never collide (cryptographic RNG, ~69 bits entropy).
+    assert user_roles.generate_temp_password() != user_roles.generate_temp_password()
+
+
+def test_reset_generates_temp_sets_flag_and_returns_once(monkeypatch):
+    # The SECURE default: no password supplied -> server generates a temp,
+    # force-flags must_change_password, returns the temp ONCE, and the stored
+    # hash verifies against the returned temp (the user could log in with it).
+    from api.routers.auth import verify_password
+
+    repo = _seed_one(["SALES_STAFF"])
+    c, audit = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    temp = body["temporary_password"]
+    assert isinstance(temp, str) and len(temp) >= 8
+    assert body["must_change_password"] is True
+    assert body["username"] == "u1"
+
+    stored = repo.find_by_id("u1")
+    assert stored["must_change_password"] is True
+    # The plaintext temp is NEVER persisted -- only its bcrypt hash, which the
+    # returned temp verifies against (so the user can log in with it).
+    assert "password" not in stored or stored.get("password") != temp
+    assert verify_password(temp, stored["password_hash"]) is True
+
+
+def test_reset_with_no_body_also_generates_temp(monkeypatch):
+    # Calling with an empty/absent body still works (new_password is optional).
+    repo = _seed_one(["SALES_STAFF"])
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password")
+    assert r.status_code == 200, r.text
+    assert r.json().get("temporary_password")
+
+
+def test_reset_audit_row_written_without_temp_value(monkeypatch):
+    # An immutable PASSWORD_RESET audit row is written naming actor + target, and
+    # the temp plaintext appears NOWHERE in that row.
+    repo = _seed_one(["SALES_STAFF"])
+    c, audit = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password", json={})
+    assert r.status_code == 200, r.text
+    temp = r.json()["temporary_password"]
+
+    reset_rows = [a for a in audit.rows if a.get("action") == "PASSWORD_RESET"]
+    assert len(reset_rows) == 1
+    row = reset_rows[0]
+    assert row["target_user_id"] == "u1"
+    assert row["user_id"] == _SUPER["user_id"]
+    # The temp must not leak into ANY audit field.
+    assert temp not in repr(row)
+
+
+def test_admin_cannot_reset_superadmin(monkeypatch):
+    # ROLE-ESCALATION GUARD: an ADMIN may not reset a SUPERADMIN -> 403, and the
+    # target's password is untouched.
+    repo = _seed_one(["SUPERADMIN"], user_id="su-target")
+    c, _ = _client_with_audit(repo, _ADMIN, monkeypatch)
+    before = dict(repo.find_by_id("su-target"))
+    r = c.post("/api/v1/users/su-target/reset-password", json={})
+    assert r.status_code == 403, r.text
+    assert repo.find_by_id("su-target") == before  # unchanged
+
+
+def test_superadmin_can_reset_admin(monkeypatch):
+    # A SUPERADMIN may reset anyone, including an ADMIN.
+    repo = _seed_one(["ADMIN"], user_id="admin-target")
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/admin-target/reset-password", json={})
+    assert r.status_code == 200, r.text
+    assert r.json().get("temporary_password")
+
+
+def test_admin_can_reset_lower_role(monkeypatch):
+    # An ADMIN may reset a user at or below their level (a SALES_STAFF).
+    repo = _seed_one(["SALES_STAFF"])
+    c, _ = _client_with_audit(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password", json={})
+    assert r.status_code == 200, r.text
+
+
+def test_below_role_caller_cannot_reset(monkeypatch):
+    # A SALES_STAFF actor is not ADMIN/SUPERADMIN -> require_admin 403s before any
+    # reset logic runs.
+    repo = _seed_one(["SALES_STAFF"])
+    actor = {"user_id": "ss-1", "roles": ["SALES_STAFF"], "store_ids": ["S1"]}
+    c, _ = _client_with_audit(repo, actor, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password", json={})
+    assert r.status_code == 403, r.text
+
+
+def test_reset_disabled_user_is_allowed(monkeypatch):
+    # Edge: resetting a DISABLED user is allowed (re-enabling is a separate op).
+    repo = _seed_one(["SALES_STAFF"], active=False)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password", json={})
+    assert r.status_code == 200, r.text
+    assert r.json().get("temporary_password")
+    # The reset does NOT silently re-enable the account.
+    assert repo.find_by_id("u1")["is_active"] is False
+
+
+def test_supplied_password_path_does_not_echo_plaintext(monkeypatch):
+    # Backward-compat: an explicit new_password still works but its plaintext is
+    # NEVER returned (no disclosure oracle).
+    repo = _seed_one(["SALES_STAFF"])
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users/u1/reset-password", json={"new_password": "Chosen@123"}
+    )
+    assert r.status_code == 200, r.text
+    assert "temporary_password" not in r.json()
+    assert repo.find_by_id("u1")["must_change_password"] is True
+
+
+def test_reset_missing_user_404(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/nope/reset-password", json={})
+    assert r.status_code == 404, r.text

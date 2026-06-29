@@ -226,6 +226,34 @@ def password_within_bcrypt_limit(password: str) -> bool:
     return len(password.encode("utf-8")) <= BCRYPT_MAX_BYTES
 
 
+# Readable temp-password alphabet: A-Z/a-z/2-9 with the visually-ambiguous
+# characters removed (no 0/O, 1/l/I) so an admin can dictate the temp over the
+# phone / copy it without transcription errors. Mirrors the FE randomTempPassword
+# alphabet in SetupPage.tsx so server- and (legacy) client-generated temps look
+# the same. ASCII-only -> exactly 1 byte/char, so a 12-char temp is 12 bytes,
+# well within BCRYPT_MAX_BYTES.
+_TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+
+
+def generate_temp_password(length: int = 12) -> str:
+    """Generate a STRONG, human-readable temporary password.
+
+    Uses ``secrets.choice`` (the cryptographically-secure RNG) over the
+    unambiguous alphabet above. The default length of 12 over a 55-symbol
+    alphabet is ~69 bits of entropy -- far beyond what a forced-change,
+    single-use temp needs. The caller bcrypt-hashes the result and returns it to
+    the admin exactly ONCE; the plaintext is never stored or logged.
+
+    ``length`` is floored at 8 (the create/reset password floor) and the byte
+    length always equals the char length (ASCII alphabet), so the result is
+    always within bcrypt's 72-byte window.
+    """
+    import secrets
+
+    n = max(8, int(length))
+    return "".join(secrets.choice(_TEMP_PASSWORD_ALPHABET) for _ in range(n))
+
+
 # ---------------------------------------------------------------------------
 # Per-user CAPABILITY permissions (council ruling sec.2) -- grant/deny shape
 # ---------------------------------------------------------------------------

@@ -332,9 +332,21 @@ export const adminUserApi = {
     return response.data;
   },
 
-  resetPassword: async (userId: string, newPassword: string) => {
-    const response = await api.post(`/users/${userId}/reset-password`, { new_password: newPassword });
-    return response.data;
+  // Reset a user to a TEMPORARY password. The SECURE default (no newPassword
+  // arg) lets the SERVER generate a strong temp + force must_change_password,
+  // and returns the plaintext temp ONCE (temporary_password) so the admin can
+  // hand it over -- it is never stored or logged. An explicit newPassword is
+  // still accepted for backward compat but the server never echoes it back.
+  resetPassword: async (userId: string, newPassword?: string) => {
+    const body = newPassword ? { new_password: newPassword } : {};
+    const response = await api.post(`/users/${userId}/reset-password`, body);
+    return response.data as {
+      user_id: string;
+      username?: string;
+      must_change_password?: boolean;
+      temporary_password?: string;
+      message?: string;
+    };
   },
 
   assignStore: async (userId: string, storeId: string, role?: string) => {

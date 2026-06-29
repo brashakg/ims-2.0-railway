@@ -5,6 +5,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Edit2, Trash2, X, Search, ShieldCheck, Building2, Mail, Phone, BadgeCheck,
+  KeyRound, Copy, Check,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -85,6 +86,10 @@ export function UserManagementSection() {
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
   // Per-user permissions panel (slide-over) -- backlog #14 discoverability.
   const [permUser, setPermUser] = useState<UserData | null>(null);
+  // One-time temp-password display after a reset. Holds the user + the temp the
+  // server returned exactly ONCE; cleared (and forgotten) when the modal closes.
+  const [resetResult, setResetResult] = useState<{ user: UserData; temp: string } | null>(null);
+  const [resettingId, setResettingId] = useState<string | null>(null);
   // Search + filters (backlog #14).
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
@@ -174,6 +179,36 @@ export function UserManagementSection() {
       loadData();
     } catch {
       toast.error('Failed to delete user');
+    }
+  };
+
+  // Reset a user to a server-generated TEMPORARY password. The server returns
+  // the temp exactly ONCE; we surface it in a copyable modal and never refetch
+  // it (real passwords are one-way bcrypt hashes -- there is no "view password").
+  const handleResetPassword = async (targetUser: UserData) => {
+    const name = targetUser.fullName || targetUser.username;
+    if (!window.confirm(
+      `Reset ${name}'s password? They'll get a temporary password and must change it at next login.`
+    )) return;
+    try {
+      setResettingId(targetUser.id);
+      const res = await adminUserApi.resetPassword(targetUser.id);
+      if (res?.temporary_password) {
+        setResetResult({ user: targetUser, temp: res.temporary_password });
+      } else {
+        // No temp in the response (e.g. a legacy supplied-password path) -- still
+        // a success; just confirm the force-change is set.
+        toast.success(`Password reset for ${name}. They must change it at next login.`);
+      }
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 403) {
+        toast.error("You can't reset the password of a user with a higher role than yours.");
+      } else {
+        toast.error(err instanceof Error ? err.message : 'Failed to reset password');
+      }
+    } finally {
+      setResettingId(null);
     }
   };
 
@@ -401,6 +436,20 @@ export function UserManagementSection() {
                               <ShieldCheck className="w-4 h-4" />
                             </span>
                           )}
+                          {canEdit ? (
+                            <button
+                              onClick={() => handleResetPassword(u)}
+                              disabled={resettingId === u.id}
+                              className="text-gray-500 hover:text-bv-red-600 disabled:opacity-40"
+                              title="Reset password (issues a temporary password)"
+                            >
+                              <KeyRound className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span className="text-gray-200" title="Cannot reset password for higher-level users">
+                              <KeyRound className="w-4 h-4" />
+                            </span>
+                          )}
                           {canDelete ? (
                             <button
                               onClick={() => handleDeleteUser(u.id)}
@@ -462,7 +511,97 @@ export function UserManagementSection() {
           onClose={() => setPermUser(null)}
         />
       )}
+
+      {/* One-time temporary-password display after a reset */}
+      {resetResult && (
+        <TempPasswordModal
+          userName={resetResult.user.fullName || resetResult.user.username}
+          tempPassword={resetResult.temp}
+          onClose={() => setResetResult(null)}
+        />
+      )}
     </>
+  );
+}
+
+// ============================================================================
+// One-time temporary-password modal (shown once after a reset)
+// ============================================================================
+// Displays the server-generated temp in a monospace box with a copy button and
+// an explicit "won't be shown again" warning. Closing forgets the value -- the
+// only way to get another temp is to reset again (real passwords are one-way
+// bcrypt hashes; there is no "view password").
+
+function TempPasswordModal({
+  userName,
+  tempPassword,
+  onClose,
+}: {
+  userName: string;
+  tempPassword: string;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Could not copy automatically -- select the text and copy manually.');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-md overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <div className="flex items-center gap-2">
+            <KeyRound className="w-5 h-5 text-bv-red-600" />
+            <h2 className="text-lg font-semibold text-gray-900">Temporary password</h2>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4">
+          <p className="text-sm text-gray-600">
+            A temporary password for <span className="font-medium text-gray-900">{userName}</span> has
+            been set. They will be required to change it at their next login.
+          </p>
+
+          <div className="flex items-stretch gap-2">
+            <div
+              className="flex-1 font-mono text-base tracking-wide bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-gray-900 break-all select-all"
+              data-testid="temp-password-value"
+            >
+              {tempPassword}
+            </div>
+            <button
+              onClick={handleCopy}
+              className="btn-primary flex items-center gap-1.5 px-3"
+              title="Copy to clipboard"
+            >
+              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+            <p className="text-sm text-amber-800 font-medium">
+              Copy and share this now -- it won't be shown again.
+            </p>
+          </div>
+        </div>
+
+        <div className="p-4 border-t border-gray-200 flex justify-end">
+          <button onClick={onClose} className="btn-primary">Done</button>
+        </div>
+      </div>
+    </div>
   );
 }
 

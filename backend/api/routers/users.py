@@ -18,6 +18,7 @@ from ..services.role_caps import role_baseline_cap, effective_discount_cap
 from ..services.user_roles import (
     BCRYPT_MAX_BYTES,
     can_assign_roles,
+    generate_temp_password,
     grantable_capabilities_for,
     highest_level,
     normalize_role,
@@ -901,34 +902,138 @@ async def remove_role(
 
 
 class ResetPasswordBody(BaseModel):
-    # Match the create-user floor (8) and the bcrypt byte ceiling (72); the old
-    # min_length=6 let an admin reset to a weaker password than the account
-    # could be created with. Byte-length re-checked in hash_password.
-    new_password: str = Field(..., min_length=8, max_length=BCRYPT_MAX_BYTES)
+    # The SECURE default flow supplies NO password: the server GENERATES a strong
+    # temporary one (see generate_temp_password) and returns it ONCE. An admin
+    # never needs to invent (or transmit) a password. The optional ``new_password``
+    # is kept ONLY for backward compatibility with any caller that still posts an
+    # explicit value; when present it must clear the create-user floor (8) and the
+    # bcrypt byte ceiling (72). NOTE: even the supplied-password path never echoes
+    # the plaintext back -- only a server-generated temp is returned (the admin
+    # already knows a value they chose), so this can't become a password-disclosure
+    # oracle. Byte-length re-checked in hash_password.
+    new_password: Optional[str] = Field(
+        default=None, min_length=8, max_length=BCRYPT_MAX_BYTES
+    )
+
+
+def _write_password_reset_audit(actor: dict, target: dict) -> None:
+    """Append ONE fail-soft ``PASSWORD_RESET`` audit row.
+
+    Records WHO reset WHOSE password and when -- but NEVER the temporary password
+    value (a plaintext credential must never reach the immutable audit trail).
+    Fail-SOFT (unlike the permission-audit no-log-no-commit path): a password
+    reset is an operational recovery action, not a permission grant, so an audit
+    backend hiccup must not block an admin from restoring a locked-out user's
+    access. Any error is swallowed.
+    """
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is None:
+            return
+        audit_repo.create(
+            {
+                "action": "PASSWORD_RESET",
+                "entity_type": "user",
+                "entity_id": target.get("user_id"),
+                "user_id": actor.get("user_id"),
+                "actor_username": actor.get("username"),
+                "actor_roles": actor.get("roles", []),
+                "target_user_id": target.get("user_id"),
+                "target_username": target.get("username"),
+                "store_id": target.get("primary_store_id"),
+                "severity": "INFO",
+                "timestamp": datetime.now(),
+                # Deliberately NO password field of any kind.
+            }
+        )
+    except Exception:  # noqa: BLE001 - audit must never block the reset
+        pass
 
 
 @router.post("/{user_id}/reset-password")
 async def reset_password(
-    user_id: str, body: ResetPasswordBody, current_user: dict = Depends(require_admin)
+    user_id: str,
+    # Optional body: the secure default flow needs NO input at all (the server
+    # generates the temp), so a bare POST with no JSON body is valid. A default of
+    # None makes FastAPI treat the body as optional rather than 422'ing an empty
+    # request. When a body IS sent, its fields are still validated by the model.
+    body: Optional[ResetPasswordBody] = None,
+    current_user: dict = Depends(require_admin),
 ):
-    """Admin resets a user's password. Frontend adminUserApi.resetPassword
-    was 404'ing (no such route)."""
+    """Reset a user to a TEMPORARY password (SUPERADMIN / ADMIN only).
+
+    Default (secure) flow: the server GENERATES a strong temporary password,
+    bcrypt-hashes it, force-flags ``must_change_password`` so the user must
+    replace it at next login, and returns the plaintext temp EXACTLY ONCE so the
+    admin can hand it over. The plaintext is NEVER stored (only the bcrypt hash
+    is persisted) and NEVER logged (the audit row records the actor/target only,
+    not the value). This REPLACES the unsafe 'view current password' notion --
+    real passwords are one-way bcrypt hashes and cannot be revealed.
+
+    ROLE-ESCALATION GUARD: the caller may only reset a user whose highest role
+    level is AT OR BELOW the caller's own. So an ADMIN may NOT reset a SUPERADMIN
+    (403); a SUPERADMIN may reset anyone. Resetting a disabled user, or your own
+    account, is allowed.
+    """
     repo = get_user_repository()
     if repo is None:
-        return {"user_id": user_id, "message": "Password reset"}
+        # No DB (e.g. a degraded/local stub): still generate + return a temp so
+        # the contract holds, but nothing is persisted.
+        temp = generate_temp_password()
+        return {
+            "user_id": user_id,
+            "temporary_password": temp,
+            "must_change_password": True,
+            "message": "Password reset",
+        }
+
     existing = repo.find_by_id(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # ROLE-ESCALATION GUARD: a non-SUPERADMIN actor may only reset a user at or
+    # below their own level. This mirrors update_user / delete_user so an ADMIN
+    # can't reset (and thus hijack) a SUPERADMIN's account. SUPERADMIN bypasses.
+    if "SUPERADMIN" not in set(current_user.get("roles", [])):
+        if highest_level(existing.get("roles", [])) > highest_level(
+            current_user.get("roles", [])
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot reset the password of a user with a higher role than yours",
+            )
+
+    # Secure default: SERVER generates the temp. A supplied new_password (legacy)
+    # is honoured but its plaintext is NEVER returned (the admin chose it). A None
+    # body (bare POST) is the secure default path.
+    supplied = body.new_password if body is not None else None
+    server_generated = supplied is None
+    temp = generate_temp_password() if server_generated else supplied
+
     repo.update(
         user_id,
         {
-            "password_hash": hash_password(body.new_password),
+            "password_hash": hash_password(temp),
             "password_reset_at": datetime.now().isoformat(),
             "password_reset_by": current_user.get("user_id"),
             "must_change_password": True,
         },
     )
-    return {"user_id": user_id, "message": "Password reset successfully"}
+
+    # Fail-soft audit -- records the actor + target, NEVER the temp value.
+    _write_password_reset_audit(current_user, existing)
+
+    response = {
+        "user_id": user_id,
+        "username": existing.get("username"),
+        "must_change_password": True,
+        "message": "Password reset successfully",
+    }
+    # Return the plaintext ONCE only when WE generated it. A supplied password is
+    # already known to the caller, so we never echo it back (no disclosure path).
+    if server_generated:
+        response["temporary_password"] = temp
+    return response
 
 
 class AssignStoreBody(BaseModel):
