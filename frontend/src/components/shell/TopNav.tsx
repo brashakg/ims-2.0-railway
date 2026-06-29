@@ -8,9 +8,13 @@
 //   [ brand ][ Hub  Notifications  Sales floor▾  Clinical▾  … ][ user menu ]
 //
 // Reuses the shared nav model + role gating from navConfig.ts so it never drifts
-// from the phone drawer. Dropdowns are keyboard-accessible (Enter/Space toggle,
-// Esc closes + restores focus), close on outside-click, and hover-open for mouse
-// pointers only (so a tap on a touch tablet toggles via click, not hover).
+// from the phone drawer. Dropdowns open/close by CLICK/TAP only (identical on
+// desktop mouse + iPad touch), are keyboard-accessible (Enter/Space/ArrowDown
+// open + focus first item, Esc closes + restores focus), and close on
+// outside-click. NOTE: there is deliberately NO hover-open -- this top bar exists
+// for the iPad, and a hover-open fighting the click-toggle made a mouse click
+// open-then-immediately-close the menu (dead on prod), while touch (no hover)
+// left it unreliable. Click is the single, unambiguous trigger.
 
 import { NavLink, useLocation } from 'react-router-dom';
 import {
@@ -20,7 +24,6 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Icon } from './Icon';
@@ -170,24 +173,6 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     setOpenGroup((cur) => (cur === title ? null : title));
   }, []);
 
-  // Hover-open for MOUSE only — a touch tap fires pointerenter then click, so
-  // gating on pointerType avoids a double-toggle on touch tablets.
-  const onGroupPointerEnter = useCallback(
-    (title: string) => (e: ReactPointerEvent<HTMLLIElement>) => {
-      if (e.pointerType === 'mouse') {
-        setUserMenuOpen(false);
-        setOpenGroup(title);
-      }
-    },
-    [],
-  );
-  const onGroupPointerLeave = useCallback(
-    (e: ReactPointerEvent<HTMLLIElement>) => {
-      if (e.pointerType === 'mouse') setOpenGroup(null);
-    },
-    [],
-  );
-
   const onTriggerKeyDown = useCallback(
     (title: string) => (e: ReactKeyboardEvent<HTMLButtonElement>) => {
       if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
@@ -220,8 +205,16 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
 
   return (
     <nav className="top-nav no-print" aria-label="Primary" ref={navRef}>
-      {/* Brand mark + wordmark, pinned left */}
-      <div className="top-nav-brand" title={wordmark}>
+      {/* Brand mark + wordmark, pinned left — doubles as the Home link to the Hub
+          (the "Hub" top-menu item is dropped below on tablet/desktop since the
+          logo provides it; the phone Rail keeps its own Hub tab). */}
+      <NavLink
+        to="/dashboard"
+        className="top-nav-brand"
+        title={wordmark}
+        aria-label={`${wordmark} — go to Hub`}
+        onClick={closeAll}
+      >
         <img
           src={brandAssets.markWhite}
           alt={wordmark}
@@ -230,15 +223,20 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
           style={{ objectFit: 'contain', display: 'block' }}
         />
         <span className="top-nav-wordmark" aria-hidden="true">{wordmark}</span>
-      </div>
+      </NavLink>
 
       {/* Menu — direct links + group dropdowns. Scrolls horizontally only if a
           role's menu is too wide for the viewport (brand + user stay pinned). */}
       <ul className="top-nav-menu">
         {visibleGroups.map((group, gi) => {
           // Untitled group (Hub / Notifications) -> direct top-level links.
+          // The clickable brand logo above IS the Hub link on tablet/desktop, so
+          // drop the redundant "Hub" item here (Notifications stays). navConfig is
+          // untouched -> the phone Rail still shows Hub (no clickable logo there).
           if (!group.title) {
-            return group.items.map((item) => (
+            return group.items
+              .filter((item) => item.id !== 'hub')
+              .map((item) => (
               <li key={item.id} className="top-nav-li">
                 <NavLink
                   to={item.to}
@@ -258,8 +256,6 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
             <li
               key={gi}
               className={'top-nav-li top-nav-group' + (isOpen ? ' open' : '')}
-              onPointerEnter={onGroupPointerEnter(title)}
-              onPointerLeave={onGroupPointerLeave}
             >
               <button
                 type="button"

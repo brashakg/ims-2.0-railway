@@ -940,6 +940,10 @@
   flex-shrink: 0;
   padding-right: 14px; margin-right: 4px;
   border-right: 1px solid #2a2a28;
+  /* Brand is now a Home <a> link to /dashboard -- keep the prior visual. */
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
 }
 .top-nav-brand img { width: 26px; height: 26px; }
 .top-nav-wordmark {
