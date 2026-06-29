@@ -772,10 +772,12 @@ export const usePOSStore = create<POSState>()(
           // have these keys; default them so the Review UI doesn't crash.
           if (state.delivery_time_slot === undefined) state.delivery_time_slot = null;
           if (state.delivery_priority === undefined) state.delivery_priority = 'NORMAL';
-          if (state.cart_discount_percent === undefined) state.cart_discount_percent = 0;
-          if (state.cart_discount_amount === undefined) state.cart_discount_amount = 0;
-          if (state.cart_discount_reason === undefined) state.cart_discount_reason = null;
-          if (state.cart_discount_approved_by === undefined) state.cart_discount_approved_by = null;
+          // Always clear cart-level discounts on session restore: an in-progress
+          // approved discount must not carry over to a different customer's sale.
+          state.cart_discount_percent = 0;
+          state.cart_discount_amount = 0;
+          state.cart_discount_reason = null;
+          state.cart_discount_approved_by = null;
         }
       },
     }

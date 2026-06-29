@@ -9,6 +9,11 @@ from typing import List, Optional, Dict, Any, TypeVar, Generic
 from datetime import datetime
 import uuid
 
+try:
+    from api.utils.ist import now_ist_naive as _now
+except ImportError:
+    _now = datetime.now  # type: ignore[assignment]
+
 T = TypeVar("T")
 
 
@@ -44,7 +49,7 @@ class BaseRepository(ABC, Generic[T]):
 
     def _add_timestamps(self, data: Dict, is_update: bool = False) -> Dict:
         """Add created_at/updated_at timestamps"""
-        now = datetime.now()
+        now = _now()
         if not is_update:
             data["created_at"] = now
         data["updated_at"] = now
@@ -190,7 +195,7 @@ class BaseRepository(ABC, Generic[T]):
         """
         try:
             # Add updated timestamp
-            data["updated_at"] = datetime.now()
+            data["updated_at"] = _now()
 
             result = self.collection.update_one({self.id_field: id}, {"$set": data})
             return result.modified_count > 0
@@ -225,7 +230,7 @@ class BaseRepository(ABC, Generic[T]):
         Returns:
             Success boolean
         """
-        return self.update(id, {"is_active": False, "deleted_at": datetime.now()})
+        return self.update(id, {"is_active": False, "deleted_at": _now()})
 
     def count(self, filter: Dict = None) -> int:
         """

@@ -2039,6 +2039,7 @@ async def assign_accountability(
 ):
     """Assign a staff member as the stock custodian for a store (+ optional
     category), so count shrinkage can be attributed to them."""
+    validate_store_access(body.store_id, current_user)
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")

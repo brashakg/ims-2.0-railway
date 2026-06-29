@@ -24,6 +24,7 @@ from ..dependencies import (
     filter_docs_by_store,
     get_task_repository,
     get_audit_repository,
+    validate_store_access,
 )
 from ..services.task_triggers import create_system_task
 
@@ -256,6 +257,11 @@ async def get_customer_360(
         customer = db.query_customer(customer_id)
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
+        # Store-scope guard: store-level roles may not read PII for customers
+        # belonging to other stores (IDOR). filter_docs_by_store checks all
+        # store-id fields (store_id / home_store_id / preferred_store_id).
+        if not filter_docs_by_store([customer], current_user):
+            raise HTTPException(status_code=403, detail="Access denied")
 
         # Fetch orders and calculate stats
         orders = db.query_customer_orders(customer_id)
@@ -321,6 +327,8 @@ async def get_customer_lifecycle_phase(
         customer = db.query_customer(customer_id)
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
+        if not filter_docs_by_store([customer], current_user):
+            raise HTTPException(status_code=403, detail="Access denied")
 
         orders = db.query_customer_orders(customer_id)
         return _determine_lifecycle_phase(customer, orders)
@@ -401,6 +409,8 @@ async def create_customer_interaction(
         customer = db.query_customer(customer_id)
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
+        if not filter_docs_by_store([customer], current_user):
+            raise HTTPException(status_code=403, detail="Access denied")
 
         interaction_id = str(uuid.uuid4())
         interaction_data = {

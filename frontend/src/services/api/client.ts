@@ -101,7 +101,12 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
     }
   }
 
-  return Promise.reject(new Error(message));
+  // Attach response/status onto the Error so catch blocks that read
+  // e?.response?.data?.detail or e?.response?.status still work.
+  const err = new Error(message) as Error & { response?: typeof error.response; status?: number };
+  err.response = error.response;
+  err.status = error.response?.status;
+  return Promise.reject(err);
 };
 
 // ── Additive camelCase aliasing ─────────────────────────────────────────
