@@ -756,6 +756,16 @@ def _reactivate_original_unit(
         sid = unit.get("stock_id") or unit.get("_id")
         if not sid or sid in used_ids:
             continue
+        # P1-C CLEAN RESALE LINEAGE: the unit is going BACK on the sellable
+        # shelf, so it must NOT keep the attribution of the sale it was returned
+        # from. Strip the stale order_id / sold_at / sold_to_customer_id (else an
+        # AVAILABLE unit still "answers to" the refunded order, and reconciliation
+        # / warranty-by-serial / per-order unit counts read it as belonging to a
+        # sale it no longer does). We stamp returned_from_order_id (a forward
+        # audit link to the reversed sale) + prior_sold_order_id (the prior value)
+        # so the history is preserved; a later sale (claim_one_available) then
+        # stamps the NEW order_id onto a clean unit.
+        prior_order_id = unit.get("order_id") or order_id
         try:
             ok = stock_repo.update(
                 sid,
@@ -763,6 +773,13 @@ def _reactivate_original_unit(
                     "status": "AVAILABLE",
                     "returned_at": datetime.now().isoformat(),
                     "reserved_at": None,
+                    # Clear the stale sale attribution.
+                    "order_id": None,
+                    "sold_at": None,
+                    "sold_to_customer_id": None,
+                    # Preserve the lineage for audit / reconciliation.
+                    "returned_from_order_id": prior_order_id,
+                    "prior_sold_order_id": prior_order_id,
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -928,6 +945,11 @@ def _restock_good_items(
             )
             continue
         # Mint a fresh AVAILABLE serialized unit.
+        # P1-C: stamp returned_from_order_id (the sale this return reverses) so
+        # the minted unit has a forward audit link to its origin -- without it a
+        # fresh return-unit has NO connection back to the reversed sale. It
+        # carries NO order_id / sold_at (it is unsold shelf stock); a later sale
+        # stamps the new order_id cleanly.
         try:
             created = stock_repo.create(
                 {
@@ -937,6 +959,7 @@ def _restock_good_items(
                     "status": "AVAILABLE",
                     "source_type": "RETURN",
                     "source_id": return_id,
+                    "returned_from_order_id": order_id,
                 }
             )
         except Exception as exc:  # noqa: BLE001
