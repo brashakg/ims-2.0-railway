@@ -958,3 +958,275 @@ def test_audit_row_written_on_mint(ctx):
         u for u in ctx["stock_repo"].units if u["product_id"] == "PRD-FRESH-MINT"
     ][0]
     assert mint_rows[0]["stock_id"] == minted["stock_id"]
+
+
+# ============================================================================
+# P1-C - reactivated / minted units carry CLEAN resale lineage
+# ============================================================================
+#
+# A returned unit put back on the AVAILABLE shelf for re-sale must NOT keep the
+# stale attribution of the sale it was returned FROM. Before the fix the
+# reactivate path flipped SOLD -> AVAILABLE but left the ORIGINAL order_id (and
+# sold_at / sold_to_customer_id) stamped on the now-sellable unit. That unit
+# then "answered to two orders": status-agnostic lineage lookups (warranty by
+# serial, per-order unit attribution) saw an AVAILABLE-on-the-shelf unit still
+# claiming it was sold on the refunded order. The fix clears the stale sale
+# attribution and records a returned_from_order_id audit link, so a later sale
+# (claim_one_available) stamps the NEW order_id onto a clean unit.
+
+
+def test_reactivated_unit_clears_stale_sale_attribution(ctx):
+    """A SOLD->AVAILABLE reactivation must STRIP the original order_id / sold_at
+    / sold_to_customer_id (the unit is back on the shelf, not sold) and stamp a
+    returned_from_order_id audit link to the order it was returned from."""
+    # Seed the original SOLD unit with full sale attribution.
+    old = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-OLD-1"][0]
+    old["sold_at"] = "2026-01-01T00:00:00"
+    old["sold_to_customer_id"] = "CUST-1"
+
+    tok = _staff_token(["CASHIER"])
+    r = ctx["client"].post(
+        "/api/v1/returns", json=_payload(), headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    assert r.json()["restock_stock_ids"] == ["STK-OLD-1"]
+
+    unit = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-OLD-1"][0]
+    assert unit["status"] == "AVAILABLE"
+    # The stale sale attribution must NOT linger on a sellable unit.
+    assert not unit.get("order_id"), (
+        "reactivated AVAILABLE unit still carries the refunded order_id"
+    )
+    assert not unit.get("sold_at")
+    assert not unit.get("sold_to_customer_id")
+    # An audit link back to the order it came from is preserved.
+    assert unit.get("returned_from_order_id") == "ORD-1"
+
+
+def test_resold_returned_unit_attributes_to_one_order_only(ctx):
+    """Full lineage path: sell S1 on ORD-1 -> return -> resell on ORD-2. After
+    the resale, 'units SOLD for ORD-1' must NOT include S1 and 'for ORD-2'
+    must, with no ambiguity (the unit answers to exactly ONE current order)."""
+    from database.repositories.product_repository import StockRepository
+
+    old = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-OLD-1"][0]
+    old["sold_at"] = "2026-01-01T00:00:00"
+    old["sold_to_customer_id"] = "CUST-1"
+
+    tok = _staff_token(["CASHIER"])
+    r = ctx["client"].post(
+        "/api/v1/returns", json=_payload(), headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+
+    # Resell the same physical unit on ORD-2 via the real at-sale atomic claim.
+    class _Coll:
+        def __init__(self, units):
+            self.units = units
+
+        def find_one_and_update(self, flt, upd, **kw):
+            for d in self.units:
+                ok = True
+                for k, v in flt.items():
+                    if isinstance(v, dict) and "$nin" in v:
+                        if d.get(k) in v["$nin"]:
+                            ok = False
+                            break
+                    elif d.get(k) != v:
+                        ok = False
+                        break
+                if ok:
+                    d.update(upd.get("$set", {}))
+                    return dict(d)
+            return None
+
+    repo = StockRepository(_Coll(ctx["stock_repo"].units))
+    resold = repo.claim_one_available("PRD-1", "BV-PUN-01", "ORD-2")
+    assert resold == "STK-OLD-1"
+
+    units = ctx["stock_repo"].units
+    sold_ord1 = [
+        u for u in units if u.get("status") == "SOLD" and u.get("order_id") == "ORD-1"
+    ]
+    sold_ord2 = [
+        u for u in units if u.get("status") == "SOLD" and u.get("order_id") == "ORD-2"
+    ]
+    assert sold_ord1 == [], "S1 must no longer attribute to the refunded ORD-1"
+    assert [u["stock_id"] for u in sold_ord2] == ["STK-OLD-1"]
+
+
+def test_minted_return_unit_carries_returned_from_link(ctx):
+    """A freshly MINTED return unit (no prior SOLD row to reactivate) has no
+    forward link to the sale it reverses unless we stamp one. It must carry
+    returned_from_order_id so its origin is auditable, and NO sold attribution."""
+    tok = _staff_token(["CASHIER"])
+    payload = _payload()
+    payload["items"][0]["product_id"] = "PRD-MINT-LINEAGE"
+    r = ctx["client"].post(
+        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    minted = [
+        u for u in ctx["stock_repo"].units if u["product_id"] == "PRD-MINT-LINEAGE"
+    ][0]
+    assert minted["status"] == "AVAILABLE"
+    assert not minted.get("order_id")
+    assert not minted.get("sold_at")
+    assert minted.get("returned_from_order_id") == "ORD-1"
+
+
+# ============================================================================
+# P1-B - concurrent retry_restock must NOT mint/reactivate duplicate units
+# ============================================================================
+#
+# Audit claim: two concurrent retry_restock calls on the same return both read
+# restock_applied=False and both run reactivate/mint -> on-hand +2 where it
+# should be +1. VERIFIED FALSE POSITIVE: retry_restock already claims the return
+# atomically via find_one_and_update({restock_applied:{$ne:True},
+# restock_in_progress:{$ne:True}} -> $set restock_in_progress) so exactly ONE
+# worker proceeds; the other gets None and bails. The test below drives TRUE
+# concurrency (two threads, a serialized claim + a widened race window) and
+# asserts on-hand goes +1, not +2. It fails loudly if the atomic claim is ever
+# weakened back to a read-check-write.
+
+
+def test_concurrent_retry_restock_mints_exactly_one_unit(monkeypatch):
+    """Two retry_restock calls race on the same return -> exactly ONE restock
+    occurs (on-hand +1), the other is a no-op. Drives real threads through the
+    HTTP handler with a thread-safe fake returns coll whose find_one_and_update
+    serializes + sleeps to widen the window the audit was worried about."""
+    import threading
+    import time
+
+    app = FastAPI()
+    app.include_router(returns_router.router, prefix="/api/v1/returns")
+
+    class _ConcReturnsColl:
+        """Thread-safe returns coll: find_one_and_update is mutually exclusive
+        and sleeps inside the lock to maximise the race window."""
+
+        def __init__(self):
+            self.docs = []
+            self._lock = threading.Lock()
+
+        @staticmethod
+        def _match(d, q):
+            for k, v in (q or {}).items():
+                if isinstance(v, dict) and "$ne" in v:
+                    if d.get(k) == v["$ne"]:
+                        return False
+                elif d.get(k) != v:
+                    return False
+            return True
+
+        def insert_one(self, doc):
+            self.docs.append(dict(doc))
+            return _FakeResult(1)
+
+        def find_one(self, query=None, projection=None):
+            for d in self.docs:
+                if self._match(d, query):
+                    out = dict(d)
+                    out.pop("_id", None)
+                    return out
+            return None
+
+        def update_one(self, query, update):
+            with self._lock:
+                for d in self.docs:
+                    if self._match(d, query):
+                        d.update(update.get("$set", {}))
+                        return _FakeResult(1)
+            return _FakeResult(0)
+
+        def find_one_and_update(self, query, update, return_document=None):
+            with self._lock:
+                for d in self.docs:
+                    if self._match(d, query):
+                        time.sleep(0.05)  # widen the race window
+                        d.update(update.get("$set", {}))
+                        out = dict(d)
+                        out.pop("_id", None)
+                        return out
+            return None
+
+    returns_coll = _ConcReturnsColl()
+    # One SOLD unit eligible for reactivation.
+    stock_repo = _FakeStockRepo(
+        [
+            {
+                "stock_id": "STK-OLD-1",
+                "product_id": "PRD-1",
+                "store_id": "BV-PUN-01",
+                "status": "SOLD",
+                "order_id": "ORD-1",
+            }
+        ]
+    )
+    # Pre-seed a return doc that is eligible for retry (applied=False).
+    returns_coll.insert_one(
+        {
+            "return_id": "RET-CONC",
+            "order_id": "ORD-1",
+            "store_id": "BV-PUN-01",
+            "restock_applied": False,
+            "items": [
+                {
+                    "order_item_id": "li1",
+                    "product_id": "PRD-1",
+                    "product_name": "X",
+                    "sku": "X",
+                    "return_qty": 1,
+                    "unit_price": 1500,
+                    "reason": "CHANGED_MIND",
+                    "condition": "GOOD",
+                }
+            ],
+            "restock_stock_ids": [],
+        }
+    )
+
+    class _FakeDB:
+        is_connected = True
+
+        def __init__(self):
+            self.db = self
+
+        def get_collection(self, name):
+            return {"returns": returns_coll}.get(name, _FakeColl())
+
+    fake_db = _FakeDB()
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: stock_repo)
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: returns_coll)
+    monkeypatch.setattr("api.dependencies.get_db", lambda: fake_db, raising=False)
+    monkeypatch.setattr(
+        "api.dependencies.get_audit_repository", lambda: None, raising=False
+    )
+
+    client = TestClient(app)
+    tok = _staff_token(["ADMIN"])
+    hdr = {"Authorization": f"Bearer {tok}"}
+
+    results: list = []
+
+    def _call():
+        results.append(
+            client.post("/api/v1/returns/RET-CONC/restock", headers=hdr).json()
+        )
+
+    threads = [threading.Thread(target=_call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly one winner ("Restock applied"); the other bails ("in progress").
+    msgs = sorted((x.get("message") or "").lower() for x in results)
+    assert any("applied" in m for m in msgs)
+    assert any("in progress" in m for m in msgs)
+    # On-hand went +1, not +2: exactly one unit is AVAILABLE.
+    available = [u for u in stock_repo.units if u.get("status") == "AVAILABLE"]
+    assert len(available) == 1
+    assert available[0]["stock_id"] == "STK-OLD-1"
+    # No fresh unit was minted (the single SOLD unit was reactivated once).
+    assert all(not u["stock_id"].startswith("NEW-") for u in stock_repo.units)

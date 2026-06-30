@@ -451,6 +451,52 @@ async def test_restocking_fee_rejected_on_exchange(ctx):
     assert r.status_code == 422
 
 
+def test_legacy_net_unit_price_is_grossed_exactly_once():
+    """P1-A (audit claim: legacy order GST DOUBLE gross-up over-refunds).
+
+    VERIFIED FALSE POSITIVE. The legacy path (order line with no stored
+    taxable_value/tax_amount) grosses the till's NET unit_price up by the rate
+    EXACTLY ONCE in _priced_return_lines; returns_engine.returned_value then
+    treats that price as GST-INCLUSIVE and does NOT gross again. So a Rs 100 NET
+    line @ 18% refunds the correct single-grossed Rs 118.00 -- NOT the
+    double-grossed Rs 139.24 (118 * 1.18). This test fails loudly if anyone ever
+    re-introduces a second gross-up on the legacy path.
+    """
+    from api.routers.returns import _priced_return_lines, ReturnLine
+
+    order = {
+        "order_id": "ORD-L",
+        "items": [
+            {
+                "item_id": "li1",
+                "product_id": "PRD-1",
+                "quantity": 1,
+                "unit_price": 100,  # NET (no taxable_value/tax_amount stored)
+                "gst_rate": 18.0,
+                "item_total": 100,
+            }
+        ],
+    }
+    lines = [
+        ReturnLine(
+            order_item_id="li1",
+            product_id="PRD-1",
+            product_name="X",
+            sku="X",
+            return_qty=1,
+            unit_price=100,
+            reason="CHANGED_MIND",
+            condition="GOOD",
+        )
+    ]
+    priced = _priced_return_lines(lines, order)
+    # Grossed once at resolution time: 100 * 1.18 = 118.00.
+    assert priced[0]["unit_price"] == 118.0
+    # The engine does NOT gross again -> single gross, not 118 * 1.18 = 139.24.
+    assert engine.returned_value(priced) == 118.0
+    assert engine.returned_value(priced) != 139.24
+
+
 async def test_inclusive_order_refunds_billed_gross(ctx):
     """A MODERN inclusive order line stores taxable_value + tax_amount whose SUM
     is the gross the customer paid. A full return must refund that billed gross
