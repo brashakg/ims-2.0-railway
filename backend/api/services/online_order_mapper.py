@@ -654,6 +654,13 @@ def map_shopify_order(
         # (3) customer match/create.
         buyer = _extract_buyer(payload)
         customer_id = _match_or_create_customer(db, buyer, store_id)
+        # Stamp the resolved IMS customer id so the shared ingest's clinical
+        # FLAG & HOLD check matches against THIS customer's prescriptions (the raw
+        # Shopify customer id is not the IMS one; without this the Rx-match would
+        # miss and over-hold). Absent (guest) -> ingest falls back to the Shopify
+        # id, which simply won't match -> the order is flagged for staff to verify.
+        if customer_id:
+            payload["_ims_customer_id"] = customer_id
 
         # (4) delegate to the single, idempotent create path.
         # The shared ingest only creates on orders/create | orders/paid. When THIS

@@ -511,7 +511,14 @@ def ingest_shopify_order(
     try:
         from .online_rx_hold import evaluate_rx_hold
 
-        rx_customer_id = str(payload.get("customer", {}).get("id") or "") or None
+        # Prefer a pre-resolved IMS customer id (stamped by online_order_mapper)
+        # so the Rx match uses the IMS customer's prescriptions; fall back to the
+        # raw Shopify customer id (won't match IMS Rx -> safely over-holds).
+        rx_customer_id = (
+            str(payload.get("_ims_customer_id") or "").strip()
+            or str(payload.get("customer", {}).get("id") or "")
+            or None
+        )
         rx_eval = evaluate_rx_hold(db, items, rx_customer_id)
     except Exception as exc:  # noqa: BLE001 - compliance check must never block a sale
         logger.warning("[SHOPIFY_INGEST] rx hold evaluation skipped: %s", exc)
