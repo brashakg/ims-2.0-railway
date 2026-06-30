@@ -35,24 +35,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ============================================================================
 
 
+_MISSING = object()
+
+
 def _doc_matches(doc, filter):
     """Tiny Mongo-filter matcher — supports plain equality and the
-    operators the walkout repo uses ($gte/$lte). Doesn't try to be a
-    full Mongo emulator."""
+    operators the walkout repo + the member backfill use ($gte/$lte/$ne/
+    $exists and top-level $or). Doesn't try to be a full Mongo emulator."""
     if not filter:
         return True
     for k, expected in filter.items():
-        actual = doc.get(k)
+        # Top-level $or: doc matches when ANY sub-filter matches.
+        if k == "$or" and isinstance(expected, list):
+            if not any(_doc_matches(doc, sub) for sub in expected):
+                return False
+            continue
+        actual = doc.get(k, _MISSING)
+        actual_val = None if actual is _MISSING else actual
         if isinstance(expected, dict):
             for op, op_val in expected.items():
-                if op == "$gte" and not (actual is not None and actual >= op_val):
+                if op == "$gte" and not (actual_val is not None and actual_val >= op_val):
                     return False
-                if op == "$lte" and not (actual is not None and actual <= op_val):
+                if op == "$lte" and not (actual_val is not None and actual_val <= op_val):
                     return False
-                if op == "$ne" and actual == op_val:
+                if op == "$ne" and actual_val == op_val:
                     return False
+                if op == "$exists":
+                    present = actual is not _MISSING
+                    if bool(op_val) != present:
+                        return False
         else:
-            if actual != expected:
+            if actual_val != expected:
                 return False
     return True
 
@@ -152,6 +165,12 @@ class FakeDB:
         return self._collections[name]
 
     def __getattr__(self, name):
+        return self.get_collection(name)
+
+    def __getitem__(self, name):
+        # pymongo Database supports db["coll"] subscript access; mirror it so
+        # code paths that use the subscript form (e.g. the member backfill) work
+        # against the fake too.
         return self.get_collection(name)
 
 

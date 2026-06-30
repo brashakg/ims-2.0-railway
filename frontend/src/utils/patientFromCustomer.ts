@@ -107,6 +107,73 @@ export function applyCustomerToPatient<T extends PatientCopyFields>(
   return next;
 }
 
+// ============================================================================
+// BILL-TO-MEMBER P1 (council 2026-06-19) -- resolve the member to bill
+// ============================================================================
+// A raw `patients[]` entry as returned by the /customers API (snake_case).
+export interface RawPatient {
+  patient_id?: string;
+  id?: string;
+  name?: string;
+  relation?: string;
+  is_primary?: boolean;
+  mobile?: string;
+  phone?: string;
+  dob?: string;
+  dateOfBirth?: string;
+}
+
+// The shape posStore.patient expects (matches types/Patient).
+export interface PosPatient {
+  id: string;
+  customerId: string;
+  name: string;
+  relation?: string;
+  dateOfBirth?: string;
+  phone?: string;
+  isPrimary?: boolean;
+}
+
+/** Pick the Primary / account-holder member from a raw patients[] list.
+ *  Priority: an explicit is_primary -> a relation === 'Self' -> the first
+ *  member. Returns null for an empty list. Mirrors the backend
+ *  member_billing.choose_primary_member so FE + BE agree on the default. */
+export function choosePrimaryPatient(patients: RawPatient[] | undefined | null): RawPatient | null {
+  const list = Array.isArray(patients) ? patients.filter(Boolean) : [];
+  if (list.length === 0) return null;
+  const flagged = list.find((p) => p?.is_primary);
+  if (flagged) return flagged;
+  const self = list.find((p) => (p?.relation || '').trim().toLowerCase() === 'self');
+  if (self) return self;
+  return list[0];
+}
+
+/** Convert a raw patients[] entry into the posStore.patient shape, tying it to
+ *  its account (customerId). Returns null when there is nothing to map. */
+export function toPosPatient(raw: RawPatient | null | undefined, customerId: string): PosPatient | null {
+  if (!raw) return null;
+  return {
+    id: raw.patient_id || raw.id || raw.name || '',
+    customerId,
+    name: raw.name || 'Customer',
+    relation: raw.relation,
+    dateOfBirth: raw.dob || raw.dateOfBirth,
+    phone: raw.mobile || raw.phone,
+    isPrimary: !!raw.is_primary,
+  };
+}
+
+/** Sort members for display: Primary / Self first, then by name. Non-mutating. */
+export function sortMembersPrimaryFirst(patients: RawPatient[] | undefined | null): RawPatient[] {
+  const list = Array.isArray(patients) ? patients.filter(Boolean) : [];
+  const primary = choosePrimaryPatient(list);
+  return [...list].sort((a, b) => {
+    if (a === primary) return -1;
+    if (b === primary) return 1;
+    return (a?.name || '').localeCompare(b?.name || '');
+  });
+}
+
 /** Would applying the copy actually CHANGE any field the operator has already
  *  filled? Used to decide whether to ask for confirmation before overwriting.
  *  Returns true only when a non-empty patient field differs from the customer's

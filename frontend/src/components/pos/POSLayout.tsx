@@ -65,6 +65,7 @@ import { DayEndReport } from './DayEndReport';
 import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
+import { choosePrimaryPatient, toPosPatient, sortMembersPrimaryFirst } from '../../utils/patientFromCustomer';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
@@ -348,7 +349,19 @@ export function POSLayout() {
   // condensed merged-step guard). Unchanged business rules — just factored out.
   const stepReady = useCallback((s: POSStep): boolean => {
     switch (s) {
-      case 'customer': return !!store.customer && !!store.salesperson_id;
+      case 'customer': {
+        // BILL-TO-MEMBER P1: a registered customer must have a billed MEMBER
+        // selected before advancing (mandatory member step). Walk-ins are exempt
+        // -- the backend synthesizes a Primary for the synthetic account, so the
+        // member step is skipped (council walk-in rule). The Primary auto-selects
+        // on account pick, so single-member accounts stay one-click.
+        const isWalkinCust = !!store.customer && (
+          store.customer.id?.toString().startsWith('walkin-') ||
+          store.customer.name === 'Walk-in Customer'
+        );
+        if (!store.customer || !store.salesperson_id) return false;
+        return isWalkinCust || !!store.patient;
+      }
       case 'prescription':
         // Rx is mandatory for prescription orders UNLESS the operator picked the
         // accessory/no-Rx source (rxAccessory) — quick sales always pass. The
@@ -362,7 +375,7 @@ export function POSLayout() {
         return store.getBalance() <= 0.01;
       default: return true;
     }
-  }, [store.customer, store.salesperson_id, store.prescription, store.sale_type, store.cart, store.payments, store.is_advance_payment, rxAccessory]);
+  }, [store.customer, store.patient, store.salesperson_id, store.prescription, store.sale_type, store.cart, store.payments, store.is_advance_payment, rxAccessory]);
 
   // A group is satisfied only when EVERY canonical step it renders is ready —
   // so the merged condensed "Products & Rx" still enforces the Rx-attached gate
@@ -455,6 +468,10 @@ export function POSLayout() {
     try {
       const result = await orderApi.createOrder({
         customer_id: store.customer?.id,
+        // BILL-TO-MEMBER P1: send the selected member so the order bills to a
+        // member, not the bare account. Omitted for walk-ins (the backend
+        // synthesizes a Primary for the synthetic account).
+        patient_id: store.patient?.id || undefined,
         store_id: store.store_id,
         order_type: store.sale_type,
         salesperson_id: store.salesperson_id,
@@ -1491,6 +1508,92 @@ function SalespersonPicker() {
 
 // STEP 1: Customer
 // ============================================================================
+// ============================================================================
+// BILL-TO-MEMBER P1 -- mandatory member picker for a registered account.
+// ============================================================================
+// Every order bills a MEMBER, never the bare account. When an account is
+// selected the Primary member auto-selects (one click for single-member
+// accounts). For a multi-member family the operator must pick WHO is being
+// billed before continuing (the Continue gate enforces store.patient is set).
+// The Primary / account holder is badged + listed first.
+function MemberSelect() {
+  const store = usePOSStore();
+  const customerId = store.customer?.id ? String(store.customer.id) : '';
+  const [members, setMembers] = useState<any[]>(
+    Array.isArray((store.customer as any)?.patients) ? (store.customer as any).patients : [],
+  );
+
+  // If the selected-customer object didn't carry patients[] (e.g. created
+  // inline, recalled from a held bill, or a thin search row), fetch the full
+  // account so the member list is complete + a Primary can auto-select.
+  useEffect(() => {
+    let cancelled = false;
+    const onCust = Array.isArray((store.customer as any)?.patients)
+      ? (store.customer as any).patients
+      : null;
+    if (onCust && onCust.length > 0) {
+      setMembers(onCust);
+      return;
+    }
+    if (!customerId || customerId.startsWith('walkin-')) return;
+    (async () => {
+      try {
+        const full: any = await customerApi.getCustomer(customerId);
+        const pts = full?.patients || full?.customer?.patients || [];
+        if (!cancelled && Array.isArray(pts)) setMembers(pts);
+      } catch {
+        /* fail-soft: leave whatever we have; gate still requires a member */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [customerId]);
+
+  // Auto-select the Primary the moment we have members and none is chosen yet.
+  useEffect(() => {
+    if (store.patient) return;
+    const primary = choosePrimaryPatient(members);
+    if (primary) store.setPatient(toPosPatient(primary, customerId) as any);
+  }, [members, store.patient, customerId]);
+
+  const ordered = useMemo(() => sortMembersPrimaryFirst(members), [members]);
+
+  // Single member (or none yet) -> no picker; the auto-select handles it.
+  if (ordered.length <= 1) return null;
+
+  const selectedId = store.patient?.id ? String(store.patient.id) : '';
+
+  return (
+    <div className="mt-3">
+      <label className="block text-xs font-medium text-gray-700 mb-1.5">
+        Billing to (family member) <span className="text-bv-red-600">*</span>
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        {ordered.map((p: any) => {
+          const pid = String(p?.patient_id || p?.id || p?.name || '');
+          const isSel = pid === selectedId;
+          const isPrimary = !!p?.is_primary || (p?.relation || '').toLowerCase() === 'self';
+          return (
+            <button
+              key={pid}
+              type="button"
+              onClick={() => store.setPatient(toPosPatient(p, customerId) as any)}
+              className={`text-left p-2.5 rounded-lg border-2 transition-all ${
+                isSel ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300 bg-white'
+              }`}
+            >
+              <p className="text-sm font-medium text-gray-900 truncate">
+                {p?.name || 'Member'}
+                {isPrimary && <span className="ml-2 align-middle text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">Primary</span>}
+              </p>
+              <p className="text-xs text-gray-500 truncate">{p?.relation || 'Family'}{p?.dob ? ` · ${p.dob}` : ''}</p>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StepCustomer() {
   const store = usePOSStore();
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
@@ -1517,15 +1620,24 @@ function StepCustomer() {
     };
     const r = await customerApi.createCustomer(payload as any);
     const custId = r?.customer_id || r?.id || `new-${Date.now()}`;
+    // Carry the server-returned patients[] (incl. the auto-seeded Primary, with
+    // real patient_ids + is_primary) onto the selected customer so MemberSelect
+    // can render the family + the Primary auto-selects.
+    const returnedPatients = Array.isArray(r?.patients) ? r.patients : [];
     store.setCustomer({
       id: custId,
       name: customerData.fullName,
       phone: customerData.mobileNumber,
       email: customerData.email,
       customerType: customerData.customerType,
+      patients: returnedPatients,
     } as any);
-    if (customerData.patients?.length > 0) {
-      store.setPatient({ name: customerData.patients[0].name, id: customerData.patients[0].id } as any);
+    // BILL-TO-MEMBER P1: default-select the Primary (account holder) member so a
+    // single-member new account is one click; MemberSelect lets multi-member
+    // families switch.
+    const primary = choosePrimaryPatient(returnedPatients);
+    if (primary) {
+      store.setPatient(toPosPatient(primary, custId) as any);
     }
     setShowAddCustomerModal(false);
   };
@@ -1589,6 +1701,7 @@ function StepCustomer() {
             </div>
             <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-600 hover:text-gray-800 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
           </div>
+          {!isWalkin && <MemberSelect />}
           {!isWalkin && <CustomerCardWithLoyalty />}
           {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
           {!isWalkin && <CustomerHistory customerId={store.customer.id} />}
@@ -1666,17 +1779,20 @@ function StepCustomer() {
                     name: c.name || c.customer_name || c.full_name || 'Customer',
                     phone: c.phone || c.mobile || '',
                   } as any);
-                  // setCustomer resets patient to null; set the chosen family member AFTER.
+                  // BILL-TO-MEMBER P1: setCustomer resets patient to null. Set
+                  // the billed member AFTER.
+                  //  - a 'patient' hit IS a member -> bill to that member.
+                  //  - an 'account' hit -> default-select the account's Primary
+                  //    member so single-member accounts (the ~90% case) are one
+                  //    click; multi-member accounts still land on the Primary and
+                  //    the operator can switch via the member picker below.
+                  const cid = c.customer_id || c._id || c.id || '';
                   if (hit.kind === 'patient' && hit.patient) {
                     const p = hit.patient;
-                    store.setPatient({
-                      id: p.patient_id || p.id || p.name,
-                      customerId: c.customer_id || c._id || c.id || '',
-                      name: p.name,
-                      relation: p.relation,
-                      dateOfBirth: p.dob || p.dateOfBirth,
-                      phone: p.mobile || p.phone,
-                    } as any);
+                    store.setPatient(toPosPatient(p, cid) as any);
+                  } else {
+                    const primary = choosePrimaryPatient((c as any).patients);
+                    if (primary) store.setPatient(toPosPatient(primary, cid) as any);
                   }
                 });
               }}

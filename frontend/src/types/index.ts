@@ -230,6 +230,10 @@ export interface Patient {
   relation?: string;
   dateOfBirth?: string;
   phone?: string;
+  // BILL-TO-MEMBER P1: the account holder's member row is flagged is_primary on
+  // the backend. Surfaced here so POS can default-select the Primary member and
+  // badge it first in a multi-member account.
+  isPrimary?: boolean;
 }
 
 // ============================================================================
