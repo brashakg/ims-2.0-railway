@@ -314,3 +314,101 @@ def test_expired_rx_allowed_for_store_manager(client, rx_orders):
               [_item(pid, item_type="LENS", category="OPTICAL_LENS",
                      sph=-1.00, prescription_id=rxid)])
     assert r.status_code in (200, 201), r.text
+
+
+# ---------------------------------------------------------------------------
+# QUICK-SALE / FAST-SALE parity (order_type="quick_sale")
+# ---------------------------------------------------------------------------
+# The POS "quick sale" path posts the SAME POST /api/v1/orders endpoint with
+# order_type="quick_sale" (a workshop-skipping express checkout). The Rx-required
+# gate must apply IDENTICALLY -- a quick sale must NOT be a hole through which a
+# SPECTACLE (Rx) lens line reaches the lab with no / bad / cross-customer /
+# expired prescription. These tests pin that invariant so a future refactor that
+# branches create_order on order_type can never silently drop the gate for the
+# quick path. They mirror the default-path cases above, only adding
+# order_type="quick_sale".
+def test_quicksale_optical_lens_without_prescription_rejected(
+    client, staff_headers, rx_orders
+):
+    """(a) quick-sale spectacle-lens line + NO prescription -> 422 (same as
+    create_order's default path)."""
+    pid = _seed_product(rx_orders, pid="QS-LENS-NORX", category="OPTICAL_LENS",
+                        item_type="LENS")
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="LENS", category="OPTICAL_LENS",
+                     sph=-1.00)],  # no prescription_id
+              order_type="quick_sale")
+    assert r.status_code == 422, r.text
+    assert "prescription" in r.text.lower()
+
+
+def test_quicksale_valid_lens_with_prescription_allowed(
+    client, staff_headers, rx_orders
+):
+    """(b) quick-sale spectacle-lens line + a valid, customer-matching,
+    non-expired Rx + in-range powers -> 201."""
+    pid = _seed_product(rx_orders, pid="QS-LENS-OK", category="OPTICAL_LENS",
+                        item_type="LENS")
+    rxid = _seed_rx(rx_orders, prescription_id="qs-rx-valid")
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="LENS", category="OPTICAL_LENS",
+                     sph=-2.25, cyl=-1.50, axis=90, prescription_id=rxid)],
+              order_type="quick_sale")
+    assert r.status_code in (200, 201), r.text
+
+
+def test_quicksale_contact_lens_without_prescription_allowed(
+    client, staff_headers, rx_orders
+):
+    """(c) quick-sale contact-lens line + no Rx -> allowed (owner policy
+    'block Rx lenses, allow contacts' applies to the quick path too)."""
+    pid = _seed_product(rx_orders, pid="QS-CL-NORX", category="CONTACT_LENS",
+                        item_type="CONTACT_LENS")
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="CONTACT_LENS", category="CONTACT_LENS")],
+              order_type="quick_sale")
+    assert r.status_code in (200, 201), r.text
+
+
+def test_quicksale_out_of_range_power_rejected(client, staff_headers, rx_orders):
+    """(d) quick-sale ANY line with an out-of-range power (sph=+25, limit
+    -20..+20) -> 422. Power validation is universal on the quick path."""
+    pid = _seed_product(rx_orders, pid="QS-LENS-BADPWR", category="OPTICAL_LENS",
+                        item_type="LENS")
+    rxid = _seed_rx(rx_orders, prescription_id="qs-rx-badpwr")
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="LENS", category="OPTICAL_LENS",
+                     sph=25.0, prescription_id=rxid)],
+              order_type="quick_sale")
+    assert r.status_code == 422, r.text
+    assert "sph" in r.text.lower()
+
+
+def test_quicksale_expired_rx_blocked_for_sales_staff(
+    client, staff_headers, rx_orders
+):
+    """(e1) quick-sale expired Rx + SALES_STAFF -> 422 (no override)."""
+    pid = _seed_product(rx_orders, pid="QS-LENS-EXP", category="OPTICAL_LENS",
+                        item_type="LENS")
+    rxid = _seed_rx(rx_orders, prescription_id="qs-rx-expired",
+                    months_ago=30, validity_months=24)
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="LENS", category="OPTICAL_LENS",
+                     sph=-1.00, prescription_id=rxid)],
+              order_type="quick_sale")
+    assert r.status_code == 422, r.text
+    assert "expired" in r.text.lower()
+
+
+def test_quicksale_expired_rx_allowed_for_store_manager(client, rx_orders):
+    """(e2) quick-sale expired Rx + STORE_MANAGER+ -> 201 (override allowed,
+    same as the default path)."""
+    pid = _seed_product(rx_orders, pid="QS-LENS-EXP-MGR", category="OPTICAL_LENS",
+                        item_type="LENS")
+    rxid = _seed_rx(rx_orders, prescription_id="qs-rx-expired-mgr",
+                    months_ago=30, validity_months=24)
+    r = _post(client, _manager_headers(),
+              [_item(pid, item_type="LENS", category="OPTICAL_LENS",
+                     sph=-1.00, prescription_id=rxid)],
+              order_type="quick_sale")
+    assert r.status_code in (200, 201), r.text
