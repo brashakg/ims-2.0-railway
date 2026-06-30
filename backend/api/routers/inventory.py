@@ -827,6 +827,10 @@ async def get_stock_by_barcode(
     if repo is not None:
         stock = repo.find_by_barcode(barcode)
         if stock:
+            # Store-scope guard: WORKSHOP_STAFF/CASHIER/etc. must not read stock
+            # from other stores by barcode-scanning.
+            if not can_access_store_scoped(stock.get("store_id"), current_user):
+                raise HTTPException(status_code=404, detail="Stock item not found")
             return stock
         raise HTTPException(status_code=404, detail="Stock item not found")
 

@@ -289,7 +289,10 @@ def compute_payroll(
 
     total_earnings = earned_gross + incentive
     total_deductions = pf["employee"] + esi_employee + pt + tds + advance_recovery
-    net_pay = total_earnings - total_deductions
+    # Floor at 0: deductions cannot exceed earnings in a single payslip. Any
+    # excess (e.g. large manual TDS on a heavily-LWP month) is flagged via the
+    # negative-wage check in _earnings() and must be reconciled manually.
+    net_pay = max(0.0, total_earnings - total_deductions)
     employer_cost = total_earnings + pf["employer_total"] + esi_employer
 
     return {

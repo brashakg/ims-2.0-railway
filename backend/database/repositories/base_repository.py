@@ -169,7 +169,7 @@ class BaseRepository(ABC, Generic[T]):
                 cursor = cursor.sort(sort)
             if skip:
                 cursor = cursor.skip(skip)
-            if limit:
+            if limit is not None and limit > 0:
                 cursor = cursor.limit(limit)
 
             return [self._clean_id(doc) for doc in cursor]

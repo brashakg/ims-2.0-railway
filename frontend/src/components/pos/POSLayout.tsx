@@ -303,7 +303,8 @@ export function POSLayout() {
       // must pick it explicitly on step 1 (see StepCustomer). It carries
       // across sales within a session once chosen.
     }
-  }, [user]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.activeStoreId, user?.id]);
 
   // Condensed is the sole checkout flow (the classic alternative + toggle were
   // removed). The input groups (each maps to one rail entry; a condensed group

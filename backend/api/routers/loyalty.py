@@ -31,11 +31,14 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    can_access_store_scoped,
     get_audit_repository,
+    get_customer_repository,
     get_loyalty_account_repository,
     get_loyalty_settings_repository,
     get_loyalty_transaction_repository,
     get_order_repository,
+    resolve_store_scope,
 )
 from ..services.loyalty_engine import (
     calc_earn_points,
@@ -187,6 +190,15 @@ async def get_account(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Account snapshot + last 20 ledger rows."""
+    # Store-scope guard: verify caller may access this customer's store.
+    _cust_repo = get_customer_repository()
+    if _cust_repo is not None:
+        _cust = _cust_repo.find_by_id(customer_id)
+        if _cust is not None:
+            _cust_store = _cust.get("store_id") or _cust.get("primary_store_id")
+            if not can_access_store_scoped(_cust_store, current_user):
+                raise HTTPException(status_code=404, detail="Customer not found")
+
     accounts = get_loyalty_account_repository()
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
@@ -238,6 +250,15 @@ async def get_ledger(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Paginated ledger for one customer, newest-first."""
+    # Store-scope guard: verify caller may access this customer's store.
+    _cust_repo = get_customer_repository()
+    if _cust_repo is not None:
+        _cust = _cust_repo.find_by_id(customer_id)
+        if _cust is not None:
+            _cust_store = _cust.get("store_id") or _cust.get("primary_store_id")
+            if not can_access_store_scoped(_cust_store, current_user):
+                raise HTTPException(status_code=404, detail="Customer not found")
+
     txns = get_loyalty_transaction_repository()
     if txns is None:
         return {"items": [], "total": 0, "limit": limit, "skip": skip}
@@ -865,9 +886,12 @@ async def list_rewards(
     db = _reward_db()
     if db is None:
         return {"rewards": [], "total": 0}
+    # Validate + scope the store_id: store-scoped callers cannot query another
+    # store's reward catalog by supplying an arbitrary store_id.
+    scoped_store = resolve_store_scope(store_id, current_user)
     query: Dict[str, Any] = {}
-    if store_id:
-        query["store_id"] = store_id
+    if scoped_store:
+        query["store_id"] = scoped_store
     if active_only:
         query["active"] = True
     rewards = list(db.get_collection("loyalty_rewards").find(query).sort("point_cost", 1).limit(limit))
@@ -1083,27 +1107,29 @@ def reverse_for_return(
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
         return {"ok": False, "reason": "loyalty_db_unavailable"}
+    # Query by order_id directly so high-transaction customers are not silently
+    # under-counted (scanning limit=1000 would miss older ledger rows).
     try:
-        ledger = txns.find_for_customer(customer_id, limit=1000)
+        # Idempotency: an ADJUST row tagged with THIS return_id means already done.
+        existing_adj = txns.collection.find_one({
+            "customer_id": customer_id,
+            "type": "ADJUST",
+            "return_id": return_id,
+        })
+        if existing_adj is not None:
+            return {"ok": True, "already_reversed": True}
+
+        order_rows = list(txns.collection.find({
+            "customer_id": customer_id,
+            "order_id": order_id,
+            "type": {"$in": ["EARN", "REDEEM"]},
+        }))
     except Exception as exc:  # noqa: BLE001
         logger.warning("reverse_for_return ledger read failed: %s", exc)
         return {"ok": False, "reason": "ledger_read_failed"}
 
-    # Idempotency: an ADJUST row already tagged with THIS return_id == done.
-    for row in ledger:
-        if row.get("type") == "ADJUST" and row.get("return_id") == return_id:
-            return {"ok": True, "already_reversed": True}
-
-    earned = sum(
-        int(t.get("points") or 0)
-        for t in ledger
-        if t.get("order_id") == order_id and t.get("type") == "EARN"
-    )
-    redeemed = sum(
-        int(t.get("points") or 0)
-        for t in ledger
-        if t.get("order_id") == order_id and t.get("type") == "REDEEM"
-    )
+    earned = sum(int(t.get("points") or 0) for t in order_rows if t.get("type") == "EARN")
+    redeemed = sum(int(t.get("points") or 0) for t in order_rows if t.get("type") == "REDEEM")
     if earned <= 0 and redeemed <= 0:
         return {"ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0}
 

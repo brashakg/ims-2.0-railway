@@ -118,6 +118,7 @@ export function Customer360Dashboard() {
   const [searchResults, setSearchResults] = useState<Customer[]>([]);
   const [isSearching, setIsSearching] = useState(false);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!customerId) return;
     loadCustomerData();

@@ -39,7 +39,8 @@ export default function OutstandingPaymentsReport() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [selectedBucket, setSelectedBucket] = useState<AgeBucket | 'ALL'>('ALL');
 
-  useEffect(() => { loadOutstanding(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadOutstanding(); }, [user?.activeStoreId]);
 
   const loadOutstanding = async () => {
     setIsLoading(true);

@@ -448,7 +448,7 @@ export default function ReturnsPage() {
 
           <div className="space-y-3">
             {returnItems.map((item, i) => (
-              <div key={i} className={clsx('border rounded-lg p-4 transition-all',
+              <div key={item.orderItemId || item.sku || i} className={clsx('border rounded-lg p-4 transition-all',
                 item.returnQty > 0 ? 'border-bv-red-300 bg-bv-red-50' : 'border-gray-200')}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1">
