@@ -1442,6 +1442,14 @@ async def create_order(
     # money math (validation only -- it never touches pricing/GST/payment) so a
     # clinically impossible lens power or a lens line with no Rx is rejected with
     # a clear 422 before it can be persisted and sent to the lab.
+    #
+    # INVARIANT (do NOT break on refactor): this gate is order_type-AGNOSTIC. The
+    # POS "quick sale" / fast-sale (order_type="quick_sale", which skips the
+    # workshop step) posts THIS SAME endpoint, so it MUST run the identical Rx
+    # gate -- a quick sale is not a hole through which a spectacle (Rx) lens line
+    # reaches the lab without a valid, customer-matching, non-expired Rx. Never
+    # wrap this loop in an `if order.order_type != "quick_sale"` (or any sale_type)
+    # branch. Pinned by test_order_rx_validation.py::test_quicksale_* .
     for item in order.items:
         _validate_order_line_rx(item, order.customer_id, current_user)
 
