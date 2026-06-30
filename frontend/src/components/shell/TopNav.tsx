@@ -98,6 +98,14 @@ function DropdownItem({ item, onNavigate }: { item: NavItem; onNavigate: () => v
   );
 }
 
+/** Anchor a fixed-positioned group dropdown to its trigger's viewport rect,
+ *  clamped so a right-edge menu doesn't spill past the viewport. */
+function dropdownAnchor(el: HTMLElement): { left: number; top: number } {
+  const r = el.getBoundingClientRect();
+  const left = Math.max(8, Math.min(Math.round(r.left), window.innerWidth - 240));
+  return { left, top: Math.round(r.bottom + 2) };
+}
+
 export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   const { user, hasModuleAccess, logout } = useAuth();
   const { pathname } = useLocation();
@@ -107,6 +115,13 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   // Which top-level dropdown (group title) is open; null = none. Only one at a
   // time. User menu is tracked separately.
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  // The group dropdown is rendered position:FIXED and anchored to its trigger's
+  // viewport rect. Why fixed: the menu list is `overflow-x: auto` (so a wide
+  // role menu can scroll horizontally), and per CSS that forces overflow-y to
+  // clip too -- an absolutely-positioned dropdown hanging below the 52px bar got
+  // clipped to nothing (the menu opened in the DOM but was invisible). A fixed
+  // anchor escapes the ancestor's overflow clip. null = use no inline position.
+  const [ddPos, setDdPos] = useState<{ left: number; top: number } | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
@@ -163,13 +178,28 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     return () => document.removeEventListener('keydown', onKey);
   }, [openGroup, userMenuOpen]);
 
+  // The group dropdown is position:fixed (anchored to its trigger), so it would
+  // visually detach if the page scrolls, the window resizes, or the menu scrolls
+  // horizontally. Close it on any of those instead of trying to re-track.
+  useEffect(() => {
+    if (!openGroup) return;
+    const close = () => setOpenGroup(null);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true); // capture: catch the menu's own scroll too
+    return () => {
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [openGroup]);
+
   const closeAll = useCallback(() => {
     setOpenGroup(null);
     setUserMenuOpen(false);
   }, []);
 
-  const toggleGroup = useCallback((title: string) => {
+  const toggleGroup = useCallback((title: string, el: HTMLElement) => {
     setUserMenuOpen(false);
+    setDdPos(dropdownAnchor(el));
     setOpenGroup((cur) => (cur === title ? null : title));
   }, []);
 
@@ -177,6 +207,7 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     (title: string) => (e: ReactKeyboardEvent<HTMLButtonElement>) => {
       if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
+        setDdPos(dropdownAnchor(e.currentTarget));
         setOpenGroup(title);
         // Focus the first item in the dropdown on the next frame.
         requestAnimationFrame(() => {
@@ -262,14 +293,20 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
                 className={'top-nav-trigger' + (isActive ? ' active' : '')}
                 aria-haspopup="true"
                 aria-expanded={isOpen}
-                onClick={() => toggleGroup(title)}
+                onClick={(e) => toggleGroup(title, e.currentTarget)}
                 onKeyDown={onTriggerKeyDown(title)}
               >
                 <span>{title}</span>
                 <MenuChevron />
               </button>
               {isOpen && (
-                <div className="top-nav-dropdown" role="menu" aria-label={title}>
+                <div
+                  className="top-nav-dropdown"
+                  role="menu"
+                  aria-label={title}
+                  // Fixed + JS-anchored so the menu's overflow-x clip can't hide it.
+                  style={ddPos ? { position: 'fixed', left: ddPos.left, top: ddPos.top, margin: 0 } : undefined}
+                >
                   {group.items.map((item) => (
                     <DropdownItem key={item.id} item={item} onNavigate={closeAll} />
                   ))}
