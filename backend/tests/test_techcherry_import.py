@@ -141,6 +141,99 @@ class TestMappers:
         assert _map_order({"GrandTotal": "1000"}, "BV-PUN-01", "techcherry") is None
 
 
+# ----- legacy import: POWER-VALIDATE ONLY (never blocks / never skips) -----
+
+
+class TestPowerQuality:
+    """A historical row with out-of-range Rx powers is imported anyway; the
+    importer only RECORDS a data-quality note. It must NEVER reject/skip the row.
+    Reuses the canonical clinical validators (no duplicated ranges)."""
+
+    def test_in_range_powers_no_issue(self):
+        from api.routers.techcherry_import import _power_quality_issues
+        row = {
+            "InvoiceNo": "INV-1",
+            "items": [{"sph": "-2.25", "cyl": "-1.00", "axis": 90}],
+        }
+        assert _power_quality_issues(row) == []
+
+    def test_out_of_range_sph_recorded(self):
+        from api.routers.techcherry_import import _power_quality_issues
+        # +99.00 is far outside -20..+20
+        issues = _power_quality_issues({"items": [{"sph": "99.00"}]})
+        assert issues
+        assert any("99" in s for s in issues)
+
+    def test_off_grid_power_recorded(self):
+        from api.routers.techcherry_import import _power_quality_issues
+        # +1.30 is not on the 0.25 grid
+        issues = _power_quality_issues({"items": [{"sph": "1.30"}]})
+        assert issues
+
+    def test_cyl_without_axis_recorded(self):
+        from api.routers.techcherry_import import _power_quality_issues
+        # non-zero cyl requires an axis
+        issues = _power_quality_issues({"items": [{"cyl": "-1.00"}]})
+        assert issues
+
+    def test_row_level_powers_checked(self):
+        from api.routers.techcherry_import import _power_quality_issues
+        # legacy export that flattens the Rx onto the order row (no items[])
+        issues = _power_quality_issues({"sph": "50.00"})
+        assert issues
+
+    def test_no_powers_no_issue(self):
+        from api.routers.techcherry_import import _power_quality_issues
+        # a plain historical sale row with no Rx fields -> nothing to validate
+        assert _power_quality_issues({"InvoiceNo": "INV-2", "GrandTotal": "999"}) == []
+
+    def test_import_records_note_but_imports_row(self, client, auth_headers, monkeypatch):
+        """End-to-end via the endpoint: an out-of-range-power order row is still
+        imported (inserted) and surfaces in data_quality_notes + the counter."""
+        import api.routers.techcherry_import as tc
+
+        inserted = []
+
+        class _Col:
+            def find_one(self, *a, **k):
+                return None
+
+            def insert_one(self, doc):
+                inserted.append(doc)
+
+            def update_one(self, *a, **k):
+                pass
+
+        class _DB:
+            def get_collection(self, name):
+                return _Col()
+
+        monkeypatch.setattr(tc, "_get_db", lambda: _DB())
+
+        r = client.post(
+            "/api/v1/admin/techcherry/import",
+            json={
+                "type": "orders",
+                "store_id": "BV-PUN-01",
+                "rows": [
+                    {"InvoiceNo": "INV-OK", "GrandTotal": "999",
+                     "items": [{"sph": "-2.00"}]},
+                    {"InvoiceNo": "INV-BAD", "GrandTotal": "1500",
+                     "items": [{"sph": "99.00"}]},
+                ],
+            },
+            headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # BOTH rows imported -- the bad-power row is NOT skipped.
+        assert body["inserted"] == 2
+        assert body["skipped"] == 0
+        assert body["out_of_range_power_rows"] == 1
+        assert any("INV-BAD" in n for n in body["data_quality_notes"])
+        assert len(inserted) == 2
+
+
 # ----- endpoint auth ------------------------------------------------------
 
 

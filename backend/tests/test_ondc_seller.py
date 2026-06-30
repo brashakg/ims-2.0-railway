@@ -60,8 +60,12 @@ class _MockCollection:
         self._docs: List[Dict[str, Any]] = list(docs or [])
 
     def _matches(self, doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
-        """Simple query matcher supporting $in, $exists, $ne, and exact match."""
+        """Simple query matcher supporting $or, $in, $exists, $ne, exact match."""
         for k, v in query.items():
+            if k == "$or":
+                if not any(self._matches(doc, sub) for sub in v):
+                    return False
+                continue
             if isinstance(v, dict):
                 doc_val = doc.get(k)
                 if "$in" in v and doc_val not in v["$in"]:
@@ -671,3 +675,160 @@ class TestReconcileTcsFailSoft:
         result = ondc_seller.reconcile_tcs(db, "ORDER-Y", settlement)
         assert result["ok"] is False
         assert result["error"] is not None
+
+
+# ===========================================================================
+# 16. ingest_ondc_order -- clinical FLAG & HOLD (spectacle-lens missing Rx)
+# A paid ONDC sale is NEVER refused: a prescription-lens line without a valid
+# customer-matching non-expired Rx is BOOKED but flagged rx_pending +
+# fulfillment_hold, and ONE follow-up task is raised. Contacts/frames exempt.
+# ===========================================================================
+
+from datetime import datetime as _dt  # noqa: E402
+
+
+def _ondc_order_payload(order_id, item):
+    """An ONDC on_confirm payload with a single supplied item dict."""
+    return {
+        "context": {"action": "on_confirm", "bap_id": "paytm.com"},
+        "message": {
+            "order": {
+                "id": order_id,
+                "state": "Created",
+                "billing": {"name": "Rahul Sharma", "phone": "9876543210"},
+                "items": [item],
+                "payment": {"type": "PRE-PAID", "params": {"amount": "1500.00"}},
+                "fulfillments": [{"id": "1"}],
+            }
+        },
+    }
+
+
+def _ondc_lens_item(rx_id=None, sph=None, tags=None):
+    item = {
+        "id": "OL-1",
+        "descriptor": {"name": "Zeiss Single Vision Lens"},
+        "quantity": {"count": 1},
+        "price": {"currency": "INR", "value": "1500.00"},
+    }
+    if rx_id is not None:
+        item["prescription_id"] = rx_id
+    if sph is not None:
+        item["sph"] = sph
+    if tags is not None:
+        item["tags"] = tags
+    return item
+
+
+class _OndcRxRepo:
+    def __init__(self, by_id=None, by_customer=None):
+        self._by_id = by_id or {}
+        self._by_customer = by_customer or {}
+
+    def find_by_id(self, rx_id):
+        return self._by_id.get(rx_id)
+
+    def find_by_customer(self, customer_id):
+        return self._by_customer.get(str(customer_id), [])
+
+
+def _ondc_valid_rx(rx_id="RX-1", customer_id="C1"):
+    return {
+        "prescription_id": rx_id,
+        "customer_id": customer_id,
+        "prescription_date": _dt.now().isoformat(),
+        "validity_months": 12,
+    }
+
+
+class TestIngestOndcRxHold:
+    def _wire(self, monkeypatch, repo):
+        import api.dependencies as deps
+
+        monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    def test_lens_no_rx_flagged_with_one_task(self, monkeypatch):
+        """(a) spectacle-lens line, no Rx -> CREATED with rx_pending + ONE task."""
+        self._wire(monkeypatch, _OndcRxRepo())
+        db = _MockDB(orders=[], tasks=[], customers=[])
+        res = ondc_seller.ingest_ondc_order(db, _ondc_order_payload("ORX-1", _ondc_lens_item()))
+        assert res["ok"] is True  # paid sale never refused
+        assert res["ims_order"]["rx_pending"] is True
+        assert res["ims_order"]["fulfillment_hold"] is True
+        order_id = res["order_id"]
+        tasks = list(db.get_collection("tasks").find({"order_id": order_id}))
+        assert len(tasks) == 1
+        assert tasks[0]["task_type"] == "online_rx_hold"
+
+    def test_lens_with_valid_rx_no_flag_no_task(self, monkeypatch):
+        """(b) spectacle-lens line, valid customer-matching non-expired Rx ->
+        no flag, no task. Buyer phone resolves to a customer with that Rx."""
+        repo = _OndcRxRepo(by_id={"RX-1": _ondc_valid_rx("RX-1", "C1")})
+        self._wire(monkeypatch, repo)
+        db = _MockDB(
+            orders=[],
+            tasks=[],
+            customers=[{"customer_id": "C1", "phone": "9876543210", "mobile": "9876543210"}],
+        )
+        res = ondc_seller.ingest_ondc_order(
+            db, _ondc_order_payload("ORX-2", _ondc_lens_item(rx_id="RX-1"))
+        )
+        assert res["ims_order"]["rx_pending"] is False
+        assert list(db.get_collection("tasks").find({"order_id": res["order_id"]})) == []
+
+    def test_frame_line_not_flagged(self, monkeypatch):
+        """(c) a frame line -> EXEMPT, never flagged."""
+        self._wire(monkeypatch, _OndcRxRepo())
+        db = _MockDB(orders=[], tasks=[], customers=[])
+        frame_item = {
+            "id": "FR-1",
+            "descriptor": {"name": "Ray-Ban Frame RB1234"},
+            "quantity": {"count": 1},
+            "price": {"currency": "INR", "value": "3000.00"},
+        }
+        res = ondc_seller.ingest_ondc_order(db, _ondc_order_payload("ORX-3", frame_item))
+        assert res["ims_order"]["rx_pending"] is False
+
+    def test_contact_lens_not_flagged(self, monkeypatch):
+        """(c) a contact-lens line -> EXEMPT, never flagged."""
+        self._wire(monkeypatch, _OndcRxRepo())
+        db = _MockDB(orders=[], tasks=[], customers=[])
+        cl_item = {
+            "id": "CL-1",
+            "descriptor": {"name": "Acuvue Daily Contact Lens"},
+            "quantity": {"count": 1},
+            "price": {"currency": "INR", "value": "900.00"},
+        }
+        res = ondc_seller.ingest_ondc_order(db, _ondc_order_payload("ORX-4", cl_item))
+        assert res["ims_order"]["rx_pending"] is False
+
+    def test_reingest_idempotent_no_double_task(self, monkeypatch):
+        """(d) re-ingest the same ONDC order -> IDEMPOTENT, no second task."""
+        self._wire(monkeypatch, _OndcRxRepo())
+        db = _MockDB(orders=[], tasks=[], customers=[])
+        payload = _ondc_order_payload("ORX-5", _ondc_lens_item())
+        first = ondc_seller.ingest_ondc_order(db, payload)
+        assert first["ims_order"]["rx_pending"] is True
+        second = ondc_seller.ingest_ondc_order(db, payload)
+        assert second["mode"] == "IDEMPOTENT"
+        # exactly one order + exactly one task
+        assert db.get_collection("orders").count_documents({"external_order_id": "ORX-5"}) == 1
+        all_tasks = list(db.get_collection("tasks").find({}))
+        assert len(all_tasks) == 1
+
+    def test_out_of_range_power_still_created_reason_recorded(self, monkeypatch):
+        """(e) out-of-range power -> still CREATED, reason recorded."""
+        repo = _OndcRxRepo(by_id={"RX-1": _ondc_valid_rx("RX-1", "C1")})
+        self._wire(monkeypatch, repo)
+        db = _MockDB(
+            orders=[],
+            tasks=[],
+            customers=[{"customer_id": "C1", "phone": "9876543210", "mobile": "9876543210"}],
+        )
+        res = ondc_seller.ingest_ondc_order(
+            db, _ondc_order_payload("ORX-6", _ondc_lens_item(rx_id="RX-1", sph="99.00"))
+        )
+        assert res["ok"] is True
+        assert res["ims_order"]["rx_pending"] is True
+        assert "RX_POWER_OUT_OF_RANGE" in res["ims_order"]["rx_hold_reasons"]
+        assert "99" in res["ims_order"]["rx_hold_reason"]

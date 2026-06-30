@@ -106,6 +106,54 @@ def _parse_date(v: Any) -> Optional[datetime]:
         return None
 
 
+def _power_quality_issues(row: Dict[str, Any]) -> List[str]:
+    """POWER-VALIDATE ONLY for a legacy historical import row.
+
+    Returns a list of human-readable problems found in the row's Rx powers
+    (range / 0.25-grid / axis), checking BOTH any row-level sph/cyl/add/axis AND
+    each line item's powers. NEVER raises and NEVER causes a skip -- a historical
+    row with a bad power is still imported; the caller only COUNTS + records the
+    note. Reuses the canonical clinical validators (no duplicated ranges).
+    """
+    from ..services.rx_validation import _validate_axis, _validate_rx_value
+
+    issues: List[str] = []
+
+    def _check(holder: Dict[str, Any], where: str) -> None:
+        if not isinstance(holder, dict):
+            return
+        # Tolerate the common spellings legacy exports use.
+        def _g(*keys):
+            for k in keys:
+                if holder.get(k) not in (None, ""):
+                    return holder.get(k)
+            return None
+
+        sph = _g("sph", "SPH", "sphere")
+        cyl = _g("cyl", "CYL", "cylinder")
+        add = _g("add", "ADD", "addition")
+        axis = _g("axis", "AXIS")
+        for value, field in ((sph, "sph"), (cyl, "cyl"), (add, "add")):
+            if value in (None, ""):
+                continue
+            try:
+                _validate_rx_value(str(value), field)
+            except ValueError as exc:
+                issues.append(f"{where}: {exc}")
+        if axis not in (None, "") or cyl not in (None, ""):
+            try:
+                _validate_axis(axis, cyl=cyl)
+            except ValueError as exc:
+                issues.append(f"{where}: {exc}")
+
+    # Row-level powers (some legacy exports flatten the Rx onto the order row).
+    _check(row, "row")
+    # Per-line-item powers.
+    for idx, itm in enumerate(row.get("items") or []):
+        _check(itm, f"item[{idx}]")
+    return issues
+
+
 def _get_db():
     """Lazy DB import to keep this router self-contained — same pattern as
     other routers."""
@@ -150,6 +198,11 @@ class ImportResponse(BaseModel):
     skipped: int = 0
     errors: List[str] = Field(default_factory=list)
     sample_dedup_keys: List[str] = Field(default_factory=list)
+    # POWER-VALIDATE ONLY (legacy historical import): rows whose Rx powers are out
+    # of clinical range are NEVER skipped/rejected -- they are imported as-is and
+    # reported here as a data-quality note so staff can review the source data.
+    data_quality_notes: List[str] = Field(default_factory=list)
+    out_of_range_power_rows: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +397,30 @@ async def import_batch(
 
     for raw_row in req.rows:
         try:
+            # POWER-VALIDATE ONLY (orders carry Rx powers): record a data-quality
+            # note for out-of-range powers but NEVER skip/reject the historical
+            # row. Done before mapping so a row that is otherwise importable still
+            # gets validated; fail-soft so a validator hiccup never blocks import.
+            if req.type == "orders":
+                try:
+                    power_issues = _power_quality_issues(raw_row)
+                except Exception:  # noqa: BLE001 - quality check must not block import
+                    power_issues = []
+                if power_issues:
+                    resp.out_of_range_power_rows += 1
+                    ref = (
+                        raw_row.get("invoice_no")
+                        or raw_row.get("InvoiceNo")
+                        or raw_row.get("VchNo")
+                        or raw_row.get("vch_no")
+                        or f"row#{resp.inserted + resp.updated + resp.skipped + 1}"
+                    )
+                    if len(resp.data_quality_notes) < 50:
+                        resp.data_quality_notes.append(
+                            f"{ref}: out-of-range Rx power(s) imported as-is "
+                            f"({'; '.join(power_issues)[:200]})"
+                        )
+
             doc = mapper(raw_row, req.store_id, req.source)
             if not doc:
                 resp.errors.append("row missing required identifier — skipped")

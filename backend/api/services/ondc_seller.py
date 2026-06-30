@@ -206,6 +206,110 @@ def _hsn_for(product: Dict[str, Any]) -> str:
     return "9004"  # generic optical default
 
 
+# ---------------------------------------------------------------------------
+# Clinical FLAG & HOLD line helpers (ONDC on_confirm -> IMS line attributes)
+# ---------------------------------------------------------------------------
+
+# Item-name keyword -> IMS GST category, so is_rx_required_line can classify an
+# ONDC line. CONTACT is checked before LENS so a contact lens is never mis-read
+# as a required spectacle lens.
+_ONDC_CATEGORY_HINTS = [
+    ("sunglass", "SUNGLASS"),
+    ("goggle", "SUNGLASS"),
+    ("frame", "FRAME"),
+    ("reading", "READING_GLASSES"),
+    ("reader", "READING_GLASSES"),
+    ("contact", "CONTACT_LENS"),
+    ("lens", "OPTICAL_LENS"),
+    ("watch", "WATCH"),
+    ("accessor", "ACCESSORIES"),
+    ("case", "ACCESSORIES"),
+    ("solution", "ACCESSORIES"),
+]
+
+
+def _ondc_line_category(db, sku: str, name: str) -> str:
+    """Resolve an IMS GST category for an ONDC line. Authoritative: the IMS
+    product master by SKU; fallback: a keyword hint from the item name. Returns
+    '' when nothing matches (treated as non-Rx by is_rx_required_line). Fail-soft.
+    """
+    sku = (sku or "").strip()
+    if sku and db is not None:
+        try:
+            prod = db.get_collection("products").find_one(
+                {"$or": [{"sku": sku}, {"barcode": sku}, {"product_id": sku}]},
+                {"_id": 0, "category": 1, "item_type": 1},
+            )
+            if prod:
+                cat = prod.get("item_type") or prod.get("category") or ""
+                if cat:
+                    return str(cat)
+        except Exception:  # noqa: BLE001 - product lookup is best-effort
+            pass
+    haystack = (name or "").lower()
+    for needle, category in _ONDC_CATEGORY_HINTS:
+        if needle in haystack:
+            return category
+    return ""
+
+
+def _ondc_customer_id(db, phone: str, name: str) -> Optional[str]:
+    """Resolve the IMS customer_id for an ONDC buyer (phone is the identity), so
+    the FLAG & HOLD check can match the buyer's prescriptions. Returns None when
+    no matching customer exists -> the order is flagged (staff collect the Rx).
+    Fail-soft."""
+    phone = (phone or "").strip()
+    if db is None or not phone:
+        return None
+    try:
+        from .phone import normalize_indian_mobile
+
+        try:
+            norm = normalize_indian_mobile(phone) or phone
+        except ValueError:
+            norm = phone
+        cust = db.get_collection("customers").find_one(
+            {"$or": [{"phone": norm}, {"mobile": norm}, {"phone": phone}]},
+            {"_id": 0, "customer_id": 1},
+        )
+        if cust:
+            return cust.get("customer_id")
+    except Exception:  # noqa: BLE001 - best-effort match
+        return None
+    return None
+
+
+def _ondc_line_rx_id(itm: Dict[str, Any]) -> Optional[str]:
+    """Pull a prescription id off an ONDC item, from a top-level field or an ONDC
+    `tags` custom attribute (the standard Beckn key/value container)."""
+    direct = itm.get("prescription_id") or itm.get("prescriptionId") or itm.get("rx_id")
+    if direct:
+        return str(direct).strip() or None
+    for tag in itm.get("tags") or []:
+        for entry in (tag.get("list") or []) if isinstance(tag, dict) else []:
+            code = str(entry.get("code") or "").strip().lower()
+            if code in ("prescription_id", "prescriptionid", "rx_id", "rx"):
+                val = str(entry.get("value") or "").strip()
+                if val:
+                    return val
+    return None
+
+
+def _extract_ondc_line_rx(itm: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract sph/cyl/add/axis from an ONDC item -- top-level keys or `tags`
+    custom attributes. None for any power not present."""
+    out: Dict[str, Any] = {"sph": None, "cyl": None, "add": None, "axis": None}
+    for k in out:
+        if itm.get(k) not in (None, ""):
+            out[k] = itm.get(k)
+    for tag in itm.get("tags") or []:
+        for entry in (tag.get("list") or []) if isinstance(tag, dict) else []:
+            code = str(entry.get("code") or "").strip().lower()
+            if code in out and out[code] in (None, "") and entry.get("value") not in (None, ""):
+                out[code] = entry.get("value")
+    return out
+
+
 def _ondc_quantity(product: Dict[str, Any], variant: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Build ONDC quantity block from IMS physical stock."""
     if variant and variant.get("stock_quantity") is not None:
@@ -677,16 +781,29 @@ def _ingest_ondc_order_inner(db, payload: Dict[str, Any]) -> Dict[str, Any]:
         unit_price = _f(price_str)
         line_total = unit_price * qty
         subtotal += line_total
+        line_name = _s((itm.get("descriptor") or {}).get("name", sku))
+        rx_powers = _extract_ondc_line_rx(itm)
         ims_items.append({
             "sku": sku,
             "product_id": sku,
-            "name": _s((itm.get("descriptor") or {}).get("name", sku)),
+            "name": line_name,
+            # Resolve the IMS GST category from the product master (by SKU) or the
+            # item name, so the clinical FLAG & HOLD check can tell a spectacle /
+            # Rx lens (Rx required) from an exempt frame / sunglass / contact lens.
+            "item_type": _ondc_line_category(db, sku, line_name),
+            "category": _ondc_line_category(db, sku, line_name),
             "quantity": qty,
             "unit_price": unit_price,
             "discount": 0.0,
             "gst_rate": 5.0,  # Default; GST engine will overwrite from catalog
             "total": line_total,
             "channel": "ONDC",
+            # Clinical FLAG & HOLD inputs (None on non-lens lines).
+            "prescription_id": _ondc_line_rx_id(itm),
+            "sph": rx_powers.get("sph"),
+            "cyl": rx_powers.get("cyl"),
+            "add": rx_powers.get("add"),
+            "axis": rx_powers.get("axis"),
         })
 
     # --- Payment ---
@@ -711,6 +828,22 @@ def _ingest_ondc_order_inner(db, payload: Dict[str, Any]) -> Dict[str, Any]:
     ondc_state = _s(order.get("state", "Created"))
     ims_status = _ONDC_STATUS_MAP.get(ondc_state, "CONFIRMED")
 
+    # --- Clinical compliance: FLAG & HOLD spectacle-lens lines missing a valid Rx
+    # A paid ONDC sale is NEVER refused; a prescription-lens line with no valid
+    # customer-matching non-expired Rx (or an out-of-range power) is flagged + held
+    # + a follow-up task raised. Contacts / frames / sunglasses are EXEMPT.
+    # Fail-soft: any error leaves the order un-held rather than blocking the sale.
+    rx_eval: Dict[str, Any] = {"rx_pending": False, "reasons": [], "lines": [], "detail": ""}
+    # ONDC buyer identity for Rx matching: phone is the most reliable join key to
+    # an IMS customer, falling back to the buyer name.
+    rx_customer_id = _ondc_customer_id(db, buyer_phone, buyer_name)
+    try:
+        from .online_rx_hold import evaluate_rx_hold
+
+        rx_eval = evaluate_rx_hold(db, ims_items, rx_customer_id)
+    except Exception as exc:  # noqa: BLE001 - compliance check must never block a sale
+        logger.warning("[ONDC] rx hold evaluation skipped: %s", exc)
+
     # --- Build canonical IMS order ---
     now = datetime.now(timezone.utc)
     order_id = f"ONDC-{ondc_order_id[:16]}-{now.strftime('%Y%m%d%H%M%S')}"
@@ -731,6 +864,13 @@ def _ingest_ondc_order_inner(db, payload: Dict[str, Any]) -> Dict[str, Any]:
         "total_amount": total_amount,
         "gst_amount": round(total_amount - subtotal, 2),
         "discount_amount": 0.0,
+        # CLINICAL FLAG & HOLD: a prescription-lens line without a valid Rx (or an
+        # out-of-range power) marks the order rx_pending + fulfillment_hold so it
+        # is NOT auto-dispensed. Payment / settlement are unaffected.
+        "rx_pending": rx_eval.get("rx_pending", False),
+        "rx_hold_reasons": rx_eval.get("reasons", []),
+        "rx_hold_reason": rx_eval.get("detail", ""),
+        "fulfillment_hold": rx_eval.get("rx_pending", False),
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "ondc_context": context,
@@ -750,6 +890,25 @@ def _ingest_ondc_order_inner(db, payload: Dict[str, Any]) -> Dict[str, Any]:
             logger.info(
                 "[ONDC] Ingested ONDC order %s -> IMS %s", ondc_order_id, order_id
             )
+            # CLINICAL FLAG & HOLD follow-up task. Only on a fresh persist (the
+            # idempotency guard above returns before this on a re-ingest), and the
+            # task layer itself guards on order_id + task_type. Fail-soft.
+            if rx_eval.get("rx_pending"):
+                try:
+                    from .online_rx_hold import raise_rx_hold_task
+
+                    raise_rx_hold_task(
+                        db,
+                        order_id=order_id,
+                        order_ref=ondc_order_id,
+                        store_id=ims_order.get("store_id") or None,
+                        channel="ondc",
+                        evaluation=rx_eval,
+                    )
+                except Exception as exc:  # noqa: BLE001 - side-channel, fail-soft
+                    logger.warning(
+                        "[ONDC] rx hold task skipped for %s: %s", order_id, exc
+                    )
         except Exception as exc:
             logger.error("[ONDC] Order insert failed: %s", exc, exc_info=True)
             return {

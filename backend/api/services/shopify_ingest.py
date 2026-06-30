@@ -174,6 +174,12 @@ def _map_line_items(payload: Dict[str, Any], product_repo) -> List[Dict[str, Any
         taxable = round(line_gross / (1.0 + rate / 100.0), 2)
         tax = round(line_gross - taxable, 2)
 
+        # Carry any Rx powers the online channel captured (Shopify line-item
+        # properties / a PIM mapping may attach sph/cyl/add/axis to a lens line).
+        # These feed the clinical FLAG & HOLD evaluation; absent on a plain
+        # frame/sunglass line, where they stay None.
+        rx_powers = _extract_line_rx(line)
+
         items.append(
             {
                 "item_id": str(uuid.uuid4()),
@@ -199,9 +205,49 @@ def _map_line_items(payload: Dict[str, Any], product_repo) -> List[Dict[str, Any
                 "shopify_product_id": str(line.get("product_id") or "") or None,
                 "shopify_line_item_id": line.get("id"),
                 "shopify_variant_id": line.get("variant_id"),
+                # Clinical FLAG & HOLD inputs (None on non-lens lines).
+                "prescription_id": _line_rx_id(line),
+                "sph": rx_powers.get("sph"),
+                "cyl": rx_powers.get("cyl"),
+                "add": rx_powers.get("add"),
+                "axis": rx_powers.get("axis"),
             }
         )
     return items
+
+
+def _line_rx_id(line: Dict[str, Any]) -> Optional[str]:
+    """Pull a prescription id off a Shopify line item, from the common spots a
+    PIM / app maps it: a top-level field, or a line-item `properties` entry
+    (Shopify's standard custom-attribute container)."""
+    direct = line.get("prescription_id") or line.get("prescriptionId") or line.get("rx_id")
+    if direct:
+        return str(direct).strip() or None
+    for prop in line.get("properties") or []:
+        if isinstance(prop, dict):
+            name = str(prop.get("name") or "").strip().lower().replace(" ", "_")
+            if name in ("prescription_id", "prescriptionid", "rx_id", "rx"):
+                val = str(prop.get("value") or "").strip()
+                if val:
+                    return val
+    return None
+
+
+def _extract_line_rx(line: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract sph/cyl/add/axis powers from a Shopify line item -- from top-level
+    keys or from the line-item `properties` custom attributes. Returns a dict with
+    None for any power not present (a plain frame line yields all-None)."""
+    out: Dict[str, Any] = {"sph": None, "cyl": None, "add": None, "axis": None}
+    for k in out:
+        if line.get(k) not in (None, ""):
+            out[k] = line.get(k)
+    for prop in line.get("properties") or []:
+        if not isinstance(prop, dict):
+            continue
+        name = str(prop.get("name") or "").strip().lower().replace(" ", "_")
+        if name in out and out[name] in (None, "") and prop.get("value") not in (None, ""):
+            out[name] = prop.get("value")
+    return out
 
 
 def _online_store_id(payload: Dict[str, Any]) -> str:
@@ -455,6 +501,28 @@ def ingest_shopify_order(
         or "Online Customer"
     )
 
+    # --- Clinical compliance: FLAG & HOLD spectacle-lens lines missing a valid Rx
+    # A paid online sale is NEVER refused, but a prescription-lens line with no
+    # valid customer-matching non-expired Rx (or an out-of-range power) is flagged
+    # + held + a follow-up task raised so the store collects the Rx before
+    # dispensing. Contacts / frames / sunglasses are EXEMPT. Fail-soft: any error
+    # leaves the order un-held rather than blocking the booked sale.
+    rx_eval: Dict[str, Any] = {"rx_pending": False, "reasons": [], "lines": [], "detail": ""}
+    try:
+        from .online_rx_hold import evaluate_rx_hold
+
+        # Prefer a pre-resolved IMS customer id (stamped by online_order_mapper)
+        # so the Rx match uses the IMS customer's prescriptions; fall back to the
+        # raw Shopify customer id (won't match IMS Rx -> safely over-holds).
+        rx_customer_id = (
+            str(payload.get("_ims_customer_id") or "").strip()
+            or str(payload.get("customer", {}).get("id") or "")
+            or None
+        )
+        rx_eval = evaluate_rx_hold(db, items, rx_customer_id)
+    except Exception as exc:  # noqa: BLE001 - compliance check must never block a sale
+        logger.warning("[SHOPIFY_INGEST] rx hold evaluation skipped: %s", exc)
+
     now = datetime.now(timezone.utc)
     order_id = str(uuid.uuid4())
 
@@ -522,6 +590,13 @@ def ingest_shopify_order(
             else "UNPAID"
         ),
         "status": "CONFIRMED",
+        # CLINICAL FLAG & HOLD: a prescription-lens line without a valid Rx (or an
+        # out-of-range power) marks the order rx_pending + fulfillment_hold so it
+        # is NOT auto-dispensed. The invoice / payment are unaffected (paid sale).
+        "rx_pending": rx_eval.get("rx_pending", False),
+        "rx_hold_reasons": rx_eval.get("reasons", []),
+        "rx_hold_reason": rx_eval.get("detail", ""),
+        "fulfillment_hold": rx_eval.get("rx_pending", False),
         "place_of_supply": gst_split.get("place_of_supply", buyer_state),
         "place_of_supply_assumed": gst_split.get("place_of_supply_assumed", False),
         "interstate": gst_split.get("interstate", False),
@@ -567,6 +642,27 @@ def ingest_shopify_order(
         invoice_number,
         order_doc["interstate"],
     )
+
+    # CLINICAL FLAG & HOLD follow-up task. Raised ONLY on a fresh create (the
+    # duplicate / replay guards above return before this point), so re-ingesting
+    # the same Shopify order never raises a second task. Idempotent at the task
+    # layer too (guards on order_id + task_type). Fail-soft.
+    if rx_eval.get("rx_pending"):
+        try:
+            from .online_rx_hold import raise_rx_hold_task
+
+            raise_rx_hold_task(
+                db,
+                order_id=order_id,
+                order_ref=order_doc.get("order_number") or shopify_order_id,
+                store_id=_online_fulfillment_store_id(payload),
+                channel="shopify",
+                evaluation=rx_eval,
+            )
+        except Exception as exc:  # noqa: BLE001 - task is a side-channel, fail-soft
+            logger.warning(
+                "[SHOPIFY_INGEST] rx hold task skipped for %s: %s", order_id, exc
+            )
 
     # ONLINE-SALE STOCK DECREMENT (oversell fix). An online order previously
     # booked the GST invoice but NEVER reduced physical stock -> a walk-in and an
@@ -627,6 +723,7 @@ def ingest_shopify_order(
         "interstate": order_doc["interstate"],
         "place_of_supply": order_doc["place_of_supply"],
         "grand_total": grand_total,
+        "rx_pending": order_doc["rx_pending"],
     }
 
 

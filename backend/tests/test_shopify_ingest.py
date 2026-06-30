@@ -433,3 +433,240 @@ def test_online_order_underclaim_records_loud_stock_miss(wired, monkeypatch):
     assert misses[0]["resolved"] is False
     assert misses[0]["detail"]["expected"] == 1
     assert misses[0]["detail"]["claimed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Clinical FLAG & HOLD: spectacle-lens online orders missing a valid Rx
+# A paid online sale is NEVER refused -- a prescription-lens line without a
+# valid customer-matching non-expired Rx is BOOKED but flagged rx_pending +
+# fulfillment_hold, and ONE follow-up task is raised.
+# ---------------------------------------------------------------------------
+
+
+def _lens_order(order_id: int, *, sku="OL-1", with_rx=None, sph=None, properties=None):
+    """A Shopify order with ONE optical (spectacle) LENS line -> Rx-required."""
+    line = {
+        "id": 9100,
+        "product_id": 7100,
+        "title": "Zeiss Single Vision Lens",
+        "product_type": "Optical Lens",
+        "sku": sku,
+        "quantity": 1,
+        "price": "1500.00",
+        "total_discount": "0.00",
+    }
+    if with_rx is not None:
+        line["prescription_id"] = with_rx
+    if sph is not None:
+        line["sph"] = sph
+    if properties is not None:
+        line["properties"] = properties
+    return {
+        "id": order_id,
+        "name": f"#{order_id}",
+        "financial_status": "paid",
+        "email": "buyer@example.com",
+        "customer": {"id": 555, "first_name": "Ravi", "last_name": "Kumar"},
+        "shipping_address": {"province": "20", "province_code": "20"},
+        "line_items": [line],
+    }
+
+
+class _RxRepo:
+    """Minimal prescription repo: a dict of rx_id -> rx doc."""
+
+    def __init__(self, by_id=None, by_customer=None):
+        self._by_id = by_id or {}
+        self._by_customer = by_customer or {}
+
+    def find_by_id(self, rx_id):
+        return self._by_id.get(rx_id)
+
+    def find_by_customer(self, customer_id):
+        return self._by_customer.get(str(customer_id), [])
+
+
+def _valid_rx(rx_id="RX-1", customer_id="555"):
+    # prescription_date now -> validity 12 months -> non-expired.
+    from datetime import datetime as _dt
+
+    return {
+        "prescription_id": rx_id,
+        "customer_id": customer_id,
+        "prescription_date": _dt.now().isoformat(),
+        "validity_months": 12,
+    }
+
+
+def _expired_rx(rx_id="RX-OLD", customer_id="555"):
+    return {
+        "prescription_id": rx_id,
+        "customer_id": customer_id,
+        "prescription_date": "2020-01-01T00:00:00",
+        "validity_months": 12,
+    }
+
+
+def test_lens_line_no_rx_creates_order_flagged_and_one_task(wired, monkeypatch):
+    """(a) spectacle-lens line, NO Rx -> order CREATED with rx_pending=true +
+    exactly ONE follow-up task (NOT rejected)."""
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _lens_order(8001), topic="orders/create"
+    )
+    assert res["status"] == "created"  # paid sale NEVER refused
+    assert res["rx_pending"] is True
+
+    order = wired["orders"].find_one({"shopify_order_id": "8001"})
+    assert order["rx_pending"] is True
+    assert order["fulfillment_hold"] is True
+    assert "RX_MISSING" in order["rx_hold_reasons"]
+
+    tasks = wired["db"].get_collection("tasks").docs
+    hold_tasks = [t for t in tasks if t.get("order_id") == order["order_id"]]
+    assert len(hold_tasks) == 1
+    assert hold_tasks[0]["task_type"] == "online_rx_hold"
+    assert hold_tasks[0]["source"] == "ONLINE_RX_HOLD"
+
+
+def test_lens_line_with_valid_rx_no_flag_no_task(wired, monkeypatch):
+    """(b) spectacle-lens line, valid customer-matching non-expired Rx ->
+    no flag, no task."""
+    import api.dependencies as deps
+
+    repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _lens_order(8002, with_rx="RX-1"), topic="orders/create"
+    )
+    assert res["status"] == "created"
+    assert res["rx_pending"] is False
+
+    order = wired["orders"].find_one({"shopify_order_id": "8002"})
+    assert order["rx_pending"] is False
+    assert order["fulfillment_hold"] is False
+    tasks = wired["db"].get_collection("tasks").docs
+    assert [t for t in tasks if t.get("order_id") == order["order_id"]] == []
+
+
+def test_lens_line_finds_customer_rx_without_explicit_link(wired, monkeypatch):
+    """A lens line with no explicit Rx id but a valid Rx on the customer's file
+    is NOT flagged (the customer fallback lookup resolves it)."""
+    import api.dependencies as deps
+
+    repo = _RxRepo(by_customer={"555": [_valid_rx("RX-9", "555")]})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _lens_order(8003), topic="orders/create"
+    )
+    assert res["rx_pending"] is False
+
+
+def test_frame_line_no_rx_not_flagged(wired, monkeypatch):
+    """(c.1) a FRAME line, no Rx -> no flag (frames are EXEMPT)."""
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(8004, buyer_state="20"), topic="orders/create"
+    )
+    assert res["rx_pending"] is False
+    order = wired["orders"].find_one({"shopify_order_id": "8004"})
+    assert order["rx_pending"] is False
+    assert wired["db"].get_collection("tasks").docs == []
+
+
+def test_contact_lens_line_no_rx_not_flagged(wired, monkeypatch):
+    """(c.2) a CONTACT-lens line, no Rx -> no flag (contacts are EXEMPT)."""
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+    order = _frame_order(8005, buyer_state="20")
+    order["line_items"][0]["title"] = "Acuvue Daily Contact Lens"
+    order["line_items"][0]["product_type"] = "Contact Lenses"
+    order["line_items"][0]["sku"] = "CL-1"
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], order, topic="orders/create"
+    )
+    assert res["rx_pending"] is False
+
+
+def test_reingest_does_not_duplicate_task_or_double_flag(wired, monkeypatch):
+    """(d) re-ingest the SAME order -> duplicate, NO second task, still one flag."""
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+    payload = _lens_order(8006)
+
+    first = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    second = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+
+    assert first["status"] == "created" and first["rx_pending"] is True
+    assert second["status"] == "duplicate"
+
+    orders = [d for d in wired["orders"].docs if d.get("shopify_order_id") == "8006"]
+    assert len(orders) == 1  # single order doc (single flag)
+    tasks = wired["db"].get_collection("tasks").docs
+    hold_tasks = [t for t in tasks if t.get("order_id") == orders[0]["order_id"]]
+    assert len(hold_tasks) == 1  # exactly ONE task despite the re-ingest
+
+
+def test_out_of_range_power_still_created_reason_recorded(wired, monkeypatch):
+    """(e) out-of-range power -> still CREATED, reason recorded (data error caught
+    for staff, not dropped)."""
+    import api.dependencies as deps
+
+    # Valid Rx is on file so the ONLY problem is the bad power on the line.
+    repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    # sph = +99.00 is far outside the -20..+20 clinical range.
+    payload = _lens_order(8007, with_rx="RX-1", sph="99.00")
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["status"] == "created"
+    assert res["rx_pending"] is True
+
+    order = wired["orders"].find_one({"shopify_order_id": "8007"})
+    assert "RX_POWER_OUT_OF_RANGE" in order["rx_hold_reasons"]
+    assert "99" in order["rx_hold_reason"]
+
+
+def test_expired_rx_lens_line_flagged(wired, monkeypatch):
+    """An EXPIRED linked Rx on a lens line flags the order (online has no
+    Store-Manager override -- it holds for the store to refresh the Rx)."""
+    import api.dependencies as deps
+
+    repo = _RxRepo(by_id={"RX-OLD": _expired_rx("RX-OLD", "555")})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _lens_order(8008, with_rx="RX-OLD"), topic="orders/create"
+    )
+    assert res["status"] == "created"
+    assert res["rx_pending"] is True
+    order = wired["orders"].find_one({"shopify_order_id": "8008"})
+    assert "RX_NOT_FOUND" in order["rx_hold_reasons"]
+
+
+def test_rx_powers_from_line_properties(wired, monkeypatch):
+    """A lens line carrying powers via Shopify line-item `properties` is power-
+    validated too (out-of-range -> flagged)."""
+    import api.dependencies as deps
+
+    repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    payload = _lens_order(
+        8009,
+        with_rx="RX-1",
+        properties=[{"name": "cyl", "value": "9.99"}],  # out of -6..+6 range
+    )
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["rx_pending"] is True
+    order = wired["orders"].find_one({"shopify_order_id": "8009"})
+    assert "RX_POWER_OUT_OF_RANGE" in order["rx_hold_reasons"]
