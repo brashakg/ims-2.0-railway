@@ -1,11 +1,48 @@
 /// <reference types="vitest" />
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+// ---------------------------------------------------------------------------
+// Build identity for the "new version available — refresh" banner.
+// Computed once at config-load time so the value baked into the bundle
+// (__APP_BUILD_ID__) is byte-identical to the one emitted to dist/version.json.
+// Prefer a deploy-stable git short SHA from the build env; fall back to a
+// build-time ISO timestamp (evaluated here, in Node, at config load — safe even
+// where Date.now() is restricted at runtime). Vercel exposes
+// VERCEL_GIT_COMMIT_SHA; we also accept a plain GIT_SHA override.
+// ---------------------------------------------------------------------------
+const RAW_SHA =
+  process.env.VERCEL_GIT_COMMIT_SHA ||
+  process.env.GIT_SHA ||
+  process.env.RAILWAY_GIT_COMMIT_SHA ||
+  ''
+const APP_BUILD_ID = (RAW_SHA ? RAW_SHA.slice(0, 8) : new Date().toISOString())
+
+// Tiny dependency-free plugin: write dist/version.json at the end of the build.
+// version.json is at the site root (NOT under /assets/), so vercel.json's
+// catch-all no-cache rule keeps it always-fresh — exactly what the update check
+// needs to detect a new deploy.
+function emitVersionJson(buildId: string): Plugin {
+  return {
+    name: 'emit-version-json',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify({ build: buildId }) + '\n',
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  define: {
+    __APP_BUILD_ID__: JSON.stringify(APP_BUILD_ID),
+  },
+  plugins: [react(), tailwindcss(), emitVersionJson(APP_BUILD_ID)],
   test: {
     globals: true,
     environment: 'jsdom',

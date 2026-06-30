@@ -1,5 +1,10 @@
 /// <reference types="vite/client" />
 
+// Build identity injected at build time via vite `define` (see vite.config.ts).
+// Used by the "new version available" update check to compare the running build
+// against the freshly-fetched dist/version.json.
+declare const __APP_BUILD_ID__: string;
+
 interface ImportMetaEnv {
   readonly VITE_API_URL: string;
   readonly VITE_API_KEY: string;

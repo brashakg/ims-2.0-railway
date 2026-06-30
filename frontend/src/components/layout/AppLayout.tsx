@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { loadHsnRates, loadPricingMode } from '../../constants/gstRuntime';
 import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
 import { IdleLogoutWatcher } from '../auth/IdleLogoutWatcher';
+import { UpdateAvailableBanner } from '../common/UpdateAvailableBanner';
 import { hasNoActiveStore, isMultiStoreCapable } from '../../utils/storeAccess';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
@@ -119,6 +120,10 @@ export function AppLayout() {
           nothing until the warning window; reads its policy at runtime from
           /health (SUPERADMIN-configurable). */}
       <IdleLogoutWatcher />
+      {/* "A new version is available — refresh" bar. Polls /version.json and
+          appears only when a newer deploy is live than this running build.
+          Dismissible (per session); fail-soft (network error -> nothing). */}
+      <UpdateAvailableBanner />
       {/* INVESTOR read-only banner — sticky top-of-page strip when the
           signed-in user is INVESTOR-only. Backend middleware also blocks
           writes server-side; this is the user-facing acknowledgement so
