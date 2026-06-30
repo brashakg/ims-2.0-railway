@@ -649,7 +649,7 @@ async def create_customer(
             "patients": [],
         }
 
-        # Add default patient (self) if no patients provided
+        # Add the supplied family members (if any).
         if customer.patients:
             for p in customer.patients:
                 customer_data["patients"].append(
@@ -667,16 +667,18 @@ async def create_customer(
                         or ("Self" if p.name == customer.name else "Other"),
                     }
                 )
-        else:
-            # Add self as default patient
-            customer_data["patients"].append(
-                {
-                    "patient_id": str(uuid.uuid4()),
-                    "name": customer.name,
-                    "mobile": customer.mobile,
-                    "relation": "Self",
-                }
-            )
+
+        # BILL-TO-MEMBER P1 (council 2026-06-19): every account must carry >=1
+        # member, and exactly one is the Primary (the account holder, a REAL
+        # member row -- never the legacy patient_id==customer_id special case).
+        # ensure_primary_member seeds a Primary from the account name/mobile when
+        # no members were provided, and otherwise flags the Self/first member as
+        # is_primary + sets the root primary_patient_id pointer. This is the
+        # SAME helper order-create auto-resolve and the backfill migration use,
+        # so the invariant is enforced identically on every write path.
+        from api.services.member_billing import ensure_primary_member
+
+        ensure_primary_member(customer_data)
 
         created = repo.create(customer_data)
         if created:

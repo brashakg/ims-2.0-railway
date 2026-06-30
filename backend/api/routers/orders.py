@@ -1481,6 +1481,89 @@ async def create_order(
             customer.get("phone") or customer.get("mobile") if customer else ""
         )
 
+        # BILL-TO-MEMBER P1 (council 2026-06-19): resolve the MEMBER this order
+        # bills to -- never the bare account. NON-BREAKING:
+        #   * explicit order.patient_id MUST belong to this account -> else 422.
+        #     A cross-account patient_id is the ONLY hard reject (mis-billing
+        #     guard); it would otherwise attribute a sale to a stranger's family.
+        #   * absent/blank patient_id -> AUTO-RESOLVE to the account's Primary
+        #     member (council chose auto->Primary over a hard reject so the ~38
+        #     existing tests + automated/online order-create paths that never
+        #     send a member keep working). A real account missing a Primary gets
+        #     one minted + persisted; a walk-in (no DB doc) gets a synthetic
+        #     Primary stamped on the order only (no loyalty -- account is fake).
+        # The resolved member id is persisted as patient_id (already wired into
+        # order_data below) PLUS billed_to_member_name for receipts/reports, so
+        # no order is ever left bare-account.
+        from api.services.member_billing import (
+            ensure_primary_member,
+            find_member,
+            build_primary_member,
+        )
+
+        requested_patient_id = (order.patient_id or "").strip()
+        billed_member: Optional[Dict[str, Any]] = None
+
+        if requested_patient_id:
+            if customer:
+                billed_member = find_member(customer, requested_patient_id)
+                if billed_member is None:
+                    # The member id does not belong to this account -> reject.
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "patient_id must be a member of this account "
+                            "(customer_id)."
+                        ),
+                    )
+            else:
+                # Walk-in / synthetic account: trust the supplied id, stamp a
+                # synthetic Primary member around it so the order still carries a
+                # real member name.
+                billed_member = build_primary_member(
+                    name=customer_name or "Walk-in Customer",
+                    mobile=customer_phone,
+                    patient_id=requested_patient_id,
+                )
+        else:
+            if customer:
+                # Auto-resolve to the account's Primary; mint + persist one when
+                # the account has none yet (legacy/imported accounts).
+                billed_member, _changed = ensure_primary_member(customer)
+                if _changed:
+                    try:
+                        customer_repo.update(
+                            order.customer_id,
+                            {
+                                "patients": customer.get("patients", []),
+                                "primary_patient_id": customer.get(
+                                    "primary_patient_id"
+                                ),
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Persisting the seeded Primary is best-effort -- the
+                        # order still bills to the resolved member id even if the
+                        # account write is briefly unavailable; the backfill
+                        # migration reconciles any account left without a Primary.
+                        logger.warning(
+                            "[ORDERS] could not persist seeded Primary member "
+                            "for %s: %s",
+                            order.customer_id,
+                            exc,
+                        )
+            else:
+                # True walk-in with no member supplied -> synthesize a Primary.
+                billed_member = build_primary_member(
+                    name=customer_name or "Walk-in Customer",
+                    mobile=customer_phone,
+                )
+
+        resolved_patient_id = billed_member.get("patient_id") if billed_member else None
+        billed_to_member_name = (
+            billed_member.get("name") if billed_member else customer_name
+        )
+
         # Pre-fetch cost_price for every product on the order so we can
         # snapshot it onto each line as cost_at_sale. This freezes COGS at
         # sale time so historical P&L doesn't drift when cost_price is
@@ -2166,7 +2249,12 @@ async def create_order(
             "customer_id": order.customer_id,
             "customer_name": customer_name,
             "customer_phone": customer_phone,
-            "patient_id": order.patient_id,
+            # BILL-TO-MEMBER P1: the RESOLVED member (explicit-and-valid, or the
+            # auto-selected/seeded/synthetic Primary) -- never the raw client id,
+            # never bare-account. billed_to_member_name is denormalized for
+            # receipts/reports (council invoice rule "Billed to: [Member]").
+            "patient_id": resolved_patient_id,
+            "billed_to_member_name": billed_to_member_name,
             "salesperson_id": salesperson_id,
             "salesperson_name": salesperson_name,
             "visufit_id": (order.visufit_id or None),
