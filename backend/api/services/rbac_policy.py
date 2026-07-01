@@ -4310,6 +4310,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/summary",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # Store health readiness dashboard (BVI Phase 5 "Store health" card):
+    # orphan SKUs, attribute coverage, barcode match + a composite readiness
+    # score. Read-only + fail-soft; same ecom role set as the module summary.
+    # See routers/online_store.py + services/store_health.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/store-health",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
+    },
     # --- /api/v1/collections ---  (unification step-13: materialised collection
     # BROWSE). Read-only, fast-path over the collection_products materialised
     # view. AUTHENTICATED -- same posture as GET /products + GET /catalog/products

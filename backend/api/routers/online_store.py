@@ -151,3 +151,24 @@ async def online_store_summary(
         "counts": counts,
         "blueprint": "docs/reference/BVI_MERGE_PLAN.md",
     }
+
+
+@router.get("/store-health")
+async def online_store_health(
+    current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
+) -> Dict:
+    """Pre-cutover readiness dashboard (Phase 5 "Store health" card).
+
+    Consolidates the scattered readiness signals into ONE payload:
+      - orphan SKUs (no Shopify mapping / not in a collection / no spine link),
+      - per-attribute + overall coverage (HSN, category, brand, barcode, image),
+      - barcode match rate (present AND unique),
+      - a composite readiness_pct (0-100) + a concrete fixes_needed list,
+      - the existing IMS-vs-Shopify parity counts (reused, not re-derived).
+
+    Read-only + FAIL-SOFT: no DB -> a fully-zeroed envelope, never 500s. Gated to
+    the ecom role set (SUPERADMIN/ADMIN/CATALOG_MANAGER/DESIGN_MANAGER) like the
+    rest of the module; catalogued in rbac_policy.POLICY."""
+    from ..services.store_health import store_health_envelope
+
+    return store_health_envelope(_get_db())
