@@ -30,6 +30,8 @@ import {
   emptyCustomerFormData,
   type CustomerFormData,
 } from '../../utils/customerPayload';
+import { validateEyePair } from '../../constants/rxLimits';
+import { RxPowerInput } from './RxPowerInput';
 
 // Visual-acuity options — kept in sync with the clinic Final-Rx / POS form.
 const VA_OPTIONS = ['', '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
@@ -62,39 +64,22 @@ interface PatientIntakeModalProps {
   onComplete?: (result: PatientIntakeResult) => void;
 }
 
-// --- Rx range validation (mirrors the business rules + backend gate) --------
-// SPH -20..+20 (0.25) · CYL -6..+6 (0.25) · AXIS 1-180 whole · ADD +0.75..+3.50 (0.25)
-function inStep(n: number, step: number): boolean {
-  // Avoid float drift: compare on an integer grid.
-  return Math.abs(Math.round(n / step) - n / step) < 1e-6;
-}
-
+// --- Rx range validation (single source: constants/rxLimits.ts) -------------
+// SPH -25..+25 (0.25) - CYL -6..+6 (0.25) - AXIS 1-180 whole - ADD +0.75..+4.00
+// (0.25) - PD 40..80 (0.5). CYL<->AXIS paired. The backend rx_validation.py is
+// the ultimate gate; this gives a fast client message on an obvious typo.
 function validateEye(eye: EyeRx, label: string): string | null {
-  const num = (v: string) => (v.trim() === '' ? null : Number(v));
-
-  const sph = num(eye.sph);
-  if (sph !== null) {
-    if (!Number.isFinite(sph) || sph < -20 || sph > 20) return `${label} SPH must be between -20.00 and +20.00`;
-    if (!inStep(sph, 0.25)) return `${label} SPH must be in 0.25 steps`;
-  }
-  const cyl = num(eye.cyl);
-  if (cyl !== null) {
-    if (!Number.isFinite(cyl) || cyl < -6 || cyl > 6) return `${label} CYL must be between -6.00 and +6.00`;
-    if (!inStep(cyl, 0.25)) return `${label} CYL must be in 0.25 steps`;
-  }
-  const axis = num(eye.axis);
-  if (axis !== null) {
-    if (!Number.isFinite(axis) || axis < 1 || axis > 180 || !Number.isInteger(axis))
-      return `${label} AXIS must be a whole number 1-180`;
-  }
-  const add = num(eye.add);
-  if (add !== null) {
-    if (!Number.isFinite(add) || add < 0.75 || add > 3.5) return `${label} ADD must be between +0.75 and +3.50`;
-    if (!inStep(add, 0.25)) return `${label} ADD must be in 0.25 steps`;
-  }
-  const pd = num(eye.pd);
-  if (pd !== null && (!Number.isFinite(pd) || pd < 20 || pd > 80)) return `${label} PD looks out of range`;
-  return null;
+  return validateEyePair(
+    {
+      sph: eye.sph,
+      cyl: eye.cyl,
+      axis: eye.axis,
+      add: eye.add,
+      pd: eye.pd,
+      va: eye.va,
+    },
+    label,
+  );
 }
 
 function eyeHasValue(eye: EyeRx): boolean {
@@ -314,33 +299,33 @@ export function PatientIntakeModal({
   const eyeRow = (label: string, eye: EyeRx, key: 'od' | 'os') => (
     <div className="grid grid-cols-[44px_repeat(6,minmax(0,1fr))] gap-1.5 items-center">
       <span className="text-xs font-mono font-semibold text-gray-500">{label}</span>
-      <input
-        type="number" step="0.25" placeholder="SPH"
-        value={eye.sph} onChange={(e) => setEyeField(key, 'sph', e.target.value)}
+      <RxPowerInput
+        kind="SPH" placeholder="SPH"
+        value={eye.sph} onChange={(v) => setEyeField(key, 'sph', v)}
         className="input-field text-center text-sm py-1.5"
         aria-label={`${label} sphere`}
       />
-      <input
-        type="number" step="0.25" placeholder="CYL"
-        value={eye.cyl} onChange={(e) => setEyeField(key, 'cyl', e.target.value)}
+      <RxPowerInput
+        kind="CYL" placeholder="CYL"
+        value={eye.cyl} onChange={(v) => setEyeField(key, 'cyl', v)}
         className="input-field text-center text-sm py-1.5"
         aria-label={`${label} cylinder`}
       />
-      <input
-        type="number" min="1" max="180" placeholder="AXIS"
-        value={eye.axis} onChange={(e) => setEyeField(key, 'axis', e.target.value)}
+      <RxPowerInput
+        kind="AXIS" placeholder="AXIS"
+        value={eye.axis} onChange={(v) => setEyeField(key, 'axis', v)}
         className="input-field text-center text-sm py-1.5"
         aria-label={`${label} axis`}
       />
-      <input
-        type="number" step="0.25" placeholder="ADD"
-        value={eye.add} onChange={(e) => setEyeField(key, 'add', e.target.value)}
+      <RxPowerInput
+        kind="ADD" placeholder="ADD"
+        value={eye.add} onChange={(v) => setEyeField(key, 'add', v)}
         className="input-field text-center text-sm py-1.5"
         aria-label={`${label} add`}
       />
-      <input
-        type="number" step="0.5" placeholder="PD"
-        value={eye.pd} onChange={(e) => setEyeField(key, 'pd', e.target.value)}
+      <RxPowerInput
+        kind="PD" placeholder="PD"
+        value={eye.pd} onChange={(v) => setEyeField(key, 'pd', v)}
         className="input-field text-center text-sm py-1.5"
         aria-label={`${label} pupillary distance`}
       />
@@ -428,7 +413,7 @@ export function PatientIntakeModal({
                 {eyeRow('OD', od, 'od')}
                 {eyeRow('OS', os, 'os')}
                 <p className="text-[11px] text-gray-400 pt-1">
-                  SPH -20 to +20 · CYL -6 to +6 (0.25 step) · AXIS 1-180 · ADD +0.75 to +3.50
+                  SPH -25 to +25 · CYL -6 to +6 (0.25 step) · AXIS 1-180 · ADD +0.75 to +4.00
                 </p>
               </div>
             )}

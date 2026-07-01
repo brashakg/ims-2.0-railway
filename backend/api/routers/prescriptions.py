@@ -147,8 +147,9 @@ def _audit_rx(
 # _validate_rx_value`) and the EyeData / version validators below keep working
 # byte-for-byte. _RX_LIMITS / _validate_rx_value / _validate_rx_number are the
 # ONLY source of truth -- don't duplicate the ranges anywhere.
-#   SPH -20..+20 (0.25) · CYL -6..+6 (0.25) · AXIS 1-180 whole · ADD +0.75..+3.50 (0.25)
-#   PD 20-80 mm (a measurement, not Rx -> exempt from the 0.25 grid)
+#   SPH -25..+25 (0.25) - CYL -6..+6 (0.25) - AXIS 1-180 whole - ADD +0.75..+4.00 (0.25)
+#   PD binocular 40-80 mm / per-eye monocular 20-45 mm (measurement -> no 0.25 grid)
+#   CL base_curve 8.0-9.5 mm - CL diameter 13.0-15.0 mm
 from ..services.rx_validation import (  # noqa: E402
     _RX_LIMITS,
     _validate_rx_value,
@@ -172,14 +173,16 @@ from ..services.rx_validation import (  # noqa: E402
 # Allowed CL replacement modalities -- kept in sync with products.CL_MODALITIES.
 CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
 
-# CL power ranges are tighter than spectacle (toric cyl on a soft CL rarely
-# exceeds -2.75; powers beyond these are almost always a data-entry slip).
+# CL power ranges are CL-specific (a soft CL can carry a high minus power that a
+# spectacle lens would not). Base-curve + diameter use the CANONICAL fit ranges
+# from rx_validation._RX_LIMITS (single source of truth: BC 8.0-9.5, DIA
+# 13.0-15.0) so the Rx door and the shared validator never disagree.
 _CL_LIMITS = {
     "cl_power": (-30.0, 30.0),
     "cl_cyl": (-10.0, 10.0),
     "cl_add": (0.0, 4.0),
-    "base_curve": (7.0, 10.0),
-    "diameter": (12.0, 16.0),
+    "base_curve": _RX_LIMITS["base_curve"],
+    "diameter": _RX_LIMITS["diameter"],
 }
 
 
@@ -216,7 +219,10 @@ class EyeData(BaseModel):
     @field_validator("pd")
     @classmethod
     def validate_pd(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_rx_value(v, "pd")
+        # Per-eye PD is MONOCULAR (~half the binocular PD, ~20-45 mm); validate
+        # against the monocular range so a valid 32 mm isn't rejected by the
+        # 40-80 binocular limit. See rx_validation._RX_LIMITS.
+        return _validate_rx_value(v, "pd_mono")
 
     @field_validator("prism")
     @classmethod
@@ -886,36 +892,19 @@ async def create_prescription(
                 current_user.get("full_name") or current_user.get("username")
             )
 
-    # Validate prescription power ranges
+    # Validate prescription power ranges via the SINGLE canonical validator
+    # (rx_validation._validate_rx_value) -- the same one the POS order-create
+    # gate + the EyeData field-validators use. This previously re-derived a
+    # tighter SPH bound (-20..+20) inline, which REJECTED a valid +/-25 Rx in
+    # the clinic while POS accepted it. Never re-derive the ranges here; delegate
+    # so every Rx path enforces identical limits (SPH +/-25, CYL +/-6, ADD +4.00).
     def _validate_power(eye_label: str, eye: EyeData):
-        if eye.sph:
-            try:
-                sph_val = float(eye.sph)
-                if sph_val < -20.0 or sph_val > 20.0:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"{eye_label} SPH must be between -20.00 and +20.00",
-                    )
-            except ValueError:
-                raise HTTPException(
-                    status_code=422, detail=f"{eye_label} SPH must be a valid number"
-                )
-        if eye.cyl:
-            try:
-                cyl_val = float(eye.cyl)
-                # SYSTEM_INTENT section 4 + the canonical RANGES table both bound
-                # spectacle CYL to -6.00..+6.00. This path previously allowed
-                # +/-10.00, so a high-cyl Rx could be saved here yet fail the
-                # /validate check. Reconciled to +/-6.00.
-                if cyl_val < -6.0 or cyl_val > 6.0:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"{eye_label} CYL must be between -6.00 and +6.00",
-                    )
-            except ValueError:
-                raise HTTPException(
-                    status_code=422, detail=f"{eye_label} CYL must be a valid number"
-                )
+        try:
+            _validate_rx_value(eye.sph, "sph")
+            _validate_rx_value(eye.cyl, "cyl")
+            _validate_rx_value(eye.add, "add")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
         if eye.axis is not None:
             if not isinstance(eye.axis, int) or eye.axis < 1 or eye.axis > 180:
                 raise HTTPException(
@@ -1057,7 +1046,7 @@ async def update_prescription(
 
     Gated identically to create_prescription (OPTOMETRIST / STORE_MANAGER /
     ADMIN / SUPERADMIN). Re-runs the canonical Rx-range validation
-    (`_validate_rx_value`: SPH -20..+20, CYL -6..+6, ADD +0.75..+3.50 in 0.25
+    (`_validate_rx_value`: SPH -25..+25, CYL -6..+6, ADD +0.75..+4.00 in 0.25
     steps; AXIS 1-180) so an edit can never persist an invalid Rx. Only the keys
     the caller sends are written (PATCH-style merge), so a partial edit never
     blanks fields it didn't touch. Identity/provenance fields are immutable.
@@ -1091,7 +1080,8 @@ async def update_prescription(
             _validate_rx_value(eye.get("sph"), "sph")
             _validate_rx_value(eye.get("cyl"), "cyl")
             _validate_rx_value(eye.get("add"), "add")
-            _validate_rx_value(eye.get("pd"), "pd")
+            # Per-eye PD is monocular (~half binocular); use the monocular range.
+            _validate_rx_value(eye.get("pd"), "pd_mono")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"{eye_label}: {exc}")
         axis = eye.get("axis")

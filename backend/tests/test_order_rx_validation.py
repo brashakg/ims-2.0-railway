@@ -161,7 +161,7 @@ def test_lens_sph_out_of_range_rejected(client, staff_headers, rx_orders):
     rxid = _seed_rx(rx_orders, prescription_id="rx-ok-2")
     r = _post(client, staff_headers,
               [_item(pid, item_type="LENS", category="OPTICAL_LENS",
-                     sph=25.0, prescription_id=rxid)])
+                     sph=26.0, prescription_id=rxid)])
     assert r.status_code == 422, r.text
     assert "sph" in r.text.lower()
 
@@ -371,14 +371,14 @@ def test_quicksale_contact_lens_without_prescription_allowed(
 
 
 def test_quicksale_out_of_range_power_rejected(client, staff_headers, rx_orders):
-    """(d) quick-sale ANY line with an out-of-range power (sph=+25, limit
-    -20..+20) -> 422. Power validation is universal on the quick path."""
+    """(d) quick-sale ANY line with an out-of-range power (sph=+26, limit
+    -25..+25) -> 422. Power validation is universal on the quick path."""
     pid = _seed_product(rx_orders, pid="QS-LENS-BADPWR", category="OPTICAL_LENS",
                         item_type="LENS")
     rxid = _seed_rx(rx_orders, prescription_id="qs-rx-badpwr")
     r = _post(client, staff_headers,
               [_item(pid, item_type="LENS", category="OPTICAL_LENS",
-                     sph=25.0, prescription_id=rxid)],
+                     sph=26.0, prescription_id=rxid)],
               order_type="quick_sale")
     assert r.status_code == 422, r.text
     assert "sph" in r.text.lower()

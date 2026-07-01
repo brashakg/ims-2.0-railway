@@ -24,6 +24,7 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { customerApi, prescriptionApi } from '../../services/api';
+import { RxPowerInput, type RxPowerKind } from '../../components/clinical/RxPowerInput';
 
 // Kept in sync with backend prescriptions.CL_MODALITIES.
 const MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] as const;
@@ -198,21 +199,21 @@ export function ContactLensFittingPage() {
       <p className="font-medium text-gray-900 mb-2">{label}</p>
       <div className="grid grid-cols-2 gap-2">
         {([
-          ['cl_power', 'Power (D)'],
-          ['cl_cyl', 'Cyl (toric)'],
-          ['cl_axis', 'Axis (0–180)'],
-          ['cl_add', 'Add (multifocal)'],
-          ['base_curve', 'BC (mm)'],
-          ['diameter', 'DIA (mm)'],
-        ] as Array<[keyof EyeForm, string]>).map(([key, lbl]) => (
+          ['cl_power', 'Power (D)', 'SPH'],
+          ['cl_cyl', 'Cyl (toric)', 'CYL'],
+          ['cl_axis', 'Axis (1-180)', 'AXIS'],
+          ['cl_add', 'Add (multifocal)', 'ADD'],
+          ['base_curve', 'BC (mm)', 'BC'],
+          ['diameter', 'DIA (mm)', 'DIA'],
+        ] as Array<[keyof EyeForm, string, RxPowerKind]>).map(([key, lbl, kind]) => (
           <label key={key} className="text-xs text-gray-600">
             {lbl}
-            <input
-              type="number"
-              step={key === 'cl_axis' ? '1' : '0.25'}
-              value={eye[key]}
-              onChange={(e) => set({ ...eye, [key]: e.target.value })}
+            <RxPowerInput
+              kind={kind}
+              value={String(eye[key] ?? '')}
+              onChange={(v) => set({ ...eye, [key]: v })}
               className="input-field mt-0.5"
+              aria-label={`${label} ${lbl}`}
             />
           </label>
         ))}

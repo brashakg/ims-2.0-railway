@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import { Eye, Plus, X, Glasses, Contact } from 'lucide-react';
+import { RxPowerInput } from '../clinical/RxPowerInput';
+import { validateEyePair } from '../../constants/rxLimits';
+import { useToast } from '../../context/ToastContext';
 
 // Allowed contact-lens replacement modalities -- kept in sync with the
 // backend (prescriptions.CL_MODALITIES / products.CL_MODALITIES).
@@ -80,6 +83,7 @@ export function PrescriptionForm({
   allowContactLens = true,
   submitLabel = 'Add to Order',
 }: PrescriptionFormProps) {
+  const toast = useToast();
   const [prescription, setPrescription] = useState<PrescriptionData>(
     initialData || {}
   );
@@ -87,13 +91,19 @@ export function PrescriptionForm({
     ? prescription.rx_kind || 'SPECTACLE'
     : 'SPECTACLE';
 
-  const handleInputChange = (
-    field: keyof PrescriptionData,
-    value: string | number
-  ) => {
+  // Read a numeric spectacle field back as a STRING for RxPowerInput. A stored
+  // number renders through formatRxPower (so 5 -> "+5.00") inside the input.
+  const numStr = (field: keyof PrescriptionData): string => {
+    const v = prescription[field];
+    return v === undefined || v === null ? '' : String(v);
+  };
+
+  // RxPowerInput emits a normalized STRING (e.g. "+5.00", "-0.75", "0.00"); the
+  // signed string parses cleanly (Number("+5.00") === 5) so the sign survives.
+  const handleRxChange = (field: keyof PrescriptionData, value: string) => {
     setPrescription(prev => ({
       ...prev,
-      [field]: typeof value === 'string' ? (value ? parseFloat(value) : undefined) : value,
+      [field]: value.trim() === '' ? undefined : parseFloat(value),
     }));
   };
 
@@ -123,9 +133,46 @@ export function PrescriptionForm({
     });
   };
 
+  // Validate the entered powers against the canonical realistic limits before
+  // submitting (the backend is the ultimate gate; this gives a fast message).
+  const validateBeforeSubmit = (): string | null => {
+    if (rxKind === 'SPECTACLE') {
+      const od = validateEyePair(
+        { sph: prescription.sph_od, cyl: prescription.cyl_od, axis: prescription.axis_od,
+          add: prescription.add_od, pd: prescription.pd_od, va: prescription.va_od },
+        'Right eye (OD)',
+      );
+      if (od) return od;
+      const os = validateEyePair(
+        { sph: prescription.sph_os, cyl: prescription.cyl_os, axis: prescription.axis_os,
+          add: prescription.add_os, pd: prescription.pd_os, va: prescription.va_os },
+        'Left eye (OS)',
+      );
+      if (os) return os;
+    } else {
+      // Contact lens: power/cyl/axis/add + base curve + diameter per eye.
+      const check = (eye: CLEyeData | undefined, label: string): string | null =>
+        validateEyePair(
+          { sph: eye?.cl_power, cyl: eye?.cl_cyl, axis: eye?.cl_axis, add: eye?.cl_add,
+            base_curve: eye?.base_curve, diameter: eye?.diameter },
+          label,
+        );
+      const od = check(prescription.cl_right, 'Right eye (OD)');
+      if (od) return od;
+      const os = check(prescription.cl_left, 'Left eye (OS)');
+      if (os) return os;
+    }
+    return null;
+  };
+
   // On submit, send only the fields relevant to the chosen rx_kind so a CL Rx
   // never carries stray spectacle powers and vice-versa.
   const handleSubmit = () => {
+    const err = validateBeforeSubmit();
+    if (err) {
+      toast.error(err);
+      return;
+    }
     if (rxKind === 'CONTACT_LENS') {
       const {
         // Strip spectacle-only flat keys.
@@ -260,66 +307,65 @@ export function PrescriptionForm({
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   SPH (Sphere)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="SPH"
                   placeholder="+1.00"
-                  value={prescription.sph_od || ''}
-                  onChange={(e) => handleInputChange('sph_od', e.target.value)}
+                  value={numStr('sph_od')}
+                  onChange={(v) => handleRxChange('sph_od', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right eye sphere"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   CYL (Cylinder)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="CYL"
                   placeholder="-0.50"
-                  value={prescription.cyl_od || ''}
-                  onChange={(e) => handleInputChange('cyl_od', e.target.value)}
+                  value={numStr('cyl_od')}
+                  onChange={(v) => handleRxChange('cyl_od', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right eye cylinder"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   AXIS
                 </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="180"
+                <RxPowerInput
+                  kind="AXIS"
                   placeholder="90"
-                  value={prescription.axis_od || ''}
-                  onChange={(e) => handleInputChange('axis_od', e.target.value)}
+                  value={numStr('axis_od')}
+                  onChange={(v) => handleRxChange('axis_od', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right eye axis"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   ADD (Addition)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="ADD"
                   placeholder="+2.00"
-                  value={prescription.add_od || ''}
-                  onChange={(e) => handleInputChange('add_od', e.target.value)}
+                  value={numStr('add_od')}
+                  onChange={(v) => handleRxChange('add_od', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right eye add"
                 />
               </div>
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   PD (Pupillary Distance) - mm
                 </label>
-                <input
-                  type="number"
-                  step="0.5"
+                <RxPowerInput
+                  kind="PD"
                   placeholder="32.5"
-                  value={prescription.pd_od || ''}
-                  onChange={(e) => handleInputChange('pd_od', e.target.value)}
+                  value={numStr('pd_od')}
+                  onChange={(v) => handleRxChange('pd_od', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right eye pupillary distance"
                 />
               </div>
               <div>
@@ -376,66 +422,65 @@ export function PrescriptionForm({
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   SPH (Sphere)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="SPH"
                   placeholder="+1.00"
-                  value={prescription.sph_os || ''}
-                  onChange={(e) => handleInputChange('sph_os', e.target.value)}
+                  value={numStr('sph_os')}
+                  onChange={(v) => handleRxChange('sph_os', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left eye sphere"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   CYL (Cylinder)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="CYL"
                   placeholder="-0.50"
-                  value={prescription.cyl_os || ''}
-                  onChange={(e) => handleInputChange('cyl_os', e.target.value)}
+                  value={numStr('cyl_os')}
+                  onChange={(v) => handleRxChange('cyl_os', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left eye cylinder"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   AXIS
                 </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="180"
+                <RxPowerInput
+                  kind="AXIS"
                   placeholder="90"
-                  value={prescription.axis_os || ''}
-                  onChange={(e) => handleInputChange('axis_os', e.target.value)}
+                  value={numStr('axis_os')}
+                  onChange={(v) => handleRxChange('axis_os', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left eye axis"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   ADD (Addition)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="ADD"
                   placeholder="+2.00"
-                  value={prescription.add_os || ''}
-                  onChange={(e) => handleInputChange('add_os', e.target.value)}
+                  value={numStr('add_os')}
+                  onChange={(v) => handleRxChange('add_os', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left eye add"
                 />
               </div>
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   PD (Pupillary Distance) - mm
                 </label>
-                <input
-                  type="number"
-                  step="0.5"
+                <RxPowerInput
+                  kind="PD"
                   placeholder="32.5"
-                  value={prescription.pd_os || ''}
-                  onChange={(e) => handleInputChange('pd_os', e.target.value)}
+                  value={numStr('pd_os')}
+                  onChange={(v) => handleRxChange('pd_os', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left eye pupillary distance"
                 />
               </div>
               <div>
@@ -604,79 +649,78 @@ export function PrescriptionForm({
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Power
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="SPH"
                   placeholder="-2.25"
                   value={clEyeValue('cl_right', 'cl_power')}
-                  onChange={(e) => handleCLEyeChange('cl_right', 'cl_power', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_right', 'cl_power', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right contact lens power"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Base Curve (BC)
                 </label>
-                <input
-                  type="number"
-                  step="0.1"
+                <RxPowerInput
+                  kind="BC"
                   placeholder="8.6"
                   value={clEyeValue('cl_right', 'base_curve')}
-                  onChange={(e) => handleCLEyeChange('cl_right', 'base_curve', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_right', 'base_curve', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right contact lens base curve"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Diameter (DIA)
                 </label>
-                <input
-                  type="number"
-                  step="0.1"
+                <RxPowerInput
+                  kind="DIA"
                   placeholder="14.2"
                   value={clEyeValue('cl_right', 'diameter')}
-                  onChange={(e) => handleCLEyeChange('cl_right', 'diameter', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_right', 'diameter', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right contact lens diameter"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   CYL (toric)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="CYL"
                   placeholder="-0.75"
                   value={clEyeValue('cl_right', 'cl_cyl')}
-                  onChange={(e) => handleCLEyeChange('cl_right', 'cl_cyl', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_right', 'cl_cyl', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right contact lens cylinder"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   AXIS (toric)
                 </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="180"
+                <RxPowerInput
+                  kind="AXIS"
                   placeholder="180"
                   value={clEyeValue('cl_right', 'cl_axis')}
-                  onChange={(e) => handleCLEyeChange('cl_right', 'cl_axis', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_right', 'cl_axis', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right contact lens axis"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   ADD (multifocal)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="ADD"
                   placeholder="+2.00"
                   value={clEyeValue('cl_right', 'cl_add')}
-                  onChange={(e) => handleCLEyeChange('cl_right', 'cl_add', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_right', 'cl_add', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Right contact lens add"
                 />
               </div>
             </div>
@@ -693,79 +737,78 @@ export function PrescriptionForm({
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Power
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="SPH"
                   placeholder="-2.00"
                   value={clEyeValue('cl_left', 'cl_power')}
-                  onChange={(e) => handleCLEyeChange('cl_left', 'cl_power', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_left', 'cl_power', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left contact lens power"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Base Curve (BC)
                 </label>
-                <input
-                  type="number"
-                  step="0.1"
+                <RxPowerInput
+                  kind="BC"
                   placeholder="8.6"
                   value={clEyeValue('cl_left', 'base_curve')}
-                  onChange={(e) => handleCLEyeChange('cl_left', 'base_curve', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_left', 'base_curve', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left contact lens base curve"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Diameter (DIA)
                 </label>
-                <input
-                  type="number"
-                  step="0.1"
+                <RxPowerInput
+                  kind="DIA"
                   placeholder="14.2"
                   value={clEyeValue('cl_left', 'diameter')}
-                  onChange={(e) => handleCLEyeChange('cl_left', 'diameter', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_left', 'diameter', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left contact lens diameter"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   CYL (toric)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="CYL"
                   placeholder="-0.75"
                   value={clEyeValue('cl_left', 'cl_cyl')}
-                  onChange={(e) => handleCLEyeChange('cl_left', 'cl_cyl', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_left', 'cl_cyl', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left contact lens cylinder"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   AXIS (toric)
                 </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="180"
+                <RxPowerInput
+                  kind="AXIS"
                   placeholder="180"
                   value={clEyeValue('cl_left', 'cl_axis')}
-                  onChange={(e) => handleCLEyeChange('cl_left', 'cl_axis', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_left', 'cl_axis', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left contact lens axis"
                 />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   ADD (multifocal)
                 </label>
-                <input
-                  type="number"
-                  step="0.25"
+                <RxPowerInput
+                  kind="ADD"
                   placeholder="+2.00"
                   value={clEyeValue('cl_left', 'cl_add')}
-                  onChange={(e) => handleCLEyeChange('cl_left', 'cl_add', e.target.value)}
+                  onChange={(v) => handleCLEyeChange('cl_left', 'cl_add', v)}
                   className="input-field text-center text-sm"
+                  aria-label="Left contact lens add"
                 />
               </div>
             </div>

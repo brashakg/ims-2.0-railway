@@ -26,10 +26,10 @@ def test_plano_and_blank_accepted():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"sphere": 99},     # > +20
-        {"sphere": -25},    # < -20
+        {"sphere": 99},     # > +25
+        {"sphere": -26},    # < -25
         {"cylinder": -50},  # < -6
-        {"addition": 9.0},  # > +3.50
+        {"addition": 9.0},  # > +4.00
         {"sphere": 1.3},    # off the 0.25-diopter grid
         {"axis": 999},      # > 180 (structural Field bound)
         {"axis": 0},        # < 1

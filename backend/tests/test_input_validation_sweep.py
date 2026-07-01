@@ -92,8 +92,8 @@ def _complete_body(right=None, left=None):
 
 
 def test_clinical_complete_rejects_out_of_range_sph():
-    # SPH +25 is outside the -20..+20 clinical range.
-    body = _complete_body(right=_eye(sph="25"))
+    # SPH +26 is outside the -25..+25 clinical range.
+    body = _complete_body(right=_eye(sph="26"))
     r = _clinical_client().post("/api/v1/clinical/tests/t1/complete", json=body)
     assert r.status_code == 422
 
