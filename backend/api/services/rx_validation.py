@@ -3,48 +3,87 @@ IMS 2.0 - Shared Prescription (Rx) value validation
 ====================================================
 SINGLE source of truth for clinical Rx power limits + the 0.25-diopter grid /
 integer-axis / cyl-requires-axis rules. Factored out of routers/prescriptions.py
-(its behaviour is preserved byte-for-byte) so the POS / order-create path can
-reuse the EXACT same validator the clinical paths use, instead of re-deriving
-the limits. See docs/SYSTEM_INTENT.md section 4 and CLAUDE.md business rules.
+(its behaviour is preserved) so the POS / order-create path can reuse the EXACT
+same validator the clinical paths use, instead of re-deriving the limits. See
+docs/SYSTEM_INTENT.md section 4 and CLAUDE.md business rules.
 
-  SPH (Sphere):   -20.00 to +20.00 diopters, 0.25 steps
+Owner-approved "wider extremes" realistic limits (2026-06):
+
+  SPH (Sphere):   -25.00 to +25.00 diopters, 0.25 steps
   CYL (Cylinder):  -6.00 to  +6.00 diopters, 0.25 steps
-  AXIS:            1 to 180 degrees (WHOLE number); mandatory when cyl != 0
-  ADD (Addition): +0.75 to  +3.50 diopters, 0.25 steps
-  PD (Pupillary Distance): 20 to 80 mm (a measurement, not Rx -> no 0.25 grid)
+  AXIS:            1 to 180 degrees (WHOLE number); MANDATORY when cyl != 0
+  ADD (Addition): +0.75 to  +4.00 diopters, 0.25 steps (PLUS-ONLY)
+  PD (Pupillary Distance): 40 to 80 mm (a measurement, not Rx -> no 0.25 grid)
+  CL Base Curve (base_curve): 8.0 to 9.5 mm
+  CL Diameter (diameter):    13.0 to 15.0 mm
 
 These are the ONLY source of truth. Endpoint-level checks call these helpers --
 do NOT duplicate the ranges elsewhere. To relax a limit, change _RX_LIMITS here
-AND the spec docs; never add a second copy.
+AND the spec docs (+ the frontend constants/rxLimits.ts twin); never add a
+second copy. The frontend mirror is frontend/src/constants/rxLimits.ts -- keep
+the two in lockstep.
+
+Sign handling: every numeric parse below goes through float()/_coerce_float,
+which natively accepts a leading '+' (float('+5.00') == 5.0). A signed string
+like "+5.00" / "-0.75" therefore round-trips through this validator with its
+sign intact -- do NOT add a regex that would reject the '+'.
 """
 from typing import Optional
 
 # ASCII only (Windows cp1252) -- no emoji / unicode in any message string.
 
 _RX_LIMITS = {
-    "sph": (-20.0, 20.0),
+    "sph": (-25.0, 25.0),
     "cyl": (-6.0, 6.0),
-    "add": (0.75, 3.50),
-    "pd": (20.0, 80.0),
+    "add": (0.75, 4.00),
+    # PD comes in two shapes: a BINOCULAR (total) PD of 40-80 mm, and the
+    # per-eye MONOCULAR PD (~half the binocular, ~20-45 mm) captured in each
+    # eye's `pd` field. The canonical owner limit (40-80) is the binocular one;
+    # a monocular per-eye value must NOT be rejected for being < 40.
+    "pd": (40.0, 80.0),          # binocular / total PD (IPD)
+    "pd_mono": (20.0, 45.0),     # per-eye monocular PD
+    # Contact-lens millimetre measurements (fit params). Not dioptric -> no
+    # 0.25 grid; a plain range check only. cl_power/cl_cyl/cl_add reuse the
+    # sph/cyl/add dioptric limits below (see _CL_ALIASES).
+    "base_curve": (8.0, 9.5),
+    "diameter": (13.0, 15.0),
 }
 
 # Dioptric fields that move on the 0.25 grid (linear measures like PD /
 # base_curve / diameter are exempt from the step check).
 _STEP_FIELDS = ("sph", "cyl", "add", "cl_power", "cl_cyl", "cl_add")
 
+# Contact-lens dioptric powers reuse the spectacle dioptric limits: cl_power ~
+# sph range, cl_cyl ~ cyl range, cl_add ~ add range.
+_CL_ALIASES = {"cl_power": "sph", "cl_cyl": "cyl", "cl_add": "add"}
+
+
+def _limits_for(field_name: str):
+    """Resolve the (lo, hi) tuple for a field, mapping CL dioptric aliases onto
+    their spectacle equivalents. Unknown fields get a permissive default."""
+    key = _CL_ALIASES.get(field_name, field_name)
+    return _RX_LIMITS.get(key, (-999, 999))
+
+
+def _coerce_float(value, field_name: str) -> float:
+    """float() a value, accepting a leading '+' (float('+5') == 5.0). Raises a
+    ValueError with a clear message on a non-numeric string."""
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
+
 
 def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
     """Validate that an Rx STRING value falls within acceptable clinical range.
 
     Raises ValueError on a bad value (out of range / off the 0.25 grid /
-    non-numeric). Blank / None / "0" pass through unchanged (plano)."""
+    non-numeric). Blank / None / "0" pass through unchanged (plano). A leading
+    '+' is accepted (float('+5.00') == 5.0) so a signed string never trips."""
     if value is None or value.strip() == "" or value.strip() == "0":
         return value
-    try:
-        num = float(value)
-    except (ValueError, TypeError):
-        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
-    lo, hi = _RX_LIMITS.get(field_name, (-999, 999))
+    num = _coerce_float(value, field_name)
+    lo, hi = _limits_for(field_name)
     if num < lo or num > hi:
         raise ValueError(
             f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
@@ -67,16 +106,17 @@ def _validate_rx_number(value, field_name: str):
     """Numeric (float) variant of _validate_rx_value for the 4-version Rx model,
     which stores sphere/cylinder/addition as floats. Applies the SAME ranges +
     0.25-diopter grid, so a numeric path can no longer be used to slip an
-    out-of-range power past the validation the string path enforces."""
+    out-of-range power past the validation the string path enforces. A leading
+    '+' in a string value is accepted (float('+5') == 5.0)."""
     if value is None:
         return value
-    try:
-        num = float(value)
-    except (ValueError, TypeError):
-        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
+    # A blank / whitespace string is "not entered" -- mirror the string path.
+    if isinstance(value, str) and value.strip() == "":
+        return value
+    num = _coerce_float(value, field_name)
     if num == 0:  # plano / no-add -- mirror the string validator's "0" pass-through
         return value
-    lo, hi = _RX_LIMITS.get(field_name, (-999, 999))
+    lo, hi = _limits_for(field_name)
     if num < lo or num > hi:
         raise ValueError(
             f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
@@ -88,6 +128,26 @@ def _validate_rx_number(value, field_name: str):
                 f"{field_name} value {num} must be in 0.25-diopter steps "
                 f"(e.g. -1.25, 0.00, +2.50)."
             )
+    return value
+
+
+def _validate_measurement(value, field_name: str):
+    """Range-only check for a linear millimetre measurement (PD / base_curve /
+    diameter): no 0.25 grid, no sign rules. Blank / None passes. A leading '+'
+    is accepted. Raises ValueError when out of range."""
+    if value is None:
+        return value
+    if isinstance(value, str) and value.strip() in ("", "0"):
+        # A blank measurement is "not recorded"; unlike a dioptric power, "0"
+        # is not a meaningful PD/BC/DIA so treat it as not-entered too.
+        return value
+    num = _coerce_float(value, field_name)
+    lo, hi = _limits_for(field_name)
+    if num < lo or num > hi:
+        raise ValueError(
+            f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
+            f"Please double-check the prescription."
+        )
     return value
 
 
