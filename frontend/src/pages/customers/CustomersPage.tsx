@@ -38,7 +38,8 @@ import {
   hasCopyableCustomerFields,
   copyWouldOverwrite,
 } from '../../utils/patientFromCustomer';
-import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
+import { AddCustomerModal } from '../../components/customers/AddCustomerModal';
+import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
 import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
@@ -299,32 +300,9 @@ export function CustomersPage() {
       return;
     }
     try {
-      // Map to backend CustomerCreate schema (same as POS, same as ClinicalPage)
-      const customerData = {
-        name: formData.fullName,
-        // Backend requires exactly 10 bare digits (^\d{10}$); strip any
-        // +91 / spaces / dashes the operator typed so it doesn't 422.
-        mobile: (formData.mobileNumber || '').replace(/\D/g, '').slice(-10),
-        email: formData.email || undefined,
-        customer_type: formData.customerType,
-        gstin: formData.customerType === 'B2B' ? formData.gstNumber : undefined,
-        billing_address: (formData.address || formData.city || formData.pincode) ? {
-          address: formData.address,
-          city: formData.city,
-          state: formData.state,
-          pincode: formData.pincode,
-        } : undefined,
-        patients: (formData.patients || []).map(p => ({
-          name: p.name,
-          mobile: p.mobile || undefined,
-          dob: p.dateOfBirth || undefined,
-          relation: p.relation || 'Self',
-        })),
-        marketing_consent: formData.marketingConsent,
-        // DPDP data-storage consent + the version of the wording shown.
-        data_consent: formData.dataConsent,
-        data_consent_text_version: formData.dataConsentTextVersion,
-      };
+      // ONE shared builder maps the form onto the canonical CustomerCreate
+      // payload (same as POS, same as Clinical intake) so the doors can't drift.
+      const customerData = buildCustomerCreatePayload(formData);
       await customerApi.createCustomer(customerData as any);
       toast.success('Customer created successfully');
       loadCustomers();
