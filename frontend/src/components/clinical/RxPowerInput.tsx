@@ -29,11 +29,15 @@
 import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 
-export type RxPowerKind = 'SPH' | 'CYL' | 'ADD' | 'AXIS' | 'PD' | 'VA';
+export type RxPowerKind = 'SPH' | 'CYL' | 'ADD' | 'AXIS' | 'PD' | 'VA' | 'BC' | 'DIA';
 
 // Kinds that carry a sign the user may type. ADD is plus-only (normalized to
-// +abs on blur); SPH/CYL are signed both ways. AXIS/PD/VA carry no sign.
+// +abs on blur); SPH/CYL are signed both ways. AXIS/PD/VA/BC/DIA carry no sign.
 const SIGNED_KINDS: RxPowerKind[] = ['SPH', 'CYL', 'ADD'];
+
+// Millimetre measurements formatted to one decimal, unsigned (like PD): contact-
+// lens Base Curve (BC) and Diameter (DIA).
+const MM_1DP_KINDS: RxPowerKind[] = ['PD', 'BC', 'DIA'];
 
 /**
  * Normalize an Rx power string to its canonical optical representation.
@@ -70,8 +74,8 @@ export function formatRxPower(value: string, kind: RxPowerKind): string {
     return String(deg);
   }
 
-  if (kind === 'PD') {
-    // Pupillary distance is a millimetre measurement, one decimal, unsigned.
+  if (MM_1DP_KINDS.includes(kind)) {
+    // PD / BC / DIA are millimetre measurements: one decimal, unsigned.
     return Math.abs(num).toFixed(1);
   }
 
