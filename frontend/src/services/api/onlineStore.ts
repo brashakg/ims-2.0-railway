@@ -61,6 +61,158 @@ export const onlineStoreApi = {
       return PLACEHOLDER;
     }
   },
+
+  /** Fetch the Store health readiness dashboard. NEVER throws: any error (incl.
+   *  a 404 on a stale deploy, or a 403 for a viewer outside the gate) resolves
+   *  to a zeroed, unavailable envelope so the Store Health screen always renders. */
+  getStoreHealth: async (): Promise<StoreHealth> => {
+    try {
+      const res = await api.get('/online-store/store-health');
+      const d = (res?.data ?? {}) as Partial<StoreHealth>;
+      return {
+        available: true,
+        readiness_pct: typeof d.readiness_pct === 'number' ? d.readiness_pct : 0,
+        total_products: typeof d.total_products === 'number' ? d.total_products : 0,
+        orphans: {
+          total: d.orphans?.total ?? 0,
+          orphan_count: d.orphans?.orphan_count ?? 0,
+          no_mapping: d.orphans?.no_mapping ?? 0,
+          not_in_collection: d.orphans?.not_in_collection ?? 0,
+          missing_spine: d.orphans?.missing_spine ?? 0,
+          orphans: Array.isArray(d.orphans?.orphans) ? d.orphans!.orphans : [],
+        },
+        coverage: {
+          total: d.coverage?.total ?? 0,
+          hsn_pct: d.coverage?.hsn_pct ?? 0,
+          category_pct: d.coverage?.category_pct ?? 0,
+          brand_pct: d.coverage?.brand_pct ?? 0,
+          barcode_pct: d.coverage?.barcode_pct ?? 0,
+          image_pct: d.coverage?.image_pct ?? 0,
+          overall_pct: d.coverage?.overall_pct ?? 0,
+          missing: d.coverage?.missing ?? {},
+        },
+        barcode_match: {
+          total: d.barcode_match?.total ?? 0,
+          with_barcode: d.barcode_match?.with_barcode ?? 0,
+          missing_barcode: d.barcode_match?.missing_barcode ?? 0,
+          duplicate_barcode: d.barcode_match?.duplicate_barcode ?? 0,
+          unique_matched: d.barcode_match?.unique_matched ?? 0,
+          match_pct: d.barcode_match?.match_pct ?? 0,
+        },
+        barcode_match_pct:
+          typeof d.barcode_match_pct === 'number' ? d.barcode_match_pct : 0,
+        fixes_needed: Array.isArray(d.fixes_needed) ? d.fixes_needed : [],
+        sub_scores: {
+          coverage_pct: d.sub_scores?.coverage_pct ?? 0,
+          barcode_pct: d.sub_scores?.barcode_pct ?? 0,
+          orphan_free_pct: d.sub_scores?.orphan_free_pct ?? 0,
+        },
+      };
+    } catch {
+      return STORE_HEALTH_PLACEHOLDER;
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// STORE HEALTH (BVI Phase 5 — pre-cutover readiness dashboard)
+// ---------------------------------------------------------------------------
+// The read side of GET /api/v1/online-store/store-health: orphan SKUs, attribute
+// coverage, barcode match + a composite readiness score. Read-only. Every field
+// is defaulted so a partial backend payload never breaks rendering.
+
+/** One orphaned (not list-ready) product surfaced in the sample list. */
+export interface StoreHealthOrphan {
+  sku?: string | null;
+  product_id?: string | null;
+  /** Why it is an orphan: any of no_mapping / not_in_collection / missing_spine. */
+  reasons: string[];
+}
+
+/** One concrete, owner-actionable fix, e.g. {issue:"missing HSN code", count:12}. */
+export interface StoreHealthFix {
+  issue: string;
+  count: number;
+  /** Machine tag for the underlying check (hsn / barcode_dup / no_mapping / ...). */
+  check?: string;
+}
+
+export interface StoreHealth {
+  /** false => the backend didn't answer (stale deploy / 403) — zeroed envelope. */
+  available: boolean;
+  /** Composite readiness 0-100. */
+  readiness_pct: number;
+  total_products: number;
+  orphans: {
+    total: number;
+    orphan_count: number;
+    no_mapping: number;
+    not_in_collection: number;
+    missing_spine: number;
+    orphans: StoreHealthOrphan[];
+  };
+  coverage: {
+    total: number;
+    hsn_pct: number;
+    category_pct: number;
+    brand_pct: number;
+    barcode_pct: number;
+    image_pct: number;
+    overall_pct: number;
+    missing: Record<string, number>;
+  };
+  barcode_match: {
+    total: number;
+    with_barcode: number;
+    missing_barcode: number;
+    duplicate_barcode: number;
+    unique_matched: number;
+    match_pct: number;
+  };
+  barcode_match_pct: number;
+  fixes_needed: StoreHealthFix[];
+  sub_scores: {
+    coverage_pct: number;
+    barcode_pct: number;
+    orphan_free_pct: number;
+  };
+}
+
+/** Safe zeroed placeholder used when the backend is absent / the viewer is
+ *  outside the gate / any error occurs. Always reads as "0 / not available". */
+const STORE_HEALTH_PLACEHOLDER: StoreHealth = {
+  available: false,
+  readiness_pct: 0,
+  total_products: 0,
+  orphans: {
+    total: 0,
+    orphan_count: 0,
+    no_mapping: 0,
+    not_in_collection: 0,
+    missing_spine: 0,
+    orphans: [],
+  },
+  coverage: {
+    total: 0,
+    hsn_pct: 0,
+    category_pct: 0,
+    brand_pct: 0,
+    barcode_pct: 0,
+    image_pct: 0,
+    overall_pct: 0,
+    missing: {},
+  },
+  barcode_match: {
+    total: 0,
+    with_barcode: 0,
+    missing_barcode: 0,
+    duplicate_barcode: 0,
+    unique_matched: 0,
+    match_pct: 0,
+  },
+  barcode_match_pct: 0,
+  fixes_needed: [],
+  sub_scores: { coverage_pct: 0, barcode_pct: 0, orphan_free_pct: 0 },
 };
 
 // ============================================================================

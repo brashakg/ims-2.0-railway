@@ -144,6 +144,8 @@ const SECTIONS: Section[] = [
       'Orphan SKUs, attribute coverage and barcode-match status — the readiness checks before any product goes live online.',
     icon: Activity,
     phase: 'Phase 5',
+    // Phase 5 shipped: the read-only Store health readiness dashboard is live in-app.
+    href: '/online-store/store-health',
   },
   {
     key: 'shopify-sync',
