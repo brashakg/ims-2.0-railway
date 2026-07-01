@@ -4310,6 +4310,16 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/summary",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # --- /api/v1/online-store/stock-tally ---  (BVI Phase 5: read-only reconcile)
+    # Per online-listed SKU: online-listed vs on-hand vs reserved vs sellable +
+    # an oversell-risk flag + a conservative buffer suggestion. STRICTLY read-only
+    # (never mutates/reserves stock); the write-path allocation is a deferred
+    # follow-up. Same ecom role set. See routers/online_store.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/stock-tally",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
+    },
     # --- /api/v1/collections ---  (unification step-13: materialised collection
     # BROWSE). Read-only, fast-path over the collection_products materialised
     # view. AUTHENTICATED -- same posture as GET /products + GET /catalog/products
