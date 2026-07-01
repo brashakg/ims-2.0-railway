@@ -166,6 +166,158 @@ export const onlineStoreApi = {
       return STOCK_TALLY_PLACEHOLDER;
     }
   },
+
+  /** Fetch the Store health readiness dashboard. NEVER throws: any error (incl.
+   *  a 404 on a stale deploy, or a 403 for a viewer outside the gate) resolves
+   *  to a zeroed, unavailable envelope so the Store Health screen always renders. */
+  getStoreHealth: async (): Promise<StoreHealth> => {
+    try {
+      const res = await api.get('/online-store/store-health');
+      const d = (res?.data ?? {}) as Partial<StoreHealth>;
+      return {
+        available: true,
+        readiness_pct: typeof d.readiness_pct === 'number' ? d.readiness_pct : 0,
+        total_products: typeof d.total_products === 'number' ? d.total_products : 0,
+        orphans: {
+          total: d.orphans?.total ?? 0,
+          orphan_count: d.orphans?.orphan_count ?? 0,
+          no_mapping: d.orphans?.no_mapping ?? 0,
+          not_in_collection: d.orphans?.not_in_collection ?? 0,
+          missing_spine: d.orphans?.missing_spine ?? 0,
+          orphans: Array.isArray(d.orphans?.orphans) ? d.orphans!.orphans : [],
+        },
+        coverage: {
+          total: d.coverage?.total ?? 0,
+          hsn_pct: d.coverage?.hsn_pct ?? 0,
+          category_pct: d.coverage?.category_pct ?? 0,
+          brand_pct: d.coverage?.brand_pct ?? 0,
+          barcode_pct: d.coverage?.barcode_pct ?? 0,
+          image_pct: d.coverage?.image_pct ?? 0,
+          overall_pct: d.coverage?.overall_pct ?? 0,
+          missing: d.coverage?.missing ?? {},
+        },
+        barcode_match: {
+          total: d.barcode_match?.total ?? 0,
+          with_barcode: d.barcode_match?.with_barcode ?? 0,
+          missing_barcode: d.barcode_match?.missing_barcode ?? 0,
+          duplicate_barcode: d.barcode_match?.duplicate_barcode ?? 0,
+          unique_matched: d.barcode_match?.unique_matched ?? 0,
+          match_pct: d.barcode_match?.match_pct ?? 0,
+        },
+        barcode_match_pct:
+          typeof d.barcode_match_pct === 'number' ? d.barcode_match_pct : 0,
+        fixes_needed: Array.isArray(d.fixes_needed) ? d.fixes_needed : [],
+        sub_scores: {
+          coverage_pct: d.sub_scores?.coverage_pct ?? 0,
+          barcode_pct: d.sub_scores?.barcode_pct ?? 0,
+          orphan_free_pct: d.sub_scores?.orphan_free_pct ?? 0,
+        },
+      };
+    } catch {
+      return STORE_HEALTH_PLACEHOLDER;
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// STORE HEALTH (BVI Phase 5 — pre-cutover readiness dashboard)
+// ---------------------------------------------------------------------------
+// The read side of GET /api/v1/online-store/store-health: orphan SKUs, attribute
+// coverage, barcode match + a composite readiness score. Read-only. Every field
+// is defaulted so a partial backend payload never breaks rendering.
+
+/** One orphaned (not list-ready) product surfaced in the sample list. */
+export interface StoreHealthOrphan {
+  sku?: string | null;
+  product_id?: string | null;
+  /** Why it is an orphan: any of no_mapping / not_in_collection / missing_spine. */
+  reasons: string[];
+}
+
+/** One concrete, owner-actionable fix, e.g. {issue:"missing HSN code", count:12}. */
+export interface StoreHealthFix {
+  issue: string;
+  count: number;
+  /** Machine tag for the underlying check (hsn / barcode_dup / no_mapping / ...). */
+  check?: string;
+}
+
+export interface StoreHealth {
+  /** false => the backend didn't answer (stale deploy / 403) — zeroed envelope. */
+  available: boolean;
+  /** Composite readiness 0-100. */
+  readiness_pct: number;
+  total_products: number;
+  orphans: {
+    total: number;
+    orphan_count: number;
+    no_mapping: number;
+    not_in_collection: number;
+    missing_spine: number;
+    orphans: StoreHealthOrphan[];
+  };
+  coverage: {
+    total: number;
+    hsn_pct: number;
+    category_pct: number;
+    brand_pct: number;
+    barcode_pct: number;
+    image_pct: number;
+    overall_pct: number;
+    missing: Record<string, number>;
+  };
+  barcode_match: {
+    total: number;
+    with_barcode: number;
+    missing_barcode: number;
+    duplicate_barcode: number;
+    unique_matched: number;
+    match_pct: number;
+  };
+  barcode_match_pct: number;
+  fixes_needed: StoreHealthFix[];
+  sub_scores: {
+    coverage_pct: number;
+    barcode_pct: number;
+    orphan_free_pct: number;
+  };
+}
+
+/** Safe zeroed placeholder used when the backend is absent / the viewer is
+ *  outside the gate / any error occurs. Always reads as "0 / not available". */
+const STORE_HEALTH_PLACEHOLDER: StoreHealth = {
+  available: false,
+  readiness_pct: 0,
+  total_products: 0,
+  orphans: {
+    total: 0,
+    orphan_count: 0,
+    no_mapping: 0,
+    not_in_collection: 0,
+    missing_spine: 0,
+    orphans: [],
+  },
+  coverage: {
+    total: 0,
+    hsn_pct: 0,
+    category_pct: 0,
+    brand_pct: 0,
+    barcode_pct: 0,
+    image_pct: 0,
+    overall_pct: 0,
+    missing: {},
+  },
+  barcode_match: {
+    total: 0,
+    with_barcode: 0,
+    missing_barcode: 0,
+    duplicate_barcode: 0,
+    unique_matched: 0,
+    match_pct: 0,
+  },
+  barcode_match_pct: 0,
+  fixes_needed: [],
+  sub_scores: { coverage_pct: 0, barcode_pct: 0, orphan_free_pct: 0 },
 };
 
 // ============================================================================
@@ -1126,6 +1278,20 @@ export interface PushStatus {
   counts: PushCounts;
 }
 
+/** The POST /push/all-pending sweep result — the same engine, run over every
+ *  pending/dirty ecom doc (a dry-run PLAN per doc when DARK). Mirrors the backend
+ *  envelope; every field optional + nullable so a partial payload never breaks. */
+export interface PushSweepResult {
+  mode: PushMode;
+  db_connected?: boolean | null;
+  pushed_count?: number | null;
+  limit_reached?: boolean | null;
+  /** Per-entity {pushed, failed} tally. */
+  summary?: Record<string, { pushed?: number; failed?: number } | null> | null;
+  /** The per-doc PushResult rows (SIMULATED plans when DARK). */
+  results?: PushResult[] | null;
+}
+
 const PUSH_BASE = '/online-store/push';
 
 /** A safe DARK placeholder for getStatus — used when the backend is absent, the
@@ -1196,6 +1362,134 @@ export const pushApi = {
   pushImage: async (imageId: string): Promise<PushResult> => {
     const res = await api.post(`${PUSH_BASE}/image/${encodeURIComponent(imageId)}`);
     return _pushResultFrom(res?.data);
+  },
+
+  /** Sweep every pending/dirty ecom doc through the SAME engine and return the
+   *  batch result. This drives the control panel's per-entity "Dry-run" buttons:
+   *  when DARK (the default) each push is SIMULATED (a plan, no Shopify call), so
+   *  this is always safe to run for preview. `entities` is an optional CSV filter
+   *  (products,collections,menus,images); `limit` caps the sweep. The backend
+   *  triple-gate is the real control over whether any of these become LIVE — this
+   *  method never arms it and never bypasses it. Throws on HTTP failure so the
+   *  caller can toast; the DARK/LIVE posture is carried in the returned `mode`. */
+  pushAllPending: async (
+    entities?: string,
+    limit = 100,
+  ): Promise<PushSweepResult> => {
+    const params = new URLSearchParams();
+    if (entities) params.set('entities', entities);
+    params.set('limit', String(limit));
+    const res = await api.post(`${PUSH_BASE}/all-pending?${params.toString()}`);
+    const data = (res?.data ?? {}) as Partial<PushSweepResult>;
+    const mode = (data.mode ?? {}) as PushMode;
+    return {
+      mode: {
+        mode: mode.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
+        is_live: mode.is_live ?? (mode.mode === 'LIVE'),
+        writes_enabled: mode.writes_enabled ?? null,
+        dispatch_mode: mode.dispatch_mode ?? null,
+        creds_present: mode.creds_present ?? null,
+        api_version: mode.api_version ?? null,
+        single_writer_note: mode.single_writer_note ?? null,
+      },
+      db_connected: data.db_connected ?? null,
+      pushed_count: data.pushed_count ?? 0,
+      limit_reached: data.limit_reached ?? false,
+      summary: (data.summary ?? {}) as PushSweepResult['summary'],
+      results: Array.isArray(data.results) ? (data.results as PushResult[]) : [],
+    };
+  },
+};
+
+// ============================================================================
+// SYNC-HEALTH DIAGNOSTICS sub-api  (BVI safety net — read-only, SUPERADMIN)
+// ----------------------------------------------------------------------------
+// Thin read-only wrappers over the existing admin diagnostics endpoints
+// (backend/api/routers/admin.py ~848-943), surfaced as tiles on the Shopify sync
+// control panel. All three are SUPERADMIN-gated on the backend and 100%
+// fail-soft here: any error (403 non-superadmin / 404 stale deploy / network)
+// resolves to a safe "unavailable" shape so a tile renders empty rather than
+// crashing the page. NONE of these arm or bypass the push gates.
+//   - GET /admin/online-store/sync-health   last sync / reconcile / webhooks / drift
+//   - GET /admin/online-store/parity        IMS catalog counts vs what has a gid
+//   - GET /admin/online-store/drift         live dual-writer drift check (needs creds)
+// Import DIRECTLY from this module (NOT the api barrel — TS2614, per past sessions).
+// ============================================================================
+
+/** Parity oracle: per-entity total-vs-pushed-vs-missing counts (mirrors
+ *  online_sync_health.parity_summary + the /admin/online-store/parity envelope,
+ *  which also carries an uploads_audit block). All fields optional + nullable. */
+export interface SyncParity {
+  parity?: {
+    entities?: Record<
+      string,
+      { total?: number; pushed?: number; missing?: number } | null
+    > | null;
+    ok?: boolean | null;
+  } | null;
+  uploads_audit?: {
+    checked?: boolean | null;
+    local_url_count?: number | null;
+  } | null;
+  /** Set when the read failed / was forbidden (tile renders "unavailable"). */
+  unavailable?: boolean;
+}
+
+/** Sync-health summary (mirrors online_sync_health.sync_health). Only the fields
+ *  the panel surfaces are typed; the rest pass through untyped. */
+export interface SyncHealth {
+  online_configured?: boolean | null;
+  last_successful_shopify_sync_at?: string | null;
+  last_shopify_sync?: { found?: boolean; ok?: boolean; ran_at?: string | null } | null;
+  reconcile?: { checked?: boolean; oversell_risk?: number; count?: number } | null;
+  webhooks?: { checked?: boolean; failed?: number; skipped?: number } | null;
+  drift?: { checked?: boolean; reason?: string | null } | null;
+  stock_miss?: { checked?: boolean; unresolved?: number } | null;
+  [k: string]: any;
+  unavailable?: boolean;
+}
+
+/** Live dual-writer drift result (mirrors online_sync_health.detect_drift). */
+export interface SyncDrift {
+  checked?: boolean | null;
+  reason?: string | null;
+  drifted?: Array<{ gid?: string; sku?: string }> | null;
+  counts?: { scanned?: number; drifted?: number; no_timestamp?: number } | null;
+  unavailable?: boolean;
+}
+
+const ADMIN_ONLINE_BASE = '/admin/online-store';
+
+export const syncHealthApi = {
+  /** Read the sync-health summary. Fail-soft -> {unavailable:true}. */
+  getSyncHealth: async (): Promise<SyncHealth> => {
+    try {
+      const res = await api.get(`${ADMIN_ONLINE_BASE}/sync-health`);
+      return { ...(res?.data ?? {}) } as SyncHealth;
+    } catch {
+      return { unavailable: true };
+    }
+  },
+
+  /** Read the parity oracle + uploads audit. Fail-soft -> {unavailable:true}. */
+  getParity: async (): Promise<SyncParity> => {
+    try {
+      const res = await api.get(`${ADMIN_ONLINE_BASE}/parity`);
+      return { ...(res?.data ?? {}) } as SyncParity;
+    } catch {
+      return { unavailable: true };
+    }
+  },
+
+  /** Run the LIVE dual-writer drift check (a real Shopify READ — no writes; needs
+   *  creds, else it degrades to {checked:false}). Fail-soft -> {unavailable:true}. */
+  getDrift: async (limit = 50): Promise<SyncDrift> => {
+    try {
+      const res = await api.get(`${ADMIN_ONLINE_BASE}/drift`, { params: { limit } });
+      return { ...(res?.data ?? {}) } as SyncDrift;
+    } catch {
+      return { unavailable: true };
+    }
   },
 };
 

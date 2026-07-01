@@ -146,6 +146,8 @@ const SECTIONS: Section[] = [
       'Orphan SKUs, attribute coverage and barcode-match status — the readiness checks before any product goes live online.',
     icon: Activity,
     phase: 'Phase 5',
+    // Phase 5 shipped: the read-only Store health readiness dashboard is live in-app.
+    href: '/online-store/store-health',
   },
   {
     key: 'shopify-sync',
@@ -154,6 +156,9 @@ const SECTIONS: Section[] = [
       'The single-writer push of products, collections, menus and inventory to Shopify — armed only at the final, owner-approved cutover.',
     icon: RefreshCw,
     phase: 'Phase 6',
+    // Phase 6 shipped: the Shopify sync control panel (status + dry-run) is live
+    // in-app. The live push itself stays owner-armed behind the backend gates.
+    href: '/online-store/shopify',
   },
 ];
 
