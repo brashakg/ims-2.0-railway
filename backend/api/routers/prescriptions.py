@@ -892,36 +892,19 @@ async def create_prescription(
                 current_user.get("full_name") or current_user.get("username")
             )
 
-    # Validate prescription power ranges
+    # Validate prescription power ranges via the SINGLE canonical validator
+    # (rx_validation._validate_rx_value) -- the same one the POS order-create
+    # gate + the EyeData field-validators use. This previously re-derived a
+    # tighter SPH bound (-20..+20) inline, which REJECTED a valid +/-25 Rx in
+    # the clinic while POS accepted it. Never re-derive the ranges here; delegate
+    # so every Rx path enforces identical limits (SPH +/-25, CYL +/-6, ADD +4.00).
     def _validate_power(eye_label: str, eye: EyeData):
-        if eye.sph:
-            try:
-                sph_val = float(eye.sph)
-                if sph_val < -20.0 or sph_val > 20.0:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"{eye_label} SPH must be between -20.00 and +20.00",
-                    )
-            except ValueError:
-                raise HTTPException(
-                    status_code=422, detail=f"{eye_label} SPH must be a valid number"
-                )
-        if eye.cyl:
-            try:
-                cyl_val = float(eye.cyl)
-                # SYSTEM_INTENT section 4 + the canonical RANGES table both bound
-                # spectacle CYL to -6.00..+6.00. This path previously allowed
-                # +/-10.00, so a high-cyl Rx could be saved here yet fail the
-                # /validate check. Reconciled to +/-6.00.
-                if cyl_val < -6.0 or cyl_val > 6.0:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"{eye_label} CYL must be between -6.00 and +6.00",
-                    )
-            except ValueError:
-                raise HTTPException(
-                    status_code=422, detail=f"{eye_label} CYL must be a valid number"
-                )
+        try:
+            _validate_rx_value(eye.sph, "sph")
+            _validate_rx_value(eye.cyl, "cyl")
+            _validate_rx_value(eye.add, "add")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
         if eye.axis is not None:
             if not isinstance(eye.axis, int) or eye.axis < 1 or eye.axis > 180:
                 raise HTTPException(

@@ -276,3 +276,48 @@ class TestRxValidityReadsPrescriptionDate:
         expiry, is_valid = _rx_validity(rx)
         assert expiry is not None
         assert is_valid is True  # created_at is now -> expiry is 12 months from now
+
+
+# ---------------------------------------------------------------------------
+# Canonical power limits on the CREATE path (regression guard).
+# The clinical create path previously re-derived a TIGHTER SPH -20..+20 inline,
+# so a valid +/-25 Rx (owner-approved wider limit) was REJECTED in the clinic
+# while the POS order-create path (which uses the shared rx_validation) ACCEPTED
+# it. create_prescription now delegates to the single canonical validator, so
+# every Rx door enforces identical limits (SPH +/-25, ADD +0.75..+4.00).
+# ---------------------------------------------------------------------------
+
+
+class TestCreateEnforcesCanonicalPowerLimits:
+    def test_high_sph_within_new_limit_accepted(self, monkeypatch):
+        """SPH +22.00 is inside the canonical -25..+25 -> created (was 422 under
+        the old inline -20..+20 clinical check)."""
+        client, _ = _build_client(monkeypatch)
+        payload = {**_BASE_PAYLOAD,
+                   "right_eye": {"sph": "+22.00", "cyl": "0", "axis": None}}
+        resp = client.post("/prescriptions", json=payload)
+        assert resp.status_code == 201, resp.text
+
+    def test_sph_at_boundary_accepted(self, monkeypatch):
+        """SPH -25.00 (the boundary) is accepted."""
+        client, _ = _build_client(monkeypatch)
+        payload = {**_BASE_PAYLOAD,
+                   "right_eye": {"sph": "-25.00", "cyl": "0", "axis": None}}
+        resp = client.post("/prescriptions", json=payload)
+        assert resp.status_code == 201, resp.text
+
+    def test_sph_over_limit_rejected(self, monkeypatch):
+        """SPH +26.00 is beyond +/-25 -> rejected (422)."""
+        client, _ = _build_client(monkeypatch)
+        payload = {**_BASE_PAYLOAD,
+                   "right_eye": {"sph": "+26.00", "cyl": "0", "axis": None}}
+        resp = client.post("/prescriptions", json=payload)
+        assert resp.status_code == 422, resp.text
+
+    def test_add_at_new_max_accepted(self, monkeypatch):
+        """ADD +4.00 (the new max) is accepted."""
+        client, _ = _build_client(monkeypatch)
+        payload = {**_BASE_PAYLOAD,
+                   "right_eye": {"sph": "-1.00", "cyl": "0", "axis": None, "add": "+4.00"}}
+        resp = client.post("/prescriptions", json=payload)
+        assert resp.status_code == 201, resp.text
