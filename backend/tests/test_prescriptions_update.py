@@ -180,7 +180,7 @@ class TestOutOfRangeRejected:
         client = _client(["OPTOMETRIST"], repo, monkeypatch)
         resp = client.put(
             "/prescriptions/rx-1",
-            json={"right_eye": {"sph": "-25.00", "cyl": "0", "axis": 90}},
+            json={"right_eye": {"sph": "-25.50", "cyl": "0", "axis": 90}},
         )
         assert resp.status_code == 400, resp.text
         # The doc was NOT mutated by a rejected edit.
