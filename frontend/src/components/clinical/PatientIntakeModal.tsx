@@ -1,30 +1,35 @@
 // ============================================================================
 // IMS 2.0 - Clinical Patient Intake Modal
 // ============================================================================
-// Token-first PATIENT intake for the clinical flow. Unlike the generic CRM
-// "Add Customer" modal (components/customers/AddCustomerModal), this captures
-// the minimal patient identity an optometrist needs to start an exam PLUS an
-// inline refraction grid (OD/OS x SPH/CYL/AXIS/ADD/PD, with optional VA) so
-// the Rx is captured at the same moment the patient is registered.
+// The clinical door for registering the person being examined AND capturing
+// their refraction in one step. It now captures the SAME customer field set as
+// the POS "Add Customer" flow — via the shared <CustomerIdentityFields> body and
+// the shared buildCustomerCreatePayload — so both doors produce the IDENTICAL
+// customer record (full parity, owner decision). On top of that shared identity
+// section this modal keeps its clinical extras:
+//   - "Reason for visit"
+//   - "Capture prescription now" inline OD/OS refraction grid
+//   - find-or-create-by-phone (searchByPhone then createCustomer; on "already
+//     exists" it falls back to the found account)
+//   - prescriptionApi.createPrescription (optional Rx)
+//   - clinicalApi.addToQueue (issues the token)
 //
-// It REUSES the existing customer + prescription create APIs:
-//   - customerApi.searchByPhone / createCustomer  (patient identity record)
-//   - prescriptionApi.createPrescription          (optional Rx, flat keys)
-//   - clinicalApi.addToQueue                       (token / queue entry)
-//
-// Patient (clinical) and Customer (POS) are distinct concepts in the design:
-// this modal is the clinical door. The POS "Add Customer" flow is untouched.
+// The person being examined is the account holder (the customer's Full Name) /
+// their Primary patient. The backend seeds a Primary member from the account
+// name+mobile when no patient rows are added, so the Rx + queue reliably attach
+// to that account holder.
 // ============================================================================
 
 import { useEffect, useMemo, useState } from 'react';
 import { Eye, X, Loader2, UserPlus } from 'lucide-react';
 import { customerApi, clinicalApi, prescriptionApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
-
-const RELATIONS = [
-  'Self', 'Spouse', 'Father', 'Mother', 'Son', 'Daughter',
-  'Brother', 'Sister', 'Grandfather', 'Grandmother', 'Other',
-];
+import { CustomerIdentityFields } from '../customers/CustomerIdentityFields';
+import {
+  buildCustomerCreatePayload,
+  emptyCustomerFormData,
+  type CustomerFormData,
+} from '../../utils/customerPayload';
 
 // Visual-acuity options — kept in sync with the clinic Final-Rx / POS form.
 const VA_OPTIONS = ['', '6/6', '6/9', '6/12', '6/18', '6/24', '6/36', '6/60'] as const;
@@ -105,36 +110,49 @@ export function PatientIntakeModal({
 }: PatientIntakeModalProps) {
   const toast = useToast();
 
-  const [name, setName] = useState('');
-  const [mobile, setMobile] = useState('');
-  const [dob, setDob] = useState('');
-  const [relation, setRelation] = useState('Self');
+  // Full customer identity (same shape + field set as the POS Add Customer door).
+  const [form, setForm] = useState<CustomerFormData>(emptyCustomerFormData());
+  const [mobileError, setMobileError] = useState<string | null>(null);
+  const [gstVerified, setGstVerified] = useState<boolean | null>(null);
+  // DPDP consent wording (fetched on open, stamped onto the created record).
+  const [consentText, setConsentText] = useState('');
+  const [consentVersion, setConsentVersion] = useState<string | undefined>();
+
+  // Clinical extras.
   const [reason, setReason] = useState('Eye examination');
   const [captureRx, setCaptureRx] = useState(false);
   const [od, setOd] = useState<EyeRx>(emptyEye());
   const [os, setOs] = useState<EyeRx>(emptyEye());
   const [saving, setSaving] = useState(false);
 
-  // Seed the name/phone field from the "couldn't find them" handoff.
+  // Seed the name/phone field from the "couldn't find them" handoff + reset the
+  // rest of the form each time the modal opens. Pull the current consent wording.
   useEffect(() => {
     if (!isOpen) return;
+    const fresh = emptyCustomerFormData();
     const seed = (initialName || '').trim();
     if (/^\d{6,}$/.test(seed.replace(/\D/g, ''))) {
-      setMobile(seed.replace(/\D/g, '').slice(-10));
+      fresh.mobileNumber = seed.replace(/\D/g, '').slice(-10);
     } else if (seed) {
-      setName(seed);
+      fresh.fullName = seed;
     }
+    setForm(fresh);
+    setMobileError(null);
+    setGstVerified(null);
+    setReason('Eye examination');
+    setCaptureRx(false);
+    setOd(emptyEye());
+    setOs(emptyEye());
+    customerApi.getConsentText?.()
+      .then((r) => {
+        if (r?.text) setConsentText(r.text);
+        if (r?.version) setConsentVersion(r.version);
+      })
+      .catch(() => { /* keep default */ });
   }, [isOpen, initialName]);
-
-  const reset = () => {
-    setName(''); setMobile(''); setDob(''); setRelation('Self');
-    setReason('Eye examination'); setCaptureRx(false);
-    setOd(emptyEye()); setOs(emptyEye());
-  };
 
   const handleClose = () => {
     if (saving) return;
-    reset();
     onClose();
   };
 
@@ -154,7 +172,12 @@ export function PatientIntakeModal({
     return age >= 0 ? age : undefined;
   };
 
-  const sanitizedMobile = useMemo(() => mobile.replace(/\D/g, '').slice(-10), [mobile]);
+  // The person being examined = the account holder (customer Full Name / mobile).
+  const patientName = form.fullName.trim();
+  const sanitizedMobile = useMemo(
+    () => form.mobileNumber.replace(/\D/g, '').slice(-10),
+    [form.mobileNumber],
+  );
   const hasRx = captureRx && (eyeHasValue(od) || eyeHasValue(os));
 
   const handleSubmit = async () => {
@@ -162,12 +185,18 @@ export function PatientIntakeModal({
       toast.error('No active store selected');
       return;
     }
-    if (!name.trim()) {
+    if (!patientName) {
       toast.error('Patient name is required');
       return;
     }
     if (sanitizedMobile.length !== 10) {
+      setMobileError('Mobile number must contain 10 digits');
       toast.error('Mobile number must contain 10 digits');
+      return;
+    }
+    setMobileError(null);
+    if (form.customerType === 'B2B' && !gstVerified) {
+      toast.error('Please verify the GST number first');
       return;
     }
 
@@ -204,15 +233,12 @@ export function PatientIntakeModal({
       if (existing) {
         customerId = existing.customer_id || existing._id || existing.id;
       } else {
-        const payload = {
-          name: name.trim(),
-          mobile: sanitizedMobile,
-          dob: dob || undefined,
-          customer_type: 'B2C',
-          // Register the named person as the first patient on the account so
-          // the Rx and queue entry group under them in Family Rx.
-          patients: [{ name: name.trim(), mobile: sanitizedMobile, dob: dob || undefined, relation }],
-        };
+        // Same shared builder as POS + the Customers page -> identical record.
+        const payload = buildCustomerCreatePayload({
+          ...form,
+          mobileNumber: sanitizedMobile,
+          dataConsentTextVersion: consentVersion,
+        });
         try {
           const created = await customerApi.createCustomer(payload as any);
           customerId = created?.customer_id || created?.id;
@@ -260,21 +286,20 @@ export function PatientIntakeModal({
       // 3) Add the patient to the clinical queue (issues the token).
       await clinicalApi.addToQueue({
         storeId,
-        patientName: name.trim(),
+        patientName,
         customerPhone: sanitizedMobile,
         customerId,
-        age: calcAge(dob),
+        age: calcAge(form.dateOfBirth),
         reason: reason || 'Eye examination',
       });
 
       toast.success(
         isExisting
-          ? `${name.trim()} added to queue${prescriptionId ? ' with new Rx' : ''}`
+          ? `${patientName} added to queue${prescriptionId ? ' with new Rx' : ''}`
           : `Patient created and added to queue${prescriptionId ? ' with Rx' : ''}`,
       );
 
-      onComplete?.({ customerId, patientName: name.trim(), prescriptionId });
-      reset();
+      onComplete?.({ customerId, patientName, prescriptionId });
       onClose();
     } catch (err: any) {
       const detail = err?.response?.data?.detail || err?.message || 'Failed to add patient';
@@ -331,7 +356,7 @@ export function PatientIntakeModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
           <div className="flex items-center gap-3">
@@ -354,52 +379,23 @@ export function PatientIntakeModal({
         </div>
 
         <div className="p-6 space-y-5">
-          {/* Identity — token-first: who is being seen */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Patient name <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text" autoFocus placeholder="Full name"
-                value={name} onChange={(e) => setName(e.target.value)}
-                className="input-field"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Mobile <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="tel" inputMode="numeric" placeholder="10-digit mobile"
-                value={mobile} onChange={(e) => setMobile(e.target.value)}
-                className="input-field"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Date of birth</label>
-              <input
-                type="date" value={dob} onChange={(e) => setDob(e.target.value)}
-                max={new Date().toISOString().slice(0, 10)}
-                className="input-field"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Relation</label>
-              <select
-                value={relation} onChange={(e) => setRelation(e.target.value)}
-                className="input-field"
-              >
-                {RELATIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Reason for visit</label>
-              <input
-                type="text" value={reason} onChange={(e) => setReason(e.target.value)}
-                className="input-field"
-              />
-            </div>
+          {/* Shared customer identity — full parity with the POS Add Customer door */}
+          <CustomerIdentityFields
+            value={form}
+            onChange={setForm}
+            consentText={consentText}
+            mobileError={mobileError}
+            onMobileErrorClear={() => setMobileError(null)}
+            onGstVerifiedChange={setGstVerified}
+          />
+
+          {/* Reason for visit */}
+          <div className="border-t border-gray-100 pt-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Reason for visit</label>
+            <input
+              type="text" value={reason} onChange={(e) => setReason(e.target.value)}
+              className="input-field"
+            />
           </div>
 
           {/* Rx capture toggle + inline grid */}

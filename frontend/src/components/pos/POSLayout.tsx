@@ -66,7 +66,8 @@ import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/customerSearchHits';
 import { choosePrimaryPatient, toPosPatient, sortMembersPrimaryFirst } from '../../utils/patientFromCustomer';
-import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
+import { AddCustomerModal } from '../customers/AddCustomerModal';
+import { buildCustomerCreatePayload, type CustomerFormData } from '../../utils/customerPayload';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
@@ -1599,25 +1600,11 @@ function StepCustomer() {
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
 
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
-    const payload = {
-      name: customerData.fullName,
-      mobile: customerData.mobileNumber,
-      email: customerData.email || undefined,
-      customer_type: customerData.customerType,
-      gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
-      billing_address: (customerData.address || customerData.city || customerData.pincode) ? {
-        address: customerData.address,
-        city: customerData.city,
-        state: customerData.state,
-        pincode: customerData.pincode,
-      } : undefined,
-      patients: (customerData.patients || []).map(p => ({
-        name: p.name,
-        mobile: p.mobile || undefined,
-        dob: p.dateOfBirth || undefined,
-        relation: p.relation || 'Self',
-      })),
-    };
+    // ONE shared builder maps the form onto the canonical CustomerCreate payload
+    // (same as the Customers page + Clinical intake) so every door produces the
+    // identical record — incl. dob / anniversary / consents that were dropped here
+    // before.
+    const payload = buildCustomerCreatePayload(customerData);
     const r = await customerApi.createCustomer(payload as any);
     const custId = r?.customer_id || r?.id || `new-${Date.now()}`;
     // Carry the server-returned patients[] (incl. the auto-seeded Primary, with
