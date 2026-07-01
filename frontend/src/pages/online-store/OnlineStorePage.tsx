@@ -136,6 +136,8 @@ const SECTIONS: Section[] = [
       'Reconciles online-listed quantity against real on-hand so you never sell the same unit twice — a conservative, buffered allocation.',
     icon: Boxes,
     phase: 'Phase 5',
+    // Phase 5 shipped: the read-only stock-tally reconciliation is live in-app.
+    href: '/online-store/stock-tally',
   },
   {
     key: 'store-health',

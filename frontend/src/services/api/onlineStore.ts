@@ -43,6 +43,83 @@ const PLACEHOLDER: OnlineStoreSummary = {
   message: null,
 };
 
+// ----------------------------------------------------------------------------
+// STOCK TALLY  (BVI Phase 5 — read-only reconciliation dashboard)
+// ----------------------------------------------------------------------------
+// GET /api/v1/online-store/stock-tally reconciles, per online-listed SKU, what
+// the storefront lists vs the real physical on-hand vs what is already reserved,
+// and flags oversell-risk (listed > sellable). It is STRICTLY read-only — no
+// allocation/reserve is performed here (that write-path is a deferred follow-up).
+// Graceful degradation: any error (404 stale deploy / 403 outside the ecom gate)
+// resolves to an empty, unavailable envelope so the screen always renders.
+
+/** One reconciliation row: what a single online-listed SKU lists vs what it can
+ *  actually sell. All numeric fields default to 0; every field optional so a
+ *  partial backend payload never breaks rendering. */
+export interface StockTallyRow {
+  sku: string;
+  name?: string | null;
+  /** What the storefront currently lists (Shopify/BVI online_stock). */
+  online_listed_qty: number;
+  /** AVAILABLE serialized stock units (physical on-hand). */
+  on_hand: number;
+  /** RESERVED serialized stock units. */
+  reserved: number;
+  /** on_hand - reserved (floored at 0) — what is actually free to sell. */
+  sellable: number;
+  /** A conservative reserve suggestion to keep off the listing (not enforced). */
+  recommended_buffer: number;
+  /** True when online_listed_qty > sellable (can sell a unit that isn't free). */
+  oversell_risk: boolean;
+}
+
+export interface StockTallySummary {
+  skus_checked: number;
+  at_risk_count: number;
+  total_online_listed: number;
+  total_on_hand: number;
+  total_reserved: number;
+  total_sellable: number;
+  /** Whether the e-commerce Postgres bridge is configured (else listed=0). */
+  online_configured: boolean;
+}
+
+export interface StockTallyResult {
+  items: StockTallyRow[];
+  summary: StockTallySummary;
+  /** false => the backend endpoint isn't deployed yet / not permitted; the
+   *  screen shows the friendly "coming online" note rather than "0 SKUs". */
+  available: boolean;
+}
+
+const STOCK_TALLY_PLACEHOLDER: StockTallyResult = {
+  items: [],
+  summary: {
+    skus_checked: 0,
+    at_risk_count: 0,
+    total_online_listed: 0,
+    total_on_hand: 0,
+    total_reserved: 0,
+    total_sellable: 0,
+    online_configured: false,
+  },
+  available: false,
+};
+
+function _tallyRowFrom(r: Record<string, any>): StockTallyRow {
+  const num = (v: any): number => (typeof v === 'number' && isFinite(v) ? v : 0);
+  return {
+    sku: String(r.sku ?? ''),
+    name: r.name ?? null,
+    online_listed_qty: num(r.online_listed_qty),
+    on_hand: num(r.on_hand),
+    reserved: num(r.reserved),
+    sellable: num(r.sellable),
+    recommended_buffer: num(r.recommended_buffer),
+    oversell_risk: !!r.oversell_risk,
+  };
+}
+
 export const onlineStoreApi = {
   /** Fetch the module summary. Never throws: any error (incl. a 404 on a stale
    *  deploy) resolves to the COMING_SOON placeholder so the shell still renders. */
@@ -59,6 +136,34 @@ export const onlineStoreApi = {
       };
     } catch {
       return PLACEHOLDER;
+    }
+  },
+
+  /** Read the READ-ONLY stock-tally reconciliation. NEVER throws: any error
+   *  (404 stale deploy / 403 non-ecom viewer / network) resolves to an empty,
+   *  unavailable envelope so the Stock tally screen always renders. */
+  getStockTally: async (): Promise<StockTallyResult> => {
+    try {
+      const res = await api.get('/online-store/stock-tally');
+      const data = (res?.data ?? {}) as Record<string, any>;
+      const rawItems = Array.isArray(data.items) ? data.items : [];
+      const s = (data.summary ?? {}) as Record<string, any>;
+      const num = (v: any): number => (typeof v === 'number' && isFinite(v) ? v : 0);
+      return {
+        items: rawItems.map(_tallyRowFrom),
+        summary: {
+          skus_checked: num(s.skus_checked),
+          at_risk_count: num(s.at_risk_count),
+          total_online_listed: num(s.total_online_listed),
+          total_on_hand: num(s.total_on_hand),
+          total_reserved: num(s.total_reserved),
+          total_sellable: num(s.total_sellable),
+          online_configured: !!s.online_configured,
+        },
+        available: true,
+      };
+    } catch {
+      return STOCK_TALLY_PLACEHOLDER;
     }
   },
 };
