@@ -45,8 +45,6 @@ const STATUS_CHIP: Record<string, string> = {
 const inr = (rupees?: number) =>
   `₹${(rupees ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-interface BlankLine extends RMALinePayload {}
-
 export function VendorRMA() {
   const toast = useToast();
   const { user } = useAuth();
@@ -60,7 +58,7 @@ export function VendorRMA() {
 
   // create form state
   const [vendorId, setVendorId] = useState('');
-  const [lines, setLines] = useState<BlankLine[]>([
+  const [lines, setLines] = useState<RMALinePayload[]>([
     { product_id: '', product_name: '', quantity: 1, reason: 'DEFECTIVE', unit_cost: 0 },
   ]);
   const [createNotes, setCreateNotes] = useState('');

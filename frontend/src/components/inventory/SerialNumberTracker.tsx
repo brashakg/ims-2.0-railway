@@ -100,7 +100,9 @@ export function SerialNumberTracker() {
 
       await loadSerializedItems();
     } catch (error: any) {
-      throw new Error(error?.message || 'Failed to save serial number');
+      const err = new Error(error?.message || 'Failed to save serial number');
+      (err as Error & { cause?: unknown }).cause = error;
+      throw err;
     }
   };
 

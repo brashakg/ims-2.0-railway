@@ -155,7 +155,9 @@ export function ReorderDashboard() {
 
       toast.success('Reorder point updated successfully');
     } catch (error: any) {
-      throw new Error(error?.message || 'Failed to save reorder point');
+      const err = new Error(error?.message || 'Failed to save reorder point');
+      (err as Error & { cause?: unknown }).cause = error;
+      throw err;
     }
   };
 

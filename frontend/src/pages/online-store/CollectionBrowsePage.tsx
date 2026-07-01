@@ -185,7 +185,6 @@ export default function CollectionBrowsePage() {
                       <div key={p.sku} className="card p-3 flex flex-col">
                         <div className="aspect-square bg-gray-50 rounded-md mb-2 overflow-hidden flex items-center justify-center">
                           {p.image ? (
-                            // eslint-disable-next-line jsx-a11y/img-redundant-alt
                             <img
                               src={p.image}
                               alt={p.title || p.sku}

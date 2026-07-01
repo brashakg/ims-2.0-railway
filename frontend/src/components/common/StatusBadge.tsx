@@ -251,7 +251,7 @@ export function StatusBadge({
         className
       )}
       onClick={onClick}
-      role={interactive ? "button" : undefined}
+      role={interactive ? "button" : "status"}
       aria-label={ariaLabel || `Status: ${status}`}
       tabIndex={interactive ? 0 : -1}
     >
@@ -325,7 +325,7 @@ export function NumericBadge({
   trailingIcon: TrailingIcon,
 }: NumericBadgeProps) {
   // Determine status based on value
-  let status = 'default';
+  let status: string;
   if (getStatus) {
     status = getStatus(value);
   } else {

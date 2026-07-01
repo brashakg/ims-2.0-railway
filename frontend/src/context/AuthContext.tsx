@@ -449,7 +449,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const perms = rolePermissions[r] || [];
       allPerms.push(...perms);
     }
-    let roleAllowed = false;
+    let roleAllowed: boolean;
     if (allPerms.includes('*')) {
       roleAllowed = true;
     } else {

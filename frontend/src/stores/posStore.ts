@@ -553,7 +553,7 @@ export const usePOSStore = create<POSState>()(
         if (cart.length === 0) return null; // nothing to park
         const auto = meta?.auto === true;
         const id = `hold-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        let bills: any[] = [];
+        let bills: any[];
         try {
           bills = JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
           if (!Array.isArray(bills)) bills = [];
