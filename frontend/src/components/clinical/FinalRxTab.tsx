@@ -5,6 +5,7 @@
 import { FileText, Stethoscope } from 'lucide-react';
 import type { FinalRxData, SubjectiveRxData, ClinicalFindingsData } from './eyeTestTypes';
 import { LENS_TYPES, COLOUR_VISION_OPTIONS } from './eyeTestTypes';
+import { RxPowerInput } from './RxPowerInput';
 
 interface FinalRxTabProps {
   data: FinalRxData;
@@ -33,16 +34,16 @@ function DistanceVisionRow({
     <tr className={eye === 'rightEye' ? 'border-b border-gray-100' : ''}>
       <td className="py-3 px-3 font-medium text-gray-900">{label}</td>
       <td className="py-2 px-2">
-        <input type="text" value={data.sphere} onChange={(e) => onFieldChange(eye, 'sphere', e.target.value)}
-          placeholder="SPH" className="input-field text-center text-sm w-full" />
+        <RxPowerInput kind="SPH" value={data.sphere} onChange={(v) => onFieldChange(eye, 'sphere', v)}
+          placeholder="SPH" className="input-field text-center text-sm w-full" aria-label={`${label} sphere`} />
       </td>
       <td className="py-2 px-2">
-        <input type="text" value={data.cylinder} onChange={(e) => onFieldChange(eye, 'cylinder', e.target.value)}
-          placeholder="CYL" className="input-field text-center text-sm w-full" />
+        <RxPowerInput kind="CYL" value={data.cylinder} onChange={(v) => onFieldChange(eye, 'cylinder', v)}
+          placeholder="CYL" className="input-field text-center text-sm w-full" aria-label={`${label} cylinder`} />
       </td>
       <td className="py-2 px-2">
-        <input type="text" value={data.axis} onChange={(e) => onFieldChange(eye, 'axis', e.target.value)}
-          placeholder="1-180" className="input-field text-center text-sm w-full" />
+        <RxPowerInput kind="AXIS" value={data.axis} onChange={(v) => onFieldChange(eye, 'axis', v)}
+          placeholder="1-180" className="input-field text-center text-sm w-full" aria-label={`${label} axis`} />
       </td>
       <td className="py-2 px-2">
         <input type="text" value={data.prism} onChange={(e) => onFieldChange(eye, 'prism', e.target.value)}
@@ -167,32 +168,35 @@ export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindi
         <div className="grid grid-cols-3 gap-4">
           <div>
             <label className="text-sm text-gray-600 mb-1 block">Right ADD</label>
-            <input
-              type="text"
+            <RxPowerInput
+              kind="ADD"
               value={data.rightAdd}
-              onChange={(e) => onChange({ ...data, rightAdd: e.target.value })}
+              onChange={(v) => onChange({ ...data, rightAdd: v })}
               placeholder="+0.00"
               className="input-field"
+              aria-label="Right eye add"
             />
           </div>
           <div>
             <label className="text-sm text-gray-600 mb-1 block">Left ADD</label>
-            <input
-              type="text"
+            <RxPowerInput
+              kind="ADD"
               value={data.leftAdd}
-              onChange={(e) => onChange({ ...data, leftAdd: e.target.value })}
+              onChange={(v) => onChange({ ...data, leftAdd: v })}
               placeholder="+0.00"
               className="input-field"
+              aria-label="Left eye add"
             />
           </div>
           <div>
             <label className="text-sm text-gray-600 mb-1 block">IPD (mm)</label>
-            <input
-              type="text"
+            <RxPowerInput
+              kind="PD"
               value={data.ipd}
-              onChange={(e) => onChange({ ...data, ipd: e.target.value })}
+              onChange={(v) => onChange({ ...data, ipd: v })}
               placeholder="e.g., 62"
               className="input-field"
+              aria-label="Interpupillary distance"
             />
           </div>
         </div>

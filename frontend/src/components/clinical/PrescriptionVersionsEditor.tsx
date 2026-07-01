@@ -19,6 +19,7 @@ import {
 } from '../../services/api/sales';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { RxPowerInput } from './RxPowerInput';
 import clsx from 'clsx';
 
 type VersionName = 'before_testing' | 'after_testing' | 'manual' | 'final';
@@ -290,45 +291,43 @@ export function PrescriptionVersionsEditor({
                     </p>
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
                       <FieldBlock label="SPH" disabled={locked}>
-                        <input
-                          type="number"
-                          step={0.25}
-                          value={eye.sphere ?? ''}
+                        <RxPowerInput
+                          kind="SPH"
+                          value={eye.sphere == null ? '' : String(eye.sphere)}
                           disabled={locked}
-                          onChange={(e) => setEyeField(eyeKey, 'sphere', e.target.value)}
+                          onChange={(v) => setEyeField(eyeKey, 'sphere', v)}
                           className="w-full px-2 py-1 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                          aria-label="sphere"
                         />
                       </FieldBlock>
                       <FieldBlock label="CYL" disabled={locked}>
-                        <input
-                          type="number"
-                          step={0.25}
-                          value={eye.cylinder ?? ''}
+                        <RxPowerInput
+                          kind="CYL"
+                          value={eye.cylinder == null ? '' : String(eye.cylinder)}
                           disabled={locked}
-                          onChange={(e) => setEyeField(eyeKey, 'cylinder', e.target.value)}
+                          onChange={(v) => setEyeField(eyeKey, 'cylinder', v)}
                           className="w-full px-2 py-1 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                          aria-label="cylinder"
                         />
                       </FieldBlock>
                       <FieldBlock label="AXIS" disabled={locked}>
-                        <input
-                          type="number"
-                          step={1}
-                          min={1}
-                          max={180}
-                          value={eye.axis ?? ''}
+                        <RxPowerInput
+                          kind="AXIS"
+                          value={eye.axis == null ? '' : String(eye.axis)}
                           disabled={locked}
-                          onChange={(e) => setEyeField(eyeKey, 'axis', e.target.value)}
+                          onChange={(v) => setEyeField(eyeKey, 'axis', v)}
                           className="w-full px-2 py-1 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                          aria-label="axis"
                         />
                       </FieldBlock>
                       <FieldBlock label="ADD" disabled={locked}>
-                        <input
-                          type="number"
-                          step={0.25}
-                          value={eye.addition ?? ''}
+                        <RxPowerInput
+                          kind="ADD"
+                          value={eye.addition == null ? '' : String(eye.addition)}
                           disabled={locked}
-                          onChange={(e) => setEyeField(eyeKey, 'addition', e.target.value)}
+                          onChange={(v) => setEyeField(eyeKey, 'addition', v)}
                           className="w-full px-2 py-1 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                          aria-label="add"
                         />
                       </FieldBlock>
                       <FieldBlock label="VA" disabled={locked}>
@@ -349,15 +348,15 @@ export function PrescriptionVersionsEditor({
               {/* PD + override reason */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <FieldBlock label="PD (mm)" disabled={locked}>
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={current.pd ?? ''}
+                  <RxPowerInput
+                    kind="PD"
+                    value={current.pd == null ? '' : String(current.pd)}
                     disabled={locked}
-                    onChange={(e) =>
-                      setVersionField('pd', e.target.value === '' ? null : parseFloat(e.target.value) || 0)
+                    onChange={(v) =>
+                      setVersionField('pd', v.trim() === '' ? null : parseFloat(v) || 0)
                     }
                     className="w-full px-2 py-1 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                    aria-label="pupillary distance"
                   />
                 </FieldBlock>
                 <FieldBlock label="Source" disabled={locked}>
