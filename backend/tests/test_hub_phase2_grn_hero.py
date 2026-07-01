@@ -117,6 +117,13 @@ class _GRNRepo:
     def find(self, *a, **k):
         return [self._grn]
 
+    def claim_for_accept(self, gid, from_statuses):
+        if gid != self._grn.get("grn_id") or self._grn.get("status") not in from_statuses:
+            return None
+        pre = dict(self._grn)
+        self._grn["status"] = "ACCEPTING"
+        return pre
+
 
 def _complete_frame(
     pid, *, cost=None, colour="BLK", catalog_status="ACTIVE", gaps=None

@@ -1419,6 +1419,19 @@ async def create_order(
                     status_code=400,
                     detail=f"Product not found: {pid} ({item.product_name or 'unknown'})",
                 )
+            # Trust the CATALOG's item_type/category over whatever the client
+            # sent, for every line resolved to a real product. A mismatched
+            # client-supplied item_type otherwise dodges two downstream gates
+            # that both key off item.item_type/item.category: the BUG-006
+            # Rx-required check below (a real optical-lens SKU billed with
+            # item_type="FRAME" would skip the mandatory-prescription gate)
+            # and the GST-rate lookup (wrong item_type -> wrong tax rate on
+            # the invoice/GSTR-1). The client value is kept only as a
+            # fallback for virtual/unresolvable lines, which never reach here.
+            resolved_type = product.get("item_type") or product.get("category")
+            if resolved_type:
+                item.item_type = resolved_type
+                item.category = product.get("category") or resolved_type
             # Products-convergence ③: billing requires the `products` SPINE. A
             # product that resolves ONLY from catalog_products (no spine row) is
             # not a governed billing master -- fail LOUD instead of silently
@@ -3106,6 +3119,24 @@ async def add_order_item(
                 status_code=400, detail="Can only add items to DRAFT orders"
             )
 
+        # Trust the CATALOG's item_type/category over whatever the client sent,
+        # BEFORE the Rx gate below -- mirrors the same fix in create_order.
+        # Resolved once here and reused for the cost/cap pass below so this
+        # isn't a second DB read.
+        _pid = item.product_id or ""
+        product = None
+        if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
+            try:
+                pr = get_product_repository()
+                product = pr.find_by_id(_pid) if pr is not None else None
+            except Exception:
+                product = None
+            if product:
+                resolved_type = product.get("item_type") or product.get("category")
+                if resolved_type:
+                    item.item_type = resolved_type
+                    item.category = product.get("category") or resolved_type
+
         # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
         # Rx-required check the create path runs, for a line appended to a DRAFT
         # order. Validation only -- no pricing/GST change. Uses the order's
@@ -3127,17 +3158,11 @@ async def add_order_item(
         )
         _cap = _role_cap
         _eff_disc = item.discount_percent
-        _pid = item.product_id or ""
         # Fcostfloor (chair P1): raw catalog cost for THIS line; stamped as
         # cost_at_sale below and fed to the floor pass. None (virtual id /
         # missing product / no cost_price) keeps the line fail-open.
         _cost = None
         if _pid and not _pid.startswith(("custom-", "lens-", "lens-sug-")):
-            try:
-                pr = get_product_repository()
-                product = pr.find_by_id(_pid) if pr is not None else None
-            except Exception:
-                product = None
             if product:
                 def _n(v):
                     try:

@@ -1213,9 +1213,7 @@ async def add_loyalty_points(
     repo = get_customer_repository()
 
     if repo is not None:
-        existing = repo.find_by_id(customer_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Customer not found")
+        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
         if repo.add_loyalty_points(customer_id, points):
             return {
@@ -1238,9 +1236,7 @@ async def add_store_credit(
     repo = get_customer_repository()
 
     if repo is not None:
-        existing = repo.find_by_id(customer_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Customer not found")
+        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
         if repo.add_store_credit(customer_id, amount):
             return {
@@ -1308,9 +1304,7 @@ def _post_credit_entry(
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    existing = repo.find_by_id(customer_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    existing = _scoped_customer_or_404(customer_id, current_user, write=True)
 
     et = (entry_type or "").upper()
 

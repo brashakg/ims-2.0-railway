@@ -1477,6 +1477,10 @@ async def run_payroll(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # A store-scoped role (e.g. ACCOUNTANT) must not be able to compute/persist
+    # payroll for another store (or, worse, EVERY store by omitting store_id) --
+    # mirrors the same guard already applied on the read side (list_payroll_rows).
+    req.store_id = resolve_store_scope(req.store_id, current_user)
     try:
         configs = _scope_configs(db, req.store_id, req.entity_id)
         payroll_coll = db.get_collection("payroll")
@@ -1653,6 +1657,9 @@ async def approve_payroll(
     from .finance import check_period_locked
 
     check_period_locked(db, date(req.year, req.month, 1))
+    # A store-scoped role must not bulk-approve another store's (or every
+    # store's, by omitting store_id) DRAFT payroll into APPROVED.
+    req.store_id = resolve_store_scope(req.store_id, current_user)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "DRAFT"}
         if req.store_id:
@@ -1694,6 +1701,10 @@ async def lock_payroll(
     from .finance import check_period_locked
 
     check_period_locked(db, date(req.year, req.month, 1))
+    # A store-scoped role must not bulk-lock another store's (or every store's,
+    # by omitting store_id) APPROVED payroll into PAID (final, unwindable only
+    # by a fresh accounting entry).
+    req.store_id = resolve_store_scope(req.store_id, current_user)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "APPROVED"}
         if req.store_id:

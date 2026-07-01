@@ -2048,257 +2048,285 @@ async def accept_grn(
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
 
+    # Store-scope (SEC #2 object-level pattern, mirroring the GET .../document
+    # guard above): a store-level caller could otherwise accept -- and mint real
+    # stock for -- another store's GRN just by knowing/guessing its id.
+    if not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+
     # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
     # "Catalog now" -- some lines were held last time because their product was
     # not yet catalogued; the per-(grn,product) idempotency guard below skips the
     # already-minted lines and mints only the newly-resolved ones.
-    if grn.get("status") not in ("PENDING", "PARTIALLY_ACCEPTED"):
+    #
+    # Atomically CLAIM the GRN (status -> ACCEPTING) instead of a plain read-
+    # then-check: two concurrent/double-submitted accept requests both reading
+    # status=PENDING would otherwise both pass the check, both compute the same
+    # per-line "already minted" count, and both mint the full accepted_qty --
+    # doubling on-hand stock. Only one request can win this guarded update; the
+    # loser gets the same 400 a genuinely-already-accepted GRN would return. The
+    # pre-claim status is restored on any failure below so a real error never
+    # leaves the GRN stuck un-acceptable.
+    claimed = grn_repo.claim_for_accept(grn_id, ["PENDING", "PARTIALLY_ACCEPTED"])
+    if not claimed:
         raise HTTPException(status_code=400, detail="GRN is not pending")
+    original_status = claimed.get("status")
 
-    store_id = grn.get("store_id")
-    po_id = grn.get("po_id")
-    grn_number = grn.get("grn_number")
-    user_id = current_user.get("user_id")
+    try:
+        store_id = grn.get("store_id")
+        po_id = grn.get("po_id")
+        grn_number = grn.get("grn_number")
+        user_id = current_user.get("user_id")
 
-    # Phase 2 (inventory valuation): build a per-product unit_price map from the
-    # PO so each minted serialized unit is stamped with its PROVISIONAL cost
-    # (the agreed PO price). This is the receipt-time cost; the purchase invoice
-    # later trues it up to the actually-billed price. ADDITIVE + fail-soft: any
-    # problem here leaves po_unit_price empty and the units mint exactly as
-    # before (no unit_cost), never blocking receiving.
-    po_unit_price: dict = {}
-    po_for_cost = None
-    if po_repo is not None and po_id:
-        try:
-            po_for_cost = po_repo.find_by_id(po_id)
-            for it in (po_for_cost or {}).get("items", []) or []:
-                if not isinstance(it, dict):
-                    continue
-                pid = it.get("product_id")
-                if pid is None or pid in po_unit_price:
-                    continue
-                try:
-                    po_unit_price[pid] = round(float(it.get("unit_price") or 0), 2)
-                except (TypeError, ValueError):
-                    continue
-        except Exception:  # noqa: BLE001
-            po_unit_price = {}
-
-    minted_stock_ids: List[str] = []
-    units_added = 0
-    # Hub Phase 2: lines whose product is not yet on the spine are HELD (not
-    # minted as ghost stock) -> the GRN stays PARTIALLY_ACCEPTED and the FE shows
-    # a "Catalog now" affordance; re-accepting after cataloguing mints them.
-    unresolved_lines: List[dict] = []
-    product_repo = get_product_repository()
-
-    if stock_repo is not None:
-        for line_index, item in enumerate(grn.get("items", []) or []):
+        # Phase 2 (inventory valuation): build a per-product unit_price map from the
+        # PO so each minted serialized unit is stamped with its PROVISIONAL cost
+        # (the agreed PO price). This is the receipt-time cost; the purchase invoice
+        # later trues it up to the actually-billed price. ADDITIVE + fail-soft: any
+        # problem here leaves po_unit_price empty and the units mint exactly as
+        # before (no unit_cost), never blocking receiving.
+        po_unit_price: dict = {}
+        po_for_cost = None
+        if po_repo is not None and po_id:
             try:
-                accepted_qty = int(item.get("accepted_qty", 0) or 0)
-            except (TypeError, ValueError):
-                accepted_qty = 0
-            product_id = item.get("product_id")
-            if accepted_qty <= 0 or not product_id:
-                continue
-
-            # Hub Phase 2 ghost-stock gate: only mint against a product that
-            # exists on the `products` spine. An uncatalogued line is HELD (no
-            # ghost stock) for "Catalog now". Fail-soft: when no product repo is
-            # available we cannot verify, so we mint exactly as before.
-            prod = product_repo.find_by_id(product_id) if product_repo else None
-            if product_repo is not None and prod is None:
-                unresolved_lines.append(
-                    {
-                        "product_id": product_id,
-                        "accepted_qty": accepted_qty,
-                        "reason": "not_catalogued",
-                    }
-                )
-                continue
-
-            # Idempotency guard keyed on the GRN LINE (grn_line_index), not just
-            # the product: a GRN may legitimately carry two lines for the SAME
-            # product (e.g. different location_code). A product-only key let line
-            # B see line A's units and skip minting -> silent first-accept stock
-            # loss. Keying on the line index makes each line mint its own qty and
-            # still makes a re-accept idempotent.
-            try:
-                already = stock_repo.count(
-                    {
-                        "source_type": "GRN",
-                        "source_id": grn_id,
-                        "product_id": product_id,
-                        "grn_line_index": line_index,
-                    }
-                )
-            except Exception:  # noqa: BLE001
-                already = 0
-            if already >= accepted_qty:
-                continue
-            to_mint = accepted_qty - already
-
-            location_code = item.get("location_code") or "DEFAULT"
-            # Provisional receipt cost from the PO line (Phase 2 valuation).
-            # Prefer the GRN line's own unit_price if it carries one, else the PO
-            # price. ADDITIVE: only stamped when we have a positive cost, so a
-            # priceless receipt mints exactly as before.
-            try:
-                line_cost = float(item.get("unit_price") or 0) or po_unit_price.get(
-                    product_id, 0.0
-                )
-            except (TypeError, ValueError):
-                line_cost = po_unit_price.get(product_id, 0.0)
-            cost_fields = {}
-            if line_cost and line_cost > 0:
-                cost_fields = {
-                    "unit_cost": round(line_cost, 2),
-                    "cost_price": round(line_cost, 2),
-                    "cost_source": "GRN_PO",
-                }
-                # Hub Phase 2 hero: receiving the goods is where the cost becomes
-                # known. Backfill it onto the PRODUCT spine when the product had
-                # no cost, then atomically restamp -- a DRAFT whose only gap was
-                # cost_price auto-promotes to ACTIVE (purchasable) right here.
-                # Never-demote + fail-soft: a promote failure never blocks minting.
-                if (
-                    product_repo is not None
-                    and prod is not None
-                    and not prod.get("cost_price")
-                ):
+                po_for_cost = po_repo.find_by_id(po_id)
+                for it in (po_for_cost or {}).get("items", []) or []:
+                    if not isinstance(it, dict):
+                        continue
+                    pid = it.get("product_id")
+                    if pid is None or pid in po_unit_price:
+                        continue
                     try:
-                        product_repo.update(
-                            product_id,
-                            {
-                                "cost_price": round(line_cost, 2),
-                                "cost_source": "GRN_PO",
-                            },
-                        )
-                        _pm.apply_restamp_atomic(
-                            product_id,
-                            prod,
-                            {"cost_price": round(line_cost, 2)},
-                            product_repo=product_repo,
-                        )
-                    except Exception as _cp_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[VENDOR] GRN cost-promote skipped for %s: %s",
-                            product_id,
-                            _cp_exc,
-                        )
+                        po_unit_price[pid] = round(float(it.get("unit_price") or 0), 2)
+                    except (TypeError, ValueError):
+                        continue
+            except Exception:  # noqa: BLE001
+                po_unit_price = {}
 
-            # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
-            # COMPLETE product. After the cost backfill above, a product still
-            # missing catalogue fields beyond cost remains a non-purchasable
-            # DRAFT -- HOLD its line (like an uncatalogued line) instead of
-            # minting sellable stock POS could not lawfully price/sell. Fail-soft:
-            # only when a product repo is available to verify completeness.
-            if product_repo is not None and prod is not None:
-                merged_for_status = dict(prod)
-                if cost_fields:
-                    merged_for_status["cost_price"] = cost_fields["cost_price"]
-                if _pm.compute_catalog_status(merged_for_status)[1]:
+        minted_stock_ids: List[str] = []
+        units_added = 0
+        # Hub Phase 2: lines whose product is not yet on the spine are HELD (not
+        # minted as ghost stock) -> the GRN stays PARTIALLY_ACCEPTED and the FE shows
+        # a "Catalog now" affordance; re-accepting after cataloguing mints them.
+        unresolved_lines: List[dict] = []
+        product_repo = get_product_repository()
+
+        if stock_repo is not None:
+            for line_index, item in enumerate(grn.get("items", []) or []):
+                try:
+                    accepted_qty = int(item.get("accepted_qty", 0) or 0)
+                except (TypeError, ValueError):
+                    accepted_qty = 0
+                product_id = item.get("product_id")
+                if accepted_qty <= 0 or not product_id:
+                    continue
+
+                # Hub Phase 2 ghost-stock gate: only mint against a product that
+                # exists on the `products` spine. An uncatalogued line is HELD (no
+                # ghost stock) for "Catalog now". Fail-soft: when no product repo is
+                # available we cannot verify, so we mint exactly as before.
+                prod = product_repo.find_by_id(product_id) if product_repo else None
+                if product_repo is not None and prod is None:
                     unresolved_lines.append(
                         {
                             "product_id": product_id,
                             "accepted_qty": accepted_qty,
-                            "reason": "incomplete_catalog",
+                            "reason": "not_catalogued",
                         }
                     )
                     continue
 
-            # P2 (optical batch/expiry): stamp the supplier batch + expiry on
-            # each minted unit so contact lenses are dated for FEFO consumption
-            # and near-expiry reporting (the stock model + FEFO helpers key on
-            # batch_code/expiry_date -- the SAME fields /stock/add persists, so a
-            # GRN-received CL unit is indistinguishable from a manually-added
-            # one). ADDITIVE + fail-soft: a line with no batch/expiry (frames,
-            # undated spectacle lenses) mints exactly as before.
-            batch_fields = {}
-            _bcode = item.get("batch_code") or item.get("lot_number")
-            if _bcode:
-                batch_fields["batch_code"] = _bcode
-            if item.get("expiry_date"):
-                batch_fields["expiry_date"] = item.get("expiry_date")
+                # Idempotency guard keyed on the GRN LINE (grn_line_index), not just
+                # the product: a GRN may legitimately carry two lines for the SAME
+                # product (e.g. different location_code). A product-only key let line
+                # B see line A's units and skip minting -> silent first-accept stock
+                # loss. Keying on the line index makes each line mint its own qty and
+                # still makes a re-accept idempotent.
+                try:
+                    already = stock_repo.count(
+                        {
+                            "source_type": "GRN",
+                            "source_id": grn_id,
+                            "product_id": product_id,
+                            "grn_line_index": line_index,
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    already = 0
+                if already >= accepted_qty:
+                    continue
+                to_mint = accepted_qty - already
 
-            for _ in range(to_mint):
-                created = stock_repo.create(
-                    {
-                        "store_id": store_id,
-                        "product_id": product_id,
-                        "barcode": _grn_barcode(store_id, product_id),
-                        "location_code": location_code,
-                        "quantity": 1,
-                        "status": "AVAILABLE",
-                        "is_reserved": False,
-                        "barcode_printed": False,
-                        "source_type": "GRN",
-                        "source_id": grn_id,
-                        "grn_line_index": line_index,
-                        "grn_number": grn_number,
-                        "po_id": po_id,
-                        "created_by": user_id,
-                        **cost_fields,
-                        **batch_fields,
+                location_code = item.get("location_code") or "DEFAULT"
+                # Provisional receipt cost from the PO line (Phase 2 valuation).
+                # Prefer the GRN line's own unit_price if it carries one, else the PO
+                # price. ADDITIVE: only stamped when we have a positive cost, so a
+                # priceless receipt mints exactly as before.
+                try:
+                    line_cost = float(item.get("unit_price") or 0) or po_unit_price.get(
+                        product_id, 0.0
+                    )
+                except (TypeError, ValueError):
+                    line_cost = po_unit_price.get(product_id, 0.0)
+                cost_fields = {}
+                if line_cost and line_cost > 0:
+                    cost_fields = {
+                        "unit_cost": round(line_cost, 2),
+                        "cost_price": round(line_cost, 2),
+                        "cost_source": "GRN_PO",
                     }
-                )
-                if created:
-                    units_added += 1
-                    stock_id = created.get("stock_id") or created.get("_id")
-                    if stock_id:
-                        minted_stock_ids.append(str(stock_id))
-                        # Fail-soft audit row per unit -- never blocks receiving.
-                        _grn_stock_audit(
-                            str(stock_id),
-                            "AVAILABLE",
-                            grn_id,
-                            po_id,
-                            store_id,
-                            user_id,
-                        )
-                        # E3w: ledger the GRN mint (None -> AVAILABLE) into
-                        # item_events. Additive + fail-soft: this runs AFTER the
-                        # unit is already in stock_units, performs no CAS / no
-                        # projection, and any error is logged + swallowed so it
-                        # can never lose the received stock.
+                    # Hub Phase 2 hero: receiving the goods is where the cost becomes
+                    # known. Backfill it onto the PRODUCT spine when the product had
+                    # no cost, then atomically restamp -- a DRAFT whose only gap was
+                    # cost_price auto-promotes to ACTIVE (purchasable) right here.
+                    # Never-demote + fail-soft: a promote failure never blocks minting.
+                    if (
+                        product_repo is not None
+                        and prod is not None
+                        and not prod.get("cost_price")
+                    ):
                         try:
-                            from ..services import item_events as ie
-
-                            _le_db = _get_db()
-                            if _le_db is not None:
-                                ie.record_post_write_event(
-                                    _le_db,
-                                    event_type=ie.ItemEventType.MINT,
-                                    actor_id=user_id or "",
-                                    stock_id=str(stock_id),
-                                    from_state=None,
-                                    to_state=ie.StockState.AVAILABLE,
-                                    store_id=store_id,
-                                    product_id=product_id,
-                                    source_type="GRN",
-                                    source_id=grn_id,
-                                    payload={"grn_number": grn_number, "po_id": po_id},
-                                )
-                        except Exception as _le_exc:  # noqa: BLE001
+                            product_repo.update(
+                                product_id,
+                                {
+                                    "cost_price": round(line_cost, 2),
+                                    "cost_source": "GRN_PO",
+                                },
+                            )
+                            _pm.apply_restamp_atomic(
+                                product_id,
+                                prod,
+                                {"cost_price": round(line_cost, 2)},
+                                product_repo=product_repo,
+                            )
+                        except Exception as _cp_exc:  # noqa: BLE001
                             logger.warning(
-                                "[VENDOR] GRN mint ledger emit skipped: %s",
-                                _le_exc,
+                                "[VENDOR] GRN cost-promote skipped for %s: %s",
+                                product_id,
+                                _cp_exc,
                             )
 
-    # Mark the GRN accepted -- or PARTIALLY_ACCEPTED when one or more lines were
-    # HELD because their product is not yet catalogued (Hub Phase 2). A held GRN
-    # is re-acceptable after "Catalog now" to mint the now-resolved lines.
-    grn_status = "PARTIALLY_ACCEPTED" if unresolved_lines else "ACCEPTED"
-    grn_repo.update(
-        grn_id,
-        {
-            "status": grn_status,
-            "accepted_at": datetime.now().isoformat(),
-            "accepted_by": user_id,
-            "units_added": units_added,
-            "unresolved_lines": unresolved_lines,
-        },
-    )
+                # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
+                # COMPLETE product. After the cost backfill above, a product still
+                # missing catalogue fields beyond cost remains a non-purchasable
+                # DRAFT -- HOLD its line (like an uncatalogued line) instead of
+                # minting sellable stock POS could not lawfully price/sell. Fail-soft:
+                # only when a product repo is available to verify completeness.
+                if product_repo is not None and prod is not None:
+                    merged_for_status = dict(prod)
+                    if cost_fields:
+                        merged_for_status["cost_price"] = cost_fields["cost_price"]
+                    if _pm.compute_catalog_status(merged_for_status)[1]:
+                        unresolved_lines.append(
+                            {
+                                "product_id": product_id,
+                                "accepted_qty": accepted_qty,
+                                "reason": "incomplete_catalog",
+                            }
+                        )
+                        continue
+
+                # P2 (optical batch/expiry): stamp the supplier batch + expiry on
+                # each minted unit so contact lenses are dated for FEFO consumption
+                # and near-expiry reporting (the stock model + FEFO helpers key on
+                # batch_code/expiry_date -- the SAME fields /stock/add persists, so a
+                # GRN-received CL unit is indistinguishable from a manually-added
+                # one). ADDITIVE + fail-soft: a line with no batch/expiry (frames,
+                # undated spectacle lenses) mints exactly as before.
+                batch_fields = {}
+                _bcode = item.get("batch_code") or item.get("lot_number")
+                if _bcode:
+                    batch_fields["batch_code"] = _bcode
+                if item.get("expiry_date"):
+                    batch_fields["expiry_date"] = item.get("expiry_date")
+
+                for _ in range(to_mint):
+                    created = stock_repo.create(
+                        {
+                            "store_id": store_id,
+                            "product_id": product_id,
+                            "barcode": _grn_barcode(store_id, product_id),
+                            "location_code": location_code,
+                            "quantity": 1,
+                            "status": "AVAILABLE",
+                            "is_reserved": False,
+                            "barcode_printed": False,
+                            "source_type": "GRN",
+                            "source_id": grn_id,
+                            "grn_line_index": line_index,
+                            "grn_number": grn_number,
+                            "po_id": po_id,
+                            "created_by": user_id,
+                            **cost_fields,
+                            **batch_fields,
+                        }
+                    )
+                    if created:
+                        units_added += 1
+                        stock_id = created.get("stock_id") or created.get("_id")
+                        if stock_id:
+                            minted_stock_ids.append(str(stock_id))
+                            # Fail-soft audit row per unit -- never blocks receiving.
+                            _grn_stock_audit(
+                                str(stock_id),
+                                "AVAILABLE",
+                                grn_id,
+                                po_id,
+                                store_id,
+                                user_id,
+                            )
+                            # E3w: ledger the GRN mint (None -> AVAILABLE) into
+                            # item_events. Additive + fail-soft: this runs AFTER the
+                            # unit is already in stock_units, performs no CAS / no
+                            # projection, and any error is logged + swallowed so it
+                            # can never lose the received stock.
+                            try:
+                                from ..services import item_events as ie
+
+                                _le_db = _get_db()
+                                if _le_db is not None:
+                                    ie.record_post_write_event(
+                                        _le_db,
+                                        event_type=ie.ItemEventType.MINT,
+                                        actor_id=user_id or "",
+                                        stock_id=str(stock_id),
+                                        from_state=None,
+                                        to_state=ie.StockState.AVAILABLE,
+                                        store_id=store_id,
+                                        product_id=product_id,
+                                        source_type="GRN",
+                                        source_id=grn_id,
+                                        payload={"grn_number": grn_number, "po_id": po_id},
+                                    )
+                            except Exception as _le_exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[VENDOR] GRN mint ledger emit skipped: %s",
+                                    _le_exc,
+                                )
+
+        # Mark the GRN accepted -- or PARTIALLY_ACCEPTED when one or more lines were
+        # HELD because their product is not yet catalogued (Hub Phase 2). A held GRN
+        # is re-acceptable after "Catalog now" to mint the now-resolved lines.
+        grn_status = "PARTIALLY_ACCEPTED" if unresolved_lines else "ACCEPTED"
+        grn_repo.update(
+            grn_id,
+            {
+                "status": grn_status,
+                "accepted_at": datetime.now().isoformat(),
+                "accepted_by": user_id,
+                "units_added": units_added,
+                "unresolved_lines": unresolved_lines,
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        # Never leave the GRN wedged in ACCEPTING on a genuine failure --
+        # restore the pre-claim status so a retry (or a human) can accept again.
+        try:
+            grn_repo.update(grn_id, {"status": original_status})
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
     # Advance the PO received state. Sum the accepted qty across EVERY accepted
     # GRN for this PO (this one is now ACCEPTED) and compare against the ordered

@@ -296,6 +296,13 @@ class _FakeGRNRepo:
     def find(self, *a, **k):
         return [self._grn]
 
+    def claim_for_accept(self, grn_id, from_statuses):
+        if grn_id != self._grn.get("grn_id") or self._grn.get("status") not in from_statuses:
+            return None
+        pre = dict(self._grn)
+        self._grn["status"] = "ACCEPTING"
+        return pre
+
 
 @pytest.fixture
 def grn_env(monkeypatch):

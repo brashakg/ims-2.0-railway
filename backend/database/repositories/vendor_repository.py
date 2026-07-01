@@ -112,6 +112,19 @@ class GRNRepository(BaseRepository):
     
     def find_by_number(self, grn_number: str) -> Optional[Dict]:
         return self.find_one({"grn_number": grn_number})
+
+    def claim_for_accept(self, grn_id: str, from_statuses: List[str]) -> Optional[Dict]:
+        """Atomically flip status -> ACCEPTING iff currently one of from_statuses.
+
+        Returns the PRE-update document (so callers can read the original
+        status to restore on failure) or None if the GRN doesn't exist or is
+        no longer in one of from_statuses -- guards against two concurrent/
+        double-submitted accept requests both passing a plain read-then-check.
+        """
+        return self.collection.find_one_and_update(
+            {self.id_field: grn_id, "status": {"$in": from_statuses}},
+            {"$set": {"status": "ACCEPTING"}},
+        )
     
     def find_by_po(self, po_id: str) -> List[Dict]:
         return self.find_many({"po_id": po_id}, sort=[("created_at", -1)])
