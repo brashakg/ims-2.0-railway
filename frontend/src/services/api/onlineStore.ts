@@ -1021,6 +1021,20 @@ export interface PushStatus {
   counts: PushCounts;
 }
 
+/** The POST /push/all-pending sweep result — the same engine, run over every
+ *  pending/dirty ecom doc (a dry-run PLAN per doc when DARK). Mirrors the backend
+ *  envelope; every field optional + nullable so a partial payload never breaks. */
+export interface PushSweepResult {
+  mode: PushMode;
+  db_connected?: boolean | null;
+  pushed_count?: number | null;
+  limit_reached?: boolean | null;
+  /** Per-entity {pushed, failed} tally. */
+  summary?: Record<string, { pushed?: number; failed?: number } | null> | null;
+  /** The per-doc PushResult rows (SIMULATED plans when DARK). */
+  results?: PushResult[] | null;
+}
+
 const PUSH_BASE = '/online-store/push';
 
 /** A safe DARK placeholder for getStatus — used when the backend is absent, the
@@ -1091,6 +1105,134 @@ export const pushApi = {
   pushImage: async (imageId: string): Promise<PushResult> => {
     const res = await api.post(`${PUSH_BASE}/image/${encodeURIComponent(imageId)}`);
     return _pushResultFrom(res?.data);
+  },
+
+  /** Sweep every pending/dirty ecom doc through the SAME engine and return the
+   *  batch result. This drives the control panel's per-entity "Dry-run" buttons:
+   *  when DARK (the default) each push is SIMULATED (a plan, no Shopify call), so
+   *  this is always safe to run for preview. `entities` is an optional CSV filter
+   *  (products,collections,menus,images); `limit` caps the sweep. The backend
+   *  triple-gate is the real control over whether any of these become LIVE — this
+   *  method never arms it and never bypasses it. Throws on HTTP failure so the
+   *  caller can toast; the DARK/LIVE posture is carried in the returned `mode`. */
+  pushAllPending: async (
+    entities?: string,
+    limit = 100,
+  ): Promise<PushSweepResult> => {
+    const params = new URLSearchParams();
+    if (entities) params.set('entities', entities);
+    params.set('limit', String(limit));
+    const res = await api.post(`${PUSH_BASE}/all-pending?${params.toString()}`);
+    const data = (res?.data ?? {}) as Partial<PushSweepResult>;
+    const mode = (data.mode ?? {}) as PushMode;
+    return {
+      mode: {
+        mode: mode.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
+        is_live: mode.is_live ?? (mode.mode === 'LIVE'),
+        writes_enabled: mode.writes_enabled ?? null,
+        dispatch_mode: mode.dispatch_mode ?? null,
+        creds_present: mode.creds_present ?? null,
+        api_version: mode.api_version ?? null,
+        single_writer_note: mode.single_writer_note ?? null,
+      },
+      db_connected: data.db_connected ?? null,
+      pushed_count: data.pushed_count ?? 0,
+      limit_reached: data.limit_reached ?? false,
+      summary: (data.summary ?? {}) as PushSweepResult['summary'],
+      results: Array.isArray(data.results) ? (data.results as PushResult[]) : [],
+    };
+  },
+};
+
+// ============================================================================
+// SYNC-HEALTH DIAGNOSTICS sub-api  (BVI safety net — read-only, SUPERADMIN)
+// ----------------------------------------------------------------------------
+// Thin read-only wrappers over the existing admin diagnostics endpoints
+// (backend/api/routers/admin.py ~848-943), surfaced as tiles on the Shopify sync
+// control panel. All three are SUPERADMIN-gated on the backend and 100%
+// fail-soft here: any error (403 non-superadmin / 404 stale deploy / network)
+// resolves to a safe "unavailable" shape so a tile renders empty rather than
+// crashing the page. NONE of these arm or bypass the push gates.
+//   - GET /admin/online-store/sync-health   last sync / reconcile / webhooks / drift
+//   - GET /admin/online-store/parity        IMS catalog counts vs what has a gid
+//   - GET /admin/online-store/drift         live dual-writer drift check (needs creds)
+// Import DIRECTLY from this module (NOT the api barrel — TS2614, per past sessions).
+// ============================================================================
+
+/** Parity oracle: per-entity total-vs-pushed-vs-missing counts (mirrors
+ *  online_sync_health.parity_summary + the /admin/online-store/parity envelope,
+ *  which also carries an uploads_audit block). All fields optional + nullable. */
+export interface SyncParity {
+  parity?: {
+    entities?: Record<
+      string,
+      { total?: number; pushed?: number; missing?: number } | null
+    > | null;
+    ok?: boolean | null;
+  } | null;
+  uploads_audit?: {
+    checked?: boolean | null;
+    local_url_count?: number | null;
+  } | null;
+  /** Set when the read failed / was forbidden (tile renders "unavailable"). */
+  unavailable?: boolean;
+}
+
+/** Sync-health summary (mirrors online_sync_health.sync_health). Only the fields
+ *  the panel surfaces are typed; the rest pass through untyped. */
+export interface SyncHealth {
+  online_configured?: boolean | null;
+  last_successful_shopify_sync_at?: string | null;
+  last_shopify_sync?: { found?: boolean; ok?: boolean; ran_at?: string | null } | null;
+  reconcile?: { checked?: boolean; oversell_risk?: number; count?: number } | null;
+  webhooks?: { checked?: boolean; failed?: number; skipped?: number } | null;
+  drift?: { checked?: boolean; reason?: string | null } | null;
+  stock_miss?: { checked?: boolean; unresolved?: number } | null;
+  [k: string]: any;
+  unavailable?: boolean;
+}
+
+/** Live dual-writer drift result (mirrors online_sync_health.detect_drift). */
+export interface SyncDrift {
+  checked?: boolean | null;
+  reason?: string | null;
+  drifted?: Array<{ gid?: string; sku?: string }> | null;
+  counts?: { scanned?: number; drifted?: number; no_timestamp?: number } | null;
+  unavailable?: boolean;
+}
+
+const ADMIN_ONLINE_BASE = '/admin/online-store';
+
+export const syncHealthApi = {
+  /** Read the sync-health summary. Fail-soft -> {unavailable:true}. */
+  getSyncHealth: async (): Promise<SyncHealth> => {
+    try {
+      const res = await api.get(`${ADMIN_ONLINE_BASE}/sync-health`);
+      return { ...(res?.data ?? {}) } as SyncHealth;
+    } catch {
+      return { unavailable: true };
+    }
+  },
+
+  /** Read the parity oracle + uploads audit. Fail-soft -> {unavailable:true}. */
+  getParity: async (): Promise<SyncParity> => {
+    try {
+      const res = await api.get(`${ADMIN_ONLINE_BASE}/parity`);
+      return { ...(res?.data ?? {}) } as SyncParity;
+    } catch {
+      return { unavailable: true };
+    }
+  },
+
+  /** Run the LIVE dual-writer drift check (a real Shopify READ — no writes; needs
+   *  creds, else it degrades to {checked:false}). Fail-soft -> {unavailable:true}. */
+  getDrift: async (limit = 50): Promise<SyncDrift> => {
+    try {
+      const res = await api.get(`${ADMIN_ONLINE_BASE}/drift`, { params: { limit } });
+      return { ...(res?.data ?? {}) } as SyncDrift;
+    } catch {
+      return { unavailable: true };
+    }
   },
 };
 
