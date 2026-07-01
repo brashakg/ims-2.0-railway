@@ -171,8 +171,10 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'] },
       { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER'] },
-      // Footfall Tracking — hidden until the feature is built (route is a "Coming soon" stub). Re-enable when /pos/footfall ships.
-      // { id: 'pos-footfall', label: 'Footfall Tracking', path: '/pos/footfall' },
+      // Footfall Tracking — N3 manual walk-in capture + auto conversion %. The
+      // page (pages/pos/FootfallPage) + backend (walkouts.py) shipped, so the
+      // nav item is live. Route is registered at /pos/footfall (App.tsx).
+      { id: 'pos-footfall', label: 'Footfall Tracking', path: '/pos/footfall', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST'] },
     ],
   },
   {
