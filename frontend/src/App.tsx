@@ -57,6 +57,7 @@ const CollectionBrowsePage = lazy(() => import('./pages/online-store/CollectionB
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
+const OnlineStoreHealthPage = lazy(() => import('./pages/online-store/OnlineStoreHealthPage'));
 const OndcSellerPage = lazy(() => import('./pages/online-store/OndcSellerPage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
@@ -621,6 +622,21 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <OnlineCustomersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Store health (BVI Phase 5). Read-only
+                      pre-cutover readiness dashboard: orphan SKUs, attribute
+                      coverage, barcode match + a composite score. Same
+                      catalog/design role gate as the module shell. */}
+                  <Route
+                    path="online-store/store-health"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <OnlineStoreHealthPage />
                       </ProtectedRoute>
                     }
                   />
