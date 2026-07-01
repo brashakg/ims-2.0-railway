@@ -58,6 +58,7 @@ const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
 const OndcSellerPage = lazy(() => import('./pages/online-store/OndcSellerPage'));
+const OnlineShopifySyncPage = lazy(() => import('./pages/online-store/OnlineShopifySyncPage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -634,6 +635,23 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN']}
                       >
                         <OndcSellerPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Shopify sync control panel (BVI Phase 6).
+                      STATUS + DRY-RUN cockpit for the (dark) IMS -> Shopify push
+                      engine. Same catalog/design module role gate as the shell;
+                      the live "Go live" cutover is further gated to ADMIN/
+                      SUPERADMIN in-page AND stays owner-armed behind the backend
+                      triple-gate (this UI never arms/bypasses it). */}
+                  <Route
+                    path="online-store/shopify"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <OnlineShopifySyncPage />
                       </ProtectedRoute>
                     }
                   />
