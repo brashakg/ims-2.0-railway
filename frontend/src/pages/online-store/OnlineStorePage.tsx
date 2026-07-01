@@ -66,6 +66,8 @@ const SECTIONS: Section[] = [
     phase: 'Phase 1',
     countKey: 'products',
     countLabel: 'products',
+    // Phase 1 shipped: the read-only Products / PIM list is live in-app.
+    href: '/online-store/products',
   },
   {
     key: 'collections',
@@ -112,6 +114,8 @@ const SECTIONS: Section[] = [
     phase: 'Phase 3',
     countKey: 'customers',
     countLabel: 'customers',
+    // Phase 3 shipped: the read-only online Customers list is live in-app.
+    href: '/online-store/customers',
   },
   {
     key: 'orders',

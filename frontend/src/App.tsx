@@ -50,6 +50,8 @@ const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(
 const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
 const OnlineStorePage = lazy(() => import('./pages/online-store/OnlineStorePage'));
+const OnlineProductsPage = lazy(() => import('./pages/online-store/OnlineProductsPage'));
+const OnlineCustomersPage = lazy(() => import('./pages/online-store/OnlineCustomersPage'));
 const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'));
 const CollectionBrowsePage = lazy(() => import('./pages/online-store/CollectionBrowsePage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
@@ -526,6 +528,20 @@ function App() {
                     }
                   />
 
+                  {/* Online Store — Products / PIM (BVI Phase 1). Read-only list
+                      of the online catalog + per-SKU online status. Same
+                      catalog/design role gate as the module shell. */}
+                  <Route
+                    path="online-store/products"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <OnlineProductsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
                   {/* Online Store — Collections editor (BVI Phase 2). Same
                       catalog/design role gate as the module shell. */}
                   <Route
@@ -591,6 +607,20 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <OnlineOrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Customers (BVI Phase 3). Read-only list of
+                      the online-origin (Shopify-joined) customer segment. Same
+                      catalog/design role gate as the module shell. */}
+                  <Route
+                    path="online-store/customers"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+                      >
+                        <OnlineCustomersPage />
                       </ProtectedRoute>
                     }
                   />
