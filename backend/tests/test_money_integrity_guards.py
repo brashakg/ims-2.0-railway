@@ -570,7 +570,12 @@ class TestLoyaltyRedeemEndpoint:
                 "requested_points": 200,
             },
         )
-        body = loyalty_module.RedeemRequest(customer_id="CUST-1", points=200)
+        # order_value supplies the required order linkage (the over-redeem guard);
+        # rupee_value 200 is well within it, so the ATOMIC DEBIT guard is what
+        # this test exercises.
+        body = loyalty_module.RedeemRequest(
+            customer_id="CUST-1", points=200, order_value=5000.0
+        )
         with pytest.raises(HTTPException) as ei:
             await loyalty_module.redeem(body, current_user=_admin())
         assert ei.value.status_code == 409

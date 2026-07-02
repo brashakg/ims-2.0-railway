@@ -432,10 +432,55 @@ async def redeem(
     settings = _settings_safe()
     account = accounts.find_or_create(body.customer_id)
 
+    # OVER-REDEEM GUARD (security): a redemption must be bounded by the order it
+    # discounts -- otherwise points worth more than the order (or with no order
+    # at all) could be redeemed, minting rupee value the sale never earned.
+    #   * Require SOME order linkage: an order_id OR an explicit order_value.
+    #     The POS redeem flow always sends both (POSLayout -> loyaltyApi.redeem
+    #     with order_id + order_value), so this never breaks a real checkout.
+    #   * When order_id is present, look the order up and derive the
+    #     AUTHORITATIVE ceiling from the order's grand_total (never trust the
+    #     client order_value alone). The order must belong to this customer.
+    #   * The redeemed rupee_value is then hard-capped to the order ceiling
+    #     below (in addition to calc_redeem's max_pct cap).
+    order_ceiling: Optional[float] = None
+    if body.order_id:
+        orders = get_order_repository()
+        if orders is None:
+            raise HTTPException(status_code=503, detail="Order store unavailable")
+        order_doc = orders.find_by_id(body.order_id)
+        if not order_doc:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if (order_doc.get("customer_id") or "") != body.customer_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Order does not belong to this customer",
+            )
+        order_ceiling = max(float(order_doc.get("grand_total") or 0.0), 0.0)
+    elif body.order_value is not None:
+        # No order_id, but an explicit order_value was supplied -> use it as the
+        # ceiling (a manual redeem tied to a known cart total).
+        order_ceiling = max(float(body.order_value), 0.0)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "reason": "order_link_required",
+                "message": (
+                    "A redeem must reference the order it discounts: supply "
+                    "order_id (preferred) or order_value."
+                ),
+            },
+        )
+
+    # Feed calc_redeem the AUTHORITATIVE ceiling (the order's grand_total when we
+    # resolved one), not the raw client order_value, so its max_pct cap is
+    # computed against the real order total.
     result = calc_redeem(
         body.points,
         account.get("balance_points", 0),
-        body.order_value,
+        order_ceiling,
         settings,
     )
     if not result.get("ok"):
@@ -443,6 +488,26 @@ async def redeem(
 
     capped_points = int(result["capped_points"])
     rupee_value = float(result["rupee_value"])
+
+    # HARD over-redeem reject: the rupee value redeemed can NEVER exceed the
+    # order's own value. calc_redeem's percentage cap only bites when a
+    # max_redeem_pct_of_order < 100 is configured; this is the unconditional
+    # floor that closes the "redeem more rupees than the order is worth" hole
+    # regardless of settings. 1-paisa epsilon for float noise.
+    if order_ceiling is not None and rupee_value > order_ceiling + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "reason": "exceeds_order_value",
+                "rupee_value": rupee_value,
+                "order_value": round(order_ceiling, 2),
+                "message": (
+                    "Redemption value exceeds the order's value; points redeemed "
+                    "cannot be worth more than the order they discount."
+                ),
+            },
+        )
 
     # ATOMIC GUARDED DEBIT (no double-spend). The Python balance check above
     # (calc_redeem) is advisory only -- two concurrent redeems can both pass it.

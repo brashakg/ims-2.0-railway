@@ -416,6 +416,109 @@ def test_redeem_capped_by_max_pct_of_order(client, auth_headers, patched_loyalty
 
 
 # ============================================================================
+# Over-redeem guard (security): redemption bounded by the order it discounts
+# ============================================================================
+
+
+def _seed_balance(patched_loyalty, client, auth_headers, customer_id, points):
+    """Earn `points` for `customer_id` (1 pt / Rs 100 flat) so the account has a
+    balance to redeem against."""
+    rupees = points * 100.0
+    patched_loyalty["orders"].seed(f"EARN-{customer_id}", customer_id, rupees)
+    client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": customer_id, "order_id": f"EARN-{customer_id}",
+              "rupee_value": rupees},
+        headers=auth_headers,
+    )
+
+
+def test_redeem_exceeding_order_value_rejected(client, auth_headers, patched_loyalty):
+    """A redemption whose rupee value exceeds the order's grand_total is rejected
+    -- points cannot be worth more than the order they discount.
+
+    This targets the ACTUAL hole: with max_redeem_pct_of_order=100 (percentage
+    cap disabled), calc_redeem would NOT bound the rupee value by the order, so
+    the unconditional order-value hard-cap is the guard under test. Order is
+    Rs 150 but the customer tries to redeem 500 points (= Rs 500)."""
+    # Disable the percentage cap so only the hard order-value cap can catch this.
+    client.put(
+        "/api/v1/loyalty/settings",
+        json={"max_redeem_pct_of_order": 100},
+        headers=auth_headers,
+    )
+    _seed_balance(patched_loyalty, client, auth_headers, "cust-over", 500)
+    acct = patched_loyalty["accounts"].find_by_id("cust-over")
+    assert acct["balance_points"] == 500
+    # A small order (grand_total 150) resolved via order_id -> ceiling Rs 150.
+    patched_loyalty["orders"].seed("ORD-SMALL", "cust-over", 150.0)
+    resp = client.post(
+        "/api/v1/loyalty/redeem",
+        json={"customer_id": "cust-over", "order_id": "ORD-SMALL", "points": 500},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "exceeds_order_value" in resp.text
+    # Balance untouched -- no debit on a rejected over-redeem.
+    acct = patched_loyalty["accounts"].find_by_id("cust-over")
+    assert acct["balance_points"] == 500
+    assert acct.get("lifetime_redeemed", 0) == 0
+
+
+def test_redeem_within_order_value_ok_via_order_id(
+    client, auth_headers, patched_loyalty
+):
+    """A normal redeem within the order's value succeeds and debits the balance.
+    Order grand_total 5000; redeem 200 points (= Rs 200) -> OK."""
+    _seed_balance(patched_loyalty, client, auth_headers, "cust-ok", 500)
+    patched_loyalty["orders"].seed("ORD-BIG", "cust-ok", 5000.0)
+    resp = client.post(
+        "/api/v1/loyalty/redeem",
+        json={"customer_id": "cust-ok", "order_id": "ORD-BIG", "points": 200},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["redeemed_points"] == 200
+    assert body["rupee_value"] == 200.0
+    acct = patched_loyalty["accounts"].find_by_id("cust-ok")
+    assert acct["balance_points"] == 300
+
+
+def test_redeem_without_any_order_link_rejected(
+    client, auth_headers, patched_loyalty
+):
+    """A redeem with neither order_id nor order_value is rejected -- points can
+    never be redeemed with no order linkage at all."""
+    _seed_balance(patched_loyalty, client, auth_headers, "cust-nolink", 500)
+    resp = client.post(
+        "/api/v1/loyalty/redeem",
+        json={"customer_id": "cust-nolink", "points": 200},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400, resp.text
+    acct = patched_loyalty["accounts"].find_by_id("cust-nolink")
+    assert acct["balance_points"] == 500  # nothing debited
+
+
+def test_redeem_order_for_other_customer_rejected(
+    client, auth_headers, patched_loyalty
+):
+    """order_id must belong to the redeeming customer -- a cross-customer order
+    reference is rejected (mirrors the earn guard)."""
+    _seed_balance(patched_loyalty, client, auth_headers, "cust-a", 500)
+    patched_loyalty["orders"].seed("ORD-OTHER", "cust-b", 5000.0)
+    resp = client.post(
+        "/api/v1/loyalty/redeem",
+        json={"customer_id": "cust-a", "order_id": "ORD-OTHER", "points": 200},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400, resp.text
+    acct = patched_loyalty["accounts"].find_by_id("cust-a")
+    assert acct["balance_points"] == 500
+
+
+# ============================================================================
 # Adjust
 # ============================================================================
 
