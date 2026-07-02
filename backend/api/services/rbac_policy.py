@@ -5160,6 +5160,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/image",
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
+    # Autopilot v2 image RE-HOST: server-side copies an external (brand-site)
+    # image into our GridFS so products never hotlink. Same catalog write gate
+    # as the multipart upload; the fetch itself is SSRF-hardened in
+    # services/image_rehost.py (private/loopback/metadata ranges blocked).
+    {
+        "method": "POST",
+        "path": "/api/v1/products/image/from-url",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/products/image/{file_id}",

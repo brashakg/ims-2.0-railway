@@ -226,6 +226,15 @@ export const productApi = {
     return response.data as UploadedProductImage;
   },
 
+  // RE-HOST an external image URL (an Autopilot brand-site photo): the backend
+  // copies the bytes into OUR file store via an SSRF-hardened server-side
+  // fetch, so the product never depends on the brand site keeping the file.
+  // Same response shape as uploadProductImage, with a stable internal url.
+  rehostProductImage: async (url: string): Promise<UploadedProductImage> => {
+    const response = await api.post('/products/image/from-url', { url });
+    return response.data as UploadedProductImage;
+  },
+
   // Update a product through the SINGLE validated path (`PUT /products/{id}`).
   // The backend ProductUpdate schema enforces category (422) + MRP >= offer
   // and persists only modelled fields (snake_case). Use this instead of the

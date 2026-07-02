@@ -1643,6 +1643,81 @@ async def upload_product_image(
     }
 
 
+class ImageFromUrlBody(BaseModel):
+    """Body for the Autopilot image RE-HOST endpoint."""
+
+    url: str
+
+
+@router.post("/image/from-url", status_code=201)
+def rehost_product_image_from_url(
+    body: ImageFromUrlBody,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """RE-HOST an external product image into OUR file store (Autopilot v2).
+
+    Catalog Autopilot candidates carry brand-site image URLs; hotlinking them
+    means the product photo dies whenever the brand site moves the file. This
+    endpoint server-side fetches the external image ONCE and persists the
+    bytes durably in the shared GridFS store (kind="product_image", exactly
+    like the multipart upload above), returning the SAME response shape with a
+    stable self-hosted url.
+
+    SECURITY: the fetch goes through services.image_rehost.fetch_external_image
+    - http/https only, every host (and every redirect hop, max 3) resolved and
+    blocked for private/loopback/link-local/metadata ranges, response mime
+    gated to the image allowlist, and the body streamed under the shared size
+    cap. Role-gated to the catalog set like the upload. Sync `def` on purpose:
+    FastAPI runs it on the threadpool so the blocking fetch never stalls the
+    event loop.
+    """
+    from ..services.image_rehost import (
+        ImageFetchError,
+        fetch_external_image,
+        filename_from_url,
+    )
+
+    url = (body.url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    try:
+        content, mime, final_url = fetch_external_image(
+            url,
+            allowed_mimes=_IMAGE_MIME_TYPES,
+            max_bytes=MAX_FILE_SIZE_BYTES,
+        )
+    except ImageFetchError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail) from e
+
+    filename = filename_from_url(final_url, mime)
+    file_id = store.put(
+        content=content,
+        filename=filename,
+        mime_type=mime,
+        metadata={
+            "kind": "product_image",
+            "uploaded_by": current_user.get("user_id"),
+            # Audit: where the bytes came from (never re-fetched from here).
+            "source_url": url,
+        },
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    return {
+        "file_id": file_id,
+        "url": f"/api/v1/products/image/{file_id}",
+        "filename": filename,
+        "content_type": mime,
+        "size": len(content),
+    }
+
+
 @router.get("/image/{file_id}")
 async def get_product_image(file_id: str):
     """Stream a previously-uploaded product image by its stored file_id.
