@@ -115,7 +115,9 @@ const ActivityLogPage = lazy(() => import('./pages/admin/ActivityLogPage'));
 // /catalog/add — the single product-add door (Quick Add). Guided + Bulk modes
 // were removed; Quick Add absorbed every field/section Guided had.
 const QuickAddPage = lazy(() => import('./pages/catalog/QuickAddPage'));
-const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
+// CatalogAutopilotPage is retired from the nav + routes (merged inline into
+// QuickAddPage); /catalog/autopilot now redirects to /catalog/add. The page file
+// is kept in the tree but no longer imported here.
 const BuyDeskPage = lazy(() => import('./pages/catalog/BuyDeskPage'));
 const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
@@ -1331,14 +1333,15 @@ function App() {
                     }
                   />
 
-                  {/* Catalog Autopilot — brand+model search -> approve -> publish */}
+                  {/* Catalog Autopilot is now merged INLINE into the Add Product
+                      screen ("Auto-fill from web" panel). The standalone page +
+                      nav item were retired; this route redirects to /catalog/add
+                      so old bookmarks / handoffs still land somewhere useful. The
+                      ?prefill=autopilot sessionStorage handoff is unaffected (it
+                      navigates straight to /catalog/add). */}
                   <Route
                     path="catalog/autopilot"
-                    element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
-                        <CatalogAutopilotPage />
-                      </ProtectedRoute>
-                    }
+                    element={<Navigate to="/catalog/add" replace />}
                   />
 
                   {/* Pricing & Offers — bulk price + bulk offer (cap-enforced, dry-run-first) */}

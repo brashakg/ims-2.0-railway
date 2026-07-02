@@ -333,6 +333,10 @@ export interface ProductFormValues {
   syncToShopify: boolean;
   shopifyTags: string[];
   publishPOS: boolean;
+  // Uploaded product-image URLs (self-hosted, from productApi.uploadProductImage).
+  // Optional so existing callers that don't collect images still type-check;
+  // buildProductPayload defaults it to [].
+  images?: string[];
 }
 
 // Validate the common, mode-agnostic rules: category present, all required
@@ -462,7 +466,9 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     weight: values.weight ? parseFloat(values.weight) : undefined,
     cost_price: values.costPrice ? parseFloat(values.costPrice) : undefined,
     discount_category: values.discountCategory,
-    images: [],
+    // Uploaded image URLs (durably stored + served by the backend). Empty when
+    // the operator didn't add any.
+    images: Array.isArray(values.images) ? values.images : [],
     shopify: {
       // Kept for future vendor sync (NEXUS pushes POS stock -> Shopify). We
       // don't render our own storefront.
@@ -595,6 +601,11 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
     syncToShopify: false,
     shopifyTags: [],
     publishPOS: true,
+    // Preserve the source product's images so the clone starts with them (the
+    // operator can remove them before saving the new SKU).
+    images: Array.isArray(product.images)
+      ? (product.images as unknown[]).map((u) => str(u)).filter(Boolean)
+      : [],
   };
 }
 
@@ -648,6 +659,55 @@ export function inferCategoryCode(raw: unknown): string {
   return '';
 }
 
+// Keyword table for inferring a category from FREE TEXT (a product title /
+// description / brand+model string) when there is no explicit `category` field.
+// Ordered most-specific first: "sunglass" must beat "glass"/"lens", "reading
+// glasses" must beat "glasses"->frame, "smart watch" must beat "watch", etc.
+// Each entry is [substring, CATEGORIES code]. Matching is case-insensitive on a
+// space-normalised lower-case string.
+const TITLE_KEYWORD_RULES: Array<[string, string]> = [
+  // Smart eyewear / watches (before their non-smart bases).
+  ['smart sunglass', 'SMTSG'],
+  ['smart glass', 'SMTFR'], ['smartglass', 'SMTFR'],
+  ['smart watch', 'SMTWT'], ['smartwatch', 'SMTWT'],
+  // Reading glasses (before generic "glasses" -> frame).
+  ['reading glass', 'RG'], ['readers', 'RG'],
+  // Sunglasses (before "glass"/"lens").
+  ['sunglass', 'SG'], ['shades', 'SG'],
+  // Contact lenses (before "lens").
+  ['contact lens', 'CL'], ['contact lense', 'CL'], ['contacts', 'CL'],
+  // Optical / spectacle lenses.
+  ['spectacle lens', 'LS'], ['eyeglass lens', 'LS'], ['optical lens', 'LS'],
+  ['rx lens', 'LS'],
+  // Frames.
+  ['eyeglass', 'FR'], ['spectacle', 'FR'], ['eyeframe', 'FR'],
+  ['optical frame', 'FR'], ['frame', 'FR'], ['glasses', 'FR'],
+  // Hearing aids.
+  ['hearing aid', 'HA'], ['hearing', 'HA'],
+  // Clocks (before "watch"? no overlap, but keep before generic).
+  ['wall clock', 'CK'], ['table clock', 'CK'], ['alarm clock', 'CK'], ['clock', 'CK'],
+  // Watches.
+  ['wrist watch', 'WT'], ['wristwatch', 'WT'], ['watch', 'WT'],
+  // Bare "lens" last (ambiguous — after contact/optical lens rules above).
+  ['lens', 'LS'],
+];
+
+// Infer a CATEGORIES code from free text (title / description / brand+model).
+// Returns '' when nothing matches so the caller leaves the category unset.
+export function inferCategoryFromText(...texts: Array<unknown>): string {
+  const hay = texts
+    .map((t) => String(t ?? ''))
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (!hay) return '';
+  for (const [needle, code] of TITLE_KEYWORD_RULES) {
+    if (hay.includes(needle)) return code;
+  }
+  return '';
+}
+
 // Coerce the candidate's specs (Record<string, unknown>) into the string->string
 // shape the form's review/extra display expects, dropping empty values.
 function specsToStrings(specs: Record<string, unknown> | undefined): Record<string, string> {
@@ -668,7 +728,13 @@ function specsToStrings(specs: Record<string, unknown> | undefined): Record<stri
 // Pricing is intentionally left blank -- the operator sets MRP/cost (Autopilot
 // is a catalog/spec source, not a price source).
 export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFormValues {
-  const category = inferCategoryCode(c.category ?? (c.specs ? (c.specs as Record<string, unknown>).category : undefined));
+  // Prefer an explicit category (candidate.category or specs.category); when
+  // absent (the common case — scraped candidates carry no category), fall back
+  // to inferring one from the title / description / brand+model text so the
+  // staged brand/model/spec attributes don't land on an empty, field-less form.
+  const category =
+    inferCategoryCode(c.category ?? (c.specs ? (c.specs as Record<string, unknown>).category : undefined)) ||
+    inferCategoryFromText(c.title, c.description, c.usp, c.brand, c.model);
 
   const brand = str(c.brand);
   const model = str(c.model);
@@ -721,6 +787,12 @@ export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFo
     syncToShopify: false,
     shopifyTags: [],
     publishPOS: true,
+    // Carry the candidate's images into the form so Autopilot-found photos
+    // prefill the images array (the operator can remove/keep them). These are
+    // the scraped source URLs; they're stored as-is on the product.
+    images: Array.isArray(c.image_urls)
+      ? c.image_urls.map((u) => str(u)).filter(Boolean)
+      : [],
   };
 }
 
