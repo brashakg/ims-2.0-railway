@@ -42,8 +42,8 @@ class FakeCollection:
         for d in self.docs:
             if all(d.get(k) == v for k, v in query.items()):
                 d.update(update.get("$set", {}))
-                return type("R", (), {"modified_count": 1})()
-        return type("R", (), {"modified_count": 0})()
+                return type("R", (), {"modified_count": 1, "matched_count": 1})()
+        return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
 
 class FakeDB:

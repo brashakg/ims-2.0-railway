@@ -527,9 +527,10 @@ class _VendorReturnColl:
 
     def update_one(self, flt, update, upsert=False):
         self.updates.append({"filter": flt, "update": update})
-        if self.doc and self.doc.get("return_id") == flt.get("return_id"):
+        matched = bool(self.doc) and all(self.doc.get(k) == v for k, v in flt.items())
+        if matched:
             self.doc.update(update.get("$set", {}))
-        return None
+        return type("R", (), {"matched_count": 1 if matched else 0})()
 
 
 class _VendorReturnDB:

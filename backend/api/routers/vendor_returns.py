@@ -377,10 +377,22 @@ async def update_return_status(
             if status_update.status == "credit_issued":
                 update_dict["credit_note_amount"] = return_doc.get("total_value")
 
-        collection.update_one(
-            {"return_id": return_id},
+        # Guard the write with the status we validated the transition against --
+        # otherwise two concurrent requests can both read the same
+        # current_status, both pass the transition check, and both mint a
+        # credit note / advance the state (e.g. double credit-note issuance).
+        result = collection.update_one(
+            {"return_id": return_id, "status": current_status},
             {"$set": update_dict},
         )
+        matched = getattr(result, "matched_count", None)
+        if matched is None:
+            matched = getattr(result, "modified_count", 0)
+        if not matched:
+            raise HTTPException(
+                status_code=409,
+                detail="Return status changed concurrently. Please refresh and retry.",
+            )
 
         # Fetch and return updated document
         updated_doc = collection.find_one({"return_id": return_id})

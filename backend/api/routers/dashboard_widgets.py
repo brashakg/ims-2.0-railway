@@ -54,7 +54,10 @@ def _store(user: dict, override: Optional[str]) -> Optional[str]:
     roles = set(user.get("roles") or [])
     if {"SUPERADMIN", "ADMIN", "AREA_MANAGER"} & roles:
         return override or user.get("active_store_id")
-    return user.get("active_store_id") or override
+    # Store-scoped roles may only ever see their OWN active store -- never an
+    # override (which could be another store's id), even if active_store_id
+    # happens to be unset.
+    return user.get("active_store_id")
 
 
 def _month_start() -> datetime:

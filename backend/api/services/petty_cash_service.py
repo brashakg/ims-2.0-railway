@@ -361,8 +361,16 @@ def topup_float(db, *, store_id: str, amount: float, actor: str,
         db, ACCOUNT_TYPE, store_id, amt,
         reason=reason, actor=actor, ref=txn_id, store_id=store_id,
         push_extra={"ledger": _ledger_row(txn_id, "CREDIT", amt, reason, actor, None)},
+        # Race-safe ceiling: the pre-read check above can go stale between two
+        # concurrent topups, so the atomic write itself also refuses to land
+        # if it would push the balance past float_limit.
+        guard_extra={"balance": {"$lte": round(limit - amt, 2)}},
         record_ledger=False,
     )
+    if not res.ok and res.reason == "guard_failed":
+        cur_after = coll.find_one({"store_id": store_id}) or {}
+        return {"ok": False, "http": 422, "error": "exceeds_float_limit",
+                "float_limit": limit, "balance": float(cur_after.get("balance") or 0.0)}
     if not res.ok:
         return {"ok": False, "http": 409, "error": res.reason or "credit_failed"}
     _stamp_balance_after(coll, store_id, txn_id)

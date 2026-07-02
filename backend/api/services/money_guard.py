@@ -407,9 +407,15 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
            reason: str = "credit", actor: Optional[str] = None, ref: Optional[str] = None,
            store_id: Optional[str] = None, entity_id: Optional[str] = None,
            idempotency_key: Optional[str] = None, set_extra: Optional[Dict] = None,
-           push_extra: Optional[Dict] = None, record_ledger: bool = True) -> GuardResult:
+           push_extra: Optional[Dict] = None, guard_extra: Optional[Dict] = None,
+           record_ledger: bool = True) -> GuardResult:
     """Unconditional credit (no floor; a credit cannot overspend). Idempotent when
-    an idempotency_key is supplied. Emits one audit row on success."""
+    an idempotency_key is supplied. Emits one audit row on success.
+
+    guard_extra: optional extra filter clauses (e.g. a ceiling such as
+    {balance_field: {"$lte": limit - amt}}) merged into the atomic write's
+    filter, so a caller-enforced cap is race-safe instead of a stale pre-read
+    check. Defaults to None -- no existing caller is affected."""
     spec = ACCOUNT_TYPES.get(account_type)
     if spec is None:
         return GuardResult(ok=False, reason="unknown_type")
@@ -433,6 +439,8 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     filt: Dict[str, Any] = {spec.key_field: account_key}
     if idempotency_key:
         filt["money_ledger.idempotency_key"] = {"$ne": idempotency_key}
+    if guard_extra:
+        filt.update(guard_extra)
 
     inc = {spec.balance_field: amt}
     update: Dict[str, Any] = {"$inc": inc}
@@ -452,12 +460,16 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         except Exception:  # noqa: BLE001
             post = None
         if post is None:
-            # Either the doc is missing, or a concurrent same-key credit already
-            # applied. Distinguish via a dedup read.
+            # Either the doc is missing, a concurrent same-key credit already
+            # applied, or (with guard_extra) the caller-enforced ceiling was
+            # exceeded by a concurrent racing credit. Distinguish via a dedup
+            # read, then fall back to a guard_extra-specific reason.
             if idempotency_key:
                 prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
                 if prior is not None:
                     return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
+            if guard_extra:
+                return GuardResult(ok=False, reason="guard_failed")
             return GuardResult(ok=False, reason="not_found")
         bal = float(post.get(spec.balance_field) or 0.0)
         if record_ledger or idempotency_key:
@@ -483,6 +495,8 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
             prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
             if prior is not None:
                 return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
+        if guard_extra:
+            return GuardResult(ok=False, reason="guard_failed")
         return GuardResult(ok=False, reason="not_found")
     post = None
     try:
