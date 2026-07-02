@@ -2,7 +2,17 @@
 # ===============================
 
 # Web Framework
-fastapi==0.139.0
+# NOTE: stay on 0.136.3 -- 0.139.0 was tried and reverted. It refactors
+# app.include_router() to store each included sub-router lazily as an
+# internal _IncludedRouter wrapper instead of flattening its routes into
+# app.routes eagerly, so len(app.routes)/iterating app.routes for .path
+# drops from ~1254 to ~106. Verified via TestClient that actual HTTP routing
+# is UNAFFECTED (e.g. GET /api/v1/vouchers still 401s, not 404s) -- this is
+# an introspection-API change, not a routing break. 3 of our own tests
+# (test_rbac_policy.py::test_no_stale_policy_entries, test_seam_batch1.py,
+# test_vouchers.py::test_route_is_mounted) walk app.routes directly and need
+# updating for the new wrapper shape before this bump is safe to take.
+fastapi==0.136.3
 uvicorn[standard]==0.49.0
 
 # Data Validation
