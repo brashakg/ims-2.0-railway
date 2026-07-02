@@ -1655,7 +1655,11 @@ async def get_product_image(file_id: str):
     if store is None:
         raise HTTPException(status_code=503, detail="File storage unavailable")
 
-    rec = store.get(file_id)
+    # SECURITY: this serve is PUBLIC and reads the SHARED file store (which also
+    # holds GRN attachments + expense bills). Scope it to files stamped
+    # kind="product_image" at upload so a GRN / expense-bill file_id can NOT be
+    # fetched here. A wrong-kind id returns 404, same as a missing one.
+    rec = store.get(file_id, require_kind="product_image")
     if rec is None:
         raise HTTPException(status_code=404, detail="Image not found")
 

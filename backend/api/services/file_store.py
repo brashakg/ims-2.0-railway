@@ -61,8 +61,17 @@ class FileStore:
         """Store bytes; return a file_id string or None on failure."""
         raise NotImplementedError
 
-    def get(self, file_id: str) -> Optional[Tuple[bytes, str, str]]:
-        """Return (content, filename, mime_type) or None when missing."""
+    def get(
+        self, file_id: str, *, require_kind: Optional[str] = None
+    ) -> Optional[Tuple[bytes, str, str]]:
+        """Return (content, filename, mime_type) or None when missing.
+
+        `require_kind`: when set, ALSO return None unless the stored file's
+        metadata.kind matches. This lets a PUBLIC per-kind serve endpoint (e.g.
+        product images) refuse to hand back a DIFFERENT kind of file from the
+        shared store -- without it, a public image serve could be handed a GRN
+        attachment / expense bill file_id and leak it. Callers that don't pass
+        require_kind get the original unscoped behaviour."""
         raise NotImplementedError
 
     def delete(self, file_id: str) -> bool:
@@ -91,9 +100,11 @@ class InMemoryFileStore(FileStore):
         }
         return file_id
 
-    def get(self, file_id):
+    def get(self, file_id, *, require_kind=None):
         rec = self._files.get(file_id)
         if rec is None:
+            return None
+        if require_kind is not None and (rec.get("metadata") or {}).get("kind") != require_kind:
             return None
         return (rec["content"], rec["filename"], rec["mime_type"])
 
@@ -143,7 +154,7 @@ class GridFSFileStore(FileStore):
             logger.warning(f"[FILESTORE] put failed: {e}")
             return None
 
-    def get(self, file_id):
+    def get(self, file_id, *, require_kind=None):
         fs = self._bucket()
         if fs is None:
             return None
@@ -151,6 +162,10 @@ class GridFSFileStore(FileStore):
             from bson import ObjectId
 
             grid_out = fs.get(ObjectId(file_id))
+            if require_kind is not None:
+                meta = getattr(grid_out, "metadata", None) or {}
+                if meta.get("kind") != require_kind:
+                    return None
             return (
                 grid_out.read(),
                 grid_out.filename or "",

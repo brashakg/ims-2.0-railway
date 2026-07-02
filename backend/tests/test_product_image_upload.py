@@ -126,3 +126,39 @@ def test_upload_rejects_empty_body(client, auth_headers, mem_store):
     files = {"file": ("empty.png", io.BytesIO(b""), "image/png")}
     r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
     assert r.status_code == 400, r.text
+
+
+# ---------------------------------------------------------------------------
+# SECURITY: the PUBLIC serve reads the SHARED file store (GRN attachments +
+# expense bills live there too). It MUST refuse anything not stamped
+# kind="product_image" so a GRN/expense file_id can't leak through this
+# unauthenticated endpoint. Fail-CLOSED: a kind-less file is also refused.
+# ---------------------------------------------------------------------------
+
+
+def test_serve_refuses_non_product_image_file(client, mem_store):
+    grn_id = mem_store.put(
+        content=b"SENSITIVE GRN INVOICE PDF",
+        filename="grn-invoice.pdf",
+        mime_type="application/pdf",
+        metadata={"kind": "grn_attachment"},
+    )
+    assert client.get(_UPLOAD_PATH + "/" + grn_id).status_code == 404
+
+    nokind_id = mem_store.put(
+        content=b"whatever",
+        filename="x.bin",
+        mime_type="application/octet-stream",
+        metadata={},
+    )
+    assert client.get(_UPLOAD_PATH + "/" + nokind_id).status_code == 404
+
+    img_id = mem_store.put(
+        content=_PNG_BYTES,
+        filename="p.png",
+        mime_type="image/png",
+        metadata={"kind": "product_image"},
+    )
+    ok = client.get(_UPLOAD_PATH + "/" + img_id)
+    assert ok.status_code == 200
+    assert ok.content == _PNG_BYTES
