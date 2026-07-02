@@ -205,6 +205,45 @@ def _isolate_db(client):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_auth_singletons():
+    """Reset the auth router's PROCESS-GLOBAL in-memory singletons before every
+    test so login/auth tests are order-independent.
+
+    ``api.routers.auth`` holds two module-level singletons that outlive any one
+    test (they are created at import, never torn down):
+
+      * ``_login_limiter`` -- a sliding-window brute-force guard that records
+        EVERY failed login per client IP. TestClient always presents the same
+        host ("testclient"), so failed-login assertions scattered across the
+        suite (test_force_password_change, test_cors, test_core_endpoints, ...)
+        all accumulate against ONE IP bucket. After 5 failures in 15 min the IP
+        is locked out and the limiter returns 429 to ALL later logins -- which
+        silently breaks any later test that expects a 200/401/422 from
+        /auth/login (test_module_rbac::test_login_*, test_rbac_access_matrix::
+        TestPublicEndpoints, test_rbac_enforcement::test_public_login_*). This
+        passed in isolation but flaked in the full suite purely on test order.
+      * ``_token_blacklist`` -- the logout revocation set; a leaked revoked
+        token hash could likewise bleed across tests.
+
+    The conftest ``_isolate_db`` fixture already resets Mongo state; this does
+    the same for the auth in-memory state. Fail-soft: never breaks a test if the
+    auth module or its internals change shape."""
+    try:
+        from api.routers import auth as _auth
+
+        limiter = getattr(_auth, "_login_limiter", None)
+        if limiter is not None:
+            limiter._attempts.clear()
+            limiter._lockouts.clear()
+        blacklist = getattr(_auth, "_token_blacklist", None)
+        if blacklist is not None:
+            blacklist._revoked.clear()
+    except Exception:  # noqa: BLE001 - test hygiene must never break a test
+        pass
+    yield
+
+
 @pytest.fixture
 def auth_headers(client):
     """Get a valid JWT for an admin user by calling login.
