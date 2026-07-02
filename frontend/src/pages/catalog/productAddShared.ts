@@ -15,6 +15,7 @@ import type {
 } from '../../services/api/products';
 import { productApi } from '../../services/api/products';
 import type { AutopilotCandidate } from '../../services/api/catalogAutopilot';
+import { mapSpecsToCategoryFields } from './autopilotSpecMap';
 import { getHSNByCategory, getGSTRateByCategory } from '../../constants/gst';
 
 // Product categories with display names + emoji (used in the category picker).
@@ -721,18 +722,68 @@ function specsToStrings(specs: Record<string, unknown> | undefined): Record<stri
   return out;
 }
 
-// Map an Autopilot candidate -> ProductFormValues for prefill. Brand + model land
-// in the attribute keys the form reads (brand_name; both model_no AND model_name
-// so whichever the chosen category renders is populated). Category is inferred;
-// HSN/GST prefer the candidate's suggestions, else resolve from the category.
-// Pricing is intentionally left blank -- the operator sets MRP/cost (Autopilot
-// is a catalog/spec source, not a price source).
-export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFormValues {
-  // Prefer an explicit category (candidate.category or specs.category); when
-  // absent (the common case — scraped candidates carry no category), fall back
-  // to inferring one from the title / description / brand+model text so the
-  // staged brand/model/spec attributes don't land on an empty, field-less form.
+// The rich result the panel UX consumes: the form values PLUS which fields
+// Autopilot filled (for the "auto" chips + fill summary), the unmapped extra
+// specs (surfaced so the operator sees everything), and the reference URLs
+// the data came from.
+export interface AutopilotFillResult {
+  values: ProductFormValues;
+  /** Attribute names Autopilot populated (mapper + AI + identity + fallbacks). */
+  autoFilled: string[];
+  /** Scraped specs no declared field consumed (still kept as attributes). */
+  extras: Record<string, string>;
+  /** The exact page URL(s) this candidate's data came from. */
+  referenceUrls: string[];
+}
+
+/** {domain, url} reference chips for a candidate (dedup'd, invalid dropped). */
+export function candidateReferences(c: AutopilotCandidate): Array<{ domain: string; url: string }> {
+  const urls: string[] = [];
+  (c.references || []).forEach((r) => {
+    if (r && typeof r.url === 'string' && r.url) urls.push(r.url);
+  });
+  if (urls.length === 0 && c.source_url) urls.push(c.source_url);
+  if (urls.length === 0 && c.url) urls.push(c.url);
+  const out: Array<{ domain: string; url: string }> = [];
+  const seen = new Set<string>();
+  urls.forEach((u) => {
+    if (seen.has(u)) return;
+    seen.add(u);
+    try {
+      const domain = new URL(u).hostname.replace(/^www\./, '');
+      if (domain) out.push({ domain, url: u });
+    } catch {
+      /* not a valid absolute URL — skip the chip */
+    }
+  });
+  return out;
+}
+
+// Attribute key that persists the Autopilot reference URL(s) onto the created
+// product (harmless attributes passthrough -> a permanent record of where the
+// catalog data came from).
+export const AUTOPILOT_REFERENCE_ATTR = 'autopilot_reference';
+
+// Map an Autopilot candidate -> the rich fill result. Brand + model land in
+// the attribute keys the form reads (brand_name; both model_no AND model_name
+// so whichever the chosen category renders is populated). Category comes from
+// the job stamp (candidates now KNOW their category), else is inferred from
+// text; `categoryOverride` (the form's already-picked category) wins over
+// both so a user choice is never overridden. The spec mapper then populates
+// the category's DECLARED fields from the scraped specs/title/size string,
+// and any backend AI-suggested attributes fill remaining gaps (deterministic
+// first, AI second). HSN/GST prefer the candidate's suggestions, else resolve
+// from the category. Pricing is intentionally left blank -- the operator sets
+// MRP/cost (Autopilot is a catalog/spec source, not a price source).
+export function mapAutopilotCandidate(
+  c: AutopilotCandidate,
+  categoryOverride?: string
+): AutopilotFillResult {
+  // Category priority: the form's own pick > the job/candidate stamp (or the
+  // candidate's specs.category) > free-text inference. '' when nothing works,
+  // so the user simply picks one (nothing is mis-filed).
   const category =
+    (categoryOverride && inferCategoryCode(categoryOverride)) ||
     inferCategoryCode(c.category ?? (c.specs ? (c.specs as Record<string, unknown>).category : undefined)) ||
     inferCategoryFromText(c.title, c.description, c.usp, c.brand, c.model);
 
@@ -750,6 +801,53 @@ export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFo
   if (model) {
     attributes.model_no = model;
     attributes.model_name = model;
+  }
+  const autoFilled = new Set<string>(
+    ['brand_name', 'model_no', 'model_name'].filter((k) => attributes[k])
+  );
+
+  // THE core v2 step: map free-form scraped specs (+ the size string in the
+  // query/title/description) onto the category's declared form fields.
+  let extras: Record<string, string> = {};
+  if (category) {
+    const specMap = mapSpecsToCategoryFields(
+      category,
+      c.specs as Record<string, unknown> | undefined,
+      { brand, model, color: c.color ?? '', size: c.size ?? '' },
+      c.title,
+      c.description
+    );
+    Object.entries(specMap.mapped).forEach(([k, v]) => {
+      if (v) {
+        attributes[k] = v;
+        autoFilled.add(k);
+      }
+    });
+    extras = specMap.extras;
+
+    // AI gap-fill (backend ai_attributes): deterministic mapping wins; the AI
+    // only fills declared fields that are still empty. Unknown keys ignored.
+    const declared = new Set(getCategoryFields(category).map((f) => f.name));
+    Object.entries(c.ai_attributes || {}).forEach(([k, v]) => {
+      const val = str(v);
+      if (val && declared.has(k) && !attributes[k]) {
+        attributes[k] = val;
+        autoFilled.add(k);
+      }
+    });
+  } else {
+    // No category yet: every spec is an "extra" until the operator picks one
+    // (QuickAddPage re-runs the mapper on category pick).
+    extras = specsToStrings(c.specs as Record<string, unknown> | undefined);
+    delete extras.category;
+  }
+
+  // Reference audit: persist where this data came from onto the product doc
+  // via a passthrough attribute (plus return the URLs for the summary UI).
+  const references = candidateReferences(c);
+  const referenceUrls = references.map((r) => r.url);
+  if (referenceUrls.length > 0) {
+    attributes[AUTOPILOT_REFERENCE_ATTR] = referenceUrls.join(' ');
   }
 
   // Description: prefer the full description, fall back to the USP one-liner.
@@ -769,7 +867,7 @@ export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFo
     if (!gstRate) gstRate = resolved.gstRate;
   }
 
-  return {
+  const values: ProductFormValues = {
     category,
     attributes,
     description,
@@ -794,6 +892,13 @@ export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFo
       ? c.image_urls.map((u) => str(u)).filter(Boolean)
       : [],
   };
+
+  return { values, autoFilled: Array.from(autoFilled), extras, referenceUrls };
+}
+
+// Back-compat thin wrapper (the original prefill mapper's contract).
+export function autopilotCandidateToFormValues(c: AutopilotCandidate): ProductFormValues {
+  return mapAutopilotCandidate(c).values;
 }
 
 // ----------------------------------------------------------------------------

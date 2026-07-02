@@ -12,6 +12,11 @@ export interface AutopilotCandidate {
   source: string;
   source_class: 'AUTHORIZED' | 'UNVERIFIED';
   url?: string | null;
+  // v2 reference audit: the EXACT page this candidate was scraped from, and
+  // every {source, url} pair that contributed (rendered as reference chips +
+  // persisted onto the created product).
+  source_url?: string | null;
+  references?: Array<{ source: string; url: string | null }>;
   title?: string;
   brand?: string;
   model?: string;
@@ -25,6 +30,9 @@ export interface AutopilotCandidate {
   // All optional + additive: the card renders them only when present, so the
   // page works identically whether or not the enriching source is configured.
   category?: string | null;
+  // v2 AI spec-mapping: backend-suggested {attributeName: value} for the job's
+  // category. The FE merges these UNDER its deterministic mapper (gaps only).
+  ai_attributes?: Record<string, string> | null;
   suggested_hsn?: string | null;
   suggested_gst_rate?: number | null;
   confidence?: number | null;
@@ -52,7 +60,7 @@ export interface AutopilotSource {
 
 export interface AutopilotJobResult {
   job_id: string;
-  query: { brand: string; model: string; color?: string; size?: string };
+  query: { brand: string; model: string; color?: string; size?: string; category?: string };
   candidates: AutopilotCandidate[];
   sources: AutopilotSource[];
   candidate_count: number;
@@ -65,7 +73,15 @@ export const catalogAutopilotApi = {
     return res.data as { sources: AutopilotSource[] };
   },
 
-  createJob: async (body: { brand: string; model: string; color?: string; size?: string }) => {
+  // `category` (v2): a Quick Add picker code (SG/FR/...), canonical key, or
+  // human label — the backend canonicalises + stamps it on every candidate.
+  createJob: async (body: {
+    brand: string;
+    model: string;
+    color?: string;
+    size?: string;
+    category?: string;
+  }) => {
     const res = await api.post('/catalog-autopilot/jobs', body);
     return res.data as AutopilotJobResult;
   },
