@@ -42,6 +42,7 @@ import {
   PackagePlus,
   Info,
   Sparkles as SparklesIcon,
+  ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -64,7 +65,10 @@ import {
   buildProductPayload,
   resolveHsnGst,
   productToFormValues,
-  autopilotCandidateToFormValues,
+  mapAutopilotCandidate,
+  candidateReferences,
+  candidateImagesUsable,
+  imageRehostSummary,
   takeAutopilotPrefill,
   AUTOPILOT_PREFILL_PARAM,
   AUTOPILOT_PREFILL_VALUE,
@@ -112,14 +116,32 @@ export function QuickAddPage() {
   const [dragActive, setDragActive] = useState(false);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Inline Catalog Autopilot panel (Part 2): collapsed by default so the manual
-  // flow is unchanged. Search brand+model -> candidates -> "Use this" prefills.
+  // Inline Catalog Autopilot panel: collapsed by default so the manual flow
+  // is unchanged. v2 search inputs = brand + model + colour + size + category;
+  // "Use this" fills EVERY mapped field + images and the operator verifies.
   const [autopilotOpen, setAutopilotOpen] = useState(false);
   const [apBrand, setApBrand] = useState('');
   const [apModel, setApModel] = useState('');
+  const [apColor, setApColor] = useState('');
+  const [apSize, setApSize] = useState('');
+  // Category for the search when the operator starts with Autopilot first;
+  // the form's own picked category always wins when set.
+  const [apCategory, setApCategory] = useState('');
   const [apLoading, setApLoading] = useState(false);
   const [apSearched, setApSearched] = useState(false);
   const [apCandidates, setApCandidates] = useState<AutopilotCandidate[]>([]);
+  // v2 "operator verifies" UX: which attribute fields Autopilot filled (auto
+  // chips + highlight), the unmapped extra specs found, and the reference
+  // URL(s) the data came from. Cleared on reset / manual edit of a field.
+  const [autoFilled, setAutoFilled] = useState<Set<string>>(new Set());
+  const [apExtras, setApExtras] = useState<Record<string, string>>({});
+  const [apRefUrls, setApRefUrls] = useState<string[]>([]);
+  // Image RE-HOST outcome: how many candidate images were COPIED into our own
+  // storage vs KEPT as external hotlinks (re-host failed / rights disallow).
+  const [apImageCopy, setApImageCopy] = useState<{ copied: number; kept: number } | null>(null);
+  // The last used candidate — re-mapped when the operator picks a category
+  // AFTER staging (so staged specs still land on the category's real fields).
+  const stagedCandidateRef = useRef<AutopilotCandidate | null>(null);
 
   // UI state
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -238,6 +260,12 @@ export function QuickAddPage() {
       setPublishPOS(true);
       setImages([]);
       setErrors({});
+      // Clear the v2 Autopilot verify state so a fresh product starts clean.
+      setAutoFilled(new Set());
+      setApExtras({});
+      setApRefUrls([]);
+      setApImageCopy(null);
+      stagedCandidateRef.current = null;
     },
     [attributes.brand_name]
   );
@@ -337,7 +365,11 @@ export function QuickAddPage() {
     setImages((prev) => prev.filter((u) => u !== url));
   }, []);
 
-  // ---- Inline Catalog Autopilot (Part 2) -----------------------------------
+  // ---- Inline Catalog Autopilot (v2) ----------------------------------------
+  // The search knows its category: the form's already-picked category wins,
+  // else the panel's own category select (for autopilot-first flows).
+  const apEffectiveCategory = selectedCategory || apCategory;
+
   const runAutopilotSearch = useCallback(async () => {
     if (!apBrand.trim() || !apModel.trim()) {
       toast.error('Brand and model are required to search.');
@@ -349,6 +381,9 @@ export function QuickAddPage() {
       const r = await catalogAutopilotApi.createJob({
         brand: apBrand.trim(),
         model: apModel.trim(),
+        color: apColor.trim(),
+        size: apSize.trim(),
+        category: apEffectiveCategory,
       });
       setApCandidates(r.candidates || []);
       setApSearched(true);
@@ -358,29 +393,99 @@ export function QuickAddPage() {
     } finally {
       setApLoading(false);
     }
-  }, [apBrand, apModel, toast]);
+  }, [apBrand, apModel, apColor, apSize, apEffectiveCategory, toast]);
 
-  // "Use this": prefill the form in place (no navigation). If the operator has
-  // ALREADY picked a category, we KEEP their category and only fill the fields
-  // for it; otherwise we take the candidate's inferred category. Either way the
-  // staged brand/model/specs survive so nothing is lost.
-  const useAutopilotCandidate = useCallback(
-    (c: AutopilotCandidate) => {
-      const mapped = autopilotCandidateToFormValues(c);
-      const keepCategory = selectedCategory && !mapped.category;
-      const finalCategory = selectedCategory || mapped.category;
-      applyFormValues({ ...mapped, category: finalCategory });
+  // Shared "apply a candidate" for BOTH the inline "Use this" and the
+  // ?prefill=autopilot handoff: maps every field, marks what was auto-filled,
+  // surfaces the unmapped extras + references, summarises the fill, and then
+  // RE-HOSTS the candidate's images into our own storage (fail-soft).
+  const applyAutopilotCandidate = useCallback(
+    async (c: AutopilotCandidate) => {
+      // Category resolution (the owner's #1 gripe was a fill that "did
+      // nothing" because no category was set, so no fields rendered):
+      //   1. the form's own picked category (never overridden),
+      //   2. the panel's category selector (autopilot-first flows),
+      //   3. the job stamp on the candidate / title inference (inside
+      //      mapAutopilotCandidate),
+      //   4. else we stage + prompt, and the late-category effect fills the
+      //      fields the moment a category is picked.
+      const res = mapAutopilotCandidate(c, selectedCategory || apCategory || undefined);
+      applyFormValues(res.values);
+      setAutoFilled(new Set(res.autoFilled));
+      setApExtras(res.extras);
+      setApRefUrls(res.referenceUrls);
+      setApImageCopy(null);
+      stagedCandidateRef.current = c;
+
+      const finalCategory = res.values.category;
+      const imgCount = res.values.images?.length ?? 0;
+      const refDomain = res.referenceUrls[0] ? apDomain(res.referenceUrls[0]) : '';
       if (!finalCategory) {
-        toast.info('Details staged. Pick a category above to reveal the fields.');
-      } else if (keepCategory) {
-        toast.success('Filled the details into your chosen category.');
+        toast.info(
+          'Details staged — pick a category (panel selector or the form) and the fields will fill in automatically.'
+        );
       } else {
-        toast.success('Prefilled from Autopilot. Add price + any missing fields, then save.');
+        toast.success(
+          `Filled ${res.autoFilled.length} fields` +
+            (imgCount > 0 ? ` + ${imgCount} image${imgCount === 1 ? '' : 's'}` : '') +
+            (refDomain ? ` from ${refDomain}` : '') +
+            ' into the product form — please verify.'
+        );
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
+
+      // RE-HOST (owner requirement): copy each candidate image into OUR file
+      // store via POST /products/image/from-url so the product never hotlinks
+      // a brand site. Concurrent + fail-soft: a failed copy KEEPS the external
+      // link (nothing is lost); the fill summary reports copied vs kept.
+      // Respect the image-rights rules — UNVERIFIED-source images without a
+      // rights confirmation are never copied into our storage.
+      const externals = res.values.images ?? [];
+      if (externals.length === 0) return;
+      if (!candidateImagesUsable(c)) {
+        setApImageCopy({ copied: 0, kept: externals.length });
+        return;
+      }
+      const settled = await Promise.allSettled(
+        externals.map((u) => productApi.rehostProductImage(u))
+      );
+      const swap = new Map<string, string>();
+      let copied = 0;
+      settled.forEach((s, i) => {
+        if (s.status === 'fulfilled' && s.value?.url) {
+          swap.set(externals[i], s.value.url);
+          copied += 1;
+        }
+      });
+      if (copied > 0) {
+        // Replace only the URLs we copied; the operator may have edited the
+        // list meanwhile, so map over the CURRENT state.
+        setImages((prev) => prev.map((u) => swap.get(u) || u));
+      }
+      setApImageCopy({ copied, kept: externals.length - copied });
     },
-    [applyFormValues, selectedCategory, toast]
+    [applyFormValues, selectedCategory, apCategory, toast]
   );
+
+  const useAutopilotCandidate = applyAutopilotCandidate;
+
+  // Late category pick: staged attributes survive AND get re-mapped onto the
+  // newly picked category's real fields (only filling attributes the operator
+  // hasn't already typed — a user value is never clobbered).
+  useEffect(() => {
+    const staged = stagedCandidateRef.current;
+    if (!staged || !selectedCategory) return;
+    const res = mapAutopilotCandidate(staged, selectedCategory);
+    const additions: Record<string, string> = {};
+    Object.entries(res.values.attributes).forEach(([k, v]) => {
+      if (v && !attributes[k]) additions[k] = v;
+    });
+    if (Object.keys(additions).length === 0) return;
+    setAttributes((prev) => ({ ...additions, ...prev }));
+    setAutoFilled((s) => new Set([...s, ...Object.keys(additions)]));
+    setApExtras(res.extras);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategory, attributes]);
 
   const handleSubmit = useCallback(
     async (saveAndNew: boolean) => {
@@ -598,9 +703,9 @@ export function QuickAddPage() {
     if (prefillKind !== AUTOPILOT_PREFILL_VALUE) return;
     const candidate = takeAutopilotPrefill();
     if (candidate) {
-      applyFormValues(autopilotCandidateToFormValues(candidate));
-      toast.success('Prefilled from Catalog Autopilot. Add price + any missing fields, then save.');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Same v2 richness as the inline "Use this": full field mapping, auto
+      // chips, extras + reference summary.
+      void applyAutopilotCandidate(candidate);
     } else {
       toast.info('Nothing to prefill — open a candidate from Catalog Autopilot first.');
     }
@@ -630,8 +735,16 @@ export function QuickAddPage() {
   const lensPowerFields = new Set(['sph', 'cyl', 'axis', 'add']);
   const visibleFields = isLens ? fields.filter((f) => !lensPowerFields.has(f.name)) : fields;
 
-  const setAttr = (name: string, value: string) =>
+  const setAttr = (name: string, value: string) => {
     setAttributes((prev) => ({ ...prev, [name]: value }));
+    // The operator touched this field — it is now verified, drop the auto chip.
+    setAutoFilled((prev) => {
+      if (!prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.delete(name);
+      return next;
+    });
+  };
 
   const toggleSection = (id: SectionId) =>
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
@@ -649,11 +762,24 @@ export function QuickAddPage() {
       : null;
 
   // -------- small presentational helpers -----------------------------------
-  const renderField = (field: CategoryField, autoFocus = false) => (
+  const renderField = (field: CategoryField, autoFocus = false) => {
+    // Autopilot filled this and the operator hasn't touched it yet: a subtle
+    // highlight + "auto" chip flags it for verification (chip drops on edit).
+    const isAuto = autoFilled.has(field.name);
+    const fieldClass = clsx('input-field w-full', isAuto && 'ring-1 ring-violet-300 bg-violet-50/40');
+    return (
     <div key={field.name}>
       <label className="block text-sm font-medium text-gray-700 mb-1">
         {field.label}
         {field.required && <span className="text-red-500 ml-1">*</span>}
+        {isAuto && (
+          <span
+            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-violet-100 text-violet-700 text-[10px] font-medium align-middle"
+            title="Auto-filled by Autopilot — please verify"
+          >
+            <SparklesIcon className="w-2.5 h-2.5" /> auto
+          </span>
+        )}
       </label>
       {field.type === 'select' ? (
         <select
@@ -661,7 +787,7 @@ export function QuickAddPage() {
           title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
-          className="input-field w-full"
+          className={fieldClass}
         >
           <option value="">Select {field.label}</option>
           {field.options?.map((opt) => (
@@ -675,7 +801,7 @@ export function QuickAddPage() {
           title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
-          className="input-field w-full"
+          className={fieldClass}
         />
       ) : (
         <input
@@ -685,14 +811,15 @@ export function QuickAddPage() {
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
           placeholder={field.placeholder || field.label}
-          className="input-field w-full"
+          className={fieldClass}
         />
       )}
       {errors[field.name] && (
         <p className="text-red-500 text-xs mt-1">{errors[field.name]}</p>
       )}
     </div>
-  );
+    );
+  };
 
   const Section = ({
     id, title, icon, subtitle, children,
@@ -910,7 +1037,7 @@ export function QuickAddPage() {
 
             {autopilotOpen && (
               <div className="px-5 pb-5 pt-1 border-t border-gray-100 space-y-4">
-                <div className="grid grid-cols-1 tablet:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+                <div className="grid grid-cols-2 tablet:grid-cols-4 laptop:grid-cols-[1.1fr_1.1fr_0.9fr_0.9fr_1.1fr_auto] gap-3 items-end">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
                     <input
@@ -930,6 +1057,44 @@ export function QuickAddPage() {
                       onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void runAutopilotSearch(); } }}
                       placeholder="RB4105"
                     />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Colour</label>
+                    <input
+                      className="input-field w-full"
+                      value={apColor}
+                      onChange={(e) => setApColor(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void runAutopilotSearch(); } }}
+                      placeholder="601/58"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Size</label>
+                    <input
+                      className="input-field w-full"
+                      value={apSize}
+                      onChange={(e) => setApSize(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void runAutopilotSearch(); } }}
+                      placeholder="52-18-140"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <select
+                      title="Search category"
+                      className="input-field w-full disabled:bg-gray-50 disabled:text-gray-500"
+                      value={apEffectiveCategory}
+                      disabled={Boolean(selectedCategory)}
+                      onChange={(e) => setApCategory(e.target.value)}
+                    >
+                      <option value="">Auto-detect</option>
+                      {CATEGORIES.map((c) => (
+                        <option key={c.code} value={c.code}>{c.name}</option>
+                      ))}
+                    </select>
+                    {selectedCategory && (
+                      <p className="text-[11px] text-gray-400 mt-0.5">Using the form's category</p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -952,16 +1117,104 @@ export function QuickAddPage() {
                   </p>
                 )}
 
+                {apSearched && apCandidates.length === 1 && (
+                  <p className="text-xs text-gray-500 flex items-start gap-1.5">
+                    <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    Only 1 source result — refine colour / size / category for more options.
+                  </p>
+                )}
+
                 {apCandidates.length > 0 && (
-                  <div className="space-y-2">
-                    {apCandidates.map((c) => (
-                      <AutopilotCandidateRow key={c.candidate_id} c={c} onUse={() => useAutopilotCandidate(c)} />
+                  <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
+                    {apCandidates.slice(0, 8).map((c) => (
+                      <AutopilotCandidateRow key={c.candidate_id} c={c} onUse={() => { void useAutopilotCandidate(c); }} />
                     ))}
                   </div>
+                )}
+                {apCandidates.length > 8 && (
+                  <p className="text-[11px] text-gray-400">
+                    Showing the top 8 of {apCandidates.length} candidates (sorted by confidence).
+                  </p>
+                )}
+
+                {/* Fill confirmation right where the button was clicked: what
+                    just landed in the MAIN form below. */}
+                {autoFilled.size > 0 && (
+                  <p className="text-sm text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2 flex items-center gap-2">
+                    <SparklesIcon className="w-4 h-4 shrink-0" />
+                    Filled {autoFilled.size} field{autoFilled.size === 1 ? '' : 's'}
+                    {images.length > 0 && <> + {images.length} image{images.length === 1 ? '' : 's'}</>}
+                    {apRefUrls[0] && apDomain(apRefUrls[0]) ? ` from ${apDomain(apRefUrls[0])}` : ''}
+                    {' '}into the product form below — please verify.
+                  </p>
                 )}
               </div>
             )}
           </div>
+
+          {/* AUTOPILOT FILL SUMMARY — "operator verifies" strip. Lists how many
+              fields/images were auto-filled, where the data came from, and the
+              extra (unmapped) specs found so nothing scraped is invisible. */}
+          {(autoFilled.size > 0 || Object.keys(apExtras).length > 0 || apRefUrls.length > 0) && (
+            <div className="rounded-xl border border-violet-200 bg-violet-50/60 px-4 py-3 text-sm">
+              <div className="flex items-start gap-2.5">
+                <SparklesIcon className="w-4 h-4 text-violet-600 mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <p className="text-gray-800">
+                    Auto-filled <span className="font-semibold">{autoFilled.size}</span> field{autoFilled.size === 1 ? '' : 's'}
+                    {images.length > 0 && <> + <span className="font-semibold">{images.length}</span> image{images.length === 1 ? '' : 's'}</>}
+                    {apRefUrls.length > 0 && (
+                      <>
+                        {' '}from{' '}
+                        {apRefUrls.map((u, i) => (
+                          <a
+                            key={u}
+                            href={u}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-0.5 text-violet-700 underline decoration-violet-300 hover:decoration-violet-600"
+                          >
+                            {apDomain(u)}
+                            <ExternalLink className="w-3 h-3" />
+                            {i < apRefUrls.length - 1 ? ',' : ''}
+                          </a>
+                        ))}
+                      </>
+                    )}
+                    {' '}— <span className="font-semibold">please verify</span> the marked fields.
+                  </p>
+                  {apImageCopy && imageRehostSummary(apImageCopy.copied, apImageCopy.kept) && (
+                    <p className="text-xs text-gray-600 flex items-center gap-1.5">
+                      <ImageIcon className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+                      {imageRehostSummary(apImageCopy.copied, apImageCopy.kept)}
+                    </p>
+                  )}
+                  {Object.keys(apExtras).length > 0 && (
+                    <details className="text-xs text-gray-600">
+                      <summary className="cursor-pointer select-none text-gray-700 font-medium">
+                        Extra specs found ({Object.keys(apExtras).length}) — kept on the product
+                      </summary>
+                      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+                        {Object.entries(apExtras).map(([k, v]) => (
+                          <span key={k} className="text-gray-600">
+                            <span className="text-gray-400">{k}:</span> {v}
+                          </span>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setAutoFilled(new Set()); setApExtras({}); setApRefUrls([]); setApImageCopy(null); }}
+                  className="shrink-0 text-gray-400 hover:text-gray-600"
+                  title="Dismiss (clears the auto markers)"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* IDENTITY */}
           <Section
@@ -1533,51 +1786,82 @@ function apConfidencePct(c: AutopilotCandidate): number | null {
   return Math.round(Number(v) * 100);
 }
 
-// A compact candidate row for the inline panel: image, source + confidence
-// badges, title/brand/model, and a single "Use this" that prefills the form.
+// Hostname (minus www.) for a reference chip / fill summary; '' when invalid.
+function apDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+// A compact candidate CARD for the inline panel's two-column grid: thumbnail,
+// source + confidence badges, a clickable source-reference chip (domain), the
+// title/brand/model, and a single "Use this" that fills the whole form.
 function AutopilotCandidateRow({ c, onUse }: { c: AutopilotCandidate; onUse: () => void }) {
   const badge = apSourceBadge(c);
   const pct = apConfidencePct(c);
+  const refs = candidateReferences(c);
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-gray-200 p-3">
-      {c.image_urls && c.image_urls.length > 0 && (
-        <img
-          src={c.image_urls[0]}
-          alt={c.title || `${c.brand ?? ''} ${c.model ?? ''}`.trim()}
-          className={clsx('w-14 h-14 rounded-lg object-cover border shrink-0', badge.authorized ? 'border-gray-200' : 'border-amber-300')}
-          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-        />
-      )}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium',
-            badge.ai ? 'bg-violet-100 text-violet-700'
-              : badge.authorized ? 'bg-emerald-100 text-emerald-700'
-              : 'bg-amber-100 text-amber-700')}>
-            {badge.ai ? <SparklesIcon className="w-3 h-3" />
-              : badge.authorized ? <ShieldCheck className="w-3 h-3" />
-              : <AlertTriangle className="w-3 h-3" />}
-            {badge.label}
-          </span>
-          {pct !== null && (
-            <span className={clsx('inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full',
-              pct >= 90 ? 'bg-green-100 text-green-700' : pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600')}>
-              <Gauge className="w-3 h-3" />
-              {pct}% {c.confidence != null ? 'confidence' : 'match'}
-            </span>
-          )}
+    <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-3 min-w-0">
+      <div className="flex items-start gap-2.5 min-w-0">
+        {c.image_urls && c.image_urls.length > 0 && (
+          <img
+            src={c.image_urls[0]}
+            alt={c.title || `${c.brand ?? ''} ${c.model ?? ''}`.trim()}
+            className={clsx('w-12 h-12 rounded-lg object-cover border shrink-0', badge.authorized ? 'border-gray-200' : 'border-amber-300')}
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+          />
+        )}
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-gray-900 text-sm truncate">{c.title || `${c.brand} ${c.model}`}</p>
+          <p className="text-xs text-gray-500 truncate">
+            {c.brand} · {c.model}{c.color ? ` · ${c.color}` : ''}{c.size ? ` · ${c.size}` : ''}{c.category ? ` · ${c.category}` : ''}
+          </p>
         </div>
-        <p className="font-medium text-gray-900 mt-1 truncate">{c.title || `${c.brand} ${c.model}`}</p>
-        <p className="text-sm text-gray-500 truncate">
-          {c.brand} · {c.model}{c.color ? ` · ${c.color}` : ''}{c.category ? ` · ${c.category}` : ''}
-        </p>
       </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className={clsx('inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium',
+          badge.ai ? 'bg-violet-100 text-violet-700'
+            : badge.authorized ? 'bg-emerald-100 text-emerald-700'
+            : 'bg-amber-100 text-amber-700')}>
+          {badge.ai ? <SparklesIcon className="w-3 h-3" />
+            : badge.authorized ? <ShieldCheck className="w-3 h-3" />
+            : <AlertTriangle className="w-3 h-3" />}
+          {badge.label}
+        </span>
+        {pct !== null && (
+          <span className={clsx('inline-flex items-center gap-1 text-[11px] font-semibold px-1.5 py-0.5 rounded-full',
+            pct >= 90 ? 'bg-green-100 text-green-700' : pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600')}>
+            <Gauge className="w-3 h-3" />
+            {pct}%
+          </span>
+        )}
+        {/* Source-reference chip: the exact page this data came from. */}
+        {refs.slice(0, 2).map((r) => (
+          <a
+            key={r.url}
+            href={r.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={r.url}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 max-w-[160px]"
+          >
+            <span className="truncate">{r.domain}</span>
+            <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+          </a>
+        ))}
+      </div>
+      {/* THE action (owner requirement): unmistakably push everything —
+          category, every mapped field, description, HSN/GST, images — into
+          the MAIN product form. Full-width primary, not a subtle link. */}
       <button
         type="button"
         onClick={onUse}
-        className="shrink-0 px-3 py-1.5 rounded-md bg-bv text-white text-xs inline-flex items-center justify-center gap-1.5 hover:opacity-90"
+        className="w-full px-3 py-2 rounded-md bg-bv text-white text-sm font-semibold inline-flex items-center justify-center gap-1.5 hover:opacity-90"
       >
-        <PackagePlus className="w-3.5 h-3.5" /> Use this
+        <PackagePlus className="w-4 h-4" /> Fill product form
       </button>
     </div>
   );

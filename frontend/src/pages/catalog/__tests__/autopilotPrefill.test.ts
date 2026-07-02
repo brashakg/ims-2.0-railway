@@ -14,6 +14,8 @@ import {
   autopilotCandidateToFormValues,
   mapAutopilotCandidate,
   candidateReferences,
+  candidateImagesUsable,
+  imageRehostSummary,
   buildProductPayload,
   AUTOPILOT_REFERENCE_ATTR,
 } from '../productAddShared';
@@ -332,5 +334,24 @@ describe('candidateReferences (reference chips)', () => {
   it('drops invalid URLs and returns [] when there is nothing', () => {
     expect(candidateReferences(candidate({ source_url: 'not-a-url' }))).toEqual([]);
     expect(candidateReferences(candidate({}))).toEqual([]);
+  });
+});
+
+describe('image re-host summary + rights gate', () => {
+  it('candidateImagesUsable mirrors the backend image_use_allowed rule', () => {
+    expect(candidateImagesUsable(candidate({ source_class: 'AUTHORIZED' }))).toBe(true);
+    expect(candidateImagesUsable(candidate({ source_class: 'UNVERIFIED' }))).toBe(false);
+    expect(
+      candidateImagesUsable(candidate({ source_class: 'UNVERIFIED', rights_confirmed: true }))
+    ).toBe(true);
+  });
+
+  it('imageRehostSummary counts copied vs external', () => {
+    expect(imageRehostSummary(2, 1)).toBe(
+      '2 images copied to your storage, 1 kept as external link'
+    );
+    expect(imageRehostSummary(1, 0)).toBe('1 image copied to your storage');
+    expect(imageRehostSummary(0, 3)).toBe('3 kept as external links');
+    expect(imageRehostSummary(0, 0)).toBe('');
   });
 });

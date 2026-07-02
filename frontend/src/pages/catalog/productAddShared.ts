@@ -764,6 +764,24 @@ export function candidateReferences(c: AutopilotCandidate): Array<{ domain: stri
 // catalog data came from).
 export const AUTOPILOT_REFERENCE_ATTR = 'autopilot_reference';
 
+// Whether the current rights rules allow USING a candidate's images at all
+// (mirrors the backend image_use_allowed guard): AUTHORIZED sources yes;
+// UNVERIFIED only when rights were explicitly confirmed. Gates the re-host —
+// we never copy an image into OUR storage that the rules don't let us use.
+export function candidateImagesUsable(c: AutopilotCandidate): boolean {
+  return c.source_class === 'AUTHORIZED' || c.rights_confirmed === true;
+}
+
+// Human summary of the image re-host outcome for the fill-summary strip,
+// e.g. "2 images copied to your storage, 1 kept as external link".
+export function imageRehostSummary(copied: number, kept: number): string {
+  if (copied <= 0 && kept <= 0) return '';
+  const parts: string[] = [];
+  if (copied > 0) parts.push(`${copied} image${copied === 1 ? '' : 's'} copied to your storage`);
+  if (kept > 0) parts.push(`${kept} kept as external link${kept === 1 ? '' : 's'}`);
+  return parts.join(', ');
+}
+
 // Map an Autopilot candidate -> the rich fill result. Brand + model land in
 // the attribute keys the form reads (brand_name; both model_no AND model_name
 // so whichever the chosen category renders is populated). Category comes from
