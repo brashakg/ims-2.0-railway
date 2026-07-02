@@ -485,20 +485,21 @@ def test_redeem_within_order_value_ok_via_order_id(
     assert acct["balance_points"] == 300
 
 
-def test_redeem_without_any_order_link_rejected(
+def test_redeem_standalone_without_order_link_allowed(
     client, auth_headers, patched_loyalty
 ):
-    """A redeem with neither order_id nor order_value is rejected -- points can
-    never be redeemed with no order linkage at all."""
+    """Owner decision: a STANDALONE redeem (no order_id / order_value) is ALLOWED
+    (goodwill/manual) and stays bounded only by the point balance -- it is NOT
+    rejected. The order-value cap applies only when an order is attached."""
     _seed_balance(patched_loyalty, client, auth_headers, "cust-nolink", 500)
     resp = client.post(
         "/api/v1/loyalty/redeem",
         json={"customer_id": "cust-nolink", "points": 200},
         headers=auth_headers,
     )
-    assert resp.status_code == 400, resp.text
+    assert resp.status_code == 200, resp.text
     acct = patched_loyalty["accounts"].find_by_id("cust-nolink")
-    assert acct["balance_points"] == 500  # nothing debited
+    assert acct["balance_points"] == 300  # 200 debited, bounded by balance
 
 
 def test_redeem_order_for_other_customer_rejected(

@@ -432,12 +432,14 @@ async def redeem(
     settings = _settings_safe()
     account = accounts.find_or_create(body.customer_id)
 
-    # OVER-REDEEM GUARD (security): a redemption must be bounded by the order it
-    # discounts -- otherwise points worth more than the order (or with no order
-    # at all) could be redeemed, minting rupee value the sale never earned.
-    #   * Require SOME order linkage: an order_id OR an explicit order_value.
+    # OVER-REDEEM GUARD (security): when a redemption IS tied to an order, it must
+    # be bounded by that order -- otherwise points worth more than the order could
+    # be redeemed, minting rupee value the sale never earned. A STANDALONE redeem
+    # (no order) is ALLOWED (owner decision: goodwill/manual redemption) and stays
+    # bounded by the customer's point balance.
+    #   * If order_id / order_value is supplied, derive a ceiling and cap to it.
     #     The POS redeem flow always sends both (POSLayout -> loyaltyApi.redeem
-    #     with order_id + order_value), so this never breaks a real checkout.
+    #     with order_id + order_value), so the cap applies at real checkout.
     #   * When order_id is present, look the order up and derive the
     #     AUTHORITATIVE ceiling from the order's grand_total (never trust the
     #     client order_value alone). The order must belong to this customer.
@@ -461,18 +463,13 @@ async def redeem(
         # No order_id, but an explicit order_value was supplied -> use it as the
         # ceiling (a manual redeem tied to a known cart total).
         order_ceiling = max(float(body.order_value), 0.0)
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "ok": False,
-                "reason": "order_link_required",
-                "message": (
-                    "A redeem must reference the order it discounts: supply "
-                    "order_id (preferred) or order_value."
-                ),
-            },
-        )
+    # else: NO order linkage -> a STANDALONE / goodwill redemption (owner-allowed:
+    # points may be redeemed without a bill). order_ceiling stays None so the
+    # order-value cap below is skipped; the redemption is STILL bounded by the
+    # customer's point balance (calc_redeem + the atomic try_debit guard), so it
+    # can never mint rupee value beyond the points actually earned. The
+    # over-redeem hole this fix closes is redeeming MORE than the order is worth
+    # WHEN an order is present -- that path is capped below.
 
     # Feed calc_redeem the AUTHORITATIVE ceiling (the order's grand_total when we
     # resolved one), not the raw client order_value, so its max_pct cap is
