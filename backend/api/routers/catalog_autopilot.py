@@ -36,6 +36,30 @@ class JobCreate(BaseModel):
     model: str
     color: Optional[str] = ""
     size: Optional[str] = ""
+    # v2: the category the operator is searching in (a Quick Add picker code
+    # like "SG", a canonical key like "SUNGLASS", or a human label). Optional;
+    # when present it is normalised to the canonical product_master key,
+    # persisted on the job, used to refine source queries, and stamped onto
+    # every returned candidate so downstream field-mapping never guesses.
+    category: Optional[str] = ""
+
+
+def _normalise_category(raw: str) -> str:
+    """Best-effort canonicalisation via the product_master registry ("SG" ->
+    "SUNGLASS"). Unknown values pass through upper-cased (harmless: the FE
+    mapper ignores categories it can't resolve). Never raises."""
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    try:
+        from ..services.product_master import resolve_category
+
+        canonical = resolve_category(value)
+        if canonical:
+            return canonical
+    except Exception:  # noqa: BLE001
+        pass
+    return value.upper().replace("-", "_").replace(" ", "_")
 
 
 class Decision(BaseModel):
@@ -62,11 +86,13 @@ async def create_job(
     if not body.brand.strip() or not body.model.strip():
         raise HTTPException(status_code=400, detail="brand and model are required")
 
+    category = _normalise_category(body.category or "")
     result = ap.run_search(
         body.brand.strip(),
         body.model.strip(),
         (body.color or "").strip(),
         (body.size or "").strip(),
+        category=category,
     )
 
     job_id = str(uuid.uuid4())
@@ -88,6 +114,7 @@ async def create_job(
                     "model": body.model.strip(),
                     "color": (body.color or "").strip(),
                     "size": (body.size or "").strip(),
+                    "category": category,
                     "status": "SEARCHED",
                     "candidate_count": len(cands),
                     "created_by": current_user.get("user_id"),
