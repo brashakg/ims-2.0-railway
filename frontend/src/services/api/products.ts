@@ -32,6 +32,17 @@ export interface CategoryRegistryResponse {
   categories: CategoryRegistryEntry[];
 }
 
+// Result of POST /products/image. `url` points at the backend serve endpoint
+// (GET /products/image/{file_id}) and is what gets stored in the product
+// `images` array.
+export interface UploadedProductImage {
+  file_id: string;
+  url: string;
+  filename: string;
+  content_type: string;
+  size: number;
+}
+
 export interface CreateProductPayload {
   category: string;
   // Required by the backend ProductCreate (top-level, NOT inside attributes).
@@ -200,6 +211,19 @@ export const productApi = {
   createProduct: async (data: CreateProductPayload) => {
     const response = await api.post('/products', data);
     return response.data;
+  },
+
+  // Upload a single product image (multipart). Persists the bytes durably on the
+  // backend (GridFS) and returns a stable, self-hosted URL to embed in the
+  // product `images` array. Import this DIRECTLY from this module (not the api
+  // barrel) — the barrel re-export fails to resolve for new methods (TS2614).
+  uploadProductImage: async (file: File): Promise<UploadedProductImage> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post('/products/image', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data as UploadedProductImage;
   },
 
   // Update a product through the SINGLE validated path (`PUT /products/{id}`).

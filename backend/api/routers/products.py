@@ -4,7 +4,9 @@ IMS 2.0 - Products Router
 Product catalog management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+import io
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Union
 from datetime import datetime
@@ -12,6 +14,11 @@ import logging
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_product_repository
+from ..services.file_store import (
+    get_file_store,
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_SIZE_BYTES,
+)
 
 router = APIRouter()
 
@@ -1565,6 +1572,104 @@ async def list_tags(
         except Exception:  # noqa: BLE001 - autocomplete must never 500
             return {"tags": []}
     return {"tags": []}
+
+
+# ============================================================================
+# PRODUCT IMAGES — durable upload + serve (GridFS-backed file store)
+# ============================================================================
+# The Add Product screen (Quick Add + Guided) uploads product photos here. We
+# persist the bytes durably via the shared GridFS-backed file store (same store
+# admin_catalog bulk-import + GRN attachments use), so an image survives a
+# Railway redeploy, and return a stable URL the create payload sends in the
+# product `images` array. Mirrors the expenses upload-bill / download-bill
+# pattern (size + mime validation, then store.put / store.get + StreamingResponse).
+
+# Images only -- the shared ALLOWED_MIME_TYPES also permits application/pdf,
+# which is not a product image, so gate on this narrower image-only subset.
+_IMAGE_MIME_TYPES = frozenset(
+    m for m in ALLOWED_MIME_TYPES if m.startswith("image/")
+)
+
+
+@router.post("/image", status_code=201)
+async def upload_product_image(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Upload one product image; persist it durably and return {file_id, url}.
+
+    The returned `url` points at the sibling GET /products/image/{file_id} serve
+    endpoint, so the create payload can carry a stable, self-hosted image URL in
+    its `images` array (no external CDN needed). Validates the mime is an image
+    and the size is within the shared cap before persisting anything.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
+        )
+    mime = (file.content_type or "").lower()
+    if mime not in _IMAGE_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{mime}' not allowed. Accepted image types: {sorted(_IMAGE_MIME_TYPES)}",
+        )
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    file_id = store.put(
+        content=content,
+        filename=file.filename,
+        mime_type=mime,
+        metadata={"kind": "product_image", "uploaded_by": current_user.get("user_id")},
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    return {
+        "file_id": file_id,
+        "url": f"/api/v1/products/image/{file_id}",
+        "filename": file.filename,
+        "content_type": mime,
+        "size": len(content),
+    }
+
+
+@router.get("/image/{file_id}")
+async def get_product_image(file_id: str):
+    """Stream a previously-uploaded product image by its stored file_id.
+
+    Public (no auth): product images are non-sensitive catalog media and the
+    returned URL is embedded in <img> tags that don't carry the auth header.
+    Catalogued PUBLIC in rbac_policy for the same reason.
+    """
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    rec = store.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    content, filename, mime = rec
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=mime or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            # Product images are immutable (a new upload gets a new id), so let
+            # the browser cache aggressively.
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
 
 
 @router.get("/sku/{sku}")
