@@ -187,6 +187,152 @@ def test_pending_reconcile_failsoft_with_no_products():
 
 
 # ---------------------------------------------------------------------------
+# Stock tally (BVI Phase 5 read-only reconciliation dashboard)
+# ---------------------------------------------------------------------------
+
+
+class _StockUnitsColl(_FakeColl):
+    """A fake stock_units collection that supports the on-hand / reserved
+    aggregation the tally reader uses: {$match:{product_id:{$in},status...}},
+    {$group:{_id:'$product_id', n:{$sum:{$ifNull:['$quantity',1]}}}}."""
+
+    def aggregate(self, pipeline):
+        match = {}
+        for stage in pipeline:
+            if "$match" in stage:
+                match = stage["$match"]
+        pid_in = ((match.get("product_id") or {}).get("$in")) or []
+        # on-hand uses an $or over AVAILABLE-ish / absent status; reserved uses a
+        # flat status == "RESERVED". Detect which predicate this call carries.
+        avail_statuses = None
+        or_clause = match.get("$or")
+        if isinstance(or_clause, list):
+            for clause in or_clause:
+                cond = (clause or {}).get("status")
+                if isinstance(cond, dict) and "$in" in cond:
+                    avail_statuses = set(cond["$in"])
+        status_eq = match.get("status")
+        counts: Dict[str, int] = {}
+        for r in self._rows:
+            pid = r.get("product_id")
+            if pid_in and pid not in pid_in:
+                continue
+            st = r.get("status")
+            if avail_statuses is not None:
+                # on-hand: AVAILABLE-ish OR status absent/None
+                if not (st in avail_statuses or st is None):
+                    continue
+            elif status_eq is not None:
+                # reserved: exact status match
+                if st != status_eq:
+                    continue
+            counts[pid] = counts.get(pid, 0) + int(r.get("quantity", 1) or 1)
+        return iter([{"_id": pid, "n": n} for pid, n in counts.items()])
+
+
+def _tally_db():
+    """Two online-listed SKUs: one healthy, one oversell-risk; plus one
+    not-online SKU that must be skipped from the tally."""
+    products = _FakeColl(
+        [
+            {"product_id": "P1", "sku": "SKU-OK", "name": "Ray-Ban RB1", "is_active": True},
+            {"product_id": "P2", "sku": "SKU-RISK", "name": "Oakley OO2", "is_active": True},
+            {"product_id": "P3", "sku": "SKU-OFFLINE", "name": "Local Only", "is_active": True},
+        ]
+    )
+    stock = _StockUnitsColl(
+        [
+            # P1: 5 AVAILABLE, 1 RESERVED -> sellable 4
+            *[{"product_id": "P1", "status": "AVAILABLE", "quantity": 1} for _ in range(5)],
+            {"product_id": "P1", "status": "RESERVED", "quantity": 1},
+            # P2: 2 AVAILABLE, 0 RESERVED -> sellable 2
+            *[{"product_id": "P2", "status": "AVAILABLE", "quantity": 1} for _ in range(2)],
+            # P3: 3 AVAILABLE (but not listed online)
+            *[{"product_id": "P3", "status": "AVAILABLE", "quantity": 1} for _ in range(3)],
+        ]
+    )
+    return _FakeDb({"products": products, "stock_units": stock})
+
+
+def _patch_online(monkeypatch, mapping):
+    """Stub online_status_for_skus (Postgres bridge) with a fixed mapping."""
+    from api.services import online_catalog
+
+    monkeypatch.setattr(
+        online_catalog, "online_status_for_skus", lambda skus: mapping
+    )
+    # stock_tally imports the name inside the function from .online_catalog, so
+    # patching the module attribute is sufficient.
+
+
+def test_stock_tally_failsoft_no_db():
+    """No DB -> empty envelope with the documented summary keys, never raises."""
+    out = sh.stock_tally_summary(None)
+    assert out["items"] == []
+    s = out["summary"]
+    assert s["skus_checked"] == 0
+    assert s["at_risk_count"] == 0
+    assert s["total_online_listed"] == 0
+    assert s["total_on_hand"] == 0
+    assert "online_configured" in s
+
+
+def test_stock_tally_populated_with_oversell_risk(monkeypatch):
+    """Populated fake repo: SKU-OK healthy, SKU-RISK oversell (listed > sellable),
+    SKU-OFFLINE skipped (not online). Read-only: no stock is mutated."""
+    _patch_online(
+        monkeypatch,
+        {
+            # listed 3 <= sellable 4 -> OK
+            "SKU-OK": {"online": True, "online_stock": 3},
+            # listed 9 > sellable 2 -> OVERSELL RISK
+            "SKU-RISK": {"online": True, "online_stock": 9},
+            # present online-status but marked not-online -> excluded
+            "SKU-OFFLINE": {"online": False, "online_stock": 0},
+        },
+    )
+    db = _tally_db()
+    out = sh.stock_tally_summary(db)
+
+    # Only the two ONLINE skus are assessed; the offline one is skipped.
+    assert out["summary"]["skus_checked"] == 2
+    assert out["summary"]["at_risk_count"] == 1
+    skus = [i["sku"] for i in out["items"]]
+    assert "SKU-OFFLINE" not in skus
+    # Worst-first: the oversell-risk row is on top.
+    assert out["items"][0]["sku"] == "SKU-RISK"
+
+    by_sku = {i["sku"]: i for i in out["items"]}
+    ok = by_sku["SKU-OK"]
+    assert ok["on_hand"] == 5 and ok["reserved"] == 1 and ok["sellable"] == 4
+    assert ok["oversell_risk"] is False
+    assert ok["recommended_buffer"] == 1  # max(1, ceil(5% of 5))
+
+    risk = by_sku["SKU-RISK"]
+    assert risk["on_hand"] == 2 and risk["reserved"] == 0 and risk["sellable"] == 2
+    assert risk["online_listed_qty"] == 9
+    assert risk["oversell_risk"] is True
+
+    # Summary totals only cover the online SKUs (P1 + P2), not the offline P3.
+    assert out["summary"]["total_on_hand"] == 7      # 5 + 2
+    assert out["summary"]["total_reserved"] == 1
+    assert out["summary"]["total_sellable"] == 6     # 4 + 2
+    assert out["summary"]["total_online_listed"] == 12  # 3 + 9
+
+    # READ-ONLY: the fake stock rows are unchanged (nothing reserved/minted).
+    assert len(db["stock_units"]._rows) == 11
+
+
+def test_stock_tally_online_unconfigured_lists_zero(monkeypatch):
+    """Postgres unconfigured -> online_status_for_skus returns {} -> no SKU is
+    treated as online, so the tally is empty (never raises)."""
+    _patch_online(monkeypatch, {})
+    out = sh.stock_tally_summary(_tally_db())
+    assert out["items"] == []
+    assert out["summary"]["skus_checked"] == 0
+
+
+# ---------------------------------------------------------------------------
 # HTTP endpoint tests (SUPERADMIN gate + payload shape)
 # ---------------------------------------------------------------------------
 

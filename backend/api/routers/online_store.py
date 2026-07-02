@@ -153,6 +153,32 @@ async def online_store_summary(
     }
 
 
+@router.get("/stock-tally")
+async def online_store_stock_tally(
+    current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
+) -> Dict:
+    """READ-ONLY reconciliation dashboard (BVI Phase 5 "Stock tally").
+
+    Per online-listed SKU, compares what the storefront lists against the real
+    physical on-hand and what is already reserved, and flags any SKU that lists
+    MORE than is actually free to sell (oversell risk). It also suggests a
+    conservative buffer to keep off the online listing -- a SUGGESTION only.
+
+    This surface is strictly read-only: it REUSES the on-hand / reserved
+    aggregations (services.online_sync_health) + the online-catalog bridge and
+    NEVER mutates stock, NEVER reserves a unit. The write-path allocation
+    (marking units RESERVED on order ingest, excluding them from on-hand) is a
+    deliberate, separately-reviewed follow-up (needs an atomic claim +
+    idempotency) and is NOT part of this endpoint.
+
+    Fail-soft: no DB -> an empty envelope; Postgres unconfigured ->
+    online_listed_qty 0 with online_configured=False. Never 500s.
+    """
+    from ..services.online_sync_health import stock_tally_summary
+
+    return stock_tally_summary(_get_db())
+
+
 @router.get("/store-health")
 async def online_store_health(
     current_user: dict = Depends(require_roles(*_ECOM_ROLES)),

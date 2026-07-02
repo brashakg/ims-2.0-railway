@@ -216,6 +216,185 @@ def pending_reconcile_summary(
     }
 
 
+def _reserved_by_product(
+    db, product_ids: List[str], store_id: Optional[str] = None
+) -> Dict[str, int]:
+    """Count RESERVED units per product from the serialized `stock_units`
+    collection (one row per unit). Mirrors _on_hand_by_product but for the
+    RESERVED status -- the same signal the inventory Stock Ledger rolls up as
+    `reserved` (see routers/inventory._build_store_ledger). Read-only,
+    fail-soft -> {}.
+
+    NOTE (Phase 5 scope): today NOTHING in the online path writes RESERVED on
+    order ingest -- that write-side allocation is the DEFERRED follow-up. This
+    reader is here so the tally already reflects any RESERVED units the rest of
+    IMS creates (e.g. a POS hold), and so the sellable math is correct the day
+    the write-path lands. It never mutates stock."""
+    if db is None or not product_ids:
+        return {}
+    match: Dict[str, Any] = {
+        "product_id": {"$in": list(product_ids)},
+        "status": "RESERVED",
+    }
+    if store_id:
+        match["store_id"] = store_id
+    out: Dict[str, int] = {}
+    try:
+        coll = _coll(db, "stock_units")
+        if coll is None:
+            return {}
+        for row in coll.aggregate(
+            [
+                {"$match": match},
+                {
+                    "$group": {
+                        "_id": "$product_id",
+                        "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                },
+            ]
+        ):
+            out[row.get("_id")] = int(row.get("n") or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK_TALLY] reserved aggregate failed: %s", exc)
+        return {}
+    return out
+
+
+def _recommended_buffer(on_hand: int) -> int:
+    """A conservative reserve to keep OFF the online listing so a walk-in sale
+    can't strand an online order. Rule: keep max(1, ceil(5% of on-hand)) units
+    back -- but never suggest reserving more than what is on hand. A suggestion
+    only; NOTHING here enforces it (the write-path allocation is deferred)."""
+    on_hand = int(on_hand or 0)
+    if on_hand <= 0:
+        return 0
+    from math import ceil
+
+    return min(on_hand, max(1, ceil(on_hand * 0.05)))
+
+
+def stock_tally_summary(
+    db, limit: int = _RECONCILE_SCAN_LIMIT
+) -> Dict[str, Any]:
+    """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
+    already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
+
+    For each online-eligible SKU it reports:
+      - online_listed_qty : what the storefront currently lists (Shopify/BVI)
+      - on_hand           : AVAILABLE serialized stock_units (reuses
+                            _on_hand_by_product -- NOT re-derived)
+      - reserved          : RESERVED serialized stock_units (reuses
+                            _reserved_by_product)
+      - sellable          : max(0, on_hand - reserved)
+      - recommended_buffer: a conservative reserve suggestion (not enforced)
+      - oversell_risk     : online_listed_qty > sellable  (the admin.py
+                            oversell-risk rule: online listing exceeds what is
+                            actually free to sell)
+
+    Plus a summary {skus_checked, at_risk_count, total_online_listed,
+    total_on_hand, total_reserved, total_sellable, online_configured}.
+
+    100% read-only + fail-soft: no DB -> empty envelope; a Postgres that is
+    unconfigured -> online_listed_qty 0 everywhere (online_configured=False so
+    the UI can say so). NEVER mutates stock, NEVER reserves a unit."""
+    from .online_catalog import ecommerce_db_configured, online_status_for_skus
+
+    base: Dict[str, Any] = {
+        "items": [],
+        "summary": {
+            "skus_checked": 0,
+            "at_risk_count": 0,
+            "total_online_listed": 0,
+            "total_on_hand": 0,
+            "total_reserved": 0,
+            "total_sellable": 0,
+            "online_configured": ecommerce_db_configured(),
+        },
+    }
+    if db is None:
+        return base
+
+    try:
+        products = list(
+            _coll(db, "products")
+            .find(
+                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
+                {"_id": 0, "product_id": 1, "sku": 1, "name": 1},
+            )
+            .limit(limit)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK_TALLY] products scan failed: %s", exc)
+        return base
+    if not products:
+        return base
+
+    pids = [p.get("product_id") for p in products if p.get("product_id")]
+    on_hand = _on_hand_by_product(db, pids)
+    reserved = _reserved_by_product(db, pids)
+    skus = [p.get("sku") for p in products if p.get("sku")]
+    online = online_status_for_skus(skus)  # {} when Postgres unconfigured
+
+    items: List[Dict[str, Any]] = []
+    at_risk = 0
+    tot_listed = tot_on_hand = tot_reserved = tot_sellable = 0
+
+    for p in products:
+        sku = p.get("sku")
+        pid = p.get("product_id")
+        o = online.get(sku, {})
+        # Only assess SKUs that are actually listed online. A product that is
+        # not online can't oversell online, so it is skipped from the tally
+        # (the reconcile screen elsewhere shows the full catalog).
+        if not bool(o.get("online")):
+            continue
+        oh = int(on_hand.get(pid, 0) or 0)
+        rv = int(reserved.get(pid, 0) or 0)
+        sellable = max(0, oh - rv)
+        listed = int(o.get("online_stock") or 0)
+        risk = listed > sellable
+        if risk:
+            at_risk += 1
+        tot_listed += listed
+        tot_on_hand += oh
+        tot_reserved += rv
+        tot_sellable += sellable
+        items.append(
+            {
+                "sku": sku,
+                "name": p.get("name") or "",
+                "online_listed_qty": listed,
+                "on_hand": oh,
+                "reserved": rv,
+                "sellable": sellable,
+                "recommended_buffer": _recommended_buffer(oh),
+                "oversell_risk": risk,
+            }
+        )
+
+    # Worst first: oversell-risk rows on top, then by how far over they list.
+    items.sort(
+        key=lambda r: (
+            0 if r["oversell_risk"] else 1,
+            -(r["online_listed_qty"] - r["sellable"]),
+        )
+    )
+
+    return {
+        "items": items,
+        "summary": {
+            "skus_checked": len(items),
+            "at_risk_count": at_risk,
+            "total_online_listed": tot_listed,
+            "total_on_hand": tot_on_hand,
+            "total_reserved": tot_reserved,
+            "total_sellable": tot_sellable,
+            "online_configured": ecommerce_db_configured(),
+        },
+    }
+
+
 def failed_webhook_summary(db) -> Dict[str, Any]:
     """Count inbound webhook envelopes that failed to process or were skipped,
     from the `webhook_inbox` collection.
