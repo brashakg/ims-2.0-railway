@@ -35,10 +35,22 @@ import {
   Search,
   Upload,
   Image as ImageIcon,
+  Wand2,
+  Gauge,
+  ShieldCheck,
+  AlertTriangle,
+  PackagePlus,
+  Info,
+  Sparkles as SparklesIcon,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { productApi } from '../../services/api/products';
+import {
+  catalogAutopilotApi,
+  AI_ENRICH_SOURCE,
+  type AutopilotCandidate,
+} from '../../services/api/catalogAutopilot';
 // Import the templates service DIRECTLY from its module (not the api barrel —
 // the barrel re-export fails to resolve for new services, TS2614).
 import { productTemplatesApi, type ProductTemplate } from '../../services/api/productTemplates';
@@ -93,6 +105,21 @@ export function QuickAddPage() {
   const [syncToShopify, setSyncToShopify] = useState(false);
   const [shopifyTags, setShopifyTags] = useState<string[]>([]);
   const [publishPOS, setPublishPOS] = useState(true);
+
+  // Product images (Part 1): self-hosted URLs returned by the upload endpoint.
+  const [images, setImages] = useState<string[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Inline Catalog Autopilot panel (Part 2): collapsed by default so the manual
+  // flow is unchanged. Search brand+model -> candidates -> "Use this" prefills.
+  const [autopilotOpen, setAutopilotOpen] = useState(false);
+  const [apBrand, setApBrand] = useState('');
+  const [apModel, setApModel] = useState('');
+  const [apLoading, setApLoading] = useState(false);
+  const [apSearched, setApSearched] = useState(false);
+  const [apCandidates, setApCandidates] = useState<AutopilotCandidate[]>([]);
 
   // UI state
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -181,10 +208,12 @@ export function QuickAddPage() {
       syncToShopify,
       shopifyTags,
       publishPOS,
+      images,
     }),
     [
       selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp,
       offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags, publishPOS,
+      images,
     ]
   );
 
@@ -207,6 +236,7 @@ export function QuickAddPage() {
       setSyncToShopify(false);
       setShopifyTags([]);
       setPublishPOS(true);
+      setImages([]);
       setErrors({});
     },
     [attributes.brand_name]
@@ -234,9 +264,123 @@ export function QuickAddPage() {
     setSyncToShopify(Boolean(v.syncToShopify));
     setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
     setPublishPOS(v.publishPOS !== false);
+    setImages(Array.isArray(v.images) ? v.images : []);
     setErrors({});
-    setOpenSections((s) => ({ ...s, identity: true, pricing: true }));
+    // Reveal Inventory too when a prefill carries images so they're visible.
+    setOpenSections((s) => ({
+      ...s,
+      identity: true,
+      pricing: true,
+      ...(Array.isArray(v.images) && v.images.length > 0 ? { inventory: true } : {}),
+    }));
   }, []);
+
+  // ---- Product image upload (Part 1) ---------------------------------------
+  // Upload each selected/dropped file via productApi.uploadProductImage and
+  // append the returned self-hosted URL to `images`. Fail-soft: a failed upload
+  // just isn't added (a toast names how many, so nothing silently vanishes).
+  const uploadImageFiles = useCallback(
+    async (files: File[]) => {
+      const imageFiles = files.filter((f) => f.type.startsWith('image/'));
+      if (imageFiles.length === 0) {
+        if (files.length > 0) toast.error('Only image files can be uploaded.');
+        return;
+      }
+      setUploadingImages(true);
+      let failed = 0;
+      const uploaded: string[] = [];
+      for (const file of imageFiles) {
+        try {
+          const res = await productApi.uploadProductImage(file);
+          if (res?.url) uploaded.push(res.url);
+          else failed += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      if (uploaded.length > 0) {
+        setImages((prev) => [...prev, ...uploaded]);
+      }
+      if (failed > 0) {
+        toast.warning(
+          `${failed} image${failed > 1 ? 's' : ''} could not be uploaded${uploaded.length ? ' (the rest were added)' : ''}.`
+        );
+      } else if (uploaded.length > 0) {
+        toast.success(`${uploaded.length} image${uploaded.length > 1 ? 's' : ''} uploaded.`);
+      }
+      setUploadingImages(false);
+    },
+    [toast]
+  );
+
+  const onImageInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files ? Array.from(e.target.files) : [];
+      void uploadImageFiles(files);
+      // Reset so the same file can be re-picked after a remove.
+      e.target.value = '';
+    },
+    [uploadImageFiles]
+  );
+
+  const onImageDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setDragActive(false);
+      const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+      void uploadImageFiles(files);
+    },
+    [uploadImageFiles]
+  );
+
+  const removeImage = useCallback((url: string) => {
+    setImages((prev) => prev.filter((u) => u !== url));
+  }, []);
+
+  // ---- Inline Catalog Autopilot (Part 2) -----------------------------------
+  const runAutopilotSearch = useCallback(async () => {
+    if (!apBrand.trim() || !apModel.trim()) {
+      toast.error('Brand and model are required to search.');
+      return;
+    }
+    setApLoading(true);
+    setApSearched(false);
+    try {
+      const r = await catalogAutopilotApi.createJob({
+        brand: apBrand.trim(),
+        model: apModel.trim(),
+      });
+      setApCandidates(r.candidates || []);
+      setApSearched(true);
+      if (!r.candidate_count) toast.info('No candidates from active sources yet.');
+    } catch {
+      toast.error('Autopilot search failed.');
+    } finally {
+      setApLoading(false);
+    }
+  }, [apBrand, apModel, toast]);
+
+  // "Use this": prefill the form in place (no navigation). If the operator has
+  // ALREADY picked a category, we KEEP their category and only fill the fields
+  // for it; otherwise we take the candidate's inferred category. Either way the
+  // staged brand/model/specs survive so nothing is lost.
+  const useAutopilotCandidate = useCallback(
+    (c: AutopilotCandidate) => {
+      const mapped = autopilotCandidateToFormValues(c);
+      const keepCategory = selectedCategory && !mapped.category;
+      const finalCategory = selectedCategory || mapped.category;
+      applyFormValues({ ...mapped, category: finalCategory });
+      if (!finalCategory) {
+        toast.info('Details staged. Pick a category above to reveal the fields.');
+      } else if (keepCategory) {
+        toast.success('Filled the details into your chosen category.');
+      } else {
+        toast.success('Prefilled from Autopilot. Add price + any missing fields, then save.');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [applyFormValues, selectedCategory, toast]
+  );
 
   const handleSubmit = useCallback(
     async (saveAndNew: boolean) => {
@@ -743,6 +887,82 @@ export function QuickAddPage() {
       <div className="grid grid-cols-1 laptop:grid-cols-[1fr_320px] gap-5 items-start">
         {/* ---- Form column ---- */}
         <div className="space-y-4">
+          {/* AUTO-FILL FROM WEB (inline Catalog Autopilot) — collapsed by default
+              so the normal manual flow is unchanged. */}
+          <div className="card !p-0 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setAutopilotOpen((v) => !v)}
+              className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+              aria-expanded={autopilotOpen ? 'true' : 'false'}
+            >
+              <span className="flex items-center gap-3">
+                <span className="text-bv"><Wand2 className="w-5 h-5" /></span>
+                <span>
+                  <span className="block font-semibold text-gray-900">Auto-fill from web (Autopilot)</span>
+                  <span className="block text-xs text-gray-500">
+                    Search a brand + model to pull specs, description &amp; images
+                  </span>
+                </span>
+              </span>
+              <ChevronDown className={clsx('w-5 h-5 text-gray-400 transition-transform', autopilotOpen && 'rotate-180')} />
+            </button>
+
+            {autopilotOpen && (
+              <div className="px-5 pb-5 pt-1 border-t border-gray-100 space-y-4">
+                <div className="grid grid-cols-1 tablet:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
+                    <input
+                      className="input-field w-full"
+                      value={apBrand}
+                      onChange={(e) => setApBrand(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void runAutopilotSearch(); } }}
+                      placeholder="Ray-Ban"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+                    <input
+                      className="input-field w-full"
+                      value={apModel}
+                      onChange={(e) => setApModel(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void runAutopilotSearch(); } }}
+                      placeholder="RB4105"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => runAutopilotSearch()}
+                    disabled={apLoading}
+                    className="btn-primary inline-flex items-center justify-center gap-2 h-[42px]"
+                  >
+                    {apLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                    Search
+                  </button>
+                </div>
+
+                {apSearched && apCandidates.length === 0 && (
+                  <p className="text-sm text-gray-500 flex items-start gap-2">
+                    <Info className="w-4 h-4 mt-0.5 shrink-0" />
+                    No candidates found. Try a different model number or spelling, or use the full
+                    {' '}
+                    <Link to="/catalog/autopilot" className="text-bv underline">Catalog Autopilot</Link>
+                    {' '}page (more sources + rights review).
+                  </p>
+                )}
+
+                {apCandidates.length > 0 && (
+                  <div className="space-y-2">
+                    {apCandidates.map((c) => (
+                      <AutopilotCandidateRow key={c.candidate_id} c={c} onUse={() => useAutopilotCandidate(c)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* IDENTITY */}
           <Section
             id="identity"
@@ -1027,18 +1247,71 @@ export function QuickAddPage() {
               you&apos;ll be alerted when stock falls below the reorder level.
             </p>
 
-            {/* Product images (parity with the Guided wizard). Upload wiring is a
-                future enhancement; the create payload sends images: [] today. */}
+            {/* Product images — real upload (durably stored + served by the
+                backend; the create payload sends the resulting URLs). */}
             <div className="mt-4 pt-4 border-t border-gray-100">
               <label className="block text-sm font-medium text-gray-700 mb-2">Product Images</label>
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-                <ImageIcon className="w-12 h-12 mx-auto text-gray-400 mb-2" />
-                <p className="text-gray-500">Drag and drop images here, or click to browse</p>
-                <button type="button" className="btn-outline mt-4 inline-flex items-center">
+
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                title="Upload product images"
+                onChange={onImageInputChange}
+              />
+
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+                onDragLeave={(e) => { e.preventDefault(); setDragActive(false); }}
+                onDrop={onImageDrop}
+                onClick={() => imageInputRef.current?.click()}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') imageInputRef.current?.click(); }}
+                className={clsx(
+                  'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors',
+                  dragActive ? 'border-bv bg-bv-50' : 'border-gray-300 hover:border-gray-400'
+                )}
+              >
+                {uploadingImages ? (
+                  <Loader2 className="w-12 h-12 mx-auto text-bv mb-2 animate-spin" />
+                ) : (
+                  <ImageIcon className="w-12 h-12 mx-auto text-gray-400 mb-2" />
+                )}
+                <p className="text-gray-500">
+                  {uploadingImages ? 'Uploading…' : 'Drag and drop images here, or click to browse'}
+                </p>
+                <span className="btn-outline mt-4 inline-flex items-center pointer-events-none">
                   <Upload className="w-4 h-4 mr-2" />
                   Upload Images
-                </button>
+                </span>
               </div>
+
+              {images.length > 0 && (
+                <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-3">
+                  {images.map((url) => (
+                    <div key={url} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200">
+                      <img
+                        src={url}
+                        alt="Product"
+                        className="w-full h-full object-cover"
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '0.3'; }}
+                      />
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); removeImage(url); }}
+                        aria-label="Remove image"
+                        title="Remove image"
+                        className="absolute top-1 right-1 p-1 rounded-full bg-white/90 text-gray-600 hover:text-red-600 shadow"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </Section>
 
@@ -1180,6 +1453,9 @@ export function QuickAddPage() {
               <ReviewRow label="Discount band" value={discountCategory || '—'} />
               <ReviewRow label="Initial qty" value={initialQuantity || '0'} />
               <ReviewRow label="Reorder level" value={reorderLevel || '—'} />
+              {images.length > 0 && (
+                <ReviewRow label="Images" value={`${images.length} uploaded`} />
+              )}
               {syncToShopify && <ReviewRow label="Shopify" value="Will sync" />}
             </dl>
 
@@ -1235,6 +1511,75 @@ function ReviewRow({ label, value }: { label: string; value: string }) {
       <dt className="text-gray-500 shrink-0">{label}</dt>
       <dd className="font-medium text-gray-900 text-right truncate">{value}</dd>
     </dl>
+  );
+}
+
+// ---- Inline Autopilot candidate helpers (mirrors CatalogAutopilotPage) ------
+
+// Human label + AI/authorized flags for a candidate's source badge.
+function apSourceBadge(c: AutopilotCandidate): { label: string; ai: boolean; authorized: boolean } {
+  const authorized = c.source_class === 'AUTHORIZED';
+  if (c.source === AI_ENRICH_SOURCE) return { label: 'AI-suggested', ai: true, authorized };
+  if (c.source === 'internal_bvi') return { label: 'Catalog', ai: false, authorized };
+  if (c.source === 'brand_site' || c.source === 'myluxottica') return { label: 'Brand site', ai: false, authorized };
+  if (c.source === 'marketplace') return { label: 'Web (unverified)', ai: false, authorized };
+  return { label: authorized ? 'Authorized' : 'Unverified', ai: false, authorized };
+}
+
+// Confidence (or match score) as a 0-100 int; null when neither is present.
+function apConfidencePct(c: AutopilotCandidate): number | null {
+  const v = c.confidence ?? c.score;
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return null;
+  return Math.round(Number(v) * 100);
+}
+
+// A compact candidate row for the inline panel: image, source + confidence
+// badges, title/brand/model, and a single "Use this" that prefills the form.
+function AutopilotCandidateRow({ c, onUse }: { c: AutopilotCandidate; onUse: () => void }) {
+  const badge = apSourceBadge(c);
+  const pct = apConfidencePct(c);
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-gray-200 p-3">
+      {c.image_urls && c.image_urls.length > 0 && (
+        <img
+          src={c.image_urls[0]}
+          alt={c.title || `${c.brand ?? ''} ${c.model ?? ''}`.trim()}
+          className={clsx('w-14 h-14 rounded-lg object-cover border shrink-0', badge.authorized ? 'border-gray-200' : 'border-amber-300')}
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+        />
+      )}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium',
+            badge.ai ? 'bg-violet-100 text-violet-700'
+              : badge.authorized ? 'bg-emerald-100 text-emerald-700'
+              : 'bg-amber-100 text-amber-700')}>
+            {badge.ai ? <SparklesIcon className="w-3 h-3" />
+              : badge.authorized ? <ShieldCheck className="w-3 h-3" />
+              : <AlertTriangle className="w-3 h-3" />}
+            {badge.label}
+          </span>
+          {pct !== null && (
+            <span className={clsx('inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full',
+              pct >= 90 ? 'bg-green-100 text-green-700' : pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600')}>
+              <Gauge className="w-3 h-3" />
+              {pct}% {c.confidence != null ? 'confidence' : 'match'}
+            </span>
+          )}
+        </div>
+        <p className="font-medium text-gray-900 mt-1 truncate">{c.title || `${c.brand} ${c.model}`}</p>
+        <p className="text-sm text-gray-500 truncate">
+          {c.brand} · {c.model}{c.color ? ` · ${c.color}` : ''}{c.category ? ` · ${c.category}` : ''}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onUse}
+        className="shrink-0 px-3 py-1.5 rounded-md bg-bv text-white text-xs inline-flex items-center justify-center gap-1.5 hover:opacity-90"
+      >
+        <PackagePlus className="w-3.5 h-3.5" /> Use this
+      </button>
+    </div>
   );
 }
 

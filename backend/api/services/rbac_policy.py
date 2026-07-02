@@ -5151,6 +5151,20 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
     {"method": "GET", "path": "/api/v1/products/gst-rates", "allowed": "AUTHENTICATED"},
+    # Product-image upload/serve (GridFS-backed). Upload is a catalog-mutation
+    # (write) gated to the catalog roles; the serve endpoint is PUBLIC because
+    # the returned URL is embedded in <img> tags that carry no auth header and
+    # product photos are non-sensitive catalog media.
+    {
+        "method": "POST",
+        "path": "/api/v1/products/image",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/products/image/{file_id}",
+        "allowed": "PUBLIC",
+    },
     {"method": "GET", "path": "/api/v1/products/sku/{sku}", "allowed": "AUTHENTICATED"},
     {
         "method": "GET",

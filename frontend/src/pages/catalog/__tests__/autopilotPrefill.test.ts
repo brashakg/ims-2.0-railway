@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   inferCategoryCode,
+  inferCategoryFromText,
   autopilotCandidateToFormValues,
 } from '../productAddShared';
 import type { AutopilotCandidate } from '../../../services/api/catalogAutopilot';
@@ -47,6 +48,30 @@ describe('inferCategoryCode', () => {
     expect(inferCategoryCode(null)).toBe('');
     expect(inferCategoryCode(undefined)).toBe('');
     expect(inferCategoryCode('Telescope')).toBe('');
+  });
+});
+
+describe('inferCategoryFromText', () => {
+  it('infers a category from a free-text title / description', () => {
+    expect(inferCategoryFromText('Ray-Ban Aviator Sunglasses')).toBe('SG');
+    expect(inferCategoryFromText('Titan Rectangle Eyeglass Frame')).toBe('FR');
+    expect(inferCategoryFromText('Acuvue Oasys Contact Lenses')).toBe('CL');
+    expect(inferCategoryFromText('Zeiss 1.6 Optical Lens')).toBe('LS');
+    expect(inferCategoryFromText('Reading Glasses +2.00')).toBe('RG');
+    expect(inferCategoryFromText('Casio Analog Wrist Watch')).toBe('WT');
+    expect(inferCategoryFromText('Phonak Hearing Aid BTE')).toBe('HA');
+  });
+
+  it('prefers the more specific keyword (sunglass over glass, smart watch over watch)', () => {
+    expect(inferCategoryFromText('designer sunglasses')).toBe('SG');
+    expect(inferCategoryFromText('Apple Smart Watch series 9')).toBe('SMTWT');
+    expect(inferCategoryFromText('reading glasses')).toBe('RG');
+  });
+
+  it('combines multiple text fragments and is blank when nothing matches', () => {
+    expect(inferCategoryFromText('Ray-Ban', 'RB4105', 'Classic aviator sunglasses')).toBe('SG');
+    expect(inferCategoryFromText('Acme', 'X1', 'a generic gadget')).toBe('');
+    expect(inferCategoryFromText('', null, undefined)).toBe('');
   });
 });
 
@@ -123,5 +148,48 @@ describe('autopilotCandidateToFormValues', () => {
     expect(v.category).toBe('');
     expect(v.hsnCode).toBe('');
     expect(v.gstRate).toBe('18');
+  });
+
+  it('infers the category from the title when the candidate has NO category', () => {
+    // The common scraped case: no `category` field at all. Previously this
+    // produced category='' -> a field-less form -> the staged brand/model looked
+    // "lost". Now the title/brand text drives the inference.
+    const v = autopilotCandidateToFormValues(
+      candidate({ brand: 'Ray-Ban', model: 'RB3025', title: 'Ray-Ban Aviator Sunglasses', category: null })
+    );
+    expect(v.category).toBe('SG');
+    expect(v.attributes.brand_name).toBe('Ray-Ban');
+    expect(v.attributes.model_no).toBe('RB3025');
+  });
+
+  it('never DROPS brand/model/description even when no category can be inferred', () => {
+    const v = autopilotCandidateToFormValues(
+      candidate({
+        brand: 'Acme', model: 'X1', category: null,
+        title: 'Acme X1 gadget', description: 'A generic gadget with no category signal',
+      })
+    );
+    // No category (nothing matched) but the identity + description survive so the
+    // operator only has to pick a category to reveal + populate the fields.
+    expect(v.category).toBe('');
+    expect(v.attributes.brand_name).toBe('Acme');
+    expect(v.attributes.model_no).toBe('X1');
+    expect(v.attributes.model_name).toBe('X1');
+    expect(v.description).toBe('A generic gadget with no category signal');
+  });
+
+  it('carries candidate image_urls into the images array', () => {
+    const v = autopilotCandidateToFormValues(
+      candidate({
+        brand: 'Ray-Ban', model: 'RB4105', category: 'Sunglasses',
+        image_urls: ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg'],
+      })
+    );
+    expect(v.images).toEqual(['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg']);
+  });
+
+  it('has an empty images array when the candidate has no image_urls', () => {
+    const v = autopilotCandidateToFormValues(candidate({ brand: 'Titan', model: 'T1' }));
+    expect(v.images).toEqual([]);
   });
 });
