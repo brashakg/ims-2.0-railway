@@ -767,3 +767,54 @@ class TestStoreCreditRedeemEndpoint:
         assert out["entry"]["type"] == "ISSUED"
         assert out["entry"]["delta"] == 250.0
         assert out["balance"] == 750.0
+
+    def test_redeem_no_atomic_path_rejects_503_never_decrements(self, monkeypatch):
+        """DOUBLE-SPEND GUARD: when the collection cannot perform an atomic
+        conditional decrement (try_debit_store_credit -> DEBIT_NO_ATOMIC), a
+        REDEEM must be REJECTED with 503 -- it must NOT fall back to the
+        non-atomic snapshot read-modify-write path (which two concurrent redeems
+        could both pass, double-spending the balance). No ledger row is written."""
+        from database.repositories.customer_repository import CustomerRepository
+
+        class _NoAtomicColl:
+            """Supports find_one (so find_by_id works) but has NO update_one, so
+            money_guard reports 'no_atomic' -> DEBIT_NO_ATOMIC sentinel."""
+
+            def __init__(self):
+                self.docs = [{"customer_id": "CUST-1", "store_credit": 500.0}]
+
+            def find_one(self, flt=None, projection=None):
+                for d in self.docs:
+                    if all(d.get(k) == v for k, v in (flt or {}).items()
+                           if not isinstance(v, dict)):
+                        return copy.deepcopy(d)
+                return None
+
+        coll = _NoAtomicColl()
+        repo = CustomerRepository(coll)
+
+        class _LedgerColl:
+            def __init__(self):
+                self.docs: List[Dict[str, Any]] = []
+
+            def insert_one(self, doc):
+                self.docs.append(copy.deepcopy(doc))
+                return type("R", (), {"inserted_id": None})()
+
+            def find(self, query=None, projection=None):
+                return iter([])
+
+        ledger = _LedgerColl()
+        monkeypatch.setattr(customers_module, "get_customer_repository", lambda: repo)
+        monkeypatch.setattr(customers_module, "_ledger_coll", lambda: ledger)
+
+        # Sanity: the repo really does yield the no-atomic sentinel here.
+        assert repo.try_debit_store_credit("CUST-1", 100.0) == repo.DEBIT_NO_ATOMIC
+
+        body = customers_module.StoreCreditEntryRequest(amount=100.0, reason="POS")
+        with pytest.raises(HTTPException) as ei:
+            customers_module._post_credit_entry("CUST-1", "REDEEMED", body, _admin())
+        assert ei.value.status_code == 503
+        # No ledger row written; balance never touched (no non-atomic decrement).
+        assert ledger.docs == []
+        assert coll.docs[0]["store_credit"] == 500.0
