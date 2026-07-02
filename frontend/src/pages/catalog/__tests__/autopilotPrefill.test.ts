@@ -12,6 +12,12 @@ import {
   inferCategoryCode,
   inferCategoryFromText,
   autopilotCandidateToFormValues,
+  mapAutopilotCandidate,
+  candidateReferences,
+  candidateImagesUsable,
+  imageRehostSummary,
+  buildProductPayload,
+  AUTOPILOT_REFERENCE_ATTR,
 } from '../productAddShared';
 import type { AutopilotCandidate } from '../../../services/api/catalogAutopilot';
 
@@ -191,5 +197,161 @@ describe('autopilotCandidateToFormValues', () => {
   it('has an empty images array when the candidate has no image_urls', () => {
     const v = autopilotCandidateToFormValues(candidate({ brand: 'Titan', model: 'T1' }));
     expect(v.images).toEqual([]);
+  });
+
+  it('v2: maps scraped specs onto the declared category fields', () => {
+    const v = autopilotCandidateToFormValues(
+      candidate({
+        brand: 'Ray-Ban', model: 'RB4105', category: 'SUNGLASS',
+        specs: { 'Lens Width': '52 mm', Bridge: '18', 'Temple Length': '140 mm', 'Frame Color': 'Black' },
+      })
+    );
+    expect(v.category).toBe('SG');
+    expect(v.attributes.lens_size).toBe('52');
+    expect(v.attributes.bridge_width).toBe('18');
+    expect(v.attributes.temple_length).toBe('140');
+    expect(v.attributes.colour_code).toBe('Black');
+    // Raw scraped keys are still kept (harmless passthrough).
+    expect(v.attributes['Lens Width']).toBe('52 mm');
+  });
+
+  it('v2: parses the size string from the candidate size / title', () => {
+    const v = autopilotCandidateToFormValues(
+      candidate({ brand: 'Ray-Ban', model: 'RB3025', category: 'SUNGLASS', size: '58-14-135' })
+    );
+    expect(v.attributes.lens_size).toBe('58');
+    expect(v.attributes.bridge_width).toBe('14');
+    expect(v.attributes.temple_length).toBe('135');
+  });
+
+  it('v2: colour falls back to the search colour when the scrape lacks one', () => {
+    const v = autopilotCandidateToFormValues(
+      candidate({ brand: 'Ray-Ban', model: 'RB4105', category: 'SUNGLASS', color: '601/58' })
+    );
+    expect(v.attributes.colour_code).toBe('601/58');
+  });
+});
+
+describe('mapAutopilotCandidate (rich v2 result)', () => {
+  it('reports which fields were auto-filled + the unmapped extras', () => {
+    const res = mapAutopilotCandidate(
+      candidate({
+        brand: 'Ray-Ban', model: 'RB4105', category: 'SUNGLASS',
+        specs: { 'Lens Width': '52 mm', 'Hinge Type': 'Spring' },
+      })
+    );
+    expect(res.autoFilled).toEqual(
+      expect.arrayContaining(['brand_name', 'model_no', 'lens_size'])
+    );
+    expect(res.extras['Hinge Type']).toBe('Spring');
+    expect(res.extras['Lens Width']).toBeUndefined();
+  });
+
+  it('a category override (the form pick) wins and drives the mapping', () => {
+    const res = mapAutopilotCandidate(
+      candidate({
+        brand: 'Titan', model: 'T123', category: 'SUNGLASS',
+        specs: { 'Case Diameter': '42 mm' },
+      }),
+      'WT'
+    );
+    expect(res.values.category).toBe('WT');
+    expect(res.values.attributes.dial_size).toBe('42');
+  });
+
+  it('AI attributes fill gaps but never beat the deterministic mapping', () => {
+    const res = mapAutopilotCandidate(
+      candidate({
+        brand: 'Ray-Ban', model: 'RB4105', category: 'SUNGLASS',
+        specs: { 'Lens Width': '52 mm' },
+        ai_attributes: { lens_size: '99', colour_code: '601/58', bogus: 'zap' },
+      })
+    );
+    // Deterministic 52 wins over the AI's 99; the AI fills the colour gap.
+    expect(res.values.attributes.lens_size).toBe('52');
+    expect(res.values.attributes.colour_code).toBe('601/58');
+    // Unknown attribute names from the AI are ignored.
+    expect(res.values.attributes.bogus).toBeUndefined();
+    expect(res.autoFilled).toEqual(expect.arrayContaining(['lens_size', 'colour_code']));
+  });
+
+  it('carries reference URLs + persists them into the payload attributes', () => {
+    const res = mapAutopilotCandidate(
+      candidate({
+        brand: 'Ray-Ban', model: 'RB4105', category: 'SUNGLASS',
+        source_url: 'https://www.ray-ban.com/india/p/rb4105-black',
+        references: [{ source: 'brand_site', url: 'https://www.ray-ban.com/india/p/rb4105-black' }],
+      })
+    );
+    expect(res.referenceUrls).toEqual(['https://www.ray-ban.com/india/p/rb4105-black']);
+    expect(res.values.attributes[AUTOPILOT_REFERENCE_ATTR]).toBe(
+      'https://www.ray-ban.com/india/p/rb4105-black'
+    );
+    // ...and buildProductPayload forwards it onto the created product doc.
+    const payload = buildProductPayload({
+      ...res.values,
+      mrp: '9990',
+      discountCategory: 'PREMIUM',
+    });
+    expect(payload.attributes[AUTOPILOT_REFERENCE_ATTR]).toBe(
+      'https://www.ray-ban.com/india/p/rb4105-black'
+    );
+  });
+
+  it('no references -> no reference attribute (no empty junk persisted)', () => {
+    const res = mapAutopilotCandidate(candidate({ brand: 'Titan', model: 'T1' }));
+    expect(res.referenceUrls).toEqual([]);
+    expect(res.values.attributes[AUTOPILOT_REFERENCE_ATTR]).toBeUndefined();
+  });
+});
+
+describe('candidateReferences (reference chips)', () => {
+  it('derives {domain, url} chips from references, deduped', () => {
+    const chips = candidateReferences(
+      candidate({
+        references: [
+          { source: 'brand_site', url: 'https://www.ray-ban.com/india/p/rb4105' },
+          { source: 'brand_site', url: 'https://www.ray-ban.com/india/p/rb4105' },
+          { source: 'marketplace', url: 'https://amazon.in/rb4105' },
+        ],
+      })
+    );
+    expect(chips).toEqual([
+      { domain: 'ray-ban.com', url: 'https://www.ray-ban.com/india/p/rb4105' },
+      { domain: 'amazon.in', url: 'https://amazon.in/rb4105' },
+    ]);
+  });
+
+  it('falls back to source_url, then url', () => {
+    expect(candidateReferences(candidate({ source_url: 'https://x.example/p/1' }))).toEqual([
+      { domain: 'x.example', url: 'https://x.example/p/1' },
+    ]);
+    expect(candidateReferences(candidate({ url: 'https://y.example/p/2' }))).toEqual([
+      { domain: 'y.example', url: 'https://y.example/p/2' },
+    ]);
+  });
+
+  it('drops invalid URLs and returns [] when there is nothing', () => {
+    expect(candidateReferences(candidate({ source_url: 'not-a-url' }))).toEqual([]);
+    expect(candidateReferences(candidate({}))).toEqual([]);
+  });
+});
+
+describe('image re-host summary + rights gate', () => {
+  it('candidateImagesUsable mirrors the backend image_use_allowed rule', () => {
+    expect(candidateImagesUsable(candidate({ source_class: 'AUTHORIZED' }))).toBe(true);
+    expect(candidateImagesUsable(candidate({ source_class: 'UNVERIFIED' }))).toBe(false);
+    expect(
+      candidateImagesUsable(candidate({ source_class: 'UNVERIFIED', rights_confirmed: true }))
+    ).toBe(true);
+  });
+
+  it('imageRehostSummary counts copied vs external', () => {
+    expect(imageRehostSummary(2, 1)).toBe(
+      '2 images copied to your storage, 1 kept as external link'
+    );
+    expect(imageRehostSummary(1, 0)).toBe('1 image copied to your storage');
+    expect(imageRehostSummary(0, 3)).toBe('3 kept as external links');
+    expect(imageRehostSummary(0, 0)).toBe('');
   });
 });

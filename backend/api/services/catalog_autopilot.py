@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import json
 import logging
 import os
 import re
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin, urlparse
 
 # httpx is an installed dependency, but guard the import so a missing httpx
 # simply disables the web adapters (they report is_enabled()=False) instead of
@@ -160,11 +162,17 @@ class _ProductHTMLParser(HTMLParser):
         self.og_description: str = ""
         self.image_urls: List[str] = []
         self.specs: Dict[str, str] = {}
+        # Anchor links (href + visible text) so a SEARCH-RESULTS page can be
+        # mined for the top product-page links (Autopilot v2 multi-candidate).
+        self.links: List[Dict[str, str]] = []
         self._in_title = False
         # Pending spec key/value cells while we walk a definition/table row.
         self._cell_tag: Optional[str] = None
         self._cell_text: List[str] = []
         self._pending_key: str = ""
+        # Pending anchor while we walk <a>...</a>.
+        self._link_href: Optional[str] = None
+        self._link_text: List[str] = []
 
     # -- helpers -----------------------------------------------------------
     def _attrs(self, attrs: List[tuple]) -> Dict[str, str]:
@@ -205,6 +213,11 @@ class _ProductHTMLParser(HTMLParser):
             self._add_image(
                 a.get("src") or a.get("data-src") or a.get("data-original") or ""
             )
+        elif tag == "a":
+            href = (a.get("href") or "").strip()
+            if href and len(self.links) < 300:
+                self._link_href = href
+                self._link_text = []
         elif tag in ("th", "td", "dt", "dd"):
             self._cell_tag = tag
             self._cell_text = []
@@ -213,6 +226,12 @@ class _ProductHTMLParser(HTMLParser):
         tag = tag.lower()
         if tag == "title":
             self._in_title = False
+        elif tag == "a":
+            if self._link_href is not None:
+                text = re.sub(r"\s+", " ", "".join(self._link_text)).strip()
+                self.links.append({"href": self._link_href, "text": text[:120]})
+                self._link_href = None
+                self._link_text = []
         elif tag in ("th", "td", "dt", "dd") and tag == self._cell_tag:
             text = re.sub(r"\s+", " ", "".join(self._cell_text)).strip()
             # th/dt = label cell; td/dd = value cell paired with the last label.
@@ -230,6 +249,8 @@ class _ProductHTMLParser(HTMLParser):
             self.title += data
         elif self._cell_tag is not None:
             self._cell_text.append(data)
+        if self._link_href is not None:
+            self._link_text.append(data)
 
 
 def scrape_product_page(raw_html: str) -> Dict[str, Any]:
@@ -277,6 +298,82 @@ def scrape_product_page(raw_html: str) -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         logger.warning("[AUTOPILOT] scrape_product_page failed: %s", e)
     return out
+
+
+# Obvious non-product link filters for extract_product_links.
+_LINK_ASSET_EXTS = (
+    ".css",
+    ".js",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".svg",
+    ".gif",
+    ".ico",
+    ".webp",
+    ".pdf",
+)
+_LINK_SKIP_SCHEMES = ("javascript:", "mailto:", "tel:", "#")
+
+
+def extract_product_links(
+    raw_html: str, base_url: str, model: str, limit: int = 5
+) -> List[str]:
+    """Best-effort product-page URLs mined from a SEARCH-RESULTS page.
+
+    Autopilot v2: a brand-site search should yield SEVERAL candidates (one per
+    product link), not just the search page's own metadata. Rules:
+      - same host as the search page (never wander off-site),
+      - skip assets / javascript: / mailto: / other search pages,
+      - rank links whose href/anchor-text contain the normalized model FIRST,
+        then product-ish paths (/p/, /product, *.html),
+      - dedupe, cap at `limit`.
+    Fully fail-soft: any parse problem -> [] (the caller falls back to scraping
+    the search page itself as a single candidate).
+    """
+    if not raw_html or not base_url:
+        return []
+    try:
+        parser = _ProductHTMLParser()
+        parser.feed(raw_html[:_MAX_HTML_BYTES])
+        try:
+            parser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        base_host = urlparse(base_url).netloc.lower()
+        base_clean = base_url.split("#", 1)[0]
+        nmodel = normalize_model(model)
+        primary: List[str] = []
+        secondary: List[str] = []
+        seen: set = set()
+        for link in parser.links:
+            href = (link.get("href") or "").strip()
+            if not href or href.lower().startswith(_LINK_SKIP_SCHEMES):
+                continue
+            absu = urljoin(base_url, href)
+            parsed = urlparse(absu)
+            if parsed.scheme not in ("http", "https"):
+                continue
+            if parsed.netloc.lower() != base_host:
+                continue
+            path_low = (parsed.path or "").lower()
+            if path_low.endswith(_LINK_ASSET_EXTS) or "/search" in path_low:
+                continue
+            clean = absu.split("#", 1)[0]
+            if clean in seen or clean == base_clean:
+                continue
+            seen.add(clean)
+            hay = normalize_model(href + " " + (link.get("text") or ""))
+            if nmodel and nmodel in hay:
+                primary.append(clean)
+            elif any(
+                seg in path_low for seg in ("/p/", "/product", "/products/")
+            ) or path_low.endswith(".html"):
+                secondary.append(clean)
+        return (primary + secondary)[: max(0, int(limit))]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[AUTOPILOT] extract_product_links failed: %s", e)
+        return []
 
 
 def _http_get(
@@ -355,6 +452,8 @@ def search_internal_catalog(
                         "source": "internal_bvi",
                         "source_class": AUTHORIZED,
                         "url": None,
+                        "source_url": None,
+                        "references": [],
                         "title": r[4] or f"{r[1]} {r[2] or ''}".strip(),
                         "brand": r[1],
                         "model": r[3] or r[2],
@@ -402,6 +501,12 @@ def _candidate_skeleton(source: str, source_class: str) -> Dict[str, Any]:
         "source": source,
         "source_class": source_class,
         "url": None,
+        # The EXACT page this candidate's data was scraped from (None for
+        # DB-backed / AI-generated candidates). `references` lists every
+        # {source, url} pair that contributed, so the operator can audit where
+        # catalog data came from (Autopilot v2).
+        "source_url": None,
+        "references": [],
         "title": None,
         "brand": None,
         "model": None,
@@ -412,6 +517,33 @@ def _candidate_skeleton(source: str, source_class: str) -> Dict[str, Any]:
         "description": None,
         "usp": None,
     }
+
+
+# Canonical category -> the word appended to source search queries so a
+# category-aware job refines the query ("RB4105 sunglasses"). Unknown/blank
+# categories fall back to the lower-cased words of the key (fail-soft).
+CATEGORY_QUERY_WORDS: Dict[str, str] = {
+    "SUNGLASS": "sunglasses",
+    "FRAME": "eyeglasses",
+    "OPTICAL_LENS": "optical lens",
+    "CONTACT_LENS": "contact lenses",
+    "COLORED_CONTACT_LENS": "colored contact lenses",
+    "READING_GLASSES": "reading glasses",
+    "WATCH": "watch",
+    "SMARTWATCH": "smartwatch",
+    "SMARTGLASSES": "smart glasses",
+    "WALL_CLOCK": "wall clock",
+    "ACCESSORIES": "accessories",
+    "HEARING_AID": "hearing aid",
+}
+
+
+def _category_query_word(category: Any) -> str:
+    """Human search word for a canonical category ('' when blank)."""
+    key = _norm(category).replace(" ", "_")
+    if not key:
+        return ""
+    return CATEGORY_QUERY_WORDS.get(key, key.replace("_", " ").lower())
 
 
 # ---------------------------------------------------------------------------
@@ -441,19 +573,50 @@ class SourceAdapter:
         return ""
 
     def _search(
-        self, brand: str, model: str, color: str, size: str, limit: int
+        self,
+        brand: str,
+        model: str,
+        color: str,
+        size: str,
+        limit: int,
+        category: str = "",
     ) -> List[Dict[str, Any]]:
-        """Real work; may hit the network. Subclasses implement this."""
+        """Real work; may hit the network. Subclasses implement this. The v2
+        `category` kwarg is optional — search() only passes it to overrides
+        that declare it, so legacy 5-arg adapters keep working unchanged."""
         raise NotImplementedError
 
     def search(
-        self, brand: str, model: str, color: str = "", size: str = "", limit: int = 25
+        self,
+        brand: str,
+        model: str,
+        color: str = "",
+        size: str = "",
+        limit: int = 25,
+        category: str = "",
     ) -> List[Dict[str, Any]]:
         """Fail-soft wrapper around _search(). ANY exception -> [] + a warning.
         Guarantees every returned candidate carries this adapter's source +
-        source_class so downstream dedupe/scoring/copyright logic is correct."""
+        source_class so downstream dedupe/scoring/copyright logic is correct.
+
+        `category` (v2) is passed through ONLY to adapters whose _search
+        declares it — older/third-party adapters with the 5-arg signature keep
+        working unchanged (inspected, not duck-typed, so an adapter's own
+        TypeError is never mistaken for a signature mismatch)."""
         try:
-            out = self._search(brand, model, color, size, limit) or []
+            try:
+                accepts_category = (
+                    "category" in inspect.signature(self._search).parameters
+                )
+            except (TypeError, ValueError):
+                accepts_category = False
+            if accepts_category:
+                out = (
+                    self._search(brand, model, color, size, limit, category=category)
+                    or []
+                )
+            else:
+                out = self._search(brand, model, color, size, limit) or []
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[AUTOPILOT] adapter %s raised (suppressed): %s", self.name, e
@@ -467,6 +630,11 @@ class SourceAdapter:
             cand.setdefault("source_class", self.source_class)
             cand["source"] = cand.get("source") or self.name
             cand["source_class"] = cand.get("source_class") or self.source_class
+            # v2 reference audit fields — always present so the FE can render
+            # a reference chip (None/[] for DB-backed or AI-generated rows).
+            cand.setdefault("source_url", None)
+            if not isinstance(cand.get("references"), list):
+                cand["references"] = []
             normalized.append(cand)
         return normalized
 
@@ -532,29 +700,15 @@ class BrandSiteAdapter(SourceAdapter):
             return "AUTOPILOT_DISABLE_NETWORK set; brand-site scraping off."
         return "Fetches the brand's India site at search time (fail-soft)."
 
-    def _search(self, brand, model, color, size, limit):
-        base = self._site_for(brand)
-        if not base:
-            logger.warning(
-                "[AUTOPILOT] brand_site: no configured site for brand %r", brand
-            )
-            return []
-        key = _norm(brand).replace(" ", "")
-        path = BRAND_SITE_SEARCH_PATHS.get(key, BRAND_SITE_DEFAULT_SEARCH_PATH)
-        query = model if not color else f"{model} {color}"
-        url = base.rstrip("/") + path.format(q=_url_q(query))
-        body = _http_get(url)
-        if not body:
-            return []
-        scraped = scrape_product_page(body)
-        if not (
-            scraped.get("title") or scraped.get("specs") or scraped.get("image_urls")
-        ):
-            return []
+    def _build_candidate(
+        self, scraped: Dict[str, Any], page_url: str, brand, model, color, size
+    ) -> Dict[str, Any]:
         cand = _candidate_skeleton(self.name, self.source_class)
         cand.update(
             {
-                "url": url,
+                "url": page_url,
+                "source_url": page_url,
+                "references": [{"source": self.name, "url": page_url}],
                 "title": scraped.get("title") or f"{brand} {model}".strip(),
                 "brand": brand,
                 "model": model,
@@ -566,7 +720,57 @@ class BrandSiteAdapter(SourceAdapter):
                 "usp": scraped.get("usp") or None,
             }
         )
-        return [cand]
+        return cand
+
+    def _search(self, brand, model, color, size, limit, category=""):
+        base = self._site_for(brand)
+        if not base:
+            logger.warning(
+                "[AUTOPILOT] brand_site: no configured site for brand %r", brand
+            )
+            return []
+        key = _norm(brand).replace(" ", "")
+        path = BRAND_SITE_SEARCH_PATHS.get(key, BRAND_SITE_DEFAULT_SEARCH_PATH)
+        cat_word = _category_query_word(category)
+        query = " ".join(p for p in (model, color, cat_word) if p)
+        url = base.rstrip("/") + path.format(q=_url_q(query))
+        body = _http_get(url)
+        if not body:
+            return []
+
+        # v2 multi-candidate: mine the SEARCH-RESULTS page for the top product
+        # links and scrape each one -> a candidate per product page (with its
+        # exact source_url), so a search can surface 4-5 options, not 1.
+        max_pages = int(os.getenv("AUTOPILOT_BRAND_SITE_MAX_PAGES", "5"))
+        out: List[Dict[str, Any]] = []
+        links = extract_product_links(
+            body, url, model, limit=min(max_pages, int(limit))
+        )
+        for link in links:
+            page = _http_get(link)
+            if not page:
+                continue
+            scraped = scrape_product_page(page)
+            if not (
+                scraped.get("title")
+                or scraped.get("specs")
+                or scraped.get("image_urls")
+            ):
+                continue
+            out.append(self._build_candidate(scraped, link, brand, model, color, size))
+            if len(out) >= max_pages:
+                break
+        if out:
+            return out
+
+        # Fallback (legacy path): no usable product links — scrape the search
+        # page itself (it often IS the product page for an exact-model query).
+        scraped = scrape_product_page(body)
+        if not (
+            scraped.get("title") or scraped.get("specs") or scraped.get("image_urls")
+        ):
+            return []
+        return [self._build_candidate(scraped, url, brand, model, color, size)]
 
 
 # --- Priority 2: myLuxottica dealer portal (AUTHORIZED, authenticated) ------
@@ -625,7 +829,7 @@ class MyLuxotticaAdapter(SourceAdapter):
             logger.warning("[AUTOPILOT] myluxottica login failed: %s", e)
             return False
 
-    def _search(self, brand, model, color, size, limit):
+    def _search(self, brand, model, color, size, limit, category=""):
         if not self.is_enabled() or httpx is None:
             return []
         try:
@@ -633,7 +837,8 @@ class MyLuxotticaAdapter(SourceAdapter):
                 if not self.login(client):
                     logger.warning("[AUTOPILOT] myluxottica: login unsuccessful")
                     return []
-                query = model if not color else f"{model} {color}"
+                cat_word = _category_query_word(category)
+                query = " ".join(p for p in (model, color, cat_word) if p)
                 url = MYLUXOTTICA_BASE_URL.rstrip("/") + MYLUXOTTICA_SEARCH_PATH.format(
                     q=_url_q(query)
                 )
@@ -652,6 +857,8 @@ class MyLuxotticaAdapter(SourceAdapter):
         cand.update(
             {
                 "url": MYLUXOTTICA_BASE_URL,
+                "source_url": url,
+                "references": [{"source": self.name, "url": url}],
                 "title": scraped.get("title") or f"{brand} {model}".strip(),
                 "brand": brand,
                 "model": model,
@@ -725,10 +932,11 @@ class MarketplaceAdapter(SourceAdapter):
             return "Search API key present; specs-only (images stay unverified)."
         return "Set SERP_API_KEY or GOOGLE_CSE_KEY+GOOGLE_CSE_CX to enable."
 
-    def _search(self, brand, model, color, size, limit):
+    def _search(self, brand, model, color, size, limit, category=""):
         if httpx is None or not self.is_enabled():
             return []
-        q = " ".join(p for p in [brand, model, color, size] if p).strip()
+        cat_word = _category_query_word(category)
+        q = " ".join(p for p in [brand, model, color, size, cat_word] if p).strip()
         if not q:
             return []
         items: List[Dict[str, Any]] = []
@@ -760,9 +968,14 @@ class MarketplaceAdapter(SourceAdapter):
         out: List[Dict[str, Any]] = []
         for it in items[: int(limit)]:
             cand = _candidate_skeleton(self.name, self.source_class)
+            it_url = it.get("url")
             cand.update(
                 {
-                    "url": it.get("url"),
+                    "url": it_url,
+                    "source_url": it_url,
+                    "references": (
+                        [{"source": self.name, "url": it_url}] if it_url else []
+                    ),
                     "title": it.get("title"),
                     "brand": brand,
                     "model": model,
@@ -971,7 +1184,7 @@ class AIEnrichAdapter(SourceAdapter):
             return "agents Claude client unavailable; AI enrichment disabled."
         return "Claude generates catalog copy/specs from brand + model (no images)."
 
-    def _build_prompt(self, brand, model, color, size) -> tuple:
+    def _build_prompt(self, brand, model, color, size, category="") -> tuple:
         cats = ", ".join(_ai_allowed_categories())
         descriptor = " ".join(
             p for p in [brand, model, color, size] if (p and str(p).strip())
@@ -982,10 +1195,19 @@ class AIEnrichAdapter(SourceAdapter):
             "Do NOT invent a product image URL. If you are not confident the "
             "exact product exists, set needs_review to true and confidence low."
         )
+        category_hint = ""
+        if category and str(category).strip():
+            category_hint = (
+                " The operator states this product's category is "
+                + str(category).strip().upper()
+                + "; use that category unless it is clearly impossible."
+            )
         user = (
             "For the eyewear product "
             + (descriptor or f"{brand} {model}".strip())
-            + ", return STRICT JSON with these keys:\n"
+            + "."
+            + category_hint
+            + " Return STRICT JSON with these keys:\n"
             '  "title": string,\n'
             '  "category": one of [' + cats + "],\n"
             '  "frame_shape": string,\n'
@@ -1052,7 +1274,7 @@ class AIEnrichAdapter(SourceAdapter):
         cand["needs_review"] = bool(data.get("needs_review", True))
         return cand
 
-    def _search(self, brand, model, color, size, limit):
+    def _search(self, brand, model, color, size, limit, category=""):
         if not self.is_enabled():
             return []
         try:
@@ -1060,7 +1282,7 @@ class AIEnrichAdapter(SourceAdapter):
         except Exception as e:  # noqa: BLE001
             logger.warning("[AUTOPILOT] ai_enrich import failed: %s", e)
             return []
-        system, user = self._build_prompt(brand, model, color, size)
+        system, user = self._build_prompt(brand, model, color, size, category)
         max_tokens = int(os.getenv("AUTOPILOT_AI_MAX_TOKENS", "700"))
         # ONE Claude call. The helper already strips code fences + parses JSON
         # fail-soft (returns None on any failure), so we never see raw text.
@@ -1069,6 +1291,112 @@ class AIEnrichAdapter(SourceAdapter):
             return []
         cand = self._to_candidate(data, brand, model, color, size)
         return [cand] if cand else []
+
+
+# ---------------------------------------------------------------------------
+# Optional AI spec-mapping enrichment (v2, fail-soft)
+# ---------------------------------------------------------------------------
+# After scraping, when the job is category-aware AND ANTHROPIC_API_KEY is set,
+# each top candidate's scraped title/description/free-form specs are sent to
+# Claude together with the category's CANONICAL attribute field list (from the
+# product_master CATEGORY_SPECS registry). Claude returns {attributeName:
+# value}, attached to the candidate as `ai_attributes`. The FE merges these
+# UNDER its deterministic synonym mapper (deterministic first, AI fills gaps).
+# Strictly fail-soft: no key / import error / timeout / bad JSON -> {} and the
+# candidate simply has no ai_attributes. No emojis in any of this (cp1252).
+
+
+def _ai_spec_enrich_enabled() -> bool:
+    """Gate for the spec-mapping enrichment: same contract as AIEnrichAdapter
+    (env key + importable shared Claude client). Reads config only."""
+    return bool(os.getenv("ANTHROPIC_API_KEY")) and _ai_client_importable()
+
+
+def _category_field_names(category: Any) -> List[str]:
+    """The canonical required+optional attribute keys for a category, from the
+    product_master CATEGORY_SPECS registry. [] for unknown/blank (fail-soft)."""
+    try:
+        from .product_master import category_spec
+
+        spec = category_spec(category)
+        if spec is None:
+            return []
+        return list(spec.required) + list(spec.optional)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def ai_map_specs_to_fields(
+    category: Any,
+    title: Any,
+    description: Any,
+    specs: Any,
+    query: Dict[str, Any],
+) -> Dict[str, str]:
+    """ONE short Claude call: map scraped info onto the category's canonical
+    attribute fields. Returns {attributeName: value} restricted to the
+    category's declared field names; {} on ANY failure (never raises, never
+    blocks long — timeout defaults to 8s via AUTOPILOT_AI_ENRICH_TIMEOUT)."""
+    try:
+        if not category or not _ai_spec_enrich_enabled():
+            return {}
+        field_names = _category_field_names(category)
+        if not field_names:
+            return {}
+        try:
+            from agents.claude_client import call_claude_json
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[AUTOPILOT] ai spec-map import failed: %s", e)
+            return {}
+        try:
+            specs_json = json.dumps(specs or {}, ensure_ascii=True, default=str)[:2000]
+        except Exception:  # noqa: BLE001
+            specs_json = "{}"
+        system = (
+            "You are an optical-retail catalog data mapper. Map scraped product "
+            "information onto a FIXED set of catalog attribute fields. Respond "
+            "with STRICT JSON whose keys are ONLY drawn from the allowed "
+            "attribute names; omit any field you cannot fill confidently from "
+            "the given data. Values are short strings without units (write 52, "
+            "not '52 mm'). Never invent data that is not supported by the input."
+        )
+        user = (
+            "Product category: " + str(category) + "\n"
+            "Search query: brand="
+            + str(query.get("brand") or "")
+            + " model="
+            + str(query.get("model") or "")
+            + " color="
+            + str(query.get("color") or "")
+            + " size="
+            + str(query.get("size") or "")
+            + "\n"
+            "Scraped title: " + str(title or "")[:200] + "\n"
+            "Scraped description: " + str(description or "")[:600] + "\n"
+            "Scraped specs JSON: " + specs_json + "\n"
+            "Allowed attribute names: " + ", ".join(field_names) + "\n"
+            "Return one JSON object mapping attribute name -> string value."
+        )
+        timeout = float(os.getenv("AUTOPILOT_AI_ENRICH_TIMEOUT", "8.0"))
+        max_tokens = int(os.getenv("AUTOPILOT_AI_ENRICH_MAX_TOKENS", "400"))
+        data = _run_coro_sync(
+            call_claude_json(system, user, max_tokens=max_tokens, timeout=timeout)
+        )
+        if not isinstance(data, dict):
+            return {}
+        allowed = set(field_names)
+        out: Dict[str, str] = {}
+        for k, v in data.items():
+            key = str(k).strip()
+            if key not in allowed or v is None:
+                continue
+            val = str(v).strip()
+            if val:
+                out[key] = val[:200]
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[AUTOPILOT] ai_map_specs_to_fields failed: %s", e)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1104,24 +1432,40 @@ def _ident_key(brand: str, model: str) -> str:
     return normalize_model(brand) + "|" + normalize_model(model)
 
 
-def _dedupe_key(brand: str, model: str, source: str) -> str:
-    """Per-candidate dedupe key = normalized brand + model + source. Including
-    the source means a single source can't list the same product twice, while a
-    DIFFERENT source offering the same model is still kept (useful for the
-    dedup/enrich view - e.g. the authoritative brand-site row AND the 'already
-    in our catalog' internal row). Exact-key collisions are resolved in favour
-    of the higher-priority / AUTHORIZED source."""
-    return _ident_key(brand, model) + "|" + str(source or "")
+def _dedupe_key(brand: str, model: str, source: str, source_url: str = "") -> str:
+    """Per-candidate dedupe key = normalized brand + model + source (+ the
+    exact source page URL when present). Including the source means a single
+    source can't list the same product twice, while a DIFFERENT source offering
+    the same model is still kept (useful for the dedup/enrich view - e.g. the
+    authoritative brand-site row AND the 'already in our catalog' internal
+    row). v2: a source that scrapes SEVERAL DISTINCT product pages (brand-site
+    multi-candidate) keeps one candidate per page — the page URL disambiguates;
+    candidates with no source_url collapse per-source exactly as before."""
+    return (
+        _ident_key(brand, model) + "|" + str(source or "") + "|" + str(source_url or "")
+    )
 
 
 def run_search(
-    brand: str, model: str, color: str = "", size: str = "", limit: int = 25
+    brand: str,
+    model: str,
+    color: str = "",
+    size: str = "",
+    limit: int = 25,
+    category: str = "",
 ) -> Dict[str, Any]:
     """Run all ENABLED adapters in priority order, dedupe across the combined
     result set, score, and sort. Pure orchestration; persistence is the router's
     job. Every step is fail-soft - no exception escapes (a bad adapter just
-    contributes nothing)."""
+    contributes nothing).
+
+    v2: `category` (a canonical product category, e.g. "SUNGLASS") makes the
+    job category-aware — it refines source queries, is stamped onto the query
+    echo AND every candidate (so downstream mapping never guesses), and gates
+    the optional AI spec-mapping enrichment."""
     query = {"brand": brand, "model": model, "color": color, "size": size}
+    if category:
+        query["category"] = category
     registry = build_registry()
 
     # Dedupe: first-seen wins. Because we walk the registry in priority order
@@ -1138,11 +1482,15 @@ def run_search(
                 "[AUTOPILOT] adapter %s is_enabled raised: %s", adapter.name, e
             )
             continue
-        for cand in adapter.search(brand, model, color, size, limit=limit):
+        for cand in adapter.search(
+            brand, model, color, size, limit=limit, category=category
+        ):
             cand_brand = cand.get("brand") or brand
             cand_model = cand.get("model") or model
             cand_source = cand.get("source") or adapter.name
-            dkey = _dedupe_key(cand_brand, cand_model, cand_source)
+            dkey = _dedupe_key(
+                cand_brand, cand_model, cand_source, cand.get("source_url") or ""
+            )
             if dkey in seen:
                 continue
             try:
@@ -1152,11 +1500,44 @@ def run_search(
                 scored = {"score": 0.0, "matched": {}}
             cand.update(scored)
             cand["source_priority"] = adapter.priority
+            # v2: the operator-chosen category is authoritative — stamp it on
+            # every candidate so the Add-Product mapper knows the category
+            # without re-guessing from free text.
+            if category:
+                cand["category"] = category
             seen[dkey] = cand
             candidates.append(cand)
 
     # Sort by score desc, stable tie-break on source priority (lower first).
     candidates.sort(key=lambda c: (-c.get("score", 0), c.get("source_priority", 100)))
+
+    # OPTIONAL AI assist (v2, strictly fail-soft): map the top scraped
+    # candidates' free-form specs onto the category's canonical attribute
+    # fields via one short Claude call each. Deterministic mapping happens on
+    # the FE; these AI values only FILL GAPS there. Skipped entirely when no
+    # key / no category; a per-candidate failure just leaves that candidate
+    # without ai_attributes. Never blocks: short timeout, capped candidates.
+    if category and candidates and _ai_spec_enrich_enabled():
+        max_enrich = int(os.getenv("AUTOPILOT_AI_ENRICH_MAX", "3"))
+        enriched = 0
+        for cand in candidates:
+            if enriched >= max_enrich:
+                break
+            if cand.get("source") == "ai_enrich":
+                continue  # already AI-generated content
+            if not (cand.get("title") or cand.get("specs") or cand.get("description")):
+                continue
+            attrs = ai_map_specs_to_fields(
+                category,
+                cand.get("title"),
+                cand.get("description"),
+                cand.get("specs"),
+                query,
+            )
+            if attrs:
+                cand["ai_attributes"] = attrs
+            enriched += 1
+
     return {
         "query": query,
         "candidates": candidates,

@@ -12,7 +12,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Search, Loader2, Check, X as XIcon, ShieldCheck, AlertTriangle, Globe,
-  FileText, Eye, Sparkles, PackagePlus, Info, Gauge,
+  FileText, Sparkles, PackagePlus, Info, Gauge, ExternalLink,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -21,7 +21,7 @@ import {
   type AutopilotCandidate,
   type AutopilotSource,
 } from '../../services/api/catalogAutopilot';
-import { stashAutopilotPrefill } from './productAddShared';
+import { stashAutopilotPrefill, candidateReferences, CATEGORIES } from './productAddShared';
 import clsx from 'clsx';
 
 const DECISION_LABEL: Record<string, string> = {
@@ -55,6 +55,9 @@ export default function CatalogAutopilotPage() {
   const [model, setModel] = useState('');
   const [color, setColor] = useState('');
   const [size, setSize] = useState('');
+  // v2: category-aware search — the backend refines queries with it and
+  // stamps it on every candidate so the Add-Product mapper never guesses.
+  const [category, setCategory] = useState('');
   const [loading, setLoading] = useState(false);
   const [sources, setSources] = useState<AutopilotSource[]>([]);
   const [candidates, setCandidates] = useState<AutopilotCandidate[]>([]);
@@ -73,7 +76,7 @@ export default function CatalogAutopilotPage() {
     if (!brand.trim() || !model.trim()) { toast.error('Brand and model are required'); return; }
     setLoading(true); setSearched(false);
     try {
-      const r = await catalogAutopilotApi.createJob({ brand: brand.trim(), model: model.trim(), color: color.trim(), size: size.trim() });
+      const r = await catalogAutopilotApi.createJob({ brand: brand.trim(), model: model.trim(), color: color.trim(), size: size.trim(), category });
       setCandidates(r.candidates || []);
       setSources(r.sources || sources);
       setDecided({});
@@ -120,11 +123,19 @@ export default function CatalogAutopilotPage() {
 
       {/* Search form */}
       <div className="card p-4">
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
           <Field label="Brand *"><input className="input-field" value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Ray-Ban" /></Field>
           <Field label="Model *"><input className="input-field" value={model} onChange={(e) => setModel(e.target.value)} placeholder="RB4105" /></Field>
           <Field label="Color code"><input className="input-field" value={color} onChange={(e) => setColor(e.target.value)} placeholder="6019" /></Field>
           <Field label="Size"><input className="input-field" value={size} onChange={(e) => setSize(e.target.value)} placeholder="54-16" /></Field>
+          <Field label="Category">
+            <select className="input-field" title="Search category" value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="">Auto-detect</option>
+              {CATEGORIES.map((c) => (
+                <option key={c.code} value={c.code}>{c.name}</option>
+              ))}
+            </select>
+          </Field>
           <button onClick={runSearch} disabled={loading} className="btn-primary inline-flex items-center justify-center gap-2 h-[42px]">
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} Search
           </button>
@@ -272,10 +283,23 @@ export default function CatalogAutopilotPage() {
                       ))}
                     </div>
                   )}
-                  {c.url && (
-                    <a href={c.url} target="_blank" rel="noopener noreferrer" className="text-xs text-bv-red-600 hover:underline inline-flex items-center gap-1 mt-1">
-                      <Eye className="w-3 h-3" /> source
-                    </a>
+                  {/* v2 reference chips: the exact page(s) this data came from. */}
+                  {candidateReferences(c).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {candidateReferences(c).map((r) => (
+                        <a
+                          key={r.url}
+                          href={r.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={r.url}
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 max-w-[220px]"
+                        >
+                          <span className="truncate">{r.domain}</span>
+                          <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                        </a>
+                      ))}
+                    </div>
                   )}
                   {!authorized && (
                     <label className="flex items-center gap-2 mt-2 text-xs text-gray-600">
