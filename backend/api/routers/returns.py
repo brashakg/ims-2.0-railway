@@ -1384,12 +1384,6 @@ async def create_return(
             status_code=400, detail="Select at least one item to return"
         )
 
-    # IDOR guard (P1): the refund's store must be one the caller can access.
-    # body.store_id was previously trusted as-is, letting a store-scoped role
-    # book a refund into ANY store. Falls back to the caller's active store
-    # when omitted (validate_store_access returns it); 403 otherwise.
-    store_id = validate_store_access(body.store_id, current_user)
-
     order = _resolve_order(body)
 
     # 0. QUANTITY INTEGRITY (the over-refund guard). A return must trace to a
@@ -1413,15 +1407,32 @@ async def create_return(
             ),
         )
 
-    # IDOR guard (P1): the resolved order must belong to a store the caller can
-    # access. _resolve_order fetches by id/number with no ownership check, so a
-    # store-scoped role could previously create a refund against ANOTHER
-    # store's sale. HQ roles (SUPERADMIN/ADMIN) pass via can_access_store_scoped.
-    if not can_access_store_scoped(order.get("store_id"), current_user):
+    # IDOR guard (P1): the refund's store is DERIVED FROM THE RESOLVED ORDER, not
+    # from the user-supplied body.store_id -- otherwise a store-scoped role could
+    # refund ANOTHER store's order (and/or book the refund into a third store).
+    # _resolve_order fetches by id/number with no ownership check, so we authorise
+    # the caller against the ORDER's store here. HQ roles (SUPERADMIN/ADMIN) pass
+    # via can_access_store_scoped.
+    order_store_id = order.get("store_id") or order.get("storeId")
+    if not can_access_store_scoped(order_store_id, current_user):
         raise HTTPException(
             status_code=403,
             detail="No access to the store this order belongs to.",
         )
+    # If the client supplied a store_id, it MUST equal the order's store -- a
+    # mismatch is a mis-book attempt (refund one store's sale into another).
+    if body.store_id and str(body.store_id) != str(order_store_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "store_id does not match the order's store; a return is booked "
+                "into the store the original order belongs to."
+            ),
+        )
+    # The refund's store is the ORDER's store (never the client value). Fall back
+    # to validate_store_access only when the order has no store stamp (legacy
+    # doc) -- that still authorises the caller and never trusts a foreign store.
+    store_id = order_store_id or validate_store_access(body.store_id, current_user)
 
     # BUG-096: only a completed sale is returnable. Reject a CANCELLED / DRAFT /
     # REFUNDED / VOID order -- you cannot refund a sale that never completed or was
