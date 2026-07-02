@@ -35,6 +35,7 @@ from api.services import catalog_autopilot as ap  # noqa: E402
 # Helpers (mirrors the 1b test harness)
 # ---------------------------------------------------------------------------
 
+
 def _clear_source_env(monkeypatch):
     for var in (
         "ECOMMERCE_DATABASE_URL",
@@ -94,10 +95,17 @@ def _stub_adapter(name, source_class, priority, candidates, enabled=True):
 
 def _scraped_cand(**over):
     base = {
-        "source": "s", "source_class": ap.AUTHORIZED, "url": None,
-        "title": "Ray-Ban RB4105 Wayfarer", "brand": "Ray-Ban", "model": "RB4105",
-        "color": None, "size": None, "image_urls": [],
-        "specs": {"Lens width": "50 mm"}, "description": "Folding wayfarer.",
+        "source": "s",
+        "source_class": ap.AUTHORIZED,
+        "url": None,
+        "title": "Ray-Ban RB4105 Wayfarer",
+        "brand": "Ray-Ban",
+        "model": "RB4105",
+        "color": None,
+        "size": None,
+        "image_urls": [],
+        "specs": {"Lens width": "50 mm"},
+        "description": "Folding wayfarer.",
     }
     base.update(over)
     return base
@@ -142,6 +150,7 @@ _NO_LINKS_HTML = """
 # Category plumbing
 # ---------------------------------------------------------------------------
 
+
 class TestCategoryPlumbing:
     def test_run_search_stamps_category_on_every_candidate(self, monkeypatch):
         _clear_source_env(monkeypatch)
@@ -157,7 +166,10 @@ class TestCategoryPlumbing:
         out = ap.run_search("Ray-Ban", "RB4105", "Black", "50")
         # No category key at all when the caller didn't pass one.
         assert out["query"] == {
-            "brand": "Ray-Ban", "model": "RB4105", "color": "Black", "size": "50"
+            "brand": "Ray-Ban",
+            "model": "RB4105",
+            "color": "Black",
+            "size": "50",
         }
 
     def test_legacy_5_arg_adapter_still_works_with_category(self, monkeypatch):
@@ -225,6 +237,7 @@ class TestCategoryPlumbing:
 # ---------------------------------------------------------------------------
 # Brand-site multi-candidate + source_url/references
 # ---------------------------------------------------------------------------
+
 
 class TestBrandSiteMultiCandidate:
     def test_extract_product_links_filters_and_ranks(self):
@@ -328,6 +341,7 @@ class TestBrandSiteMultiCandidate:
 # AI spec-mapping enrichment (ai_attributes)
 # ---------------------------------------------------------------------------
 
+
 class TestAISpecEnrichment:
     def test_skipped_cleanly_when_no_key(self, monkeypatch):
         _clear_source_env(monkeypatch)  # also drops ANTHROPIC_API_KEY
@@ -339,9 +353,12 @@ class TestAISpecEnrichment:
         assert "ai_attributes" not in out["candidates"][0]
         assert calls["n"] == 0  # the client was never even called
         # And the direct helper is a clean no-op too.
-        assert ap.ai_map_specs_to_fields(
-            "SUNGLASS", "t", "d", {"Lens width": "50 mm"}, {"brand": "x"}
-        ) == {}
+        assert (
+            ap.ai_map_specs_to_fields(
+                "SUNGLASS", "t", "d", {"Lens width": "50 mm"}, {"brand": "x"}
+            )
+            == {}
+        )
 
     def test_merges_only_canonical_field_names(self, monkeypatch):
         _clear_source_env(monkeypatch)
@@ -391,9 +408,7 @@ class TestAISpecEnrichment:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("AUTOPILOT_AI_ENRICH_MAX", "2")
         calls = _mock_claude_json(monkeypatch, returns={"colour_code": "601"})
-        cands = [
-            _scraped_cand(source_url=f"https://b/p/{i}") for i in range(5)
-        ]
+        cands = [_scraped_cand(source_url=f"https://b/p/{i}") for i in range(5)]
         reg = [_stub_adapter("brand_site", ap.AUTHORIZED, 1, cands)]
         monkeypatch.setattr(ap, "build_registry", lambda: reg)
         out = ap.run_search("Ray-Ban", "RB4105", category="SUNGLASS")

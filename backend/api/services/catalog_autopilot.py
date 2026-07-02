@@ -302,7 +302,16 @@ def scrape_product_page(raw_html: str) -> Dict[str, Any]:
 
 # Obvious non-product link filters for extract_product_links.
 _LINK_ASSET_EXTS = (
-    ".css", ".js", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".ico", ".webp", ".pdf",
+    ".css",
+    ".js",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".svg",
+    ".gif",
+    ".ico",
+    ".webp",
+    ".pdf",
 )
 _LINK_SKIP_SCHEMES = ("javascript:", "mailto:", "tel:", "#")
 
@@ -564,9 +573,17 @@ class SourceAdapter:
         return ""
 
     def _search(
-        self, brand: str, model: str, color: str, size: str, limit: int
+        self,
+        brand: str,
+        model: str,
+        color: str,
+        size: str,
+        limit: int,
+        category: str = "",
     ) -> List[Dict[str, Any]]:
-        """Real work; may hit the network. Subclasses implement this."""
+        """Real work; may hit the network. Subclasses implement this. The v2
+        `category` kwarg is optional — search() only passes it to overrides
+        that declare it, so legacy 5-arg adapters keep working unchanged."""
         raise NotImplementedError
 
     def search(
@@ -594,7 +611,10 @@ class SourceAdapter:
             except (TypeError, ValueError):
                 accepts_category = False
             if accepts_category:
-                out = self._search(brand, model, color, size, limit, category=category) or []
+                out = (
+                    self._search(brand, model, color, size, limit, category=category)
+                    or []
+                )
             else:
                 out = self._search(brand, model, color, size, limit) or []
         except Exception as e:  # noqa: BLE001
@@ -1342,10 +1362,15 @@ def ai_map_specs_to_fields(
         )
         user = (
             "Product category: " + str(category) + "\n"
-            "Search query: brand=" + str(query.get("brand") or "")
-            + " model=" + str(query.get("model") or "")
-            + " color=" + str(query.get("color") or "")
-            + " size=" + str(query.get("size") or "") + "\n"
+            "Search query: brand="
+            + str(query.get("brand") or "")
+            + " model="
+            + str(query.get("model") or "")
+            + " color="
+            + str(query.get("color") or "")
+            + " size="
+            + str(query.get("size") or "")
+            + "\n"
             "Scraped title: " + str(title or "")[:200] + "\n"
             "Scraped description: " + str(description or "")[:600] + "\n"
             "Scraped specs JSON: " + specs_json + "\n"
@@ -1500,9 +1525,7 @@ def run_search(
                 break
             if cand.get("source") == "ai_enrich":
                 continue  # already AI-generated content
-            if not (
-                cand.get("title") or cand.get("specs") or cand.get("description")
-            ):
+            if not (cand.get("title") or cand.get("specs") or cand.get("description")):
                 continue
             attrs = ai_map_specs_to_fields(
                 category,

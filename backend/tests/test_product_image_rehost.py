@@ -114,8 +114,17 @@ def test_rehost_rbac_denied_below_catalog_roles(client, staff_headers, mem_store
 
 def test_blocked_ip_predicate_covers_the_classic_ranges():
     for ip in (
-        "127.0.0.1", "10.0.0.5", "172.16.0.1", "172.31.255.255", "192.168.1.10",
-        "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fc00::1",
+        "127.0.0.1",
+        "10.0.0.5",
+        "172.16.0.1",
+        "172.31.255.255",
+        "192.168.1.10",
+        "169.254.169.254",
+        "100.64.0.1",
+        "0.0.0.0",
+        "::1",
+        "fe80::1",
+        "fc00::1",
     ):
         assert image_rehost._is_blocked_ip(ip) is True, ip
     for ip in ("93.184.216.34", "1.1.1.1", "2606:2800:220:1:248:1893:25c8:1946"):
@@ -146,9 +155,16 @@ def test_private_ip_literal_is_blocked_without_fetch(
 
 @pytest.mark.parametrize(
     "url",
-    ["file:///etc/passwd", "ftp://host/img.jpg", "data:image/png;base64,AAAA", "not a url"],
+    [
+        "file:///etc/passwd",
+        "ftp://host/img.jpg",
+        "data:image/png;base64,AAAA",
+        "not a url",
+    ],
 )
-def test_non_http_schemes_are_blocked(client, auth_headers, mem_store, monkeypatch, url):
+def test_non_http_schemes_are_blocked(
+    client, auth_headers, mem_store, monkeypatch, url
+):
     _no_network(monkeypatch)
     r = client.post(_REHOST_PATH, headers=auth_headers, json={"url": url})
     assert r.status_code == 400, r.text
@@ -160,7 +176,9 @@ def test_hostname_resolving_to_private_ip_is_blocked(
     _no_network(monkeypatch)
     _resolve_public(monkeypatch, {"internal.example": ["10.0.0.7"]})
     r = client.post(
-        _REHOST_PATH, headers=auth_headers, json={"url": "https://internal.example/a.jpg"}
+        _REHOST_PATH,
+        headers=auth_headers,
+        json={"url": "https://internal.example/a.jpg"},
     )
     assert r.status_code == 400, r.text
     assert "blocked" in r.json()["detail"].lower()
@@ -214,7 +232,9 @@ def test_non_image_content_type_rejected(client, auth_headers, mem_store, monkey
     _resolve_public(monkeypatch)
 
     def handler(request):
-        return httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html>")
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, content=b"<html>"
+        )
 
     _install_mock_httpx(monkeypatch, handler)
     r = client.post(
@@ -325,7 +345,9 @@ def test_happy_path_stores_and_serves(client, auth_headers, mem_store, monkeypat
     # Stored with the product_image kind + the source_url audit stamp.
     rec = mem_store._files[body["file_id"]]  # type: ignore[attr-defined]
     assert rec["metadata"]["kind"] == "product_image"
-    assert rec["metadata"]["source_url"] == "https://cdn.example/photos/rb4105-black.jpg"
+    assert (
+        rec["metadata"]["source_url"] == "https://cdn.example/photos/rb4105-black.jpg"
+    )
 
     # The self-hosted url serves the identical bytes back (public serve).
     served = client.get(body["url"])
@@ -333,7 +355,9 @@ def test_happy_path_stores_and_serves(client, auth_headers, mem_store, monkeypat
     assert served.content == _JPEG_BYTES
 
 
-def test_follows_safe_redirect_then_stores(client, auth_headers, mem_store, monkeypatch):
+def test_follows_safe_redirect_then_stores(
+    client, auth_headers, mem_store, monkeypatch
+):
     _resolve_public(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -352,8 +376,19 @@ def test_follows_safe_redirect_then_stores(client, auth_headers, mem_store, monk
 
 
 def test_filename_from_url_fallbacks():
-    assert image_rehost.filename_from_url("https://x/a/b/photo.png", "image/png") == "photo.png"
-    assert image_rehost.filename_from_url("https://x/a/b/photo", "image/jpeg") == "photo.jpg"
-    assert image_rehost.filename_from_url("https://x/", "image/webp") == "autopilot-image.webp"
+    assert (
+        image_rehost.filename_from_url("https://x/a/b/photo.png", "image/png")
+        == "photo.png"
+    )
+    assert (
+        image_rehost.filename_from_url("https://x/a/b/photo", "image/jpeg")
+        == "photo.jpg"
+    )
+    assert (
+        image_rehost.filename_from_url("https://x/", "image/webp")
+        == "autopilot-image.webp"
+    )
     # Path traversal / odd chars are stripped.
-    assert "/" not in image_rehost.filename_from_url("https://x/..%2F..%2Fetc", "image/png")
+    assert "/" not in image_rehost.filename_from_url(
+        "https://x/..%2F..%2Fetc", "image/png"
+    )

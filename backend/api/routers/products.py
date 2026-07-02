@@ -1586,9 +1586,7 @@ async def list_tags(
 
 # Images only -- the shared ALLOWED_MIME_TYPES also permits application/pdf,
 # which is not a product image, so gate on this narrower image-only subset.
-_IMAGE_MIME_TYPES = frozenset(
-    m for m in ALLOWED_MIME_TYPES if m.startswith("image/")
-)
+_IMAGE_MIME_TYPES = frozenset(m for m in ALLOWED_MIME_TYPES if m.startswith("image/"))
 
 
 @router.post("/image", status_code=201)

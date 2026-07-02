@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 # Hard cap on redirect hops (each hop is re-validated).
 MAX_REDIRECTS = 3
 
+
 # Fetch timeout (seconds). Short: this runs inline in a user action.
 def _fetch_timeout() -> float:
     try:
