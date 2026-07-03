@@ -542,6 +542,13 @@ export const vendorsApi = {
     return response.data;
   },
 
+  // Void a PENDING GRN (duplicate/mistake cleanup — no stock was added yet;
+  // accepted GRNs must be corrected via a vendor return instead).
+  voidGRN: async (grnId: string) => {
+    const response = await api.post(`/vendors/grn/${grnId}/void`);
+    return response.data;
+  },
+
   escalateGRN: async (grnId: string, note: string) => {
     const response = await api.post(`/vendors/grn/${grnId}/escalate`, null, { params: { note } });
     return response.data;
