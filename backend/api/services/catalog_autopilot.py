@@ -1508,6 +1508,50 @@ def run_search(
             seen[dkey] = cand
             candidates.append(cand)
 
+    # v2 auto-broaden: a colour/size-narrowed query often starves the pool (the
+    # source search resolves to the ONE exact product page). Rather than
+    # dead-end the operator with a "refine your search" message, re-run the SAME
+    # enabled adapters on brand+model ALONE and merge the near-matches. They are
+    # still scored against the ORIGINAL query (colour/size act as ranking
+    # boosts, not hard filters), so an exact colour/size match keeps ranking
+    # first while the operator also sees the sibling colourways/sizes. Every
+    # broadened candidate is stamped broadened=True for provenance. Fail-soft:
+    # a bad adapter contributes nothing, exactly like the main pass.
+    _MIN_RESULTS = 4
+    if len(candidates) < _MIN_RESULTS and (color or size):
+        for adapter in registry:
+            try:
+                if not adapter.is_enabled():
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            for cand in adapter.search(
+                brand, model, "", "", limit=limit, category=category
+            ):
+                cand_brand = cand.get("brand") or brand
+                cand_model = cand.get("model") or model
+                cand_source = cand.get("source") or adapter.name
+                dkey = _dedupe_key(
+                    cand_brand, cand_model, cand_source, cand.get("source_url") or ""
+                )
+                if dkey in seen:
+                    continue
+                try:
+                    scored = score_candidate(query, cand)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[AUTOPILOT] broaden scoring failed for %s: %s",
+                        adapter.name, e,
+                    )
+                    scored = {"score": 0.0, "matched": {}}
+                cand.update(scored)
+                cand["source_priority"] = adapter.priority
+                cand["broadened"] = True
+                if category:
+                    cand["category"] = category
+                seen[dkey] = cand
+                candidates.append(cand)
+
     # Sort by score desc, stable tie-break on source priority (lower first).
     candidates.sort(key=lambda c: (-c.get("score", 0), c.get("source_priority", 100)))
 

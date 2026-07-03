@@ -147,7 +147,9 @@ export function QuickAddPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [useAdvancedHSN, setUseAdvancedHSN] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  // HSN / GST / weight open by default: they auto-fill from the category, so the
+  // operator sees + can tweak them without the extra "Advanced" click.
+  const [showAdvanced, setShowAdvanced] = useState(true);
   const [openSections, setOpenSections] = useState<Record<SectionId, boolean>>({
     identity: true,
     pricing: true,
@@ -1788,6 +1790,10 @@ function AutopilotCandidateRow({ c, onUse }: { c: AutopilotCandidate; onUse: () 
         {c.image_urls && c.image_urls.length > 0 && (
           <img
             src={c.image_urls[0]}
+            // Scraped brand-site thumbnails often 403 on hotlink when a Referer
+            // is sent; strip it so more of them actually render.
+            referrerPolicy="no-referrer"
+            loading="lazy"
             alt={c.title || `${c.brand ?? ''} ${c.model ?? ''}`.trim()}
             className={clsx('w-12 h-12 rounded-lg object-cover border shrink-0', badge.authorized ? 'border-gray-200' : 'border-amber-300')}
             onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}

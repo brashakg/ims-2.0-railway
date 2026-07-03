@@ -187,6 +187,9 @@ export default function CatalogAutopilotPage() {
                 {c.image_urls && c.image_urls.length > 0 && (
                   <img
                     src={c.image_urls[0]}
+                    // Strip the Referer so hotlink-protected brand thumbnails render.
+                    referrerPolicy="no-referrer"
+                    loading="lazy"
                     alt={c.title || `${c.brand ?? ''} ${c.model ?? ''}`.trim()}
                     className={clsx('w-16 h-16 rounded-lg object-cover border flex-shrink-0', authorized ? 'border-gray-200' : 'border-amber-300')}
                     onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
