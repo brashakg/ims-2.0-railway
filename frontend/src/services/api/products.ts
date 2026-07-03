@@ -45,8 +45,11 @@ export interface UploadedProductImage {
 
 export interface CreateProductPayload {
   category: string;
-  // Required by the backend ProductCreate (top-level, NOT inside attributes).
-  sku: string;
+  // SKU is AUTO-MINTED by the backend (product_master mints the clean semantic
+  // SKU when none is supplied). Only send one when the operator explicitly
+  // provided it (e.g. a legacy/imported SKU); otherwise OMIT it so the backend
+  // mints the canonical value — the FE no longer fabricates a Date.now() SKU.
+  sku?: string;
   brand: string;
   model: string;
   attributes: Record<string, string | number>;

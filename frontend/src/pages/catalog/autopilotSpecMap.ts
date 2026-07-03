@@ -211,7 +211,22 @@ const SYNONYM_RULES: SynonymRule[] = [
   { attr: 'frame_type', exact: ['frame type', 'rim type', 'rim'] },
   { attr: 'polarization', exact: ['polarization', 'polarisation', 'polarized', 'polarised'] },
   { attr: 'uv_protection', exact: ['uv protection', 'uv', 'uv400', 'uv rating'] },
-  { attr: 'tint', exact: ['tint', 'lens tint', 'lens colour', 'lens color'] },
+  { attr: 'tint', exact: ['tint', 'lens tint'] },
+  // Rich eyewear field set (FRAME + SUNGLASS). frame_color/temple_color are
+  // guarded so a bare "colour" doesn't claim them (they need the qualifier).
+  { attr: 'shape', exact: ['shape', 'frame shape', 'lens shape', 'style shape'] },
+  { attr: 'frame_color', exact: ['frame colour', 'frame color', 'front colour', 'front color'], loose: ['frame colour', 'frame color'] },
+  { attr: 'temple_color', exact: ['temple colour', 'temple color', 'arm colour', 'arm color'] },
+  { attr: 'temple_material', exact: ['temple material', 'arm material', 'side material'] },
+  { attr: 'lens_colour', exact: ['lens colour', 'lens color', 'tint colour', 'tint color'] },
+  { attr: 'lens_material', exact: ['lens material', 'lens type material'] },
+  { attr: 'blue_cut_lens', exact: ['blue cut', 'blue cut lens', 'blue light', 'blue light filter', 'blue block'] },
+  { attr: 'gender', exact: ['gender', 'suitable for', 'target group'] },
+  { attr: 'country_of_origin', exact: ['country of origin', 'origin', 'made in', 'manufactured in'] },
+  { attr: 'warranty', exact: ['warranty', 'guarantee', 'warranty period'] },
+  { attr: 'full_model_no', exact: ['full model no', 'full model number', 'full style code'] },
+  { attr: 'upc', exact: ['upc', 'upc code'] },
+  { attr: 'gtin', exact: ['gtin', 'ean', 'ean code', 'barcode'] },
   // Hearing aids
   { attr: 'machine_type', exact: ['machine type', 'hearing aid type', 'aid type', 'wearing style'] },
   {

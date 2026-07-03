@@ -355,3 +355,46 @@ describe('image re-host summary + rights gate', () => {
     expect(imageRehostSummary(0, 0)).toBe('');
   });
 });
+
+describe('buildProductPayload — auto-SKU (no client override)', () => {
+  const base = {
+    category: 'FR',
+    attributes: { brand_name: 'Ray-Ban', model_no: 'RB-2140', colour_code: 'BLK' },
+    gstRate: '5',
+    mrp: '5000',
+    offerPrice: '4500',
+    discountCategory: 'MASS',
+    syncToShopify: false,
+    shopifyTags: [],
+    publishPOS: true,
+  };
+
+  it('OMITS sku entirely when the operator did not supply one (backend mints it)', () => {
+    const payload = buildProductPayload({ ...base });
+    // No client-generated Date.now() SKU — the field is simply absent so the
+    // backend product_master door mints the clean semantic SKU.
+    expect('sku' in payload).toBe(false);
+    expect(payload.sku).toBeUndefined();
+    // Identity is still mapped from the attribute keys.
+    expect(payload.brand).toBe('Ray-Ban');
+    expect(payload.model).toBe('RB-2140');
+  });
+
+  it('sends the sku ONLY when the operator explicitly provided one', () => {
+    const payload = buildProductPayload({
+      ...base,
+      attributes: { ...base.attributes, sku: 'LEGACY-SKU-123' },
+    });
+    expect(payload.sku).toBe('LEGACY-SKU-123');
+  });
+
+  it('does NOT treat a manufacturer barcode as our SKU', () => {
+    // Owner rule: a manufacturer barcode is captured as UPC/GTIN, never as our
+    // SKU. A stray attributes.barcode must not become the SKU.
+    const payload = buildProductPayload({
+      ...base,
+      attributes: { ...base.attributes, barcode: '8901234567890' },
+    });
+    expect('sku' in payload).toBe(false);
+  });
+});

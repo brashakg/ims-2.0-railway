@@ -170,8 +170,11 @@ describe('mapSpecsToCategoryFields', () => {
       {}
     );
     expect(mapped.lens_size).toBe('52');
+    // "Made In" now maps onto the declared country_of_origin field (rich eyewear
+    // field set); "Hinge Type" has no declared home so it stays an extra.
+    expect(mapped.country_of_origin).toBe('Italy');
     expect(extras['Hinge Type']).toBe('Spring');
-    expect(extras['Made In']).toBe('Italy');
+    expect(extras['Made In']).toBeUndefined(); // consumed -> country_of_origin
     expect(extras['Lens Width']).toBeUndefined(); // consumed
   });
 

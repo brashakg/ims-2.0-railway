@@ -56,20 +56,64 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
   SG: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Oakley', 'Vogue', 'Prada', 'Gucci', 'Titan', 'Fastrack', 'Lenskart', 'Vincent Chase'] },
     { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
+    { name: 'label', label: 'Label', type: 'text', required: false },
     { name: 'model_no', label: 'Model No', type: 'text', required: true },
+    { name: 'full_model_no', label: 'Full Model No', type: 'text', required: false },
     { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
+    { name: 'shape', label: 'Shape', type: 'select', required: false, options: ['Rectangle', 'Square', 'Round', 'Oval', 'Cat-Eye', 'Aviator', 'Wayfarer', 'Clubmaster', 'Oversized', 'Geometric', 'Wrap'] },
+    { name: 'frame_color', label: 'Frame Colour', type: 'text', required: false },
+    { name: 'temple_color', label: 'Temple Colour', type: 'text', required: false },
+    { name: 'frame_material', label: 'Frame Material', type: 'text', required: false },
+    { name: 'temple_material', label: 'Temple Material', type: 'text', required: false },
+    { name: 'frame_type', label: 'Frame Type', type: 'select', required: false, options: ['Full Rim', 'Half Rim', 'Rimless'] },
     { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
     { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
     { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
+    { name: 'lens_colour', label: 'Lens Colour', type: 'text', required: false },
+    { name: 'lens_material', label: 'Lens Material', type: 'select', required: false, options: ['CR-39', 'Polycarbonate', 'Glass', 'Trivex', 'Nylon'] },
+    { name: 'polarization', label: 'Polarization', type: 'select', required: false, options: ['Yes', 'No'] },
+    { name: 'uv_protection', label: 'UV Protection', type: 'select', required: false, options: ['UV400', 'UV380', 'Polarized', 'None'] },
+    { name: 'tint', label: 'Tint', type: 'text', required: false },
+    { name: 'lens_usp', label: 'Lens USP', type: 'text', required: false },
+    { name: 'product_usp', label: 'Product USP', type: 'text', required: false },
+    { name: 'usp_1', label: 'Product USP 1', type: 'text', required: false },
+    { name: 'usp_2', label: 'Product USP 2', type: 'text', required: false },
+    { name: 'usp', label: 'USP', type: 'text', required: false },
+    { name: 'gender', label: 'Gender', type: 'select', required: false, options: ['Men', 'Women', 'Unisex', 'Kids'] },
+    { name: 'gender_label', label: 'Gender Label', type: 'text', required: false },
+    { name: 'country_of_origin', label: 'Country of Origin', type: 'text', required: false },
+    { name: 'warranty', label: 'Warranty', type: 'text', required: false },
+    { name: 'upc', label: 'UPC (mfr)', type: 'text', required: false },
+    { name: 'gtin', label: 'GTIN (mfr)', type: 'text', required: false },
   ],
   FR: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Oakley', 'Vogue', 'Prada', 'Titan', 'Fastrack', 'Lenskart', 'Vincent Chase', 'John Jacobs'] },
     { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
+    { name: 'label', label: 'Label', type: 'text', required: false },
     { name: 'model_no', label: 'Model No', type: 'text', required: true },
+    { name: 'full_model_no', label: 'Full Model No', type: 'text', required: false },
     { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
+    { name: 'shape', label: 'Shape', type: 'select', required: false, options: ['Rectangle', 'Square', 'Round', 'Oval', 'Cat-Eye', 'Aviator', 'Wayfarer', 'Clubmaster', 'Oversized', 'Geometric', 'Wrap'] },
+    { name: 'frame_color', label: 'Frame Colour', type: 'text', required: false },
+    { name: 'temple_color', label: 'Temple Colour', type: 'text', required: false },
+    { name: 'frame_material', label: 'Frame Material', type: 'text', required: false },
+    { name: 'temple_material', label: 'Temple Material', type: 'text', required: false },
+    { name: 'frame_type', label: 'Frame Type', type: 'select', required: false, options: ['Full Rim', 'Half Rim', 'Rimless'] },
     { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
     { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
     { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
+    { name: 'blue_cut_lens', label: 'Blue-Cut Lens', type: 'select', required: false, options: ['Yes', 'No'] },
+    { name: 'lens_usp', label: 'Lens USP', type: 'text', required: false },
+    { name: 'product_usp', label: 'Product USP', type: 'text', required: false },
+    { name: 'usp_1', label: 'Product USP 1', type: 'text', required: false },
+    { name: 'usp_2', label: 'Product USP 2', type: 'text', required: false },
+    { name: 'usp', label: 'USP', type: 'text', required: false },
+    { name: 'gender', label: 'Gender', type: 'select', required: false, options: ['Men', 'Women', 'Unisex', 'Kids'] },
+    { name: 'gender_label', label: 'Gender Label', type: 'text', required: false },
+    { name: 'country_of_origin', label: 'Country of Origin', type: 'text', required: false },
+    { name: 'warranty', label: 'Warranty', type: 'text', required: false },
+    { name: 'upc', label: 'UPC (mfr)', type: 'text', required: false },
+    { name: 'gtin', label: 'GTIN (mfr)', type: 'text', required: false },
   ],
   CL: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Bausch & Lomb', 'Johnson & Johnson', 'Alcon', 'CooperVision', 'Acuvue'] },
@@ -404,17 +448,18 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
 export function buildProductPayload(values: ProductFormValues): CreateProductPayload {
   const { category, attributes } = values;
 
-  // ProductCreate requires top-level sku/brand/model. The dynamic form collects
+  // ProductCreate requires top-level brand/model. The dynamic form collects
   // these under category-specific attribute names (brand_name, model_no /
-  // model_name); map them here. SKU is not a form field, so generate a stable
-  // unique one when absent.
+  // model_name); map them here. SKU is NOT a form field: the backend mints the
+  // clean semantic SKU (product_master.mint_unique_sku) whenever none is sent,
+  // so we OMIT it unless the operator explicitly supplied one (e.g. a legacy /
+  // imported SKU under attributes.sku). We no longer fabricate a Date.now() SKU
+  // — that ugly client SKU used to override the backend's clean one.
   const brand = String(attributes.brand_name || attributes.brand || '').trim();
   const model = String(
     attributes.model_no || attributes.model_name || attributes.subbrand || 'STD'
   ).trim();
-  const sku =
-    String(attributes.sku || attributes.barcode || '').trim() ||
-    `${category}-${(brand || 'GEN').replace(/\s+/g, '').slice(0, 6)}-${Date.now().toString(36)}`.toUpperCase();
+  const suppliedSku = String(attributes.sku || '').trim();
 
   // Contact lenses: map CL attribute fields onto the top-level CL identity
   // fields the backend models. Only sent for CL.
@@ -449,7 +494,9 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
 
   return {
     category,
-    sku,
+    // Only send a SKU when the operator explicitly supplied one; otherwise omit
+    // it entirely so the backend mints the canonical SKU.
+    ...(suppliedSku ? { sku: suppliedSku } : {}),
     brand,
     model,
     attributes,
@@ -709,15 +756,70 @@ export function inferCategoryFromText(...texts: Array<unknown>): string {
   return '';
 }
 
+// Normalise a scraped spec KEY onto one of our canonical attribute keys where
+// the mapping is obvious. Lowercases + strips punctuation, then looks up a small
+// synonym table. Unknown keys return '' so the caller keeps the ORIGINAL key as
+// passthrough (nothing scraped is silently lost). This complements the richer,
+// category-aware mapper in autopilotSpecMap.ts (which only fills a category's
+// DECLARED fields); here we also canonicalise the seed attributes so the new
+// eyewear fields (frame_material, shape, lens_colour, upc/gtin, ...) prefill.
+const SCRAPED_KEY_SYNONYMS: Record<string, string> = {
+  'frame material': 'frame_material',
+  'material': 'frame_material',
+  'frame shape': 'shape',
+  'shape': 'shape',
+  'frame colour': 'frame_color',
+  'frame color': 'frame_color',
+  'colour': 'frame_color',
+  'color': 'frame_color',
+  'lens colour': 'lens_colour',
+  'lens color': 'lens_colour',
+  'temple colour': 'temple_color',
+  'temple color': 'temple_color',
+  'temple material': 'temple_material',
+  'polarised': 'polarization',
+  'polarized': 'polarization',
+  'polarisation': 'polarization',
+  'polarization': 'polarization',
+  'uv': 'uv_protection',
+  'uv protection': 'uv_protection',
+  'lens material': 'lens_material',
+  'bridge width': 'bridge_width',
+  'temple length': 'temple_length',
+  'lens size': 'lens_size',
+  'upc': 'upc',
+  'gtin': 'gtin',
+  'ean': 'gtin',
+  'country of origin': 'country_of_origin',
+  'warranty': 'warranty',
+};
+
+/** Map a scraped spec key onto our canonical attribute key, or '' if unknown. */
+export function normaliseSpecKey(key: unknown): string {
+  const norm = String(key ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (!norm) return '';
+  return SCRAPED_KEY_SYNONYMS[norm] || '';
+}
+
 // Coerce the candidate's specs (Record<string, unknown>) into the string->string
-// shape the form's review/extra display expects, dropping empty values.
+// shape the form's review/extra display expects, dropping empty values. Scraped
+// spec KEYS are canonicalised onto our attribute keys where obvious (e.g. "Frame
+// Material" -> frame_material); unknown keys are kept as-is (passthrough). A
+// canonical key an EARLIER entry already filled is never clobbered.
 function specsToStrings(specs: Record<string, unknown> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!specs) return out;
   Object.entries(specs).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
     const s = String(v).trim();
-    if (s) out[k] = s;
+    if (!s) return;
+    const canonical = normaliseSpecKey(k);
+    const outKey = canonical || k;
+    // Don't overwrite a value a prior spec already set under the same key.
+    if (out[outKey] === undefined) out[outKey] = s;
   });
   return out;
 }

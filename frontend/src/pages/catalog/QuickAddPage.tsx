@@ -100,9 +100,9 @@ export function QuickAddPage() {
   const [costPrice, setCostPrice] = useState('');
   const [discountCategory, setDiscountCategory] = useState('');
 
-  // Inventory
-  const [initialQuantity, setInitialQuantity] = useState('0');
-  const [barcode, setBarcode] = useState('');
+  // Inventory. Stock is added via Goods Receipt (GRN), and both the SKU and our
+  // internal barcode are auto-assigned (SKU at create, barcode at GRN) — there
+  // is no manual quantity or barcode entry here. Only the reorder level is set.
   const [reorderLevel, setReorderLevel] = useState('5');
 
   // Online (Shopify)
@@ -252,8 +252,6 @@ export function QuickAddPage() {
       setOfferPrice('');
       setCostPrice('');
       setDiscountCategory('');
-      setInitialQuantity('0');
-      setBarcode('');
       setReorderLevel('5');
       setSyncToShopify(false);
       setShopifyTags([]);
@@ -508,23 +506,29 @@ export function QuickAddPage() {
       setIsSubmitting(true);
       try {
         const created = await productApi.createProduct(buildProductPayload(values));
-        // ProductCreate does NOT model barcode/reorder_point (only ProductUpdate
-        // does), so persist the Inventory-section fields via a follow-up update
-        // on the new product_id. Fail-soft: a bad/duplicate barcode (PUT runs the
-        // EAN-13 + uniqueness guard) must not fail the create the user just did.
+        // Persist the reorder level via a follow-up update on the new product_id
+        // (ProductCreate doesn't model reorder_point; ProductUpdate does). The
+        // SKU is auto-minted by the backend and our internal barcode is assigned
+        // at Goods Receipt — neither is entered here. Fail-soft: a failed reorder
+        // update must not fail the create the user just did.
         const newId = created?.product_id || created?.id;
         const reorderNum = Number(reorderLevel);
-        const inventoryPatch: { barcode?: string; reorder_point?: number } = {};
-        if (barcode.trim()) inventoryPatch.barcode = barcode.trim();
-        if (Number.isFinite(reorderNum) && reorderNum >= 0) inventoryPatch.reorder_point = reorderNum;
-        if (newId && Object.keys(inventoryPatch).length > 0) {
+        if (newId && Number.isFinite(reorderNum) && reorderNum >= 0) {
           try {
-            await productApi.updateProduct(newId, inventoryPatch);
+            await productApi.updateProduct(newId, { reorder_point: reorderNum });
           } catch {
-            toast.warning('Product created, but the barcode / reorder level could not be saved.');
+            toast.warning('Product created, but the reorder level could not be saved.');
           }
         }
-        toast.success('Product created successfully!');
+        // Surface the auto-assigned SKU (and barcode, if the backend returned one)
+        // so the operator sees the clean system-generated identifiers.
+        const createdSku = created?.sku;
+        const createdBarcode = (created as { barcode?: string } | undefined)?.barcode;
+        toast.success(
+          createdSku
+            ? `Product created — SKU ${createdSku}${createdBarcode ? ` · barcode ${createdBarcode}` : ''}.`
+            : 'Product created successfully!'
+        );
         if (saveAndNew) {
           resetForm(true);
           // Keep focus flowing — jump back to the top of the form.
@@ -1455,31 +1459,9 @@ export function QuickAddPage() {
             id="inventory"
             title="Inventory"
             icon={<Boxes className="w-5 h-5" />}
-            subtitle="Barcode & reorder level (stock added via GRN)"
+            subtitle="Reorder level (stock, SKU & barcode are automatic)"
           >
             <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Initial Quantity</label>
-                <input
-                  type="number"
-                  title="Initial Quantity"
-                  placeholder="0"
-                  value={initialQuantity}
-                  onChange={(e) => setInitialQuantity(e.target.value)}
-                  className="input-field w-full"
-                  min="0"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Barcode / SKU</label>
-                <input
-                  type="text"
-                  value={barcode}
-                  onChange={(e) => setBarcode(e.target.value)}
-                  className="input-field w-full"
-                  placeholder="Scan or enter barcode"
-                />
-              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Reorder Level</label>
                 <input
@@ -1494,8 +1476,9 @@ export function QuickAddPage() {
               </div>
             </div>
             <p className="text-xs text-gray-500 mt-2">
-              Stock is created via GRN, not at product-create time. Barcode &amp; reorder level are saved with the SKU —
-              you&apos;ll be alerted when stock falls below the reorder level.
+              Stock is added via Goods Receipt (GRN), not at product-create time. The SKU is auto-assigned when the
+              product is created and our internal barcode is generated at goods receipt — neither is entered here.
+              Set the reorder level and you&apos;ll be alerted when stock falls below it.
             </p>
 
             {/* Product images — real upload (durably stored + served by the
@@ -1702,7 +1685,6 @@ export function QuickAddPage() {
               {weight && <ReviewRow label="Weight" value={`${weight} g`} />}
               <ReviewRow label="HSN / GST" value={selectedCategory ? `${hsnCode || '—'} · ${gstRate}%` : '—'} />
               <ReviewRow label="Discount band" value={discountCategory || '—'} />
-              <ReviewRow label="Initial qty" value={initialQuantity || '0'} />
               <ReviewRow label="Reorder level" value={reorderLevel || '—'} />
               {images.length > 0 && (
                 <ReviewRow label="Images" value={`${images.length} uploaded`} />
