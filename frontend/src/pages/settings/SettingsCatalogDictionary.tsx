@@ -1,31 +1,52 @@
 // ============================================================================
 // IMS 2.0 - Settings: Catalog Dictionary
 // ============================================================================
-// The owner-editable "dictionary" for Add-Product attribute fields: for any
-// field you save a value list for here, the Catalog Add-Product form renders
-// a select restricted to EXACTLY these values, and the backend enforces the
-// same list at create/update (case-insensitive; saved casing wins).
+// The owner-editable "dictionary" for Add-Product attribute fields, in TWO
+// scopes per field:
+//   - "All categories": one shared list (e.g. gender, country_of_origin).
+//   - Per-category overrides: a list saved for one category REPLACES the
+//     shared list there — so same-named fields that bleed across categories
+//     (lens_material on Sunglass vs Optical Lens, power on CL vs Readers,
+//     dial_colour on Watch vs Clock) each get their own dictionary.
+// The Catalog Add-Product form then renders selects restricted to EXACTLY the
+// effective values, and the backend enforces the same lists at create/update
+// (case-insensitive; saved casing wins).
 //
 // Brand Name / Sub Brand are deliberately NOT edited here — their source of
-// truth is the Brand Master tab (brands + per-category applicability). A
-// field with NO saved list stays free-form (or keeps its built-in app
-// defaults) until you configure it.
+// truth is the Brand Master tab. A field/scope with NO saved list stays
+// free-form (or keeps its built-in app defaults) until you configure it.
 //
 // BV brand tokens only (bv / bv-600 / bv-50 / bv-soft). No mock data.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpenCheck, Loader2, Plus, Save, Search, Sparkles, X } from 'lucide-react';
+import { BookOpenCheck, Globe, Loader2, Plus, Save, Search, Sparkles, X } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { catalogDictionaryApi } from '../../services/api/catalogDictionary';
+import {
+  catalogDictionaryApi,
+  type CatalogDictionaryResponse,
+} from '../../services/api/catalogDictionary';
 import { productApi, type CategoryRegistryEntry } from '../../services/api/products';
 import { CATEGORY_FIELDS } from '../catalog/productAddShared';
+
+const ALL_SCOPE = '*';
+
+interface FieldCategory {
+  code: string; // canonical, e.g. "SUNGLASS" — the scope key
+  name: string; // display, e.g. "Sunglass"
+  prefix: string; // FE short code, e.g. "SG" — keys CATEGORY_FIELDS defaults
+}
 
 interface FieldRow {
   name: string;
   label: string;
-  categories: string[]; // display names of categories using this field
-  appDefaults: string[]; // union of local hardcoded options (suggestion seed)
+  categories: FieldCategory[];
 }
+
+const EMPTY_DICT: CatalogDictionaryResponse = {
+  fields: {},
+  by_category: {},
+  brand_managed_fields: ['brand_name', 'subbrand'],
+};
 
 export function CatalogDictionarySection() {
   const toast = useToast();
@@ -33,10 +54,10 @@ export function CatalogDictionarySection() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [registry, setRegistry] = useState<CategoryRegistryEntry[]>([]);
-  const [saved, setSaved] = useState<Record<string, string[]>>({});
-  const [brandManaged, setBrandManaged] = useState<string[]>(['brand_name', 'subbrand']);
+  const [saved, setSaved] = useState<CatalogDictionaryResponse>(EMPTY_DICT);
 
   const [selected, setSelected] = useState<string | null>(null);
+  const [scope, setScope] = useState<string>(ALL_SCOPE);
   const [working, setWorking] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
   const [newValue, setNewValue] = useState('');
@@ -51,8 +72,7 @@ export function CatalogDictionarySection() {
         catalogDictionaryApi.list(),
         productApi.getCategoryRegistry(),
       ]);
-      setSaved(dict.fields || {});
-      if (dict.brand_managed_fields?.length) setBrandManaged(dict.brand_managed_fields);
+      setSaved(dict);
       setRegistry(reg.categories || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the catalog dictionary');
@@ -64,50 +84,74 @@ export function CatalogDictionarySection() {
   useEffect(() => { load(); }, [load]);
 
   // Field inventory: every attribute field across every category (deduped),
-  // excluding the Brand-Master-managed ones. App defaults come from the local
-  // CATEGORY_FIELDS UI metadata so "Start from app defaults" can seed a list.
+  // excluding the Brand-Master-managed ones.
   const fields: FieldRow[] = useMemo(() => {
     const byName = new Map<string, FieldRow>();
     registry.forEach((cat) => {
       (cat.fields || []).forEach((f) => {
-        if (brandManaged.includes(f.name)) return;
-        const row = byName.get(f.name) || {
-          name: f.name,
-          label: f.label || f.name,
-          categories: [],
-          appDefaults: [],
-        };
-        if (!row.categories.includes(cat.name)) row.categories.push(cat.name);
-        byName.set(f.name, row);
-      });
-    });
-    Object.values(CATEGORY_FIELDS).forEach((catFields) => {
-      catFields.forEach((f) => {
-        const row = byName.get(f.name);
-        if (row && f.options) {
-          f.options.forEach((o) => {
-            if (!row.appDefaults.some((d) => d.toLowerCase() === o.toLowerCase())) {
-              row.appDefaults.push(o);
-            }
-          });
+        if (saved.brand_managed_fields.includes(f.name)) return;
+        const row = byName.get(f.name) || { name: f.name, label: f.label || f.name, categories: [] };
+        if (!row.categories.some((c) => c.code === cat.code)) {
+          row.categories.push({ code: cat.code, name: cat.name, prefix: cat.sku_prefix });
         }
+        byName.set(f.name, row);
       });
     });
     const q = query.trim().toLowerCase();
     return Array.from(byName.values())
       .filter((r) => !q || r.name.toLowerCase().includes(q) || r.label.toLowerCase().includes(q))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [registry, brandManaged, query]);
+  }, [registry, saved.brand_managed_fields, query]);
 
   const selectedRow = useMemo(
     () => fields.find((f) => f.name === selected) || null,
     [fields, selected],
   );
 
-  const pick = (name: string) => {
-    if (dirty && !window.confirm('Discard unsaved changes to the current field?')) return;
+  const savedFor = useCallback(
+    (field: string, sc: string): string[] =>
+      sc === ALL_SCOPE
+        ? saved.fields[field] || []
+        : saved.by_category[sc]?.[field] || [],
+    [saved],
+  );
+
+  // Built-in app defaults for the seed button: per-category from that
+  // category's CATEGORY_FIELDS metadata; union across categories for "All".
+  const appDefaults = useMemo(() => {
+    if (!selectedRow) return [];
+    const cats = scope === ALL_SCOPE
+      ? selectedRow.categories
+      : selectedRow.categories.filter((c) => c.code === scope);
+    const out: string[] = [];
+    cats.forEach((c) => {
+      (CATEGORY_FIELDS[c.prefix] || []).forEach((f) => {
+        if (f.name === selectedRow.name && f.options) {
+          f.options.forEach((o) => {
+            if (!out.some((d) => d.toLowerCase() === o.toLowerCase())) out.push(o);
+          });
+        }
+      });
+    });
+    return out;
+  }, [selectedRow, scope]);
+
+  const guardDirty = () =>
+    !dirty || window.confirm('Discard unsaved changes to the current list?');
+
+  const pickField = (name: string) => {
+    if (!guardDirty()) return;
     setSelected(name);
-    setWorking(saved[name] ? [...saved[name]] : []);
+    setScope(ALL_SCOPE);
+    setWorking([...savedFor(name, ALL_SCOPE)]);
+    setDirty(false);
+    setNewValue('');
+  };
+
+  const pickScope = (sc: string) => {
+    if (!selected || sc === scope || !guardDirty()) return;
+    setScope(sc);
+    setWorking([...savedFor(selected, sc)]);
     setDirty(false);
     setNewValue('');
   };
@@ -130,9 +174,8 @@ export function CatalogDictionarySection() {
   };
 
   const seedDefaults = () => {
-    if (!selectedRow) return;
     const merged = [...working];
-    selectedRow.appDefaults.forEach((d) => {
+    appDefaults.forEach((d) => {
       if (!merged.some((w) => w.toLowerCase() === d.toLowerCase())) merged.push(d);
     });
     setWorking(merged);
@@ -143,14 +186,29 @@ export function CatalogDictionarySection() {
     if (!selected) return;
     setSaving(true);
     try {
-      const r = await catalogDictionaryApi.save(selected, working);
-      setSaved((prev) => ({ ...prev, [selected]: r.items }));
+      const category = scope === ALL_SCOPE ? undefined : scope;
+      const r = await catalogDictionaryApi.save(selected, working, category);
+      setSaved((prev) => {
+        if (!category) {
+          return { ...prev, fields: { ...prev.fields, [selected]: r.items } };
+        }
+        return {
+          ...prev,
+          by_category: {
+            ...prev.by_category,
+            [category]: { ...(prev.by_category[category] || {}), [selected]: r.items },
+          },
+        };
+      });
       setWorking([...r.items]);
       setDirty(false);
+      const scopeName = category
+        ? selectedRow?.categories.find((c) => c.code === category)?.name || category
+        : 'all categories';
       toast.success(
         r.items.length
-          ? `${selectedRow?.label || selected}: ${r.items.length} allowed value${r.items.length === 1 ? '' : 's'} saved. Only these can be chosen in Catalog now.`
-          : `${selectedRow?.label || selected} is free-form again (no list configured).`
+          ? `${selectedRow?.label || selected} (${scopeName}): ${r.items.length} allowed value${r.items.length === 1 ? '' : 's'} saved.`
+          : `${selectedRow?.label || selected} (${scopeName}): list cleared — falls back to ${category ? 'the All-categories list (or free-form)' : 'free-form'}.`
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Save failed');
@@ -170,6 +228,8 @@ export function CatalogDictionarySection() {
     return <div className="card text-red-600 text-sm">{error}</div>;
   }
 
+  const globalCount = selected ? savedFor(selected, ALL_SCOPE).length : 0;
+
   return (
     <div className="space-y-4">
       <div className="card">
@@ -178,11 +238,11 @@ export function CatalogDictionarySection() {
           <h2 className="text-lg font-semibold text-ink">Catalog Dictionary</h2>
         </div>
         <p className="text-sm text-ink-4">
-          Save an allowed-value list for any Add-Product field and the Catalog screen will only
-          offer those values — enforced on the server too, so nothing outside your list can be
-          saved. A field without a list stays free-form.{' '}
-          <strong>Brand Name and Sub Brand are managed in the Brand Master tab</strong> (with
-          per-category applicability), not here.
+          Save an allowed-value list for any Add-Product field and Catalog will only offer those
+          values — enforced on the server too. Each field has an <strong>All categories</strong>{' '}
+          list plus optional <strong>per-category lists</strong> that override it, so shared field
+          names (lens material, power, colours…) never bleed between categories.{' '}
+          <strong>Brand Name and Sub Brand are managed in the Brand Master tab</strong>, not here.
         </p>
       </div>
 
@@ -200,13 +260,20 @@ export function CatalogDictionarySection() {
           </div>
           <div className="max-h-[480px] overflow-y-auto space-y-0.5">
             {fields.map((f) => {
-              const count = (saved[f.name] || []).length;
+              const gCount = (saved.fields[f.name] || []).length;
+              const overrides = f.categories.filter(
+                (c) => (saved.by_category[c.code]?.[f.name] || []).length > 0
+              ).length;
               const on = f.name === selected;
+              const badge =
+                gCount > 0 || overrides > 0
+                  ? `${gCount > 0 ? `${gCount} values` : 'free-form'}${overrides > 0 ? ` · ${overrides} override${overrides === 1 ? '' : 's'}` : ''}`
+                  : 'free-form';
               return (
                 <button
                   key={f.name}
                   type="button"
-                  onClick={() => pick(f.name)}
+                  onClick={() => pickField(f.name)}
                   className={
                     'w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left text-sm transition ' +
                     (on ? 'bg-bv-50 text-bv font-medium ring-1 ring-bv' : 'hover:bg-gray-50 text-ink')
@@ -215,17 +282,17 @@ export function CatalogDictionarySection() {
                   <span className="min-w-0">
                     <span className="block truncate">{f.label}</span>
                     <span className="block text-[11px] text-ink-4 truncate">
-                      {f.categories.slice(0, 3).join(', ')}
+                      {f.categories.slice(0, 3).map((c) => c.name).join(', ')}
                       {f.categories.length > 3 ? ` +${f.categories.length - 3}` : ''}
                     </span>
                   </span>
                   <span
                     className={
                       'shrink-0 px-1.5 py-0.5 rounded-full text-[11px] font-medium ' +
-                      (count > 0 ? 'bg-bv-50 text-bv' : 'bg-gray-100 text-ink-4')
+                      (gCount > 0 || overrides > 0 ? 'bg-bv-50 text-bv' : 'bg-gray-100 text-ink-4')
                     }
                   >
-                    {count > 0 ? `${count} values` : 'free-form'}
+                    {badge}
                   </span>
                 </button>
               );
@@ -248,7 +315,7 @@ export function CatalogDictionarySection() {
                 <div>
                   <h3 className="font-semibold text-ink">{selectedRow.label}</h3>
                   <p className="text-xs text-ink-4">
-                    Used by: {selectedRow.categories.join(', ')}
+                    Used by: {selectedRow.categories.map((c) => c.name).join(', ')}
                   </p>
                 </div>
                 <button
@@ -261,6 +328,45 @@ export function CatalogDictionarySection() {
                   Save list
                 </button>
               </div>
+
+              {/* Scope tabs: All categories + one per category using this field */}
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {[{ code: ALL_SCOPE, name: 'All categories' } as { code: string; name: string }]
+                  .concat(selectedRow.categories)
+                  .map((c) => {
+                    const on = scope === c.code;
+                    const count = savedFor(selectedRow.name, c.code).length;
+                    return (
+                      <button
+                        key={c.code}
+                        type="button"
+                        onClick={() => pickScope(c.code)}
+                        className={
+                          'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition ' +
+                          (on
+                            ? 'bg-bv-50 text-bv border-bv'
+                            : 'bg-white text-ink-3 border-line hover:bg-bv-50 hover:text-bv')
+                        }
+                      >
+                        {c.code === ALL_SCOPE && <Globe className="w-3.5 h-3.5" />}
+                        {c.name}
+                        {count > 0 && (
+                          <span className="px-1 py-px rounded-full bg-bv-50 text-bv text-[10px]">
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+              </div>
+
+              {scope !== ALL_SCOPE && working.length === 0 && globalCount > 0 && !dirty && (
+                <p className="text-xs text-ink-4 mb-2">
+                  No override here — this category currently uses the{' '}
+                  <strong>All-categories list ({globalCount} values)</strong>. Add values below to
+                  give it its own list.
+                </p>
+              )}
 
               <div className="flex flex-wrap items-center gap-2 mb-3">
                 <input
@@ -278,12 +384,12 @@ export function CatalogDictionarySection() {
                 <button type="button" onClick={addValue} className="btn-secondary flex items-center gap-1.5">
                   <Plus className="w-4 h-4" /> Add
                 </button>
-                {selectedRow.appDefaults.length > 0 && (
+                {appDefaults.length > 0 && (
                   <button
                     type="button"
                     onClick={seedDefaults}
                     className="btn-outline flex items-center gap-1.5"
-                    title={`Prefill with the app's built-in suggestions (${selectedRow.appDefaults.length})`}
+                    title={`Prefill with the app's built-in suggestions (${appDefaults.length})`}
                   >
                     <Sparkles className="w-4 h-4" /> Start from app defaults
                   </button>
@@ -292,8 +398,10 @@ export function CatalogDictionarySection() {
 
               {working.length === 0 ? (
                 <p className="text-sm text-ink-4 border border-dashed border-gray-200 rounded-lg px-3 py-6 text-center">
-                  No values yet — this field is <strong>free-form</strong> in Catalog. Add values and
-                  save to restrict it.
+                  No values in this scope —{' '}
+                  {scope === ALL_SCOPE
+                    ? <>the field is <strong>free-form</strong> wherever no category override exists.</>
+                    : <>this category falls back to the All-categories list{globalCount === 0 && ' (none — free-form)'}.</>}
                 </p>
               ) : (
                 <div className="flex flex-wrap gap-1.5">

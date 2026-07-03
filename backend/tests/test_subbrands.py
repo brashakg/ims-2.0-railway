@@ -138,7 +138,7 @@ _SENTINEL = object()
 class TestSubbrandEnforcement:
     def _patch(self, monkeypatch, subs):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: subs)
 
     def test_unknown_subbrand_rejected(self, monkeypatch):
@@ -171,7 +171,7 @@ class TestSubbrandEnforcement:
 
     def test_no_brand_means_no_subbrand_gate(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: [])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
 
         def _boom(db, b):  # pragma: no cover - must never run
             raise AssertionError("subbrand lookup without a brand")

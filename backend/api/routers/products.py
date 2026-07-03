@@ -1576,13 +1576,16 @@ async def get_category_registry(current_user: dict = Depends(get_current_user)):
 
         db = _get_db_dep()
         if db is not None and getattr(db, "is_connected", False):
-            field_options = _cd.load_field_options(db)
+            # ONE raw read; per-category effective lists are merged in memory
+            # (category-scoped lists override the All-categories ones).
+            raw_options = _cd.load_field_options_raw(db)
             brand_cache: dict = {}
             for cat in categories:
                 prefix = cat.get("sku_prefix")
                 if prefix not in brand_cache:
                     brand_cache[prefix] = _cd.load_brand_options(db, prefix)
                 brands = brand_cache[prefix]
+                field_options = _cd.merged_field_options(raw_options, cat.get("code"))
                 for fld in cat.get("fields", []):
                     name = fld.get("name")
                     if name == "brand_name":

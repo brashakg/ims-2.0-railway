@@ -127,7 +127,7 @@ _DB = object()  # sentinel: "a db is present"; loaders are monkeypatched
 class TestEnforcement:
     def test_unknown_brand_rejected_with_brand_master_message(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban", "Oakley"])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         with pytest.raises(pm.ProductMasterError) as exc:
             pm.enforce_dictionary_values(
                 "FRAME", {"brand_name": "Nobody", "model_no": "X1"}, db=_DB
@@ -138,14 +138,14 @@ class TestEnforcement:
 
     def test_brand_canonicalised_to_master_casing(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         out = pm.enforce_dictionary_values("FRAME", {"brand_name": "ray-ban"}, db=_DB)
         assert out["brand_name"] == "Ray-Ban"
 
     def test_empty_brand_master_fails_open(self, monkeypatch):
         # [] (no brands yet) and None (read failed) both skip enforcement so
         # cataloguing is never bricked before the owner seeds the master.
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         for master in ([], None):
             monkeypatch.setattr(cd, "load_brand_options", lambda db, p, m=master: m)
             out = pm.enforce_dictionary_values("FRAME", {"brand_name": "Anything"}, db=_DB)
@@ -154,7 +154,7 @@ class TestEnforcement:
     def test_configured_field_rejects_and_canonicalises(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: [])
         monkeypatch.setattr(
-            cd, "load_field_options", lambda db: {"frame_material": ["Acetate", "Metal"]}
+            cd, "load_field_options", lambda db, category=None: {"frame_material": ["Acetate", "Metal"]}
         )
         # Wrong value -> 422 naming the field + the Settings location.
         with pytest.raises(pm.ProductMasterError) as exc:
@@ -168,7 +168,7 @@ class TestEnforcement:
 
     def test_unconfigured_and_blank_values_pass(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: [])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {"tint": ["Grey"]})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {"tint": ["Grey"]})
         out = pm.enforce_dictionary_values(
             "FRAME", {"shape": "FreeText", "tint": "  "}, db=_DB
         )
@@ -178,7 +178,7 @@ class TestEnforcement:
         # Even if a brand_name list sneaks into the collection, the Brand
         # Master (here: empty -> fail-open) governs brands, not the dictionary.
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: [])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {"brand_name": ["X"]})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {"brand_name": ["X"]})
         out = pm.enforce_dictionary_values("FRAME", {"brand_name": "Ray-Ban"}, db=_DB)
         assert out["brand_name"] == "Ray-Ban"
 
@@ -209,7 +209,7 @@ class TestCreateDoorIntegration:
 
     def test_normalise_payload_canonicalises_and_rejects(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         doc = pm.normalise_payload(db=_DB, **self._payload())
         assert doc["attributes"]["brand_name"] == "Ray-Ban"
         assert doc["brand"] == "Ray-Ban"  # identity column follows the canonical value
@@ -287,7 +287,7 @@ class TestTierDerivation:
 
     def test_tier_derived_from_brand_master(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: [])
         monkeypatch.setattr(cd, "load_brand_tier", lambda db, b: "LUXURY")
         doc = pm.normalise_payload(db=_DB, **self._BASE)
@@ -295,7 +295,7 @@ class TestTierDerivation:
 
     def test_explicit_tier_still_wins(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: [])
         monkeypatch.setattr(cd, "load_brand_tier", lambda db, b: "LUXURY")
         doc = pm.normalise_payload(db=_DB, discount_category="MASS", **self._BASE)
@@ -303,7 +303,7 @@ class TestTierDerivation:
 
     def test_underivable_stays_none_draft_gap(self, monkeypatch):
         monkeypatch.setattr(cd, "load_brand_options", lambda db, p: [])
-        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_field_options", lambda db, category=None: {})
         monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: None)
         monkeypatch.setattr(cd, "load_brand_tier", lambda db, b: None)
         doc = pm.normalise_payload(db=_DB, **self._BASE)
@@ -323,3 +323,72 @@ class TestTierDerivation:
         assert cd.load_brand_tier(_Db(), "NoTier") is None
         assert cd.load_brand_tier(_Db(), "Unknown") is None
         assert cd.load_brand_tier(None, "Gucci") is None
+
+
+# ---------------------------------------------------------------------------
+# 7. Per-category dictionary scopes (owner: fields must not bleed across
+#    categories -- a category list overrides the All-categories list)
+# ---------------------------------------------------------------------------
+
+
+class TestPerCategoryScopes:
+    def _db(self):
+        return _FakeDb({
+            cd.FIELD_OPTIONS_COLLECTION: [
+                # All-categories (legacy docs have no category key at all)
+                {"field_id": "gender", "items": ["Men", "Women", "Unisex"]},
+                {"field_id": "lens_material", "items": ["CR-39", "Polycarbonate"]},
+                # Sunglass override for lens_material
+                {"field_id": "lens_material", "category": "SUNGLASS",
+                 "items": ["Polycarbonate", "Glass", "Nylon"]},
+                # Optical-lens-only field
+                {"field_id": "coating", "category": "OPTICAL_LENS",
+                 "items": ["ARC", "Blue Cut"]},
+            ]
+        })
+
+    def test_raw_groups_by_scope(self):
+        raw = cd.load_field_options_raw(self._db())
+        assert set(raw) == {cd.GLOBAL_SCOPE, "SUNGLASS", "OPTICAL_LENS"}
+        assert raw[cd.GLOBAL_SCOPE]["gender"] == ["Men", "Women", "Unisex"]
+
+    def test_category_list_overrides_global(self):
+        eff = cd.load_field_options(self._db(), "SUNGLASS")
+        assert eff["lens_material"] == ["Polycarbonate", "Glass", "Nylon"]
+        assert eff["gender"] == ["Men", "Women", "Unisex"]  # global still applies
+        assert "coating" not in eff  # other category's list does NOT bleed
+
+    def test_global_only_when_no_category(self):
+        eff = cd.load_field_options(self._db(), None)
+        assert eff["lens_material"] == ["CR-39", "Polycarbonate"]
+        assert "coating" not in eff
+
+    def test_enforcement_uses_category_scope(self, monkeypatch):
+        db = self._db()
+        monkeypatch.setattr(cd, "load_brand_options", lambda d, p: [])
+        monkeypatch.setattr(cd, "load_subbrand_options", lambda d, b: None)
+        # Glass is allowed for SUNGLASS (override) but NOT for FRAME (global).
+        out = pm.enforce_dictionary_values("SUNGLASS", {"lens_material": "glass"}, db=db)
+        assert out["lens_material"] == "Glass"
+        with pytest.raises(pm.ProductMasterError):
+            pm.enforce_dictionary_values("FRAME", {"lens_material": "Glass"}, db=db)
+
+    def test_patch_with_category_scopes_the_doc(self, client, auth_headers):
+        r = client.patch(
+            "/api/v1/catalog-field-options/lens_material",
+            json={"items": ["Glass"], "category": "SG"},  # alias resolves
+            headers=auth_headers,
+        )
+        # Mock-db envs may 503; a real backend returns the resolved canonical.
+        assert r.status_code in (200, 503)
+        if r.status_code == 200:
+            assert r.json()["category"] == "SUNGLASS"
+
+    def test_patch_unknown_category_400(self, client, auth_headers):
+        r = client.patch(
+            "/api/v1/catalog-field-options/lens_material",
+            json={"items": ["Glass"], "category": "NOT_A_CATEGORY"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 400
+        assert "Unknown category" in r.json()["detail"]
