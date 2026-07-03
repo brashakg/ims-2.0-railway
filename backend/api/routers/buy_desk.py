@@ -139,9 +139,10 @@ async def buy_desk_rows(
 ):
     """Per-product Buy Desk rows: readiness + ecom state + on-hand + on-order +
     netted buy signal. Read-only."""
-    # Store-scope the on-hand read: a store-level role can only see its own store's
-    # counts (403 on a foreign ?store_id; omitted -> own store). Admins/area-mgrs
-    # keep their reach. Same canonical guard as the LIST endpoints (payroll etc.).
+    # Store-scope the on-hand read (same canonical guard as the LIST endpoints):
+    # an explicit ?store_id is validated against the caller's access (403 on a
+    # foreign store); omitted -> the caller's own active store for store-level
+    # roles, or None (all stores) for SUPERADMIN/ADMIN. Area/admin reach is kept.
     store_id = resolve_store_scope(store_id, current_user)
     repo = get_product_repository()
     db = _get_db()

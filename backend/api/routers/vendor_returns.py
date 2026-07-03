@@ -387,9 +387,16 @@ async def update_return_status(
             {"$set": update_dict},
         )
         if getattr(result, "matched_count", 0) == 0:
+            # CAS lost: another request already transitioned this return out of
+            # current_status. Surface the CURRENT status so the caller can decide
+            # (retry / skip / show a conflict) instead of a blind retry.
+            latest = collection.find_one({"return_id": return_id}) or {}
             raise HTTPException(
                 status_code=409,
-                detail="Return was already updated by another request",
+                detail=(
+                    "Return was already updated by another request "
+                    f"(current status: {latest.get('status')})"
+                ),
             )
 
         # Fetch and return updated document

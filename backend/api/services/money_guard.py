@@ -417,8 +417,12 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     RACE-SAFE ceiling in the same guarded write -- e.g. a petty-cash float top-up
     passes {"balance": {"$lte": limit - amount}} so two concurrent top-ups can
     never both breach the float limit. When the guard matches nothing the write is
-    a no-op and the result is ok=False reason="not_found". Defaults None -> no
-    existing caller is affected."""
+    a no-op and the result is ok=False reason="not_found" (the caller must
+    disambiguate that from a genuinely-missing doc if it cares). Defaults None.
+
+    guard_extra is keyword-only (it sits after the * barrier), so inserting it is
+    backward compatible: every existing caller already passes credit()'s optional
+    args by keyword -- none may be passed positionally past `amount`."""
     spec = ACCOUNT_TYPES.get(account_type)
     if spec is None:
         return GuardResult(ok=False, reason="unknown_type")

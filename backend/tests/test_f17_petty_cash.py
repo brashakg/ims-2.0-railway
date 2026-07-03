@@ -675,3 +675,24 @@ def test_t15_topup_within_limit_succeeds(db):
     assert r.get("balance") == 6000.0
     bal = db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"]
     assert bal == 6000.0
+
+
+def test_t16_topup_not_found_after_float_deleted_is_not_ceiling(db, monkeypatch):
+    """A concurrent float close/delete makes the guarded credit return
+    reason='not_found'. topup_float must NOT mislabel that as exceeds_float_limit
+    -- a re-read distinguishes the vanished doc (404 float_not_open) from a real
+    ceiling breach (422)."""
+    _open(db, amount=5000.0, threshold=0.0)
+    coll = db.get_collection("petty_cash_floats")
+
+    def _fake_credit(*a, **k):
+        # Simulate the float being deleted between the existence check and the
+        # guarded write, then the write matching nothing.
+        coll.delete_one({"store_id": "S1"})
+        return mg.GuardResult(ok=False, reason="not_found")
+
+    monkeypatch.setattr(pcs.mg, "credit", _fake_credit)
+    r = pcs.topup_float(db, store_id="S1", amount=100.0, actor="mgr1")
+    assert r.get("ok") is False
+    assert r.get("http") == 404
+    assert r.get("error") == "float_not_open"

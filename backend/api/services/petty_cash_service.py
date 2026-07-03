@@ -368,11 +368,16 @@ def topup_float(db, *, store_id: str, amount: float, actor: str,
     )
     if not res.ok:
         if res.reason == "not_found":
-            # The atomic ceiling guard matched nothing: this top-up would push the
-            # float past its limit (or a concurrent top-up already consumed the
-            # headroom). Same 422 the old pre-read check returned.
+            # "not_found" from the guarded credit is ambiguous: EITHER the atomic
+            # ceiling guard matched nothing (balance would breach the limit), OR
+            # the float doc vanished (a concurrent close/delete) between the
+            # existence check above and this write. Re-read to distinguish, so a
+            # deleted float is not mislabeled as "exceeds_float_limit".
+            still = coll.find_one({"store_id": store_id})
+            if still is None:
+                return {"ok": False, "http": 404, "error": "float_not_open"}
             return {"ok": False, "http": 422, "error": "exceeds_float_limit",
-                    "float_limit": limit, "balance": float(cur.get("balance") or 0.0)}
+                    "float_limit": limit, "balance": float(still.get("balance") or 0.0)}
         return {"ok": False, "http": 409, "error": res.reason or "credit_failed"}
     _stamp_balance_after(coll, store_id, txn_id)
     _audit(db, "petty_cash.topup", store_id, delta=amt, balance_after=res.balance,
