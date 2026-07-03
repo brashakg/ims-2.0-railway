@@ -107,16 +107,6 @@ export function WhatsAppInboxPage() {
   const [offset, setOffset] = useState(0);
   const LIMIT = 50;
 
-  const allowed = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'];
-  const activeRole = (user as { activeRole?: string })?.activeRole ?? '';
-  if (!allowed.includes(activeRole)) {
-    return (
-      <div className="p-8 text-center text-gray-500">
-        You do not have permission to view the WhatsApp inbox.
-      </div>
-    );
-  }
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -134,6 +124,18 @@ export function WhatsAppInboxPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Permission gate lives below all hooks so hook order stays stable across
+  // renders (rules-of-hooks): a role change must never add or drop a hook.
+  const allowed = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'];
+  const activeRole = (user as { activeRole?: string })?.activeRole ?? '';
+  if (!allowed.includes(activeRole)) {
+    return (
+      <div className="p-8 text-center text-gray-500">
+        You do not have permission to view the WhatsApp inbox.
+      </div>
+    );
+  }
 
   const lastMsg = (conv: WaConversation) => {
     const msgs = conv.messages ?? [];

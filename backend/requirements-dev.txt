@@ -2,16 +2,23 @@
 # ==========================================
 
 # Testing
-pytest==7.4.4
-pytest-asyncio==0.23.2
-pytest-cov==4.1.0
-pytest-mock==3.12.0
+# Verified against the suite: full collect-only is clean (7226 tests, 0 errors)
+# under pytest 9 + pytest-asyncio 1.x with the existing asyncio_mode=auto, and
+# the pure-unit anchors (payroll engine / observability / event bus) still pass.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+pytest-mock==3.15.1
 
 # Code Quality
-black==24.1.1
+# 24.3.0 fixes GHSA-fj7x-q9j7-g6q6 / CVE-2024-21503 (ReDoS) while staying on
+# black's 2024 stable style, so no repo-wide reformat. The dev-only cache-name
+# file-write CVE (GHSA-3936-cmfr-pm3m) needs black 26.x, which changes the
+# stable style -> deferred to a deliberate formatter-upgrade change.
+black==24.3.0
 pylint==3.0.3
 mypy==1.8.0
-types-python-dateutil==2.9.0.20240316
+types-python-dateutil==2.9.0.20260518
 
 # Security
 bandit==1.7.6

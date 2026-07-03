@@ -7,18 +7,23 @@ uvicorn[standard]==0.49.0
 
 # Data Validation
 pydantic==2.13.4
-pydantic-settings==2.14.1
+# 2.14.2 fixes GHSA-4xgf-cpjx-pc3j (NestedSecretsSettingsSource followed
+# symlinks outside secrets_dir, bypassing the size cap -> local file read).
+pydantic-settings==2.14.2
 
 # Authentication & Security
 pyjwt==2.13.0
 bcrypt==4.2.0
-python-multipart==0.0.30
+# 0.0.31 fixes GHSA-v9pg-7xvm-68hf / CVE-2026-53540 (negative Content-Length
+# buffers the whole request body in memory -> DoS).
+python-multipart==0.0.32
 # RSA-SHA256 signing for QZ Tray silent label printing (labels.py). The
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
 # 48.0.0 fixes CVE-2024-12797, PYSEC-2026-35 (X.509 DNS name-constraint
-# bypass) and CVE-2026-26007 (EC public-key subgroup check) without
-# breaking API changes for our RSA-sign-only usage.
-cryptography==48.0.0
+# bypass) and CVE-2026-26007 (EC public-key subgroup check); 48.0.1 fixes
+# GHSA-537c-gmf6-5ccf (vulnerable OpenSSL bundled in the wheel) -- all
+# without breaking API changes for our RSA-sign-only usage.
+cryptography==48.0.1
 
 # Database
 pymongo==4.17.0
@@ -29,7 +34,7 @@ psycopg2-binary==2.9.12
 httpx==0.28.1
 
 # Agent Scheduler
-apscheduler==3.11.2
+apscheduler==3.11.3
 
 # Caching
 # redis 8.x is a major rebranding release (no redis 6/7); API-compatible for
