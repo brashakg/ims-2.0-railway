@@ -202,6 +202,15 @@ class DatabaseConnection:
             background=True,
         )
         _idx("orders", [("salesperson_id", 1), ("created_at", -1)], background=True)
+        # Collections movement analytics: every per-collection sales aggregation
+        # matches {items.product_id $in members, created_at >= cutoff} -- the
+        # multikey items index is what keeps it off a collection scan. Also
+        # serves the non-moving-stock report's per-product last-sold lookups.
+        _idx(
+            "orders",
+            [("items.product_id", 1), ("created_at", -1)],
+            background=True,
+        )
         _idx("orders", "order_number", unique=True, sparse=True, background=True)
         _idx("orders", [("store_id", 1), ("balance_due", 1)], background=True)
         # GST invoice serial (Rule 46(b)): UNIQUE backstop so a duplicate invoice
