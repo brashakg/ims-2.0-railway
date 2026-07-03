@@ -34,7 +34,7 @@ psycopg2-binary==2.9.12
 httpx==0.28.1
 
 # Agent Scheduler
-apscheduler==3.11.2
+apscheduler==3.11.3
 
 # Caching
 # redis 8.x is a major rebranding release (no redis 6/7); API-compatible for
