@@ -403,6 +403,130 @@ def test_materialize_failsoft_no_db():
 
 
 # ===========================================================================
+# Collections Phase 1, Track 1 -- product_id denormalised onto the
+# collection_products rows + the new view indexes
+# ===========================================================================
+
+
+def test_materialized_rows_carry_spine_product_id():
+    """Every SMART-materialised row carries the `products` spine doc's
+    product_id (resolved in one batched find). _seed_product writes
+    product_id == sku, so the rows must mirror that."""
+    db = _db_with_catalog()
+    cid = _seed_collection(
+        db,
+        handle="frames-pid",
+        rules=[{"field": "tag", "relation": "EQUALS", "value": "frames"}],
+        disjunctive=True,
+    )
+    coll = db["ecom_collections"].find_one({"collection_id": cid})
+    assert mat.materialize_collection(db, coll) == 2
+    rows = list(db["collection_products"].find({"collection_id": cid}))
+    assert {r["sku"] for r in rows} == {"RB-1", "GZ-1"}
+    for r in rows:
+        assert r["product_id"] == r["sku"]
+
+
+def test_materialized_rows_product_id_none_when_sku_not_on_spine():
+    """A catalog_products-only member (no `products` spine doc) still
+    materialises -- fail-soft with product_id None, never an error."""
+    db = MockDatabase()
+    db["catalog_products"].insert_one(
+        {
+            "sku": "CAT-ONLY",
+            "category": "SUNGLASS",
+            "attributes": {"brand": "Prada"},
+        }
+    )
+    cid = _seed_collection(
+        db,
+        handle="cat-only",
+        rules=[{"field": "category", "relation": "EQUALS", "value": "SUNGLASS"}],
+        disjunctive=True,
+    )
+    coll = db["ecom_collections"].find_one({"collection_id": cid})
+    assert mat.materialize_collection(db, coll) == 1
+    row = db["collection_products"].find_one(
+        {"collection_id": cid, "sku": "CAT-ONLY"}
+    )
+    assert row is not None
+    assert row["product_id"] is None
+
+
+def test_custom_collection_rows_also_carry_product_id():
+    """The CUSTOM (manual membership) write path denormalises product_id the
+    same way; an unresolvable sku writes product_id None (fail-soft)."""
+    db = _db_with_catalog()
+    cid = _seed_collection(
+        db,
+        handle="curated-pid",
+        ctype="CUSTOM",
+        products=[{"sku": "RB-1", "position": 0}, {"sku": "GHOST", "position": 1}],
+    )
+    coll = db["ecom_collections"].find_one({"collection_id": cid})
+    assert mat.materialize_collection(db, coll) == 2
+    rows = {r["sku"]: r for r in db["collection_products"].find({"collection_id": cid})}
+    assert rows["RB-1"]["product_id"] == "RB-1"
+    assert rows["GHOST"]["product_id"] is None
+
+
+class _RecordingColl:
+    """Records create_index calls (keys, kwargs) -- mirrors the fake in
+    test_unification_index_backstops.py."""
+
+    def __init__(self, name):
+        self.name = name
+        self.calls = []  # list of (keys, kwargs)
+
+    def create_index(self, keys, **kw):
+        self.calls.append((keys, dict(kw)))
+        return "idx"
+
+
+class _RecordingDB:
+    def __init__(self):
+        self._colls = {}
+
+    def __getitem__(self, name):
+        if name not in self._colls:
+            self._colls[name] = _RecordingColl(name)
+        return self._colls[name]
+
+
+def _index_kwargs(coll, keys):
+    """Return the kwargs of the create_index call whose keys match, else None."""
+    for got_keys, kw in coll.calls:
+        if got_keys == keys:
+            return kw
+    return None
+
+
+def test_ensure_indexes_builds_product_id_indexes():
+    db = _RecordingDB()
+    mat.ensure_indexes(db)
+    coll = db["collection_products"]
+
+    # New Track-1 indexes: single product_id + {collection_id, product_id}
+    # compound, both NON-unique (product_id may be None / repeat).
+    kw = _index_kwargs(coll, [("product_id", 1)])
+    assert kw is not None, "collection_products.product_id index not built"
+    assert kw.get("unique") is not True
+
+    kw = _index_kwargs(coll, [("collection_id", 1), ("product_id", 1)])
+    assert kw is not None, "collection_products {collection_id, product_id} index not built"
+    assert kw.get("unique") is not True
+
+    # The pre-existing view indexes are still built (additive change).
+    assert _index_kwargs(coll, [("collection_id", 1), ("position", 1)]) is not None
+    unique_kw = _index_kwargs(coll, [("collection_id", 1), ("sku", 1)])
+    assert unique_kw is not None and unique_kw.get("unique") is True
+    assert _index_kwargs(coll, [("sku", 1)]) is not None
+
+    # Fail-soft contract: no db -> no raise.
+    mat.ensure_indexes(None)
+
+
+# ===========================================================================
 # RBAC cataloguing
 # ===========================================================================
 
