@@ -5,7 +5,6 @@
 export type SettingsTab =
   | 'profile'
   | 'business'
-  | 'stores'
   | 'users'
   | 'categories'
   | 'brands'
