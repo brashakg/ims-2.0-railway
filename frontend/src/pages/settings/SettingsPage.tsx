@@ -115,7 +115,9 @@ const SETTINGS_SECTIONS = [
   { id: 'business' as SettingsTab, label: 'Business Profile', icon: Building2, description: 'Company info and branding', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'users' as SettingsTab, label: 'User Management', icon: Users, description: 'Manage users and roles', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
   { id: 'categories' as SettingsTab, label: 'Category Master', icon: Tag, description: 'Product categories and attributes', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-  { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+  // Backend /admin/brands is gated SUPERADMIN/ADMIN — CATALOG_MANAGER was
+  // shown this tab but 403'd on every call, so the tab matches the gate now.
+  { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands, sub-brands and tier — drives the Catalog brand list', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'lens-master' as SettingsTab, label: 'Lens Master', icon: CircleDot, description: 'Lens brands, indices, coatings', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-enums' as SettingsTab, label: 'Lens Catalog Enums', icon: Layers, description: 'Editable brand/coating/index/material/type lists for the typed catalog', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'catalog-dictionary' as SettingsTab, label: 'Catalog Dictionary', icon: BookOpenCheck, description: 'Allowed values per Add-Product field — only saved values can be chosen in Catalog', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },

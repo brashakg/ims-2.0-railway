@@ -659,6 +659,25 @@ def enforce_dictionary_values(
                 )
             attrs["brand_name"] = canonical_brand
 
+        # Sub-brand: enforced ONLY when the (canonical) brand HAS subbrands in
+        # the Brand Master -- a brand with none keeps subbrand free-form
+        # (mirrors the lens 'series falls open per brand' rule).
+        sub_val = attrs.get("subbrand")
+        if isinstance(sub_val, str) and sub_val.strip():
+            subs = _cd.load_subbrand_options(db, attrs.get("brand_name") or brand_val)
+            if subs:  # None (read failed) and [] (no subbrands) fail open
+                canonical_sub = _cd.match_canonical(sub_val, subs)
+                if canonical_sub is None:
+                    preview = ", ".join(subs[:6]) + ("..." if len(subs) > 6 else "")
+                    raise ProductMasterError(
+                        f"Sub-brand '{sub_val.strip()}' is not defined for this "
+                        f"brand. Its sub-brands: {preview}. Manage them in "
+                        "Settings -> Brand Master.",
+                        status=422,
+                        field="subbrand",
+                    )
+                attrs["subbrand"] = canonical_sub
+
     options = _cd.load_field_options(db)
     if options:
         for name, allowed in options.items():

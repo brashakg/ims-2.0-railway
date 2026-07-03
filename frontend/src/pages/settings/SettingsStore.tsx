@@ -351,6 +351,8 @@ export function BrandSection() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [showAddBrandModal, setShowAddBrandModal] = useState(false);
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
+  // Per-brand "new sub-brand" input value, keyed by brand id.
+  const [newSubbrand, setNewSubbrand] = useState<Record<string, string>>({});
   const categories = CATEGORY_DEFINITIONS;
 
   useEffect(() => {
@@ -401,13 +403,46 @@ export function BrandSection() {
   };
 
   const handleDeleteBrand = async (brandId: string) => {
-    if (!window.confirm('Are you sure you want to delete this brand?')) return;
+    if (!window.confirm('Are you sure you want to delete this brand? Its sub-brands are removed too.')) return;
     try {
       await adminBrandApi.deleteBrand(brandId);
       toast.success('Brand deleted successfully');
       loadBrands();
     } catch {
       toast.error('Failed to delete brand');
+    }
+  };
+
+  // Sub-brands: the value list the Catalog Sub Brand field restricts to for
+  // this brand (a brand with none keeps the field free-typing in Catalog).
+  const handleAddSubbrand = async (brand: Brand) => {
+    const name = (newSubbrand[brand.id] || '').trim();
+    if (!name) return;
+    if (brand.subbrands.some((sb) => sb.name.toLowerCase() === name.toLowerCase())) {
+      toast.warning(`"${name}" is already a sub-brand of ${brand.brandName}.`);
+      return;
+    }
+    // Code auto-derived from the name (uppercase alphanumerics, max 24) so the
+    // owner only types the display name.
+    const code = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 24) || 'SB';
+    try {
+      await adminBrandApi.createSubbrand(brand.id, { name, code });
+      setNewSubbrand((prev) => ({ ...prev, [brand.id]: '' }));
+      toast.success(`Sub-brand "${name}" added to ${brand.brandName}. Catalog now restricts Sub Brand to this list for the brand.`);
+      loadBrands();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to add sub-brand');
+    }
+  };
+
+  const handleDeleteSubbrand = async (brand: Brand, subbrandId: string, name: string) => {
+    if (!window.confirm(`Remove sub-brand "${name}" from ${brand.brandName}?`)) return;
+    try {
+      await adminBrandApi.deleteSubbrand(brand.id, subbrandId);
+      toast.success(`Sub-brand "${name}" removed`);
+      loadBrands();
+    } catch {
+      toast.error('Failed to remove sub-brand');
     }
   };
 
@@ -484,19 +519,50 @@ export function BrandSection() {
                   </div>
                 </div>
 
-                {/* Subbrands */}
-                {brand.subbrands && brand.subbrands.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-gray-200">
-                    <p className="text-xs text-gray-500 mb-2">Subbrands:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {brand.subbrands.map(sb => (
-                        <span key={sb.id} className="text-xs bg-white px-2 py-1 rounded border">
-                          {sb.name}
-                        </span>
-                      ))}
-                    </div>
+                {/* Sub-brands: managed inline. When a brand has sub-brands the
+                    Catalog Sub Brand field becomes a select restricted to them
+                    (server-enforced); with none it stays free-typing. */}
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <p className="text-xs text-gray-500 mb-2">
+                    Sub-brands{brand.subbrands.length === 0 && ' (none — Sub Brand stays free-typing in Catalog)'}:
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {brand.subbrands.map(sb => (
+                      <span key={sb.id} className="inline-flex items-center gap-1 text-xs bg-white pl-2 pr-1 py-1 rounded border">
+                        {sb.name}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteSubbrand(brand, sb.id, sb.name)}
+                          aria-label={`Remove sub-brand ${sb.name}`}
+                          title="Remove sub-brand"
+                          className="p-0.5 rounded-full text-gray-400 hover:text-red-600 hover:bg-red-50"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                    <input
+                      className="input-field !w-44 !h-7 text-xs"
+                      placeholder="Add sub-brand…"
+                      value={newSubbrand[brand.id] || ''}
+                      onChange={(e) => setNewSubbrand((prev) => ({ ...prev, [brand.id]: e.target.value }))}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAddSubbrand(brand);
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleAddSubbrand(brand)}
+                      className="text-gray-500 hover:text-bv-red-600"
+                      title="Add sub-brand"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
                   </div>
-                )}
+                </div>
               </div>
             ))}
           </div>

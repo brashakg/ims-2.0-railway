@@ -1597,6 +1597,44 @@ async def get_category_registry(current_user: dict = Depends(get_current_user)):
     return {"categories": categories}
 
 
+@router.get("/brand-options")
+async def get_brand_options(
+    category: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Brand Master brands (+ their sub-brands) for the Add-Product form.
+
+    The admin Brand Master CRUD lives behind SUPERADMIN/ADMIN gates; this is
+    the READ-ONLY projection any authenticated catalog operator can use:
+    active brands applicable to `category` (short prefix like 'FR' or a
+    canonical name like 'FRAME'; omit for all), each with its sub-brand names
+    so the form can restrict the Sub Brand select per selected brand.
+
+    Shape: {"brands": [{"name": str, "subbrands": [str, ...]}, ...]}.
+    Fail-soft: db trouble -> {"brands": []}.
+    """
+    try:
+        from ..dependencies import get_db as _get_db_dep
+        from ..services import catalog_dictionary as _cd
+
+        db = _get_db_dep()
+        if db is None or not getattr(db, "is_connected", False):
+            return {"brands": []}
+        prefix = None
+        if category:
+            spec = _pm.category_spec(category)
+            prefix = spec.prefix if spec is not None else str(category).strip()
+        names = _cd.load_brand_options(db, prefix) or []
+        brands = []
+        for name in names:
+            subs = _cd.load_subbrand_options(db, name) or []
+            brands.append({"name": name, "subbrands": subs})
+        return {"brands": brands}
+    except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
+        logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)
+        return {"brands": []}
+
+
 @router.get("/categories/list")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories"""

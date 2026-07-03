@@ -125,6 +125,46 @@ def load_brand_options(db, category_prefix: Optional[str] = None) -> Optional[Li
         return None
 
 
+SUBBRAND_COLLECTION = "subbrand_masters"
+
+
+def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:
+    """Subbrand names configured for the ACTIVE Brand-Master brand matching
+    `brand_name` (case-insensitive). Returns:
+      - None  when the read failed / no db (fail-open, skip enforcement),
+      - []    when the brand is unknown or has NO subbrands (subbrand stays
+              free-form — mirrors the lens 'series falls open per brand' rule),
+      - [...] the configured subbrand names otherwise.
+    """
+    if db is None or not str(brand_name or "").strip():
+        return None
+    try:
+        probe = str(brand_name).strip().casefold()
+        brands = db.get_collection(BRAND_COLLECTION)
+        brand_doc = None
+        for doc in brands.find({"is_active": {"$ne": False}}):
+            if doc.get("is_active") is False:
+                continue
+            if str(doc.get("name") or "").strip().casefold() == probe:
+                brand_doc = doc
+                break
+        if brand_doc is None or not brand_doc.get("brand_id"):
+            return []
+        subs = db.get_collection(SUBBRAND_COLLECTION)
+        names: List[str] = []
+        seen: set = set()
+        for sb in subs.find({"brand_id": brand_doc["brand_id"]}):
+            name = str(sb.get("name") or "").strip()
+            if name and name.casefold() not in seen:
+                seen.add(name.casefold())
+                names.append(name)
+        names.sort(key=str.casefold)
+        return names
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[CATALOG-DICT] subbrand options read failed: %s", e)
+        return None
+
+
 def match_canonical(value: str, allowed: List[str]) -> Optional[str]:
     """Case-insensitive, trimmed membership check. Returns the CONFIGURED
     casing on match (so saved data is canonical), else None."""

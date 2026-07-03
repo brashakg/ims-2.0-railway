@@ -3848,6 +3848,11 @@ POLICY: List[Dict[str, object]] = [
     # --- /api/v1/catalog-field-options (Settings -> Catalog Dictionary) ---
     {
         "method": "GET",
+        "path": "/api/v1/products/brand-options",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
         "path": "/api/v1/catalog-field-options",
         "allowed": "AUTHENTICATED",
     },

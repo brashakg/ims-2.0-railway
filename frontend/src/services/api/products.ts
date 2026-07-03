@@ -204,6 +204,17 @@ export const productApi = {
     return response.data;
   },
 
+  // Brand Master read-projection for the Add-Product form: active brands
+  // applicable to the category (short code like 'FR' or canonical), each with
+  // its sub-brand names — drives the Brand Name select and restricts the
+  // Sub Brand select per selected brand. Authenticated (not admin-gated).
+  getBrandOptions: async (
+    category?: string
+  ): Promise<{ brands: Array<{ name: string; subbrands: string[] }> }> => {
+    const response = await api.get('/products/brand-options', { params: { category } });
+    return response.data as { brands: Array<{ name: string; subbrands: string[] }> };
+  },
+
   getBrands: async (category?: string) => {
     const response = await api.get('/products/brands/list', { params: { category } });
     return response.data;

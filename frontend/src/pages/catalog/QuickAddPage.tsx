@@ -172,6 +172,10 @@ export function QuickAddPage() {
   // Bump on registry load so the field list (required markers sourced from the
   // canonical server registry) re-renders once it arrives.
   const [registryReady, setRegistryReady] = useState(false);
+  // Brand Master projection for the selected category: brand name -> its
+  // sub-brand names. Drives the per-brand Sub Brand select (a brand with no
+  // sub-brands keeps the field free-form). Fail-soft {}.
+  const [subbrandsByBrand, setSubbrandsByBrand] = useState<Record<string, string[]>>({});
 
   // Load the canonical category field registry once (shared module cache). The
   // required/optional flags the form renders + validates derive from it so they
@@ -211,6 +215,29 @@ export function QuickAddPage() {
     if (!selectedCategory) return;
     const t = window.setTimeout(() => firstFieldRef.current?.focus(), 60);
     return () => window.clearTimeout(t);
+  }, [selectedCategory]);
+
+  // Load the Brand Master projection (brand -> sub-brands) for the selected
+  // category so the Sub Brand field can restrict to the chosen brand's
+  // sub-brands. Fail-soft: any error just leaves subbrand free-form.
+  useEffect(() => {
+    if (!selectedCategory) {
+      setSubbrandsByBrand({});
+      return;
+    }
+    let alive = true;
+    productApi
+      .getBrandOptions(selectedCategory)
+      .then((r) => {
+        if (!alive) return;
+        const map: Record<string, string[]> = {};
+        (r.brands || []).forEach((b) => {
+          if (b?.name) map[b.name] = Array.isArray(b.subbrands) ? b.subbrands : [];
+        });
+        setSubbrandsByBrand(map);
+      })
+      .catch(() => { /* free-form fallback */ });
+    return () => { alive = false; };
   }, [selectedCategory]);
 
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
@@ -789,7 +816,16 @@ export function QuickAddPage() {
   const isLens = selectedCategory === 'LS';
   // The lens stock-power fields are entered via the Power Grid, not here.
   const lensPowerFields = new Set(['sph', 'cyl', 'axis', 'add']);
-  const visibleFields = isLens ? fields.filter((f) => !lensPowerFields.has(f.name)) : fields;
+  const visibleFields = (isLens ? fields.filter((f) => !lensPowerFields.has(f.name)) : fields)
+    // Sub Brand follows the SELECTED brand: when that brand has sub-brands in
+    // the Brand Master the field becomes a select restricted to them (the
+    // server enforces the same rule); a brand without sub-brands (or no brand
+    // picked yet) keeps the free-text input.
+    .map((f) => {
+      if (f.name !== 'subbrand') return f;
+      const subs = subbrandsByBrand[attributes.brand_name || ''];
+      return subs && subs.length > 0 ? { ...f, type: 'select' as const, options: subs } : f;
+    });
 
   const setAttr = (name: string, value: string) => {
     setAttributes((prev) => ({ ...prev, [name]: value }));
