@@ -391,7 +391,10 @@ def _http_get(
             with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as c:
                 resp = c.get(url, params=params, headers=headers)
         if resp.status_code != 200:
-            logger.warning("[AUTOPILOT] GET %s -> HTTP %s", url, resp.status_code)
+            snippet = " ".join((resp.text or "")[:300].split())
+            logger.warning(
+                "[AUTOPILOT] GET %s -> HTTP %s: %s", url, resp.status_code, snippet
+            )
             return None
         return resp.text
     except Exception as e:  # noqa: BLE001
@@ -419,7 +422,13 @@ def _http_post_json(
         with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as c:
             resp = c.post(url, json=payload, headers=hdrs)
         if resp.status_code != 200:
-            logger.warning("[AUTOPILOT] POST %s -> HTTP %s", url, resp.status_code)
+            # Include a body snippet: provider errors (e.g. Google's 429) carry
+            # the exact quota/permission reason there. The auth header is never
+            # logged, and the key never rides the URL, so this stays secret-safe.
+            snippet = " ".join((resp.text or "")[:300].split())
+            logger.warning(
+                "[AUTOPILOT] POST %s -> HTTP %s: %s", url, resp.status_code, snippet
+            )
             return None
         data = resp.json()
         return data if isinstance(data, dict) else None
