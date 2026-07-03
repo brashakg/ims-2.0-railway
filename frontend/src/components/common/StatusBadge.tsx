@@ -251,7 +251,14 @@ export function StatusBadge({
         className
       )}
       onClick={onClick}
-      role={interactive ? "button" : "status"}
+      /*
+       * Non-interactive badges expose NO ARIA role. role="status" is an ARIA
+       * live region (implicit aria-live="polite"); this badge renders many
+       * times per page (status columns, dashboards), so role="status" would
+       * make screen readers announce every badge. The aria-label alone conveys
+       * the meaning. Do NOT re-add role="status" here (see StatusBadge.test.tsx).
+       */
+      role={interactive ? "button" : undefined}
       aria-label={ariaLabel || `Status: ${status}`}
       tabIndex={interactive ? 0 : -1}
     >

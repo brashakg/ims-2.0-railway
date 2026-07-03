@@ -13,22 +13,26 @@ describe('StatusBadge', () => {
     expect(screen.getByText('at-risk')).toBeInTheDocument();
   });
 
-  it('exposes role="status" and an accessible label by default', () => {
-    render(<StatusBadge status="active" />);
-    const badge = screen.getByRole('status');
+  it('exposes an accessible label but no live-region role by default', () => {
+    const { container } = render(<StatusBadge status="active" />);
+    const badge = container.firstChild as HTMLElement;
     expect(badge).toHaveAttribute('aria-label', 'Status: active');
+    // A reusable badge must NOT be an ARIA live region (role="status"), or
+    // screen readers would announce every badge on the page. The aria-label
+    // alone conveys the status. See StatusBadge.tsx for the rationale.
+    expect(badge).not.toHaveAttribute('role');
   });
 
   it('applies the predefined subtle color for a known status', () => {
-    render(<StatusBadge status="active" />);
-    const badge = screen.getByRole('status');
+    const { container } = render(<StatusBadge status="active" />);
+    const badge = container.firstChild as HTMLElement;
     expect(badge.className).toContain('bg-green-100');
     expect(badge.className).toContain('text-green-700');
   });
 
   it('honors customColor over the automatic mapping', () => {
-    render(<StatusBadge status="active" customColor="bg-pink-500 text-white" />);
-    const badge = screen.getByRole('status');
+    const { container } = render(<StatusBadge status="active" customColor="bg-pink-500 text-white" />);
+    const badge = container.firstChild as HTMLElement;
     expect(badge.className).toContain('bg-pink-500');
     expect(badge.className).not.toContain('bg-green-100');
   });
