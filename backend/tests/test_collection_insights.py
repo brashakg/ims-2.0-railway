@@ -796,3 +796,39 @@ def test_preview_endpoint_shape(client, auth_headers):
     assert body["match_count"] == 0
     assert body["sample"] == []
     assert body["units_on_hand"] == 0
+
+
+# ---------------------------------------------------------------------------
+# SmartRule payload normalization (integration fixup: the CRUD model must
+# accept the merch builder's IN arrays + numeric price values)
+# ---------------------------------------------------------------------------
+
+
+class TestSmartRulePayload:
+    def _rule(self, **kw):
+        from api.routers.online_store_collections import SmartRule
+
+        return SmartRule(**kw)
+
+    def test_in_accepts_list_and_cleans(self):
+        r = self._rule(field="lens_colour", relation="IN", value=["Black", " ", "Grey "])
+        assert r.value == ["Black", "Grey"]
+
+    def test_list_rejected_for_non_in(self):
+        import pytest as _pt
+        from pydantic import ValidationError
+
+        with _pt.raises(ValidationError):
+            self._rule(field="brand", relation="EQUALS", value=["Ray-Ban"])
+
+    def test_numeric_price_value_coerced_to_str(self):
+        r = self._rule(field="price", relation="GREATER_THAN", value=5000)
+        assert r.value == "5000"
+
+    def test_in_scalar_wrapped(self):
+        r = self._rule(field="gender", relation="IN", value="Women")
+        assert r.value == ["Women"]
+
+    def test_plain_string_untouched(self):
+        r = self._rule(field="brand", relation="EQUALS", value="Ray-Ban")
+        assert r.value == "Ray-Ban"

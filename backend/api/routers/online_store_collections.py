@@ -32,10 +32,10 @@ returns an empty set rather than 500.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .auth import require_roles
 from ..services import ecom_smart_rules
@@ -193,8 +193,30 @@ def _with_normalized_rules(doc):
 
 class SmartRule(BaseModel):
     field: str = Field(..., description="Logical field, e.g. brand / category / tag")
-    relation: str = Field("EQUALS", description="EQUALS | CONTAINS")
-    value: str = Field(..., description="Value to match (case-insensitive)")
+    relation: str = Field("EQUALS", description="EQUALS | CONTAINS | IN | ...")
+    # IN carries a LIST of values (the merch builder's multi-value chips, e.g.
+    # lens_colour IN [Black, Grey]); numeric comparisons (price bands) may
+    # arrive as numbers -- normalised to the engine's expected shapes below.
+    value: Union[str, int, float, List[str]] = Field(
+        ..., description="Value to match (case-insensitive); a list ONLY for IN"
+    )
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _normalize_value(cls, v, info):
+        relation = str((info.data or {}).get("relation") or "EQUALS").strip().upper()
+        if isinstance(v, list):
+            if relation != "IN":
+                raise ValueError("a list value is only allowed with relation IN")
+            return [str(item).strip() for item in v if str(item or "").strip()]
+        if relation == "IN":
+            s = str(v or "").strip()
+            return [s] if s else []
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            # Numeric price-band values: the engine coerces at compare time;
+            # store the canonical string form.
+            return str(v)
+        return v
 
 
 class CollectionCreate(BaseModel):

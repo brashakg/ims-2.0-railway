@@ -50,7 +50,10 @@ _INSIGHT_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER")
 _HQ_ROLES = frozenset({"SUPERADMIN", "ADMIN", "AREA_MANAGER", "CATALOG_MANAGER"})
 
 # How many collections the batched summary will evaluate before ranking.
-_SUMMARY_SCAN_MAX = 500
+# Must cover the full catalogue: ~1,160 BVI-migrated collections exist, and
+# the list page's "Show all" toggle needs every row (le on the limit query
+# param matches).
+_SUMMARY_SCAN_MAX = 2000
 
 
 def _get_db():
@@ -104,7 +107,7 @@ class PreviewBody(BaseModel):
 
 @router.get("/insights/summary")
 async def collections_insights_summary(
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=2000),
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_INSIGHT_ROLES)),
 ):
