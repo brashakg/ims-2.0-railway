@@ -314,3 +314,63 @@ def test_default_password_not_forced_in_test_env(client, patched_repo, monkeypat
     )
     assert r.status_code == 200, r.text
     assert r.json()["user"]["must_change_password"] is False
+
+
+# ============================================================================
+# SECURITY: the EMERGENCY_ADMIN_HASH env backdoor is REMOVED
+# ============================================================================
+
+
+def test_emergency_admin_env_backdoor_does_not_authenticate(
+    client, patched_repo, monkeypatch
+):
+    """The removed EMERGENCY_ADMIN_HASH bypass: with NO 'admin' user in the users
+    collection but EMERGENCY_ADMIN_HASH set to a valid bcrypt hash of the
+    submitted password, a login as 'admin' must FAIL (401) -- the env-var login
+    path no longer authenticates. Previously this minted a SUPERADMIN with all
+    stores, no TTL, bypassing the users collection + rate-limit."""
+    # Set the env var to a bcrypt hash of "letmein" -- exactly what the old
+    # backdoor's bcrypt.checkpw would have accepted.
+    monkeypatch.setenv("EMERGENCY_ADMIN_HASH", hash_password("letmein"))
+    # Empty users collection: no 'admin' (nor any) user exists in the DB.
+    patched_repo([])
+
+    r = client.post(
+        "/api/v1/auth/login",
+        json={"username": "admin", "password": "letmein"},
+    )
+    assert r.status_code == 401, r.text
+    assert "invalid username or password" in r.json()["detail"].lower()
+
+
+def test_normal_admin_login_via_users_collection_still_works(
+    client, patched_repo, monkeypatch
+):
+    """Removing the backdoor must NOT break the real admin login path: an admin
+    user that exists in the users collection still authenticates normally, even
+    when EMERGENCY_ADMIN_HASH is set (it is simply ignored)."""
+    monkeypatch.setenv("EMERGENCY_ADMIN_HASH", hash_password("letmein"))
+    admin_user = _make_user(
+        user_id="u-admin-1",
+        _id="u-admin-1",
+        username="admin",
+        email="admin@bettervision.in",
+        password_hash=hash_password("RealAdminPw@1"),
+        roles=["SUPERADMIN"],
+    )
+    patched_repo([admin_user])
+
+    # The real DB password works.
+    r = client.post(
+        "/api/v1/auth/login",
+        json={"username": "admin", "password": "RealAdminPw@1"},
+    )
+    assert r.status_code == 200, r.text
+    assert "SUPERADMIN" in r.json()["user"]["roles"]
+
+    # The emergency-hash password must NOT be accepted for the DB admin user.
+    r2 = client.post(
+        "/api/v1/auth/login",
+        json={"username": "admin", "password": "letmein"},
+    )
+    assert r2.status_code == 401, r2.text

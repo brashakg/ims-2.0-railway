@@ -552,33 +552,11 @@ async def login(request: LoginRequest, req: Request = None):
         except Exception as e:
             logger.warning("DB user lookup error: %s", e)
 
-    # Emergency access via environment variable only (no hardcoded credentials)
-    if user is None and os.getenv("EMERGENCY_ADMIN_HASH"):
-        import bcrypt as _bc
-
-        emergency_hash = os.getenv("EMERGENCY_ADMIN_HASH")
-        if login_input == "admin":
-            try:
-                if _bc.checkpw(request.password.encode(), emergency_hash.encode()):
-                    user = {
-                        "user_id": "user-emergency-admin",
-                        "username": "admin",
-                        "email": "admin@bettervision.in",
-                        "password_hash": emergency_hash,
-                        "full_name": "Emergency Admin",
-                        "roles": ["SUPERADMIN"],
-                        "store_ids": [
-                            "BV-BOK-01",
-                            "BV-BOK-02",
-                            "BV-DHN-01",
-                            "BV-DHN-02",
-                            "WO-DHN-01",
-                            "BV-PUN-01",
-                        ],
-                        "is_active": True,
-                    }
-            except Exception:
-                pass
+    # SECURITY: the EMERGENCY_ADMIN_HASH env backdoor was REMOVED. It enabled a
+    # second login path that minted a SUPERADMIN with all stores, no TTL, and
+    # bypassed the users collection + rate-limit accounting. All admin login now
+    # goes through the users collection only. (The documented alternative for a
+    # lockout is a seeded emergency user in that collection, not an env bypass.)
 
     if user is None:
         # Always run bcrypt verify against dummy hash to prevent timing side-channel

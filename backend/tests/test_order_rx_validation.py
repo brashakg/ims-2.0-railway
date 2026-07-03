@@ -266,6 +266,42 @@ def test_prescription_for_other_customer_rejected(client, staff_headers,
 
 
 # ---------------------------------------------------------------------------
+# SECURITY -- Rx-required decision keys off the PRODUCT MASTER, not the client
+# item_type (spoof defense). A spectacle-LENS product sent with a forged
+# item_type='FRAME' must STILL require an Rx -- the client cannot downgrade a
+# lens line to a frame line to slip it past the prescription gate.
+# ---------------------------------------------------------------------------
+def test_lens_product_spoofed_as_frame_still_requires_rx(
+    client, staff_headers, rx_orders
+):
+    """A product whose MASTER item_type is LENS, sent with item_type='FRAME' and
+    category='FRAME' in the request body and NO prescription_id, is STILL
+    rejected 422 -- the Rx-required decision uses the resolved product's
+    canonical item_type (LENS), not the spoofed client value."""
+    pid = _seed_product(rx_orders, pid="LENS-SPOOF", category="OPTICAL_LENS",
+                        item_type="LENS")
+    # Client claims FRAME to try to skip the Rx requirement; no prescription_id.
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="FRAME", category="FRAME", sph=-1.00)])
+    assert r.status_code == 422, r.text
+    assert "prescription" in r.text.lower()
+
+
+def test_lens_product_spoofed_as_frame_ok_with_valid_rx(
+    client, staff_headers, rx_orders
+):
+    """The spoof defense does not break the legit flow: the SAME spoofed-as-FRAME
+    lens product WITH a valid, customer-matching, non-expired Rx is accepted."""
+    pid = _seed_product(rx_orders, pid="LENS-SPOOF-OK", category="OPTICAL_LENS",
+                        item_type="LENS")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-spoof-ok")
+    r = _post(client, staff_headers,
+              [_item(pid, item_type="FRAME", category="FRAME",
+                     sph=-1.00, prescription_id=rxid)])
+    assert r.status_code in (200, 201), r.text
+
+
+# ---------------------------------------------------------------------------
 # Allowed paths -- frame-only + valid in-range Rx lens
 # ---------------------------------------------------------------------------
 def test_frame_only_no_rx_allowed(client, staff_headers, rx_orders):

@@ -460,6 +460,51 @@ def test_return_create_admin_cross_store_ok(monkeypatch):
     assert len(returns_coll.docs) == 1
 
 
+def _multi_store_user_dep(roles, active, store_ids):
+    async def _u():
+        return {
+            "user_id": "u-test",
+            "roles": roles,
+            "active_store_id": active,
+            "store_ids": store_ids,
+        }
+
+    return _u
+
+
+def test_return_store_stamped_from_order_not_body(monkeypatch):
+    """The refund's store_id is DERIVED FROM THE ORDER, not body.store_id. When
+    the body omits store_id (or sends the order's), the persisted return is
+    stamped with the ORDER's store -- so a refund can never be booked into a
+    different store than the sale it reverses."""
+    app, returns_coll, _ = _returns_ctx(monkeypatch, order_store=OWN_STORE)
+    client = _returns_client(app, ["STORE_MANAGER"], OWN_STORE)
+    payload = _qa_payload()
+    payload.pop("store_id", None)  # body omits store_id entirely
+    r = client.post("/api/v1/returns", json=payload)
+    assert r.status_code == 201
+    assert len(returns_coll.docs) == 1
+    assert returns_coll.docs[0]["store_id"] == OWN_STORE  # stamped from the order
+
+
+def test_return_body_store_mismatch_rejected_even_when_accessible(monkeypatch):
+    """A multi-store user (access to BOTH stores) sends body.store_id=STORE_A
+    for an order that belongs to STORE_B. Even though the user CAN access
+    STORE_A, the mismatch is rejected 403 -- the refund must book into the
+    order's own store, closing the 'refund one store's sale into another' hole."""
+    app, returns_coll, customer_repo = _returns_ctx(monkeypatch, order_store=OTHER_STORE)
+    app.dependency_overrides[get_current_user] = _multi_store_user_dep(
+        ["STORE_MANAGER"], OWN_STORE, [OWN_STORE, OTHER_STORE]
+    )
+    client = TestClient(app)
+    # order is in OTHER_STORE; body claims OWN_STORE (which the user CAN access).
+    r = client.post("/api/v1/returns", json=_qa_payload(store_id=OWN_STORE))
+    assert r.status_code == 403
+    assert "store" in r.json()["detail"].lower()
+    assert returns_coll.docs == []
+    assert customer_repo.updates == []
+
+
 _SEEDED_RETURN = {
     "return_id": "RET-260601-AB12CD",
     "return_type": "RETURN",

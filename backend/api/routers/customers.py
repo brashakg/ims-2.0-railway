@@ -1345,35 +1345,43 @@ def _post_credit_entry(
                 ),
             )
         if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
-            # Collection can't do a conditional update (minimal stand-in). Fall
-            # back to the validated read-modify-write path below.
-            new_balance = None
-        else:
-            # Authoritative post-update balance from the decremented document.
-            new_balance = float((debited or {}).get("store_credit", 0) or 0)
-
-        if new_balance is not None:
-            # Build the ledger row whose balance_after matches the atomic result.
-            entry = scl.make_entry(
-                customer_id=customer_id,
-                entry_type=scl.REDEEMED,
-                amount=amt,
-                current_balance=new_balance + amt,  # pre-debit balance
-                reason=body.reason or "",
-                ref=body.ref,
-                store_id=current_user.get("active_store_id"),
-                user_id=current_user.get("user_id"),
+            # DOUBLE-SPEND GUARD (security): the collection cannot perform a
+            # conditional (atomic) decrement. Taking the old snapshot
+            # read-modify-write fallback here let two concurrent redeems both
+            # pass and spend the same credit twice. A REDEEM (debit) is a
+            # double-spend risk, so REJECT with 503 rather than fall back to the
+            # non-atomic path. (ISSUE/ADJUST credits keep the snapshot path
+            # below -- a credit cannot overspend.)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Store-credit redemption is temporarily unavailable: the "
+                    "atomic debit path is not available, and a non-atomic "
+                    "decrement could double-spend the balance. Please retry."
+                ),
             )
-            entry["balance_after"] = round(new_balance, 2)
-            coll = _ledger_coll()
-            if coll is not None:
-                try:
-                    coll.insert_one(dict(entry))
-                except Exception:  # noqa: BLE001
-                    pass
-            entry.pop("_id", None)
-            return {"entry": entry, "balance": entry["balance_after"]}
-        # else: fall through to the legacy snapshot path (no-atomic fallback).
+        # Authoritative post-update balance from the decremented document.
+        new_balance = float((debited or {}).get("store_credit", 0) or 0)
+        # Build the ledger row whose balance_after matches the atomic result.
+        entry = scl.make_entry(
+            customer_id=customer_id,
+            entry_type=scl.REDEEMED,
+            amount=amt,
+            current_balance=new_balance + amt,  # pre-debit balance
+            reason=body.reason or "",
+            ref=body.ref,
+            store_id=current_user.get("active_store_id"),
+            user_id=current_user.get("user_id"),
+        )
+        entry["balance_after"] = round(new_balance, 2)
+        coll = _ledger_coll()
+        if coll is not None:
+            try:
+                coll.insert_one(dict(entry))
+            except Exception:  # noqa: BLE001
+                pass
+        entry.pop("_id", None)
+        return {"entry": entry, "balance": entry["balance_after"]}
 
     # ------------------------------------------------------------------
     # ISSUE / ADJUST (credit), or no-atomic REDEEM fallback.

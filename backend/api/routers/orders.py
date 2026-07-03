@@ -650,7 +650,9 @@ _RX_EXPIRY_OVERRIDE_ROLES = (
 )
 
 
-def _validate_order_line_rx(item, customer_id: str, current_user: dict) -> None:
+def _validate_order_line_rx(
+    item, customer_id: str, current_user: dict, product_doc=None
+) -> None:
     """Validate ONE order line's clinical Rx data. Raises HTTPException(422) on a
     bad/missing value -- never 500s. Pure validation; touches no pricing/GST math.
 
@@ -662,6 +664,14 @@ def _validate_order_line_rx(item, customer_id: str, current_user: dict) -> None:
              hard gate (owner policy 2026-06-18 "block Rx lenses, allow contacts").
     Frame-only / contact-lens / non-Rx lines are not Rx-gated -- but their
     powers (if any) are STILL range-checked above (BUG-005 is universal).
+
+    SECURITY (Rx-item_type spoof): the Rx-required decision MUST key off the
+    resolved PRODUCT MASTER's canonical item_type / category (`product_doc`),
+    not the client-supplied item.item_type / item.category -- otherwise a
+    spectacle-lens product sent with item_type='FRAME' would skip the hard Rx
+    requirement and reach the lab without a prescription. The client value is
+    used ONLY as a fallback when the resolved product doc lacks item_type /
+    category (virtual lens-*/custom-* lines, or a not-found product).
     """
     name = getattr(item, "product_name", None) or getattr(item, "product_id", "") or "item"
 
@@ -683,8 +693,21 @@ def _validate_order_line_rx(item, customer_id: str, current_user: dict) -> None:
         )
 
     # --- BUG-006: Rx-required for SPECTACLE-lens lines (contacts EXEMPT) -------
-    item_type = getattr(item, "item_type", None)
-    category = getattr(item, "category", None)
+    # SECURITY: prefer the RESOLVED product master's canonical item_type /
+    # category over the client-supplied values so a lens line cannot skip the Rx
+    # requirement by claiming item_type='FRAME'. Fall back to the client value
+    # only per-field when the product doc has nothing (virtual/not-found lines).
+    client_item_type = getattr(item, "item_type", None)
+    client_category = getattr(item, "category", None)
+    item_type = client_item_type
+    category = client_category
+    if product_doc:
+        prod_item_type = product_doc.get("item_type")
+        prod_category = product_doc.get("category")
+        if prod_item_type:
+            item_type = prod_item_type
+        if prod_category:
+            category = prod_category
     if not _is_rx_required_line(item_type, category):
         return  # frame / sunglass / accessory / service / CONTACT-LENS -> no Rx needed
 
@@ -1451,7 +1474,22 @@ async def create_order(
     # wrap this loop in an `if order.order_type != "quick_sale"` (or any sale_type)
     # branch. Pinned by test_order_rx_validation.py::test_quicksale_* .
     for item in order.items:
-        _validate_order_line_rx(item, order.customer_id, current_user)
+        # SECURITY (Rx-item_type spoof): resolve the PRODUCT MASTER so the
+        # Rx-required decision keys off the product's canonical item_type /
+        # category, not the client-supplied item_type (a lens sent as 'FRAME'
+        # must still require an Rx). Virtual lens-*/custom-* lines and
+        # unresolvable ids have no product doc -> the client value is the
+        # fallback. Fail-soft: any resolution error -> None -> client fallback.
+        _rx_product_doc = None
+        _rx_pid = (item.product_id or "")
+        if _rx_pid and not _rx_pid.startswith(("custom-", "lens-", "lens-sug-")):
+            try:
+                _rx_product_doc = _resolve_product_doc(product_repo, _rx_pid)
+            except Exception:  # noqa: BLE001 -- resolution is best-effort
+                _rx_product_doc = None
+        _validate_order_line_rx(
+            item, order.customer_id, current_user, product_doc=_rx_product_doc
+        )
 
     # BUG-119/BUG-118: the real server-side price ceiling / cost floor / discount
     # validation runs in the totals loop below (AFTER the idempotency check, using
@@ -3110,8 +3148,25 @@ async def add_order_item(
         # Rx-required check the create path runs, for a line appended to a DRAFT
         # order. Validation only -- no pricing/GST change. Uses the order's
         # customer so an expired / cross-customer / missing Rx is caught here too.
+        #
+        # SECURITY (Rx-item_type spoof): resolve the PRODUCT MASTER so the
+        # Rx-required decision keys off the product's canonical item_type /
+        # category, not the client-supplied item_type. Virtual/unresolvable
+        # lines have no product doc -> the client value is the fallback.
+        _rx_product_doc = None
+        _rx_pid = (item.product_id or "")
+        if _rx_pid and not _rx_pid.startswith(("custom-", "lens-", "lens-sug-")):
+            try:
+                _rx_product_doc = _resolve_product_doc(
+                    get_product_repository(), _rx_pid
+                )
+            except Exception:  # noqa: BLE001 -- resolution is best-effort
+                _rx_product_doc = None
         _validate_order_line_rx(
-            item, order.get("customer_id") or order.get("customerId") or "", current_user
+            item,
+            order.get("customer_id") or order.get("customerId") or "",
+            current_user,
+            product_doc=_rx_product_doc,
         )
 
         # Enforce role + category + luxury-brand discount cap on items added to a
