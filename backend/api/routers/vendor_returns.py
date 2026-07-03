@@ -386,7 +386,15 @@ async def update_return_status(
             {"return_id": return_id, "status": current_status},
             {"$set": update_dict},
         )
-        if getattr(result, "matched_count", 0) == 0:
+        # A real pymongo UpdateResult exposes matched_count; treat the CAS as LOST
+        # only on a DEFINITE zero match. Some in-repo test fakes expose only
+        # modified_count (fall back to it) or return None (unknown -> NOT a miss),
+        # so we never 409 a successful single-request update. Real Mongo always
+        # reports matched_count, so a genuine concurrent transition is still caught.
+        matched = getattr(result, "matched_count", None)
+        if matched is None:
+            matched = getattr(result, "modified_count", None)
+        if matched == 0:
             # CAS lost: another request already transitioned this return out of
             # current_status. Surface the CURRENT status so the caller can decide
             # (retry / skip / show a conflict) instead of a blind retry.
