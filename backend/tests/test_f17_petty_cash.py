@@ -638,3 +638,40 @@ def test_t13_idempotent_debit_no_double(db):
     r2 = pcs.debit_float(db, store_id="S1", amount=300.0, expense_id="E1", actor="mgr1")
     assert r2["ok"] is False and r2["error"] == "duplicate"
     assert db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"] == 4700.0
+
+
+# ============================================================================
+# T14 -- float TOP-UP ceiling is concurrency-safe (atomic, not TOCTOU)
+# ============================================================================
+
+
+def test_t14_topup_ceiling_is_atomic(db):
+    """Two top-ups whose SUM would breach the float_limit: the atomic ceiling
+    guard (money_guard.credit guard_extra: balance <= limit-amt merged into the
+    CAS filter) lets EXACTLY ONE win, so the balance can never exceed the limit
+    even when both racers read the same pre-credit balance. Previously the
+    read-then-check in topup_float was TOCTOU-racy and both could apply."""
+    # _open sets float_limit=10000. Start at 9600; two +300 top-ups would reach
+    # 10200 > 10000 -- only the first may apply.
+    _open(db, amount=9600.0, threshold=0.0)
+    r1 = pcs.topup_float(db, store_id="S1", amount=300.0, actor="mgr1")
+    r2 = pcs.topup_float(db, store_id="S1", amount=300.0, actor="mgr1")
+    oks = [r1.get("ok"), r2.get("ok")]
+    assert oks.count(True) == 1 and oks.count(False) == 1
+    loser = r1 if not r1.get("ok") else r2
+    assert loser.get("http") == 422
+    assert loser.get("error") == "exceeds_float_limit"
+    # Balance is exactly 9900 (9600 + 300), NEVER 10200.
+    bal = db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"]
+    assert bal == 9900.0
+
+
+def test_t15_topup_within_limit_succeeds(db):
+    """A normal top-up with headroom still succeeds (guard_extra is a no-op when
+    balance + amount <= float_limit)."""
+    _open(db, amount=5000.0, threshold=0.0)
+    r = pcs.topup_float(db, store_id="S1", amount=1000.0, actor="mgr1")
+    assert r.get("ok") is True
+    assert r.get("balance") == 6000.0
+    bal = db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"]
+    assert bal == 6000.0

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query
 
 from .auth import require_roles
-from ..dependencies import get_product_repository
+from ..dependencies import get_product_repository, resolve_store_scope
 from ..services import buy_desk as _bd
 from ..services import product_master as _pm
 from ..services import shopify_push as _sp
@@ -139,6 +139,10 @@ async def buy_desk_rows(
 ):
     """Per-product Buy Desk rows: readiness + ecom state + on-hand + on-order +
     netted buy signal. Read-only."""
+    # Store-scope the on-hand read: a store-level role can only see its own store's
+    # counts (403 on a foreign ?store_id; omitted -> own store). Admins/area-mgrs
+    # keep their reach. Same canonical guard as the LIST endpoints (payroll etc.).
+    store_id = resolve_store_scope(store_id, current_user)
     repo = get_product_repository()
     db = _get_db()
     if repo is None:

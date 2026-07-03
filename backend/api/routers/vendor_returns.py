@@ -377,10 +377,20 @@ async def update_return_status(
             if status_update.status == "credit_issued":
                 update_dict["credit_note_amount"] = return_doc.get("total_value")
 
-        collection.update_one(
-            {"return_id": return_id},
+        # Compare-and-swap on status: the CURRENT status is baked into the filter
+        # so two concurrent transitions out of the same state can't both win. The
+        # loser matches zero docs -> 409, so a credit note is issued (and the
+        # status advanced) exactly once. The credit-note number generated above is
+        # pure (no side effect) and is simply discarded by the loser.
+        result = collection.update_one(
+            {"return_id": return_id, "status": current_status},
             {"$set": update_dict},
         )
+        if getattr(result, "matched_count", 0) == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Return was already updated by another request",
+            )
 
         # Fetch and return updated document
         updated_doc = collection.find_one({"return_id": return_id})
