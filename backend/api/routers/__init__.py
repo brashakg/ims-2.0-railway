@@ -95,6 +95,7 @@ from .budgets import router as budgets_router
 from .online_store import router as online_store_router
 from .online_store_collections import router as online_store_collections_router
 from .collections_browse import router as collections_browse_router
+from .collections_insights import router as collections_insights_router
 from .online_store_menus import router as online_store_menus_router
 from .online_store_images import router as online_store_images_router
 from .online_store_push import router as online_store_push_router
@@ -195,6 +196,7 @@ __all__ = [
     "online_store_router",
     "online_store_collections_router",
     "collections_browse_router",
+    "collections_insights_router",
     "online_store_menus_router",
     "online_store_images_router",
     "online_store_push_router",

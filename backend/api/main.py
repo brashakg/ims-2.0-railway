@@ -128,6 +128,7 @@ from .routers import (
     online_store_router,
     online_store_collections_router,
     collections_browse_router,
+    collections_insights_router,
     online_store_menus_router,
     online_store_images_router,
     online_store_push_router,
@@ -1623,6 +1624,22 @@ app.include_router(
     collections_browse_router,
     prefix="/api/v1/collections",
     tags=["Collections - Browse"],
+)
+# Collection INSIGHTS (Collections Phase 1, Track 2). Read-only analytics over
+# the materialised collection_products view + stock_units + orders: per-
+# collection KPI block (on-hand, labelled stock value, d7/d30/d90 sold,
+# margin/sell-through/days-of-cover), a per-store breakdown, a batched summary
+# and an unsaved-rules preview. Mounted at the SAME /api/v1/collections prefix
+# AFTER the browse router; its literal paths (/insights/summary, /preview) are
+# declared before its /{collection_id}/... wildcards and none of its paths
+# shadow a browse route. Role-gated INSIDE the router (require_roles ->
+# ADMIN / AREA_MANAGER / STORE_MANAGER / CATALOG_MANAGER; SUPERADMIN auto) +
+# catalogued in rbac_policy.POLICY. Non-HQ callers are FORCED to their own
+# active_store_id (see routers/collections_insights.py).
+app.include_router(
+    collections_insights_router,
+    prefix="/api/v1/collections",
+    tags=["Collections - Insights"],
 )
 # Menus / Mega-menu sub-module (BVI Phase 3, FLAGSHIP #2). ecom_menus CRUD + an
 # embedded recursive item-tree editor (add/move/remove/reorder nodes) -- PUSH-DARK
