@@ -250,6 +250,52 @@ class PatientCreate(BaseModel):
         return v
 
 
+# Address is stored in TWO shapes that must never drift: a structured
+# `billing_address` dict (what the GST place-of-supply / invoice logic reads --
+# orders.py resolves CGST/SGST vs IGST off billing_address.state/.state_code)
+# and flat top-level `address`/`city`/`state`/`pincode` fields (what the
+# Customers detail + edit screen reads/writes). The create door only ever wrote
+# the structured dict; the edit door only ever wrote the flat `address` string.
+# So a created customer showed a blank address on the edit screen, and an edited
+# address never reached the GST reader. This helper keeps both shapes in sync on
+# every write so every screen -- and the invoice -- sees the same address.
+_ADDRESS_FLAT_KEYS = ("address", "city", "state", "pincode")
+
+
+def _sync_address_representations(data: dict, existing: Optional[dict] = None) -> None:
+    """Reconcile the structured `billing_address` dict and the flat top-level
+    address fields inside `data` (mutated in place).
+
+    Merge order (later wins): existing billing_address -> supplied
+    billing_address -> supplied flat fields. The merged structured dict is
+    written back to BOTH `billing_address` and the flat top-level keys, so a
+    reader of either shape sees the current value. No-op when the write carries
+    no address content at all (so an unrelated edit never stamps an empty
+    address)."""
+    ba_in = data.get("billing_address")
+    flat_sent = any(k in data for k in _ADDRESS_FLAT_KEYS)
+    if not isinstance(ba_in, dict) and not flat_sent:
+        return  # nothing address-related in this write
+
+    merged: dict = {}
+    existing_ba = (existing or {}).get("billing_address")
+    if isinstance(existing_ba, dict):
+        merged.update({k: v for k, v in existing_ba.items() if v is not None})
+    if isinstance(ba_in, dict):
+        merged.update({k: v for k, v in ba_in.items() if v is not None})
+    for k in _ADDRESS_FLAT_KEYS:
+        if k in data and data[k] is not None:
+            merged[k] = data[k]
+
+    if not merged:
+        return
+
+    data["billing_address"] = merged
+    for k in _ADDRESS_FLAT_KEYS:
+        if merged.get(k) is not None:
+            data[k] = merged[k]
+
+
 class CustomerCreate(BaseModel):
     customer_type: str = "B2C"  # B2C, B2B
     name: str = Field(..., min_length=2, max_length=120)
@@ -649,6 +695,11 @@ async def create_customer(
             "patients": [],
         }
 
+        # Mirror the structured billing_address onto flat top-level fields so the
+        # Customers detail + edit screen (which reads flat `address`/`city`/...)
+        # shows a created customer's address instead of a blank.
+        _sync_address_representations(customer_data)
+
         # Add the supplied family members (if any).
         if customer.patients:
             for p in customer.patients:
@@ -973,6 +1024,13 @@ async def update_customer(
                     }
                 )
             update_data["patients"] = current_patients
+
+        # Keep the structured billing_address and the flat top-level address
+        # fields in sync. When the edit form sends only a flat `address` string,
+        # fold it into billing_address (preserving the existing city/state/
+        # pincode) so the GST place-of-supply reader stays current; when it sends
+        # a structured dict, mirror it back to the flat fields the screen reads.
+        _sync_address_representations(update_data, existing)
 
         if not update_data:
             return {"message": "No changes", "customer_id": customer_id}
