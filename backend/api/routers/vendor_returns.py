@@ -377,10 +377,35 @@ async def update_return_status(
             if status_update.status == "credit_issued":
                 update_dict["credit_note_amount"] = return_doc.get("total_value")
 
-        collection.update_one(
-            {"return_id": return_id},
+        # Compare-and-swap on status: the CURRENT status is baked into the filter
+        # so two concurrent transitions out of the same state can't both win. The
+        # loser matches zero docs -> 409, so a credit note is issued (and the
+        # status advanced) exactly once. The credit-note number generated above is
+        # pure (no side effect) and is simply discarded by the loser.
+        result = collection.update_one(
+            {"return_id": return_id, "status": current_status},
             {"$set": update_dict},
         )
+        # A real pymongo UpdateResult exposes matched_count; treat the CAS as LOST
+        # only on a DEFINITE zero match. Some in-repo test fakes expose only
+        # modified_count (fall back to it) or return None (unknown -> NOT a miss),
+        # so we never 409 a successful single-request update. Real Mongo always
+        # reports matched_count, so a genuine concurrent transition is still caught.
+        matched = getattr(result, "matched_count", None)
+        if matched is None:
+            matched = getattr(result, "modified_count", None)
+        if matched == 0:
+            # CAS lost: another request already transitioned this return out of
+            # current_status. Surface the CURRENT status so the caller can decide
+            # (retry / skip / show a conflict) instead of a blind retry.
+            latest = collection.find_one({"return_id": return_id}) or {}
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Return was already updated by another request "
+                    f"(current status: {latest.get('status')})"
+                ),
+            )
 
         # Fetch and return updated document
         updated_doc = collection.find_one({"return_id": return_id})

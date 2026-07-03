@@ -39,8 +39,14 @@ from api.routers.inventory import (  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 
 
-# Fixed "now" so day-deltas are deterministic.
-NOW = datetime(2026, 5, 24, 12, 0, 0)
+# "Now" anchored to TODAY (noon, so the exact day-delta assertions below still
+# resolve the same) -- NOT a hard-coded calendar date. The endpoint routes under
+# test compute expiry against the real current date, so a fixed base date rots:
+# once real-today passed the old base + a near-expiry offset, a "near" batch
+# flipped to "expired" and broke the counts. Anchoring to today keeps the seed
+# and the endpoint in agreement forever. Day-deltas stay deterministic because
+# every _iso(...) offset is relative to this same NOW.
+NOW = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 def _iso(days_from_now: int) -> str:
