@@ -2,7 +2,7 @@
 // IMS 2.0 - Product / Catalog API
 // ============================================================================
 
-import api from './client';
+import api, { resolveApiAssetUrl } from './client';
 
 // ---------------------------------------------------------------------------
 // Canonical category field registry (GET /products/categories).
@@ -225,8 +225,13 @@ export const productApi = {
     formData.append('file', file);
     const response = await api.post('/products/image', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      // Phone photos over store Wi-Fi can exceed the global 10s timeout.
+      timeout: 60000,
     });
-    return response.data as UploadedProductImage;
+    const data = response.data as UploadedProductImage;
+    // Absolutize: the deployed FE is on a different origin than the API, so a
+    // relative url would render (and be stored) as a broken image.
+    return { ...data, url: resolveApiAssetUrl(data.url) };
   },
 
   // RE-HOST an external image URL (an Autopilot brand-site photo): the backend
@@ -234,8 +239,9 @@ export const productApi = {
   // fetch, so the product never depends on the brand site keeping the file.
   // Same response shape as uploadProductImage, with a stable internal url.
   rehostProductImage: async (url: string): Promise<UploadedProductImage> => {
-    const response = await api.post('/products/image/from-url', { url });
-    return response.data as UploadedProductImage;
+    const response = await api.post('/products/image/from-url', { url }, { timeout: 60000 });
+    const data = response.data as UploadedProductImage;
+    return { ...data, url: resolveApiAssetUrl(data.url) };
   },
 
   // Remove the background of a previously-uploaded product image and resize to
@@ -245,8 +251,12 @@ export const productApi = {
   // the api barrel) — the barrel re-export fails to resolve for new methods
   // (TS2614).
   editProductImage: async (fileId: string): Promise<{ file_id: string; url: string }> => {
-    const response = await api.post(`/products/image/${fileId}/edit`);
-    return response.data as { file_id: string; url: string };
+    // Photoroom round-trip (fetch -> provider -> store) can exceed 10s.
+    const response = await api.post(`/products/image/${fileId}/edit`, undefined, {
+      timeout: 60000,
+    });
+    const data = response.data as { file_id: string; url: string };
+    return { ...data, url: resolveApiAssetUrl(data.url) };
   },
 
   // Update a product through the SINGLE validated path (`PUT /products/{id}`).

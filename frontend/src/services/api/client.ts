@@ -19,6 +19,21 @@ export function getSecureApiUrl(): string {
   return url;
 }
 
+// Resolve a backend-relative asset path (e.g. "/api/v1/products/image/<id>")
+// to an absolute URL on the API host. The deployed frontend lives on a
+// DIFFERENT origin (Vercel) than the API (Railway): a relative <img src>
+// resolves against the frontend origin, where the SPA catch-all rewrite
+// serves index.html instead of the image — so every self-hosted image must
+// be absolutized before it is rendered or stored. In dev the base URL is
+// relative ("/api/v1", Vite proxy) and the path passes through unchanged.
+// Absolute (http/https/data:) URLs pass through unchanged.
+export function resolveApiAssetUrl(url: string): string {
+  if (!url || !url.startsWith('/')) return url;
+  const base = getSecureApiUrl();
+  if (!/^https?:\/\//.test(base)) return url;
+  return base.replace(/\/api\/v1\/?$/, '') + url;
+}
+
 // Retry configuration
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
