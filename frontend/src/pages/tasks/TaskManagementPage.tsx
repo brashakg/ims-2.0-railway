@@ -1227,6 +1227,22 @@ function TaskDetailPanel({ task, onClose, onChanged }: { task: Task; onClose: ()
           </div>
         )}
 
+        {/* Completion note: captured at complete-time (required by the API)
+            but previously fetched and never rendered anywhere. */}
+        {task.completionNotes && (
+          <div className="d-sec">
+            <h4>Completion note</h4>
+            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
+              {task.completionNotes}
+            </p>
+            {task.completedDate && (
+              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 4 }}>
+                Completed {task.completedDate}
+              </div>
+            )}
+          </div>
+        )}
+
         {task.attachment?.file_id && (
           <div className="d-sec">
             <h4>Attachment</h4>
