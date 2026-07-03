@@ -113,6 +113,8 @@ export function QuickAddPage() {
   // Product images (Part 1): self-hosted URLs returned by the upload endpoint.
   const [images, setImages] = useState<string[]>([]);
   const [uploadingImages, setUploadingImages] = useState(false);
+  // URLs currently being background-removed (per-image spinner + disabled btn).
+  const [editingImages, setEditingImages] = useState<Set<string>>(new Set());
   const [dragActive, setDragActive] = useState(false);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -363,6 +365,52 @@ export function QuickAddPage() {
   const removeImage = useCallback((url: string) => {
     setImages((prev) => prev.filter((u) => u !== url));
   }, []);
+
+  // A self-hosted product image looks like /api/v1/products/image/{file_id}.
+  // Return the file_id for those; null for anything else (e.g. a pasted
+  // external URL) — the Remove-background button is only shown when this is
+  // non-null, since the edit endpoint operates on our stored file_id.
+  const fileIdFromImageUrl = useCallback((url: string): string | null => {
+    const m = /\/api\/v1\/products\/image\/([^/?#]+)$/.exec(url);
+    return m ? m[1] : null;
+  }, []);
+
+  // Run background removal + catalog-standard resize on one uploaded image and
+  // REPLACE that entry (keeping array order) with the cleaned result.
+  const editImage = useCallback(
+    async (url: string) => {
+      const fileId = fileIdFromImageUrl(url);
+      if (!fileId) return;
+      setEditingImages((prev) => new Set(prev).add(url));
+      try {
+        const res = await productApi.editProductImage(fileId);
+        if (res?.url) {
+          setImages((prev) => prev.map((u) => (u === url ? res.url : u)));
+          toast.success('Background removed.');
+        } else {
+          toast.error("Couldn't remove background, please try again.");
+        }
+      } catch (err) {
+        // The shared axios interceptor rejects with a plain Error whose message
+        // is already the backend `detail` string (for a 4xx). The "not set up"
+        // 400 carries the "Settings -> Integrations" hint — surface that verbatim
+        // so the operator knows how to enable it; otherwise a generic retry line.
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.includes('Settings -> Integrations')) {
+          toast.error(msg);
+        } else {
+          toast.error("Couldn't remove background, please try again.");
+        }
+      } finally {
+        setEditingImages((prev) => {
+          const next = new Set(prev);
+          next.delete(url);
+          return next;
+        });
+      }
+    },
+    [fileIdFromImageUrl, toast]
+  );
 
   // ---- Inline Catalog Autopilot (v2) ----------------------------------------
   // The search knows its category: the form's already-picked category wins,
@@ -1526,7 +1574,10 @@ export function QuickAddPage() {
 
               {images.length > 0 && (
                 <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-3">
-                  {images.map((url) => (
+                  {images.map((url) => {
+                    const canEdit = fileIdFromImageUrl(url) !== null;
+                    const isEditing = editingImages.has(url);
+                    return (
                     <div key={url} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200">
                       <img
                         src={url}
@@ -1543,8 +1594,26 @@ export function QuickAddPage() {
                       >
                         <X className="w-3.5 h-3.5" />
                       </button>
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); void editImage(url); }}
+                          disabled={isEditing}
+                          aria-label="Remove background"
+                          title="Remove background (clean up + resize)"
+                          className="absolute bottom-1 left-1 inline-flex items-center gap-1 px-1.5 py-1 rounded-md bg-white/90 text-gray-700 hover:text-bv shadow text-[11px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {isEditing ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Wand2 className="w-3.5 h-3.5" />
+                          )}
+                          <span>{isEditing ? 'Working…' : 'Remove bg'}</span>
+                        </button>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

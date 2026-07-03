@@ -5169,6 +5169,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/image/from-url",
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
+    # Background-removal edit: re-runs the DETERMINISTIC cut-out pipeline
+    # (Photoroom) on a previously-uploaded product image and persists the
+    # cleaned result as a NEW image. Same catalog-write gate as the upload.
+    {
+        "method": "POST",
+        "path": "/api/v1/products/image/{file_id}/edit",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/products/image/{file_id}",

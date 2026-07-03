@@ -19,6 +19,10 @@ from ..services.file_store import (
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
 )
+# Product-image editor (Photoroom background-removal + catalog-standard resize).
+# Imported at module level so the edit endpoint below (and its test) resolve the
+# editor through THIS module -- tests monkeypatch `get_image_editor` here.
+from ..services.image_editor import get_image_editor, EditSpec
 
 router = APIRouter()
 
@@ -1728,6 +1732,73 @@ def rehost_product_image_from_url(
         "content_type": mime,
         "size": len(content),
     }
+
+
+@router.post("/image/{file_id}/edit", status_code=201)
+async def edit_product_image(
+    file_id: str,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Clean up a previously-uploaded product image: remove its background and
+    resize to the catalog standard, then persist the result as a NEW image.
+
+    This runs the DETERMINISTIC cut-out pipeline (services/image_editor.py --
+    Photoroom v2/edit pinned to a static backdrop + soft synthetic shadow, so
+    the product pixels are preserved; it never repaints the subject). The
+    EditSpec.from_env() recipe is the catalog STANDARD (white backdrop, square
+    1000x1000 tile, padding) applied identically to every image, so the output
+    is consistent across the catalog.
+
+    Additive + backward-compatible: the ORIGINAL image is left untouched; a new
+    file_id/url is returned so the caller replaces the entry it just edited.
+    Same catalog-write role gate as the multipart upload. Fail-soft: when no
+    editor is configured (no Photoroom key), returns 400 with an operator-facing
+    hint -- provider internals are never leaked.
+    """
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    # Scope the read to product images (the shared store also holds GRN
+    # attachments / expense bills). A wrong-kind or missing id -> 404.
+    got = store.get(file_id, require_kind="product_image")
+    if got is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    raw, _filename, _mime = got
+
+    editor = get_image_editor()
+    if not editor.available():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Background removal isn't set up. Add a Photoroom API key in "
+                "Settings -> Integrations to enable it."
+            ),
+        )
+
+    try:
+        edited = await editor.edit(raw, EditSpec.from_env())
+    except RuntimeError as e:
+        # Fail-soft: surface a short, provider-agnostic reason (no secrets).
+        err = str(e)[:200]
+        raise HTTPException(
+            status_code=502, detail=f"Background removal failed. {err}"
+        ) from e
+
+    new_id = store.put(
+        content=edited,
+        filename=f"bg-{file_id}.png",
+        mime_type="image/png",
+        metadata={
+            "kind": "product_image",
+            "edited_from": file_id,
+            "edited_by": current_user.get("user_id"),
+        },
+    )
+    if not new_id:
+        raise HTTPException(status_code=503, detail="File store write failed")
+
+    return {"file_id": new_id, "url": f"/api/v1/products/image/{new_id}"}
 
 
 @router.get("/image/{file_id}")

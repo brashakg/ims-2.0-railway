@@ -238,6 +238,17 @@ export const productApi = {
     return response.data as UploadedProductImage;
   },
 
+  // Remove the background of a previously-uploaded product image and resize to
+  // the catalog standard (Photoroom cut-out pipeline on the backend). The
+  // ORIGINAL image is untouched — a NEW {file_id, url} is returned so the caller
+  // swaps the entry it just edited. Import this DIRECTLY from this module (not
+  // the api barrel) — the barrel re-export fails to resolve for new methods
+  // (TS2614).
+  editProductImage: async (fileId: string): Promise<{ file_id: string; url: string }> => {
+    const response = await api.post(`/products/image/${fileId}/edit`);
+    return response.data as { file_id: string; url: string };
+  },
+
   // Update a product through the SINGLE validated path (`PUT /products/{id}`).
   // The backend ProductUpdate schema enforces category (422) + MRP >= offer
   // and persists only modelled fields (snake_case). Use this instead of the
