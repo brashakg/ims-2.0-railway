@@ -33,10 +33,11 @@ const DECISION_LABEL: Record<string, string> = {
 // source the backend adds still renders something sensible.
 function sourceBadge(c: AutopilotCandidate): { label: string; ai: boolean; authorized: boolean } {
   const authorized = c.source_class === 'AUTHORIZED';
-  if (c.source === AI_ENRICH_SOURCE) return { label: 'AI-suggested', ai: true, authorized };
-  if (c.source === 'internal_bvi') return { label: 'Catalog', ai: false, authorized };
-  if (c.source === 'brand_site' || c.source === 'myluxottica') return { label: 'Brand site', ai: false, authorized };
-  if (c.source === 'marketplace') return { label: 'Web (unverified)', ai: false, authorized };
+  if (c.source === AI_ENRICH_SOURCE) return { label: 'AI (Claude)', ai: true, authorized };
+  if (c.source === 'internal_bvi') return { label: 'Your catalog', ai: false, authorized };
+  if (c.source === 'brand_site') return { label: 'Brand site', ai: false, authorized };
+  if (c.source === 'myluxottica') return { label: 'myLuxottica', ai: false, authorized };
+  if (c.source === 'marketplace') return { label: 'Web search', ai: false, authorized };
   return { label: authorized ? 'Authorized' : 'Unverified', ai: false, authorized };
 }
 

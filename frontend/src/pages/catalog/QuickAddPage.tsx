@@ -78,7 +78,7 @@ import {
 } from './productAddShared';
 import clsx from 'clsx';
 
-type SectionId = 'identity' | 'pricing' | 'inventory' | 'online';
+type SectionId = 'identity' | 'pricing' | 'inventory';
 
 export function QuickAddPage() {
   const { hasRole } = useAuth();
@@ -154,7 +154,6 @@ export function QuickAddPage() {
     identity: true,
     pricing: true,
     inventory: true,
-    online: false, // collapsed by default per the design
   });
 
   // ---- Templates + clone state (Phase C) -----------------------------------
@@ -1551,87 +1550,84 @@ export function QuickAddPage() {
             </div>
           </Section>
 
-          {/* ONLINE (collapsed by default) */}
-          <Section
-            id="online"
-            title="Online"
-            icon={<Globe className="w-5 h-5" />}
-            subtitle="Shopify sync flags"
-          >
-            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-              <div>
-                <p className="font-medium text-gray-900">Sync to Shopify</p>
-                <p className="text-sm text-gray-500">Push this product to Shopify (future vendor channel)</p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  title="Sync to Shopify"
-                  aria-label="Sync to Shopify"
-                  checked={syncToShopify}
-                  onChange={(e) => setSyncToShopify(e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bv"></div>
+          {/* ONLINE — compact, always-visible strip (Shopify writes are owned by
+              the BVI app; these are dormant future flags, so keep them muted and
+              minimal, no accordion / no extra click). */}
+          <div className="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
+                <Globe className="w-3.5 h-3.5" />
+                Online
+              </span>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <span className="relative inline-flex items-center">
+                  <input
+                    type="checkbox"
+                    title="Sync to Shopify"
+                    aria-label="Sync to Shopify"
+                    checked={syncToShopify}
+                    onChange={(e) => setSyncToShopify(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <span className="w-8 h-4 bg-gray-200 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-bv"></span>
+                </span>
+                <span className="text-xs text-gray-500">Sync to Shopify</span>
               </label>
-            </div>
-
-            {syncToShopify && (
-              <div className="mt-4 space-y-4">
-                <div className="flex items-center justify-between p-3 border rounded-lg">
-                  <div>
-                    <p className="font-medium text-gray-900">Point of Sale</p>
-                    <p className="text-sm text-gray-500">Publish to Shopify POS</p>
-                  </div>
+              <label className={clsx('flex items-center gap-2', syncToShopify ? 'cursor-pointer' : 'cursor-not-allowed opacity-50')}>
+                <span className="relative inline-flex items-center">
                   <input
                     type="checkbox"
                     title="Publish to Shopify POS"
                     aria-label="Publish to Shopify POS"
                     checked={publishPOS}
+                    disabled={!syncToShopify}
                     onChange={(e) => setPublishPOS(e.target.checked)}
-                    className="w-5 h-5 rounded border-gray-300"
+                    className="sr-only peer"
                   />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tags</label>
-                  <input
-                    type="text"
-                    className="input-field w-full"
-                    placeholder="Type a tag, press Enter or comma"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ',') {
-                        e.preventDefault();
-                        const input = e.currentTarget;
-                        const value = input.value.trim();
-                        if (value && !shopifyTags.includes(value)) {
-                          setShopifyTags([...shopifyTags, value]);
-                          input.value = '';
-                        }
+                  <span className="w-8 h-4 bg-gray-200 rounded-full peer peer-checked:after:translate-x-4 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-bv"></span>
+                </span>
+                <span className="text-xs text-gray-500">Publish to Shopify POS</span>
+              </label>
+            </div>
+            {syncToShopify && (
+              <div className="mt-2.5">
+                <input
+                  type="text"
+                  className="input-field w-full !py-1.5 text-xs"
+                  placeholder="Add Shopify tags — type a tag, press Enter or comma"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ',') {
+                      e.preventDefault();
+                      const input = e.currentTarget;
+                      const value = input.value.trim();
+                      if (value && !shopifyTags.includes(value)) {
+                        setShopifyTags([...shopifyTags, value]);
+                        input.value = '';
                       }
-                    }}
-                  />
-                  {shopifyTags.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mt-2">
-                      {shopifyTags.map((tag) => (
-                        <span key={tag} className="inline-flex items-center px-2 py-1 text-sm bg-gray-100 rounded-full">
-                          {tag}
-                          <button
-                            type="button"
-                            onClick={() => setShopifyTags(shopifyTags.filter((t) => t !== tag))}
-                            className="ml-1 text-gray-500 hover:text-gray-700"
-                            aria-label={`Remove tag ${tag}`}
-                            title={`Remove tag ${tag}`}
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                    }
+                  }}
+                />
+                {shopifyTags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {shopifyTags.map((tag) => (
+                      <span key={tag} className="inline-flex items-center px-2 py-0.5 text-xs bg-gray-100 rounded-full">
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => setShopifyTags(shopifyTags.filter((t) => t !== tag))}
+                          className="ml-1 text-gray-500 hover:text-gray-700"
+                          aria-label={`Remove tag ${tag}`}
+                          title={`Remove tag ${tag}`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
-          </Section>
+          </div>
 
           {/* Action bar (mobile / inline fallback — rail also has buttons) */}
           <div className="flex flex-wrap items-center gap-3 laptop:hidden">
@@ -1754,10 +1750,11 @@ function ReviewRow({ label, value }: { label: string; value: string }) {
 // Human label + AI/authorized flags for a candidate's source badge.
 function apSourceBadge(c: AutopilotCandidate): { label: string; ai: boolean; authorized: boolean } {
   const authorized = c.source_class === 'AUTHORIZED';
-  if (c.source === AI_ENRICH_SOURCE) return { label: 'AI-suggested', ai: true, authorized };
-  if (c.source === 'internal_bvi') return { label: 'Catalog', ai: false, authorized };
-  if (c.source === 'brand_site' || c.source === 'myluxottica') return { label: 'Brand site', ai: false, authorized };
-  if (c.source === 'marketplace') return { label: 'Web (unverified)', ai: false, authorized };
+  if (c.source === AI_ENRICH_SOURCE) return { label: 'AI (Claude)', ai: true, authorized };
+  if (c.source === 'internal_bvi') return { label: 'Your catalog', ai: false, authorized };
+  if (c.source === 'brand_site') return { label: 'Brand site', ai: false, authorized };
+  if (c.source === 'myluxottica') return { label: 'myLuxottica', ai: false, authorized };
+  if (c.source === 'marketplace') return { label: 'Web search', ai: false, authorized };
   return { label: authorized ? 'Authorized' : 'Unverified', ai: false, authorized };
 }
 
