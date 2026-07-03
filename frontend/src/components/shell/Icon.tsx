@@ -89,6 +89,8 @@ export const Icon = {
   building: makeIcon('M3 21h18M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M19 21V11a2 2 0 0 0-2-2h-2M9 7h2M9 11h2M9 15h2'),
   // User-plus — staff onboarding (sits next to Users).
   userPlus: makeIcon('M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM19 8v6M22 11h-6'),
+  // Layers — merchandising Collections (stacked strata).
+  layers: makeIcon('M12 3L2 9l10 6 10-6-10-6zM2 13l10 6 10-6M2 17l10 6 10-6'),
 };
 
 export type IconName = keyof typeof Icon;

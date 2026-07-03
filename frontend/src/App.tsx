@@ -54,6 +54,10 @@ const OnlineProductsPage = lazy(() => import('./pages/online-store/OnlineProduct
 const OnlineCustomersPage = lazy(() => import('./pages/online-store/OnlineCustomersPage'));
 const CollectionsPage = lazy(() => import('./pages/online-store/CollectionsPage'));
 const CollectionBrowsePage = lazy(() => import('./pages/online-store/CollectionBrowsePage'));
+// Collections Phase 1 — merchandising surface (list / chip builder / KPI detail)
+const CollectionsListPage = lazy(() => import('./pages/collections/CollectionsListPage'));
+const CollectionNewPage = lazy(() => import('./pages/collections/CollectionNewPage'));
+const CollectionDetailPage = lazy(() => import('./pages/collections/CollectionDetailPage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
@@ -723,6 +727,42 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER']}
                       >
                         <FollowUpDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Collections Phase 1 — merchandising surface over the ecom
+                      collections system: KPI list, governed chip builder, and
+                      per-collection insights. STORE_MANAGER is view-only (the
+                      builder button is hidden in-page; backend enforces write
+                      authz). */}
+                  <Route
+                    path="collections"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}
+                      >
+                        <CollectionsListPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="collections/new"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}
+                      >
+                        <CollectionNewPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="collections/:id"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}
+                      >
+                        <CollectionDetailPage />
                       </ProtectedRoute>
                     }
                   />
