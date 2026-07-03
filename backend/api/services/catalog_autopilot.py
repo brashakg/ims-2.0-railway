@@ -399,6 +399,35 @@ def _http_get(
         return None
 
 
+def _http_post_json(
+    url: str,
+    payload: Dict[str, Any],
+    *,
+    headers: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """POST a JSON body and return the parsed JSON response dict, or None on ANY
+    failure (missing httpx, network error, non-200, unparseable body). Fully
+    fail-soft; respects AUTOPILOT_DISABLE_NETWORK. The URL is logged on a
+    non-200/error but any auth header (e.g. x-goog-api-key) is NOT logged, so a
+    secret in a header never lands in logs."""
+    if httpx is None or not url or _network_disabled():
+        return None
+    hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as c:
+            resp = c.post(url, json=payload, headers=hdrs)
+        if resp.status_code != 200:
+            logger.warning("[AUTOPILOT] POST %s -> HTTP %s", url, resp.status_code)
+            return None
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[AUTOPILOT] POST %s failed: %s", url, e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Source providers (fail-soft). Each returns a list of candidate dicts.
 # ---------------------------------------------------------------------------
@@ -1103,6 +1132,217 @@ class MarketplaceAdapter(SourceAdapter):
         return out
 
 
+# --- Priority 2: Gemini web-grounded search (Google, referenced) ------------
+
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+class GeminiSearchAdapter(SourceAdapter):
+    """Web-grounded catalog search via Google Gemini with the built-in Google
+    Search tool. ONE API call returns factual product specs / description / USP
+    for the brand+model TOGETHER WITH the web pages Gemini grounded on -- their
+    URIs become the candidate's `references`, so the operator can audit exactly
+    where the data came from. Billed to the owner's Google Cloud account (their
+    credit), not Anthropic.
+
+    Classified UNVERIFIED: the text is AI-synthesized from open-web pages and
+    any image it surfaces is third-party, so the router's copyright guard keeps
+    images from being auto-applied -- but the grounding URIs are always shown as
+    references. Fully fail-soft: no key / network off / bad JSON -> [] (never
+    raises)."""
+
+    name = "gemini"
+    label = "Gemini web search (Google, referenced)"
+    source_class = UNVERIFIED
+    priority = 2
+
+    def _config(self) -> Dict[str, Any]:
+        """Read the Gemini config from Settings->Integrations (DB) with an env
+        fallback. Imported lazily to avoid import-order/circular issues.
+        Fail-soft: any error -> {} (treated as unconfigured)."""
+        try:
+            from api.services import integration_config
+
+            return integration_config.get_gemini_config() or {}
+        except Exception:  # noqa: BLE001 - never break the adapter on config read
+            return {}
+
+    def is_enabled(self) -> bool:
+        if _network_disabled():
+            return False
+        return bool(self._config().get("api_key"))
+
+    def reason(self) -> str:
+        if _network_disabled():
+            return "AUTOPILOT_DISABLE_NETWORK set; Gemini search off."
+        if self.is_enabled():
+            return (
+                "Gemini + Google Search returns referenced product data on your "
+                "Google Cloud credit."
+            )
+        return (
+            "Add a Gemini API key in Settings -> Integrations (or set "
+            "GEMINI_API_KEY) to enable."
+        )
+
+    def _build_prompt(self, brand, model, color, size, category="") -> str:
+        cat_word = _category_query_word(category)
+        descriptor = " ".join(
+            p for p in [brand, model, color, size, cat_word] if (p and str(p).strip())
+        ).strip()
+        return (
+            "You are an optical-retail catalog assistant. Use Google Search to "
+            "find the real, current product below and return ONLY factual data "
+            "you can support from the search results. Do NOT invent details.\n\n"
+            "Product: " + (descriptor or f"{brand} {model}".strip()) + "\n\n"
+            "Return STRICT JSON (no prose) of the form:\n"
+            '{"products": [{\n'
+            '  "brand": string, "model": string, "color": string, "size": string,\n'
+            '  "title": string,\n'
+            '  "frame_shape": string, "frame_material": string,\n'
+            '  "lens_material": string, "gender": string,\n'
+            '  "description": string (2-3 sentences),\n'
+            '  "usp": string (one line),\n'
+            '  "specs": object of concise key facts,\n'
+            '  "suggested_hsn": string, "suggested_gst_rate": number,\n'
+            '  "image_url": string (a direct product image URL if one appears in '
+            "the results, else omit),\n"
+            '  "confidence": number between 0 and 1\n'
+            "}]}\n"
+            "Return at most 3 close matches (color variants of the same model). "
+            'If you cannot confirm the product exists, return {"products": []}.'
+        )
+
+    def _search(self, brand, model, color, size, limit, category=""):
+        cfg = self._config()
+        api_key = cfg.get("api_key")
+        if httpx is None or not api_key or _network_disabled():
+            return []
+        model_id = str(cfg.get("model") or "gemini-2.0-flash").strip()
+        url = GEMINI_API_BASE + "/" + model_id + ":generateContent"
+        prompt = self._build_prompt(brand, model, color, size, category)
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": int(
+                    os.getenv("AUTOPILOT_GEMINI_MAX_TOKENS", "1400")
+                ),
+            },
+        }
+        # The API key goes in a HEADER, never the URL, so it can't leak into any
+        # request log line.
+        data = _http_post_json(url, payload, headers={"x-goog-api-key": api_key})
+        if not isinstance(data, dict):
+            return []
+        text, references = self._extract(data)
+        products = self._parse_products(text)
+        out: List[Dict[str, Any]] = []
+        for p in products[: int(limit)]:
+            cand = self._to_candidate(p, brand, model, color, size, references)
+            if cand:
+                out.append(cand)
+        return out
+
+    @staticmethod
+    def _extract(data: Dict[str, Any]) -> tuple:
+        """Return (concatenated text, [reference dicts]) from a Gemini response.
+        References come from candidates[0].groundingMetadata.groundingChunks[].web."""
+        text_parts: List[str] = []
+        references: List[Dict[str, Any]] = []
+        try:
+            cands = data.get("candidates") or []
+            if not cands:
+                return "", []
+            first = cands[0] or {}
+            content = first.get("content") or {}
+            for part in content.get("parts") or []:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+            gm = first.get("groundingMetadata") or {}
+            for chunk in gm.get("groundingChunks") or []:
+                web = (chunk or {}).get("web") or {}
+                uri = web.get("uri")
+                if uri:
+                    references.append(
+                        {"source": "gemini", "url": uri, "title": web.get("title")}
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+        return "".join(text_parts), references
+
+    @staticmethod
+    def _parse_products(text: str) -> List[Dict[str, Any]]:
+        """Lenient JSON extraction: strip code fences, load the outermost {...}
+        object, and return its 'products' list (or a bare product object)."""
+        if not text or not text.strip():
+            return []
+        s = text.strip()
+        if s.startswith("```"):
+            s = s.strip("`")
+            if s[:4].lower() == "json":
+                s = s[4:]
+        lo = s.find("{")
+        hi = s.rfind("}")
+        if lo != -1 and hi != -1 and hi > lo:
+            s = s[lo : hi + 1]
+        try:
+            obj = json.loads(s)
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(obj, dict):
+            return []
+        products = obj.get("products")
+        if isinstance(products, list):
+            return [p for p in products if isinstance(p, dict)]
+        return [obj] if any(k in obj for k in ("brand", "model", "title")) else []
+
+    def _to_candidate(self, p, brand, model, color, size, references):
+        cand = _candidate_skeleton(self.name, self.source_class)
+        img = _coerce_str(p.get("image_url"))
+        primary_url = references[0]["url"] if references else None
+        cand.update(
+            {
+                "title": _coerce_str(p.get("title")) or f"{brand} {model}".strip(),
+                "brand": brand,
+                "model": model,
+                "color": _coerce_str(p.get("color")) or _coerce_str(color),
+                "size": _coerce_str(p.get("size")) or _coerce_str(size),
+                "source_url": primary_url,
+                "references": references,
+                "image_urls": [img] if img else [],
+                "specs": _coerce_specs(p.get("specs")),
+                "description": _coerce_str(p.get("description")),
+                "usp": _coerce_str(p.get("usp")),
+            }
+        )
+        cat = _coerce_str(p.get("category"))
+        if cat:
+            cand["category"] = cat.upper()
+        for key in ("frame_shape", "frame_material", "lens_material", "gender"):
+            val = _coerce_str(p.get(key))
+            if val:
+                cand[key] = val
+        hsn = _coerce_str(p.get("suggested_hsn"))
+        if hsn:
+            cand["suggested_hsn"] = hsn
+        rate = p.get("suggested_gst_rate")
+        if rate is not None:
+            try:
+                cand["suggested_gst_rate"] = float(rate)
+            except (TypeError, ValueError):
+                pass
+        conf = p.get("confidence")
+        if conf is not None:
+            try:
+                cand["confidence"] = float(conf)
+            except (TypeError, ValueError):
+                pass
+        cand["needs_review"] = bool(p.get("needs_review", True))
+        return cand
+
+
 # --- Priority 2: Claude AI product enrichment (AUTHORIZED, generated TEXT) ---
 
 # The IMS GST categories the AI is allowed to choose from. Sourced from the
@@ -1468,6 +1708,7 @@ def build_registry() -> List[SourceAdapter]:
     source of truth for both run_search and GET /sources."""
     adapters = [
         BrandSiteAdapter(),
+        GeminiSearchAdapter(),
         AIEnrichAdapter(),
         MyLuxotticaAdapter(),
         InternalCatalogAdapter(),

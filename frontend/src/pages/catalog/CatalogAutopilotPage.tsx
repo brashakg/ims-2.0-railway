@@ -37,6 +37,7 @@ function sourceBadge(c: AutopilotCandidate): { label: string; ai: boolean; autho
   if (c.source === 'internal_bvi') return { label: 'Your catalog', ai: false, authorized };
   if (c.source === 'brand_site') return { label: 'Brand site', ai: false, authorized };
   if (c.source === 'myluxottica') return { label: 'myLuxottica', ai: false, authorized };
+  if (c.source === 'gemini') return { label: 'Gemini (Google)', ai: true, authorized };
   if (c.source === 'marketplace') return { label: 'Web search', ai: false, authorized };
   return { label: authorized ? 'Authorized' : 'Unverified', ai: false, authorized };
 }
