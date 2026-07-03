@@ -467,8 +467,6 @@ export function QuickAddPage() {
     [applyFormValues, selectedCategory, apCategory, toast]
   );
 
-  const useAutopilotCandidate = applyAutopilotCandidate;
-
   // Late category pick: staged attributes survive AND get re-mapped onto the
   // newly picked category's real fields (only filling attributes the operator
   // hasn't already typed — a user value is never clobbered).
@@ -1127,7 +1125,7 @@ export function QuickAddPage() {
                 {apCandidates.length > 0 && (
                   <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
                     {apCandidates.slice(0, 8).map((c) => (
-                      <AutopilotCandidateRow key={c.candidate_id} c={c} onUse={() => { void useAutopilotCandidate(c); }} />
+                      <AutopilotCandidateRow key={c.candidate_id} c={c} onUse={() => { void applyAutopilotCandidate(c); }} />
                     ))}
                   </div>
                 )}

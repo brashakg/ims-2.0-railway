@@ -45,7 +45,7 @@ const STATUS_CHIP: Record<string, string> = {
 const inr = (rupees?: number) =>
   `₹${(rupees ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-interface BlankLine extends RMALinePayload {}
+type BlankLine = RMALinePayload;
 
 export function VendorRMA() {
   const toast = useToast();
