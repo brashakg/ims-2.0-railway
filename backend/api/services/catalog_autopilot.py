@@ -431,7 +431,11 @@ def search_internal_catalog(
             cur.execute(
                 """
                 SELECT p.id, p.brand, p."modelNo", p."fullModelNo", p."productName",
-                       p.status, p."shopifyProductId", p.category, p.shape, p.gender
+                       p.status, p."shopifyProductId", p.category, p.shape, p.gender,
+                       (SELECT pi.url FROM "ProductImage" pi
+                          WHERE pi."productId" = p.id
+                          ORDER BY (pi.role = 'EDITED') DESC, pi.position ASC
+                          LIMIT 1) AS image_url
                 FROM "Product" p
                 WHERE (%s = '' OR upper(p.brand) LIKE upper(%s))
                   AND upper(regexp_replace(
@@ -447,6 +451,7 @@ def search_internal_catalog(
                 ),
             )
             for r in cur.fetchall():
+                image_url = r[10] if len(r) > 10 else None
                 out.append(
                     {
                         "source": "internal_bvi",
@@ -459,7 +464,7 @@ def search_internal_catalog(
                         "model": r[3] or r[2],
                         "color": None,
                         "size": None,
-                        "image_urls": [],
+                        "image_urls": [image_url] if image_url else [],
                         "specs": {"category": r[7], "shape": r[8], "gender": r[9]},
                         "existing_status": r[5],
                         "existing_shopify_product_id": r[6],
