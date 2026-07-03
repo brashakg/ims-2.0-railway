@@ -678,7 +678,11 @@ def enforce_dictionary_values(
                     )
                 attrs["subbrand"] = canonical_sub
 
-    options = _cd.load_field_options(db)
+    # Per-category effective lists: the category's own lists override the
+    # All-categories ones, so same-named fields (lens_material, power, ...)
+    # never bleed across categories.
+    canonical_key = spec.canonical if spec is not None else category
+    options = _cd.load_field_options(db, canonical_key)
     if options:
         for name, allowed in options.items():
             if name in _cd.BRAND_MANAGED_FIELDS:

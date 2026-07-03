@@ -60,7 +60,13 @@ def _coll():
         return None
 
 
-def _audit(actor: Any, field: str, before: List[str], after: List[str]) -> None:
+def _audit(
+    actor: Any,
+    field: str,
+    before: List[str],
+    after: List[str],
+    category: Any = None,
+) -> None:
     """Fail-soft audit trail for dictionary edits."""
     try:
         repo = get_audit_repository()
@@ -70,11 +76,12 @@ def _audit(actor: Any, field: str, before: List[str], after: List[str]) -> None:
             {
                 "kind": "catalog_dictionary_update",
                 "entity_type": "catalog_field_options",
-                "entity_id": field,
+                "entity_id": f"{category}:{field}" if category else field,
                 "action": "UPDATE",
                 "performed_by": actor,
                 "details": {
                     "field": field,
+                    "category": category or "ALL",
                     "before_count": len(before),
                     "after_count": len(after),
                     "added": [v for v in after if v not in before][:20],
@@ -89,21 +96,36 @@ def _audit(actor: Any, field: str, before: List[str], after: List[str]) -> None:
 @router.get("")
 @router.get("/")
 async def list_field_options(current_user: dict = Depends(get_current_user)):
-    """Every configured field list: {"fields": {field_name: [values...]}}.
+    """Every configured list, split by scope:
+    {"fields": {field: [values]},                    -- "All categories" lists
+     "by_category": {CATEGORY: {field: [values]}},   -- per-category overrides
+     "brand_managed_fields": [...]}.
     Empty lists are included here (unlike the enforcement loader) so the
-    Settings editor can show a saved-but-empty state."""
+    Settings editor can show a saved-but-empty state. At enforcement/render
+    time a category's own list REPLACES the All-categories one per field."""
     coll = _coll()
     fields: Dict[str, List[str]] = {}
+    by_category: Dict[str, Dict[str, List[str]]] = {}
     if coll is not None:
         try:
             for doc in coll.find({}):
                 field = str(doc.get("field_id") or "").strip()
                 items = doc.get("items")
-                if field and isinstance(items, list):
-                    fields[field] = [str(i) for i in items]
+                if not field or not isinstance(items, list):
+                    continue
+                values = [str(i) for i in items]
+                category = str(doc.get("category") or "").strip().upper()
+                if category:
+                    by_category.setdefault(category, {})[field] = values
+                else:
+                    fields[field] = values
         except Exception as e:  # noqa: BLE001
             logger.warning("[CATALOG-DICT] list read failed: %s", e)
-    return {"fields": fields, "brand_managed_fields": sorted(BRAND_MANAGED_FIELDS)}
+    return {
+        "fields": fields,
+        "by_category": by_category,
+        "brand_managed_fields": sorted(BRAND_MANAGED_FIELDS),
+    }
 
 
 @router.patch("/{field_name}")
@@ -112,11 +134,14 @@ async def replace_field_options(
     body: Dict[str, Any] = Body(...),
     current_user: dict = Depends(require_roles(*_WRITE_ROLES)),
 ):
-    """Replace the allowed-value list for one attribute field.
+    """Replace the allowed-value list for one attribute field, in one SCOPE.
 
-    Body: {"items": ["Acetate", "Metal", ...]}. An empty list UN-configures
-    the field (it becomes free-form again). Values are trimmed + de-duped
-    case-insensitively; the saved casing is what products canonicalise to.
+    Body: {"items": ["Acetate", ...], "category": "SUNGLASS"?}. Without
+    `category` the list applies to ALL categories; with it, the list applies
+    to that category ONLY and overrides the All-categories list there (so
+    same-named fields never bleed across categories). An empty list
+    UN-configures that scope. Values are trimmed + de-duped case-
+    insensitively; the saved casing is what products canonicalise to.
     """
     field = field_name.strip()
     if field in BRAND_MANAGED_FIELDS:
@@ -132,18 +157,35 @@ async def replace_field_options(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    category = None
+    raw_category = str(body.get("category") or "").strip()
+    if raw_category:
+        # Lazy import (products router already couples these modules; keep the
+        # category vocabulary in ONE place -- product_master's registry).
+        from ..services.product_master import resolve_category
+
+        category = resolve_category(raw_category)
+        if category is None:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown category '{raw_category}'."
+            )
+
     coll = _coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    before_doc = coll.find_one({"field_id": field}) or {}
+    # One doc per (field, scope): category None matches docs where the field
+    # is null OR absent, i.e. the legacy pre-split "All categories" rows.
+    scope_filter = {"field_id": field, "category": category}
+    before_doc = coll.find_one(scope_filter) or {}
     before = [str(i) for i in (before_doc.get("items") or [])]
 
     coll.update_one(
-        {"field_id": field},
+        scope_filter,
         {
             "$set": {
                 "field_id": field,
+                "category": category,
                 "items": items,
                 "updated_at": datetime.utcnow(),
                 "updated_by": current_user.get("user_id"),
@@ -151,5 +193,10 @@ async def replace_field_options(
         },
         upsert=True,
     )
-    _audit(current_user.get("user_id"), field, before, items)
-    return {"field": field, "items": items, "count": len(items)}
+    _audit(current_user.get("user_id"), field, before, items, category)
+    return {
+        "field": field,
+        "category": category,
+        "items": items,
+        "count": len(items),
+    }

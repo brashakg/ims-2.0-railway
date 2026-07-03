@@ -72,26 +72,54 @@ def normalize_items(items: Any) -> List[str]:
     return out
 
 
-def load_field_options(db) -> Dict[str, List[str]]:
-    """{field_name: [allowed values...]} for every CONFIGURED field (empty
-    lists are treated as unconfigured and dropped). Fail-soft: {} on any
-    error / no db."""
+# Scope key for lists that apply to every category ("All categories" docs,
+# stored WITHOUT a category field).
+GLOBAL_SCOPE = "*"
+
+
+def load_field_options_raw(db) -> Dict[str, Dict[str, List[str]]]:
+    """{scope: {field_name: [values...]}} for every CONFIGURED list, where
+    scope is a canonical category key ('SUNGLASS', ...) or GLOBAL_SCOPE for
+    docs saved without a category. Empty lists are treated as unconfigured
+    and dropped. Fail-soft: {} on any error / no db."""
     if db is None:
         return {}
     try:
         coll = db.get_collection(FIELD_OPTIONS_COLLECTION)
-        out: Dict[str, List[str]] = {}
+        out: Dict[str, Dict[str, List[str]]] = {}
         for doc in coll.find({}):
             field = str(doc.get("field_id") or "").strip()
             items = doc.get("items")
-            if field and isinstance(items, list):
-                cleaned = [str(i).strip() for i in items if str(i or "").strip()]
-                if cleaned:
-                    out[field] = cleaned
+            if not field or not isinstance(items, list):
+                continue
+            cleaned = [str(i).strip() for i in items if str(i or "").strip()]
+            if not cleaned:
+                continue
+            scope = str(doc.get("category") or "").strip().upper() or GLOBAL_SCOPE
+            out.setdefault(scope, {})[field] = cleaned
         return out
     except Exception as e:  # noqa: BLE001 - dictionary read must never break a caller
         logger.warning("[CATALOG-DICT] field options read failed: %s", e)
         return {}
+
+
+def merged_field_options(
+    raw: Dict[str, Dict[str, List[str]]], category: Optional[str]
+) -> Dict[str, List[str]]:
+    """The EFFECTIVE per-field lists for one category: the All-categories
+    lists overlaid by that category's own lists (a category list fully
+    REPLACES the global list for that field — fields that share a name across
+    categories, e.g. lens_material, no longer bleed into each other)."""
+    merged = dict(raw.get(GLOBAL_SCOPE, {}))
+    if category:
+        merged.update(raw.get(str(category).strip().upper(), {}))
+    return merged
+
+
+def load_field_options(db, category: Optional[str] = None) -> Dict[str, List[str]]:
+    """{field_name: [allowed values...]} EFFECTIVE for `category` (global +
+    per-category overrides; global-only when category is None). Fail-soft."""
+    return merged_field_options(load_field_options_raw(db), category)
 
 
 def load_brand_options(db, category_prefix: Optional[str] = None) -> Optional[List[str]]:
