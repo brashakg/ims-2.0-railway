@@ -296,7 +296,36 @@ _OPTIONAL_PRODUCT_FIELDS = (
     "cyl",
     "axis",
     "add",
+    # Product images: self-hosted /products/image URLs (or vetted absolute
+    # URLs) the Add-Product form uploads BEFORE create. This field was
+    # collected by the FE but never modelled here, so pydantic silently
+    # DROPPED it and every product saved without its images (masked until
+    # the GridFS store fix made uploads work at all).
+    "images",
 )
+
+
+def _clean_image_urls(v):
+    """Shared ProductCreate/ProductUpdate images validator: trim, drop blanks,
+    cap 12 entries, each a plausible URL (http(s) absolute or app-relative).
+    Returns None for None (field absent) so exclude_unset semantics hold."""
+    if v is None:
+        return None
+    if not isinstance(v, list):
+        raise ValueError("images must be a list of URLs")
+    out = []
+    for item in v:
+        s = str(item or "").strip()
+        if not s:
+            continue
+        if len(s) > 600:
+            raise ValueError("image URL too long (max 600 chars)")
+        if not (s.startswith("http://") or s.startswith("https://") or s.startswith("/")):
+            raise ValueError(f"image URL must be absolute or app-relative: '{s[:60]}'")
+        out.append(s)
+        if len(out) > 12:
+            raise ValueError("at most 12 images per product")
+    return out
 
 
 # Unification step-9: the ONE canonical product-create door. The FORM
@@ -526,6 +555,14 @@ class ProductCreate(BaseModel):
     cyl: Optional[float] = None
     axis: Optional[int] = Field(default=None, ge=0, le=180)
     add: Optional[float] = None
+    # ---- Product images (self-hosted /products/image URLs uploaded before
+    # create; the door persists them onto the spine via extra_fields). ----
+    images: Optional[List[str]] = None
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def _validate_images(cls, v):
+        return _clean_image_urls(v)
 
 
 class ProductUpdate(BaseModel):
@@ -572,6 +609,13 @@ class ProductUpdate(BaseModel):
     # retired (unvalidated) /admin/products PUT so the Inventory "Save barcode"
     # action writes through the SAME validated update path as every other field.
     barcode: Optional[str] = None
+    # Product images (replaces the whole array; same validation as create).
+    images: Optional[List[str]] = None
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def _validate_images(cls, v):
+        return _clean_image_urls(v)
     # ---- Per-product reorder configuration. Moved here from the retired
     # /admin/products PUT (the Reorder dashboard's only writer) so reorder
     # settings persist through the validated path. All optional + additive. ----
