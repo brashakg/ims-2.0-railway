@@ -460,7 +460,11 @@ def _build_product_data(product: "ProductCreate", created_by) -> dict:
 
 
 class ProductCreate(BaseModel):
-    sku: str
+    # SKU is AUTO-MINTED by the canonical door (product_master.mint_unique_sku)
+    # when not supplied, so it is OPTIONAL. A supplied (legacy/imported) SKU is
+    # still accepted as-is and never re-minted. The FE no longer fabricates a
+    # client-side SKU; it omits this field so the clean semantic SKU is minted.
+    sku: Optional[str] = None
     category: str
     brand: str
     model: str
@@ -844,7 +848,17 @@ async def create_product(
 
         raise HTTPException(status_code=500, detail="Failed to create product")
 
-    return {"product_id": str(uuid.uuid4()), "sku": product.sku}
+    # Stub mode (no repo): mint the canonical SKU when none was supplied so the
+    # response still carries a clean SKU (mirrors the canonical door's minting).
+    stub_sku = product.sku
+    if not stub_sku:
+        try:
+            stub_sku = _pm.mint_unique_sku(
+                product.category, dict(product.attributes or {})
+            )
+        except Exception:  # noqa: BLE001 - never block the (stub) create
+            stub_sku = None
+    return {"product_id": str(uuid.uuid4()), "sku": stub_sku}
 
 
 # ============================================================================
