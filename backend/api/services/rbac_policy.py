@@ -4366,6 +4366,60 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/collections/{handle}/refresh",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # --- /api/v1/collections insights ---  (Collections Phase 1, Track 2:
+    # read-only analytics over the materialised collection_products view +
+    # stock_units + orders, plus an unsaved-rules preview). Router-level
+    # require_roles with this exact set; non-HQ callers (STORE_MANAGER here)
+    # are additionally FORCED to their own active_store_id inside the handlers
+    # (store_scoped). See routers/collections_insights.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/collections/insights/summary",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/collections/preview",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/collections/{collection_id}/insights",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/collections/{collection_id}/insights/stores",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "CATALOG_MANAGER",
+            "SUPERADMIN",
+        ],
+        "store_scoped": True,
+    },
     # --- /api/v1/online-store/collections ---  (BVI Phase 2: Collections, FLAGSHIP #1)
     # PUSH-DARK ecom_collections CRUD + manual/smart membership + smart-rule
     # resolver. All gated to the ecom role set (router-level require_roles); see
