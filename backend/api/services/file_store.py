@@ -39,6 +39,8 @@ ALLOWED_MIME_TYPES = frozenset(
         "image/heic",
         "image/heif",
         "image/webp",
+        "image/avif",
+        "image/gif",
         "application/pdf",
     }
 )
@@ -219,12 +221,19 @@ def get_file_store() -> Optional[FileStore]:
 
         db = get_db()
         if db is not None and db.is_connected:
-            # Reach down to the underlying pymongo Database
-            mongo_db = getattr(db, "db", None) or db
+            # Reach down to the underlying pymongo Database. MUST be an
+            # explicit None check: pymongo Database forbids truth-testing
+            # (bool() raises NotImplementedError), so `getattr(...) or db`
+            # blew up here on every prod call and the except below swallowed
+            # it -- file storage reported "unavailable" whenever a REAL Mongo
+            # was connected. (Dev mocks have normal truthiness, hiding it.)
+            mongo_db = getattr(db, "db", None)
+            if mongo_db is None:
+                mongo_db = db
             _INSTANCE = GridFSFileStore(mongo_db)
             return _INSTANCE
     except Exception as e:
-        logger.debug(f"[FILESTORE] init failed: {e}")
+        logger.warning(f"[FILESTORE] init failed: {e}")
     return None
 
 
