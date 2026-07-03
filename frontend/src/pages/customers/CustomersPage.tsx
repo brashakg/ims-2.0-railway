@@ -53,6 +53,21 @@ import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmenta
 type ViewMode = 'list' | 'detail';
 type CRMTab = 'customers' | 'recalls' | 'campaigns';
 
+// Address lives in two shapes on a customer record: flat top-level fields
+// (address/city/state/pincode) and a structured `billing_address` object.
+// Customers created before the sync fix carry ONLY the structured object, so
+// resolve from the flat field first and fall back to billing_address — that way
+// every existing customer's address shows on the detail + edit screens.
+function resolveAddress(c: any): { address: string; city: string; state: string; pincode: string } {
+  const ba = (c?.billing_address && typeof c.billing_address === 'object') ? c.billing_address : {};
+  return {
+    address: c?.address ?? ba.address ?? '',
+    city: c?.city ?? ba.city ?? '',
+    state: c?.state ?? ba.state ?? '',
+    pincode: c?.pincode ?? ba.pincode ?? '',
+  };
+}
+
 export function CustomersPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
@@ -699,7 +714,7 @@ export function CustomersPage() {
                   name: selectedCustomer.name || '',
                   phone: selectedCustomer.phone || '',
                   email: selectedCustomer.email || '',
-                  address: (selectedCustomer as any).address || '',
+                  address: resolveAddress(selectedCustomer).address,
                 });
                 setShowEditModal(true);
               }
@@ -778,14 +793,18 @@ export function CustomersPage() {
                 <span>{selectedCustomer.email}</span>
               </div>
             )}
-            {selectedCustomer?.address && (
-              <div className="flex items-start gap-2 text-sm">
-                <MapPin className="w-4 h-4 text-gray-500 mt-0.5" />
-                <span>
-                  {selectedCustomer.address}, {selectedCustomer.city}, {selectedCustomer.state} - {selectedCustomer.pincode}
-                </span>
-              </div>
-            )}
+            {(() => {
+              const a = resolveAddress(selectedCustomer);
+              return a.address ? (
+                <div className="flex items-start gap-2 text-sm">
+                  <MapPin className="w-4 h-4 text-gray-500 mt-0.5" />
+                  <span>
+                    {[a.address, a.city, a.state].filter(Boolean).join(', ')}
+                    {a.pincode ? ` - ${a.pincode}` : ''}
+                  </span>
+                </div>
+              ) : null;
+            })()}
             <div className="flex items-center gap-2 text-sm">
               <Calendar className="w-4 h-4 text-gray-500" />
               <span>Customer since {formatDate(selectedCustomer?.createdAt || '')}</span>
