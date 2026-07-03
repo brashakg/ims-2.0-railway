@@ -310,21 +310,26 @@ export function QuickAddPage() {
   // just isn't added (a toast names how many, so nothing silently vanishes).
   const uploadImageFiles = useCallback(
     async (files: File[]) => {
-      const imageFiles = files.filter((f) => f.type.startsWith('image/'));
+      // Keep files with an EMPTY reported type too (some browsers report ''
+      // for HEIC/AVIF): the backend validates the real mime and its clear 400
+      // detail is surfaced below — better than silently dropping the file.
+      const imageFiles = files.filter((f) => f.type === '' || f.type.startsWith('image/'));
       if (imageFiles.length === 0) {
         if (files.length > 0) toast.error('Only image files can be uploaded.');
         return;
       }
       setUploadingImages(true);
       let failed = 0;
+      let lastError = '';
       const uploaded: string[] = [];
       for (const file of imageFiles) {
         try {
           const res = await productApi.uploadProductImage(file);
           if (res?.url) uploaded.push(res.url);
           else failed += 1;
-        } catch {
+        } catch (err) {
           failed += 1;
+          if (err instanceof Error && err.message) lastError = err.message;
         }
       }
       if (uploaded.length > 0) {
@@ -332,7 +337,7 @@ export function QuickAddPage() {
       }
       if (failed > 0) {
         toast.warning(
-          `${failed} image${failed > 1 ? 's' : ''} could not be uploaded${uploaded.length ? ' (the rest were added)' : ''}.`
+          `${failed} image${failed > 1 ? 's' : ''} could not be uploaded${uploaded.length ? ' (the rest were added)' : ''}.${lastError ? ` ${lastError}` : ''}`
         );
       } else if (uploaded.length > 0) {
         toast.success(`${uploaded.length} image${uploaded.length > 1 ? 's' : ''} uploaded.`);
@@ -820,7 +825,7 @@ export function QuickAddPage() {
     const fieldClass = clsx('input-field w-full', isAuto && 'ring-1 ring-violet-300 bg-violet-50/40');
     return (
     <div key={field.name}>
-      <label className="block text-sm font-medium text-gray-700 mb-1">
+      <label className="block text-xs font-medium text-gray-700 mb-1">
         {field.label}
         {field.required && <span className="text-red-500 ml-1">*</span>}
         {isAuto && (
@@ -887,13 +892,13 @@ export function QuickAddPage() {
         <button
           type="button"
           onClick={() => toggleSection(id)}
-          className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+          className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition-colors"
           aria-expanded={open ? "true" : "false"}
         >
           <span className="flex items-center gap-3">
             <span className="text-bv">{icon}</span>
             <span>
-              <span className="block font-semibold text-gray-900">{title}</span>
+              <span className="block text-[15px] font-semibold text-gray-900">{title}</span>
               {subtitle && <span className="block text-xs text-gray-500">{subtitle}</span>}
             </span>
           </span>
@@ -901,13 +906,16 @@ export function QuickAddPage() {
             className={clsx('w-5 h-5 text-gray-400 transition-transform', open && 'rotate-180')}
           />
         </button>
-        {open && <div className="px-5 pb-5 pt-1 border-t border-gray-100">{children}</div>}
+        {open && <div className="px-4 pb-4 pt-1 border-t border-gray-100">{children}</div>}
       </div>
     );
   };
 
   return (
-    <div className="inv-body">
+    // Page-scoped ~10% density pass: the arbitrary variants shrink every
+    // .input-field (36px -> 32px, 13px -> 12.5px) and the page h1 (32 -> 28px)
+    // on THIS page only — no global CSS edits.
+    <div className="inv-body [&_.input-field]:h-8 [&_.input-field]:text-[12.5px] [&_.inv-head_h1]:!text-[28px]">
       {/* Editorial header (mode toggle is rendered by the route shell) */}
       <div className="inv-head">
         <div>
@@ -1062,22 +1070,24 @@ export function QuickAddPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 laptop:grid-cols-[1fr_320px] gap-5 items-start">
+      {/* Single full-width column: the review moved to the bottom of the page,
+          freeing the old 320px right rail for 3-4 field columns. */}
+      <div className="space-y-3">
         {/* ---- Form column ---- */}
-        <div className="space-y-4">
+        <div className="space-y-3">
           {/* AUTO-FILL FROM WEB (inline Catalog Autopilot) — collapsed by default
               so the normal manual flow is unchanged. */}
           <div className="card !p-0 overflow-hidden">
             <button
               type="button"
               onClick={() => setAutopilotOpen((v) => !v)}
-              className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+              className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition-colors"
               aria-expanded={autopilotOpen ? 'true' : 'false'}
             >
               <span className="flex items-center gap-3">
                 <span className="text-bv"><Wand2 className="w-5 h-5" /></span>
                 <span>
-                  <span className="block font-semibold text-gray-900">Auto-fill from web (Autopilot)</span>
+                  <span className="block text-[15px] font-semibold text-gray-900">Auto-fill from web (Autopilot)</span>
                   <span className="block text-xs text-gray-500">
                     Search a brand + model to pull specs, description &amp; images
                   </span>
@@ -1087,10 +1097,10 @@ export function QuickAddPage() {
             </button>
 
             {autopilotOpen && (
-              <div className="px-5 pb-5 pt-1 border-t border-gray-100 space-y-4">
+              <div className="px-4 pb-4 pt-1 border-t border-gray-100 space-y-3">
                 <div className="grid grid-cols-2 tablet:grid-cols-4 laptop:grid-cols-[1.1fr_1.1fr_0.9fr_0.9fr_1.1fr_auto] gap-3 items-end">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Brand</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Brand</label>
                     <input
                       className="input-field w-full"
                       value={apBrand}
@@ -1100,7 +1110,7 @@ export function QuickAddPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Model</label>
                     <input
                       className="input-field w-full"
                       value={apModel}
@@ -1110,7 +1120,7 @@ export function QuickAddPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Colour</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Colour</label>
                     <input
                       className="input-field w-full"
                       value={apColor}
@@ -1120,7 +1130,7 @@ export function QuickAddPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Size</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Size</label>
                     <input
                       className="input-field w-full"
                       value={apSize}
@@ -1130,7 +1140,7 @@ export function QuickAddPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
                     <select
                       title="Search category"
                       className="input-field w-full disabled:bg-gray-50 disabled:text-gray-500"
@@ -1176,7 +1186,7 @@ export function QuickAddPage() {
                 )}
 
                 {apCandidates.length > 0 && (
-                  <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 tablet:grid-cols-2 desktop:grid-cols-3 gap-3">
                     {apCandidates.slice(0, 8).map((c) => (
                       <AutopilotCandidateRow key={c.candidate_id} c={c} onUse={() => { void applyAutopilotCandidate(c); }} />
                     ))}
@@ -1276,7 +1286,7 @@ export function QuickAddPage() {
           >
             {/* Category picker */}
             <div className="mb-5">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
                 Category <span className="text-red-500">*</span>
               </label>
               <div className="grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-2">
@@ -1286,13 +1296,13 @@ export function QuickAddPage() {
                     type="button"
                     onClick={() => setSelectedCategory(c.code)}
                     className={clsx(
-                      'flex flex-col items-center gap-1 px-2 py-3 rounded-lg border text-center transition-all',
+                      'flex flex-col items-center gap-1 px-2 py-2 rounded-lg border text-center transition-all',
                       selectedCategory === c.code
                         ? 'border-bv bg-bv-50 ring-1 ring-bv'
                         : 'border-gray-200 hover:border-gray-300'
                     )}
                   >
-                    <span className="text-2xl leading-none">{c.icon}</span>
+                    <span className="text-xl leading-none">{c.icon}</span>
                     <span className="text-xs font-medium text-gray-800">{c.name}</span>
                   </button>
                 ))}
@@ -1305,7 +1315,7 @@ export function QuickAddPage() {
             {selectedCategory && (
               <>
                 {/* Category-specific fields */}
-                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
                   {visibleFields.map((f, i) => renderField(f, i === 0))}
                 </div>
 
@@ -1326,7 +1336,7 @@ export function QuickAddPage() {
 
                 {/* Description */}
                 <div className="mt-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -1361,7 +1371,7 @@ export function QuickAddPage() {
                       </label>
                       <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
                             HSN Code <span className="text-red-500">*</span>
                           </label>
                           <select
@@ -1382,7 +1392,7 @@ export function QuickAddPage() {
                           <p className="text-xs text-gray-500 mt-1">Auto-selected based on category</p>
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">GST Rate (%)</label>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">GST Rate (%)</label>
                           <input
                             type="text"
                             title="GST Rate (auto-filled from HSN)"
@@ -1393,7 +1403,7 @@ export function QuickAddPage() {
                           <p className="text-xs text-gray-500 mt-1">Auto-filled from HSN code</p>
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Weight (g)</label>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Weight (g)</label>
                           <input
                             type="number"
                             value={weight}
@@ -1425,9 +1435,9 @@ export function QuickAddPage() {
             icon={<IndianRupee className="w-5 h-5" />}
             subtitle="MRP, offer, cost & discount band"
           >
-            <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-xs font-medium text-gray-700 mb-1">
                   MRP <span className="text-red-500">*</span>
                 </label>
                 <div className="relative">
@@ -1444,7 +1454,7 @@ export function QuickAddPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Offer Price</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Offer Price</label>
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                   <input
@@ -1463,7 +1473,7 @@ export function QuickAddPage() {
 
               {canSeeCost && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Cost Price</label>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Cost Price</label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                     <input
@@ -1481,7 +1491,7 @@ export function QuickAddPage() {
               )}
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-xs font-medium text-gray-700 mb-1">
                   Discount Category
                   <span className="text-red-500 ml-1">*</span>
                 </label>
@@ -1510,9 +1520,9 @@ export function QuickAddPage() {
             icon={<Boxes className="w-5 h-5" />}
             subtitle="Reorder level (stock, SKU & barcode are automatic)"
           >
-            <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 tablet:grid-cols-3 desktop:grid-cols-4 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Reorder Level</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Reorder Level</label>
                 <input
                   type="number"
                   title="Reorder Level"
@@ -1533,7 +1543,7 @@ export function QuickAddPage() {
             {/* Product images — real upload (durably stored + served by the
                 backend; the create payload sends the resulting URLs). */}
             <div className="mt-4 pt-4 border-t border-gray-100">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Product Images</label>
+              <label className="block text-xs font-medium text-gray-700 mb-2">Product Images</label>
 
               <input
                 ref={imageInputRef}
@@ -1554,26 +1564,26 @@ export function QuickAddPage() {
                 tabIndex={0}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') imageInputRef.current?.click(); }}
                 className={clsx(
-                  'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors',
+                  'border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors',
                   dragActive ? 'border-bv bg-bv-50' : 'border-gray-300 hover:border-gray-400'
                 )}
               >
                 {uploadingImages ? (
-                  <Loader2 className="w-12 h-12 mx-auto text-bv mb-2 animate-spin" />
+                  <Loader2 className="w-10 h-10 mx-auto text-bv mb-2 animate-spin" />
                 ) : (
-                  <ImageIcon className="w-12 h-12 mx-auto text-gray-400 mb-2" />
+                  <ImageIcon className="w-10 h-10 mx-auto text-gray-400 mb-2" />
                 )}
                 <p className="text-gray-500">
                   {uploadingImages ? 'Uploading…' : 'Drag and drop images here, or click to browse'}
                 </p>
-                <span className="btn-outline mt-4 inline-flex items-center pointer-events-none">
+                <span className="btn-outline mt-3 inline-flex items-center pointer-events-none">
                   <Upload className="w-4 h-4 mr-2" />
                   Upload Images
                 </span>
               </div>
 
               {images.length > 0 && (
-                <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-3">
+                <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 desktop:grid-cols-8 gap-3">
                   {images.map((url) => {
                     const canEdit = fileIdFromImageUrl(url) !== null;
                     const isEditing = editingImages.has(url);
@@ -1698,38 +1708,17 @@ export function QuickAddPage() {
             )}
           </div>
 
-          {/* Action bar (mobile / inline fallback — rail also has buttons) */}
-          <div className="flex flex-wrap items-center gap-3 laptop:hidden">
-            <button
-              type="button"
-              onClick={() => handleSubmit(false)}
-              disabled={isSubmitting}
-              className="btn-primary flex items-center gap-2"
-            >
-              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              Save product
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSubmit(true)}
-              disabled={isSubmitting}
-              className="btn-secondary flex items-center gap-2"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Save + New
-            </button>
-          </div>
         </div>
 
-        {/* ---- Live Review rail ---- */}
-        <aside className="laptop:sticky laptop:top-4 space-y-4">
+        {/* ---- Live Review (bottom of page; rows flow in up to 3 columns) ---- */}
+        <aside className="space-y-3">
           <div className="card">
             <div className="flex items-center gap-2 mb-3">
               <Sparkles className="w-4 h-4 text-bv" />
               <h3 className="font-semibold text-gray-900">Review</h3>
             </div>
 
-            <dl className="space-y-2 text-sm">
+            <dl className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-x-8 gap-y-1.5 text-sm">
               <ReviewRow label="Category" value={categoryName(selectedCategory) || '—'} />
               <ReviewRow label="Brand" value={attributes.brand_name || '—'} />
               <ReviewRow
@@ -1758,47 +1747,38 @@ export function QuickAddPage() {
               )}
               {syncToShopify && <ReviewRow label="Shopify" value="Will sync" />}
             </dl>
-
-            <div className="mt-4 pt-4 border-t border-gray-100 hidden laptop:flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => handleSubmit(false)}
-                disabled={isSubmitting}
-                className="btn-primary w-full flex items-center justify-center gap-2"
-              >
-                {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                Save product
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSubmit(true)}
-                disabled={isSubmitting}
-                className="btn-secondary w-full flex items-center justify-center gap-2"
-              >
-                <RotateCcw className="w-4 h-4" />
-                Save + New
-              </button>
-            </div>
-          </div>
-
-          {/* Keyboard hint */}
-          <div className="card !py-3">
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <Keyboard className="w-4 h-4" />
-              <span className="font-medium text-gray-700">Shortcuts</span>
-            </div>
-            <div className="mt-2 space-y-1 text-xs text-gray-600">
-              <div className="flex items-center justify-between">
-                <span>Save</span>
-                <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd></span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Save + New</span>
-                <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd></span>
-              </div>
-            </div>
           </div>
         </aside>
+
+        {/* ---- Sticky action bar: the single Save point, always reachable.
+            Must stay the LAST child of this container so sticky containment
+            spans the whole page; -mx-7/-mb-6 cancel .inv-body's padding so the
+            bar runs edge-to-edge, flush with the viewport bottom. ---- */}
+        <div className="sticky bottom-0 z-30 -mx-7 -mb-6 px-7 py-2.5 bg-white/95 backdrop-blur border-t border-gray-200 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => handleSubmit(false)}
+            disabled={isSubmitting}
+            className="btn-primary flex items-center gap-2"
+          >
+            {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            Save product
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSubmit(true)}
+            disabled={isSubmitting}
+            className="btn-secondary flex items-center gap-2"
+          >
+            <RotateCcw className="w-4 h-4" />
+            Save + New
+          </button>
+          <span className="ml-auto hidden tablet:flex items-center gap-4 text-xs text-gray-500">
+            <Keyboard className="w-4 h-4" />
+            <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> Save</span>
+            <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> Save + New</span>
+          </span>
+        </div>
       </div>
     </div>
   );
