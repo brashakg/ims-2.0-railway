@@ -15,7 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
+        # Vite 7 (the build tool) requires Node 20.19+ / 22.12+, and Node 18
+        # reached end-of-life in Apr 2025. Testing on 18.x failed at `vite build`
+        # regardless of this branch; run the supported LTS lines instead.
+        node-version: [20.x, 22.x]
 
     steps:
       - uses: actions/checkout@v4
