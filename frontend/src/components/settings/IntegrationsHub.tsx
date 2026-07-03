@@ -108,6 +108,18 @@ const INTEGRATION_META: Record<string, IntegrationMeta> = {
       text: 'GST filing already works end-to-end via the offline-tool workflow: download GSTR-1 / GSTR-3B JSON from Reports -> GST, import on gst.gov.in -> Returns -> Offline Tool. A GSP integration (one-click portal push from inside IMS) only becomes necessary once any single legal entity crosses the Rs 5 Cr aggregate-turnover e-invoicing mandate. Until then, the manual JSON workflow is the standard practice for small + mid Indian businesses and is the supported path here.',
     },
   },
+  myluxottica: {
+    banner: {
+      kind: 'info',
+      text: "Dealer portals often use SSO/2FA a server login can't complete; after saving, Autopilot will try it and we'll confirm it actually pulls data. Railway env vars (MYLUXOTTICA_USER / MYLUXOTTICA_PASS) also work as a fallback.",
+    },
+  },
+  web_search: {
+    banner: {
+      kind: 'info',
+      text: 'Create a Programmable Search Engine at programmablesearchengine.google.com (that gives you the cx / Search Engine ID) and an API key in Google Cloud with the Custom Search JSON API enabled. Railway env vars (GOOGLE_CSE_KEY / GOOGLE_CSE_CX, or SERP_API_KEY) also work as a fallback.',
+    },
+  },
 };
 
 function metaFor(type: string): IntegrationMeta {
