@@ -42,7 +42,10 @@ interface StoreOpt {
 const STORE_FILTER_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER'];
 const PUBLISH_LINK_ROLES = ['SUPERADMIN', 'ADMIN'];
 
-const DAY_OPTIONS = [7, 30, 90] as const;
+// NOTE: the insights API's KPI windows are FIXED (sold d7/d30/d90; revenue/
+// margin/sell-through are 30d) -- a window selector would relabel numbers it
+// cannot re-window, so the strip shows all three sold windows and labels the
+// 30d KPIs honestly. (The API's `days` param is reserved for a later phase.)
 
 function KpiCard({
   label,
@@ -84,7 +87,6 @@ export default function CollectionDetailPage() {
   const [insights, setInsights] = useState<CollectionInsights | null>(null);
   const [storeRows, setStoreRows] = useState<CollectionStoreInsight[]>([]);
   const [stores, setStores] = useState<StoreOpt[]>([]);
-  const [days, setDays] = useState<number>(30);
   const [storeId, setStoreId] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -118,12 +120,12 @@ export default function CollectionDetailPage() {
     };
   }, [showStoreFilter]);
 
-  // KPI rollup: re-fetch on days / store change.
+  // KPI rollup: re-fetch on store change.
   useEffect(() => {
     let alive = true;
     setLoading(true);
     collectionsInsightsApi
-      .insights(id, { days, store_id: storeId || undefined })
+      .insights(id, { store_id: storeId || undefined })
       .then((res) => {
         if (!alive) return;
         setInsights(res);
@@ -132,7 +134,7 @@ export default function CollectionDetailPage() {
     return () => {
       alive = false;
     };
-  }, [id, days, storeId]);
+  }, [id, storeId]);
 
   const title = meta?.title || insights?.title || '(untitled collection)';
   const collectionType = meta?.collection_type || 'SMART';
@@ -178,19 +180,6 @@ export default function CollectionDetailPage() {
           </h1>
         </div>
         <div className="flex items-center gap-3">
-          {/* days window */}
-          <select
-            value={days}
-            onChange={(e) => setDays(Number(e.target.value))}
-            className="input-field text-sm"
-            aria-label="Analysis window (days)"
-          >
-            {DAY_OPTIONS.map((d) => (
-              <option key={d} value={d}>
-                Last {d} days
-              </option>
-            ))}
-          </select>
           {/* store filter — hidden for store-forced roles */}
           {showStoreFilter && stores.length > 0 && (
             <select
@@ -274,12 +263,12 @@ export default function CollectionDetailPage() {
             />
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-            <KpiCard label={`Revenue (${days}d)`} value={rupee(insights.revenue_30d)} />
+            <KpiCard label="Revenue (30d)" value={rupee(insights.revenue_30d)} />
             <KpiCard
-              label={`Margin (${days}d)`}
+              label="Margin (30d)"
               value={insights.margin_30d === null ? 'needs cost data' : rupee(insights.margin_30d)}
             />
-            <KpiCard label={`Sell-through (${days}d)`} value={pct(insights.sell_through_30d)} />
+            <KpiCard label="Sell-through (30d)" value={pct(insights.sell_through_30d)} />
             <KpiCard label="Days of cover" value={daysOfCover(insights.days_of_cover)} />
           </div>
         </>
