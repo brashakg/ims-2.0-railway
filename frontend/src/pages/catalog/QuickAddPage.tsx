@@ -870,6 +870,17 @@ export function QuickAddPage() {
           className={fieldClass}
         />
       )}
+      {/* Brand Master is the single source for brands: an EMPTY options list
+          (owner hasn't added brands yet) gets a pointer instead of silently
+          offering nothing. */}
+      {field.type === 'select' && field.options?.length === 0 && (
+        <p className="text-amber-600 text-xs mt-1">
+          No {field.name === 'brand_name' ? 'brands' : 'values'} saved yet — add them in{' '}
+          <Link to="/settings" className="underline font-medium">
+            Settings → {field.name === 'brand_name' ? 'Brand Master' : 'Catalog Dictionary'}
+          </Link>.
+        </p>
+      )}
       {errors[field.name] && (
         <p className="text-red-500 text-xs mt-1">{errors[field.name]}</p>
       )}

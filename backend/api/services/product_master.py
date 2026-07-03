@@ -614,6 +614,73 @@ def validate_attributes(category: Any, attributes: Dict[str, Any]) -> None:
             )
 
 
+def enforce_dictionary_values(
+    category: Any, attributes: Dict[str, Any], *, db=None
+) -> Dict[str, Any]:
+    """Catalog Dictionary enforcement (owner rule: only values saved in
+    Settings may be chosen in Catalog).
+
+    - brand_name: validated against the ACTIVE Brand Master brands applicable
+      to this category (Settings -> Brand Master). Only enforced when the
+      master has at least one applicable brand -- an empty master fails OPEN
+      so cataloguing is not bricked before the owner seeds brands.
+    - every other attribute: validated against Settings -> Catalog Dictionary
+      (`catalog_field_options`) WHEN a non-empty list is configured for that
+      field; unconfigured fields stay free-form.
+    - Matches are case-insensitive and the stored value is canonicalised to
+      the configured casing, so 'ray-ban' saves as 'Ray-Ban'.
+
+    Returns a (possibly canonicalised) copy of `attributes`. Fail-soft: no db
+    or a config read error -> attributes returned unchanged. Raises
+    ProductMasterError(422, field=<name>) on a value outside its list.
+    """
+    attrs = dict(attributes or {})
+    if db is None:
+        return attrs
+    # Lazy import (module attribute access kept so tests can monkeypatch the
+    # loaders on the catalog_dictionary module).
+    from api.services import catalog_dictionary as _cd
+
+    spec = category_spec(category)
+    prefix = spec.prefix if spec is not None else None
+
+    brand_val = attrs.get("brand_name")
+    if isinstance(brand_val, str) and brand_val.strip():
+        brands = _cd.load_brand_options(db, prefix)
+        if brands:  # None (read failed) or [] (empty master) both fail open
+            canonical_brand = _cd.match_canonical(brand_val, brands)
+            if canonical_brand is None:
+                raise ProductMasterError(
+                    f"Brand '{brand_val.strip()}' is not in the Brand Master for "
+                    "this category. Pick a saved brand, or add it in "
+                    "Settings -> Brand Master.",
+                    status=422,
+                    field="brand_name",
+                )
+            attrs["brand_name"] = canonical_brand
+
+    options = _cd.load_field_options(db)
+    if options:
+        for name, allowed in options.items():
+            if name in _cd.BRAND_MANAGED_FIELDS:
+                continue  # brand fields are governed by the Brand Master above
+            val = attrs.get(name)
+            if not isinstance(val, str) or not val.strip():
+                continue  # absent/blank values are the required-gate's concern
+            canonical_val = _cd.match_canonical(val, allowed)
+            if canonical_val is None:
+                preview = ", ".join(allowed[:6]) + ("..." if len(allowed) > 6 else "")
+                raise ProductMasterError(
+                    f"'{val.strip()}' is not an allowed value for {field_label(name)}. "
+                    f"Allowed: {preview}. Manage the list in "
+                    "Settings -> Catalog Dictionary.",
+                    status=422,
+                    field=name,
+                )
+            attrs[name] = canonical_val
+    return attrs
+
+
 def normalise_tags(tags: Any) -> List[str]:
     """Governed normalisation for product tags (step-12).
 
@@ -796,6 +863,12 @@ def normalise_payload(
                 status=422,
                 field=names[0],
             )
+
+    # Catalog Dictionary: when the owner has configured allowed values for a
+    # field (Settings -> Catalog Dictionary / Brand Master), a present value
+    # must match one of them; the match canonicalises casing. Fail-soft when
+    # db is absent (unit tests / callers without a connection).
+    attributes = enforce_dictionary_values(canonical, attributes or {}, db=db)
 
     # discount_category: forced for HA/SERVICES, else validate the supplied tier.
     if spec.forced_discount_category:

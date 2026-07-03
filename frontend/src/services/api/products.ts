@@ -16,6 +16,11 @@ export interface CategoryRegistryField {
   name: string;
   label: string;
   required: boolean;
+  // Catalog Dictionary: owner-configured allowed values for this field
+  // (Settings -> Catalog Dictionary; brand_name comes from the Brand Master).
+  // When present the form renders a select restricted to these values — the
+  // backend enforces the same list at create/update.
+  options?: string[];
 }
 
 export interface CategoryRegistryEntry {

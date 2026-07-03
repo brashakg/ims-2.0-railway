@@ -13,7 +13,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Users, Tag, Percent, Database,
-  ChevronRight, Plus, AlertCircle,
+  BookOpenCheck, ChevronRight, Plus, AlertCircle,
   RefreshCw, ToggleLeft, ToggleRight,
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer, Save,
@@ -57,6 +57,7 @@ import { UserManagementSection } from './SettingsAuth';
 import { CategorySection, BrandSection, DiscountSection } from './SettingsStore';
 import { LensMasterSection } from './SettingsLens';
 import { LensCatalogEnumsSection } from './SettingsLensEnums';
+import { CatalogDictionarySection } from './SettingsCatalogDictionary';
 import { RemindersSettings } from './RemindersSettings';
 import { RefundPolicySection } from './RefundPolicyPage';
 import type { SettingsTab } from './settingsTypes';
@@ -117,6 +118,7 @@ const SETTINGS_SECTIONS = [
   { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-master' as SettingsTab, label: 'Lens Master', icon: CircleDot, description: 'Lens brands, indices, coatings', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-enums' as SettingsTab, label: 'Lens Catalog Enums', icon: Layers, description: 'Editable brand/coating/index/material/type lists for the typed catalog', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+  { id: 'catalog-dictionary' as SettingsTab, label: 'Catalog Dictionary', icon: BookOpenCheck, description: 'Allowed values per Add-Product field — only saved values can be chosen in Catalog', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-pricing' as SettingsTab, label: 'Lens Pricing', icon: Receipt, description: 'Range-based tier pricing brackets', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'discounts' as SettingsTab, label: 'Discount Rules', icon: Percent, description: 'Role-based discount limits', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'] },
   { id: 'loyalty' as SettingsTab, label: 'Loyalty Programme', icon: Award, description: 'Earn rate, tiers, expiry, redemption rules', role: ['SUPERADMIN', 'ADMIN'] },
@@ -151,7 +153,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'refund-policy', 'notifications', 'reminders', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'catalog-dictionary', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'refund-policy', 'notifications', 'reminders', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -238,6 +240,7 @@ export function SettingsPage() {
     brands: 'catalog',
     'lens-master': 'catalog',
     'lens-enums': 'catalog',
+    'catalog-dictionary': 'catalog',
     'lens-pricing': 'catalog',
     discounts: 'catalog',
     loyalty: 'catalog',
@@ -441,6 +444,7 @@ export function SettingsPage() {
           {activeTab === 'brands' && <BrandSection />}
           {activeTab === 'lens-master' && <LensMasterSection />}
           {activeTab === 'lens-enums' && <LensCatalogEnumsSection />}
+          {activeTab === 'catalog-dictionary' && <CatalogDictionarySection />}
           {activeTab === 'discounts' && <DiscountSection />}
 
           {/* ---- Existing component delegates ---- */}

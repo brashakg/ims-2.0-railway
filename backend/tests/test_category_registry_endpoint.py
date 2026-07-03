@@ -141,8 +141,27 @@ def test_http_get_categories_returns_the_registry(client, auth_headers):
     assert "categories" in body
     codes = {c["code"] for c in body["categories"]}
     assert codes == set(pm.canonical_categories())
-    # The HTTP payload equals the pure registry (no transformation in the route).
-    assert body["categories"] == pm.all_category_specs()
+    # The HTTP payload equals the pure registry PLUS the Catalog-Dictionary
+    # enrichment: per-field `options` may be attached (brand_name from the
+    # Brand Master, other fields from Settings -> Catalog Dictionary). Strip
+    # the additive key and the payload must equal the pure registry exactly.
+    stripped = [
+        {
+            **cat,
+            "fields": [
+                {k: v for k, v in fld.items() if k != "options"}
+                for fld in cat.get("fields", [])
+            ],
+        }
+        for cat in body["categories"]
+    ]
+    assert stripped == pm.all_category_specs()
+    # Any attached options list is a list of strings (shape contract).
+    for cat in body["categories"]:
+        for fld in cat.get("fields", []):
+            if "options" in fld:
+                assert isinstance(fld["options"], list)
+                assert all(isinstance(o, str) for o in fld["options"])
 
 
 def test_http_get_categories_is_readable_by_any_authenticated_user(

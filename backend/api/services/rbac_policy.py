@@ -3845,6 +3845,22 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/lens-enums/{enum_type}/rename",
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
+    # --- /api/v1/catalog-field-options (Settings -> Catalog Dictionary) ---
+    {
+        "method": "GET",
+        "path": "/api/v1/catalog-field-options",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/catalog-field-options/",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "PATCH",
+        "path": "/api/v1/catalog-field-options/{field_name}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
     # --- /api/v1/lens-stock ---
     {
         "method": "POST",
