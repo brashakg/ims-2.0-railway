@@ -168,3 +168,53 @@ def get_whatsapp_config() -> Dict[str, Any]:
         "default_store_id": cfg.get("default_store_id")
         or os.getenv("WABA_DEFAULT_STORE_ID", "HQ"),
     }
+
+
+def get_myluxottica_config() -> Dict[str, Any]:
+    """Return myLuxottica dealer-portal creds for Catalog Autopilot.
+
+    DB key  : type="myluxottica" -> config.user, config.password, config.base_url
+    Env vars: MYLUXOTTICA_USER, MYLUXOTTICA_PASS, MYLUXOTTICA_BASE_URL (fallback)
+
+    Returns {"user", "password", "base_url"} only when BOTH user and password
+    are present, else {} (so the adapter stays disabled). base_url may be empty;
+    the adapter falls back to its own default. NO secrets logged.
+    """
+    cfg = _load_db_config("myluxottica")
+    user = cfg.get("user") or os.getenv("MYLUXOTTICA_USER", "")
+    password = cfg.get("password") or os.getenv("MYLUXOTTICA_PASS", "")
+    base_url = cfg.get("base_url") or os.getenv("MYLUXOTTICA_BASE_URL", "")
+    if user and password:
+        return {"user": user, "password": password, "base_url": base_url}
+    return {}
+
+
+def get_websearch_config() -> Dict[str, Any]:
+    """Return open-web search config for Catalog Autopilot's MarketplaceAdapter.
+
+    DB key  : type="web_search" -> config.api_key (Google API key), config.cx
+    Env vars: GOOGLE_CSE_KEY + GOOGLE_CSE_CX (Google Custom Search), or
+              SERP_API_KEY (SerpAPI) -- both remain a fallback.
+
+    Returns a dict describing what's usable. `provider` is:
+      "google_cse" when a Google key + cx are both present (preferred),
+      "serpapi"    when only a SerpAPI key is present,
+      ""           when nothing is configured.
+    NO secrets logged.
+    """
+    cfg = _load_db_config("web_search")
+    cse_key = cfg.get("api_key") or os.getenv("GOOGLE_CSE_KEY", "")
+    cse_cx = cfg.get("cx") or os.getenv("GOOGLE_CSE_CX", "")
+    serp = os.getenv("SERP_API_KEY", "")
+    if cse_key and cse_cx:
+        provider = "google_cse"
+    elif serp:
+        provider = "serpapi"
+    else:
+        provider = ""
+    return {
+        "google_cse_key": cse_key,
+        "google_cse_cx": cse_cx,
+        "serp_api_key": serp,
+        "provider": provider,
+    }

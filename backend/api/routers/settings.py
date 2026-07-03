@@ -406,6 +406,43 @@ _INTEGRATION_CATALOG = [
              "placeholder": "https://preprod.gateway.ondc.org", "optional": True},
         ],
     },
+    {
+        # Catalog-Autopilot data source: the AUTHORIZED Ray-Ban / Oakley /
+        # Luxottica wholesale portal. Consumed by MyLuxotticaAdapter (priority 2)
+        # via integration_config.get_myluxottica_config(); env vars
+        # MYLUXOTTICA_USER/PASS remain a fallback.
+        "type": "myluxottica",
+        "name": "myLuxottica (dealer catalog)",
+        "description": "Authorized Ray-Ban / Oakley / Luxottica wholesale source "
+                       "for Catalog Autopilot (dealer-portal login).",
+        "category": "Commerce",
+        "fields": [
+            {"key": "user", "label": "Dealer Username / Email", "secret": False,
+             "placeholder": "Your myLuxottica dealer login"},
+            {"key": "password", "label": "Password", "secret": True,
+             "placeholder": "myLuxottica portal password"},
+            {"key": "base_url", "label": "Portal Base URL (optional)", "secret": False,
+             "placeholder": "https://my.essilorluxottica.com", "optional": True},
+        ],
+    },
+    {
+        # Catalog-Autopilot data source: open-web search via Google Programmable
+        # Search (Custom Search JSON API). Consumed by MarketplaceAdapter
+        # (priority 4) via integration_config.get_websearch_config(); env vars
+        # GOOGLE_CSE_KEY/GOOGLE_CSE_CX (or SERP_API_KEY) remain a fallback.
+        "type": "web_search",
+        "name": "Web Search (Google Custom Search)",
+        "description": "Powers Autopilot open-web results. Create a Programmable "
+                       "Search Engine at programmablesearchengine.google.com + an "
+                       "API key in Google Cloud.",
+        "category": "Commerce",
+        "fields": [
+            {"key": "api_key", "label": "Google API Key", "secret": True,
+             "placeholder": "Google Cloud API key with Custom Search JSON API"},
+            {"key": "cx", "label": "Search Engine ID (cx)", "secret": False,
+             "placeholder": "Your Programmable Search Engine ID"},
+        ],
+    },
     # ---- Messaging ---------------------------------------------------------
     {
         "type": "whatsapp",

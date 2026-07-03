@@ -778,7 +778,11 @@ class BrandSiteAdapter(SourceAdapter):
 # Portal endpoints/selectors kept as tunable module constants because we cannot
 # test the live portal here. The operator adjusts these once creds are set on
 # Railway. All are best-effort; any mismatch just yields [] (fail-soft).
-MYLUXOTTICA_BASE_URL = os.getenv("MYLUXOTTICA_BASE_URL", "https://my.luxottica.com")
+MYLUXOTTICA_BASE_URL = os.getenv(
+    "MYLUXOTTICA_BASE_URL", "https://my.essilorluxottica.com"
+)
+# Login / search paths stay env-tunable: the exact EssilorLuxottica portal paths
+# are unknown and get tuned during live testing after the owner pastes creds.
 MYLUXOTTICA_LOGIN_PATH = os.getenv("MYLUXOTTICA_LOGIN_PATH", "/auth/login")
 MYLUXOTTICA_SEARCH_PATH = os.getenv(
     "MYLUXOTTICA_SEARCH_PATH", "/catalog/search?query={q}"
@@ -798,22 +802,51 @@ class MyLuxotticaAdapter(SourceAdapter):
     source_class = AUTHORIZED
     priority = 2
 
+    @staticmethod
+    def _creds() -> Dict[str, str]:
+        """Read decrypted creds from Settings->Integrations (DB) with an env
+        fallback. Imported lazily to avoid any import-order/circular issues.
+        Fail-soft: any error -> {}."""
+        try:
+            from api.services import integration_config
+
+            return integration_config.get_myluxottica_config() or {}
+        except Exception:  # noqa: BLE001 - never break the adapter on config read
+            return {}
+
     def is_enabled(self) -> bool:
-        return bool(os.getenv("MYLUXOTTICA_USER") and os.getenv("MYLUXOTTICA_PASS"))
+        creds = self._creds()
+        return (
+            bool(creds.get("user") and creds.get("password"))
+            and httpx is not None
+            and not _network_disabled()
+        )
 
     def reason(self) -> str:
+        if _network_disabled():
+            return "AUTOPILOT_DISABLE_NETWORK set; myLuxottica scrape off."
+        if httpx is None:
+            return "httpx unavailable; myLuxottica scraping disabled."
         if self.is_enabled():
             return "Credentials present; authenticated portal scrape active."
-        return "Set MYLUXOTTICA_USER + MYLUXOTTICA_PASS to enable."
+        return (
+            "Add myLuxottica dealer creds in Settings -> Integrations "
+            "(or set MYLUXOTTICA_USER + MYLUXOTTICA_PASS) to enable."
+        )
+
+    def _base_url(self) -> str:
+        """Portal base URL: DB config wins, else the module default."""
+        return (self._creds().get("base_url") or MYLUXOTTICA_BASE_URL).rstrip("/")
 
     def login(self, client: Any) -> bool:
         """Best-effort form login on the shared client session. Returns True if
         the POST looked successful. Never raises."""
-        user = os.getenv("MYLUXOTTICA_USER") or ""
-        pwd = os.getenv("MYLUXOTTICA_PASS") or ""
+        creds = self._creds()
+        user = creds.get("user") or ""
+        pwd = creds.get("password") or ""
         if not (user and pwd) or httpx is None:
             return False
-        url = MYLUXOTTICA_BASE_URL.rstrip("/") + MYLUXOTTICA_LOGIN_PATH
+        url = self._base_url() + MYLUXOTTICA_LOGIN_PATH
         try:
             resp = client.post(
                 url,
@@ -832,6 +865,7 @@ class MyLuxotticaAdapter(SourceAdapter):
     def _search(self, brand, model, color, size, limit, category=""):
         if not self.is_enabled() or httpx is None:
             return []
+        base_url = self._base_url()
         try:
             with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
                 if not self.login(client):
@@ -839,7 +873,7 @@ class MyLuxotticaAdapter(SourceAdapter):
                     return []
                 cat_word = _category_query_word(category)
                 query = " ".join(p for p in (model, color, cat_word) if p)
-                url = MYLUXOTTICA_BASE_URL.rstrip("/") + MYLUXOTTICA_SEARCH_PATH.format(
+                url = base_url + MYLUXOTTICA_SEARCH_PATH.format(
                     q=_url_q(query)
                 )
                 body = _http_get(url, client=client)
@@ -856,7 +890,7 @@ class MyLuxotticaAdapter(SourceAdapter):
         cand = _candidate_skeleton(self.name, self.source_class)
         cand.update(
             {
-                "url": MYLUXOTTICA_BASE_URL,
+                "url": base_url,
                 "source_url": url,
                 "references": [{"source": self.name, "url": url}],
                 "title": scraped.get("title") or f"{brand} {model}".strip(),
@@ -914,54 +948,73 @@ class MarketplaceAdapter(SourceAdapter):
     source_class = UNVERIFIED
     priority = 4
 
+    @staticmethod
+    def _websearch_config() -> Dict[str, Any]:
+        """Read the web-search config from Settings->Integrations (DB) with an
+        env fallback. Imported lazily to avoid import-order/circular issues.
+        Fail-soft: any error -> {} (treated as unconfigured)."""
+        try:
+            from api.services import integration_config
+
+            return integration_config.get_websearch_config() or {}
+        except Exception:  # noqa: BLE001 - never break the adapter on config read
+            return {}
+
     def _has_serp(self) -> bool:
-        return bool(os.getenv("SERP_API_KEY"))
+        return self._websearch_config().get("provider") == "serpapi"
 
     def _has_cse(self) -> bool:
-        return bool(os.getenv("GOOGLE_CSE_KEY") and os.getenv("GOOGLE_CSE_CX"))
+        return self._websearch_config().get("provider") == "google_cse"
 
     def is_enabled(self) -> bool:
         if _network_disabled():
             return False
-        return self._has_serp() or self._has_cse()
+        return bool(self._websearch_config().get("provider"))
 
     def reason(self) -> str:
         if _network_disabled():
             return "AUTOPILOT_DISABLE_NETWORK set; marketplace search off."
         if self.is_enabled():
             return "Search API key present; specs-only (images stay unverified)."
-        return "Set SERP_API_KEY or GOOGLE_CSE_KEY+GOOGLE_CSE_CX to enable."
+        return (
+            "Add a Web Search key in Settings -> Integrations "
+            "(or set GOOGLE_CSE_KEY+GOOGLE_CSE_CX / SERP_API_KEY) to enable."
+        )
 
     def _search(self, brand, model, color, size, limit, category=""):
         if httpx is None or not self.is_enabled():
             return []
+        cfg = self._websearch_config()
+        provider = cfg.get("provider")
         cat_word = _category_query_word(category)
         q = " ".join(p for p in [brand, model, color, size, cat_word] if p).strip()
         if not q:
             return []
         items: List[Dict[str, Any]] = []
         try:
-            if self._has_serp():
-                body = _http_get(
-                    MARKETPLACE_SEARCH_URL,
-                    params={
-                        "q": q,
-                        "api_key": os.getenv("SERP_API_KEY"),
-                        "num": min(int(limit), 10),
-                    },
-                )
-                items = self._parse_serp(body)
-            elif self._has_cse():
+            # Prefer Google CSE (key + cx), then SerpAPI. Behaviour is identical
+            # when only env vars are set (the loader falls back to env).
+            if provider == "google_cse":
                 body = _http_get(
                     GOOGLE_CSE_URL,
                     params={
                         "q": q,
-                        "key": os.getenv("GOOGLE_CSE_KEY"),
-                        "cx": os.getenv("GOOGLE_CSE_CX"),
+                        "key": cfg.get("google_cse_key"),
+                        "cx": cfg.get("google_cse_cx"),
                         "num": min(int(limit), 10),
                     },
                 )
                 items = self._parse_cse(body)
+            elif provider == "serpapi":
+                body = _http_get(
+                    MARKETPLACE_SEARCH_URL,
+                    params={
+                        "q": q,
+                        "api_key": cfg.get("serp_api_key"),
+                        "num": min(int(limit), 10),
+                    },
+                )
+                items = self._parse_serp(body)
         except Exception as e:  # noqa: BLE001
             logger.warning("[AUTOPILOT] marketplace search failed: %s", e)
             return []
