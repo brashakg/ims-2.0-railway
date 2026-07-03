@@ -210,9 +210,11 @@ export const productApi = {
   // Sub Brand select per selected brand. Authenticated (not admin-gated).
   getBrandOptions: async (
     category?: string
-  ): Promise<{ brands: Array<{ name: string; subbrands: string[] }> }> => {
+  ): Promise<{ brands: Array<{ name: string; subbrands: string[]; tier?: string }> }> => {
     const response = await api.get('/products/brand-options', { params: { category } });
-    return response.data as { brands: Array<{ name: string; subbrands: string[] }> };
+    return response.data as {
+      brands: Array<{ name: string; subbrands: string[]; tier?: string }>;
+    };
   },
 
   getBrands: async (category?: string) => {

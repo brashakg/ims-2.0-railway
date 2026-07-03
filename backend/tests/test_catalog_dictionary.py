@@ -269,3 +269,57 @@ class TestRouter:
     def test_get_requires_auth(self, client):
         r = client.get("/api/v1/catalog-field-options")
         assert r.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# 6. Discount tier derivation (owner rule: tier comes from Settings)
+# ---------------------------------------------------------------------------
+
+
+class TestTierDerivation:
+    _BASE = dict(
+        category="FRAME",
+        attributes={"brand_name": "Ray-Ban", "model_no": "RX1", "colour_code": "BLK"},
+        mrp=5000,
+        offer_price=4500,
+        sku="FRTIER1",
+    )
+
+    def test_tier_derived_from_brand_master(self, monkeypatch):
+        monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
+        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: [])
+        monkeypatch.setattr(cd, "load_brand_tier", lambda db, b: "LUXURY")
+        doc = pm.normalise_payload(db=_DB, **self._BASE)
+        assert doc["discount_category"] == "LUXURY"
+
+    def test_explicit_tier_still_wins(self, monkeypatch):
+        monkeypatch.setattr(cd, "load_brand_options", lambda db, p: ["Ray-Ban"])
+        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: [])
+        monkeypatch.setattr(cd, "load_brand_tier", lambda db, b: "LUXURY")
+        doc = pm.normalise_payload(db=_DB, discount_category="MASS", **self._BASE)
+        assert doc["discount_category"] == "MASS"
+
+    def test_underivable_stays_none_draft_gap(self, monkeypatch):
+        monkeypatch.setattr(cd, "load_brand_options", lambda db, p: [])
+        monkeypatch.setattr(cd, "load_field_options", lambda db: {})
+        monkeypatch.setattr(cd, "load_subbrand_options", lambda db, b: None)
+        monkeypatch.setattr(cd, "load_brand_tier", lambda db, b: None)
+        doc = pm.normalise_payload(db=_DB, **self._BASE)
+        assert doc.get("discount_category") is None
+
+    def test_load_brand_tier_reads_master(self):
+        class _Coll:
+            def find(self, q=None):
+                return [{"brand_id": "b1", "name": "Gucci", "tier": "LUXURY"},
+                        {"brand_id": "b2", "name": "NoTier", "tier": "WEIRD"}]
+
+        class _Db:
+            def get_collection(self, name):
+                return _Coll()
+
+        assert cd.load_brand_tier(_Db(), "gucci") == "LUXURY"
+        assert cd.load_brand_tier(_Db(), "NoTier") is None
+        assert cd.load_brand_tier(_Db(), "Unknown") is None
+        assert cd.load_brand_tier(None, "Gucci") is None

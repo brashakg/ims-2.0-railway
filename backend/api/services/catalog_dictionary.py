@@ -127,6 +127,39 @@ def load_brand_options(db, category_prefix: Optional[str] = None) -> Optional[Li
 
 SUBBRAND_COLLECTION = "subbrand_masters"
 
+# Brand Master tiers that map 1:1 onto product discount tiers.
+BRAND_TIERS = frozenset({"MASS", "PREMIUM", "LUXURY"})
+
+
+def _find_active_brand(db, brand_name: str) -> Optional[Dict[str, Any]]:
+    """The ACTIVE brand_masters doc whose name matches case-insensitively,
+    or None (not found / no db / read failure)."""
+    if db is None or not str(brand_name or "").strip():
+        return None
+    try:
+        probe = str(brand_name).strip().casefold()
+        for doc in db.get_collection(BRAND_COLLECTION).find({"is_active": {"$ne": False}}):
+            if doc.get("is_active") is False:
+                continue
+            if str(doc.get("name") or "").strip().casefold() == probe:
+                return doc
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
+        return None
+
+
+def load_brand_tier(db, brand_name: str) -> Optional[str]:
+    """The Brand Master tier (MASS/PREMIUM/LUXURY) for a brand, or None when
+    the brand is unknown / has no valid tier / read failed. Used to DERIVE a
+    product's discount tier at create time (owner rule: the tier is set
+    brand-wise in Settings, not re-picked per product)."""
+    doc = _find_active_brand(db, brand_name)
+    if doc is None:
+        return None
+    tier = str(doc.get("tier") or "").strip().upper()
+    return tier if tier in BRAND_TIERS else None
+
 
 def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:
     """Subbrand names configured for the ACTIVE Brand-Master brand matching

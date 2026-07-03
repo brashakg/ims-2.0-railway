@@ -889,7 +889,12 @@ def normalise_payload(
     # db is absent (unit tests / callers without a connection).
     attributes = enforce_dictionary_values(canonical, attributes or {}, db=db)
 
-    # discount_category: forced for HA/SERVICES, else validate the supplied tier.
+    # discount_category: forced for HA/SERVICES, else an explicit value wins
+    # (validated), else DERIVED from the brand's Brand Master tier (owner rule:
+    # the tier is set brand-wise + category-wise in Settings, never re-picked
+    # per product). Underivable (brand not in master / no db) -> None, which
+    # compute_catalog_status surfaces as a DRAFT gap -- visible, never a
+    # silent MASS default.
     if spec.forced_discount_category:
         dc = spec.forced_discount_category
     elif discount_category is not None:
@@ -903,6 +908,13 @@ def normalise_payload(
             )
     else:
         dc = None
+        if db is not None:
+            try:
+                from api.services import catalog_dictionary as _cd
+
+                dc = _cd.load_brand_tier(db, (attributes or {}).get("brand_name"))
+            except Exception:  # noqa: BLE001 - derivation is fail-soft
+                dc = None
 
     # GST / HSN: explicit value wins; else derive from the canonical table so
     # the master rate always equals what POS bills (gst_rates.py).
