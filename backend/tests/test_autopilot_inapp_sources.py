@@ -56,15 +56,21 @@ class TestMyLuxotticaInApp:
         )
         assert ap.MyLuxotticaAdapter().is_enabled() is True
 
-    def test_network_disabled_forces_off(self, monkeypatch):
-        # Even with creds, the hard kill-switch keeps it disabled.
+    def test_network_disabled_does_not_unconfigure(self, monkeypatch):
+        # is_enabled reflects CONFIG (creds present), not runtime network state
+        # -- matches the original contract + the gating tests. The kill-switch is
+        # a runtime concern: surfaced by reason() and handled fail-soft in
+        # login()/_search(); it must NOT make a configured source report as
+        # unconfigured.
         monkeypatch.setenv("AUTOPILOT_DISABLE_NETWORK", "1")
         monkeypatch.setattr(
             ic,
             "get_myluxottica_config",
             lambda: {"user": "u", "password": "p", "base_url": ""},
         )
-        assert ap.MyLuxotticaAdapter().is_enabled() is False
+        adapter = ap.MyLuxotticaAdapter()
+        assert adapter.is_enabled() is True
+        assert "AUTOPILOT_DISABLE_NETWORK" in adapter.reason()
 
     def test_base_url_prefers_db_then_default(self, monkeypatch):
         monkeypatch.setattr(

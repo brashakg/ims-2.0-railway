@@ -815,12 +815,13 @@ class MyLuxotticaAdapter(SourceAdapter):
             return {}
 
     def is_enabled(self) -> bool:
+        # Enabled purely on credential presence (matches the original contract +
+        # the InternalCatalog/gating tests). httpx-missing / network-disabled are
+        # runtime concerns: login()/_search() are fail-soft (return []), and
+        # reason() surfaces them. Gating is_enabled on them would wrongly report
+        # the source as unconfigured.
         creds = self._creds()
-        return (
-            bool(creds.get("user") and creds.get("password"))
-            and httpx is not None
-            and not _network_disabled()
-        )
+        return bool(creds.get("user") and creds.get("password"))
 
     def reason(self) -> str:
         if _network_disabled():
