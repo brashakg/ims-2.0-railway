@@ -79,6 +79,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // /catalog/autopilot route still resolves (it redirects to /catalog/add)
       // so bookmarks + the ?prefill=autopilot handoff keep working.
       { id: 'pricing', label: 'Pricing & Offers', to: '/catalog/pricing', icon: 'coins', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      // Collections Phase 1: merchandising view over the ecom collections
+      // system — governed chip builder + per-collection stock/sales KPIs.
+      // requireRoles mirrors the /collections ProtectedRoute gate in App.tsx.
+      { id: 'collections', label: 'Collections', to: '/collections', icon: 'layers', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
     ],
   },
   {
