@@ -12,13 +12,13 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
-  Store, Users, Tag, Percent, Database,
+  Users, Tag, Percent, Database,
   ChevronRight, Plus, AlertCircle,
   RefreshCw, ToggleLeft, ToggleRight,
   Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer, Save,
   Search, Calendar, Filter, X, Shield, LogOut, Bot, Award, Sliders, Target,
-  RotateCcw, ExternalLink, ArrowRight,
+  RotateCcw, ExternalLink,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -112,7 +112,6 @@ type GroupId = 'account' | 'org' | 'catalog' | 'compliance' | 'system';
 const SETTINGS_SECTIONS = [
   { id: 'profile' as SettingsTab, label: 'My Profile', icon: User, description: 'Account settings and preferences', role: ['ALL'] },
   { id: 'business' as SettingsTab, label: 'Business Profile', icon: Building2, description: 'Company info and branding', role: ['SUPERADMIN', 'ADMIN'] },
-  { id: 'stores' as SettingsTab, label: 'Stores & Entities', icon: Store, description: 'Managed on the Organization screen', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'users' as SettingsTab, label: 'User Management', icon: Users, description: 'Manage users and roles', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
   { id: 'categories' as SettingsTab, label: 'Category Master', icon: Tag, description: 'Product categories and attributes', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
@@ -152,7 +151,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'refund-policy', 'notifications', 'reminders', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'tds-rates', 'policies', 'refund-policy', 'notifications', 'reminders', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -233,7 +232,6 @@ export function SettingsPage() {
     profile: 'account',
     // Business & Org (the Organization link lives in this group's header)
     business: 'org',
-    stores: 'org',
     users: 'org',
     // Catalog & Pricing
     categories: 'catalog',
@@ -438,7 +436,6 @@ export function SettingsPage() {
           {/* ---- Delegated sub-components ---- */}
           {activeTab === 'profile' && <ProfileSection />}
           {activeTab === 'business' && <BusinessSection />}
-          {activeTab === 'stores' && <StoresRedirectCard onGo={() => navigate('/organization')} />}
           {activeTab === 'users' && <UserManagementSection />}
           {activeTab === 'categories' && <CategorySection />}
           {activeTab === 'brands' && <BrandSection />}
@@ -509,43 +506,6 @@ export function SettingsPage() {
           {!isLoading && activeTab === 'system' && (
             <SystemSection systemStatus={systemStatus} />
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// Stores Redirect Card (COUNCIL RULING §3 — single source of truth)
-// ============================================================================
-// Stores + legal entities are created/edited ONLY on the canonical /organization
-// screen (it captures the required entity link + derives each store's GSTIN by
-// state). This card keeps the Settings "Stores" tab slot but points the operator
-// at the one place that works — no second, drifting store editor.
-
-function StoresRedirectCard({ onGo }: { onGo: () => void }) {
-  return (
-    <div className="card">
-      <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-lg bg-bv-red-50 flex items-center justify-center flex-shrink-0">
-          <Building2 className="w-5 h-5 text-bv-red-600" />
-        </div>
-        <div className="flex-1">
-          <h2 className="text-lg font-semibold text-gray-900">Stores &amp; entities moved to Organization</h2>
-          <p className="text-sm text-gray-500 mt-1 max-w-prose">
-            Legal entities (PAN / GSTIN) and their stores are now managed in one
-            place: the <strong>Organization</strong> screen. It links each store
-            to its entity and derives the store GSTIN by state — the single source
-            of truth for store data.
-          </p>
-          <button
-            type="button"
-            onClick={onGo}
-            className="btn-primary mt-4 inline-flex items-center gap-2"
-          >
-            Open Organization
-            <ArrowRight className="w-4 h-4" />
-          </button>
         </div>
       </div>
     </div>
