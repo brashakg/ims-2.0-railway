@@ -121,13 +121,42 @@ def _member_skus(db, collection: Dict) -> List[str]:
     )
 
 
+def _product_ids_by_sku(db, skus: List[str]) -> Dict[str, Any]:
+    """sku -> the `products` SPINE doc's product_id, resolved in ONE batched
+    find over {"sku": {"$in": [...]}} (projected to sku + product_id).
+
+    Collections Phase 1 groundwork: rows in the materialised view carry a
+    denormalised product_id so downstream joins (orders.items.product_id,
+    analytics) are a direct indexed lookup instead of a per-row sku hop.
+    FAIL-SOFT: any error / a sku with no spine doc simply resolves to None --
+    a catalog-only member never blocks materialisation."""
+    out: Dict[str, Any] = {}
+    if db is None or not skus:
+        return out
+    try:
+        cursor = db["products"].find(
+            {"sku": {"$in": list(skus)}}, {"sku": 1, "product_id": 1}
+        )
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            sku = doc.get("sku")
+            if sku and doc.get("product_id") is not None and sku not in out:
+                out[sku] = doc.get("product_id")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[COLL-MAT] product_id resolve failed: %s", exc)
+    return out
+
+
 def materialize_collection(db, collection: Dict) -> int:
     """Recompute + persist a collection's membership into `collection_products`.
 
     Replaces ALL prior rows for the collection with one row per member SKU:
-        {collection_id, handle, sku, position, computed_at}
-    Also writes back `products_count` + `materialized_at` onto the collection doc
-    (best-effort). Returns the member count. Fail-soft -> 0."""
+        {collection_id, handle, sku, product_id, position, computed_at}
+    `product_id` is denormalised from the `products` spine (batched, fail-soft
+    -> None when the sku has no spine doc). Also writes back `products_count` +
+    `materialized_at` onto the collection doc (best-effort). Returns the member
+    count. Fail-soft -> 0."""
     if db is None or not isinstance(collection, dict):
         return 0
     collection_id = collection.get("collection_id") or collection.get("id")
@@ -152,11 +181,13 @@ def materialize_collection(db, collection: Dict) -> int:
         # orphaned members after a rule narrows). Standalone Mongo, no txn.
         view.delete_many({"collection_id": collection_id})
         if skus:
+            product_ids = _product_ids_by_sku(db, skus)
             rows = [
                 {
                     "collection_id": collection_id,
                     "handle": handle,
                     "sku": sku,
+                    "product_id": product_ids.get(sku),
                     "position": idx,
                     "computed_at": computed_at,
                 }
@@ -318,5 +349,10 @@ def ensure_indexes(db) -> None:
         view.create_index([("collection_id", 1), ("position", 1)])
         view.create_index([("collection_id", 1), ("sku", 1)], unique=True)
         view.create_index([("sku", 1)])
+        # Collections Phase 1: product_id joins (orders.items.product_id /
+        # analytics) hit the view directly. NON-unique -- product_id may be
+        # None for catalog-only members and repeats across collections.
+        view.create_index([("product_id", 1)])
+        view.create_index([("collection_id", 1), ("product_id", 1)])
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COLL-MAT] ensure_indexes failed: %s", exc)

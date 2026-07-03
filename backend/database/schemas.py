@@ -730,7 +730,12 @@ INDEXES = {
             "unique": True,
             "partialFilterExpression": {"shopify_order_id": {"$type": "string"}},
             "name": "uniq_shopify_order_id",
-        }
+        },
+        # Collections Phase 1 (merchandising engine): per-product sales lookups
+        # over order lines -- "orders containing product X, newest first" --
+        # powering collection analytics / bestseller ranking without a full
+        # collection scan. Multikey on the embedded items array; non-unique.
+        {"keys": [("items.product_id", 1), ("created_at", -1)]}
     ],
     "vendors": [
         {"keys": [("vendor_code", 1)], "unique": True},

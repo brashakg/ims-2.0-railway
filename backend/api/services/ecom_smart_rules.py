@@ -49,6 +49,13 @@ MATCH SEMANTICS:
   - STARTS_WITH / ENDS_WITH : case-insensitive prefix / suffix on any element.
   - GREATER_THAN / LESS_THAN : numeric compare (any element parseable as a
                     number satisfies it; non-numeric -> no match, never raises).
+  - IN            : value is a LIST of strings; matches when any element of the
+                    field's extracted value(s) case-insensitively equals ANY
+                    list entry. The ONLY relation that accepts a list value --
+                    every other relation keeps coercing/rejecting non-string
+                    values exactly as before. An empty list is a VALID rule
+                    that never matches (False, not skipped). Legacy
+                    Shopify-shaped rules never carry IN.
   - Unknown relation -> defaults to EQUALS (fail-soft, never raises).
 
 FAIL-SOFT CONTRACT: a malformed rule (missing field/value) is SKIPPED. With no
@@ -92,6 +99,7 @@ _STARTS_WITH = "STARTS_WITH"
 _ENDS_WITH = "ENDS_WITH"
 _GREATER_THAN = "GREATER_THAN"
 _LESS_THAN = "LESS_THAN"
+_IN = "IN"
 
 # Shopify smart-collection rule column -> IMS logical field. Lookup key is the
 # _norm_field()'d column, so VENDOR / vendor / Vendor all fold the same way.
@@ -121,6 +129,26 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
+def _clean_in_values(value: Any) -> List[str]:
+    """Coerce an IN rule's value into a list of trimmed, NON-EMPTY strings.
+
+    Entries are stringified + trimmed; blanks and None entries are dropped. A
+    scalar folds into a single-item list (fail-soft -- a one-value IN then
+    behaves exactly like EQUALS). Returns [] for None / an empty or
+    blank-only list -- an IN rule with [] never matches."""
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    out: List[str] = []
+    for item in items:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
 def normalize_rule(rule: Any) -> Any:
     """Normalise ONE rule to the IMS shape ``{field, relation, value}``.
 
@@ -141,6 +169,21 @@ def normalize_rule(rule: Any) -> Any:
         return rule
     field = rule.get("field")
     value = rule.get("value")
+    # IN (additive, native-shape only -- no legacy Shopify rule carries IN):
+    # the value STAYS a list, normalised to trimmed non-empty strings (blanks
+    # dropped; empty list kept -- a valid rule that never matches). Handled
+    # BEFORE the generic passthrough so the list is always cleaned, and
+    # idempotent: re-normalising a clean IN rule yields an equal rule.
+    if (
+        str(rule.get("relation") or "").strip().upper() == _IN
+        and field not in (None, "")
+    ):
+        if value is None:
+            return rule  # malformed (no value) -- the evaluator skips it
+        out_in = dict(rule)
+        out_in["relation"] = _IN
+        out_in["value"] = _clean_in_values(value)
+        return out_in
     if field not in (None, "") and value is not None:
         return rule  # already IMS-shaped -- idempotent passthrough
     if "column" not in rule and "condition" not in rule:
@@ -238,10 +281,23 @@ def _rule_matches(doc: Dict, rule: Dict) -> Optional[bool]:
         return None
     field = rule.get("field")
     value = rule.get("value")
+    relation = str(rule.get("relation") or _EQUALS).strip().upper()
+
+    # IN: the ONLY relation whose value is a list. Matches when any extracted
+    # candidate equals ANY list entry (case-insensitive). An empty list is a
+    # VALID rule that never matches -> False (not None), so it can never
+    # accidentally match-all through the malformed-skip path.
+    if relation == _IN:
+        if not field or value is None:
+            return None  # malformed -- skip (same as a missing value today)
+        needles = {v.lower() for v in _clean_in_values(value)}
+        if not needles:
+            return False
+        return any(c.lower() in needles for c in _extract_values(doc, field))
+
     if not field or value is None or str(value).strip() == "":
         return None
 
-    relation = str(rule.get("relation") or _EQUALS).strip().upper()
     needle = str(value).strip().lower()
     candidates = [c.lower() for c in _extract_values(doc, field)]
 
@@ -337,6 +393,7 @@ SUPPORTED_RELATIONS = [
     _ENDS_WITH,
     _GREATER_THAN,
     _LESS_THAN,
+    _IN,
 ]
 
 
