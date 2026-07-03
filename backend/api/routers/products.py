@@ -1553,7 +1553,15 @@ async def get_category_registry(current_user: dict = Depends(get_current_user)):
     on the frontend: it derives from this endpoint.
 
     Shape: {"categories": [{code, sku_prefix, name, required_fields,
-    optional_fields, fields:[{name,label,required}], forced_discount_category}]}.
+    optional_fields, fields:[{name,label,required,options?}], forced_discount_category}]}.
+
+    Per-field `options` (Catalog Dictionary): when the owner configured an
+    allowed-value list for a field (Settings -> Catalog Dictionary) it is
+    attached to that field entry, and `brand_name` ALWAYS carries the ACTIVE
+    Brand Master brands applicable to the category (possibly []) -- the
+    Add-Product form renders these as restricted selects, and the create/update
+    doors enforce the same lists server-side. Fail-soft: db trouble -> the raw
+    registry without options.
 
     cost_price is intentionally NOT a required field here: it is GRN-deferred
     (required to make a product ACTIVE/sellable, not to save it).
@@ -1561,7 +1569,32 @@ async def get_category_registry(current_user: dict = Depends(get_current_user)):
     Available to any authenticated user (read-only metadata; the create gate is
     role-protected separately).
     """
-    return {"categories": _pm.all_category_specs()}
+    categories = _pm.all_category_specs()
+    try:
+        from ..dependencies import get_db as _get_db_dep
+        from ..services import catalog_dictionary as _cd
+
+        db = _get_db_dep()
+        if db is not None and getattr(db, "is_connected", False):
+            field_options = _cd.load_field_options(db)
+            brand_cache: dict = {}
+            for cat in categories:
+                prefix = cat.get("sku_prefix")
+                if prefix not in brand_cache:
+                    brand_cache[prefix] = _cd.load_brand_options(db, prefix)
+                brands = brand_cache[prefix]
+                for fld in cat.get("fields", []):
+                    name = fld.get("name")
+                    if name == "brand_name":
+                        # Always attach (even []) -- the Brand Master is the
+                        # single source of truth for brands; None = read failed.
+                        if brands is not None:
+                            fld["options"] = brands
+                    elif name in field_options:
+                        fld["options"] = field_options[name]
+    except Exception as e:  # noqa: BLE001 - options are an enrichment, never a blocker
+        logger.warning("[CATALOG-DICT] registry options merge skipped: %s", e)
+    return {"categories": categories}
 
 
 @router.get("/categories/list")
@@ -1923,6 +1956,25 @@ async def update_product(
                 **(existing.get("attributes") or {}),
                 **(update_data["attributes"] or {}),
             }
+            # Catalog Dictionary: the update path must enforce the same
+            # owner-configured value lists as the create door (create runs it
+            # inside normalise_payload; PUT does not go through that path).
+            try:
+                from ..dependencies import get_db as _get_db_dep
+
+                _dict_db = _get_db_dep()
+            except Exception:  # noqa: BLE001
+                _dict_db = None
+            try:
+                update_data["attributes"] = _pm.enforce_dictionary_values(
+                    update_data.get("category") or existing.get("category"),
+                    update_data["attributes"],
+                    db=_dict_db,
+                )
+            except _pm.ProductMasterError as err:
+                raise HTTPException(
+                    status_code=err.status, detail=_pm_error_detail(err)
+                ) from err
 
         # Validate modality enum if a CL modality is being set.
         if update_data.get("modality") and update_data["modality"] not in CL_MODALITIES:

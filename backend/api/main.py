@@ -121,6 +121,7 @@ from .routers import (
     lens_catalog_router,
     lens_stock_router,
     lens_enums_router,
+    catalog_field_options_router,
     product_templates_router,
     audit_router,
     budgets_router,
@@ -1471,6 +1472,13 @@ app.include_router(
     lens_enums_router,
     prefix="/api/v1/lens-enums",
     tags=["Lens Enums"],
+)
+# Settings -> Catalog Dictionary: owner-managed allowed values per
+# Add-Product attribute field (brand values come from the Brand Master).
+app.include_router(
+    catalog_field_options_router,
+    prefix="/api/v1/catalog-field-options",
+    tags=["Catalog Dictionary"],
 )
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]

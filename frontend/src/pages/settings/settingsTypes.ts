@@ -10,6 +10,7 @@ export type SettingsTab =
   | 'brands'
   | 'lens-master'
   | 'lens-enums'
+  | 'catalog-dictionary'
   | 'discounts'
   | 'tax-invoice'
   | 'hsn-rates'

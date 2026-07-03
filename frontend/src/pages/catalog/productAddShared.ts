@@ -328,25 +328,46 @@ export function getCategoryFields(code: string | null | undefined): CategoryFiel
   const optionalSet = new Set(entry.optional_fields || []);
   const known = new Set(local.map((f) => f.name));
 
+  // Catalog Dictionary: per-field allowed values the server attached to the
+  // registry (Settings -> Catalog Dictionary; brand_name = Brand Master).
+  // When the server sends options for a field they REPLACE any local
+  // hardcoded list and force the field to render as a restricted select —
+  // the owner's saved values are the only choosable ones. brand_name is
+  // special: the server sends it even when EMPTY (empty Brand Master), so an
+  // empty select + "add brands in Settings" hint shows instead of the stale
+  // hardcoded brand list.
+  const serverOptions = new Map<string, string[]>();
+  (entry.fields || []).forEach((rf: CategoryRegistryField) => {
+    if (Array.isArray(rf.options) && (rf.options.length > 0 || rf.name === 'brand_name')) {
+      serverOptions.set(rf.name, rf.options);
+    }
+  });
+
   // 1) Override the required flag on every local field from the registry. A field
   // the registry lists (required OR optional) keeps its local UI metadata; a
   // local field the registry does not mention keeps its own `required` flag
   // (e.g. extra UI-only fields like lens_size that the spine doesn't gate on).
   const merged: CategoryField[] = local.map((f) => {
-    if (requiredSet.has(f.name)) return { ...f, required: true };
-    if (optionalSet.has(f.name)) return { ...f, required: false };
-    return f;
+    let out = f;
+    if (requiredSet.has(f.name)) out = { ...out, required: true };
+    else if (optionalSet.has(f.name)) out = { ...out, required: false };
+    const opts = serverOptions.get(f.name);
+    if (opts) out = { ...out, type: 'select', options: opts };
+    return out;
   });
 
   // 2) Append any registry field (required first) the local metadata lacks, so
-  // it can never be hidden. Build a minimal text field using the registry label.
+  // it can never be hidden. Build a minimal text field using the registry label
+  // (a select when the dictionary configured values for it).
   (entry.fields || []).forEach((rf: CategoryRegistryField) => {
     if (!known.has(rf.name)) {
+      const opts = serverOptions.get(rf.name);
       merged.push({
         name: rf.name,
         label: rf.label || rf.name,
-        type: 'text',
+        type: opts ? 'select' : 'text',
         required: !!rf.required,
+        ...(opts ? { options: opts } : {}),
       });
     }
   });
@@ -402,6 +423,21 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
     fields.forEach((field) => {
       if (field.required && !values.attributes[field.name]) {
         errors[field.name] = `${field.label} is required`;
+      }
+      // Catalog Dictionary mirror of the server gate: a filled select value
+      // must be one of the allowed options (case-insensitive — the server
+      // canonicalises the casing on save).
+      const val = values.attributes[field.name];
+      if (
+        !errors[field.name] &&
+        val &&
+        field.type === 'select' &&
+        Array.isArray(field.options) &&
+        field.options.length > 0 &&
+        !field.options.some((o) => o.toLowerCase() === String(val).trim().toLowerCase())
+      ) {
+        errors[field.name] =
+          `"${val}" is not in the allowed list for ${field.label} — pick one from the dropdown (manage values in Settings)`;
       }
     });
     // Belt-and-braces: enforce every registry-required key even if it had no UI
