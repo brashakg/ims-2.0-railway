@@ -1628,7 +1628,10 @@ async def get_brand_options(
         brands = []
         for name in names:
             subs = _cd.load_subbrand_options(db, name) or []
-            brands.append({"name": name, "subbrands": subs})
+            # tier: shown read-only in the form's Review (the product's
+            # discount band derives from it at create time).
+            tier = _cd.load_brand_tier(db, name)
+            brands.append({"name": name, "subbrands": subs, "tier": tier})
         return {"brands": brands}
     except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
         logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)

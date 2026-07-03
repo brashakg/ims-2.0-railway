@@ -468,12 +468,10 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
     }
   }
 
-  // Discount tier must be an explicit choice (no silent MASS default) so a
-  // premium/luxury product never lands on the highest discount caps by
-  // accident -- it drives the POS discount ceiling.
-  if (!values.discountCategory) {
-    errors.discount_category = 'Please choose a discount tier';
-  }
+  // Discount tier is no longer picked per product (owner rule: it is set
+  // brand-wise in the Brand Master + forced category-wise). The backend
+  // derives it (category force > brand tier); when it cannot, the product
+  // saves as DRAFT with the gap named -- visible, never silently MASS.
 
   return errors;
 }
@@ -549,7 +547,10 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
     ...lsFields,
     weight: values.weight ? parseFloat(values.weight) : undefined,
     cost_price: values.costPrice ? parseFloat(values.costPrice) : undefined,
-    discount_category: values.discountCategory,
+    // Only sent when explicitly set (template/clone/legacy); otherwise OMITTED
+    // so the backend derives the tier from Settings (category force > Brand
+    // Master brand tier).
+    ...(values.discountCategory ? { discount_category: values.discountCategory } : {}),
     // Uploaded image URLs (durably stored + served by the backend). Empty when
     // the operator didn't add any.
     images: Array.isArray(values.images) ? values.images : [],

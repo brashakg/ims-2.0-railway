@@ -176,6 +176,10 @@ export function QuickAddPage() {
   // sub-brand names. Drives the per-brand Sub Brand select (a brand with no
   // sub-brands keeps the field free-form). Fail-soft {}.
   const [subbrandsByBrand, setSubbrandsByBrand] = useState<Record<string, string[]>>({});
+  // Brand name -> Brand Master tier (MASS/PREMIUM/LUXURY). The discount band
+  // is no longer picked per product — the backend derives it from this tier
+  // (category force wins); shown read-only in the Review.
+  const [brandTiers, setBrandTiers] = useState<Record<string, string>>({});
 
   // Load the canonical category field registry once (shared module cache). The
   // required/optional flags the form renders + validates derive from it so they
@@ -223,6 +227,7 @@ export function QuickAddPage() {
   useEffect(() => {
     if (!selectedCategory) {
       setSubbrandsByBrand({});
+      setBrandTiers({});
       return;
     }
     let alive = true;
@@ -231,10 +236,15 @@ export function QuickAddPage() {
       .then((r) => {
         if (!alive) return;
         const map: Record<string, string[]> = {};
+        const tiers: Record<string, string> = {};
         (r.brands || []).forEach((b) => {
-          if (b?.name) map[b.name] = Array.isArray(b.subbrands) ? b.subbrands : [];
+          if (b?.name) {
+            map[b.name] = Array.isArray(b.subbrands) ? b.subbrands : [];
+            if (b.tier) tiers[b.name] = b.tier;
+          }
         });
         setSubbrandsByBrand(map);
+        setBrandTiers(tiers);
       })
       .catch(() => { /* free-form fallback */ });
     return () => { alive = false; };
@@ -398,23 +408,31 @@ export function QuickAddPage() {
     setImages((prev) => prev.filter((u) => u !== url));
   }, []);
 
-  // A self-hosted product image looks like /api/v1/products/image/{file_id}.
-  // Return the file_id for those; null for anything else (e.g. a pasted
-  // external URL) — the Remove-background button is only shown when this is
-  // non-null, since the edit endpoint operates on our stored file_id.
+  // A self-hosted product image looks like /api/v1/products/image/{file_id}
+  // (absolute or relative). Return the file_id for those; null for an external
+  // URL (e.g. an Autopilot brand-site photo) — editImage RE-HOSTS those first.
   const fileIdFromImageUrl = useCallback((url: string): string | null => {
     const m = /\/api\/v1\/products\/image\/([^/?#]+)$/.exec(url);
     return m ? m[1] : null;
   }, []);
 
-  // Run background removal + catalog-standard resize on one uploaded image and
-  // REPLACE that entry (keeping array order) with the cleaned result.
+  // Run background removal + catalog-standard resize on one image and REPLACE
+  // that entry (keeping array order) with the cleaned result. An EXTERNAL url
+  // (Autopilot photo) is re-hosted into our store first, then edited — so the
+  // Remove-background button works on every image, not only manual uploads.
   const editImage = useCallback(
     async (url: string) => {
-      const fileId = fileIdFromImageUrl(url);
-      if (!fileId) return;
       setEditingImages((prev) => new Set(prev).add(url));
       try {
+        let fileId = fileIdFromImageUrl(url);
+        if (!fileId) {
+          const hosted = await productApi.rehostProductImage(url);
+          fileId = hosted?.file_id || null;
+          if (!fileId) {
+            toast.error("Couldn't copy this image into your store, please try again.");
+            return;
+          }
+        }
         const res = await productApi.editProductImage(fileId);
         if (res?.url) {
           setImages((prev) => prev.map((u) => (u === url ? res.url : u)));
@@ -924,40 +942,6 @@ export function QuickAddPage() {
     );
   };
 
-  const Section = ({
-    id, title, icon, subtitle, children,
-  }: {
-    id: SectionId;
-    title: string;
-    icon: React.ReactNode;
-    subtitle?: string;
-    children: React.ReactNode;
-  }) => {
-    const open = openSections[id];
-    return (
-      <div className="card !p-0 overflow-hidden">
-        <button
-          type="button"
-          onClick={() => toggleSection(id)}
-          className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition-colors"
-          aria-expanded={open ? "true" : "false"}
-        >
-          <span className="flex items-center gap-3">
-            <span className="text-bv">{icon}</span>
-            <span>
-              <span className="block text-[15px] font-semibold text-gray-900">{title}</span>
-              {subtitle && <span className="block text-xs text-gray-500">{subtitle}</span>}
-            </span>
-          </span>
-          <ChevronDown
-            className={clsx('w-5 h-5 text-gray-400 transition-transform', open && 'rotate-180')}
-          />
-        </button>
-        {open && <div className="px-4 pb-4 pt-1 border-t border-gray-100">{children}</div>}
-      </div>
-    );
-  };
-
   return (
     // Page-scoped ~10% density pass: the arbitrary variants shrink every
     // .input-field (36px -> 32px, 13px -> 12.5px) and the page h1 (32 -> 28px)
@@ -1330,6 +1314,8 @@ export function QuickAddPage() {
             title="Identity"
             icon={<Tag className="w-5 h-5" />}
             subtitle="Category, brand, model & specs"
+            open={openSections.identity}
+            onToggle={toggleSection}
           >
             {/* Category picker */}
             <div className="mb-5">
@@ -1480,7 +1466,9 @@ export function QuickAddPage() {
             id="pricing"
             title="Pricing"
             icon={<IndianRupee className="w-5 h-5" />}
-            subtitle="MRP, offer, cost & discount band"
+            subtitle="MRP, offer & cost (discount band auto-derives from Brand Master)"
+            open={openSections.pricing}
+            onToggle={toggleSection}
           >
             <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
               <div>
@@ -1537,26 +1525,11 @@ export function QuickAddPage() {
                 </div>
               )}
 
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Discount Category
-                  <span className="text-red-500 ml-1">*</span>
-                </label>
-                <select
-                  title="Discount Category"
-                  value={discountCategory}
-                  onChange={(e) => setDiscountCategory(e.target.value)}
-                  className="input-field w-full"
-                >
-                  <option value="" disabled>Select a discount tier…</option>
-                  <option value="MASS">Mass (Standard discount caps)</option>
-                  <option value="PREMIUM">Premium (Reduced discount caps)</option>
-                  <option value="LUXURY">Luxury (Minimal discounts)</option>
-                </select>
-                {errors.discount_category && (
-                  <p className="text-red-500 text-xs mt-1">{errors.discount_category}</p>
-                )}
-              </div>
+              {/* Discount tier is NOT picked per product any more (owner rule:
+                  it is already set brand-wise + category-wise in Settings).
+                  The backend derives it: category force (HA/Services) > the
+                  brand's Brand Master tier. The derived band shows read-only
+                  in the Review below. */}
             </div>
           </Section>
 
@@ -1566,6 +1539,8 @@ export function QuickAddPage() {
             title="Inventory"
             icon={<Boxes className="w-5 h-5" />}
             subtitle="Reorder level (stock, SKU & barcode are automatic)"
+            open={openSections.inventory}
+            onToggle={toggleSection}
           >
             <div className="grid grid-cols-1 tablet:grid-cols-3 desktop:grid-cols-4 gap-3">
               <div>
@@ -1632,7 +1607,8 @@ export function QuickAddPage() {
               {images.length > 0 && (
                 <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 desktop:grid-cols-8 gap-3">
                   {images.map((url) => {
-                    const canEdit = fileIdFromImageUrl(url) !== null;
+                    // Every image is editable now: an external (Autopilot) URL
+                    // is re-hosted into our store first, then cleaned.
                     const isEditing = editingImages.has(url);
                     return (
                     <div key={url} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200">
@@ -1651,23 +1627,21 @@ export function QuickAddPage() {
                       >
                         <X className="w-3.5 h-3.5" />
                       </button>
-                      {canEdit && (
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); void editImage(url); }}
-                          disabled={isEditing}
-                          aria-label="Remove background"
-                          title="Remove background (clean up + resize)"
-                          className="absolute bottom-1 left-1 inline-flex items-center gap-1 px-1.5 py-1 rounded-md bg-white/90 text-gray-700 hover:text-bv shadow text-[11px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                          {isEditing ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Wand2 className="w-3.5 h-3.5" />
-                          )}
-                          <span>{isEditing ? 'Working…' : 'Remove bg'}</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); void editImage(url); }}
+                        disabled={isEditing}
+                        aria-label="Remove background"
+                        title="Remove background (clean up + resize)"
+                        className="absolute bottom-1 left-1 inline-flex items-center gap-1 px-1.5 py-1 rounded-md bg-white/90 text-gray-700 hover:text-bv shadow text-[11px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {isEditing ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Wand2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isEditing ? 'Working…' : 'Remove bg'}</span>
+                      </button>
                     </div>
                     );
                   })}
@@ -1787,7 +1761,15 @@ export function QuickAddPage() {
               {canSeeCost && costPrice && <ReviewRow label="Cost" value={`₹${costPrice}`} />}
               {weight && <ReviewRow label="Weight" value={`${weight} g`} />}
               <ReviewRow label="HSN / GST" value={selectedCategory ? `${hsnCode || '—'} · ${gstRate}%` : '—'} />
-              <ReviewRow label="Discount band" value={discountCategory || '—'} />
+              <ReviewRow
+                label="Discount band"
+                value={
+                  discountCategory ||
+                  (attributes.brand_name && brandTiers[attributes.brand_name]
+                    ? `${brandTiers[attributes.brand_name]} (from Brand Master)`
+                    : 'Auto (Brand Master tier)')
+                }
+              />
               <ReviewRow label="Reorder level" value={reorderLevel || '—'} />
               {images.length > 0 && (
                 <ReviewRow label="Images" value={`${images.length} uploaded`} />
@@ -1827,6 +1809,46 @@ export function QuickAddPage() {
           </span>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Collapsible form section. MODULE-LEVEL on purpose: it was previously defined
+// INSIDE QuickAddPage, which gave it a new component identity on every render —
+// React remounted the whole section subtree per keystroke, so every input lost
+// focus after one character. Hoisted + fed state via props, the identity is
+// stable and typing keeps focus.
+function Section({
+  id, title, icon, subtitle, open, onToggle, children,
+}: {
+  id: SectionId;
+  title: string;
+  icon: React.ReactNode;
+  subtitle?: string;
+  open: boolean;
+  onToggle: (id: SectionId) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="card !p-0 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => onToggle(id)}
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+        aria-expanded={open ? "true" : "false"}
+      >
+        <span className="flex items-center gap-3">
+          <span className="text-bv">{icon}</span>
+          <span>
+            <span className="block text-[15px] font-semibold text-gray-900">{title}</span>
+            {subtitle && <span className="block text-xs text-gray-500">{subtitle}</span>}
+          </span>
+        </span>
+        <ChevronDown
+          className={clsx('w-5 h-5 text-gray-400 transition-transform', open && 'rotate-180')}
+        />
+      </button>
+      {open && <div className="px-4 pb-4 pt-1 border-t border-gray-100">{children}</div>}
     </div>
   );
 }
