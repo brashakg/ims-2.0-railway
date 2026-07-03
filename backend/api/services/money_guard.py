@@ -406,10 +406,23 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
 def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
            reason: str = "credit", actor: Optional[str] = None, ref: Optional[str] = None,
            store_id: Optional[str] = None, entity_id: Optional[str] = None,
-           idempotency_key: Optional[str] = None, set_extra: Optional[Dict] = None,
+           idempotency_key: Optional[str] = None, guard_extra: Optional[Dict] = None,
+           set_extra: Optional[Dict] = None,
            push_extra: Optional[Dict] = None, record_ledger: bool = True) -> GuardResult:
     """Unconditional credit (no floor; a credit cannot overspend). Idempotent when
-    an idempotency_key is supplied. Emits one audit row on success."""
+    an idempotency_key is supplied. Emits one audit row on success.
+
+    guard_extra (symmetry with debit()): an OPTIONAL extra filter merged into the
+    atomic find_one_and_update/update_one predicate, so a caller can enforce a
+    RACE-SAFE ceiling in the same guarded write -- e.g. a petty-cash float top-up
+    passes {"balance": {"$lte": limit - amount}} so two concurrent top-ups can
+    never both breach the float limit. When the guard matches nothing the write is
+    a no-op and the result is ok=False reason="not_found" (the caller must
+    disambiguate that from a genuinely-missing doc if it cares). Defaults None.
+
+    guard_extra is keyword-only (it sits after the * barrier), so inserting it is
+    backward compatible: every existing caller already passes credit()'s optional
+    args by keyword -- none may be passed positionally past `amount`."""
     spec = ACCOUNT_TYPES.get(account_type)
     if spec is None:
         return GuardResult(ok=False, reason="unknown_type")
@@ -433,6 +446,8 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     filt: Dict[str, Any] = {spec.key_field: account_key}
     if idempotency_key:
         filt["money_ledger.idempotency_key"] = {"$ne": idempotency_key}
+    if guard_extra:
+        filt.update(guard_extra)
 
     inc = {spec.balance_field: amt}
     update: Dict[str, Any] = {"$inc": inc}

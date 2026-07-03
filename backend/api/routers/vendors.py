@@ -2048,6 +2048,14 @@ async def accept_grn(
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
 
+    # Store-scope (SEC #2 object-level pattern, same as download_grn_doc): a
+    # cross-store role (SUPERADMIN/ADMIN) may accept any GRN; a store-level caller
+    # may only accept GRNs stamped with one of their stores. A mismatch reads as
+    # 404 (not 403) so a GRN's existence in another store isn't disclosed. This
+    # gates the stock mint + PO advance + audit writes below.
+    if not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+
     # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
     # "Catalog now" -- some lines were held last time because their product was
     # not yet catalogued; the per-(grn,product) idempotency guard below skips the

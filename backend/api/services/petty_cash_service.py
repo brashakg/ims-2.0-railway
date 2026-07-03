@@ -352,18 +352,32 @@ def topup_float(db, *, store_id: str, amount: float, actor: str,
         return {"ok": False, "http": 409, "error": "float_not_active",
                 "status": cur.get("status")}
     limit = float(cur.get("float_limit") or float_limit_for(db, store_id, cur.get("entity_id")))
-    if round(float(cur.get("balance") or 0.0) + amt, 2) > limit + 1e-6:
-        return {"ok": False, "http": 422, "error": "exceeds_float_limit",
-                "float_limit": limit, "balance": float(cur.get("balance") or 0.0)}
 
     txn_id = str(uuid.uuid4())
+    # Ceiling is enforced ATOMICALLY inside the guarded credit (balance <=
+    # limit - amt merged into the CAS filter), NOT by the pre-read above -- a
+    # read-then-check would be TOCTOU-racy and let two concurrent top-ups both
+    # push the float past its limit.
+    ceiling_guard = {"balance": {"$lte": round(limit - amt, 2)}}
     res = mg.credit(
         db, ACCOUNT_TYPE, store_id, amt,
         reason=reason, actor=actor, ref=txn_id, store_id=store_id,
+        guard_extra=ceiling_guard,
         push_extra={"ledger": _ledger_row(txn_id, "CREDIT", amt, reason, actor, None)},
         record_ledger=False,
     )
     if not res.ok:
+        if res.reason == "not_found":
+            # "not_found" from the guarded credit is ambiguous: EITHER the atomic
+            # ceiling guard matched nothing (balance would breach the limit), OR
+            # the float doc vanished (a concurrent close/delete) between the
+            # existence check above and this write. Re-read to distinguish, so a
+            # deleted float is not mislabeled as "exceeds_float_limit".
+            still = coll.find_one({"store_id": store_id})
+            if still is None:
+                return {"ok": False, "http": 404, "error": "float_not_open"}
+            return {"ok": False, "http": 422, "error": "exceeds_float_limit",
+                    "float_limit": limit, "balance": float(still.get("balance") or 0.0)}
         return {"ok": False, "http": 409, "error": res.reason or "credit_failed"}
     _stamp_balance_after(coll, store_id, txn_id)
     _audit(db, "petty_cash.topup", store_id, delta=amt, balance_after=res.balance,
