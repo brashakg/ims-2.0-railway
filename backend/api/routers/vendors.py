@@ -2381,6 +2381,76 @@ async def accept_grn(
     }
 
 
+@router.post("/grn/{grn_id}/void")
+async def void_grn(
+    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
+    """Void a PENDING goods-receipt note (duplicate/mistake cleanup).
+
+    Only a PENDING GRN can be voided: it has added NO stock yet, so voiding is
+    purely a bookkeeping status flip. An ACCEPTED / PARTIALLY_ACCEPTED GRN has
+    already minted stock_units and must be corrected through a vendor return,
+    never a void. Store-scoped like accept (cross-store reads as 404). The
+    receipt row is kept (audit trail, numbering continuity) with status VOID --
+    the accept endpoint refuses VOID rows, and PO receipt math only ever sums
+    ACCEPTED GRNs, so a voided duplicate can never double stock.
+    """
+    grn_repo = get_grn_repository()
+    if grn_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    grn = grn_repo.find_by_id(grn_id)
+    if not grn:
+        raise HTTPException(status_code=404, detail="GRN not found")
+    if not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+    if grn.get("status") != "PENDING":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only a PENDING GRN can be voided. This one is "
+                f"{grn.get('status')} -- accepted stock must be corrected via a "
+                "vendor return."
+            ),
+        )
+
+    grn_repo.update(
+        grn_id,
+        {
+            "status": "VOID",
+            "voided_at": datetime.now().isoformat(),
+            "voided_by": current_user.get("user_id"),
+        },
+    )
+    # Fail-soft audit trail (same contract as the other GRN mutations).
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "kind": "grn_void",
+                    "entity_type": "grn",
+                    "entity_id": grn_id,
+                    "action": "VOID",
+                    "performed_by": current_user.get("user_id"),
+                    "details": {
+                        "grn_number": grn.get("grn_number"),
+                        "po_id": grn.get("po_id"),
+                        "store_id": grn.get("store_id"),
+                    },
+                }
+            )
+    except Exception:  # noqa: BLE001 - audit must never block the void
+        pass
+
+    return {
+        "message": "GRN voided",
+        "grn_id": grn_id,
+        "grn_number": grn.get("grn_number"),
+        "grn_status": "VOID",
+    }
+
+
 @router.post("/grn/{grn_id}/escalate")
 async def escalate_grn(
     grn_id: str,

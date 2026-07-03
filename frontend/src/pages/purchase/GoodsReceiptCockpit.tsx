@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { grnCockpitApi } from '../../services/api/grnCockpit';
+import { vendorsApi } from '../../services/api/inventory';
 import labelsApi from '../../services/api/labels';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -310,6 +311,72 @@ export function GoodsReceiptCockpit() {
   const [showPending, setShowPending] = useState(true);
   const [showCataloged, setShowCataloged] = useState(false);
 
+  // ---- PENDING GRNs (created but not yet accepted into stock) ---------------
+  // The loop-breaker: a created-but-unaccepted GRN adds NO stock and the PO
+  // stays receivable, which used to read as "nothing happened". These rows
+  // surface that state with one-click Accept (mint stock) / Void (duplicate).
+  const [pendingGrns, setPendingGrns] = useState<
+    Array<{ grn_id: string; grn_number: string; vendor_invoice_no?: string; created_at?: string; items?: unknown[] }>
+  >([]);
+  const [grnActionBusy, setGrnActionBusy] = useState<string | null>(null);
+
+  const loadPendingGrns = useCallback(
+    async (vid: string) => {
+      try {
+        const res = await vendorsApi.getGRNs({
+          store_id: storeId || undefined,
+          status: 'PENDING',
+        });
+        const rows = (res.grns || res.items || res || []) as Array<Record<string, unknown>>;
+        setPendingGrns(
+          (Array.isArray(rows) ? rows : [])
+            .filter((g) => !vid || g.vendor_id === vid || !g.vendor_id)
+            .map((g) => ({
+              grn_id: String(g.grn_id || g.id || ''),
+              grn_number: String(g.grn_number || ''),
+              vendor_invoice_no: g.vendor_invoice_no ? String(g.vendor_invoice_no) : undefined,
+              created_at: g.created_at ? String(g.created_at) : undefined,
+              items: Array.isArray(g.items) ? g.items : [],
+            }))
+        );
+      } catch {
+        /* fail-soft: the panel just doesn't render */
+      }
+    },
+    [storeId],
+  );
+
+  const acceptPendingGrn = async (grnId: string, grnNumber: string) => {
+    setGrnActionBusy(grnId);
+    try {
+      const res = await vendorsApi.acceptGRN(grnId);
+      toast.success(
+        `GRN ${grnNumber} accepted — ${res.units_added ?? 0} units added to stock` +
+          (res.po_status ? ` · PO ${res.po_status}` : ''),
+      );
+      await loadPendingGrns(vendorId);
+      await loadCockpit(vendorId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to accept GRN ${grnNumber}`);
+    } finally {
+      setGrnActionBusy(null);
+    }
+  };
+
+  const voidPendingGrn = async (grnId: string, grnNumber: string) => {
+    if (!window.confirm(`Void ${grnNumber}? Use this for duplicates — no stock was added by it.`)) return;
+    setGrnActionBusy(grnId);
+    try {
+      await vendorsApi.voidGRN(grnId);
+      toast.success(`GRN ${grnNumber} voided`);
+      await loadPendingGrns(vendorId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to void GRN ${grnNumber}`);
+    } finally {
+      setGrnActionBusy(null);
+    }
+  };
+
   // ---- Load vendors on first render ----------------------------------------
   const ensureVendors = useCallback(async () => {
     if (vendorsLoaded) return;
@@ -344,13 +411,15 @@ export function GoodsReceiptCockpit() {
         setActivePO(null);
         setReceiveLines([]);
         setUploadResult(null);
+        // Surface any created-but-unaccepted GRNs alongside the worklists.
+        void loadPendingGrns(vid);
       } catch {
         toast.error('Failed to load goods-receipt data for this vendor');
       } finally {
         setLoadingCockpit(false);
       }
     },
-    [storeId, toast],
+    [storeId, toast, loadPendingGrns],
   );
 
   const onVendorChange = (vid: string) => {
@@ -489,9 +558,29 @@ export function GoodsReceiptCockpit() {
         notes: notes.trim() || undefined,
       });
 
-      toast.success(
-        `${result.message} — GRN ${result.grn_number} · ${result.total_received} units received`,
-      );
+      // COMPLETE the receipt in one action: creating a GRN only records it
+      // (PENDING, no stock) — accepting is what mints stock_units and advances
+      // the PO. Splitting these across screens made the flow read as a loop
+      // (the PO stayed receivable), so the cockpit now accepts immediately;
+      // QC accept/reject was already captured per line above.
+      try {
+        const acc = await vendorsApi.acceptGRN(result.grn_id);
+        toast.success(
+          `GRN ${result.grn_number} complete — ${acc.units_added ?? result.total_received} units added to stock` +
+            (acc.po_status ? ` · PO ${acc.po_status}` : ''),
+        );
+        if (acc.grn_status === 'PARTIALLY_ACCEPTED') {
+          toast.warning(
+            'Some lines were held because their product is not catalogued yet — catalogue them, then accept the GRN from the Pending receipts panel.',
+          );
+        }
+      } catch (acceptErr) {
+        toast.warning(
+          `GRN ${result.grn_number} was saved but could NOT be added to stock: ` +
+            (acceptErr instanceof Error ? acceptErr.message : 'accept failed') +
+            ' — use the Pending receipts panel below to accept it.',
+        );
+      }
 
       // Show print-labels dialog
       const productIds = [...new Set(items.map((i) => i.product_id))];
@@ -952,6 +1041,68 @@ export function GoodsReceiptCockpit() {
             ) : (
               /* ── Worklists (no PO selected yet) ── */
               <div className="space-y-4">
+                {/* Pending receipts: created but NOT yet added to stock. Kept
+                    visible so an interrupted/failed accept (or an old
+                    duplicate) can be completed or voided in one click. */}
+                {pendingGrns.length > 0 && (
+                  <div className="card border-amber-200 bg-amber-50/40">
+                    <div className="flex items-center gap-2 mb-2">
+                      <AlertCircle className="w-4 h-4 text-amber-600" />
+                      <h3 className="font-semibold text-gray-900">
+                        Pending receipts — not yet added to stock ({pendingGrns.length})
+                      </h3>
+                    </div>
+                    <p className="text-xs text-gray-600 mb-3">
+                      These GRNs were created but never accepted, so their units are NOT in
+                      stock and their POs still show as receivable. Accept the correct one;
+                      void duplicates (voiding is safe — a pending GRN has added nothing).
+                    </p>
+                    <div className="space-y-2">
+                      {pendingGrns.map((g) => (
+                        <div
+                          key={g.grn_id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2"
+                        >
+                          <div className="min-w-0 text-sm">
+                            <span className="font-medium text-gray-900">{g.grn_number}</span>
+                            {g.vendor_invoice_no && (
+                              <span className="text-gray-500"> · Inv {g.vendor_invoice_no}</span>
+                            )}
+                            {g.created_at && (
+                              <span className="text-gray-400"> · {String(g.created_at).slice(0, 10)}</span>
+                            )}
+                            <span className="text-gray-500"> · {g.items?.length ?? 0} line(s)</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => acceptPendingGrn(g.grn_id, g.grn_number)}
+                              disabled={grnActionBusy === g.grn_id}
+                              className="btn-primary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              {grnActionBusy === g.grn_id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                              )}
+                              Add to stock
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                              disabled={grnActionBusy === g.grn_id}
+                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              Void (duplicate)
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Open POs */}
                 <div className="card">
                   <div className="card-head">

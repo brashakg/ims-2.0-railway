@@ -6353,6 +6353,11 @@ POLICY: List[Dict[str, object]] = [
     },
     {
         "method": "POST",
+        "path": "/api/v1/vendors/grn/{grn_id}/void",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
