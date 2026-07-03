@@ -42,6 +42,9 @@ def _clear_source_env(monkeypatch):
         "SERP_API_KEY",
         "GOOGLE_CSE_KEY",
         "GOOGLE_CSE_CX",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -138,10 +141,12 @@ class TestAdapterInterface:
     def test_registry_is_priority_ordered(self):
         names = [a.name for a in ap.build_registry()]
         prios = [a.priority for a in ap.build_registry()]
-        # ai_enrich (Claude, priority 2) is the reliable contributor; it shares
-        # priority 2 with myluxottica and is inserted ahead of it.
+        # gemini + ai_enrich (both priority 2) are the web-grounded / AI
+        # contributors; both share priority 2 with myluxottica and are inserted
+        # ahead of it. gemini is registered before ai_enrich so it wins ties.
         assert names == [
-            "brand_site", "ai_enrich", "myluxottica", "internal_bvi", "marketplace"
+            "brand_site", "gemini", "ai_enrich", "myluxottica",
+            "internal_bvi", "marketplace",
         ]
         assert prios == sorted(prios)
 
@@ -239,9 +244,11 @@ class TestProviderStatus:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         status = {s["name"]: s for s in ap._provider_status()}
         assert set(status) == {
-            "brand_site", "ai_enrich", "myluxottica", "internal_bvi", "marketplace"
+            "brand_site", "gemini", "ai_enrich", "myluxottica",
+            "internal_bvi", "marketplace",
         }
         assert status["brand_site"]["enabled"] is False  # killswitch on
+        assert status["gemini"]["enabled"] is False  # killswitch on (network off)
         assert status["ai_enrich"]["enabled"] is False  # no ANTHROPIC_API_KEY
         assert status["myluxottica"]["enabled"] is False
         assert status["internal_bvi"]["enabled"] is False
@@ -632,5 +639,6 @@ class TestRunSearchEndToEndMocked:
         assert cand["source_priority"] == 1
         # sources array still derived from the registry.
         assert {s["name"] for s in out["sources"]} == {
-            "brand_site", "ai_enrich", "myluxottica", "internal_bvi", "marketplace"
+            "brand_site", "gemini", "ai_enrich", "myluxottica",
+            "internal_bvi", "marketplace",
         }

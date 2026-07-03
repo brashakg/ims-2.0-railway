@@ -218,3 +218,34 @@ def get_websearch_config() -> Dict[str, Any]:
         "serp_api_key": serp,
         "provider": provider,
     }
+
+
+# Default Gemini model for Catalog Autopilot's web-grounded search adapter.
+# gemini-2.0-flash supports the built-in google_search grounding tool and is
+# low-cost. Overridable per-deploy (GEMINI_MODEL) or per-tenant in the UI.
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+
+
+def get_gemini_config() -> Dict[str, Any]:
+    """Return Google Gemini config for Catalog Autopilot's GeminiSearchAdapter.
+
+    DB key  : type="gemini" -> config.api_key (Google AI Studio / Gemini key),
+              config.model (optional; defaults to DEFAULT_GEMINI_MODEL)
+    Env vars: GEMINI_API_KEY or GOOGLE_API_KEY (fallback), GEMINI_MODEL
+
+    Gemini's built-in Google Search grounding returns web-referenced product
+    data WITH citation URLs, billed to the owner's Google Cloud account. Returns
+    {"api_key", "model"} only when an api_key is present, else {}. NO secrets
+    logged. Read fresh per-call so a Save in Settings->Integrations takes effect
+    without a redeploy.
+    """
+    cfg = _load_db_config("gemini")
+    api_key = (
+        cfg.get("api_key")
+        or os.getenv("GEMINI_API_KEY", "")
+        or os.getenv("GOOGLE_API_KEY", "")
+    )
+    model = cfg.get("model") or os.getenv("GEMINI_MODEL", "") or DEFAULT_GEMINI_MODEL
+    if api_key:
+        return {"api_key": api_key, "model": model}
+    return {}

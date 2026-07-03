@@ -443,6 +443,25 @@ _INTEGRATION_CATALOG = [
              "placeholder": "Your Programmable Search Engine ID"},
         ],
     },
+    {
+        # Catalog-Autopilot data source: Google Gemini with the built-in Google
+        # Search grounding tool. Consumed by GeminiSearchAdapter (priority 2)
+        # via integration_config.get_gemini_config(); env vars GEMINI_API_KEY /
+        # GOOGLE_API_KEY remain a fallback. Runs on the owner's Google Cloud
+        # credit and returns web-referenced product data with source links.
+        "type": "gemini",
+        "name": "Gemini Web Search (Google AI)",
+        "description": "Powers Autopilot's referenced web results on your Google "
+                       "Cloud credit. Get a key at aistudio.google.com/app/apikey. "
+                       "Returns product specs WITH the source pages Gemini used.",
+        "category": "Commerce",
+        "fields": [
+            {"key": "api_key", "label": "Gemini API Key", "secret": True,
+             "placeholder": "Google AI Studio / Gemini API key"},
+            {"key": "model", "label": "Model (optional)", "secret": False,
+             "placeholder": "gemini-2.0-flash", "optional": True},
+        ],
+    },
     # ---- Messaging ---------------------------------------------------------
     {
         "type": "whatsapp",
