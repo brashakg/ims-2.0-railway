@@ -304,6 +304,26 @@ class BrandUpdate(BaseModel):
     status: Optional[str] = None
 
 
+def _attach_subbrands(brands: List[Dict]) -> List[Dict]:
+    """Embed each brand's subbrands (from subbrand_masters) into the brand
+    docs, batch-loaded in ONE query. Fail-soft: on any trouble the brands are
+    returned with an empty subbrands list (never an error)."""
+    for b in brands:
+        b.setdefault("subbrands", [])
+    coll = _coll("subbrand_masters")
+    if coll is None or not brands:
+        return brands
+    try:
+        by_id = {b.get("brand_id"): b for b in brands if b.get("brand_id")}
+        for sb in coll.find({"brand_id": {"$in": list(by_id.keys())}}):
+            parent = by_id.get(sb.get("brand_id"))
+            if parent is not None:
+                parent["subbrands"].append(_scrub(sb))
+    except Exception:  # noqa: BLE001 - embedding is an enrichment, never a blocker
+        pass
+    return brands
+
+
 @router.get("/brands")
 async def list_brands(category: Optional[str] = None, tier: Optional[str] = None):
     filter_: Dict = {}
@@ -311,7 +331,13 @@ async def list_brands(category: Optional[str] = None, tier: Optional[str] = None
         filter_["categories"] = category
     if tier:
         filter_["tier"] = tier
-    return _list_envelope("brand_masters", "brands", filter_=filter_, sort_field="name")
+    envelope = _list_envelope(
+        "brand_masters", "brands", filter_=filter_, sort_field="name"
+    )
+    # Embed subbrands so the Settings Brand Master list can render + manage
+    # them (they live in their own collection keyed by brand_id).
+    envelope["brands"] = _attach_subbrands(envelope.get("brands", []))
+    return envelope
 
 
 @router.get("/brands/{brand_id}")
@@ -340,9 +366,25 @@ async def update_brand(brand_id: str, payload: BrandUpdate):
     )
 
 
+def _cascade_delete_subbrands(brand_id: str) -> int:
+    """Remove every subbrand of a deleted brand so subbrand_masters never
+    accumulates orphans. Fail-soft: returns the deleted count (0 on trouble)."""
+    coll = _coll("subbrand_masters")
+    if coll is None:
+        return 0
+    try:
+        res = coll.delete_many({"brand_id": brand_id})
+        return int(getattr(res, "deleted_count", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 @router.delete("/brands/{brand_id}")
 async def delete_brand(brand_id: str):
-    return _delete_doc("brand_masters", "brand_id", brand_id)
+    out = _delete_doc("brand_masters", "brand_id", brand_id)
+    # Cascade AFTER the parent delete succeeded (a missing brand 404s above).
+    out["subbrands_deleted"] = _cascade_delete_subbrands(brand_id)
+    return out
 
 
 # Subbrands are nested under brands. Stored in their own collection
