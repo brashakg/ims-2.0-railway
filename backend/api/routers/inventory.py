@@ -14,6 +14,7 @@ import logging
 from .auth import get_current_user, require_roles
 from ..services import power_grid
 from ..services import barcode as barcode_svc
+from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -3104,6 +3105,12 @@ def _build_stock_alert(
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
     reorder_point = int(product.get("reorder_point", 0) or 0)
+    # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1 default)
+    # means auto-reorder is DISABLED for this product -- never emit a
+    # REORDER_ALERT / restock suggestion for it. Informational alerts
+    # (LOW_STOCK without a suggested qty, DEAD_STOCK, OVERSTOCK, FAST_MOVING)
+    # still apply. See api/services/reorder_policy.py.
+    reorder_suggestions_off = _reorder_disabled(product)
 
     velocity = (sold_30 or 0) / 30.0  # units/day from the last 30 days
     days_without_movement = (now - last_sale).days if last_sale else None
@@ -3135,7 +3142,9 @@ def _build_stock_alert(
     out_of_stock_but_selling = stock <= 0 and velocity > 0
     below_reorder_point = reorder_point > 0 and stock <= reorder_point and velocity > 0
     runs_out_soon = projected is not None and projected <= lead_time_days
-    if out_of_stock_but_selling or below_reorder_point or runs_out_soon:
+    if not reorder_suggestions_off and (
+        out_of_stock_but_selling or below_reorder_point or runs_out_soon
+    ):
         target = velocity * lead_time_days * 2  # cover 2x lead time
         recommended = max(int(round(target - stock)), 1)
         if stock <= 0 or (projected is not None and projected <= lead_time_days / 2):
@@ -3157,9 +3166,15 @@ def _build_stock_alert(
         )
         return base
 
-    # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical
+    # 2. LOW_STOCK — sells, getting low, but not yet reorder-critical.
+    # When auto-reorder is disabled the alert stays (it is informational)
+    # but with NO suggested restock qty (recommendedOrder 0, costImpact 0).
     if velocity > 0 and projected is not None and projected <= lead_time_days * 2:
-        recommended = max(int(round(velocity * lead_time_days * 2 - stock)), 1)
+        recommended = (
+            0
+            if reorder_suggestions_off
+            else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
+        )
         base.update(
             {
                 "alertType": "LOW_STOCK",
@@ -3318,6 +3333,7 @@ async def get_stock_alerts(
                     "cost_price": 1,
                     "stock_quantity": 1,
                     "reorder_point": 1,
+                    "reorder_quantity": 1,
                 },
             )
         )

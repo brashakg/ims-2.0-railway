@@ -292,6 +292,11 @@ class BrandCreate(BaseModel):
     warranty: Optional[int] = Field(None, ge=0, le=120, description="Warranty months")
     description: Optional[str] = None
     status: Optional[str] = "ACTIVE"
+    # Default Shopify-sync INTENT for products of this brand. Nothing pushes
+    # to Shopify from IMS anymore (the BVI app owns Shopify) -- the product
+    # create door stamps `sync_to_shopify` from this default so the future
+    # BVI-side push knows which products the owner wants online.
+    sync_to_shopify_default: bool = False
 
 
 class BrandUpdate(BaseModel):
@@ -302,6 +307,7 @@ class BrandUpdate(BaseModel):
     warranty: Optional[int] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    sync_to_shopify_default: Optional[bool] = None
 
 
 def _attach_subbrands(brands: List[Dict]) -> List[Dict]:
@@ -320,6 +326,49 @@ def _attach_subbrands(brands: List[Dict]) -> List[Dict]:
             if parent is not None:
                 parent["subbrands"].append(_scrub(sb))
     except Exception:  # noqa: BLE001 - embedding is an enrichment, never a blocker
+        pass
+    return brands
+
+
+def _attach_product_counts(brands: List[Dict]) -> List[Dict]:
+    """Embed a `product_count` per brand: products in the canonical `products`
+    collection whose attributes.brand_name matches the brand name case-
+    insensitively. ONE aggregation for all brands. Fail-soft: on any trouble
+    (no db / fake backend without aggregate) counts are simply OMITTED --
+    the Settings UI hides the badge."""
+    if not brands:
+        return brands
+    coll = _coll("products")
+    if coll is None:
+        return brands
+    try:
+        pipeline = [
+            {"$match": {"is_active": {"$ne": False}}},
+            {
+                "$group": {
+                    "_id": {
+                        "$toLower": {
+                            "$trim": {
+                                "input": {
+                                    "$toString": {
+                                        "$ifNull": ["$attributes.brand_name", ""]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "count": {"$sum": 1},
+                }
+            },
+        ]
+        counts = {
+            str(row.get("_id") or ""): int(row.get("count") or 0)
+            for row in coll.aggregate(pipeline)
+        }
+        for b in brands:
+            key = str(b.get("name") or "").strip().lower()
+            b["product_count"] = counts.get(key, 0) if key else 0
+    except Exception:  # noqa: BLE001 - counts are an enrichment, never a blocker
         pass
     return brands
 
@@ -343,6 +392,9 @@ async def list_brands(category: Optional[str] = None, tier: Optional[str] = None
     # Embed subbrands so the Settings Brand Master list can render + manage
     # them (they live in their own collection keyed by brand_id).
     envelope["brands"] = _attach_subbrands(envelope.get("brands", []))
+    # Embed per-brand product counts (fail-soft enrichment for the Settings
+    # "N products" badge).
+    envelope["brands"] = _attach_product_counts(envelope.get("brands", []))
     return envelope
 
 

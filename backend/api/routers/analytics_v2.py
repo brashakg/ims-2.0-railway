@@ -25,6 +25,7 @@ from .auth import get_current_user
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.notification_service import send_notification
+from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 
 router = APIRouter()
 
@@ -341,7 +342,13 @@ async def demand_forecast(
         current_stock = int(
             prod_doc.get("quantity", 0) or prod_doc.get("stock", 0) or 0
         )
-        reorder = max(0, predicted_30 - current_stock)
+        # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
+        # default) disables auto-reorder -- the forecast row stays (info)
+        # but never recommends a reorder qty (api/services/reorder_policy.py).
+        if _reorder_disabled(prod_doc):
+            reorder = 0
+        else:
+            reorder = max(0, predicted_30 - current_stock)
 
         forecasts.append(
             {

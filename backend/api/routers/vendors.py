@@ -30,6 +30,7 @@ from ..dependencies import (
 )
 from ..services import ap_engine
 from ..services import product_master as _pm
+from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ..services.file_store import (
     get_file_store,
     ALLOWED_MIME_TYPES,
@@ -1006,6 +1007,11 @@ async def create_pos_from_forecast(
             need = predicted + buffer
 
             prod = prod_docs.get(pid, {})
+            # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
+            # default) disables auto-reorder for the product -- no forecast
+            # suggestion, no draft PO line (see api/services/reorder_policy.py).
+            if _auto_reorder_disabled(prod):
+                continue
             current_stock = int(prod.get("quantity", 0) or prod.get("stock", 0) or 0)
             reorder_qty = max(0, round(need - current_stock))
             if reorder_qty == 0:

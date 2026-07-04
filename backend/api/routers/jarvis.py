@@ -22,6 +22,7 @@ import httpx
 import logging
 
 from .auth import get_current_user
+from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
@@ -452,17 +453,23 @@ class JarvisAnalyticsEngine:
                             "reorder_point": reorder,
                         }
                     )
-                    reorder_recs.append(
-                        {
-                            "sku": sku,
-                            "product": name,
-                            "current": qty,
-                            "recommended_order": max(
-                                int(p.get("reorder_quantity") or 0), reorder * 2, 20
-                            ),
-                            "supplier": p.get("vendor") or p.get("brand") or "—",
-                        }
-                    )
+                    # Owner decision: reorder_quantity <= 0 (default -1) means
+                    # "no auto-reorder" -- keep the low-stock ALERT but never
+                    # SUGGEST an order for a disabled product.
+                    if not _reorder_disabled(p):
+                        reorder_recs.append(
+                            {
+                                "sku": sku,
+                                "product": name,
+                                "current": qty,
+                                "recommended_order": max(
+                                    int(p.get("reorder_quantity") or 0),
+                                    reorder * 2,
+                                    20,
+                                ),
+                                "supplier": p.get("vendor") or p.get("brand") or "—",
+                            }
+                        )
             if total == 0:
                 return None
             healthy = max(0, total - low - oos)

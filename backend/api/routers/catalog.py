@@ -961,7 +961,10 @@ class InventoryInput(BaseModel):
     location_id: Optional[str] = None
     barcode: Optional[str] = None
     reorder_level: int = 5
-    reorder_quantity: int = 10
+    # Owner decision (2026-07-04): -1 means "no auto-reorder" -- every reorder
+    # engine skips the product until a positive qty is explicitly configured
+    # (see api/services/reorder_policy.py).
+    reorder_quantity: int = -1
 
 
 class ShopifySyncInput(BaseModel):
@@ -1265,7 +1268,28 @@ async def get_brands(
     category: Optional[ProductCategory] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """Get available brands, optionally filtered by category"""
+    """Get available brands, optionally filtered by category.
+
+    The Brand Master (Settings -> Brand Master, `brand_masters`) is the
+    source of truth: active brand names, filtered by the category's short
+    prefix code when given (ProductCategory values ARE those codes). FAIL-
+    OPEN to the legacy hardcoded BRANDS dict when the master is empty or
+    unreadable so the Collections chip builder keeps working on a fresh /
+    degraded deploy. Response shape unchanged: {"brands": [str, ...]}."""
+    try:
+        from ..dependencies import get_db as _get_db_dep
+        from ..services import catalog_dictionary as _cd
+
+        conn = _get_db_dep()
+        if conn is not None and getattr(conn, "is_connected", False):
+            prefix = category.value if category else None
+            names = _cd.load_brand_options(conn, prefix)
+            # None = read failed, [] = empty master -> both fall back.
+            if names:
+                return {"brands": names}
+    except Exception as e:  # noqa: BLE001 - fail-open to the static dict
+        logger.warning("[CATALOG] brand_masters read failed (fallback): %s", e)
+
     if category:
         # Map category to brand list
         brand_map = {
@@ -1553,8 +1577,9 @@ async def create_catalog_product(
             "reorder_level": (
                 product.inventory.reorder_level if product.inventory else 5
             ),
+            # -1 = auto-reorder disabled (owner default; reorder_policy.py).
             "reorder_quantity": (
-                product.inventory.reorder_quantity if product.inventory else 10
+                product.inventory.reorder_quantity if product.inventory else -1
             ),
         },
         "shopify": {
@@ -1982,7 +2007,13 @@ async def import_products(
                     "discount_category": product.pricing.discount_category,
                 },
                 "images": product.images,
-                "inventory": {"total_quantity": 0, "locations": {}, "reorder_level": 5},
+                # reorder_quantity -1 = auto-reorder disabled (owner default).
+                "inventory": {
+                    "total_quantity": 0,
+                    "locations": {},
+                    "reorder_level": 5,
+                    "reorder_quantity": -1,
+                },
                 "shopify": {"synced": False},
                 "seo": {},
                 "is_active": True,

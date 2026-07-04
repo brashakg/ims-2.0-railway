@@ -189,6 +189,20 @@ def load_brand_tier(db, brand_name: str) -> Optional[str]:
     return tier if tier in BRAND_TIERS else None
 
 
+def load_brand_sync_default(db, brand_name: str) -> bool:
+    """The brand's `sync_to_shopify_default` flag (Settings -> Brand Master).
+
+    Used by the product create door to stamp `sync_to_shopify` INTENT on new
+    spine products when the payload doesn't say explicitly. NOTE: nothing
+    pushes to Shopify from IMS anymore (the BVI app owns Shopify) -- this is
+    a recorded intent for the future BVI-side push. FAIL-SOFT: unknown brand /
+    no db / read failure -> False (never sync by accident)."""
+    doc = _find_active_brand(db, brand_name)
+    if doc is None:
+        return False
+    return doc.get("sync_to_shopify_default") is True
+
+
 def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:
     """Subbrand names configured for the ACTIVE Brand-Master brand matching
     `brand_name` (case-insensitive). Returns:

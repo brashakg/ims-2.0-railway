@@ -19,6 +19,8 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
+from .reorder_policy import auto_reorder_disabled
+
 logger = logging.getLogger("ims.buy_desk")
 
 # ecom_state values (frozen interface -- the FE column keys on these).
@@ -100,6 +102,13 @@ def build_row(
         "ecom_state": ecom_state(product, push_locked),
         "on_hand": int(on_hand or 0),
         "on_order": int(on_order or 0),
-        "buy_signal": buy_signal(velocity_per_day, on_hand, on_order, lead_days),
+        # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
+        # default) disables auto-reorder -- the Buy Desk shows "-" (None)
+        # instead of a suggested qty. See api/services/reorder_policy.py.
+        "buy_signal": (
+            None
+            if auto_reorder_disabled(product)
+            else buy_signal(velocity_per_day, on_hand, on_order, lead_days)
+        ),
         "purchasable": bool(readiness.get("purchasable")),
     }

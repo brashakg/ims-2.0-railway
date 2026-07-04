@@ -546,8 +546,31 @@ class TaskmasterAgent(JarvisAgent):
                     }
                 ).limit(20)
             )
+            # Owner decision (2026-07-04): a product whose master carries
+            # reorder_quantity <= 0 (the new -1 default) has auto-reorder
+            # DISABLED -- never draft a PO for it. Batch-resolve the flag from
+            # the products spine by SKU; fail-soft (lookup trouble -> no skus
+            # marked disabled, legacy behaviour).
+            disabled_skus: set = set()
+            try:
+                from api.services.reorder_policy import auto_reorder_disabled
+
+                skus = [i.get("sku") for i in low_stock if i.get("sku")]
+                products_coll = self.get_collection("products")
+                if products_coll is not None and skus:
+                    for prod in products_coll.find(
+                        {"sku": {"$in": skus}},
+                        {"sku": 1, "reorder_quantity": 1},
+                    ):
+                        if auto_reorder_disabled(prod):
+                            disabled_skus.add(prod.get("sku"))
+            except Exception as e:  # noqa: BLE001 - guard is fail-soft
+                logger.debug(f"[TASKMASTER] reorder-disable lookup failed: {e}")
+                disabled_skus = set()
             for item in low_stock:
                 sku = item.get("sku")
+                if sku in disabled_skus:
+                    continue
                 # Skip if a draft PO already exists for this SKU today
                 today_start = (
                     datetime.now(timezone.utc)

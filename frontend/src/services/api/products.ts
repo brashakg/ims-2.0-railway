@@ -491,6 +491,8 @@ export const adminBrandApi = {
     warranty?: number;
     description?: string;
     status?: string;
+    /** Default Shopify-sync intent stamped on new products of this brand. */
+    sync_to_shopify_default?: boolean;
   }) => {
     const response = await api.post('/admin/brands', data);
     return response.data;
@@ -504,6 +506,7 @@ export const adminBrandApi = {
     warranty: number;
     description: string;
     status: string;
+    sync_to_shopify_default: boolean;
   }>) => {
     const response = await api.put(`/admin/brands/${brandId}`, data);
     return response.data;
