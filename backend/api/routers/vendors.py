@@ -1733,6 +1733,19 @@ async def create_grn(
     grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
 ):
     """Create a new GRN (STANDARD) or log a Delivery Challan (F9 DC subtype)."""
+    return await _create_grn_impl(grn, current_user)
+
+
+async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
+    """Shared GRN-create engine behind POST /grn (and POST /grn/express).
+
+    Behavior-preserving extraction of the original create_grn body so the
+    express receiving chain can run the SAME validation + persistence path --
+    attachment gate (F-S3 + BUG-010 file-exists), PO receivable check, F2
+    store re-point to the PO's delivery store, per-store numbering and the DC
+    guards -- without duplicating any control. Callers pass the authenticated
+    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
 
@@ -2095,6 +2108,19 @@ async def accept_grn(
     PO state update, and the per-unit stock_audit rows all follow and are each
     wrapped so that a logging/secondary failure can never lose the stock that
     was already received.
+    """
+    return await _accept_grn_impl(grn_id, current_user)
+
+
+async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
+    """Shared GRN-accept engine behind POST /grn/{grn_id}/accept (and
+    POST /grn/express).
+
+    Behavior-preserving extraction of the original accept_grn body: the
+    store-scope guard, the PENDING/PARTIALLY_ACCEPTED status gate, idempotent
+    per-(grn, line) stock minting, PO receipt math and the audit trail all run
+    here unchanged for both callers. Callers pass the authenticated
+    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
     """
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
