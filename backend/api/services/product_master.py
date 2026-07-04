@@ -760,29 +760,40 @@ def _derive_brand_model_color_size(
     }
 
 
+def normalise_identity_component(value: Any) -> str:
+    """THE one normaliser every identity comparison must run through.
+
+    Lowercases and folds every run of [-/_. whitespace] to a single space (the
+    same separators the SKU builder strips). This is the function that builds
+    the stored `identity_key` (compute_identity_key below) AND what the live
+    "similar products" lookup (find_similar_products / GET /products/similar)
+    normalises its query inputs with -- council rule: matching must use the
+    SAME normaliser as the spine's duplicate key, never a reimplementation.
+    """
+    return re.sub(r"[-/_.\s]+", " ", str(value or "").strip().lower()).strip()
+
+
 def compute_identity_key(
     brand: Any, model: Any, colour: Any = None, size: Any = None
 ) -> Optional[str]:
     """The brand+model+colour(+size) identity used by the Hub Phase 1 duplicate
     guard.
 
-    Normalised so casing/spacing/PUNCTUATION variants of the same product collide:
-    lowercased, and every run of [-/_. whitespace] folded to a single space (the
-    same separators the SKU builder strips). Without this, "RB-2140" and "RB 2140"
-    would be distinct identities yet mint the SAME SKU base -- the SKU
-    collision-suffix would then create a real duplicate that the identity arm
-    missed. Returns None unless BOTH brand and model are present -- an identity
-    needs at least those two; a category without them (e.g. SERVICES) gets no
-    identity_key and is not identity-deduped. Colour is folded in (empty when
-    absent) so two colours of the same model are distinct products. SIZE is folded
-    in ONLY when present (build_sku already varies on size) so the same frame in
-    two sizes is two distinct products -- a sizeless product keeps the 3-part key
+    Normalised (normalise_identity_component) so casing/spacing/PUNCTUATION
+    variants of the same product collide: lowercased, and every run of
+    [-/_. whitespace] folded to a single space (the same separators the SKU
+    builder strips). Without this, "RB-2140" and "RB 2140" would be distinct
+    identities yet mint the SAME SKU base -- the SKU collision-suffix would then
+    create a real duplicate that the identity arm missed. Returns None unless
+    BOTH brand and model are present -- an identity needs at least those two; a
+    category without them (e.g. SERVICES) gets no identity_key and is not
+    identity-deduped. Colour is folded in (empty when absent) so two colours of
+    the same model are distinct products. SIZE is folded in ONLY when present
+    (build_sku already varies on size) so the same frame in two sizes is two
+    distinct products -- a sizeless product keeps the 3-part key
     (backward-compatible).
     """
-
-    def _norm(v: Any) -> str:
-        return re.sub(r"[-/_.\s]+", " ", str(v or "").strip().lower()).strip()
-
+    _norm = normalise_identity_component
     b, m = _norm(brand), _norm(model)
     if not b or not m:
         return None
@@ -793,18 +804,15 @@ def compute_identity_key(
     return "|".join(parts)
 
 
-def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
-    """Build the 409 duplicate-product error carrying the EXISTING row so the
-    caller/FE can link to it ('add stock or a variant instead'). Hub Phase 1.
+def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
+    """The display projection of an EXISTING spine row the FE dup surfaces
+    render: the duplicate-rescue popup (409 conflict payload, Phase 1) and the
+    live "similar products" strip (GET /products/similar, Phase 2) both read
+    THIS shape, so the two surfaces can never drift in how they extract
+    name/colour/size/pricing from a product doc.
 
-    Duplicate-rescue (variant assist Phase 1): the conflict payload is ENRICHED
-    ADDITIVELY with the existing row's display fields (name, colour, size,
-    pricing, active flag, first image) so the FE popup can show the product and
-    offer 'add a new colour/size of this model' without a second round-trip.
-    The original keys (product_id / sku / identity_key / barcode), the 409
-    status and the DUPLICATE_PRODUCT code are UNCHANGED -- additions only.
     Every value is .get()-sourced so a sparse row (e.g. the race fallback
-    {'sku': ...}) still builds a valid payload with None gaps.
+    {'sku': ...}) still builds a valid payload with None gaps -- never a crash.
     """
     existing = existing or {}
     attrs = existing.get("attributes")
@@ -833,15 +841,7 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
         " ".join(str(p) for p in (brand, model) if p) or None
     )
 
-    err = ProductMasterError(
-        "A product with this identity already exists "
-        f"(SKU {existing.get('sku')}). Add stock or a variant instead of a "
-        "duplicate.",
-        status=409,
-        field="sku",
-    )
-    err.code = "DUPLICATE_PRODUCT"
-    err.conflict = {
+    return {
         # -- original keys (other tests/callers rely on these; unchanged) --
         "product_id": existing.get("product_id"),
         "sku": existing.get("sku"),
@@ -860,7 +860,152 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
         "catalog_status": existing.get("catalog_status"),
         "image_url": _first_image(),
     }
+
+
+def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
+    """Build the 409 duplicate-product error carrying the EXISTING row so the
+    caller/FE can link to it ('add stock or a variant instead'). Hub Phase 1.
+
+    Duplicate-rescue (variant assist Phase 1): the conflict payload is ENRICHED
+    ADDITIVELY with the existing row's display fields (name, colour, size,
+    pricing, active flag, first image) so the FE popup can show the product and
+    offer 'add a new colour/size of this model' without a second round-trip.
+    The original keys (product_id / sku / identity_key / barcode), the 409
+    status and the DUPLICATE_PRODUCT code are UNCHANGED -- additions only.
+    The payload shape lives in existing_product_summary (shared with the
+    Phase 2 similar-products strip).
+    """
+    existing = existing or {}
+    err = ProductMasterError(
+        "A product with this identity already exists "
+        f"(SKU {existing.get('sku')}). Add stock or a variant instead of a "
+        "duplicate.",
+        status=409,
+        field="sku",
+    )
+    err.code = "DUPLICATE_PRODUCT"
+    err.conflict = existing_product_summary(existing)
     return err
+
+
+# Sibling cap for the live "similar products" strip (dup-detect Phase 2). The
+# strip is a hint, not a browser -- 12 chips is plenty; model_colour_count still
+# reports the TRUE distinct-colour total.
+SIMILAR_SIBLINGS_CAP = 12
+
+
+def find_similar_products(
+    products_collection,
+    *,
+    category: Any,
+    brand: Any,
+    model: Any,
+    colour: Any = None,
+    size: Any = None,
+    limit: int = SIMILAR_SIBLINGS_CAP,
+) -> Dict[str, Any]:
+    """Live as-you-type "similar products" lookup for the Add-Product form
+    (dup-detect council ruling, Phase 2).
+
+    COUNCIL DESIGN RULE: matching runs through the SAME normaliser that builds
+    the spine's identity/duplicate key (normalise_identity_component /
+    compute_identity_key) -- a value differing only by case, spacing or the
+    folded punctuation (- / _ .) from a stored product MUST match, exactly as
+    it would 409 at create time. Never reimplement the folding here or in the
+    browser.
+
+    Matching strategy (cheapest possible): stored docs carry `identity_key`
+    (unique+sparse indexed), which was BUILT by compute_identity_key -- so an
+    ^-anchored, escaped prefix regex on "brand|model|" walks that index and is
+    normaliser-parity-correct by construction. `category` rides along as a
+    filter (spec: siblings are same-category). No new index is needed: the
+    identity_key index serves the prefix scan.
+
+      * exact_match  -- the row whose identity_key equals compute_identity_key(
+                        brand, model, colour, size): the row a create would 409
+                        against. NOT category-filtered (the create-door dup
+                        check isn't either -- parity over prettiness).
+      * siblings     -- same category + brand + model, ANY colour/size, capped
+                        at `limit`, exact match excluded (the warning line
+                        already shows it).
+      * model_colour_count -- distinct colour segments across ALL the model's
+                        rows (not capped).
+
+    FAIL-SOFT: any DB trouble returns the empty shape -- the strip simply does
+    not render; it must never block or 5xx the Add-Product flow.
+    """
+    empty: Dict[str, Any] = {
+        "exact_match": None,
+        "siblings": [],
+        "model_colour_count": 0,
+    }
+    try:
+        if products_collection is None:
+            return empty
+        canonical = resolve_category(category)
+        if canonical is None:
+            return empty
+        b = normalise_identity_component(brand)
+        m = normalise_identity_component(model)
+        if not b or not m:
+            return empty
+
+        # "brand|model|" -- the trailing | delimiter guarantees "rb 21" can
+        # never prefix-match "rb 213". re.escape because the normaliser only
+        # folds [-/_. whitespace]: '&', '(', '+' ... survive into the key.
+        prefix = f"{b}|{m}|"
+        sibling_query = {
+            "category": canonical,
+            "identity_key": {"$regex": "^" + re.escape(prefix)},
+        }
+
+        exact_key = compute_identity_key(brand, model, colour, size)
+        exact_doc = (
+            products_collection.find_one({"identity_key": exact_key})
+            if exact_key
+            else None
+        )
+
+        docs = list(
+            products_collection.find(sibling_query)
+            .sort("identity_key", 1)
+            .limit(int(limit) + 1)
+        )
+        exact_ident = (exact_doc or {}).get("identity_key")
+        siblings = [
+            existing_product_summary(d)
+            for d in docs
+            if not (exact_ident and d.get("identity_key") == exact_ident)
+        ][: int(limit)]
+
+        # Distinct colours across ALL of the model's rows (uncapped): the
+        # colour is segment 3 of the identity_key, already normalised.
+        try:
+            keys = products_collection.distinct("identity_key", sibling_query)
+            colours = {
+                k.split("|")[2]
+                for k in keys
+                if isinstance(k, str) and len(k.split("|")) >= 3
+            }
+            model_colour_count = len(colours)
+        except Exception:  # noqa: BLE001 - count is a nicety, never a blocker
+            seen = [d.get("identity_key") for d in docs] + [exact_ident]
+            model_colour_count = len(
+                {
+                    k.split("|")[2]
+                    for k in seen
+                    if isinstance(k, str) and len(k.split("|")) >= 3
+                }
+            )
+
+        return {
+            "exact_match": existing_product_summary(exact_doc) if exact_doc else None,
+            "siblings": siblings,
+            "model_colour_count": model_colour_count,
+        }
+    except Exception as exc:  # noqa: BLE001 - fail-soft: hint only, never a 5xx
+        logger.warning("[PM] find_similar_products failed: %s", exc)
+        return empty
 
 
 def normalise_payload(

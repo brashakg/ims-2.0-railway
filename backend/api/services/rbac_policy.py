@@ -3851,6 +3851,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/brand-options",
         "allowed": "AUTHENTICATED",
     },
+    # Live "similar products" strip in the Add-Product form (dup-detect
+    # Phase 2). Read-only hint any authenticated catalog operator can use;
+    # mirrors GET /api/v1/products.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/similar",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "GET",
         "path": "/api/v1/catalog-field-options",

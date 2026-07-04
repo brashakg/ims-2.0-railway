@@ -86,6 +86,7 @@ import {
   type ProductFormValues,
   type ProductDoc,
 } from './productAddShared';
+import { SimilarProductsHint } from './SimilarProductsHint';
 import clsx from 'clsx';
 
 type SectionId = 'identity' | 'pricing' | 'inventory';
@@ -494,6 +495,32 @@ export function QuickAddPage() {
       `/inventory?tab=catalog${sku ? `&search=${encodeURIComponent(sku)}` : ''}`
     );
   }, [dupInfo, navigate]);
+
+  // ---- Similar-products strip (Phase 2) -------------------------------------
+  // A sibling chip prefills the form through the SAME Phase 1 variant path the
+  // rescue popup uses (fetch the product -> enterVariantMode); the exact-match
+  // "Open it" follows the same product-open destination as the popup.
+  const handleSimilarPick = useCallback(
+    async (productId: string) => {
+      if (!productId) return;
+      try {
+        const product = (await productApi.getProduct(productId)) as ProductDoc;
+        enterVariantMode(product);
+      } catch {
+        toast.error('Could not load that product to start a variant.');
+      }
+    },
+    [enterVariantMode, toast]
+  );
+
+  const handleSimilarOpen = useCallback(
+    (sku?: string | null) => {
+      navigate(
+        `/inventory?tab=catalog${sku ? `&search=${encodeURIComponent(sku)}` : ''}`
+      );
+    },
+    [navigate]
+  );
 
   // ---- Product image upload (Part 1) ---------------------------------------
   // Upload each selected/dropped file via productApi.uploadProductImage and
@@ -1068,6 +1095,15 @@ export function QuickAddPage() {
       const subs = subbrandsByBrand[attributes.brand_name || ''];
       return subs && subs.length > 0 ? { ...f, type: 'select' as const, options: subs } : f;
     });
+
+  // Similar-products strip anchor: it renders under the category's MODEL
+  // field (model_no for eyewear/watches, model_name for the categories keyed
+  // on it). null when the category has neither (e.g. SERVICES-like sets).
+  const similarAnchorField = visibleFields.some((f) => f.name === 'model_no')
+    ? 'model_no'
+    : visibleFields.some((f) => f.name === 'model_name')
+      ? 'model_name'
+      : null;
 
   const setAttr = (name: string, value: string) => {
     setAttributes((prev) => ({ ...prev, [name]: value }));
@@ -1733,16 +1769,38 @@ export function QuickAddPage() {
                     injected right after Warranty (before UPC) per the
                     owner-locked field order. */}
                 <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
-                  {visibleFields.map((f, i) =>
-                    isEyewear && f.name === 'warranty' ? (
-                      <Fragment key={f.name}>
-                        {renderField(f, i === 0)}
-                        {renderWeightInput()}
-                      </Fragment>
-                    ) : (
-                      renderField(f, i === 0)
-                    )
-                  )}
+                  {visibleFields.map((f, i) => {
+                    if (isEyewear && f.name === 'warranty') {
+                      return (
+                        <Fragment key={f.name}>
+                          {renderField(f, i === 0)}
+                          {renderWeightInput()}
+                        </Fragment>
+                      );
+                    }
+                    if (f.name === similarAnchorField) {
+                      // Similar-products strip (Phase 2): a full-width quiet
+                      // line straight under the model field. The component
+                      // renders NOTHING (no cell, no gap) until it has fresh
+                      // matches, so the grid is untouched while typing.
+                      return (
+                        <Fragment key={f.name}>
+                          {renderField(f, i === 0)}
+                          <SimilarProductsHint
+                            category={selectedCategory}
+                            brand={attributes.brand_name || ''}
+                            model={attributes.model_no || attributes.model_name || ''}
+                            colour={attributes.colour_code || ''}
+                            size={attributes.size || ''}
+                            variantMode={Boolean(variantCtx)}
+                            onPickSibling={handleSimilarPick}
+                            onOpenExisting={handleSimilarOpen}
+                          />
+                        </Fragment>
+                      );
+                    }
+                    return renderField(f, i === 0);
+                  })}
                   {/* Fallback: eyewear categories missing a warranty field
                       still get the inline Weight input at the end. */}
                   {isEyewear && !visibleFields.some((f) => f.name === 'warranty') && renderWeightInput()}
