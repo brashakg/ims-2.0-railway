@@ -1462,17 +1462,61 @@ async def create_catalog_product(
     _spine["product_id"] = product_id
     _spine["id"] = product_id
     _spine["sku"] = sku
-    # Persist the spine. Fail-soft: a spine-write error never blocks the catalog
-    # save -- the order-create spine guard (③) then fails loud on a sale of a
-    # product that never got its spine row, surfacing the gap rather than hiding it.
-    try:
-        _pr = get_product_repository()
-        if _pr is not None:
-            _pr.create(_spine)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "[CATALOG] spine write skipped for %s (%s)", product_id, sku, exc_info=True
-        )
+    # F6: persist the spine as a HARD gate. The products spine is REQUIRED -- POS
+    # / PO / Buy Desk resolve the catalog id straight to it, and the order-create
+    # spine guard (3) fails loud without it. Previously a spine-write error was
+    # swallowed and the catalog doc saved anyway, leaving a hidden catalog-only
+    # product that couldn't be billed until a sale surfaced the gap. Now a
+    # spine-write failure aborts the create BEFORE the catalog doc is saved:
+    # a duplicate identity/SKU -> 409, any other failure (incl. a swallowed None
+    # return) -> 500. When there is no DB (_pr is None) the catalog save below
+    # also falls back to in-memory, so there is no orphan to guard against.
+    _pr = get_product_repository()
+    if _pr is not None:
+        try:
+            _spine_created = _pr.create(_spine, raise_on_duplicate=True)
+        except HTTPException:
+            raise
+        except Exception as err:  # noqa: BLE001
+            if err.__class__.__name__ == "DuplicateKeyError":
+                logger.warning(
+                    "[CATALOG] spine duplicate for %s (%s)", product_id, sku
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A product with the same identity or SKU already exists. "
+                        "The catalog product was not created."
+                    ),
+                ) from err
+            logger.error(
+                "[CATALOG] spine write FAILED for %s (%s); aborting catalog create",
+                product_id,
+                sku,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Failed to create the product's billing record. The product "
+                    "was not saved -- please retry."
+                ),
+            ) from err
+        if not _spine_created:
+            # create() returns None on a swallowed (non-duplicate) DB error;
+            # treat that as a hard failure too rather than saving an orphan.
+            logger.error(
+                "[CATALOG] spine write returned no doc for %s (%s); aborting create",
+                product_id,
+                sku,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Failed to create the product's billing record. The product "
+                    "was not saved -- please retry."
+                ),
+            )
 
     # Build product data
     product_data = {

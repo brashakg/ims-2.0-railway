@@ -390,6 +390,8 @@ _PO_DOC = {
 }
 _GRN_DOC = {
     "grn_id": "G1", "po_id": "PO1", "vendor_id": "V1", "store_id": "S1",
+    # A standard GRN can only be billed once ACCEPTED (F3 server-side guard).
+    "status": "ACCEPTED",
     "items": [{"product_id": "P1", "accepted_qty": 10}],
 }
 

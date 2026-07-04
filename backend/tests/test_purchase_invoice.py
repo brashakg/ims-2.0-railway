@@ -493,6 +493,8 @@ class TestFromGrnDraft:
         grn = {
             "grn_id": "G1", "grn_number": "GRN-1", "po_id": "PO1",
             "vendor_id": "V1", "vendor_name": "Acme Optics", "store_id": "S1",
+            # A standard GRN can only be drafted/billed once ACCEPTED (F3 guard).
+            "status": "ACCEPTED",
             "vendor_invoice_no": "INV-FROM-GRN", "vendor_invoice_date": "2026-05-02",
             "items": [
                 {"product_id": "P1", "product_name": "Frame X", "accepted_qty": 5},
@@ -590,3 +592,117 @@ def test_regression_without_pos_would_be_intrastate():
     reg = build_itc_register(bills, entity_state="20")
     assert reg["total_igst"] == 0.0
     assert reg["total_cgst"] == 25.0 and reg["total_sgst"] == 25.0
+
+
+# ===========================================================================
+# Hardening findings F1 (read RBAC) / F3 (standard GRN must be ACCEPTED) /
+# F4 (duplicate-invoice race -> DB unique index -> 409).
+# ===========================================================================
+
+
+class TestReadEndpointsAreAccountingOnly:
+    """F1: purchase-invoice READS expose supplier bill / AP / GST-ITC / 3-way-
+    match data -> restricted to ACCOUNTANT/ADMIN (SUPERADMIN auto-passes)."""
+
+    _READ_PATHS = [
+        "/api/v1/vendors/purchase-invoices",
+        "/api/v1/vendors/purchase-invoices/config",
+        "/api/v1/vendors/purchase-invoices/INV1/match",
+        "/api/v1/vendors/purchase-invoices/INV1",
+    ]
+
+    def test_sales_staff_403_on_every_read(self):
+        cli = _app(_FakeDB(), roles=("SALES_STAFF",))
+        for path in self._READ_PATHS:
+            r = cli.get(path)
+            assert r.status_code == 403, f"{path} -> {r.status_code} {r.text}"
+
+    def test_cashier_403_on_every_read(self):
+        cli = _app(_FakeDB(), roles=("CASHIER",))
+        for path in self._READ_PATHS:
+            assert cli.get(path).status_code == 403, path
+
+    def test_accountant_not_403_on_reads(self):
+        cli = _app(_FakeDB(), roles=("ACCOUNTANT",))
+        for path in self._READ_PATHS:
+            assert cli.get(path).status_code != 403, path
+
+    def test_superadmin_not_403_on_reads(self):
+        cli = _app(_FakeDB(), roles=("SUPERADMIN",))
+        for path in self._READ_PATHS:
+            assert cli.get(path).status_code != 403, path
+
+
+class TestStandardGrnMustBeAccepted:
+    """F3: a STANDARD PO-backed GRN must be ACCEPTED before it can be billed."""
+
+    def _wire_grn(self, status):
+        grn = {
+            "grn_id": "G9", "po_id": "PO1", "vendor_id": "V1", "store_id": "S1",
+            "status": status, "grn_subtype": "STANDARD",
+            "vendor_invoice_no": "INV-G9", "vendor_invoice_date": "2026-05-02",
+            "items": [{"product_id": "P1", "product_name": "Frame X",
+                       "accepted_qty": 10}],
+        }
+
+        class _R:
+            def find_by_id(self, _id):
+                return dict(grn)
+
+        pi_router.get_grn_repository = lambda: _R()
+
+    def test_create_from_pending_grn_400(self):
+        cli = _app(_FakeDB())
+        self._wire_grn("PENDING")
+        r = cli.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(grn_id="G9"),
+        )
+        assert r.status_code == 400, r.text
+        assert "accepted" in r.json()["detail"].lower()
+
+    def test_create_from_partially_accepted_grn_400(self):
+        cli = _app(_FakeDB())
+        self._wire_grn("PARTIALLY_ACCEPTED")
+        r = cli.post(
+            "/api/v1/vendors/purchase-invoices",
+            json=_invoice_body(grn_id="G9"),
+        )
+        assert r.status_code == 400, r.text
+
+    def test_draft_from_pending_grn_400(self):
+        cli = _app(_FakeDB())
+        self._wire_grn("PENDING")
+        r = cli.get("/api/v1/vendors/purchase-invoices/from-grn/G9")
+        assert r.status_code == 400, r.text
+        assert "accepted" in r.json()["detail"].lower()
+
+
+class TestDuplicateInvoiceRaceMaps409:
+    """F4: the app-level pre-check can be raced; the UNIQUE partial index is the
+    atomic backstop -> the insert loser's DuplicateKeyError maps to 409."""
+
+    def test_duplicate_key_on_insert_returns_409(self):
+        db = _FakeDB()
+
+        class _DupErr(Exception):
+            pass
+
+        _DupErr.__name__ = "DuplicateKeyError"  # matched by class name
+
+        class _RaisingColl(_FakeCollection):
+            def insert_one(self, doc):
+                raise _DupErr("E11000 duplicate key")
+
+        orig_get = db.get_collection
+
+        def _patched(name):
+            if name == "vendor_bills":
+                return _RaisingColl(db.collections.setdefault("vendor_bills", []))
+            return orig_get(name)
+
+        db.get_collection = _patched
+        cli = _app(db)
+        r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
+        assert r.status_code == 409, r.text
+        assert "already" in r.json()["detail"].lower()

@@ -104,11 +104,20 @@ export default function BuyDeskDraftPOModal({
       toast.error('Pick a vendor for this draft PO');
       return;
     }
-    const validLines = lines.filter((l) => l.product_id && l.quantity > 0);
-    if (validLines.length === 0) {
+    const linesWithProduct = lines.filter((l) => l.product_id && l.quantity > 0);
+    if (linesWithProduct.length === 0) {
       toast.error('Every line needs a quantity of at least 1');
       return;
     }
+    // Cost arrives on the PO, not at GRN: accept_grn reads the PO's unit price,
+    // so a zero-cost line would mint stock with no cost basis. Require a positive
+    // unit cost up front, matching the manual PO form's gate.
+    const zeroCost = linesWithProduct.filter((l) => !(l.unitCost > 0));
+    if (zeroCost.length > 0) {
+      toast.error('Every line needs a unit cost above 0 — cost cannot be added later at receiving.');
+      return;
+    }
+    const validLines = linesWithProduct;
     if (submittingRef.current) return;
     submittingRef.current = true;
     const storeId = user?.activeStoreId ?? 'default';

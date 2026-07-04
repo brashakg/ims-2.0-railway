@@ -6385,12 +6385,13 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
-    # Create/from-grn/book is an accounting action -> ACCOUNTANT/ADMIN; reads
-    # are AUTHENTICATED. (SUPERADMIN auto-passes via require_roles.)
+    # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
+    # (SUPERADMIN auto-passes via require_roles.) F1: reads expose supplier bill /
+    # AP / GST-ITC / 3-way-match data, so they are no longer AUTHENTICATED.
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -6400,7 +6401,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -6426,12 +6427,12 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # Phase 2: 3-way-match config + per-invoice match detail + exception override.
-    # Config read is AUTHENTICATED; config write + exception override are
-    # accounting actions -> ACCOUNTANT/ADMIN. Match detail read is AUTHENTICATED.
+    # F1: config read (accounting policy) + match-detail read are now ACCOUNTANT/
+    # ADMIN, same as the config write + exception override (SUPERADMIN auto-passes).
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/config",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "PUT",
@@ -6441,7 +6442,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}/match",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     {
         "method": "POST",
@@ -6469,7 +6470,7 @@ POLICY: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-invoices/{invoice_id}",
-        "allowed": "AUTHENTICATED",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # S6: Accountant reconciliation ticks (inline recon sub-doc on vendor_bills).
     # Both write and read are accounting actions -> ACCOUNTANT/ADMIN.
