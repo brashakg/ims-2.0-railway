@@ -1753,6 +1753,51 @@ async def get_brand_options(
         return {"brands": []}
 
 
+# NOTE: registered here (with the other literal /products/* paths like
+# /brand-options and /generate-description) so it stays ABOVE the
+# GET /products/{product_id} catch-all -- the literal path must win.
+@router.get("/similar")
+async def get_similar_products(
+    category: str,
+    brand: str = "",
+    model_no: str = "",
+    colour_code: str = "",
+    size: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """Live as-you-type "similar products" check for the Add-Product form
+    (dup-detect council ruling, Phase 2).
+
+    Any authenticated catalog operator may call it (mirrors GET /products).
+    The matching runs through product_master.find_similar_products, which
+    reuses THE same normaliser that builds the spine's identity/duplicate key
+    (council rule) -- so what this reports as an exact match is exactly what
+    the create door would 409.
+
+    Shape: {"exact_match": {summary}|null, "siblings": [summary, ...] (cap 12),
+    "model_colour_count": N}. FAIL-SOFT: any DB trouble returns the empty
+    shape with 200 -- the FE strip simply doesn't render; never a 5xx.
+    """
+    empty = {"exact_match": None, "siblings": [], "model_colour_count": 0}
+    try:
+        from database.connection import get_db
+
+        db = get_db()
+        if not (db and getattr(db, "is_connected", False)):
+            return empty
+        return _pm.find_similar_products(
+            db.db.get_collection("products"),
+            category=category,
+            brand=brand,
+            model=model_no,
+            colour=colour_code,
+            size=size,
+        )
+    except Exception as e:  # noqa: BLE001 - hint endpoint, never a blocker
+        logger.warning("[SIMILAR] lookup failed: %s", e)
+        return empty
+
+
 class DescriptionGenerateRequest(BaseModel):
     """Input for the Add-Product form's "Auto-fill with AI" button."""
 
