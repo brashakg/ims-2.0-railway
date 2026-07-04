@@ -1744,9 +1744,7 @@ async def get_brand_options(
                     # Default Shopify-sync INTENT for the brand (Settings ->
                     # Brand Master); the create door stamps sync_to_shopify
                     # from it when the payload doesn't say explicitly.
-                    "sync_to_shopify_default": _cd.load_brand_sync_default(
-                        db, name
-                    ),
+                    "sync_to_shopify_default": _cd.load_brand_sync_default(db, name),
                 }
             )
         return {"brands": brands}
@@ -1798,15 +1796,24 @@ async def generate_product_description(
     category_name = spec.display if spec is not None else str(body.category)
 
     system = (
-        "You are a product copywriter for an Indian optical retail chain. "
-        "Write a customer-facing retail description for the product described "
-        "by the attributes given. Rules: 2-3 sentences, under "
+        "You are an SEO product copywriter for an Indian optical retail chain. "
+        "Write a customer-facing, search-optimised retail description for the "
+        "product described by the attributes given. Rules: 2-3 sentences, under "
         f"{body.max_length} characters, plain text only (no markdown, no "
         "headings, no bullet points, no emojis). Use ONLY the attributes "
         "provided -- never invent specifications, certifications or claims "
-        "that are not in the data. Natural, confident retail tone; mention "
-        "the brand and model naturally; no superlatives like 'best' or "
-        "'world-class'."
+        "that are not in the data. SEO KEYWORD RULES (owner requirement): the "
+        "text MUST naturally contain the search phrases shoppers type -- the "
+        "brand name, the model number and model name, the product-type word "
+        "(e.g. 'sunglasses', 'spectacle frames', 'reading glasses'), the "
+        "gender when given (e.g. 'men's sunglasses', 'unisex frames'), the "
+        "colour, and the key feature terms present in the data (e.g. "
+        "'polarized', 'UV400 protection', 'metal frame', 'blue-cut lenses'). "
+        "Weave them into natural sentences -- NO keyword stuffing, no comma "
+        "lists of keywords, each keyword at most twice. Front-load the most "
+        "important phrase (brand + model + product type) in the first "
+        "sentence. Natural, confident retail tone; no superlatives like "
+        "'best' or 'world-class'."
     )
     lines = "\n".join(f"{k}: {v}" for k, v in sorted(filled.items()))
     user_msg = f"Product category: {category_name}\nAttributes:\n{lines}"

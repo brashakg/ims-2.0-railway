@@ -49,6 +49,9 @@ def test_generated_happy_path(monkeypatch):
         assert "Ray-Ban" in user and "RB3025" in user
         assert "empty_field" not in user and "none_field" not in user
         assert "invent" in system  # no-invented-specs rule present
+        # SEO contract (owner 2026-07-04): keyword rules + front-loading present.
+        assert "SEO" in system and "keyword" in system.lower()
+        assert "Front-load" in system and "stuffing" in system
         return "Classic Ray-Ban RB3025 aviators with polarized Green G-15 lenses in a gold frame."
 
     monkeypatch.setattr(claude_client, "is_claude_available", lambda: True)
