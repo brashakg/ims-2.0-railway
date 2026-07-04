@@ -576,6 +576,27 @@ class DatabaseConnection:
         # invoice guard lives in app code (legacy prod data may already have one).
         _idx("vendor_bills", "bill_id", unique=True, sparse=True, background=True)
         _idx("vendor_bills", [("vendor_id", 1), ("bill_number", 1)], background=True)
+        # F4: DB-level duplicate-invoice backstop. The same vendor tax-invoice
+        # number must never be booked twice as a PURCHASE_INVOICE -- a double
+        # entry doubles the payable AND the ITC. The app-level check-then-insert
+        # in create_purchase_invoice races; this UNIQUE index is the atomic
+        # guard (insert loser -> DuplicateKeyError -> 409). PARTIAL to
+        # doc_type == PURCHASE_INVOICE so legacy header-only vendor_bills (and
+        # rows with a null/missing bill_number) are never indexed and can't
+        # collide. If prod already holds duplicate PURCHASE_INVOICE rows this
+        # build fails SOFT (logged, never aborts boot -- see _idx); a data-hygiene
+        # pass must de-dupe before the index can take effect.
+        _idx(
+            "vendor_bills",
+            [("vendor_id", 1), ("bill_number", 1)],
+            unique=True,
+            partialFilterExpression={
+                "doc_type": "PURCHASE_INVOICE",
+                "bill_number": {"$type": "string"},
+            },
+            name="uniq_purchase_invoice_vendor_number",
+            background=True,
+        )
         _idx("vendor_bills", "po_id", sparse=True, background=True)
         _idx("vendor_bills", "grn_id", sparse=True, background=True)
         _idx("vendor_bills", "status", background=True)
@@ -906,8 +927,12 @@ class MockCollection:
         return type("obj", (object,), {"modified_count": 0})()
 
     def find_one_and_update(
-        self, filter: Dict, update: Dict, upsert: bool = False,
-        return_document: Any = False, **kwargs
+        self,
+        filter: Dict,
+        update: Dict,
+        upsert: bool = False,
+        return_document: Any = False,
+        **kwargs,
     ) -> Optional[Dict]:
         """Atomic find-and-update for no-Mongo mode.
 

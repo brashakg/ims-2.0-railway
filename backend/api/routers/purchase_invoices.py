@@ -136,6 +136,15 @@ class PurchaseInvoiceCreate(BaseModel):
     # and flips dc_matched=true on each linked DC.
     linked_dc_ids: Optional[List[str]] = None
 
+    @field_validator("invoice_number", mode="before")
+    @classmethod
+    def _strip_invoice_number(cls, v):
+        """F4: trim surrounding whitespace so '  INV-12  ' and 'INV-12' are the
+        SAME vendor invoice for the duplicate guard + unique index (a stray space
+        must not create a phantom distinct bill). Case is preserved -- vendor
+        invoice numbers can be case-significant."""
+        return v.strip() if isinstance(v, str) else v
+
 
 def _clean(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "_id"}
@@ -212,6 +221,49 @@ def _load_linked_dcs(db, dc_ids):
             )
         docs.append(doc)
     return docs
+
+
+def _load_standard_grn(grn_id):
+    """Load a STANDARD (PO-backed) GRN and verify it is ACCEPTED before it can be
+    billed -- the mirror of the DC guard in `_load_linked_dcs`.
+
+    A GRN only mints stock at accept time, so booking a purchase invoice against
+    a PENDING / PARTIALLY_ACCEPTED GRN would record a payable (and its ITC) for
+    goods not yet accepted into stock. The frontend already filters to ACCEPTED
+    GRNs; this is the server-side enforcement.
+
+    Loads via the GRN repository (the same path draft/match already use), so a
+    caller need not hold the doc. Raises HTTPException (404 / 400) if the GRN is
+    missing or its status is not ACCEPTED. A Delivery Challan is out of scope here
+    (it is billed via the /from-dcs consolidated path) -> 400. Fail-soft only when
+    there is no GRN repository / no DB (returns None).
+    """
+    if not grn_id:
+        return None
+    grn_repo = get_grn_repository()
+    if grn_repo is None:
+        return None
+    doc = grn_repo.find_by_id(grn_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"GRN {grn_id} not found")
+    if doc.get("grn_subtype") == GRN_SUBTYPE_DC:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"GRN {grn_id} is a Delivery Challan; consolidate it via the "
+                f"/from-dcs bulk-invoice path, not a single-GRN invoice."
+            ),
+        )
+    if doc.get("status") != "ACCEPTED":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"GRN {grn_id} must be ACCEPTED before it can be billed "
+                f"(current status: {doc.get('status') or 'UNKNOWN'}). Accept the "
+                f"goods receipt first, then raise the purchase invoice."
+            ),
+        )
+    return doc
 
 
 def _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=None):
@@ -537,6 +589,14 @@ async def create_purchase_invoice(
 
     db = _get_db()
 
+    # F3: a STANDARD PO-backed GRN must be ACCEPTED before it can be billed -- a
+    # GRN mints stock only at accept time, so booking against a PENDING /
+    # PARTIALLY_ACCEPTED GRN records a payable + ITC for goods not yet received
+    # into stock. DC-consolidated invoices validate each linked DC separately
+    # below (via _load_linked_dcs), so the single-GRN guard skips them.
+    if body.grn_id and not body.linked_dc_ids:
+        _load_standard_grn(body.grn_id)
+
     # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
     # The same vendor tax-invoice number must not be booked twice -- a double
     # entry would double the payable AND double-count the ITC.
@@ -704,7 +764,23 @@ async def create_purchase_invoice(
     if db is not None:
         try:
             db.get_collection("vendor_bills").insert_one(dict(doc))
+        except HTTPException:
+            raise
         except Exception as exc:
+            # F4: the app-level pre-check above narrows the common case, but the
+            # race window (two concurrent bookings of the same vendor invoice no)
+            # is closed by the UNIQUE partial index -- the insert LOSER surfaces
+            # here as a DuplicateKeyError -> 409 (not a 500). Matched by class name
+            # so no hard pymongo import (MockCollection never raises it).
+            if exc.__class__.__name__ == "DuplicateKeyError":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Invoice number '{body.invoice_number}' is already "
+                        f"recorded for this vendor. Duplicate vendor invoices are "
+                        f"not allowed."
+                    ),
+                ) from exc
             raise HTTPException(
                 status_code=500, detail="Failed to save purchase invoice"
             ) from exc
@@ -748,9 +824,7 @@ async def create_purchase_invoice(
                         invoice_id,
                     )
             try:
-                db.get_collection("vendor_bills").delete_one(
-                    {"bill_id": invoice_id}
-                )
+                db.get_collection("vendor_bills").delete_one({"bill_id": invoice_id})
             except Exception:  # noqa: BLE001
                 logger.error(
                     "[F9] CRITICAL: dc-race rollback could not delete orphan "
@@ -861,7 +935,10 @@ async def list_purchase_invoices(
     unmatched: Optional[bool] = Query(
         None, description="true -> only invoices with no po_id/grn_id link"
     ),
-    current_user: dict = Depends(get_current_user),
+    # F1: purchase-invoice READS expose supplier bill / AP / GST-ITC / 3-way-match
+    # data -- restrict to the AP roles (ACCOUNTANT/ADMIN; SUPERADMIN auto-passes),
+    # same gate as the create/approve writes, instead of any authenticated user.
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List first-class purchase invoices (doc_type=PURCHASE_INVOICE), newest
     first. Header-only legacy bills are excluded from this view. Filterable by
@@ -906,6 +983,13 @@ async def draft_invoice_from_grn(
     if grn_repo is not None and grn is None:
         raise HTTPException(status_code=404, detail="GRN not found")
     grn = grn or {}
+
+    # F3: only a still-ACCEPTED standard GRN can be drafted into an invoice, so
+    # the user sees the block here rather than after filling in the POST body. A
+    # DC is drafted via /from-dcs (_load_standard_grn 400s a DC). Fail-soft when
+    # there is no DB (returns None -> no block).
+    if grn:
+        _load_standard_grn(grn_id)
 
     po = None
     po_id = grn.get("po_id")
@@ -1078,7 +1162,11 @@ async def draft_invoice_from_dcs(
 
 
 @router.get("/config")
-async def get_purchase_config(current_user: dict = Depends(get_current_user)):
+async def get_purchase_config(
+    # F1: exposes the accounting policy (valuation method + match tolerance) --
+    # AP roles only (ACCOUNTANT/ADMIN; SUPERADMIN auto-passes).
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
     """Effective purchase config: valuation_method (MOVING_AVERAGE | FIFO) +
     match_tolerance_pct. Returns the stored override merged over safe defaults
     (so the response is always complete + valid even with no settings doc)."""
@@ -1156,7 +1244,9 @@ async def update_purchase_config(
 
 @router.get("/{invoice_id}/match")
 async def get_invoice_match(
-    invoice_id: str, current_user: dict = Depends(get_current_user)
+    invoice_id: str,
+    # F1: 3-way match detail (PO vs GRN vs invoice) is AP data -- AP roles only.
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Return the stored 3-way match detail for an invoice.
 
@@ -1203,7 +1293,8 @@ async def get_invoice_match(
 
 @router.get("/{invoice_id}/dc-match")
 async def get_invoice_dc_match(
-    invoice_id: str, current_user: dict = Depends(require_roles(*_AP_ROLES)),
+    invoice_id: str,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """F9 -- return the stored Delivery-Challan bulk-tally detail for an invoice.
 
@@ -1344,9 +1435,7 @@ class LandedCostComponent(BaseModel):
     def _known_type(cls, v: str) -> str:
         t = (v or "").strip().upper()
         if t not in lc.COMPONENT_TYPES:
-            raise ValueError(
-                f"component type must be one of {lc.COMPONENT_TYPES}"
-            )
+            raise ValueError(f"component type must be one of {lc.COMPONENT_TYPES}")
         return t
 
 
@@ -1750,7 +1839,10 @@ async def allocate_invoice_landed_costs(
 
 @router.get("/{invoice_id}")
 async def get_purchase_invoice(
-    invoice_id: str, current_user: dict = Depends(get_current_user)
+    invoice_id: str,
+    # F1: single-invoice read carries supplier bill / ITC / landed cost / match
+    # verdict -- AP roles only (ACCOUNTANT/ADMIN; SUPERADMIN auto-passes).
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Get one purchase invoice by id (looks up the vendor_bills row)."""
     db = _get_db()

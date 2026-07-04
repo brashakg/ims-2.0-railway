@@ -1462,17 +1462,68 @@ async def create_catalog_product(
     _spine["product_id"] = product_id
     _spine["id"] = product_id
     _spine["sku"] = sku
-    # Persist the spine. Fail-soft: a spine-write error never blocks the catalog
-    # save -- the order-create spine guard (③) then fails loud on a sale of a
-    # product that never got its spine row, surfacing the gap rather than hiding it.
-    try:
-        _pr = get_product_repository()
-        if _pr is not None:
-            _pr.create(_spine)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "[CATALOG] spine write skipped for %s (%s)", product_id, sku, exc_info=True
-        )
+    # F6: persist the spine as a HARD gate on a GENUINE write failure. The products
+    # spine is REQUIRED -- POS / PO / Buy Desk resolve the catalog id straight to
+    # it, and the order-create spine guard (3) fails loud without it. Previously a
+    # spine-write error was swallowed and the catalog doc saved anyway, leaving a
+    # hidden catalog-only product that couldn't be billed until a sale surfaced the
+    # gap. Now a REAL spine-write failure (a transient DB error -> create() returns
+    # None, or a non-duplicate exception) aborts the create BEFORE the catalog doc
+    # is saved -> 500.
+    #
+    # A DuplicateKeyError is DELIBERATELY tolerated: the catalog/PIM door
+    # legitimately holds same-identity variants (see the build_canonical_product
+    # note above -- the spine is inserted directly precisely to NOT impose the
+    # identity duplicate-block here), and that identity already has a billable
+    # spine. Failing it would break the by-design "accept the same product at the
+    # form AND catalog doors" flow. When there is no DB (_pr is None) the catalog
+    # save below also falls back to in-memory, so there is no orphan to guard.
+    _pr = get_product_repository()
+    if _pr is not None:
+        try:
+            _spine_created = _pr.create(_spine, raise_on_duplicate=True)
+        except HTTPException:
+            raise
+        except Exception as err:  # noqa: BLE001
+            if err.__class__.__name__ == "DuplicateKeyError":
+                # Same-identity variant: the spine already exists (billable).
+                # Tolerate + proceed to save the catalog/PIM doc, as before.
+                logger.info(
+                    "[CATALOG] spine already exists for the identity of %s (%s); "
+                    "saving catalog variant",
+                    product_id,
+                    sku,
+                )
+                _spine_created = True
+            else:
+                logger.error(
+                    "[CATALOG] spine write FAILED for %s (%s); aborting catalog create",
+                    product_id,
+                    sku,
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Failed to create the product's billing record. The "
+                        "product was not saved -- please retry."
+                    ),
+                ) from err
+        if not _spine_created:
+            # create() returns None on a swallowed (non-duplicate) DB error;
+            # treat that as a hard failure too rather than saving an orphan.
+            logger.error(
+                "[CATALOG] spine write returned no doc for %s (%s); aborting create",
+                product_id,
+                sku,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Failed to create the product's billing record. The product "
+                    "was not saved -- please retry."
+                ),
+            )
 
     # Build product data
     product_data = {
@@ -1640,7 +1691,10 @@ async def update_catalog_product(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
 
-    return {"product": mask_cost(existing, current_user, context="catalog_edit"), "message": "Product updated successfully"}
+    return {
+        "product": mask_cost(existing, current_user, context="catalog_edit"),
+        "message": "Product updated successfully",
+    }
 
 
 @router.delete("/products/{product_id}")
@@ -1673,7 +1727,9 @@ async def delete_catalog_product(
             _pr.update(product_id, {"is_active": False})
     except Exception:  # noqa: BLE001
         logger.warning(
-            "[CATALOG] spine deactivate on delete skipped for %s", product_id, exc_info=True
+            "[CATALOG] spine deactivate on delete skipped for %s",
+            product_id,
+            exc_info=True,
         )
 
     return {"message": "Product deleted successfully"}
@@ -1875,7 +1931,8 @@ async def import_products(
                         "category": product.category.value,
                         "attributes": dict(product.attributes or {}),
                         "mrp": product.pricing.mrp,
-                        "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                        "offer_price": product.pricing.offer_price
+                        or product.pricing.mrp,
                         "discount_category": product.pricing.discount_category,
                         "hsn_code": product.hsn_code,
                         "gst_rate": product.gst_rate,
@@ -1885,7 +1942,9 @@ async def import_products(
             except _pm.ProductMasterError as req_exc:
                 detail = (
                     f"Missing required field: {req_exc.field}"
-                    if req_exc.status == 422 and req_exc.field and req_exc.field != "category"
+                    if req_exc.status == 422
+                    and req_exc.field
+                    and req_exc.field != "category"
                     else req_exc.message
                 )
                 errors.append({"index": i, "error": detail})

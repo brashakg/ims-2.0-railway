@@ -214,7 +214,9 @@ class TestCatalogPricingSchema:
     def test_all_canonical_tiers_accepted(self):
         """Every canonical cap tier validates at the model layer (no DB)."""
         for tier in ("MASS", "PREMIUM", "LUXURY", "SERVICE", "NON_DISCOUNTABLE"):
-            model = catalog.PricingInput(mrp=1000, offer_price=900, discount_category=tier)
+            model = catalog.PricingInput(
+                mrp=1000, offer_price=900, discount_category=tier
+            )
             assert model.discount_category == tier
 
 
@@ -235,3 +237,100 @@ class TestCatalogGuardUnit:
 
         with pytest.raises(ValidationError):
             catalog.PricingInput(mrp=1000, discount_category="PLATINUM")
+
+
+# ---------------------------------------------------------------------------
+# F6: the products SPINE write is a HARD gate on catalog create. A spine
+# failure must abort the create (no hidden catalog-only product), mapping a
+# duplicate identity/SKU -> 409 and any other failure -> 500.
+# ---------------------------------------------------------------------------
+
+
+class TestCatalogSpineWriteIsHardGate:
+    def _patch_repo(self, monkeypatch, repo):
+        # create_catalog_product does `from ..dependencies import
+        # get_product_repository` at call time, so patch the source module.
+        from api import dependencies as deps
+
+        monkeypatch.setattr(deps, "get_product_repository", lambda: repo)
+
+    def test_spine_write_exception_aborts_with_500_and_no_catalog_doc(
+        self, client, auth_headers, monkeypatch
+    ):
+        class _FailingRepo:
+            def create(self, doc, raise_on_duplicate=False):
+                raise RuntimeError("spine DB down")
+
+        self._patch_repo(monkeypatch, _FailingRepo())
+        resp = client.post(
+            "/api/v1/catalog/products",
+            json=_frame_payload(mrp=4000, offer_price=3600),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 500, resp.text
+        # Hard fail: the spine write raises BEFORE the catalog doc is saved, so
+        # the response is an error with no product (no orphan catalog-only doc).
+        assert "product" not in resp.json()
+
+    def test_spine_write_returning_none_aborts_with_500(
+        self, client, auth_headers, monkeypatch
+    ):
+        class _NoneRepo:
+            def create(self, doc, raise_on_duplicate=False):
+                return None  # swallowed DB error
+
+        self._patch_repo(monkeypatch, _NoneRepo())
+        resp = client.post(
+            "/api/v1/catalog/products",
+            json=_frame_payload(mrp=4000, offer_price=3600),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 500, resp.text
+        # Hard fail: the spine write raises BEFORE the catalog doc is saved, so
+        # the response is an error with no product (no orphan catalog-only doc).
+        assert "product" not in resp.json()
+
+    def test_spine_duplicate_is_tolerated_same_identity_variant(
+        self, client, auth_headers, monkeypatch
+    ):
+        """A DuplicateKeyError means the identity already has a (billable) spine.
+        The catalog/PIM door legitimately holds same-identity variants, so the
+        create is TOLERATED and still saves the catalog doc (200) -- it must NOT
+        hard-fail (that would break the by-design form+catalog dual-door flow)."""
+
+        class DuplicateKeyError(Exception):
+            pass
+
+        class _DupRepo:
+            def create(self, doc, raise_on_duplicate=False):
+                raise DuplicateKeyError("E11000 duplicate key")
+
+        self._patch_repo(monkeypatch, _DupRepo())
+        resp = client.post(
+            "/api/v1/catalog/products",
+            json=_frame_payload(mrp=4000, offer_price=3600),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["product"]["id"]
+
+    def test_spine_success_saves_catalog_doc(self, client, auth_headers, monkeypatch):
+        saved = []
+
+        class _OkRepo:
+            def create(self, doc, raise_on_duplicate=False):
+                saved.append(doc)
+                return doc
+
+        self._patch_repo(monkeypatch, _OkRepo())
+        resp = client.post(
+            "/api/v1/catalog/products",
+            json=_frame_payload(mrp=4000, offer_price=3600),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(saved) == 1  # spine persisted (hard gate passed)
+        # Catalog doc persisted + retrievable by the returned id.
+        pid = resp.json()["product"]["id"]
+        got = client.get(f"/api/v1/catalog/products/{pid}", headers=auth_headers)
+        assert got.status_code == 200, got.text

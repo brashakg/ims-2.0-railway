@@ -139,9 +139,7 @@ class TestThreeWayMatchExceptions:
         inv = [_inv_line("P1", 10, 100.0)]
         res = pmatch.three_way_match(po, grn, inv, tolerance_pct=5)
         assert res["match_status"] == pmatch.MATCH_ON_HOLD
-        assert any(
-            "no goods received" in r.lower() for r in res["lines"][0]["reasons"]
-        )
+        assert any("no goods received" in r.lower() for r in res["lines"][0]["reasons"])
 
     def test_received_short_holds_even_if_invoice_matches_po(self):
         # Invoice agrees with PO (10 @100) but only 7 were received -> short.
@@ -276,8 +274,15 @@ class _FakeCollection:
             newdoc = dict(flt)
             newdoc.update(update.get("$set", {}))
             self._store.append(newdoc)
-            return type("R", (), {"modified_count": 0, "matched_count": 0,
-                                  "upserted_id": flt.get("_id")})()
+            return type(
+                "R",
+                (),
+                {
+                    "modified_count": 0,
+                    "matched_count": 0,
+                    "upserted_id": flt.get("_id"),
+                },
+            )()
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
     def count_documents(self, flt):
@@ -300,13 +305,21 @@ class _FakeDB:
         self.collections = {
             "vendor_bills": [],
             "vendors": [
-                {"vendor_id": "V1", "trade_name": "Acme Optics",
-                 "gstin": SUP_MH, "credit_days": 30},
+                {
+                    "vendor_id": "V1",
+                    "trade_name": "Acme Optics",
+                    "gstin": SUP_MH,
+                    "credit_days": 30,
+                },
             ],
             "entities": [
-                {"entity_id": "E1", "name": "BV",
-                 "gstins": [{"gstin": BUY_MH, "state_code": "27",
-                             "is_primary": True}]},
+                {
+                    "entity_id": "E1",
+                    "name": "BV",
+                    "gstins": [
+                        {"gstin": BUY_MH, "state_code": "27", "is_primary": True}
+                    ],
+                },
             ],
             "stores": [{"store_id": "S1", "entity_id": "E1"}],
             "products": [
@@ -315,8 +328,12 @@ class _FakeDB:
             "stock_units": [
                 # 10 AVAILABLE units of P1 at store S1 (on-hand for the blend).
                 *[
-                    {"stock_id": f"U{i}", "product_id": "P1",
-                     "store_id": "S1", "status": "AVAILABLE"}
+                    {
+                        "stock_id": f"U{i}",
+                        "product_id": "P1",
+                        "store_id": "S1",
+                        "status": "AVAILABLE",
+                    }
                     for i in range(10)
                 ]
             ],
@@ -340,9 +357,7 @@ class _Repo:
 
 def _app(db, roles=("ACCOUNTANT",), uid="u1", po=None, grn=None):
     app = FastAPI()
-    app.include_router(
-        pi_router.router, prefix="/api/v1/vendors/purchase-invoices"
-    )
+    app.include_router(pi_router.router, prefix="/api/v1/vendors/purchase-invoices")
 
     async def _u():
         return {
@@ -384,12 +399,26 @@ def _restore_router():
 
 
 _PO_DOC = {
-    "po_id": "PO1", "vendor_id": "V1",
-    "items": [{"product_id": "P1", "product_name": "Frame X", "sku": "SKU1",
-               "quantity": 10, "unit_price": 100.0, "hsn": "9003"}],
+    "po_id": "PO1",
+    "vendor_id": "V1",
+    "items": [
+        {
+            "product_id": "P1",
+            "product_name": "Frame X",
+            "sku": "SKU1",
+            "quantity": 10,
+            "unit_price": 100.0,
+            "hsn": "9003",
+        }
+    ],
 }
 _GRN_DOC = {
-    "grn_id": "G1", "po_id": "PO1", "vendor_id": "V1", "store_id": "S1",
+    "grn_id": "G1",
+    "po_id": "PO1",
+    "vendor_id": "V1",
+    "store_id": "S1",
+    # A standard GRN can only be billed once ACCEPTED (F3 server-side guard).
+    "status": "ACCEPTED",
     "items": [{"product_id": "P1", "accepted_qty": 10}],
 }
 
@@ -403,8 +432,14 @@ def _body(**over):
         "po_id": "PO1",
         "grn_id": "G1",
         "lines": [
-            {"product_id": "P1", "description": "Frame X", "hsn": "9003",
-             "qty": 10, "unit_price": 100, "gst_rate": 5},
+            {
+                "product_id": "P1",
+                "description": "Frame X",
+                "hsn": "9003",
+                "qty": 10,
+                "unit_price": 100,
+                "gst_rate": 5,
+            },
         ],
     }
     body.update(over)
@@ -427,8 +462,7 @@ class TestCreateRunsMatch:
         # Invoice price 200 vs PO 100 -> 100% gap -> ON_HOLD. Still 201 booked.
         body = _body(
             invoice_number="INV-HOLD-1",
-            lines=[{"product_id": "P1", "qty": 10, "unit_price": 200,
-                    "gst_rate": 5}],
+            lines=[{"product_id": "P1", "qty": 10, "unit_price": 200, "gst_rate": 5}],
             total=2100,  # 10*200 + 5% = 2100, reconciles
         )
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
@@ -454,14 +488,12 @@ class TestValuationTrueUp:
         cli = _app(db, po=_PO_DOC, grn=_GRN_DOC)
         body = _body(
             invoice_number="INV-VAL-1",
-            lines=[{"product_id": "P1", "qty": 10, "unit_price": 120,
-                    "gst_rate": 5}],
+            lines=[{"product_id": "P1", "qty": 10, "unit_price": 120, "gst_rate": 5}],
             total=1260,  # 1200 + 5%
         )
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
-        prod = [p for p in db.collections["products"]
-                if p["product_id"] == "P1"][0]
+        prod = [p for p in db.collections["products"] if p["product_id"] == "P1"][0]
         assert prod["cost_price"] == 110.0
         assert prod["moving_avg_cost"] == 110.0
         assert prod["cost_source"] == "PURCHASE_INVOICE"
@@ -471,9 +503,7 @@ class TestMatchEndpoint:
     def test_get_match_returns_detail(self):
         db = _FakeDB()
         cli = _app(db, po=_PO_DOC, grn=_GRN_DOC)
-        created = cli.post(
-            "/api/v1/vendors/purchase-invoices", json=_body()
-        ).json()
+        created = cli.post("/api/v1/vendors/purchase-invoices", json=_body()).json()
         inv_id = created["invoice_id"]
         r = cli.get(f"/api/v1/vendors/purchase-invoices/{inv_id}/match")
         assert r.status_code == 200, r.text
@@ -486,8 +516,7 @@ class TestApproveException:
     def _book_held(self, db, cli):
         body = _body(
             invoice_number="INV-OVR-1",
-            lines=[{"product_id": "P1", "qty": 10, "unit_price": 200,
-                    "gst_rate": 5}],
+            lines=[{"product_id": "P1", "qty": 10, "unit_price": 200, "gst_rate": 5}],
             total=2100,
         )
         return cli.post("/api/v1/vendors/purchase-invoices", json=body).json()
@@ -505,8 +534,9 @@ class TestApproveException:
         assert r.status_code == 200, r.text
         assert r.json()["match_status"] == pmatch.MATCH_OVERRIDE
         # Persisted on the doc.
-        stored = [d for d in db.collections["vendor_bills"]
-                  if d["bill_id"] == inv_id][0]
+        stored = [d for d in db.collections["vendor_bills"] if d["bill_id"] == inv_id][
+            0
+        ]
         assert stored["match_status"] == pmatch.MATCH_OVERRIDE
         assert stored["exception_override"]["approved_by"] == "u1"
         assert "Negotiated" in stored["exception_override"]["reason"]
@@ -514,9 +544,7 @@ class TestApproveException:
     def test_approve_clean_match_400(self):
         db = _FakeDB()
         cli = _app(db, po=_PO_DOC, grn=_GRN_DOC)
-        created = cli.post(
-            "/api/v1/vendors/purchase-invoices", json=_body()
-        ).json()
+        created = cli.post("/api/v1/vendors/purchase-invoices", json=_body()).json()
         assert created["match_status"] == pmatch.MATCH_MATCHED
         inv_id = created["invoice_id"]
         r = cli.post(
@@ -584,14 +612,18 @@ class TestConfigEndpoint:
         # With a wide tolerance an otherwise-held invoice matches.
         db = _FakeDB()
         db.collections["purchase_settings"].append(
-            {"_id": "default", "valuation_method": "MOVING_AVERAGE",
-             "match_tolerance_pct": 60}
+            {
+                "_id": "default",
+                "valuation_method": "MOVING_AVERAGE",
+                "match_tolerance_pct": 60,
+            }
         )
         cli = _app(db, po=_PO_DOC, grn=_GRN_DOC)
         body = _body(
             invoice_number="INV-TOL-1",
-            lines=[{"product_id": "P1", "qty": 10, "unit_price": 150,
-                    "gst_rate": 5}],  # 50% over PO, within 60% tol
+            lines=[
+                {"product_id": "P1", "qty": 10, "unit_price": 150, "gst_rate": 5}
+            ],  # 50% over PO, within 60% tol
             total=1575,
         )
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)

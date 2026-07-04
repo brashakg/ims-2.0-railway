@@ -26,6 +26,7 @@ from ..dependencies import (
     get_product_repository,
     validate_store_access,
     can_access_store_scoped,
+    resolve_store_scope,
 )
 from ..services import ap_engine
 from ..services import product_master as _pm
@@ -1133,6 +1134,13 @@ async def create_po(
     po_repo = get_purchase_order_repository()
     vendor_repo = get_vendor_repository()
 
+    # F2 store boundary: a store-scoped role may only raise a PO for a store it
+    # can access. validate_store_access 403s another store; ADMIN / AREA_MANAGER /
+    # SUPERADMIN pass. Without this, delivery_store_id came straight off the
+    # request body, so a store-scoped user could craft a PO against another
+    # store's inventory.
+    validate_store_access(po.delivery_store_id, current_user)
+
     po_id = str(uuid.uuid4())
     po_number = generate_po_number(po.delivery_store_id)
 
@@ -1274,12 +1282,18 @@ async def goods_receipt_cockpit(
             "vendor_id": vendor_id,
             "status": {"$in": list(_RECEIVABLE_PO_STATUSES)},
         }
-        if store_id:
-            flt["delivery_store_id"] = store_id
-        for po in (po_repo.find_many(flt, limit=500) or []):
+        # F2 store boundary: resolve the effective store filter for the caller.
+        # An explicit store_id is validated (403 if a store-scoped role asks for
+        # another store); when omitted, SUPERADMIN/ADMIN see all stores while a
+        # store-scoped role is pinned to its OWN active store -- so a store role
+        # can no longer see every store's open POs by leaving store_id blank.
+        scoped_store = resolve_store_scope(store_id, current_user)
+        if scoped_store:
+            flt["delivery_store_id"] = scoped_store
+        for po in po_repo.find_many(flt, limit=500) or []:
             header_recv = po.get("received_qty_by_product") or {}
             open_lines: list = []
-            for it in (po.get("items") or []):
+            for it in po.get("items") or []:
                 pid = it.get("product_id")
                 ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
                 recv = it.get("received_qty")
@@ -1373,6 +1387,12 @@ async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
+    # F2 object-level store boundary: a store-scoped role may only read a PO for
+    # its own store. Cross-store roles pass; otherwise 404 (hide existence of
+    # other stores' POs, mirroring the GRN read guards).
+    if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
     return po
 
 
@@ -1386,6 +1406,11 @@ async def send_po(
     if po_repo is not None:
         po = po_repo.find_by_id(po_id)
         if not po:
+            raise HTTPException(status_code=404, detail="Purchase order not found")
+
+        # F2 object-level store boundary: a store-scoped role may only send a PO
+        # for its own store (cross-store roles pass; else 404).
+        if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
         if po.get("status") != "DRAFT":
@@ -1459,6 +1484,11 @@ async def cancel_po(
     if po_repo is not None:
         po = po_repo.find_by_id(po_id)
         if not po:
+            raise HTTPException(status_code=404, detail="Purchase order not found")
+
+        # F2 object-level store boundary: a store-scoped role may only cancel a
+        # PO for its own store (cross-store roles pass; else 404).
+        if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
         # A PARTIALLY_RECEIVED PO has stock already in the warehouse. Cancelling
@@ -1702,8 +1732,10 @@ async def create_grn(
 
     grn_id = str(uuid.uuid4())
     store_id = current_user.get("active_store_id")
-    grn_number = generate_grn_number(store_id)
     is_dc = grn.grn_subtype == GRN_SUBTYPE_DC
+    # grn_number is generated AFTER the receiving store is finalised (a standard
+    # PO-backed GRN is re-pointed to the PO's delivery store below), so the
+    # per-store serial reflects the store the goods are actually booked to.
 
     # F-S3: mandatory goods-receipt document. The ops user physically receiving a
     # STANDARD shipment MUST attach the vendor invoice/challan (image or PDF)
@@ -1714,7 +1746,9 @@ async def create_grn(
     # A DELIVERY_CHALLAN is exempt at receipt (its tax invoice arrives later and
     # is attached at reconciliation). Fail LOUD: a 400 with a stable code the UI
     # keys on to keep the user on the upload step.
-    if not is_dc and not (grn.attachment_file_id and str(grn.attachment_file_id).strip()):
+    if not is_dc and not (
+        grn.attachment_file_id and str(grn.attachment_file_id).strip()
+    ):
         raise HTTPException(
             status_code=400,
             detail={
@@ -1738,9 +1772,7 @@ async def create_grn(
     if not is_dc:
         store = get_file_store()
         if store is None:
-            raise HTTPException(
-                status_code=503, detail="File storage unavailable"
-            )
+            raise HTTPException(status_code=503, detail="File storage unavailable")
         if store.get(str(grn.attachment_file_id).strip()) is None:
             raise HTTPException(
                 status_code=400,
@@ -1766,8 +1798,29 @@ async def create_grn(
                 status_code=400, detail="PO is not in receivable status"
             )
 
+        # F2 store boundary: a STANDARD PO-backed GRN is received at the PO's
+        # delivery store -- not blindly the caller's active store, else stock from
+        # another store's PO could be mis-credited here (the GRN was stamped to
+        # active_store_id with no PO cross-check). Re-point store_id to the PO's
+        # store and verify the caller may act on it: cross-store roles (ADMIN /
+        # AREA_MANAGER / SUPERADMIN) pass; a store-scoped role only for its own
+        # store, else 404 (hiding other stores' POs). DC / PO-less receipts stay
+        # on the caller's active store.
+        if not is_dc:
+            po_store = po.get("delivery_store_id")
+            if po_store:
+                if not can_access_store_scoped(po_store, current_user):
+                    raise HTTPException(
+                        status_code=404, detail="Purchase order not found"
+                    )
+                store_id = po_store
+
     # F9: the vendor a DC is for -- from the PO when linked, else the body field.
     vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
+
+    # Now that the receiving store is final (re-pointed to the PO's delivery
+    # store for a standard PO-backed GRN), mint the per-store GRN serial.
+    grn_number = generate_grn_number(store_id)
 
     # F9: DC-specific guards (uniqueness + period lock). Both are best-effort on
     # a DB error (fail-soft) but a found duplicate is a hard 409.
@@ -2717,9 +2770,7 @@ class DebitNoteCreate(BaseModel):
     def _validate_cn_type(cls, v):
         v = (v or "RETURN_CN").strip().upper()
         if v not in VENDOR_CN_TYPES:
-            raise ValueError(
-                "cn_type must be one of " + ", ".join(VENDOR_CN_TYPES)
-            )
+            raise ValueError("cn_type must be one of " + ", ".join(VENDOR_CN_TYPES))
         return v
 
 
