@@ -100,6 +100,44 @@ export interface CreateProductPayload {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Duplicate-product 409 (Hub Phase 1 hard-block + variant-assist rescue).
+// The backend refuses a create that collides by SKU / brand+model+colour
+// identity / barcode with a structured detail:
+//   { message, code: "DUPLICATE_PRODUCT", existing: DuplicateProductInfo }
+// `existing` carries the display fields the duplicate-rescue popup renders
+// (see product_master._duplicate_error). createProduct() below preserves this
+// payload as a typed DuplicateProductError — the shared axios interceptor
+// would otherwise flatten the object detail into a generic string Error.
+// ---------------------------------------------------------------------------
+export interface DuplicateProductInfo {
+  product_id?: string | null;
+  sku?: string | null;
+  identity_key?: string | null;
+  barcode?: string | null;
+  name?: string | null;
+  category?: string | null;
+  brand?: string | null;
+  model?: string | null;
+  colour_code?: string | null;
+  size?: string | null;
+  mrp?: number | null;
+  offer_price?: number | null;
+  is_active?: boolean | null;
+  catalog_status?: string | null;
+  image_url?: string | null;
+}
+
+export class DuplicateProductError extends Error {
+  readonly code = 'DUPLICATE_PRODUCT';
+  readonly existing: DuplicateProductInfo;
+  constructor(message: string, existing: DuplicateProductInfo) {
+    super(message);
+    this.name = 'DuplicateProductError';
+    this.existing = existing || {};
+  }
+}
+
 // Partial update payload for `PUT /products/{id}`. Mirrors the backend
 // `ProductUpdate` schema (snake_case). Every field is optional; the backend
 // merges only what is sent and re-runs the category + MRP>=offer validators.
@@ -230,7 +268,31 @@ export const productApi = {
   },
 
   createProduct: async (data: CreateProductPayload) => {
-    const response = await api.post('/products', data);
+    // The duplicate 409 returns a STRUCTURED detail ({message, code, existing})
+    // that the shared axios error interceptor would flatten into a generic
+    // string Error (same problem approvals.ts documents). THIS call alone lets
+    // the 409 through validateStatus so the payload survives intact and is
+    // re-thrown as a typed DuplicateProductError the Add-Product form can
+    // branch on (duplicate-rescue popup). Every other status keeps the normal
+    // interceptor path unchanged (retries, 401 logout, flattened messages).
+    const response = await api.post('/products', data, {
+      validateStatus: (s) => (s >= 200 && s < 300) || s === 409,
+    });
+    if (response.status === 409) {
+      const detail = (response.data as { detail?: unknown } | null | undefined)
+        ?.detail;
+      const d = (detail && typeof detail === 'object' ? detail : {}) as {
+        message?: string;
+        existing?: DuplicateProductInfo;
+      };
+      throw new DuplicateProductError(
+        d.message ||
+          (typeof detail === 'string'
+            ? detail
+            : 'A product with this identity already exists.'),
+        d.existing || {}
+      );
+    }
     return response.data;
   },
 
