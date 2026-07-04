@@ -6,14 +6,32 @@ import {
   Eye,
   Download,
   Package,
+  Truck,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { getStatusBadge } from './statusBadge';
+import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
+import { useAuth } from '../../context/AuthContext';
+import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
 import type { PurchaseOrder } from './purchaseTypes';
 
 interface PurchaseTableProps {
   purchaseOrders: PurchaseOrder[];
   onViewPO: (po: PurchaseOrder) => void;
 }
+
+// Receiving progress for a PO: how many lines are FULLY received.
+// receivedQty comes from the per-line received_qty (header fallback mapped in
+// PurchaseManagementPage). Lines with no ordered qty are ignored.
+function receivingProgress(po: PurchaseOrder): { received: number; total: number } {
+  const lines = po.items.filter((i) => (i.quantity ?? 0) > 0);
+  const received = lines.filter((i) => (i.receivedQty ?? 0) >= i.quantity).length;
+  return { received, total: lines.length };
+}
+
+// Statuses where receiving is in play (receivable now, or already done) —
+// the progress chip is only meaningful once the PO has gone to the vendor.
+const RECEIVING_VISIBLE_STATUSES = new Set([...RECEIVABLE_PO_STATUSES, 'RECEIVED']);
 
 function downloadPO(po: PurchaseOrder) {
   const lines: string[] = [];
@@ -55,10 +73,19 @@ function downloadPO(po: PurchaseOrder) {
 }
 
 export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) {
+  const navigate = useNavigate();
+  const { hasRole } = useAuth();
+  // Mirrors the /purchase/receive ProtectedRoute gate in App.tsx so a role
+  // (e.g. ACCOUNTANT) is never handed a button that lands on /unauthorized.
+  const canReceive = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
 
   return (
     <div className="space-y-4">
-      {purchaseOrders.map((po) => (
+      {purchaseOrders.map((po) => {
+        const receivable = RECEIVABLE_PO_STATUSES.includes(po.status);
+        const showReceiving = RECEIVING_VISIBLE_STATUSES.has(po.status);
+        const progress = showReceiving ? receivingProgress(po) : null;
+        return (
         <div key={po.id} className="card hover:shadow-lg transition-shadow">
           <div className="flex items-start justify-between mb-4">
             <div className="flex-1">
@@ -67,8 +94,32 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
                 {getStatusBadge(po.status)}
               </div>
               <p className="text-sm text-gray-600">{po.supplierName}</p>
+              {/* Receiving column (Phase 1): owner 5-word vocabulary chip +
+                  fully-received line count, once the PO is with the vendor. */}
+              {progress && (
+                <div className="flex items-center gap-2 mt-1.5">
+                  <PurchaseStatusChip status={po.status} />
+                  <span className="text-xs text-gray-500">
+                    {progress.received} of {progress.total} line{progress.total === 1 ? '' : 's'} received
+                  </span>
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-2">
+              {receivable && canReceive && (
+                <button
+                  onClick={() =>
+                    navigate(
+                      `/purchase/receive?vendor_id=${encodeURIComponent(po.supplierId)}&po_id=${encodeURIComponent(po.id)}`,
+                    )
+                  }
+                  title="Receive goods against this PO"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                >
+                  <Truck className="w-4 h-4" />
+                  Receive
+                </button>
+              )}
               <button
                 onClick={() => onViewPO(po)}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
@@ -117,7 +168,8 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
 
       {purchaseOrders.length === 0 && (
         <div className="text-center py-12">

@@ -31,6 +31,9 @@ export interface BuyDeskRow {
   /** Suggested order qty, netted against on_hand + on_order. null = no sales signal yet. */
   buy_signal: number | null;
   purchasable: boolean;
+  /** The product's preferred vendor (when set) — used to preselect the vendor
+   *  in the draft-PO modal. Optional: older payloads may omit it. */
+  preferred_vendor_id?: string | null;
 }
 
 export interface BuyDeskRowsResponse {

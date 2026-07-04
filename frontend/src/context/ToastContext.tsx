@@ -12,16 +12,24 @@ import type { ReactNode } from 'react';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
+/** Optional one-click follow-up rendered inside the toast (e.g. "Order this
+ *  now" after a product create). Clicking runs the handler and dismisses. */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface Toast {
   id: string;
   type: ToastType;
   message: string;
   duration?: number;
+  action?: ToastAction;
 }
 
 interface ToastContextType {
   toasts: Toast[];
-  success: (message: unknown, duration?: number) => void;
+  success: (message: unknown, duration?: number, action?: ToastAction) => void;
   error: (message: unknown, duration?: number) => void;
   warning: (message: unknown, duration?: number) => void;
   info: (message: unknown, duration?: number) => void;
@@ -60,10 +68,10 @@ export function ToastProvider({ children }: ToastProviderProps) {
     return String(msg || 'An error occurred');
   };
 
-  const addToast = useCallback((type: ToastType, message: unknown, duration = 5000) => {
+  const addToast = useCallback((type: ToastType, message: unknown, duration = 5000, action?: ToastAction) => {
     const safeMsg = safeMessage(message);
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const toast: Toast = { id, type, message: safeMsg, duration };
+    const toast: Toast = { id, type, message: safeMsg, duration, action };
 
     setToasts((prev) => [...prev, toast]);
 
@@ -77,8 +85,8 @@ export function ToastProvider({ children }: ToastProviderProps) {
     return id;
   }, []);
 
-  const success = useCallback((message: unknown, duration?: number) => {
-    addToast('success', message, duration);
+  const success = useCallback((message: unknown, duration?: number, action?: ToastAction) => {
+    addToast('success', message, duration, action);
   }, [addToast]);
 
   const error = useCallback((message: unknown, duration?: number) => {
@@ -130,6 +138,17 @@ export function ToastProvider({ children }: ToastProviderProps) {
             }`}
           >
             <span className="flex-1 text-sm">{toast.message}</span>
+            {toast.action && (
+              <button
+                onClick={() => {
+                  toast.action?.onClick();
+                  dismiss(toast.id);
+                }}
+                className="text-sm font-semibold underline underline-offset-2 whitespace-nowrap hover:opacity-80"
+              >
+                {toast.action.label}
+              </button>
+            )}
             <button
               onClick={() => dismiss(toast.id)}
               className="text-gray-900/80 hover:text-gray-900"

@@ -103,6 +103,9 @@ interface StockItem {
   minStock?: number;
   barcode?: string;
   storeBarcode?: string;
+  /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED
+   *  GRN that stocked this product at this store, or null/absent. */
+  last_grn?: { grn_number?: string; qty?: number; date?: string } | null;
 }
 
 // Stock movement type
@@ -955,6 +958,17 @@ export function InventoryPage() {
                           <div>
                             <p className="font-medium text-gray-900">{item.name}</p>
                             <p className="text-sm text-gray-500">{item.brand}</p>
+                            {/* Procurement Phase 1: muted source chip — where the
+                                recent inbound stock came from (latest ACCEPTED GRN). */}
+                            {item.last_grn?.grn_number && (item.last_grn.qty ?? 0) > 0 && (
+                              <p
+                                className="text-xs text-gray-400 mt-0.5"
+                                title="Most recent goods receipt for this product at this store"
+                              >
+                                +{item.last_grn.qty} via {item.last_grn.grn_number}
+                                {item.last_grn.date ? `, ${item.last_grn.date}` : ''}
+                              </p>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{item.sku}</td>
@@ -1058,6 +1072,21 @@ export function InventoryPage() {
                             >
                               <Eye className="w-4 h-4" />
                             </button>
+                            {/* Procurement Phase 1: spawn a variant of this
+                                product in Quick Add (?variant= deep link —
+                                consumed by QuickAddPage). Gate mirrors the
+                                /catalog/add ProtectedRoute roles. */}
+                            {canAddProduct && item.id && (
+                              <button
+                                onClick={() => navigate(`/catalog/add?variant=${encodeURIComponent(item.id)}`)}
+                                className="inline-flex items-center gap-0.5 px-1.5 py-1 text-xs font-medium text-gray-500 hover:text-blue-600 transition-colors"
+                                title="Add a variant of this product"
+                                aria-label={`Add a variant of ${item.name}`}
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                Variant
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

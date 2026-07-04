@@ -389,6 +389,65 @@ async def get_stock(
     return {"items": items, "total": len(items)}
 
 
+def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
+    """Latest ACCEPTED GRN per product at this store (procurement Phase 1).
+
+    Additive + fail-soft + cheap: scans only the most recent 200 ACCEPTED GRNs
+    for the store from the last 30 days (newest first) and keeps the FIRST hit
+    per product, so a ledger row can show "+N via GRN-xxxx, <date>". Any error
+    returns {} and the ledger simply omits the source chip -- this join must
+    never break the Stock Ledger.
+    """
+    if not store_id:
+        return {}
+    out: Dict[str, Dict] = {}
+    try:
+        db = _get_db()
+        if db is None:
+            return {}
+        cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+        cur = (
+            db.get_collection("grns")
+            .find(
+                {
+                    "store_id": store_id,
+                    "status": "ACCEPTED",
+                    "created_at": {"$gte": cutoff},
+                },
+                {
+                    "_id": 0,
+                    "grn_number": 1,
+                    "items": 1,
+                    "accepted_at": 1,
+                    "created_at": 1,
+                },
+            )
+            .sort("created_at", -1)
+            .limit(200)
+        )
+        for grn in cur:
+            when = grn.get("accepted_at") or grn.get("created_at") or ""
+            for it in grn.get("items") or []:
+                pid = it.get("product_id")
+                if not pid or pid in out:
+                    continue
+                try:
+                    qty = int(it.get("accepted_qty") or it.get("received_qty") or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty <= 0:
+                    continue
+                out[pid] = {
+                    "grn_number": grn.get("grn_number") or "",
+                    "qty": qty,
+                    "date": str(when)[:10],
+                }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] last-GRN join failed: %s", exc)
+        return {}
+    return out
+
+
 def _build_store_ledger(
     stock_repo,
     product_repo,
@@ -479,6 +538,9 @@ def _build_store_ledger(
         logger.warning("[INVENTORY] product list failed: %s", exc)
         products = []
 
+    # Procurement Phase 1: latest ACCEPTED GRN per product (fail-soft -> {}).
+    last_grn_map = _last_grn_by_product(store_id)
+
     items: List[Dict] = []
     seen_pids = set()
     for product in products:
@@ -489,7 +551,16 @@ def _build_store_ledger(
         on_hand = on_hand_by_product.get(pid, 0)
         reserved = reserved_by_product.get(pid, 0)
         sample = sample_unit_by_product.get(pid, {})
-        items.append(_ledger_row(product, on_hand, reserved, sample, store_id))
+        items.append(
+            _ledger_row(
+                product,
+                on_hand,
+                reserved,
+                sample,
+                store_id,
+                last_grn=last_grn_map.get(pid),
+            )
+        )
 
     # ---- 3. Edge case - units exist for a product that's NOT in the
     # active catalog (deactivated SKU still on the shelf). Surface those
@@ -516,6 +587,7 @@ def _build_store_ledger(
                 reserved_by_product.get(pid, 0),
                 sample_unit_by_product.get(pid, {}),
                 store_id,
+                last_grn=last_grn_map.get(pid),
             )
         )
 
@@ -528,6 +600,7 @@ def _ledger_row(
     reserved: int,
     sample_unit: Dict,
     store_id: Optional[str],
+    last_grn: Optional[Dict] = None,
 ) -> Dict:
     """Build a single Stock Ledger row from a product master doc.
 
@@ -579,6 +652,10 @@ def _ledger_row(
         "cl_series": product.get("cl_series"),
         "base_curve": product.get("base_curve"),
         "diameter": product.get("diameter"),
+        # Procurement Phase 1 (additive, optional): the latest ACCEPTED GRN
+        # that put stock of this product on this store's shelf, or None.
+        # Shape: {"grn_number": str, "qty": int, "date": "YYYY-MM-DD"}.
+        "last_grn": last_grn or None,
     }
 
 
