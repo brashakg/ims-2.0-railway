@@ -118,35 +118,35 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         "FR",
         "Frame",
         required=("brand_name", "model_no", "colour_code"),
-        # Rich eyewear field set (shared with SUNGLASS, frame-specific split).
-        # UPC/GTIN are the MANUFACTURER's barcodes (captured for reference); our
-        # own internal barcode is minted separately at Goods-Receipt, not here.
+        # Eyewear field set, owner-locked 2026-07-04 (catalog form rework):
+        # shared with SUNGLASS, frame-specific split = blue_cut_lens. Tuple
+        # order mirrors the Add-Product form order. UPC/GTIN are the
+        # MANUFACTURER's barcodes (captured for reference); our own internal
+        # barcode is minted separately at Goods-Receipt, not here.
+        # REMOVED from the registry (legacy attribute values on existing docs
+        # persist untouched -- attributes are stored unfiltered): size,
+        # full_model_no, lens_usp, product_usp, usp, gender_label.
         optional=(
             "subbrand",
-            "size",
-            "frame_material",
-            "frame_type",
             "label",
-            "full_model_no",
-            "shape",
-            "frame_color",
-            "temple_color",
-            "temple_material",
+            "model_name",
             "lens_size",
             "bridge_width",
             "temple_length",
-            "lens_usp",
-            "product_usp",
+            "gender",
+            "shape",
+            "frame_type",
+            "blue_cut_lens",
+            "frame_color",
+            "temple_color",
+            "frame_material",
+            "temple_material",
             "usp_1",
             "usp_2",
-            "usp",
-            "gender",
-            "gender_label",
             "country_of_origin",
             "warranty",
             "upc",
             "gtin",
-            "blue_cut_lens",
         ),
     ),
     "SUNGLASS": CategorySpec(
@@ -154,38 +154,38 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         "SG",
         "Sunglass",
         required=("brand_name", "model_no", "colour_code"),
-        # Rich eyewear field set (shared with FRAME, sunglass-specific split:
-        # lens_colour + lens_material instead of blue_cut_lens). UPC/GTIN are the
-        # MANUFACTURER's barcodes; our internal barcode is minted at GRN.
+        # Eyewear field set, owner-locked 2026-07-04 (catalog form rework):
+        # shared with FRAME, sunglass-specific split = lens_colour + tint +
+        # polarization + uv_protection + lens_material. Tuple order mirrors
+        # the Add-Product form order. UPC/GTIN are the MANUFACTURER's
+        # barcodes; our internal barcode is minted at GRN.
+        # REMOVED from the registry (legacy attribute values persist):
+        # full_model_no, lens_usp, product_usp, usp, gender_label.
         optional=(
             "subbrand",
-            "lens_size",
-            "polarization",
-            "uv_protection",
-            "tint",
             "label",
-            "full_model_no",
-            "shape",
-            "frame_color",
-            "temple_color",
-            "frame_material",
-            "temple_material",
-            "frame_type",
+            "model_name",
+            "lens_size",
             "bridge_width",
             "temple_length",
-            "lens_usp",
-            "product_usp",
+            "gender",
+            "shape",
+            "frame_type",
+            "lens_colour",
+            "tint",
+            "polarization",
+            "uv_protection",
+            "frame_color",
+            "temple_color",
+            "lens_material",
+            "frame_material",
+            "temple_material",
             "usp_1",
             "usp_2",
-            "usp",
-            "gender",
-            "gender_label",
             "country_of_origin",
             "warranty",
             "upc",
             "gtin",
-            "lens_colour",
-            "lens_material",
         ),
     ),
     "OPTICAL_LENS": CategorySpec(
@@ -343,7 +343,9 @@ _FIELD_LABELS: Dict[str, str] = {
     "colour_name": "Colour Name",
     "size": "Size",
     "lens_size": "Lens Size (mm)",
-    "frame_material": "Frame Material",
+    # Owner-locked label (2026-07-04): "Frame Front Material" (the key stays
+    # frame_material -- data is untouched, only the display label changed).
+    "frame_material": "Frame Front Material",
     "frame_type": "Frame Type",
     "polarization": "Polarization",
     "uv_protection": "UV Protection",
@@ -363,13 +365,17 @@ _FIELD_LABELS: Dict[str, str] = {
     "machine_type": "Machine Type",
     # Rich eyewear field set (FRAME + SUNGLASS). frame_material/frame_type/
     # polarization/uv_protection/tint/lens_size are already labelled above.
+    # full_model_no / lens_usp / product_usp / usp / gender_label left the
+    # FRAME+SUNGLASS registry (2026-07-04 form rework) but keep their labels
+    # here so LEGACY attribute values on existing docs still render nicely.
     "label": "Label",
     "full_model_no": "Full Model No",
     "shape": "Shape",
     "frame_color": "Frame Colour",
     "temple_color": "Temple Colour",
     "temple_material": "Temple Material",
-    "bridge_width": "Bridge Width (mm)",
+    # Owner-locked label (2026-07-04): "Bridge Size" (key stays bridge_width).
+    "bridge_width": "Bridge Size",
     "temple_length": "Temple Length (mm)",
     "lens_usp": "Lens USP",
     "product_usp": "Product USP",

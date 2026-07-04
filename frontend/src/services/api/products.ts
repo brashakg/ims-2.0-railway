@@ -234,6 +234,25 @@ export const productApi = {
     return response.data;
   },
 
+  // AI product description (Add-Product form "Auto-fill with AI" button).
+  // POSTs the category + all FILLED attribute values; the backend drafts a
+  // short retail description. status: 'GENERATED' carries a description;
+  // anything else (e.g. 'FAILED_NO_KEY' = Anthropic key not configured in
+  // Settings) is surfaced to the operator as a toast — generation NEVER
+  // blocks saving the product. Import this DIRECTLY from this module (not
+  // the api barrel) — the barrel re-export fails for new methods (TS2614).
+  generateDescription: async (payload: {
+    category: string;
+    attributes: Record<string, string>;
+    max_length?: number;
+  }): Promise<GenerateDescriptionResponse> => {
+    // LLM round-trip can exceed the global 10s timeout.
+    const response = await api.post('/products/generate-description', payload, {
+      timeout: 60000,
+    });
+    return response.data as GenerateDescriptionResponse;
+  },
+
   // Upload a single product image (multipart). Persists the bytes durably on the
   // backend (GridFS) and returns a stable, self-hosted URL to embed in the
   // product `images` array. Import this DIRECTLY from this module (not the api
@@ -297,6 +316,15 @@ export const productApi = {
     return response.data as BulkCreateResponse;
   },
 };
+
+// Response of POST /products/generate-description. `description` is present
+// when status === 'GENERATED'; `message` (when present) is an operator-facing
+// explanation for non-generated statuses.
+export interface GenerateDescriptionResponse {
+  description?: string;
+  status: string;
+  message?: string;
+}
 
 // Per-row + summary result from POST /products/bulk-create.
 export interface BulkCreateRowResult {

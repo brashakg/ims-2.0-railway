@@ -186,3 +186,52 @@ def test_categories_route_does_not_collide_with_product_id(client, auth_headers)
     assert resp.status_code == 200
     # The registry shape (a categories list), not a single-product 404/shape.
     assert isinstance(resp.json().get("categories"), list)
+
+
+def test_new_eyewear_fields_in_registry_and_dictionary_options_stamped(
+    client, auth_headers
+):
+    """2026-07-04 form rework: the SUNGLASS/FRAME registry carries the reworked
+    field set (model_name, frame_color, temple_color, ...), and a Catalog
+    Dictionary list saved for one of those fields is stamped as `options` on
+    the GET /products/categories payload (the Add-Product form renders it as a
+    restricted select). Mock-db environments 503 the PATCH -- then only the
+    pure registry membership is asserted."""
+    # 1) Pure registry membership (works with or without a live db).
+    resp = client.get("/api/v1/products/categories", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    cats = {c["code"]: c for c in resp.json()["categories"]}
+    sun_fields = {f["name"]: f for f in cats["SUNGLASS"]["fields"]}
+    for key in ("model_name", "frame_color", "temple_color", "tint",
+                "frame_material", "warranty", "country_of_origin"):
+        assert key in sun_fields, f"SUNGLASS registry missing '{key}'"
+    assert "full_model_no" not in sun_fields
+    assert "gender_label" not in sun_fields
+
+    # 2) Dictionary stamping (needs a live db; PATCH 503s on mock backends).
+    field, scope = "frame_color", "SUNGLASS"
+    values = ["Matte Black", "Tortoise Shell"]
+    r = client.patch(
+        f"/api/v1/catalog-field-options/{field}",
+        json={"items": values, "category": scope},
+        headers=auth_headers,
+    )
+    assert r.status_code in (200, 503)
+    if r.status_code != 200:
+        return  # no live db in this environment -- stamping not testable here
+    try:
+        resp2 = client.get("/api/v1/products/categories", headers=auth_headers)
+        assert resp2.status_code == 200, resp2.text
+        cats2 = {c["code"]: c for c in resp2.json()["categories"]}
+        sun2 = {f["name"]: f for f in cats2["SUNGLASS"]["fields"]}
+        assert sun2[field].get("options") == values
+        # The category-scoped list must NOT bleed onto FRAME's same-named field.
+        fr2 = {f["name"]: f for f in cats2["FRAME"]["fields"]}
+        assert fr2[field].get("options") != values
+    finally:
+        # Clean up: un-configure the scope so other tests see a pristine state.
+        client.patch(
+            f"/api/v1/catalog-field-options/{field}",
+            json={"items": [], "category": scope},
+            headers=auth_headers,
+        )
