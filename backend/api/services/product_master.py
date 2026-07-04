@@ -795,8 +795,44 @@ def compute_identity_key(
 
 def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
     """Build the 409 duplicate-product error carrying the EXISTING row so the
-    caller/FE can link to it ('add stock or a variant instead'). Hub Phase 1."""
+    caller/FE can link to it ('add stock or a variant instead'). Hub Phase 1.
+
+    Duplicate-rescue (variant assist Phase 1): the conflict payload is ENRICHED
+    ADDITIVELY with the existing row's display fields (name, colour, size,
+    pricing, active flag, first image) so the FE popup can show the product and
+    offer 'add a new colour/size of this model' without a second round-trip.
+    The original keys (product_id / sku / identity_key / barcode), the 409
+    status and the DUPLICATE_PRODUCT code are UNCHANGED -- additions only.
+    Every value is .get()-sourced so a sparse row (e.g. the race fallback
+    {'sku': ...}) still builds a valid payload with None gaps.
+    """
     existing = existing or {}
+    attrs = existing.get("attributes")
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    def _first_image() -> Optional[str]:
+        imgs = existing.get("images")
+        if isinstance(imgs, (list, tuple)):
+            for u in imgs:
+                if isinstance(u, str) and u.strip():
+                    return u
+        return None
+
+    brand = existing.get("brand") or attrs.get("brand_name")
+    model = (
+        existing.get("model") or attrs.get("model_no") or attrs.get("model_name")
+    )
+    colour = (
+        attrs.get("colour_code") or attrs.get("colour_name") or existing.get("color")
+    )
+    size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
+    # Display name: an explicit doc name wins; else "Brand Model" (products
+    # have no name column -- brand+model IS the display identity).
+    name = existing.get("name") or (
+        " ".join(str(p) for p in (brand, model) if p) or None
+    )
+
     err = ProductMasterError(
         "A product with this identity already exists "
         f"(SKU {existing.get('sku')}). Add stock or a variant instead of a "
@@ -806,10 +842,23 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
     )
     err.code = "DUPLICATE_PRODUCT"
     err.conflict = {
+        # -- original keys (other tests/callers rely on these; unchanged) --
         "product_id": existing.get("product_id"),
         "sku": existing.get("sku"),
         "identity_key": existing.get("identity_key"),
         "barcode": existing.get("barcode"),
+        # -- additive display payload (duplicate-rescue popup) --
+        "name": name,
+        "category": existing.get("category"),
+        "brand": brand,
+        "model": model,
+        "colour_code": colour,
+        "size": size,
+        "mrp": existing.get("mrp"),
+        "offer_price": existing.get("offer_price"),
+        "is_active": existing.get("is_active"),
+        "catalog_status": existing.get("catalog_status"),
+        "image_url": _first_image(),
     }
     return err
 

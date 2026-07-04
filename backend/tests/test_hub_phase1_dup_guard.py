@@ -203,6 +203,104 @@ def test_distinct_products_both_create():
 
 
 # ===========================================================================
+# 2b. Enriched conflict payload (duplicate-rescue popup, variant assist Ph 1)
+# ===========================================================================
+# The 409 conflict payload additionally carries the existing row's DISPLAY
+# fields (name/brand/model/colour/size/pricing/is_active/first image) so the
+# FE can show the product and offer "add a new colour/size" without another
+# round-trip. ADDITIVE ONLY: the original keys, status and code are unchanged
+# (locked again here alongside the new ones).
+
+
+def test_dup_conflict_payload_is_enriched_for_fe_rescue():
+    repo = _FakeRepo()
+    first = _create(
+        repo,
+        sku="FR-RICH",
+        extra_fields={
+            "images": ["/api/v1/products/image/img-1", "/api/v1/products/image/img-2"]
+        },
+    )
+    # Same brand+model+colour identity, different SKU -> identity 409.
+    with pytest.raises(pm.ProductMasterError) as ei:
+        _create(repo, sku="FR-RICH-2")
+    err = ei.value
+    c = err.conflict
+
+    # -- unchanged contract --
+    assert err.status == 409
+    assert err.code == "DUPLICATE_PRODUCT"
+    assert c["product_id"] == first["product_id"]
+    assert c["sku"] == "FR-RICH"
+    assert c["identity_key"] == first["identity_key"]
+    assert "barcode" in c
+
+    # -- additive display payload --
+    assert c["brand"] == "Ray-Ban"
+    assert c["model"] == "RB-2140"
+    assert c["colour_code"] == "BLK"
+    assert c["name"] == "Ray-Ban RB-2140"
+    assert c["category"] == "FRAME"
+    assert c["mrp"] == 5000.0
+    assert c["offer_price"] == 4500.0
+    assert c["is_active"] is True
+    assert c["catalog_status"] == first["catalog_status"]
+    assert c["image_url"] == "/api/v1/products/image/img-1"
+
+
+def test_dup_conflict_payload_size_and_colour_fallbacks():
+    # size folds in from attributes.lens_size; colour falls back through
+    # colour_code -> colour_name -> top-level color.
+    repo = _FakeRepo()
+    attrs = dict(_frame_attrs())
+    attrs["lens_size"] = "52"
+    _create(repo, sku="FR-SZ", attrs=attrs)
+    dup_attrs = dict(attrs)
+    with pytest.raises(pm.ProductMasterError) as ei:
+        _create(repo, sku="FR-SZ-2", attrs=dup_attrs)
+    c = ei.value.conflict
+    assert c["size"] == "52"
+    assert c["colour_code"] == "BLK"
+
+
+def test_dup_conflict_payload_tolerates_sparse_existing_row():
+    # The race fallback can pass a minimal {"sku": ...} row: the enriched keys
+    # must all be PRESENT (None gaps), never a KeyError/AttributeError.
+    err = pm._duplicate_error({"sku": "FR-ONLY"})
+    c = err.conflict
+    assert err.status == 409
+    assert c["sku"] == "FR-ONLY"
+    for key in (
+        "product_id",
+        "identity_key",
+        "barcode",
+        "name",
+        "category",
+        "brand",
+        "model",
+        "colour_code",
+        "size",
+        "mrp",
+        "offer_price",
+        "is_active",
+        "catalog_status",
+        "image_url",
+    ):
+        assert key in c
+        if key != "sku":
+            assert c[key] is None
+
+
+def test_dup_conflict_payload_skips_blank_images():
+    # First NON-BLANK image wins; a junk/blank entry is skipped, a non-list
+    # images value yields None (never a crash).
+    err = pm._duplicate_error({"sku": "S", "images": ["", None, "/img/ok"]})
+    assert err.conflict["image_url"] == "/img/ok"
+    err2 = pm._duplicate_error({"sku": "S", "images": "not-a-list"})
+    assert err2.conflict["image_url"] is None
+
+
+# ===========================================================================
 # 3. Race-safe: DuplicateKeyError -> 409 (not a swallowed 500)
 # ===========================================================================
 
