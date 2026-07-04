@@ -60,7 +60,7 @@ def category_multiplier(category: str, settings: Dict[str, Any]) -> float:
     silently never match any real order item.
     """
     mults = settings.get("category_multipliers", {}) or {}
-    if not category:
+    if not category or not isinstance(mults, dict):
         return 1.0
     cat_upper = str(category).upper()
     # Try exact case + uppercase + a few common aliases.
