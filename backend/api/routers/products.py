@@ -402,6 +402,32 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
     return out
 
 
+def _resolve_sync_to_shopify(product: "ProductCreate", db) -> bool:
+    """The `sync_to_shopify` INTENT to stamp on a new spine product.
+
+    NOTE: nothing pushes to Shopify from IMS anymore (IMS->Shopify is
+    retired; the BVI app owns Shopify) -- the stamp records the owner's
+    intent so the FUTURE BVI-side push knows which products to list.
+
+    An explicit payload value wins; when omitted (None) the brand's
+    Brand Master `sync_to_shopify_default` decides (case-insensitive name
+    match). FAIL-SOFT: unknown brand / no db / read trouble -> False
+    (never sync by accident)."""
+    explicit = getattr(product, "sync_to_shopify", None)
+    if explicit is not None:
+        return bool(explicit)
+    try:
+        from ..dependencies import get_db as _get_db_dep
+        from ..services import catalog_dictionary as _cd
+
+        db = db if db is not None else _get_db_dep()
+        if db is not None and getattr(db, "is_connected", False):
+            return _cd.load_brand_sync_default(db, product.brand)
+    except Exception:  # noqa: BLE001 - intent stamp must never block a create
+        pass
+    return False
+
+
 def _create_via_canonical_door(
     product: "ProductCreate", current_user: dict, *, source: str, as_draft: bool = False
 ) -> dict:
@@ -431,12 +457,17 @@ def _create_via_canonical_door(
     except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
         variant_repo = None
 
+    # Additive door columns + the resolved Shopify-sync INTENT (explicit
+    # payload value, else the brand's Brand Master default, fail-soft False).
+    extra = _form_extra_fields(product)
+    extra["sync_to_shopify"] = _resolve_sync_to_shopify(product, db)
+
     try:
         return _pm.create_via_door(
             _canonical_door_payload(product, as_draft=as_draft),
             source=source,
             actor=current_user.get("user_id"),
-            extra_fields=_form_extra_fields(product),
+            extra_fields=extra,
             product_repo=get_product_repository(),
             variant_repo=variant_repo,
             audit_repo=_get_audit_repository(),
@@ -563,6 +594,13 @@ class ProductCreate(BaseModel):
     @classmethod
     def _validate_images(cls, v):
         return _clean_image_urls(v)
+
+    # Shopify-sync INTENT for the new product. NOTE: nothing pushes to
+    # Shopify from IMS anymore (IMS->Shopify is retired; the BVI app owns
+    # Shopify) -- this stamps the owner's intent for the FUTURE BVI-side
+    # push. None (default) = resolve from the brand's Brand Master
+    # `sync_to_shopify_default`; an explicit true/false is honoured as-is.
+    sync_to_shopify: Optional[bool] = None
 
 
 class ProductUpdate(BaseModel):
@@ -1659,7 +1697,8 @@ async def get_brand_options(
     canonical name like 'FRAME'; omit for all), each with its sub-brand names
     so the form can restrict the Sub Brand select per selected brand.
 
-    Shape: {"brands": [{"name": str, "subbrands": [str, ...]}, ...]}.
+    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None,
+    "sync_to_shopify_default": bool}, ...]}.
     Fail-soft: db trouble -> {"brands": []}.
     """
     try:
@@ -1680,7 +1719,19 @@ async def get_brand_options(
             # tier: shown read-only in the form's Review (the product's
             # discount band derives from it at create time).
             tier = _cd.load_brand_tier(db, name)
-            brands.append({"name": name, "subbrands": subs, "tier": tier})
+            brands.append(
+                {
+                    "name": name,
+                    "subbrands": subs,
+                    "tier": tier,
+                    # Default Shopify-sync INTENT for the brand (Settings ->
+                    # Brand Master); the create door stamps sync_to_shopify
+                    # from it when the payload doesn't say explicitly.
+                    "sync_to_shopify_default": _cd.load_brand_sync_default(
+                        db, name
+                    ),
+                }
+            )
         return {"brands": brands}
     except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
         logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)
