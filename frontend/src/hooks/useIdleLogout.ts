@@ -12,20 +12,24 @@
 // are consistent across tabs. A logout in one tab unmounts the watcher in the
 // others (AppLayout stops rendering after auth clears), so timers are torn down.
 //
-// Backgrounded-tab safety (the reason logout is gated, not just idle-driven):
-// browsers heavily throttle setInterval in HIDDEN tabs (Chrome clamps to ~once
-// per 60s after a few minutes). Since that clamp can equal the warn window, a
-// single throttled tick could otherwise step from "not yet warning" straight to
-// "expired", logging the user out -- and clearing the POS cart -- WITHOUT the
-// warning modal ever appearing. To make that impossible we:
-//   1. Never fire logout while the tab is hidden (defer until it's visible).
-//   2. Only fire logout once the warning modal has actually been on screen
-//      (tab visible) for the full configured warnSeconds (`warnShownAtRef`).
-//   3. If a tick observes "expired" but the warning was never shown for its
-//      full window (the throttled / skipped-window / was-hidden case), we do
-//      NOT log out -- we enter the warning state and (re)start a FRESH, real,
-//      visible warnSeconds countdown so the cashier always gets the full
-//      heads-up before any logout.
+// ENFORCEMENT MODEL (owner decision 2026-07-04 — "popup shows but logout does
+// not happen"): an unattended terminal MUST actually sign out.
+//   1. EXPIRED means LOGOUT. Once idle crosses the timeout, logout fires on the
+//      next tick — even if the tab is hidden (throttled hidden-tab ticks still
+//      arrive ~1/min, and visibilitychange re-ticks immediately on return).
+//      The previous design deferred logout for hidden tabs and restarted a
+//      fresh warning countdown on return; in practice that made auto-logout
+//      untriggerable (walk away -> hidden -> no logout; come back -> fresh
+//      countdown -> first mouse-move cancels). The POS cart is AUTO-PARKED by
+//      the watcher before logout, so a missed warning costs only a re-login.
+//   2. Once the warning modal is up, PASSIVE activity (mousemove/scroll/keys)
+//      in THIS tab no longer cancels it — only the explicit "Stay signed in"
+//      button (stayActive) does. Otherwise anyone could keep a session alive
+//      by wiggling the mouse at an unattended terminal.
+//   3. REAL activity in ANOTHER tab (shared `ims_last_activity` write) still
+//      cancels the warning everywhere: the person is genuinely working in this
+//      browser profile, and logging out one tab would kill the shared token
+//      under their feet.
 //
 // enabled === false makes the hook a COMPLETE no-op: no timers, no listeners.
 
@@ -96,16 +100,6 @@ function _now(): number {
   return Date.now();
 }
 
-function _isHidden(): boolean {
-  // Treat as hidden only when the DOM explicitly reports it. In non-DOM /
-  // test environments document may be undefined -> treat as visible.
-  try {
-    return typeof document !== 'undefined' && document.hidden === true;
-  } catch {
-    return false;
-  }
-}
-
 function _readLastActivity(): number {
   try {
     const raw = localStorage.getItem(LAST_ACTIVITY_KEY);
@@ -148,10 +142,10 @@ export interface UseIdleLogoutResult {
  * warning state, the live countdown, and a stayActive() resetter for the
  * modal's primary button.
  *
- * The logout decision is GUARDED (see file header): a tab that was backgrounded
- * -- where setInterval is throttled and may skip the warning window entirely --
- * can never be logged out without the warning modal first being visible for the
- * full warnSeconds. Activity / stayActive cancels the warning as before.
+ * Enforcement (see file header): expiry ALWAYS logs out — hidden tabs included —
+ * and once the warning is showing, only stayActive() (the modal button) or real
+ * activity in ANOTHER tab cancels it. Passive same-tab activity is ignored
+ * while the warning is up.
  */
 export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
   const { enabled, minutes, warnSeconds, onLogout } = opts;
@@ -165,24 +159,23 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
   onLogoutRef.current = onLogout;
   const loggedOutRef = useRef(false);
   const lastWriteRef = useRef(0);
-  // Wall-clock ms at which the warning modal first became actually visible
-  // (warning true AND tab visible). null = warning has not been shown. The
-  // logout gate requires now - warnShownAt >= warnSeconds*1000 before firing.
-  const warnShownAtRef = useRef<number | null>(null);
+  // Mirror of `warning` for the activity listeners: while the modal is up,
+  // passive activity must NOT reset the clock or dismiss it (only the explicit
+  // stayActive button, or another tab's activity, may).
+  const warningRef = useRef(false);
 
   const recordActivity = useCallback(() => {
     if (loggedOutRef.current) return;
+    // Warning showing -> passive activity is deliberately IGNORED. Mouse
+    // wiggling at an unattended terminal must not keep the session alive; the
+    // user has to click "Stay signed in".
+    if (warningRef.current) return;
     const now = _now();
     // Throttle the localStorage write (and the cross-tab storage event).
     if (now - lastWriteRef.current >= ACTIVITY_WRITE_THROTTLE_MS) {
       lastWriteRef.current = now;
       _writeLastActivity(now);
     }
-    // Always clear the in-memory warning immediately on activity so the modal
-    // dismisses without waiting for the next localStorage write window. Reset
-    // the "warning was shown" clock so a future warning starts a fresh window.
-    warnShownAtRef.current = null;
-    setWarning(false);
   }, []);
 
   const stayActive = useCallback(() => {
@@ -190,13 +183,14 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
     const now = _now();
     lastWriteRef.current = now;
     _writeLastActivity(now); // force-write (bypass throttle) for an explicit action
-    warnShownAtRef.current = null;
+    warningRef.current = false;
     setWarning(false);
   }, []);
 
   useEffect(() => {
     // Disabled -> COMPLETE no-op. No timers, no listeners, reset any state.
     if (!enabled) {
+      warningRef.current = false;
       setWarning(false);
       setRemainingSec(0);
       return;
@@ -204,7 +198,7 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
 
     loggedOutRef.current = false;
     lastWriteRef.current = 0;
-    warnShownAtRef.current = null;
+    warningRef.current = false;
     // Seed the activity clock on (re)mount so a fresh load starts the timer now.
     _writeLastActivity(_now());
 
@@ -215,93 +209,57 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
     });
 
     // Cross-tab: another tab's activity (or stayActive) updates the shared key.
+    // That is REAL use of this browser profile -> cancel our warning; the next
+    // tick re-derives the (now small) idle time.
     const handleStorage = (e: StorageEvent) => {
       if (e.key === LAST_ACTIVITY_KEY) {
-        // Someone was active elsewhere -> clear our warning; the tick re-derives.
         if (!loggedOutRef.current) {
-          warnShownAtRef.current = null;
+          warningRef.current = false;
           setWarning(false);
         }
       }
     };
     window.addEventListener('storage', handleStorage);
 
-    // Core decision. Pure-state expiry is necessary but NOT sufficient to log
-    // out -- we additionally require the warning to have been visible for its
-    // full window and the tab to be currently visible.
+    // Core decision: expired -> logout, exactly once. No hidden-tab deferral —
+    // an unattended terminal must sign out (the watcher auto-parks the POS cart
+    // first, so nothing is lost). Hidden tabs tick throttled (~1/min) which is
+    // fine: logout lands within a minute of expiry, and visibilitychange ticks
+    // immediately when the user returns.
     const tick = () => {
       if (loggedOutRef.current) return;
       const now = _now();
       const idleMs = now - _readLastActivity();
       const state = computeIdleState(idleMs, minutes, warnSeconds, enabled);
-      const hidden = _isHidden();
-      const warnWindowMs = warnSeconds * 1_000;
 
       if (state.expired) {
-        // Past the hard timeout. Only actually log out if the warning has been
-        // genuinely shown (tab visible) for the full warnSeconds AND the tab is
-        // visible right now. Otherwise treat this as "needs a fresh visible
-        // warning first" -- this is the throttled-hidden-tab safety path.
-        const shownAt = warnShownAtRef.current;
-        const shownLongEnough =
-          shownAt !== null && now - shownAt >= warnWindowMs;
-        if (!hidden && shownLongEnough) {
-          loggedOutRef.current = true;
-          warnShownAtRef.current = null;
-          setWarning(false);
-          try {
-            onLogoutRef.current();
-          } catch {
-            /* never let a logout handler error wedge the timer */
-          }
-          return;
+        loggedOutRef.current = true;
+        warningRef.current = false;
+        setWarning(false);
+        try {
+          onLogoutRef.current();
+        } catch {
+          /* never let a logout handler error wedge the timer */
         }
-        // Not safe to log out yet: ensure a fresh, visible warning countdown.
-        if (hidden) {
-          // Hidden -> defer entirely. Don't even start the visible clock; we
-          // restart it when the tab becomes visible again (handleVisibility).
-          warnShownAtRef.current = null;
-          setWarning(true);
-          setRemainingSec(warnSeconds);
-          return;
-        }
-        // Visible but the warning window was skipped/never shown: (re)start a
-        // fresh real-time warnSeconds countdown anchored at now.
-        if (warnShownAtRef.current === null) {
-          warnShownAtRef.current = now;
-        }
-        const elapsedMs = now - warnShownAtRef.current;
-        const fresh = Math.max(
-          0,
-          Math.ceil((warnWindowMs - elapsedMs) / 1_000),
-        );
-        setWarning(true);
-        setRemainingSec(fresh);
         return;
       }
 
-      // Within the normal warning window (idle past warnAt but not yet expired).
       if (state.warn) {
-        // Record the moment the warning first becomes visible. If the tab is
-        // hidden we hold off stamping it so the visible window only starts once
-        // the modal can actually be seen.
-        if (!hidden && warnShownAtRef.current === null) {
-          warnShownAtRef.current = now;
-        }
+        warningRef.current = true;
         setWarning(true);
         setRemainingSec(state.remainingSec);
         return;
       }
 
-      // Active: not warning, not expired. Clear any stale warning clock.
-      warnShownAtRef.current = null;
+      // Active: not warning, not expired.
+      warningRef.current = false;
       setWarning(false);
       setRemainingSec(state.remainingSec);
     };
 
-    // When the tab becomes visible again, re-evaluate immediately rather than
-    // waiting up to TICK_MS. If idle is already past timeout this shows a fresh
-    // warning countdown (via tick's expired branch) instead of logging out.
+    // When the tab becomes visible/focused again, re-evaluate immediately rather
+    // than waiting up to TICK_MS — a tab returned to after expiry logs out at
+    // once instead of lingering.
     const handleVisibility = () => {
       if (loggedOutRef.current) return;
       tick();
