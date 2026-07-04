@@ -824,9 +824,7 @@ async def create_purchase_invoice(
                         invoice_id,
                     )
             try:
-                db.get_collection("vendor_bills").delete_one(
-                    {"bill_id": invoice_id}
-                )
+                db.get_collection("vendor_bills").delete_one({"bill_id": invoice_id})
             except Exception:  # noqa: BLE001
                 logger.error(
                     "[F9] CRITICAL: dc-race rollback could not delete orphan "
@@ -1295,7 +1293,8 @@ async def get_invoice_match(
 
 @router.get("/{invoice_id}/dc-match")
 async def get_invoice_dc_match(
-    invoice_id: str, current_user: dict = Depends(require_roles(*_AP_ROLES)),
+    invoice_id: str,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """F9 -- return the stored Delivery-Challan bulk-tally detail for an invoice.
 
@@ -1436,9 +1435,7 @@ class LandedCostComponent(BaseModel):
     def _known_type(cls, v: str) -> str:
         t = (v or "").strip().upper()
         if t not in lc.COMPONENT_TYPES:
-            raise ValueError(
-                f"component type must be one of {lc.COMPONENT_TYPES}"
-            )
+            raise ValueError(f"component type must be one of {lc.COMPONENT_TYPES}")
         return t
 
 

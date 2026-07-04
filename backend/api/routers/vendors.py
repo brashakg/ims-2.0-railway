@@ -1290,10 +1290,10 @@ async def goods_receipt_cockpit(
         scoped_store = resolve_store_scope(store_id, current_user)
         if scoped_store:
             flt["delivery_store_id"] = scoped_store
-        for po in (po_repo.find_many(flt, limit=500) or []):
+        for po in po_repo.find_many(flt, limit=500) or []:
             header_recv = po.get("received_qty_by_product") or {}
             open_lines: list = []
-            for it in (po.get("items") or []):
+            for it in po.get("items") or []:
                 pid = it.get("product_id")
                 ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
                 recv = it.get("received_qty")
@@ -1746,7 +1746,9 @@ async def create_grn(
     # A DELIVERY_CHALLAN is exempt at receipt (its tax invoice arrives later and
     # is attached at reconciliation). Fail LOUD: a 400 with a stable code the UI
     # keys on to keep the user on the upload step.
-    if not is_dc and not (grn.attachment_file_id and str(grn.attachment_file_id).strip()):
+    if not is_dc and not (
+        grn.attachment_file_id and str(grn.attachment_file_id).strip()
+    ):
         raise HTTPException(
             status_code=400,
             detail={
@@ -1770,9 +1772,7 @@ async def create_grn(
     if not is_dc:
         store = get_file_store()
         if store is None:
-            raise HTTPException(
-                status_code=503, detail="File storage unavailable"
-            )
+            raise HTTPException(status_code=503, detail="File storage unavailable")
         if store.get(str(grn.attachment_file_id).strip()) is None:
             raise HTTPException(
                 status_code=400,
@@ -2770,9 +2770,7 @@ class DebitNoteCreate(BaseModel):
     def _validate_cn_type(cls, v):
         v = (v or "RETURN_CN").strip().upper()
         if v not in VENDOR_CN_TYPES:
-            raise ValueError(
-                "cn_type must be one of " + ", ".join(VENDOR_CN_TYPES)
-            )
+            raise ValueError("cn_type must be one of " + ", ".join(VENDOR_CN_TYPES))
         return v
 
 

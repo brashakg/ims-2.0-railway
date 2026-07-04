@@ -1479,9 +1479,7 @@ async def create_catalog_product(
             raise
         except Exception as err:  # noqa: BLE001
             if err.__class__.__name__ == "DuplicateKeyError":
-                logger.warning(
-                    "[CATALOG] spine duplicate for %s (%s)", product_id, sku
-                )
+                logger.warning("[CATALOG] spine duplicate for %s (%s)", product_id, sku)
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -1684,7 +1682,10 @@ async def update_catalog_product(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
 
-    return {"product": mask_cost(existing, current_user, context="catalog_edit"), "message": "Product updated successfully"}
+    return {
+        "product": mask_cost(existing, current_user, context="catalog_edit"),
+        "message": "Product updated successfully",
+    }
 
 
 @router.delete("/products/{product_id}")
@@ -1717,7 +1718,9 @@ async def delete_catalog_product(
             _pr.update(product_id, {"is_active": False})
     except Exception:  # noqa: BLE001
         logger.warning(
-            "[CATALOG] spine deactivate on delete skipped for %s", product_id, exc_info=True
+            "[CATALOG] spine deactivate on delete skipped for %s",
+            product_id,
+            exc_info=True,
         )
 
     return {"message": "Product deleted successfully"}
@@ -1919,7 +1922,8 @@ async def import_products(
                         "category": product.category.value,
                         "attributes": dict(product.attributes or {}),
                         "mrp": product.pricing.mrp,
-                        "offer_price": product.pricing.offer_price or product.pricing.mrp,
+                        "offer_price": product.pricing.offer_price
+                        or product.pricing.mrp,
                         "discount_category": product.pricing.discount_category,
                         "hsn_code": product.hsn_code,
                         "gst_rate": product.gst_rate,
@@ -1929,7 +1933,9 @@ async def import_products(
             except _pm.ProductMasterError as req_exc:
                 detail = (
                     f"Missing required field: {req_exc.field}"
-                    if req_exc.status == 422 and req_exc.field and req_exc.field != "category"
+                    if req_exc.status == 422
+                    and req_exc.field
+                    and req_exc.field != "category"
                     else req_exc.message
                 )
                 errors.append({"index": i, "error": detail})

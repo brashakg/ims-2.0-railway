@@ -47,10 +47,10 @@ from api.routers.auth import get_current_user  # noqa: E402
 
 # GSTINs whose first two digits are the state code (the only part that matters
 # for classification): 27 = Maharashtra, 20 = Jharkhand.
-SUP_MH = "27ABCDE1234F1Z5"   # supplier in Maharashtra
-SUP_JH = "20ABCDE1234F1Z5"   # supplier in Jharkhand
-BUY_JH = "20ZZZZZ9999Z1Z9"   # our entity (recipient) in Jharkhand
-BUY_MH = "27ZZZZZ9999Z1Z9"   # our entity (recipient) in Maharashtra
+SUP_MH = "27ABCDE1234F1Z5"  # supplier in Maharashtra
+SUP_JH = "20ABCDE1234F1Z5"  # supplier in Jharkhand
+BUY_JH = "20ZZZZZ9999Z1Z9"  # our entity (recipient) in Jharkhand
+BUY_MH = "27ZZZZZ9999Z1Z9"  # our entity (recipient) in Maharashtra
 
 
 # ===========================================================================
@@ -138,9 +138,7 @@ class TestComputeInvoice:
         assert inv["total"] == 2230.0
 
     def test_intrastate_invoice_books_cgst_sgst(self):
-        inv = pinv.compute_invoice(
-            [{"taxable": 1000, "gst_rate": 5}], SUP_MH, BUY_MH
-        )
+        inv = pinv.compute_invoice([{"taxable": 1000, "gst_rate": 5}], SUP_MH, BUY_MH)
         assert inv["interstate"] is False
         assert inv["igst_total"] == 0.0
         assert inv["cgst_total"] == 25.0 and inv["sgst_total"] == 25.0
@@ -176,8 +174,18 @@ class TestLinesFromGrn:
     def _po(self):
         return {
             "items": [
-                {"product_id": "P1", "sku": "SKU1", "unit_price": 120.0, "tax_rate": 5.0},
-                {"product_id": "P2", "sku": "SKU2", "unit_price": 800.0, "tax_rate": 18.0},
+                {
+                    "product_id": "P1",
+                    "sku": "SKU1",
+                    "unit_price": 120.0,
+                    "tax_rate": 5.0,
+                },
+                {
+                    "product_id": "P2",
+                    "sku": "SKU2",
+                    "unit_price": 800.0,
+                    "tax_rate": 18.0,
+                },
             ]
         }
 
@@ -185,8 +193,12 @@ class TestLinesFromGrn:
         return {
             "items": [
                 {"product_id": "P1", "product_name": "Frame X", "accepted_qty": 5},
-                {"product_id": "P2", "product_name": "Sun Y", "accepted_qty": 0,
-                 "rejected_qty": 2},  # fully rejected -> skipped
+                {
+                    "product_id": "P2",
+                    "product_name": "Sun Y",
+                    "accepted_qty": 0,
+                    "rejected_qty": 2,
+                },  # fully rejected -> skipped
             ]
         }
 
@@ -231,9 +243,7 @@ class _FakeCollection:
     def find(self, flt=None, projection=None):
         flt = flt or {}
         rows = [
-            dict(d)
-            for d in self._store
-            if all(d.get(k) == v for k, v in flt.items())
+            dict(d) for d in self._store if all(d.get(k) == v for k, v in flt.items())
         ]
         return _FakeCursor(rows)
 
@@ -258,13 +268,21 @@ class _FakeDB:
         self.collections = {
             "vendor_bills": [],
             "vendors": [
-                {"vendor_id": "V1", "trade_name": "Acme Optics",
-                 "gstin": SUP_MH, "credit_days": 30},
+                {
+                    "vendor_id": "V1",
+                    "trade_name": "Acme Optics",
+                    "gstin": SUP_MH,
+                    "credit_days": 30,
+                },
             ],
             "entities": [
-                {"entity_id": "E1", "name": "Better Vision",
-                 "gstins": [{"gstin": BUY_JH, "state_code": "20",
-                             "is_primary": True}]},
+                {
+                    "entity_id": "E1",
+                    "name": "Better Vision",
+                    "gstins": [
+                        {"gstin": BUY_JH, "state_code": "20", "is_primary": True}
+                    ],
+                },
             ],
             "stores": [{"store_id": "S1", "entity_id": "E1"}],
         }
@@ -276,9 +294,7 @@ class _FakeDB:
 def _app(db, roles=("ACCOUNTANT",), uid="u1"):
     """Standalone app with the purchase_invoices router + a fake DB injected."""
     app = FastAPI()
-    app.include_router(
-        pi_router.router, prefix="/api/v1/vendors/purchase-invoices"
-    )
+    app.include_router(pi_router.router, prefix="/api/v1/vendors/purchase-invoices")
 
     async def _u():
         return {
@@ -329,8 +345,14 @@ def _invoice_body(**over):
         "invoice_date": "2026-05-01",
         "recipient_entity_id": "E1",
         "lines": [
-            {"product_id": "P1", "description": "Frame X", "hsn": "9003",
-             "qty": 10, "unit_price": 100, "gst_rate": 5},
+            {
+                "product_id": "P1",
+                "description": "Frame X",
+                "hsn": "9003",
+                "qty": 10,
+                "unit_price": 100,
+                "gst_rate": 5,
+            },
         ],
     }
     body.update(over)
@@ -349,8 +371,8 @@ class TestCreateBooksApAndItc:
         # IGST classification (the fix), not CGST/SGST.
         # place_of_supply stored = the SUPPLIER state (what the ITC register
         # keys on); the legal recipient-side place of supply is kept separately.
-        assert doc["place_of_supply"] == "27"          # supplier (MH) -> register test
-        assert doc["supply_place_recipient"] == "20"   # legal recipient (JH)
+        assert doc["place_of_supply"] == "27"  # supplier (MH) -> register test
+        assert doc["supply_place_recipient"] == "20"  # legal recipient (JH)
         assert doc["interstate"] is True
         assert doc["igst_total"] == 50.0
         assert doc["cgst_total"] == 0.0 and doc["sgst_total"] == 0.0
@@ -369,7 +391,9 @@ class TestCreateBooksApAndItc:
         db = _FakeDB()
         # Make the recipient entity Maharashtra so it matches the MH supplier.
         db.collections["entities"][0]["gstins"][0] = {
-            "gstin": BUY_MH, "state_code": "27", "is_primary": True
+            "gstin": BUY_MH,
+            "state_code": "27",
+            "is_primary": True,
         }
         cli = _app(db)
         r = cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
@@ -456,8 +480,12 @@ class TestListAndGet:
         db = _FakeDB()
         # A legacy header-only bill (no doc_type) must NOT appear in the list.
         db.collections["vendor_bills"].append(
-            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1",
-             "total_amount": 500}
+            {
+                "bill_id": "legacy1",
+                "vendor_id": "V1",
+                "bill_number": "OLD-1",
+                "total_amount": 500,
+            }
         )
         cli = _app(db)
         cli.post("/api/v1/vendors/purchase-invoices", json=_invoice_body())
@@ -491,20 +519,30 @@ class TestListAndGet:
 class TestFromGrnDraft:
     def _wire_grn(self, db):
         grn = {
-            "grn_id": "G1", "grn_number": "GRN-1", "po_id": "PO1",
-            "vendor_id": "V1", "vendor_name": "Acme Optics", "store_id": "S1",
+            "grn_id": "G1",
+            "grn_number": "GRN-1",
+            "po_id": "PO1",
+            "vendor_id": "V1",
+            "vendor_name": "Acme Optics",
+            "store_id": "S1",
             # A standard GRN can only be drafted/billed once ACCEPTED (F3 guard).
             "status": "ACCEPTED",
-            "vendor_invoice_no": "INV-FROM-GRN", "vendor_invoice_date": "2026-05-02",
+            "vendor_invoice_no": "INV-FROM-GRN",
+            "vendor_invoice_date": "2026-05-02",
             "items": [
                 {"product_id": "P1", "product_name": "Frame X", "accepted_qty": 5},
             ],
         }
         po = {
-            "po_id": "PO1", "vendor_id": "V1",
+            "po_id": "PO1",
+            "vendor_id": "V1",
             "items": [
-                {"product_id": "P1", "sku": "SKU1", "unit_price": 120.0,
-                 "tax_rate": 5.0},
+                {
+                    "product_id": "P1",
+                    "sku": "SKU1",
+                    "unit_price": 120.0,
+                    "tax_rate": 5.0,
+                },
             ],
         }
 
@@ -587,8 +625,9 @@ def test_regression_without_pos_would_be_intrastate():
     """Documents the OLD behaviour: a bill with NO place_of_supply (the
     header-only path) is treated intra-state by the register -- which is exactly
     the mis-booking the written place_of_supply fixes."""
-    bills = [{"bill_date": "2026-05-01", "taxable_amount": 1000,
-              "tax_amount": 50}]  # no place_of_supply
+    bills = [
+        {"bill_date": "2026-05-01", "taxable_amount": 1000, "tax_amount": 50}
+    ]  # no place_of_supply
     reg = build_itc_register(bills, entity_state="20")
     assert reg["total_igst"] == 0.0
     assert reg["total_cgst"] == 25.0 and reg["total_sgst"] == 25.0
@@ -638,11 +677,17 @@ class TestStandardGrnMustBeAccepted:
 
     def _wire_grn(self, status):
         grn = {
-            "grn_id": "G9", "po_id": "PO1", "vendor_id": "V1", "store_id": "S1",
-            "status": status, "grn_subtype": "STANDARD",
-            "vendor_invoice_no": "INV-G9", "vendor_invoice_date": "2026-05-02",
-            "items": [{"product_id": "P1", "product_name": "Frame X",
-                       "accepted_qty": 10}],
+            "grn_id": "G9",
+            "po_id": "PO1",
+            "vendor_id": "V1",
+            "store_id": "S1",
+            "status": status,
+            "grn_subtype": "STANDARD",
+            "vendor_invoice_no": "INV-G9",
+            "vendor_invoice_date": "2026-05-02",
+            "items": [
+                {"product_id": "P1", "product_name": "Frame X", "accepted_qty": 10}
+            ],
         }
 
         class _R:

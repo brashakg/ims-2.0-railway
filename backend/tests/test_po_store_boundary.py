@@ -7,6 +7,7 @@ GRN is booked to the PO's delivery store -- not blindly the caller's active
 store. These call the router functions directly (like test_grn_accept_store_guard)
 so the guard is asserted BEFORE any mutation.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -80,22 +81,29 @@ def _po(store_id, status="SENT"):
 # PO reads / writes
 # --------------------------------------------------------------------------- #
 
+
 def test_get_po_cross_store_404(monkeypatch):
-    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B")))
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B"))
+    )
     with pytest.raises(HTTPException) as e:
         asyncio.run(vendors_mod.get_po("PO-1", _user(["STORE_MANAGER"], "STORE-A")))
     assert e.value.status_code == 404
 
 
 def test_get_po_same_store_ok(monkeypatch):
-    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-A")))
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-A"))
+    )
     out = asyncio.run(vendors_mod.get_po("PO-1", _user(["STORE_MANAGER"], "STORE-A")))
     assert out["po_id"] == "PO-1"
 
 
 def test_get_po_admin_cross_store_ok(monkeypatch):
     """ADMIN is cross-store by design -> may read any store's PO."""
-    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B")))
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B"))
+    )
     out = asyncio.run(vendors_mod.get_po("PO-1", _user(["ADMIN"], "STORE-A")))
     assert out["po_id"] == "PO-1"
 
@@ -114,20 +122,30 @@ def test_cancel_po_cross_store_404_no_mutation(monkeypatch):
     repo = _PORepo(_po("STORE-B", status="SENT"))
     monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: repo)
     with pytest.raises(HTTPException) as e:
-        asyncio.run(vendors_mod.cancel_po("PO-1", "changed mind", _user(["STORE_MANAGER"], "STORE-A")))
+        asyncio.run(
+            vendors_mod.cancel_po(
+                "PO-1", "changed mind", _user(["STORE_MANAGER"], "STORE-A")
+            )
+        )
     assert e.value.status_code == 404
     assert repo.mutations == []
 
 
 def test_create_po_other_store_403(monkeypatch):
-    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: _PORepo(None))
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(None)
+    )
     monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: None)
     body = vendors_mod.POCreate(
         vendor_id="V1",
         delivery_store_id="STORE-B",
         items=[
             vendors_mod.POItemCreate(
-                product_id="P1", product_name="Frame", sku="S1", quantity=1, unit_price=100.0
+                product_id="P1",
+                product_name="Frame",
+                sku="S1",
+                quantity=1,
+                unit_price=100.0,
             )
         ],
     )
@@ -140,12 +158,17 @@ def test_create_po_other_store_403(monkeypatch):
 # GRN receipt against a PO
 # --------------------------------------------------------------------------- #
 
+
 def _grn_body():
     return vendors_mod.GRNCreate(
         po_id="PO-1",
         vendor_invoice_no="INV-1",
         vendor_invoice_date="2026-05-02",
-        items=[vendors_mod.GRNItemCreate(product_id="P1", received_qty=5, accepted_qty=5, rejected_qty=0)],
+        items=[
+            vendors_mod.GRNItemCreate(
+                product_id="P1", received_qty=5, accepted_qty=5, rejected_qty=0
+            )
+        ],
         attachment_file_id="FILE-1",
         attachment_filename="inv.pdf",
         attachment_mime="application/pdf",
@@ -156,11 +179,15 @@ def test_create_grn_cross_store_404(monkeypatch):
     """A STORE_MANAGER of STORE-A receiving STORE-B's PO gets 404 (no GRN)."""
     grn_repo = _GRNRepo()
     monkeypatch.setattr(vendors_mod, "get_grn_repository", lambda: grn_repo)
-    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B")))
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B"))
+    )
     monkeypatch.setattr(vendors_mod, "get_file_store", lambda: _FileStore())
     monkeypatch.setattr(vendors_mod, "generate_grn_number", lambda s: "GRN-1")
     with pytest.raises(HTTPException) as e:
-        asyncio.run(vendors_mod.create_grn(_grn_body(), _user(["STORE_MANAGER"], "STORE-A")))
+        asyncio.run(
+            vendors_mod.create_grn(_grn_body(), _user(["STORE_MANAGER"], "STORE-A"))
+        )
     assert e.value.status_code == 404
     assert grn_repo.created == [], "no GRN may be minted on a cross-store reject"
 
@@ -170,7 +197,9 @@ def test_create_grn_books_to_po_store_not_active(monkeypatch):
     GRN to STORE-B (the PO's delivery store) -- not the caller's active store."""
     grn_repo = _GRNRepo()
     monkeypatch.setattr(vendors_mod, "get_grn_repository", lambda: grn_repo)
-    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B")))
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _PORepo(_po("STORE-B"))
+    )
     monkeypatch.setattr(vendors_mod, "get_audit_repository", lambda: None)
     monkeypatch.setattr(vendors_mod, "get_file_store", lambda: _FileStore())
     monkeypatch.setattr(vendors_mod, "generate_grn_number", lambda s: f"GRN-{s}")

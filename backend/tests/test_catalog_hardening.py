@@ -214,7 +214,9 @@ class TestCatalogPricingSchema:
     def test_all_canonical_tiers_accepted(self):
         """Every canonical cap tier validates at the model layer (no DB)."""
         for tier in ("MASS", "PREMIUM", "LUXURY", "SERVICE", "NON_DISCOUNTABLE"):
-            model = catalog.PricingInput(mrp=1000, offer_price=900, discount_category=tier)
+            model = catalog.PricingInput(
+                mrp=1000, offer_price=900, discount_category=tier
+            )
             assert model.discount_category == tier
 
 

@@ -927,8 +927,12 @@ class MockCollection:
         return type("obj", (object,), {"modified_count": 0})()
 
     def find_one_and_update(
-        self, filter: Dict, update: Dict, upsert: bool = False,
-        return_document: Any = False, **kwargs
+        self,
+        filter: Dict,
+        update: Dict,
+        upsert: bool = False,
+        return_document: Any = False,
+        **kwargs,
     ) -> Optional[Dict]:
         """Atomic find-and-update for no-Mongo mode.
 
