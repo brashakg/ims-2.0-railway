@@ -266,6 +266,12 @@ async def demand_forecast(
     active_store = validate_store_access(store_id, current_user) or current_user.get(
         "active_store_id", ""
     )
+    # Category-filter fix: normalise short codes / plurals to the canonical
+    # category order items carry (fail-open pass-through when unresolvable).
+    if category:
+        from ..services.product_master import resolve_category
+
+        category = resolve_category(category) or category
     db = _get_db()
     if db is None:
         return {"forecasts": []}

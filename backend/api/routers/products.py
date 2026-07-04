@@ -762,6 +762,14 @@ async def list_products(
     that's in the catalog can always be looked up at any store the user has
     access to."""
     from ..services.cache import cache
+    from ..services.product_master import resolve_category
+
+    # Category-filter fix: products store CANONICAL categories (SUNGLASS/FRAME),
+    # but callers send short codes (SG/FR) or legacy plurals. Normalise the param
+    # to canonical when resolvable (fail-open pass-through otherwise) BEFORE the
+    # cache key so both spellings share one cache entry.
+    if category:
+        category = resolve_category(category) or category
 
     # Build cache key from query params. NOTE: store_id is cache-key/back-compat
     # only -- list_products is a GLOBAL catalog lookup (POS must find any SKU at
@@ -1575,6 +1583,11 @@ async def list_brands(
     current_user: dict = Depends(get_current_user),
 ):
     """List all brands, optionally filtered by category"""
+    from ..services.product_master import resolve_category
+
+    # Normalise short codes / plurals to the canonical category the docs store.
+    if category:
+        category = resolve_category(category) or category
     repo = get_product_repository()
 
     if repo is not None:

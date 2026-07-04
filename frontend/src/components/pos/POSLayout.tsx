@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
+import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts } from '../../hooks/usePOSQueries';
 import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi, loyaltyApi } from '../../services/api';
@@ -140,12 +141,16 @@ function fc(amount: number | undefined | null): string {
 }
 
 function mapCategory(cat: string): string {
+  // item_type vocabulary for the order payload (drives backend GST item_type-
+  // wins). Canonicalise the input first so EVERY category spelling (short code,
+  // plural, canonical) resolves; outputs are unchanged from the legacy map.
+  const canonical = canonicalCategory(cat);
   const map: Record<string, string> = {
-    FRAMES: 'FRAME', FRAME: 'FRAME', SUNGLASSES: 'SUNGLASS', SUNGLASS: 'SUNGLASS',
-    RX_LENSES: 'LENS', OPTICAL_LENS: 'LENS', CONTACT_LENSES: 'CONTACT_LENS',
-    ACCESSORIES: 'ACCESSORY', WRIST_WATCHES: 'WATCH', SMARTWATCHES: 'SMARTWATCH', SERVICES: 'SERVICE',
+    FRAME: 'FRAME', SUNGLASS: 'SUNGLASS', OPTICAL_LENS: 'LENS',
+    CONTACT_LENS: 'CONTACT_LENS', COLORED_CONTACT_LENS: 'CONTACT_LENS',
+    ACCESSORIES: 'ACCESSORY', WATCH: 'WATCH', SMARTWATCH: 'SMARTWATCH', SERVICES: 'SERVICE',
   };
-  return map[cat] || cat;
+  return map[canonical] || canonical || cat;
 }
 
 // ============================================================================
@@ -442,7 +447,7 @@ export function POSLayout() {
 
     if (store.sale_type === 'prescription_order') {
       const hasLens = (store.cart || []).some(i =>
-        i.category === 'RX_LENSES' || i.lens_details || i.is_optical
+        canonicalCategory(i.category) === 'OPTICAL_LENS' || i.lens_details || i.is_optical
       );
       if (!hasLens) {
         setErrorMsg('Prescription order requires at least one lens item. Add lenses or switch to Quick Sale.');
@@ -565,12 +570,10 @@ export function POSLayout() {
         // lens. Earlier code matched category==='RX_LENSES' which never
         // matched the real catalog (categories are OPTICAL_LENS /
         // SPECTACLE_LENS). We also no longer silently swallow errors.
-        const LENS_CATS = ['OPTICAL_LENS', 'OPTICAL_LENSES', 'SPECTACLE_LENS', 'SPECTACLE_LENSES', 'RX_LENSES', 'LENS', 'LENSES'];
-        const FRAME_CATS = ['FRAMES', 'FRAME', 'SUNGLASSES', 'SUNGLASS', 'SPECTACLE_FRAME'];
         const cartItems = store.cart || [];
-        const frameItem = cartItems.find(i => FRAME_CATS.includes((i.category || '').toUpperCase()));
+        const frameItem = cartItems.find(i => ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category)));
         const lensItem = cartItems.find(
-          i => LENS_CATS.includes((i.category || '').toUpperCase()) || !!i.lens_details,
+          i => canonicalCategory(i.category) === 'OPTICAL_LENS' || !!i.lens_details,
         );
         if (store.sale_type === 'prescription_order' && store.prescription && (frameItem || lensItem)) {
           try {
@@ -2154,7 +2157,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
     startTransition(() => {
       store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
         unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
-        is_optical: ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'COLOUR_CONTACTS'].includes(product.category), image_url: product.image_url });
+        is_optical: ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(product.category)), image_url: product.image_url });
     });
   };
 
@@ -2294,7 +2297,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
                   inCart ? 'border-green-300 bg-green-50 opacity-70' : 'border-gray-200 hover:border-bv-red-300'}`}>
                 <div className="h-16 bg-white rounded-lg mb-2 flex items-center justify-center relative">
                   {product.image_url ? <img src={product.image_url} alt="" className="h-14 w-auto object-contain" /> :
-                  product.category === 'FRAMES' || product.category === 'SUNGLASSES' ? <Glasses className="w-8 h-8 text-gray-700" />
+                  ['FRAME', 'SUNGLASS'].includes(canonicalCategory(product.category)) ? <Glasses className="w-8 h-8 text-gray-700" />
                   : product.category?.includes('WATCH') ? <Watch className="w-8 h-8 text-gray-700" /> : <Package className="w-8 h-8 text-gray-700" />}
                   {stock !== null && (
                     <span className={`absolute top-1 right-1 text-[9px] px-1 py-0.5 rounded font-medium ${
@@ -2426,7 +2429,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           drives the per-staff Visufit-coverage gate in the incentive
           engine. Empty = no Visufit demo done for this order. */}
       {(store.cart || []).some((i) =>
-        i.is_optical || ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'OPTICAL_LENS', 'COLOUR_CONTACTS'].includes(i.category)
+        i.is_optical || ['FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS'].includes(canonicalCategory(i.category))
       ) && (
         <div className="bg-white border border-gray-200 rounded-xl p-4 text-sm">
           <label className="font-medium text-gray-900 block mb-1">

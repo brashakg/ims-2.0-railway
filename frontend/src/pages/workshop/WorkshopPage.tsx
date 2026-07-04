@@ -22,6 +22,7 @@ import {
   ClipboardCheck,
   X,
 } from 'lucide-react';
+import { canonicalCategory } from '../../utils/categoryNormalize';
 import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrint';
 import type { JobStatus, JobPriority } from '../../types';
 import { workshopApi, orderApi, vendorsApi } from '../../services/api';
@@ -307,10 +308,10 @@ const loadJobs = async () => {
     setCreateLoading(true);
     setDcHardlock(null);
     try {
-      const rxItem = (createSelectedOrder.items || []).find((i: any) => i.category === 'RX_LENSES' || i.is_optical);
+      const rxItem = (createSelectedOrder.items || []).find((i: any) => canonicalCategory(i.category) === 'OPTICAL_LENS' || i.is_optical);
       const created = await workshopApi.createJob({
         order_id: createSelectedOrder.id,
-        frame_details: { items: (createSelectedOrder.items || []).filter((i: any) => i.category === 'FRAMES' || i.category === 'SUNGLASSES') },
+        frame_details: { items: (createSelectedOrder.items || []).filter((i: any) => ['FRAME', 'SUNGLASS'].includes(canonicalCategory(i.category))) },
         lens_details: rxItem?.lens_details || { type: 'STANDARD' },
         prescription_id: rxItem?.prescription_id || '',
         fitting_instructions: createFitting || undefined,

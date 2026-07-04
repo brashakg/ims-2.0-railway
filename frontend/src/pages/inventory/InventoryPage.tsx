@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import { canonicalCategory, sameCategory } from '../../utils/categoryNormalize';
 import {
   Search,
   Package,
@@ -304,6 +305,10 @@ export function InventoryPage() {
         stock: item.stock || item.quantity || 0,
         lowStockThreshold: item.lowStockThreshold || item.minStock || 5,
         reserved: item.reserved || 0,
+        // Products store canonical categories (SUNGLASS/FRAME); the filter chips
+        // + label lookups use short codes (SG/FR). Canonicalise ONCE at ingest so
+        // every downstream compare goes through one vocabulary.
+        category: canonicalCategory(item.category) as ProductCategory,
       })) : [];
       setInventory(normalized);
 
@@ -403,7 +408,7 @@ export function InventoryPage() {
       item.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.brand?.toLowerCase().includes(searchQuery.toLowerCase());
 
-    const matchesCategory = !selectedCategory || item.category === selectedCategory;
+    const matchesCategory = !selectedCategory || sameCategory(item.category, selectedCategory);
 
     const isOnline = !!getOnline(item)?.online;
     const matchesAvailability =
@@ -464,7 +469,7 @@ export function InventoryPage() {
     };
     const lines = [headers.join(',')];
     for (const item of rows) {
-      const category = CATEGORIES.find(c => c.code === item.category)?.label || item.category;
+      const category = CATEGORIES.find(c => sameCategory(c.code, item.category))?.label || item.category;
       const online = getOnline(item);
       const status = getStockStatus(item).label;
       const available = (item.stock || 0) - (item.reserved || 0);
@@ -943,7 +948,7 @@ export function InventoryPage() {
                 <tbody className="divide-y divide-gray-200">
                   {paginatedInventory.map((item, i) => {
                     const status = getStockStatus(item);
-                    const category = CATEGORIES.find(c => c.code === item.category);
+                    const category = CATEGORIES.find(c => sameCategory(c.code, item.category));
                     return (
                       <tr key={item.id || item.sku || `row-${i}`} className="hover:bg-gray-50">
                         <td className="px-4 py-3">
@@ -1353,7 +1358,7 @@ export function InventoryPage() {
       {/* Product Detail Drawer — read-only snapshot of the row's real fields.
           No backend call: every value shown is already loaded in the row. */}
       {detailItem && (() => {
-        const cat = CATEGORIES.find(c => c.code === detailItem.category);
+        const cat = CATEGORIES.find(c => sameCategory(c.code, detailItem.category));
         const online = getOnline(detailItem);
         const status = getStockStatus(detailItem);
         const available = (detailItem.stock || 0) - (detailItem.reserved || 0);

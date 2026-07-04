@@ -402,12 +402,15 @@ export function StockAudit() {
                 <div>
                   <label className="block text-sm font-medium mb-1" style={{ color: 'var(--ink-2)' }}>Category (optional)</label>
                   <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="input w-full">
+                    {/* Values are the CANONICAL spine categories (what products
+                        store) — legacy plurals (FRAMES/SUNGLASSES) never matched
+                        any product. */}
                     <option value="">All categories</option>
-                    <option value="FRAMES">Frames</option>
-                    <option value="SUNGLASSES">Sunglasses</option>
-                    <option value="RX_LENSES">Rx Lenses</option>
-                    <option value="CONTACT_LENSES">Contact Lenses</option>
-                    <option value="WRIST_WATCHES">Watches</option>
+                    <option value="FRAME">Frames</option>
+                    <option value="SUNGLASS">Sunglasses</option>
+                    <option value="OPTICAL_LENS">Rx Lenses</option>
+                    <option value="CONTACT_LENS">Contact Lenses</option>
+                    <option value="WATCH">Watches</option>
                     <option value="ACCESSORIES">Accessories</option>
                   </select>
                 </div>
