@@ -75,3 +75,49 @@ export function sameCategory(
   const ca = canonicalCategory(a);
   return ca !== '' && ca === canonicalCategory(b);
 }
+
+// ---------------------------------------------------------------------------
+// ONE browse/filter vocabulary for the whole app (owner 2026-07-04: "why are
+// some categories duplicating -- lens, lenses, sunglasses, sunglass?"). Every
+// screen previously shipped its own hardcoded list with its own spelling; all
+// category filter chips / selects must consume THIS list instead: canonical
+// VALUE under the hood, one retail-natural plural LABEL on screen.
+// ---------------------------------------------------------------------------
+
+export interface CategoryBrowseOption {
+  /** Canonical spine value (what products store; safe for ?category=). */
+  value: string;
+  /** Retail-natural browse label (plural -- you browse "Sunglasses"). */
+  label: string;
+}
+
+export const CATEGORY_BROWSE_OPTIONS: CategoryBrowseOption[] = [
+  { value: 'FRAME', label: 'Frames' },
+  { value: 'SUNGLASS', label: 'Sunglasses' },
+  { value: 'READING_GLASSES', label: 'Reading Glasses' },
+  { value: 'OPTICAL_LENS', label: 'Rx Lenses' },
+  { value: 'CONTACT_LENS', label: 'Contact Lenses' },
+  { value: 'COLORED_CONTACT_LENS', label: 'Colored Contacts' },
+  { value: 'WATCH', label: 'Watches' },
+  { value: 'SMARTWATCH', label: 'Smartwatches' },
+  { value: 'SMARTGLASSES', label: 'Smart Glasses' },
+  { value: 'WALL_CLOCK', label: 'Wall Clocks' },
+  { value: 'ACCESSORIES', label: 'Accessories' },
+  { value: 'SERVICES', label: 'Services' },
+  { value: 'HEARING_AID', label: 'Hearing Aids' },
+];
+
+/** The shared browse label for ANY category spelling ("SG" / "SUNGLASSES" /
+ *  "SUNGLASS" all -> "Sunglasses"). Unknown values fall back to a title-cased
+ *  version of themselves so legacy free-form data still displays. */
+export function categoryBrowseLabel(value: string | null | undefined): string {
+  const canon = canonicalCategory(value);
+  if (!canon) return '';
+  const hit = CATEGORY_BROWSE_OPTIONS.find((o) => o.value === canon);
+  if (hit) return hit.label;
+  return canon
+    .toLowerCase()
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}

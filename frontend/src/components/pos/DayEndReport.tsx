@@ -113,7 +113,7 @@ export function DayEndReport({ storeId, onClose, entity, store, overrides }: Day
         const unitPrice = item.unitPrice || item.unit_price || 0;
         const discount = item.discountAmount || item.discount_amount || 0;
         const lineTotal = (item.finalPrice || item.item_total || item.line_total || unitPrice * qty) - discount;
-        const cat = item.category || 'FRAMES';
+        const cat = item.category || 'FRAME';
         const gstRate = getGSTRateByCategory(cat);
         const lineTax = Math.round(lineTotal * (gstRate / 100) * 100) / 100;
 

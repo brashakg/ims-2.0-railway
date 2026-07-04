@@ -76,7 +76,7 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
     patientName: store.patient?.name,
     items: (store.cart || []).map(item => ({
       id: item.id,
-      itemType: item.category || 'FRAMES',
+      itemType: item.category || 'FRAME',
       productId: item.product_id,
       productName: item.name,
       brand: item.brand,       // carried into GSTInvoice for customer-friendly description

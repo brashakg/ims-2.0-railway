@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
-import { canonicalCategory } from '../../utils/categoryNormalize';
+import { canonicalCategory, CATEGORY_BROWSE_OPTIONS, categoryBrowseLabel } from '../../utils/categoryNormalize';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts } from '../../hooks/usePOSQueries';
 import { customerApi, orderApi, prescriptionApi, workshopApi, adminStoreApi, inventoryApi, loyaltyApi } from '../../services/api';
@@ -2075,7 +2075,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const [blockMsg, setBlockMsg] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined, store_id: store.store_id || undefined });
-  const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
+  // ONE shared category vocabulary (owner 2026-07-04): canonical values +
+  // the same labels every other screen shows. POS sells these subsets.
+  const POS_CHIP_VALUES = ['FRAME', 'SUNGLASS', 'OPTICAL_LENS', 'CONTACT_LENS', 'WATCH', 'SMARTWATCH', 'ACCESSORIES'];
+  const categories = CATEGORY_BROWSE_OPTIONS.filter(o => POS_CHIP_VALUES.includes(o.value));
 
   const handleBarcodeScan = async (barcode: string) => {
     const code = (barcode || '').trim();
@@ -2217,9 +2220,9 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       <div className="flex gap-2 overflow-x-auto pb-1 items-center">
         <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>All</button>
         {categories.map(cat => (
-          <button key={cat} onClick={() => setCategoryFilter(cat === categoryFilter ? '' : cat)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
-            {cat.replace(/_/g, ' ')}
+          <button key={cat.value} onClick={() => setCategoryFilter(cat.value === categoryFilter ? '' : cat.value)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat.value ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+            {cat.label}
           </button>
         ))}
         <div className="ml-auto flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
@@ -2322,7 +2325,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         <div className="text-center py-12 text-gray-500">
           <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p className="text-sm">No products found</p>
-          {categoryFilter && debouncedSearch && <p className="text-xs mt-1">Search is filtered to <span className="font-medium">{categoryFilter.replace(/_/g, ' ')}</span>. <button onClick={() => setCategoryFilter('')} className="text-bv-red-600 hover:underline">Search all categories</button></p>}
+          {categoryFilter && debouncedSearch && <p className="text-xs mt-1">Search is filtered to <span className="font-medium">{categoryBrowseLabel(categoryFilter)}</span>. <button onClick={() => setCategoryFilter('')} className="text-bv-red-600 hover:underline">Search all categories</button></p>}
         </div>
       )}
     </div>
