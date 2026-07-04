@@ -295,6 +295,65 @@ class GRNCreate(BaseModel):
         return self
 
 
+class ExpressGRNItemCreate(BaseModel):
+    """One received line for the express (clean-delivery) receiving chain.
+
+    Mirrors GRNItemCreate's fields but WITHOUT the cross-field coherence
+    validator: express enforces its own stricter CLEAN-ONLY rule in the
+    handler (rejected == 0 and accepted == received > 0) and answers every
+    violation with ONE stable 400 code (EXPRESS_NOT_CLEAN) the frontend keys
+    on to fall back to the two-step receive -- a Pydantic 422 would leak a
+    different error shape for some non-clean payloads.
+    """
+
+    po_item_id: Optional[str] = None
+    product_id: str
+    received_qty: int = Field(..., ge=0)
+    accepted_qty: int = Field(..., ge=0)
+    rejected_qty: int = Field(0, ge=0)
+    location_code: Optional[str] = None
+    batch_code: Optional[str] = None
+    lot_number: Optional[str] = None
+    expiry_date: Optional[str] = None
+
+    @field_validator("batch_code", "lot_number", "expiry_date", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+
+class ExpressGRNCreate(BaseModel):
+    """Body for POST /vendors/grn/express -- the one-shot clean receive.
+
+    STANDARD PO-backed receipts only: po_id + vendor_invoice_no are required
+    (grn_subtype is accepted for explicitness but a DELIVERY_CHALLAN is
+    rejected in the handler with EXPRESS_STANDARD_ONLY). The attachment fields
+    flow into the SAME F-S3 mandatory-document gate create_grn enforces --
+    attachment_file_id stays Optional here so a missing document surfaces as
+    the canonical 400 ATTACHMENT_REQUIRED (not a 422), keeping the
+    no-paper-no-stock control's error contract identical across both flows.
+    """
+
+    po_id: str = Field(..., min_length=1)
+    vendor_invoice_no: str = Field(..., min_length=1)
+    vendor_invoice_date: Optional[str] = None
+    items: List[ExpressGRNItemCreate] = Field(..., min_length=1)
+    attachment_file_id: Optional[str] = None
+    attachment_filename: Optional[str] = None
+    attachment_mime: Optional[str] = None
+    notes: Optional[str] = None
+    grn_subtype: str = GRN_SUBTYPE_STANDARD
+
+    @field_validator("grn_subtype", mode="before")
+    @classmethod
+    def _normalize_subtype(cls, v):
+        s = str(v or GRN_SUBTYPE_STANDARD).strip().upper().replace("-", "_")
+        return s if s in _GRN_SUBTYPES else GRN_SUBTYPE_STANDARD
+
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -1733,6 +1792,19 @@ async def create_grn(
     grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
 ):
     """Create a new GRN (STANDARD) or log a Delivery Challan (F9 DC subtype)."""
+    return await _create_grn_impl(grn, current_user)
+
+
+async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
+    """Shared GRN-create engine behind POST /grn (and POST /grn/express).
+
+    Behavior-preserving extraction of the original create_grn body so the
+    express receiving chain can run the SAME validation + persistence path --
+    attachment gate (F-S3 + BUG-010 file-exists), PO receivable check, F2
+    store re-point to the PO's delivery store, per-store numbering and the DC
+    guards -- without duplicating any control. Callers pass the authenticated
+    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
 
@@ -2096,6 +2168,19 @@ async def accept_grn(
     wrapped so that a logging/secondary failure can never lose the stock that
     was already received.
     """
+    return await _accept_grn_impl(grn_id, current_user)
+
+
+async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
+    """Shared GRN-accept engine behind POST /grn/{grn_id}/accept (and
+    POST /grn/express).
+
+    Behavior-preserving extraction of the original accept_grn body: the
+    store-scope guard, the PENDING/PARTIALLY_ACCEPTED status gate, idempotent
+    per-(grn, line) stock minting, PO receipt math and the audit trail all run
+    here unchanged for both callers. Callers pass the authenticated
+    ``current_user`` their own ``require_roles(*_VENDOR_ROLES)`` gate produced.
+    """
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
@@ -2437,6 +2522,262 @@ async def accept_grn(
                 if (i.get("accepted_qty", 0) or 0) > 0
             ]
         ),
+    }
+
+
+@router.post("/grn/express", status_code=201)
+async def express_receive_grn(
+    body: ExpressGRNCreate,
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """One-shot receiving chain for a CLEAN delivery (procurement Phase 2).
+
+    Runs create -> accept server-side through the SAME shared impls the
+    two-step flow uses -- every control preserved: F-S3 attachment gate +
+    BUG-010 file-exists check, PO exists + receivable, F2 store re-point to
+    the PO's delivery store + cross-store 404, idempotent per-(grn, line)
+    stock mint, PO receipt math. Then computes the purchase-invoice DRAFT and
+    the 3-way match PREVIEW via the accountant console's own code paths
+    WITHOUT persisting anything (no vendor_bills write, no AP booking -- the
+    accountant attestation stays human) and raises a fail-soft accountant
+    task deep-linking to the booking screen.
+
+    CLEAN-ONLY: every line must be fully accepted (rejected_qty == 0 and
+    accepted_qty == received_qty > 0); anything else answers 400
+    EXPRESS_NOT_CLEAN so the frontend falls back to the existing two-step
+    receive (which carries the full discrepancy controls). STANDARD PO-backed
+    receipts only -- a DELIVERY_CHALLAN is 400 EXPRESS_STANDARD_ONLY.
+
+    Failure atomicity: an HTTPException BEFORE the GRN row exists propagates
+    unchanged (nothing was persisted). If accept fails AFTER the GRN was
+    created, a 500 with code EXPRESS_PARTIAL carrying the grn_id is returned
+    so the FE can point the user at the pending-receipts panel to accept or
+    void it -- never a silently stranded PENDING GRN.
+    """
+    # 1) STANDARD-only: a Delivery Challan has no vendor invoice at receipt
+    # time, so there is nothing to draft/match -- express cannot apply.
+    if body.grn_subtype == GRN_SUBTYPE_DC:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "EXPRESS_STANDARD_ONLY",
+                "message": (
+                    "Express receive applies to STANDARD PO-backed receipts "
+                    "only. Log a Delivery Challan through the normal "
+                    "receiving screen."
+                ),
+            },
+        )
+
+    # 2) CLEAN-ONLY guard: one stable code for every violation so the FE keys
+    # on it to route the user to the two-step receive.
+    for idx, item in enumerate(body.items):
+        if (
+            item.rejected_qty != 0
+            or item.received_qty <= 0
+            or item.accepted_qty != item.received_qty
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "EXPRESS_NOT_CLEAN",
+                    "message": (
+                        f"Line {idx + 1} (product {item.product_id}) is not a "
+                        "clean receipt: express requires rejected_qty=0 and "
+                        "accepted_qty equal to a positive received_qty on "
+                        "every line. Use the standard receiving flow for "
+                        "rejections or short/over receipts."
+                    ),
+                },
+            )
+
+    # 3) Create the GRN through the SHARED impl -- every create-side control
+    # (attachment mandatory + file-exists, PO exists + receivable, store
+    # re-point + cross-store 404) runs unchanged. An HTTPException here
+    # propagates as-is: nothing has been persisted yet.
+    try:
+        grn_create = GRNCreate(
+            po_id=body.po_id,
+            vendor_invoice_no=body.vendor_invoice_no,
+            vendor_invoice_date=body.vendor_invoice_date,
+            items=[GRNItemCreate(**it.model_dump()) for it in body.items],
+            notes=body.notes,
+            grn_subtype=GRN_SUBTYPE_STANDARD,
+            attachment_file_id=body.attachment_file_id,
+            attachment_filename=body.attachment_filename,
+            attachment_mime=body.attachment_mime,
+        )
+    except ValueError as exc:
+        # e.g. blank po_id / vendor_invoice_no -- surface as a clean 400.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    create_res = await _create_grn_impl(grn_create, current_user)
+    grn_id = create_res.get("grn_id")
+    grn_number = create_res.get("grn_number")
+
+    # 4) Accept through the SHARED impl. From here on the GRN row EXISTS, so a
+    # failure must never surface as a generic error that strands a PENDING
+    # GRN invisibly: EXPRESS_PARTIAL + grn_id tells the FE exactly where to
+    # send the user (the existing pending-receipts panel handles accept/void).
+    _partial_detail = {
+        "code": "EXPRESS_PARTIAL",
+        "grn_id": grn_id,
+        "grn_number": grn_number,
+        "message": (
+            f"Receipt {grn_number} was created but not accepted -- open the "
+            "receiving screen to accept or void it."
+        ),
+    }
+    try:
+        accept_res = await _accept_grn_impl(grn_id, current_user)
+    except HTTPException as exc:
+        logger.error(
+            "[VENDOR] express-receive accept failed for %s: %s",
+            grn_id,
+            exc.detail,
+        )
+        raise HTTPException(status_code=500, detail=_partial_detail)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[VENDOR] express-receive accept crashed for %s: %s", grn_id, exc
+        )
+        raise HTTPException(status_code=500, detail=_partial_detail)
+
+    grn_status = accept_res.get("grn_status")
+    if grn_status is not None and grn_status != "ACCEPTED":
+        # PARTIALLY_ACCEPTED: one or more lines were HELD (product not yet
+        # catalogued / incomplete catalog). The chain cannot finish (F3 blocks
+        # the invoice draft on a non-ACCEPTED GRN), so surface the exact
+        # recovery instead of a half-true success.
+        raise HTTPException(
+            status_code=500,
+            detail={
+                **_partial_detail,
+                "grn_status": grn_status,
+                "message": (
+                    f"Receipt {grn_number} was created but only partially "
+                    "accepted (some lines are held for cataloguing) -- open "
+                    "the receiving screen to finish it."
+                ),
+            },
+        )
+
+    # 5) Invoice DRAFT + 3-way match PREVIEW -- the SAME code paths the
+    # accountant's console uses (F3: draft_invoice_from_grn re-asserts the
+    # GRN is ACCEPTED via _load_standard_grn). NOTHING is persisted: no
+    # vendor_bills write, no AP booking -- express stops at a draft. Fail-soft:
+    # the receive above is already complete and correct, so a draft/match
+    # problem degrades to nulls rather than failing a successful receipt.
+    invoice_draft = None
+    match_preview = None
+    draft = None
+    try:
+        from . import purchase_invoices as _pi
+
+        draft = await _pi.draft_invoice_from_grn(grn_id, current_user)
+        invoice_draft = {
+            "vendor_id": draft.get("vendor_id"),
+            "invoice_number": draft.get("invoice_number"),
+            "place_of_supply": draft.get("place_of_supply"),
+            "lines_count": len(draft.get("lines") or []),
+            "totals": {
+                "taxable_total": draft.get("taxable_total"),
+                "cgst_total": draft.get("cgst_total"),
+                "sgst_total": draft.get("sgst_total"),
+                "igst_total": draft.get("igst_total"),
+                "tax_total": draft.get("tax_total"),
+                "total": draft.get("total"),
+            },
+        }
+        try:
+            _pi_db = _pi._get_db()
+        except Exception:  # noqa: BLE001
+            _pi_db = None
+        tolerance = _pi._resolved_purchase_config(_pi_db)["match_tolerance_pct"]
+        match = _pi._run_match_for_invoice(
+            _pi_db, body.po_id, grn_id, draft.get("lines") or [], tolerance
+        )
+        if match:
+            match_preview = {
+                "match_status": match.get("match_status"),
+                "exception_count": len(match.get("exceptions") or []),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[VENDOR] express-receive draft/match preview failed for %s: %s",
+            grn_id,
+            exc,
+        )
+
+    # 6) Accountant task (reuses the receiving-discrepancy SYSTEM-task
+    # pattern; fail-soft -- a task failure never rolls back the receive).
+    accountant_task_id = None
+    try:
+        from ..services.task_triggers import create_system_task
+        from ..dependencies import get_task_repository
+
+        grn_doc = None
+        try:
+            _repo = get_grn_repository()
+            grn_doc = _repo.find_by_id(grn_id) if _repo is not None else None
+        except Exception:  # noqa: BLE001
+            grn_doc = None
+        vendor_label = (
+            (draft or {}).get("vendor_name")
+            or (grn_doc or {}).get("vendor_name")
+            or (grn_doc or {}).get("vendor_id")
+            or "vendor"
+        )
+        book_link = f"/purchase/invoices/book?grn_id={grn_id}"
+        task = create_system_task(
+            get_task_repository(),
+            title=f"Book purchase invoice for GRN {grn_number} ({vendor_label})",
+            description=(
+                f"Express receive completed for goods receipt {grn_number} "
+                f"(vendor invoice {body.vendor_invoice_no}). Review the draft "
+                f"and book the purchase invoice: {book_link}."
+                + (
+                    f" 3-way match preview: {match_preview['match_status']} "
+                    f"({match_preview['exception_count']} exception(s))."
+                    if match_preview
+                    else ""
+                )
+            ),
+            priority="P2",
+            category="Purchase",
+            store_id=(grn_doc or {}).get("store_id"),
+            dedupe_ref=f"express_invoice:{grn_id}",
+            assigned_to="ACCOUNTANT",
+            extra={
+                "link": book_link,
+                "payload": {
+                    "grn_id": grn_id,
+                    "grn_number": grn_number,
+                    "po_id": body.po_id,
+                    "match_status": (match_preview or {}).get("match_status"),
+                    "exception_count": (match_preview or {}).get(
+                        "exception_count"
+                    ),
+                },
+            },
+        )
+        if task:
+            accountant_task_id = task.get("task_id")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[VENDOR] express-receive accountant task failed for %s: %s",
+            grn_id,
+            exc,
+        )
+
+    return {
+        "grn_id": grn_id,
+        "grn_number": grn_number,
+        "accepted_units": accept_res.get("units_added"),
+        "po_status": accept_res.get("po_status"),
+        "invoice_draft": invoice_draft,
+        "match_preview": match_preview,
+        "accountant_task_id": accountant_task_id,
     }
 
 

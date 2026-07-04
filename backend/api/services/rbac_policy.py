@@ -6372,6 +6372,16 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/grn",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # Procurement Phase 2: one-shot express receive for a CLEAN delivery
+    # (create + accept + invoice-draft preview + accountant task, server-side).
+    # Same gate as creating/accepting a GRN -- ALL receiving roles (owner
+    # decision); every receiving control (attachment gate, store boundary,
+    # PO receivable) is enforced inside via the shared create/accept impls.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/grn/express",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}",
