@@ -43,10 +43,17 @@ import {
   Info,
   Sparkles as SparklesIcon,
   ExternalLink,
+  Lock,
+  CopyPlus,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { productApi } from '../../services/api/products';
+import {
+  productApi,
+  DuplicateProductError,
+  type DuplicateProductInfo,
+} from '../../services/api/products';
+import { DuplicateProductModal } from './DuplicateProductModal';
 import {
   catalogAutopilotApi,
   AI_ENRICH_SOURCE,
@@ -72,6 +79,9 @@ import {
   takeAutopilotPrefill,
   AUTOPILOT_PREFILL_PARAM,
   AUTOPILOT_PREFILL_VALUE,
+  productToVariantFormValues,
+  variantFieldRule,
+  variantFlaggedFormFields,
   type CategoryField,
   type ProductFormValues,
   type ProductDoc,
@@ -169,6 +179,27 @@ export function QuickAddPage() {
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [cloneSku, setCloneSku] = useState('');
   const [cloning, setCloning] = useState(false);
+
+  // ---- Duplicate rescue + variant mode (Phase 1) ----------------------------
+  // dupInfo != null -> the rescue popup is open (the form behind stays fully
+  // intact). variantCtx != null -> the form is in VARIANT MODE: adding a new
+  // colour/size of an existing model, with brand/model locked, the copied
+  // sizes + prices amber-flagged until touched, and a save STREAK that keeps
+  // the model-level fields for the next sibling.
+  const [dupInfo, setDupInfo] = useState<DuplicateProductInfo | null>(null);
+  const [dupBusy, setDupBusy] = useState(false);
+  const [variantCtx, setVariantCtx] = useState<{
+    sourceProductId: string;
+    sourceSku: string;
+    sourceLabel: string;
+    locked: Set<string>;
+    sourceImages: string[];
+    firstClearedField: string | null;
+    dictionaryNote: string;
+  } | null>(null);
+  // Copied-but-unconfirmed fields (attribute names + form-level keys like
+  // 'mrp'/'offer_price'). Amber ring until the operator touches the field.
+  const [flaggedFields, setFlaggedFields] = useState<Set<string>>(new Set());
 
   const firstFieldRef = useRef<HTMLSelectElement | HTMLInputElement | null>(null);
   // Bump on registry load so the field list (required markers sourced from the
@@ -342,6 +373,127 @@ export function QuickAddPage() {
       ...(Array.isArray(v.images) && v.images.length > 0 ? { inventory: true } : {}),
     }));
   }, []);
+
+  // ---- Variant mode (Phase 1) ----------------------------------------------
+  // Focus a specific attribute input by field name (each input carries
+  // id="qa-field-<name>"). Used to land the cursor on the first CLEARED
+  // variant field when entering variant mode / starting the next streak item.
+  const focusAttrField = useCallback((name: string | null) => {
+    if (!name) return;
+    window.setTimeout(() => {
+      document.getElementById(`qa-field-${name}`)?.focus();
+    }, 120);
+  }, []);
+
+  // Drop a field's amber "confirm" flag once the operator touches it.
+  const clearFlag = useCallback((name: string) => {
+    setFlaggedFields((prev) => {
+      if (!prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.delete(name);
+      return next;
+    });
+  }, []);
+
+  // Flip the form into VARIANT MODE seeded from an existing product. Shared by
+  // the duplicate-rescue popup's default action and the ?variant=<id> deep
+  // link (the "+ Variant" button in the product list emits that URL).
+  const enterVariantMode = useCallback(
+    (product: ProductDoc) => {
+      const seed = productToVariantFormValues(product);
+      if (!seed.category) {
+        toast.error("Couldn't resolve this product's category to start a variant.");
+        return;
+      }
+      applyFormValues(seed.values);
+      setVariantCtx({
+        sourceProductId: seed.sourceProductId,
+        sourceSku: seed.sourceSku,
+        sourceLabel: seed.sourceLabel || seed.sourceSku || 'this model',
+        locked: new Set(seed.locked),
+        sourceImages: seed.sourceImages,
+        firstClearedField: seed.cleared[0] || null,
+        dictionaryNote:
+          seed.dictionaryDropped.length > 0
+            ? `${seed.dictionaryDropped.length} copied value${
+                seed.dictionaryDropped.length === 1 ? " isn't" : "s aren't"
+              } in your dictionary — pick from the dropdown (${seed.dictionaryDropped
+                .map((k) => k.replace(/_/g, ' '))
+                .join(', ')}).`
+            : '',
+      });
+      setFlaggedFields(new Set(seed.flagged));
+      focusAttrField(seed.cleared[0] || null);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [applyFormValues, focusAttrField, toast]
+  );
+
+  // Leave variant mode -> a fresh blank form ("New model" button / Esc).
+  const exitVariantMode = useCallback(() => {
+    setVariantCtx(null);
+    setFlaggedFields(new Set());
+    resetForm(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [resetForm]);
+
+  // VARIANT STREAK: after a successful save in variant mode, stay in variant
+  // mode — keep the model-level (copy/flag) fields, clear the variant-defining
+  // ones, re-arm the amber confirmations, focus back on the first variant
+  // field. Esc / "New model" exits to a blank form.
+  const startNextVariant = useCallback(() => {
+    const keptAttrs: Record<string, string> = {};
+    const attrFlags: string[] = [];
+    Object.entries(attributes).forEach(([k, v]) => {
+      if (!String(v ?? '').trim()) return;
+      const rule = variantFieldRule(selectedCategory, k);
+      if (rule === 'copy' || rule === 'flag') {
+        keptAttrs[k] = v;
+        if (rule === 'flag') attrFlags.push(k);
+      }
+    });
+    setAttributes(keptAttrs);
+    setDescription('');
+    setImages([]);
+    setErrors({});
+    setFlaggedFields(
+      new Set([...attrFlags, ...variantFlaggedFormFields(currentValues())])
+    );
+    focusAttrField(variantCtx?.firstClearedField ?? null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [attributes, selectedCategory, currentValues, focusAttrField, variantCtx]);
+
+  // Rescue popup: default action — fetch the existing product and flip into
+  // variant mode seeded from it. The enriched 409 payload carries product_id.
+  const handleDupAddVariant = useCallback(async () => {
+    const pid = dupInfo?.product_id;
+    if (!pid) {
+      setDupInfo(null);
+      toast.error("Couldn't identify the existing product — search it in Inventory.");
+      return;
+    }
+    setDupBusy(true);
+    try {
+      const product = (await productApi.getProduct(pid)) as ProductDoc;
+      setDupInfo(null);
+      enterVariantMode(product);
+    } catch {
+      toast.error('Could not load the existing product for a variant.');
+    } finally {
+      setDupBusy(false);
+    }
+  }, [dupInfo, enterVariantMode, toast]);
+
+  // Rescue popup: open the existing product in the catalog list. There is no
+  // per-product detail route yet; the Inventory catalog tab is the canonical
+  // product list (the search param pre-scopes it once the list supports it).
+  const handleDupOpenExisting = useCallback(() => {
+    const sku = dupInfo?.sku;
+    setDupInfo(null);
+    navigate(
+      `/inventory?tab=catalog${sku ? `&search=${encodeURIComponent(sku)}` : ''}`
+    );
+  }, [dupInfo, navigate]);
 
   // ---- Product image upload (Part 1) ---------------------------------------
   // Upload each selected/dropped file via productApi.uploadProductImage and
@@ -639,34 +791,55 @@ export function QuickAddPage() {
               }
             : undefined
         );
-        if (saveAndNew) {
+        if (variantCtx) {
+          // VARIANT STREAK: stay in variant mode for the next colour/size of
+          // the same model (Esc / "New model" exits to a blank form).
+          startNextVariant();
+        } else if (saveAndNew) {
           resetForm(true);
           // Keep focus flowing — jump back to the top of the form.
           window.scrollTo({ top: 0, behavior: 'smooth' });
         } else {
           navigate('/inventory');
         }
-      } catch {
-        toast.error('Failed to create product. Please try again.');
+      } catch (err) {
+        if (err instanceof DuplicateProductError) {
+          // Duplicate hard-block (409): open the rescue popup with the
+          // existing product. The form state stays FULLY intact behind it.
+          setDupInfo(err.existing || {});
+          return;
+        }
+        toast.error(
+          err instanceof Error && err.message
+            ? err.message
+            : 'Failed to create product. Please try again.'
+        );
       } finally {
         setIsSubmitting(false);
       }
     },
-    [currentValues, toast, resetForm, navigate]
+    [currentValues, toast, resetForm, navigate, variantCtx, startNextVariant]
   );
 
   // Keyboard-first: Ctrl+Enter = Save, Ctrl+Shift+Enter = Save + New.
+  // While the duplicate-rescue popup is open it OWNS the keyboard (Enter =
+  // add variant, Esc = go back) — the save shortcut is suppressed. In variant
+  // mode, Esc exits to a fresh blank form ("New model").
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (dupInfo) return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         if (isSubmitting) return;
         void handleSubmit(e.shiftKey);
+      } else if (e.key === 'Escape' && variantCtx) {
+        e.preventDefault();
+        exitVariantMode();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleSubmit, isSubmitting]);
+  }, [handleSubmit, isSubmitting, dupInfo, variantCtx, exitVariantMode]);
 
   // ---- Templates: list / load / save / delete ------------------------------
   const loadTemplates = useCallback(async () => {
@@ -691,6 +864,9 @@ export function QuickAddPage() {
 
   const handleLoadTemplate = useCallback(
     (tpl: ProductTemplate) => {
+      // A template load replaces the whole form — leave variant mode if active.
+      setVariantCtx(null);
+      setFlaggedFields(new Set());
       applyFormValues(tpl.payload);
       setTemplatesOpen(false);
       toast.success(`Loaded template "${tpl.name}". Edit and save as a new product.`);
@@ -739,6 +915,9 @@ export function QuickAddPage() {
   // ---- Clone: prefill from an existing product -----------------------------
   const cloneFromProduct = useCallback(
     (product: ProductDoc) => {
+      // A clone replaces the whole form — leave variant mode if active.
+      setVariantCtx(null);
+      setFlaggedFields(new Set());
       applyFormValues(productToFormValues(product));
       toast.success('Cloned into the form. Tweak the details and save as a NEW SKU.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -806,6 +985,37 @@ export function QuickAddPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloneId]);
 
+  // Deep-link variant: /catalog/add?variant=<productId> enters VARIANT MODE
+  // seeded from that product — the same code path the duplicate-rescue popup's
+  // "Add a new colour/size" uses. The "+ Variant" button in the product list
+  // emits exactly this URL. Runs once per id; clears the param so a manual
+  // reset isn't re-clobbered.
+  const variantId = searchParams.get('variant');
+  useEffect(() => {
+    if (!variantId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const product = (await productApi.getProduct(variantId)) as ProductDoc;
+        if (!cancelled && product) {
+          enterVariantMode(product);
+        }
+      } catch {
+        if (!cancelled) toast.error('Could not load the product to add a variant of.');
+      } finally {
+        if (!cancelled) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('variant');
+          setSearchParams(next, { replace: true });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variantId]);
+
   // Catalog Autopilot payoff: /catalog/add?prefill=autopilot reads the candidate
   // stashed in sessionStorage (set by "Create product from this" on the Autopilot
   // page) and prefills the form. One-shot: the candidate is consumed and the
@@ -868,6 +1078,8 @@ export function QuickAddPage() {
       next.delete(name);
       return next;
     });
+    // Variant mode: touching a copied field confirms it — drop the amber flag.
+    clearFlag(name);
   };
 
   const toggleSection = (id: SectionId) =>
@@ -890,10 +1102,20 @@ export function QuickAddPage() {
     // Autopilot filled this and the operator hasn't touched it yet: a subtle
     // highlight + "auto" chip flags it for verification (chip drops on edit).
     const isAuto = autoFilled.has(field.name);
-    const fieldClass = clsx('input-field w-full', isAuto && 'ring-1 ring-violet-300 bg-violet-50/40');
+    // Variant mode: brand/model are LOCKED (the variant shares them); copied
+    // sizes stay amber-flagged until the operator confirms (touches) them.
+    const isLocked = Boolean(variantCtx?.locked.has(field.name));
+    const isFlagged = !isLocked && flaggedFields.has(field.name);
+    const fieldClass = clsx(
+      'input-field w-full',
+      isAuto && 'ring-1 ring-violet-300 bg-violet-50/40',
+      isFlagged && 'ring-1 ring-amber-400 bg-amber-50/60',
+      isLocked && 'bg-gray-50 text-gray-500 cursor-not-allowed'
+    );
+    const fieldId = `qa-field-${field.name}`;
     return (
     <div key={field.name}>
-      <label className="block text-xs font-medium text-gray-700 mb-1">
+      <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor={fieldId}>
         {field.label}
         {field.required && <span className="text-red-500 ml-1">*</span>}
         {isAuto && (
@@ -904,37 +1126,66 @@ export function QuickAddPage() {
             <SparklesIcon className="w-2.5 h-2.5" /> auto
           </span>
         )}
+        {isLocked && (
+          <span
+            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
+            title={`Shared with ${variantCtx?.sourceLabel || 'the model'} — exit variant mode to change`}
+          >
+            <Lock className="w-2.5 h-2.5" /> model
+          </span>
+        )}
+        {isFlagged && (
+          <span
+            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
+            title="Copied from the sibling — confirm or edit"
+          >
+            confirm
+          </span>
+        )}
       </label>
       {field.type === 'select' ? (
         <select
           ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
+          id={fieldId}
           title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
+          disabled={isLocked}
           className={fieldClass}
         >
           <option value="">Select {field.label}</option>
           {field.options?.map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
+          {/* A locked value must stay visible even if it's not in the current
+              options list (e.g. legacy brand) — inject it as its own option. */}
+          {isLocked &&
+            attributes[field.name] &&
+            !field.options?.includes(attributes[field.name]) && (
+              <option value={attributes[field.name]}>{attributes[field.name]}</option>
+            )}
         </select>
       ) : field.type === 'date' ? (
         <input
           ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
+          id={fieldId}
           type="date"
           title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
+          disabled={isLocked}
           className={fieldClass}
         />
       ) : (
         <input
           ref={autoFocus ? (el) => { firstFieldRef.current = el; } : undefined}
+          id={fieldId}
           type={field.type}
           title={field.label}
           value={attributes[field.name] || ''}
           onChange={(e) => setAttr(field.name, e.target.value)}
           placeholder={field.placeholder || field.label}
+          disabled={isLocked}
           className={fieldClass}
         />
       )}
@@ -1002,13 +1253,26 @@ export function QuickAddPage() {
   // Plain render helper (NOT a nested component — avoids the remount bug).
   const renderWeightInput = () => (
     <div>
-      <label className="block text-xs font-medium text-gray-700 mb-1">Weight (g)</label>
+      <label className="block text-xs font-medium text-gray-700 mb-1">
+        Weight (g)
+        {flaggedFields.has('weight') && (
+          <span
+            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
+            title="Copied from the sibling — confirm or edit"
+          >
+            confirm
+          </span>
+        )}
+      </label>
       <input
         type="number"
         title="Weight (g)"
         value={weight}
-        onChange={(e) => setWeight(e.target.value)}
-        className="input-field w-full"
+        onChange={(e) => { setWeight(e.target.value); clearFlag('weight'); }}
+        className={clsx(
+          'input-field w-full',
+          flaggedFields.has('weight') && 'ring-1 ring-amber-400 bg-amber-50/60'
+        )}
         placeholder="e.g. 50"
       />
     </div>
@@ -1380,6 +1644,40 @@ export function QuickAddPage() {
             </div>
           )}
 
+          {/* VARIANT MODE banner: which model this sibling belongs to, the
+              copied-field legend, the dictionary-drop note, and the exit. */}
+          {variantCtx && (
+            <div className="rounded-xl border border-bv-50 bg-bv-soft px-4 py-3 text-sm">
+              <div className="flex items-start gap-2.5">
+                <CopyPlus className="w-4 h-4 text-bv mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1 space-y-1">
+                  <p className="text-gray-800">
+                    <span className="font-semibold">Variant mode</span> — adding a new
+                    colour/size of <span className="font-semibold">{variantCtx.sourceLabel}</span>
+                    {variantCtx.sourceSku ? (
+                      <span className="text-gray-500"> (SKU {variantCtx.sourceSku})</span>
+                    ) : null}
+                    . Brand &amp; model are locked; <span className="text-amber-700 font-medium">amber</span> fields
+                    were copied — confirm or edit them. Each save stays in variant mode
+                    for the next colour/size.
+                  </p>
+                  {variantCtx.dictionaryNote && (
+                    <p className="text-xs text-amber-700">{variantCtx.dictionaryNote}</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={exitVariantMode}
+                  className="shrink-0 btn-secondary !py-1 !px-2.5 text-xs flex items-center gap-1.5"
+                  title="Exit variant mode and start a fresh blank form (Esc)"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  New model <kbd className="qa-kbd">Esc</kbd>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* IDENTITY */}
           <Section
             id="identity"
@@ -1389,22 +1687,34 @@ export function QuickAddPage() {
             open={openSections.identity}
             onToggle={toggleSection}
           >
-            {/* Category picker */}
+            {/* Category picker (locked in variant mode — a sibling variant is
+                by definition the same category as its model) */}
             <div className="mb-5">
               <label className="block text-xs font-medium text-gray-700 mb-2">
                 Category <span className="text-red-500">*</span>
+                {variantCtx && (
+                  <span
+                    className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
+                    title="A variant keeps its model's category — exit variant mode to change"
+                  >
+                    <Lock className="w-2.5 h-2.5" /> model
+                  </span>
+                )}
               </label>
               <div className="grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-2">
                 {CATEGORIES.map((c) => (
                   <button
                     key={c.code}
                     type="button"
+                    disabled={Boolean(variantCtx) && selectedCategory !== c.code}
                     onClick={() => setSelectedCategory(c.code)}
                     className={clsx(
                       'flex flex-col items-center gap-1 px-2 py-2 rounded-lg border text-center transition-all',
                       selectedCategory === c.code
                         ? 'border-bv bg-bv-50 ring-1 ring-bv'
-                        : 'border-gray-200 hover:border-gray-300'
+                        : 'border-gray-200 hover:border-gray-300',
+                      Boolean(variantCtx) && selectedCategory !== c.code &&
+                        'opacity-40 cursor-not-allowed hover:border-gray-200'
                     )}
                   >
                     <span className="text-xl leading-none">{c.icon}</span>
@@ -1520,8 +1830,13 @@ export function QuickAddPage() {
                               setHsnCode(e.target.value);
                               const option = getHSNOptions(useAdvancedHSN).find((o) => o.value === e.target.value);
                               if (option) setGstRate(option.gstRate.toString());
+                              clearFlag('hsn_code');
+                              clearFlag('gst_rate');
                             }}
-                            className="input-field w-full"
+                            className={clsx(
+                              'input-field w-full',
+                              flaggedFields.has('hsn_code') && 'ring-1 ring-amber-400 bg-amber-50/60'
+                            )}
                           >
                             <option value="">Select HSN Code</option>
                             {getHSNOptions(useAdvancedHSN).map((o) => (
@@ -1573,14 +1888,25 @@ export function QuickAddPage() {
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   MRP <span className="text-red-500">*</span>
+                  {flaggedFields.has('mrp') && (
+                    <span
+                      className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
+                      title="Copied from the sibling variant — confirm or edit"
+                    >
+                      confirm
+                    </span>
+                  )}
                 </label>
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                   <input
                     type="number"
                     value={mrp}
-                    onChange={(e) => setMrp(e.target.value)}
-                    className="input-field w-full pl-8"
+                    onChange={(e) => { setMrp(e.target.value); clearFlag('mrp'); }}
+                    className={clsx(
+                      'input-field w-full pl-8',
+                      flaggedFields.has('mrp') && 'ring-1 ring-amber-400 bg-amber-50/60'
+                    )}
                     placeholder="0.00"
                   />
                 </div>
@@ -1588,14 +1914,27 @@ export function QuickAddPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Offer Price</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Offer Price
+                  {flaggedFields.has('offer_price') && (
+                    <span
+                      className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
+                      title="Copied from the sibling variant — confirm or edit"
+                    >
+                      confirm
+                    </span>
+                  )}
+                </label>
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                   <input
                     type="number"
                     value={offerPrice}
-                    onChange={(e) => setOfferPrice(e.target.value)}
-                    className="input-field w-full pl-8"
+                    onChange={(e) => { setOfferPrice(e.target.value); clearFlag('offer_price'); }}
+                    className={clsx(
+                      'input-field w-full pl-8',
+                      flaggedFields.has('offer_price') && 'ring-1 ring-amber-400 bg-amber-50/60'
+                    )}
                     placeholder="Same as MRP if blank"
                   />
                 </div>
@@ -1607,14 +1946,27 @@ export function QuickAddPage() {
 
               {canSeeCost && (
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Cost Price</label>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Cost Price
+                    {flaggedFields.has('cost_price') && (
+                      <span
+                        className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-700 text-[10px] font-medium align-middle"
+                        title="Copied from the sibling variant — confirm or edit"
+                      >
+                        confirm
+                      </span>
+                    )}
+                  </label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
                     <input
                       type="number"
                       value={costPrice}
-                      onChange={(e) => setCostPrice(e.target.value)}
-                      className="input-field w-full pl-8"
+                      onChange={(e) => { setCostPrice(e.target.value); clearFlag('cost_price'); }}
+                      className={clsx(
+                        'input-field w-full pl-8',
+                        flaggedFields.has('cost_price') && 'ring-1 ring-amber-400 bg-amber-50/60'
+                      )}
                       placeholder="Your purchase cost"
                     />
                   </div>
@@ -1702,6 +2054,26 @@ export function QuickAddPage() {
                   Upload Images
                 </span>
               </div>
+
+              {/* Variant mode: photos are never auto-copied (they usually show
+                  the SIBLING's colour) — offer them as a one-click copy. */}
+              {variantCtx && variantCtx.sourceImages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImages((prev) =>
+                      Array.from(new Set([...prev, ...variantCtx.sourceImages]))
+                    )
+                  }
+                  className="mt-3 btn-secondary flex items-center gap-2 text-sm"
+                  title="Photos usually show the sibling's colour — copy only if they apply"
+                >
+                  <ImageIcon className="w-4 h-4" />
+                  Copy {variantCtx.sourceImages.length} photo
+                  {variantCtx.sourceImages.length === 1 ? '' : 's'} from{' '}
+                  {variantCtx.sourceLabel}
+                </button>
+              )}
 
               {images.length > 0 && (
                 <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 desktop:grid-cols-8 gap-3">
@@ -1890,7 +2262,7 @@ export function QuickAddPage() {
             className="btn-primary flex items-center gap-2"
           >
             {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            Save product
+            {variantCtx ? 'Save variant' : 'Save product'}
           </button>
           <button
             type="button"
@@ -1908,6 +2280,18 @@ export function QuickAddPage() {
           </span>
         </div>
       </div>
+
+      {/* Duplicate-rescue popup (409 DUPLICATE_PRODUCT). The form behind it is
+          left fully intact; "Go back" / Esc simply closes it. */}
+      {dupInfo && (
+        <DuplicateProductModal
+          info={dupInfo}
+          busy={dupBusy}
+          onAddVariant={() => { void handleDupAddVariant(); }}
+          onOpenExisting={handleDupOpenExisting}
+          onClose={() => setDupInfo(null)}
+        />
+      )}
     </div>
   );
 }
