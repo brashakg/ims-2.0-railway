@@ -167,10 +167,15 @@ def create_system_task(
     dedupe_ref: str,
     assigned_to: Optional[str] = None,
     due_at: Optional[datetime] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a SYSTEM task, deduped by source_ref: if an ACTIVE task already
     exists for the same source_ref, do nothing (avoids a task per re-run).
-    Returns the created task, or None if deduped / no repo."""
+    Returns the created task, or None if deduped / no repo.
+
+    ``extra``: optional ADDITIVE fields merged onto the task doc (e.g. a deep
+    ``link`` path or a structured ``payload`` the frontend keys on). Extra keys
+    can never override the core task fields (setdefault semantics)."""
     if repo is None:
         return None
     try:
@@ -218,6 +223,9 @@ def create_system_task(
             }
         ],
     }
+    if extra:
+        for k, v in extra.items():
+            task.setdefault(k, v)
     try:
         created = repo.create(task)
         return created or task
