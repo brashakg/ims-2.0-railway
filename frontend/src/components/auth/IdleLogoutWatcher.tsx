@@ -89,7 +89,8 @@ export function IdleLogoutWatcher() {
         <p className="mt-2 text-sm text-gray-600" aria-live="polite">
           You&rsquo;ll be signed out in{' '}
           <span className="font-semibold text-gray-900">{formatMMSS(remainingSec)}</span> due to
-          inactivity.
+          inactivity. Click <span className="font-semibold">Stay signed in</span> to continue —
+          moving the mouse won&rsquo;t cancel this.
         </p>
         <p className="mt-2 text-xs text-gray-500">
           Any in-progress sale will be saved and can be resumed after you sign back in.

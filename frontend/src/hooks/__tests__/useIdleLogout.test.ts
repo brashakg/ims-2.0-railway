@@ -102,11 +102,11 @@ describe('computeIdleState', () => {
 });
 
 // ---------------------------------------------------------------------------
-// useIdleLogout hook — side-effecting guards around the logout decision.
-// These exercise the backgrounded-tab safety: a throttled hidden tab must NOT
-// be able to log out without the warning modal first being visible for the
-// full warnSeconds. Uses fake timers; we drive idle by pinning the shared
-// `ims_last_activity` key and advancing the system clock.
+// useIdleLogout hook — enforcement semantics (owner decision 2026-07-04:
+// "popup shows but logout does not happen" -> expired means LOGOUT, hidden tabs
+// included, and passive activity cannot dismiss an active warning).
+// Uses fake timers; we drive idle by pinning the shared `ims_last_activity`
+// key and advancing the system clock.
 // ---------------------------------------------------------------------------
 
 const BASE = 1_700_000_000_000; // fixed epoch anchor for determinism
@@ -161,7 +161,30 @@ function tickAt(t: number) {
   });
 }
 
-describe('useIdleLogout (hook guards)', () => {
+/** Simulate passive user activity (mousemove) in THIS tab. */
+function moveMouse() {
+  act(() => {
+    window.dispatchEvent(new Event('mousemove'));
+  });
+}
+
+/** Simulate REAL activity in ANOTHER tab: the shared key is updated there and a
+ *  cross-tab `storage` event reaches this tab. */
+function otherTabActivity(ts: number) {
+  setLastActivity(ts);
+  act(() => {
+    let evt: Event;
+    try {
+      evt = new StorageEvent('storage', { key: LAST_ACTIVITY_KEY, newValue: String(ts) });
+    } catch {
+      evt = new Event('storage');
+      Object.defineProperty(evt, 'key', { value: LAST_ACTIVITY_KEY });
+    }
+    window.dispatchEvent(evt);
+  });
+}
+
+describe('useIdleLogout (enforcement)', () => {
   beforeEach(() => {
     installMemoryLocalStorage();
     vi.useFakeTimers();
@@ -175,9 +198,9 @@ describe('useIdleLogout (hook guards)', () => {
     localStorage.clear();
   });
 
-  it('(a) a sparse/throttled tick that jumps over the warn window does NOT log out and enters a fresh warning', () => {
+  it('(a) expiry logs out even when a sparse/throttled tick skipped the warn window', () => {
     const onLogout = vi.fn();
-    const { result } = renderHook(() =>
+    renderHook(() =>
       useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
     );
 
@@ -185,92 +208,71 @@ describe('useIdleLogout (hook guards)', () => {
     // overwrite AFTER mount to simulate the user having been idle since BASE.
     setLastActivity(BASE);
 
-    // Throttled tab: the previous observed tick was at idle≈835s (still BEFORE
-    // the warn window at 840s), and the NEXT throttled tick lands at idle≈901s
-    // (past the 900s timeout) -- jumping the whole 60s warn window in one step.
-    tickAt(BASE + 835_000); // warn=false here (835 < 840)
+    // Throttled tab: previous tick before the warn window, next tick past the
+    // timeout — the warning was never rendered. The terminal is unattended:
+    // logout must STILL fire (the watcher auto-parks the POS cart first).
+    tickAt(BASE + 835_000); // 835s < 840s warn start
     expect(onLogout).not.toHaveBeenCalled();
-    expect(result.current.warning).toBe(false);
 
-    tickAt(BASE + 901_000); // would be "expired" -- but the warning was skipped
-    // Must NOT log out (the modal was never shown), and must instead enter the
-    // warning state with a FRESH full countdown (~WARN seconds, not 0).
-    expect(onLogout).not.toHaveBeenCalled();
-    expect(result.current.warning).toBe(true);
-    expect(result.current.remainingSec).toBe(WARN);
+    tickAt(BASE + 901_000); // past the 900s timeout
+    expect(onLogout).toHaveBeenCalledTimes(1);
   });
 
-  it('(b) logout only fires after the warning has been visible for >= warnSeconds (precise boundary)', () => {
+  it('(b) full visible flow: warn at minutes-warnSeconds, countdown, logout at the timeout', () => {
+    const onLogout = vi.fn();
+    const { result } = renderHook(() =>
+      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
+    );
+    setLastActivity(BASE);
+
+    // tickAt(t) advances 1s past t before the tick evaluates, so target t-1s to
+    // observe the exact boundary values.
+    tickAt(BASE + WARN_AT_MS - 1_000); // evaluates at 840s -> warning opens
+    expect(result.current.warning).toBe(true);
+    expect(result.current.remainingSec).toBe(WARN);
+    expect(onLogout).not.toHaveBeenCalled();
+
+    tickAt(BASE + WARN_AT_MS + 29_000); // evaluates at +30s of countdown
+    expect(result.current.warning).toBe(true);
+    expect(result.current.remainingSec).toBe(30);
+    expect(onLogout).not.toHaveBeenCalled();
+
+    tickAt(BASE + TIMEOUT_MS + 1_000); // past the timeout -> logout, once
+    expect(onLogout).toHaveBeenCalledTimes(1);
+    expect(result.current.warning).toBe(false);
+
+    // No repeat fire on later ticks.
+    tickAt(BASE + TIMEOUT_MS + 30_000);
+    expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it('(c) a HIDDEN tab past the timeout logs out (unattended terminal must sign out)', () => {
     const onLogout = vi.fn();
     renderHook(() =>
       useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
     );
     setLastActivity(BASE);
+    setHidden(true);
 
-    // Warning becomes visible exactly at the start of the warn window.
-    tickAt(BASE + WARN_AT_MS); // idle = 840s -> warn=true, warnShownAt = now
-    expect(onLogout).not.toHaveBeenCalled();
-
-    // 59s of visible warning: not yet enough.
-    tickAt(BASE + WARN_AT_MS + 59_000);
-    expect(onLogout).not.toHaveBeenCalled();
-
-    // 60s of visible warning AND idle past timeout: now it may fire.
-    tickAt(BASE + WARN_AT_MS + 61_000);
+    tickAt(BASE + 1_000_000); // far past the 900s timeout, tab hidden
     expect(onLogout).toHaveBeenCalledTimes(1);
   });
 
-  it('(c) while document.hidden, expiry does NOT trigger logout', () => {
+  it('(c2) returning to a tab that expired while hidden logs out immediately on visibilitychange', () => {
     const onLogout = vi.fn();
-    const { result } = renderHook(() =>
+    renderHook(() =>
       useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
     );
     setLastActivity(BASE);
     setHidden(true);
 
-    // Far past the timeout, but the tab is hidden the whole time.
-    tickAt(BASE + 1_000_000);
-    tickAt(BASE + 1_200_000);
-    tickAt(BASE + 1_500_000);
-    expect(onLogout).not.toHaveBeenCalled();
-    // It should be holding a (deferred) warning, ready for when the tab returns.
-    expect(result.current.warning).toBe(true);
-
-    // Becoming visible re-evaluates: still no immediate logout -- a FRESH
-    // visible countdown begins instead.
+    // Simulate heavy throttling: NO interval tick fires while hidden. The user
+    // returns long past expiry -> the visibilitychange re-tick logs out at once.
+    vi.setSystemTime(BASE + 1_500_000);
     act(() => {
       setHidden(false);
       document.dispatchEvent(new Event('visibilitychange'));
     });
-    expect(onLogout).not.toHaveBeenCalled();
-    expect(result.current.warning).toBe(true);
-    expect(result.current.remainingSec).toBe(WARN);
-  });
-
-  it('(c2) returning to visible while expired shows a fresh window, then logs out after it elapses', () => {
-    const onLogout = vi.fn();
-    const { result } = renderHook(() =>
-      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
-    );
-    setLastActivity(BASE);
-    setHidden(true);
-
-    tickAt(BASE + 1_500_000); // long past timeout, hidden -> no logout
-    expect(onLogout).not.toHaveBeenCalled();
-
-    // Become visible -> fresh window starts anchored at now (BASE+1_500_000).
-    act(() => {
-      setHidden(false);
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    expect(result.current.warning).toBe(true);
-
-    // Not enough visible time yet.
-    tickAt(BASE + 1_500_000 + 59_000);
-    expect(onLogout).not.toHaveBeenCalled();
-
-    // Full visible warnSeconds elapsed -> logout fires exactly once.
-    tickAt(BASE + 1_500_000 + 61_000);
     expect(onLogout).toHaveBeenCalledTimes(1);
   });
 
@@ -295,7 +297,70 @@ describe('useIdleLogout (hook guards)', () => {
     expect(addEventSpy).not.toHaveBeenCalled();
   });
 
-  it('activity (stayActive) cancels the warning and resets the shown clock', () => {
+  it('(e) passive activity while the warning is up does NOT cancel it — logout still fires', () => {
+    const onLogout = vi.fn();
+    const { result } = renderHook(() =>
+      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
+    );
+    setLastActivity(BASE);
+
+    tickAt(BASE + 850_000); // inside the warning window
+    expect(result.current.warning).toBe(true);
+
+    // Someone wiggles the mouse at the unattended terminal.
+    vi.setSystemTime(BASE + 855_000);
+    moveMouse();
+
+    // Warning still up, idle clock NOT reset.
+    tickAt(BASE + 856_000);
+    expect(result.current.warning).toBe(true);
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBe(String(BASE));
+
+    // The countdown completes -> logout fires.
+    tickAt(BASE + 901_000);
+    expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it('(e2) passive activity BEFORE the warning resets the idle clock as usual', () => {
+    const onLogout = vi.fn();
+    const { result } = renderHook(() =>
+      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
+    );
+    setLastActivity(BASE);
+
+    // Active use at 800s idle (before the 840s warn window).
+    vi.setSystemTime(BASE + 800_000);
+    moveMouse();
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBe(String(BASE + 800_000));
+
+    // A time that WOULD have warned off the old clock is now well within the
+    // active window off the fresh clock.
+    tickAt(BASE + 850_000); // idle = 50s
+    expect(result.current.warning).toBe(false);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it('(f) REAL activity in another tab (storage event) cancels the warning', () => {
+    const onLogout = vi.fn();
+    const { result } = renderHook(() =>
+      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
+    );
+    setLastActivity(BASE);
+
+    tickAt(BASE + 850_000); // warning up
+    expect(result.current.warning).toBe(true);
+
+    // The user is genuinely working in another tab of this browser profile.
+    otherTabActivity(BASE + 851_000);
+    expect(result.current.warning).toBe(false);
+
+    // Next tick re-derives a small idle -> no warning, no logout.
+    tickAt(BASE + 852_000);
+    expect(result.current.warning).toBe(false);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it('stayActive (the modal button) cancels the warning and resets the idle clock', () => {
     const onLogout = vi.fn();
     const { result } = renderHook(() =>
       useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
