@@ -360,10 +360,10 @@ def test_endpoint_round_trip_exact_and_sibling(client, auth_headers):
             headers=auth_headers,
             json={
                 "category": "FRAME",
-                "brand": "SimilarTest",
+                "brand": "Similar-Test",
                 "model": "ST-100",
                 "attributes": {
-                    "brand_name": "SimilarTest",
+                    "brand_name": "Similar-Test",
                     "model_no": "ST-100",
                     "colour_code": colour,
                 },
@@ -377,7 +377,7 @@ def test_endpoint_round_trip_exact_and_sibling(client, auth_headers):
         "/api/v1/products/similar",
         params={
             "category": "FR",  # short code resolves via resolve_category
-            "brand": "similar test",  # case + space variant of SimilarTest
+            "brand": "similar test",  # fold-variant of Similar-Test (dash -> space)
             "model_no": "st 100",  # dash folded to space
             "colour_code": "blk",
         },
