@@ -328,7 +328,13 @@ def _attach_subbrands(brands: List[Dict]) -> List[Dict]:
 async def list_brands(category: Optional[str] = None, tier: Optional[str] = None):
     filter_: Dict = {}
     if category:
-        filter_["categories"] = category
+        # Category-filter fix: brand docs may store either the raw or the
+        # canonical category spelling in their `categories` array -- match both.
+        from ..services.product_master import resolve_category
+
+        canon = resolve_category(category)
+        values = [category] if not canon or canon == category else [category, canon]
+        filter_["categories"] = {"$in": values}
     if tier:
         filter_["tier"] = tier
     envelope = _list_envelope(
@@ -1096,7 +1102,11 @@ async def list_products(
     if is_active is not None:
         filter_["is_active"] = is_active
     if category:
-        filter_["category"] = category
+        # Category-filter fix: normalise short codes / plurals to the canonical
+        # category the products collection stores (fail-open pass-through).
+        from ..services.product_master import resolve_category
+
+        filter_["category"] = resolve_category(category) or category
     if brand:
         filter_["brand"] = brand
     if search:

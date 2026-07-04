@@ -353,6 +353,13 @@ async def get_stock(
     product_repo = get_product_repository()
     active_store = validate_store_access(store_id, current_user)
 
+    # Category-filter fix: products store CANONICAL categories (SUNGLASS/FRAME),
+    # callers send short codes (SG/FR) or plurals -- normalise fail-open.
+    if category:
+        from ..services.product_master import resolve_category
+
+        category = resolve_category(category) or category
+
     if stock_repo is None or product_repo is None:
         return {"items": [], "total": 0}
 
@@ -1129,6 +1136,12 @@ async def get_stock_aging_report(
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
     active_store = validate_store_access(store_id, current_user)
+
+    # Category-filter fix: normalise short codes / plurals to canonical.
+    if category:
+        from ..services.product_master import resolve_category
+
+        category = resolve_category(category) or category
 
     if stock_repo is None or product_repo is None:
         return {"products": [], "summary": {}}
@@ -2232,7 +2245,12 @@ async def get_non_moving_stock(
         orders_coll = db.get_collection("orders")
         stock_coll = db.get_collection("stock_units")
 
-        # Get all products (optionally filtered by category)
+        # Get all products (optionally filtered by category). Normalise short
+        # codes / plurals to the canonical value the docs store (fail-open).
+        if category:
+            from ..services.product_master import resolve_category
+
+            category = resolve_category(category) or category
         query = {} if not category else {"category": category}
         products = list(products_coll.find(query, {"_id": 1, "name": 1, "sku": 1}))
 

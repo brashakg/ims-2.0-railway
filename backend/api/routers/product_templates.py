@@ -121,7 +121,12 @@ async def list_templates(
 
     query: dict = {}
     if category:
-        query["category"] = str(category).strip()
+        # Category-filter fix: normalise short codes / plurals to the canonical
+        # category templates stamp; fail-open pass-through when unresolvable.
+        from ..services.product_master import resolve_category
+
+        raw = str(category).strip()
+        query["category"] = resolve_category(raw) or raw
 
     try:
         items = list(col.find(query, {"_id": 0}).sort("created_at", -1).limit(limit))
