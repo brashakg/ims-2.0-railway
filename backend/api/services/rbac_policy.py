@@ -6552,6 +6552,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders",
         "allowed": "AUTHENTICATED",
     },
+    # Last-paid price lookup for the PO / Buy-Desk form (vendor roles; the
+    # endpoint additionally store-scopes each PO it reads).
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/last-cost",
+        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",

@@ -1440,6 +1440,72 @@ async def goods_receipt_cockpit(
     }
 
 
+@router.get("/last-cost")
+async def get_last_purchase_cost(
+    vendor_id: str = Query(..., description="Vendor to look up prior prices for"),
+    product_ids: str = Query(..., description="Comma-separated product_ids to price"),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+):
+    """Most-recent agreed purchase price per product for this vendor, from PO
+    history -- so the PO / Buy-Desk form can pre-fill "last paid Rs X on <date>"
+    instead of the operator guessing the cost (procurement Phase 2C).
+
+    Reads the vendor's POs newest-first (capped) and takes the first line hit
+    per requested product_id. Read-only, fail-soft: DB trouble or no history
+    yields an empty map (the form then just shows a blank cost). Registered
+    ABOVE /purchase-orders/{po_id} so the literal path wins.
+
+    Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
+    """
+    wanted = {p.strip() for p in (product_ids or "").split(",") if p.strip()}
+    if not vendor_id or not wanted:
+        return {"costs": {}}
+
+    po_repo = get_purchase_order_repository()
+    if po_repo is None:
+        return {"costs": {}}
+
+    costs: dict = {}
+    try:
+        # Newest POs for this vendor first; walk lines until every requested
+        # product has a price (or the cap is hit).
+        pos = po_repo.find_many(
+            {"vendor_id": vendor_id},
+            sort=[("created_at", -1)],
+            limit=100,
+        )
+        for po in pos or []:
+            # Only surface prices from stores the caller may see (cross-store
+            # roles pass); never leak another store's negotiated cost.
+            if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+                continue
+            for it in po.get("items", []) or []:
+                if not isinstance(it, dict):
+                    continue
+                pid = it.get("product_id")
+                if pid not in wanted or pid in costs:
+                    continue
+                try:
+                    price = round(float(it.get("unit_price") or 0), 2)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                costs[pid] = {
+                    "unit_price": price,
+                    "po_number": po.get("po_number"),
+                    "po_id": po.get("po_id"),
+                    "date": po.get("created_at"),
+                }
+            if len(costs) >= len(wanted):
+                break
+    except Exception as e:  # noqa: BLE001 - read-only helper, never a blocker
+        logger.warning("[VENDOR] last-cost lookup failed: %s", e)
+        return {"costs": {}}
+
+    return {"costs": costs}
+
+
 @router.get("/purchase-orders/{po_id}")
 async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Get purchase order details"""
@@ -2638,9 +2704,7 @@ async def express_receive_grn(
         )
         raise HTTPException(status_code=500, detail=_partial_detail)
     except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "[VENDOR] express-receive accept crashed for %s: %s", grn_id, exc
-        )
+        logger.error("[VENDOR] express-receive accept crashed for %s: %s", grn_id, exc)
         raise HTTPException(status_code=500, detail=_partial_detail)
 
     grn_status = accept_res.get("grn_status")
@@ -2755,9 +2819,7 @@ async def express_receive_grn(
                     "grn_number": grn_number,
                     "po_id": body.po_id,
                     "match_status": (match_preview or {}).get("match_status"),
-                    "exception_count": (match_preview or {}).get(
-                        "exception_count"
-                    ),
+                    "exception_count": (match_preview or {}).get("exception_count"),
                 },
             },
         )
