@@ -961,7 +961,10 @@ class InventoryInput(BaseModel):
     location_id: Optional[str] = None
     barcode: Optional[str] = None
     reorder_level: int = 5
-    reorder_quantity: int = 10
+    # Owner decision (2026-07-04): -1 means "no auto-reorder" -- every reorder
+    # engine skips the product until a positive qty is explicitly configured
+    # (see api/services/reorder_policy.py).
+    reorder_quantity: int = -1
 
 
 class ShopifySyncInput(BaseModel):
@@ -1553,8 +1556,9 @@ async def create_catalog_product(
             "reorder_level": (
                 product.inventory.reorder_level if product.inventory else 5
             ),
+            # -1 = auto-reorder disabled (owner default; reorder_policy.py).
             "reorder_quantity": (
-                product.inventory.reorder_quantity if product.inventory else 10
+                product.inventory.reorder_quantity if product.inventory else -1
             ),
         },
         "shopify": {
@@ -1982,7 +1986,13 @@ async def import_products(
                     "discount_category": product.pricing.discount_category,
                 },
                 "images": product.images,
-                "inventory": {"total_quantity": 0, "locations": {}, "reorder_level": 5},
+                # reorder_quantity -1 = auto-reorder disabled (owner default).
+                "inventory": {
+                    "total_quantity": 0,
+                    "locations": {},
+                    "reorder_level": 5,
+                    "reorder_quantity": -1,
+                },
                 "shopify": {"synced": False},
                 "seo": {},
                 "is_active": True,

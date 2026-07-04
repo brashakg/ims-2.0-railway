@@ -555,7 +555,7 @@ class OracleAgent(JarvisAgent):
             ]}
             prod_proj = {"product_id": 1, "sku": 1, "preferred_vendor_id": 1,
                          "default_vendor_id": 1, "vendor_id": 1,
-                         "reorder_point": 1}
+                         "reorder_point": 1, "reorder_quantity": 1}
             try:
                 prods = list(products_coll.find(prod_query, prod_proj))
             except Exception as e:  # noqa: BLE001
@@ -586,6 +586,15 @@ class OracleAgent(JarvisAgent):
                 continue  # not at risk inside the horizon -> no suggestion
 
             prod = prod_by_id.get(pid, {})
+            # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
+            # default) means auto-reorder is DISABLED for this product -- no
+            # predictive reorder proposal. Missing field = legacy doc, enabled.
+            try:
+                from api.services.reorder_policy import auto_reorder_disabled
+                if auto_reorder_disabled(prod):
+                    continue
+            except ImportError:  # pragma: no cover - defensive
+                pass
             preferred_vendor_id = (
                 prod.get("preferred_vendor_id")
                 or prod.get("default_vendor_id")

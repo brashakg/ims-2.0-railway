@@ -24,6 +24,7 @@ from ..dependencies import (
     get_db,
     validate_store_access,
 )
+from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 
 router = APIRouter()
 
@@ -4422,6 +4423,11 @@ async def purchase_recommendations(
     recs: list = []
     for pid, stats in sku_stats.items():
         prod = products.get(pid, {})
+        # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
+        # default) disables auto-reorder for the product -- it never appears
+        # in the purchase recommendations (api/services/reorder_policy.py).
+        if _auto_reorder_disabled(prod):
+            continue
         velocity_90d = stats["units_sold"]
         daily_v = velocity_90d / float(lookback_days) if lookback_days else 0.0
         desired_cover = round(daily_v * cover_days)

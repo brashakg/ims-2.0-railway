@@ -620,7 +620,9 @@ class ProductUpdate(BaseModel):
     # /admin/products PUT (the Reorder dashboard's only writer) so reorder
     # settings persist through the validated path. All optional + additive. ----
     reorder_point: Optional[int] = Field(None, ge=0)
-    reorder_quantity: Optional[int] = Field(None, ge=0)
+    # ge=-1: -1 is the owner's "no auto-reorder" sentinel (reorder_policy.py),
+    # so the Reorder dashboard can explicitly disable a product again.
+    reorder_quantity: Optional[int] = Field(None, ge=-1)
     max_stock: Optional[int] = Field(None, ge=0)
     lead_time_days: Optional[int] = Field(None, ge=0)
     # ---- Contact-lens (CL) identity fields. All optional + additive. ----

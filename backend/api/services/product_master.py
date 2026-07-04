@@ -985,6 +985,13 @@ def normalise_payload(
     for _k, _v in (extra_fields or {}).items():
         if _v is not None and _k not in doc:
             doc[_k] = _v
+    # Owner decision (2026-07-04): every new product is born with
+    # reorder_quantity = -1 = "no auto-reorder" (see api/services/
+    # reorder_policy.py). Reorder engines skip the product until someone
+    # explicitly configures a positive quantity (PUT /products/{id} /
+    # Reorder dashboard). setdefault so a door that DID supply a value
+    # (via extra_fields) keeps it.
+    doc.setdefault("reorder_quantity", -1)
     # --- Phase 0: stamp the catalog-done chokepoint on the spine ---
     # compute_catalog_status reads the doc we just built (cost_price + the
     # derived hsn/gst are now present), so the stamp is consistent with what was
