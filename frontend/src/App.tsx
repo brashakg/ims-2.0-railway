@@ -1036,12 +1036,14 @@ function App() {
                     }
                   />
 
-                  {/* Purchase P1/S4: Goods-Receipt Cockpit — vendor-first receiving
-                      with mandatory attachment gate (SUPERADMIN/ADMIN/STORE_MANAGER) */}
+                  {/* Procurement Phase 2: Deliveries inbox + guided express
+                      receive (mandatory attachment gate). ALL receiving roles —
+                      mirrors the backend /vendors/grn* gate (owner decision:
+                      express receive for all receiving staff). */}
                   <Route
                     path="purchase/receive"
                     element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']}>
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <GoodsReceiptCockpit />
                       </ProtectedRoute>
                     }

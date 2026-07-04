@@ -76,8 +76,9 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
   const navigate = useNavigate();
   const { hasRole } = useAuth();
   // Mirrors the /purchase/receive ProtectedRoute gate in App.tsx so a role
-  // (e.g. ACCOUNTANT) is never handed a button that lands on /unauthorized.
-  const canReceive = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
+  // is never handed a button that lands on /unauthorized. Phase 2: ACCOUNTANT
+  // added — express receive is for ALL receiving roles (backend gate matches).
+  const canReceive = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
 
   return (
     <div className="space-y-4">
