@@ -15,7 +15,7 @@
 // Shares CATEGORY_FIELDS + the create payload mapping via productAddShared.ts so
 // the create contract + per-category required-field enforcement are unchanged.
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   Save,
@@ -90,6 +90,8 @@ export function QuickAddPage() {
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [attributes, setAttributes] = useState<Record<string, string>>({});
   const [description, setDescription] = useState('');
+  // "Auto-fill with AI" (description) round-trip in flight.
+  const [generatingDesc, setGeneratingDesc] = useState(false);
   const [hsnCode, setHsnCode] = useState('');
   const [gstRate, setGstRate] = useState('18');
   const [weight, setWeight] = useState('');
@@ -832,6 +834,9 @@ export function QuickAddPage() {
   void registryReady;
   const fields: CategoryField[] = selectedCategory ? getCategoryFields(selectedCategory) : [];
   const isLens = selectedCategory === 'LS';
+  // Eyewear (SG/FR): the Weight input renders inline in the attribute grid
+  // (between Warranty and UPC — owner-locked order) instead of under Advanced.
+  const isEyewear = selectedCategory === 'SG' || selectedCategory === 'FR';
   // The lens stock-power fields are entered via the Power Grid, not here.
   const lensPowerFields = new Set(['sph', 'cyl', 'axis', 'add']);
   const visibleFields = (isLens ? fields.filter((f) => !lensPowerFields.has(f.name)) : fields)
@@ -941,6 +946,64 @@ export function QuickAddPage() {
     </div>
     );
   };
+
+  // --- AI description ("Auto-fill with AI") ---------------------------------
+  // Needs at least brand + model to have anything meaningful to write about.
+  // model_no is the eyewear model key; model_name covers the categories that
+  // use it instead (CL / smartwatch / accessories).
+  const aiDescIdentityMissing =
+    !String(attributes.brand_name || '').trim() ||
+    !String(attributes.model_no || attributes.model_name || '').trim();
+
+  const handleGenerateDescription = async () => {
+    if (generatingDesc || aiDescIdentityMissing || !selectedCategory) return;
+    setGeneratingDesc(true);
+    try {
+      // Send every FILLED attribute value — the backend drafts from these.
+      const filled: Record<string, string> = {};
+      Object.entries(attributes).forEach(([k, v]) => {
+        const val = String(v ?? '').trim();
+        if (val) filled[k] = val;
+      });
+      const res = await productApi.generateDescription({
+        category: selectedCategory,
+        attributes: filled,
+      });
+      if (res?.status === 'GENERATED' && res.description) {
+        // Overwrite (operator can edit afterwards).
+        setDescription(res.description);
+      } else if (res?.status === 'FAILED_NO_KEY') {
+        toast.error('AI unavailable — add the Anthropic key in Settings');
+      } else {
+        toast.error(
+          res?.message || `Could not generate a description (${res?.status || 'no response'}).`
+        );
+      }
+    } catch {
+      // Never blocks saving — the description stays manual on failure.
+      toast.error('Could not generate a description — please try again.');
+    } finally {
+      setGeneratingDesc(false);
+    }
+  };
+
+  // Weight is a TOP-LEVEL payload field (weight_grams), not an attribute. For
+  // SG/FR it renders inline in the attribute grid (between Warranty and UPC —
+  // owner-locked order); for every other category it stays under Advanced.
+  // Plain render helper (NOT a nested component — avoids the remount bug).
+  const renderWeightInput = () => (
+    <div>
+      <label className="block text-xs font-medium text-gray-700 mb-1">Weight (g)</label>
+      <input
+        type="number"
+        title="Weight (g)"
+        value={weight}
+        onChange={(e) => setWeight(e.target.value)}
+        className="input-field w-full"
+        placeholder="e.g. 50"
+      />
+    </div>
+  );
 
   return (
     // Page-scoped ~10% density pass: the arbitrary variants shrink every
@@ -1347,9 +1410,23 @@ export function QuickAddPage() {
 
             {selectedCategory && (
               <>
-                {/* Category-specific fields */}
+                {/* Category-specific fields. For SG/FR the Weight input is
+                    injected right after Warranty (before UPC) per the
+                    owner-locked field order. */}
                 <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
-                  {visibleFields.map((f, i) => renderField(f, i === 0))}
+                  {visibleFields.map((f, i) =>
+                    isEyewear && f.name === 'warranty' ? (
+                      <Fragment key={f.name}>
+                        {renderField(f, i === 0)}
+                        {renderWeightInput()}
+                      </Fragment>
+                    ) : (
+                      renderField(f, i === 0)
+                    )
+                  )}
+                  {/* Fallback: eyewear categories missing a warranty field
+                      still get the inline Weight input at the end. */}
+                  {isEyewear && !visibleFields.some((f) => f.name === 'warranty') && renderWeightInput()}
                 </div>
 
                 {/* Lenses: route power entry to the Power Grid */}
@@ -1367,9 +1444,29 @@ export function QuickAddPage() {
                   </div>
                 )}
 
-                {/* Description */}
+                {/* Description (+ AI auto-fill; generation never blocks save) */}
                 <div className="mt-4">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-medium text-gray-700">Description</label>
+                    <button
+                      type="button"
+                      onClick={() => void handleGenerateDescription()}
+                      disabled={generatingDesc || aiDescIdentityMissing}
+                      title={
+                        aiDescIdentityMissing
+                          ? 'Fill Brand and Model first'
+                          : 'Draft a description from the filled fields'
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {generatingDesc ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <SparklesIcon className="w-3 h-3" />
+                      )}
+                      Auto-fill with AI
+                    </button>
+                  </div>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -1387,7 +1484,7 @@ export function QuickAddPage() {
                     className="flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900"
                   >
                     <ChevronDown className={clsx('w-4 h-4 transition-transform', showAdvanced && 'rotate-180')} />
-                    Advanced — HSN, GST &amp; weight
+                    {isEyewear ? 'Advanced — HSN & GST' : 'Advanced — HSN, GST & weight'}
                     <span className="ml-1 text-xs text-gray-400">(auto-filled from category)</span>
                   </button>
 
@@ -1435,16 +1532,9 @@ export function QuickAddPage() {
                           />
                           <p className="text-xs text-gray-500 mt-1">Auto-filled from HSN code</p>
                         </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">Weight (g)</label>
-                          <input
-                            type="number"
-                            value={weight}
-                            onChange={(e) => setWeight(e.target.value)}
-                            className="input-field w-full"
-                            placeholder="e.g. 50"
-                          />
-                        </div>
+                        {/* SG/FR render Weight inline in the attribute grid
+                            (between Warranty and UPC) — not duplicated here. */}
+                        {!isEyewear && renderWeightInput()}
                       </div>
 
                       {/* GST-compliance note (parity with the Guided wizard). */}
