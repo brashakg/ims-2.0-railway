@@ -55,6 +55,8 @@ const transformBrand = (b: any): Brand => ({
   categories: b.categories || [],
   tier: b.tier || 'MASS',
   isActive: b.is_active !== false,
+  syncToShopifyDefault: b.sync_to_shopify_default === true || b.syncToShopifyDefault === true,
+  productCount: typeof b.product_count === 'number' ? b.product_count : undefined,
   subbrands: (b.subbrands || []).map((sb: any) => ({
     id: sb.id || sb.subbrand_id,
     name: sb.name || sb.subbrand_name,
@@ -353,7 +355,13 @@ export function BrandSection() {
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
   // Per-brand "new sub-brand" input value, keyed by brand id.
   const [newSubbrand, setNewSubbrand] = useState<Record<string, string>>({});
+  // Client-side brand-name filter (the list can get long).
+  const [brandSearch, setBrandSearch] = useState('');
   const categories = CATEGORY_DEFINITIONS;
+
+  const visibleBrands = brandSearch.trim()
+    ? brands.filter(b => b.brandName.toLowerCase().includes(brandSearch.trim().toLowerCase()))
+    : brands;
 
   useEffect(() => {
     loadBrands();
@@ -384,6 +392,7 @@ export function BrandSection() {
         categories: brandData.categories || [],
         tier: brandData.tier || 'MASS',
         status: brandData.isActive ? 'ACTIVE' : 'INACTIVE',
+        sync_to_shopify_default: brandData.syncToShopifyDefault === true,
       };
 
       if (editingBrand?.id) {
@@ -467,15 +476,32 @@ export function BrandSection() {
           </button>
         </div>
 
+        {brands.length > 0 && (
+          <div className="mb-4">
+            <input
+              type="search"
+              className="input-field !w-72"
+              placeholder="Search brands…"
+              value={brandSearch}
+              onChange={(e) => setBrandSearch(e.target.value)}
+              aria-label="Search brands by name"
+            />
+          </div>
+        )}
+
         {brands.length === 0 ? (
           <div className="text-center py-12 text-gray-500">
             <Boxes className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No brands created yet</p>
             <p className="text-sm">Click "Add Brand" to add your first brand</p>
           </div>
+        ) : visibleBrands.length === 0 ? (
+          <div className="text-center py-8 text-gray-500 text-sm">
+            No brands match "{brandSearch.trim()}"
+          </div>
         ) : (
           <div className="space-y-3">
-            {brands.map(brand => (
+            {visibleBrands.map(brand => (
               <div
                 key={brand.id}
                 className="p-4 border border-gray-200 rounded-lg"
@@ -493,6 +519,16 @@ export function BrandSection() {
                       )}>
                         {brand.tier}
                       </span>
+                      {typeof brand.productCount === 'number' && (
+                        <span className="text-xs px-2 py-0.5 rounded bg-gray-50 text-gray-400">
+                          {brand.productCount} product{brand.productCount === 1 ? '' : 's'}
+                        </span>
+                      )}
+                      {brand.syncToShopifyDefault && (
+                        <span className="text-xs px-2 py-0.5 rounded bg-green-50 text-green-600" title="New products of this brand default to Shopify-sync intent">
+                          Shopify default
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-gray-500 mt-1">
                       Categories: {brand.categories.join(', ')}
@@ -1011,6 +1047,7 @@ function BrandModal({
       tier: 'MASS',
       isActive: true,
       subbrands: [],
+      syncToShopifyDefault: false,
     }
   );
 
@@ -1085,6 +1122,22 @@ function BrandModal({
                 </label>
               ))}
             </div>
+          </div>
+
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={formData.syncToShopifyDefault === true}
+                onChange={e => setFormData(prev => ({ ...prev, syncToShopifyDefault: e.target.checked }))}
+                className="rounded border-gray-300 text-bv-red-600 focus:ring-bv-red-500"
+              />
+              <span className="text-sm font-medium text-gray-700">Sync to Shopify by default</span>
+            </label>
+            <p className="text-xs text-gray-500 mt-1 ml-6">
+              New products of this brand are marked for the online store by default.
+              (Intent only — the e-commerce app controls the actual Shopify push.)
+            </p>
           </div>
         </div>
 

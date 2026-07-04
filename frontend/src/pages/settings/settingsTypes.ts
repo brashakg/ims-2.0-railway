@@ -90,6 +90,12 @@ export interface Brand {
   tier: 'MASS' | 'PREMIUM' | 'LUXURY';
   isActive: boolean;
   subbrands: Subbrand[];
+  /** Default Shopify-sync INTENT stamped on new products of this brand
+   *  (nothing pushes from IMS -- the BVI app owns Shopify). */
+  syncToShopifyDefault: boolean;
+  /** Products in the master matching this brand (backend enrichment;
+   *  undefined when the count aggregation was unavailable). */
+  productCount?: number;
 }
 
 export interface Subbrand {
