@@ -138,6 +138,24 @@ export class DuplicateProductError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Live "similar products" lookup (dup-detect Phase 2, GET /products/similar).
+// The backend classifies against THE same normalised identity the create door
+// 409s on: `exact_match` = the row this exact colour(/size) would collide
+// with; `siblings` = other colours/sizes of the same category+brand+model
+// (capped at 12); `model_colour_count` = the true distinct-colour total.
+// Fail-soft server-side: DB trouble returns the empty shape with 200.
+// Each summary row is product_master.existing_product_summary — the same
+// projection the duplicate-rescue 409 popup renders.
+// ---------------------------------------------------------------------------
+export type SimilarProductSummary = DuplicateProductInfo;
+
+export interface SimilarProductsResponse {
+  exact_match: SimilarProductSummary | null;
+  siblings: SimilarProductSummary[];
+  model_colour_count: number;
+}
+
 // Partial update payload for `PUT /products/{id}`. Mirrors the backend
 // `ProductUpdate` schema (snake_case). Every field is optional; the backend
 // merges only what is sent and re-runs the category + MRP>=offer validators.
@@ -265,6 +283,27 @@ export const productApi = {
     // dedicated /products/search route (which 404'd).
     const response = await api.get('/products', { params: { search: query, category } });
     return response.data;
+  },
+
+  // Live "similar products" check for the Add-Product form (dup-detect
+  // Phase 2). ABORTABLE: pass an AbortSignal so the as-you-type caller can
+  // cancel the in-flight request on every keystroke (useSimilarProducts).
+  // `category` accepts the FE picker code (SG/FR/...) — the backend resolves
+  // it through the canonical alias table. Import this DIRECTLY from this
+  // module (not the api barrel) — the barrel re-export fails for new methods
+  // (TS2614).
+  getSimilarProducts: async (
+    params: {
+      category: string;
+      brand: string;
+      model_no: string;
+      colour_code?: string;
+      size?: string;
+    },
+    signal?: AbortSignal
+  ): Promise<SimilarProductsResponse> => {
+    const response = await api.get('/products/similar', { params, signal });
+    return response.data as SimilarProductsResponse;
   },
 
   createProduct: async (data: CreateProductPayload) => {
