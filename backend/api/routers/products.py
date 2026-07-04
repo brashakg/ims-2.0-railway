@@ -8,7 +8,7 @@ import io
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from datetime import datetime
 import logging
 import uuid
@@ -19,6 +19,7 @@ from ..services.file_store import (
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
 )
+
 # Product-image editor (Photoroom background-removal + catalog-standard resize).
 # Imported at module level so the edit endpoint below (and its test) resolve the
 # editor through THIS module -- tests monkeypatch `get_image_editor` here.
@@ -320,7 +321,9 @@ def _clean_image_urls(v):
             continue
         if len(s) > 600:
             raise ValueError("image URL too long (max 600 chars)")
-        if not (s.startswith("http://") or s.startswith("https://") or s.startswith("/")):
+        if not (
+            s.startswith("http://") or s.startswith("https://") or s.startswith("/")
+        ):
             raise ValueError(f"image URL must be absolute or app-relative: '{s[:60]}'")
         out.append(s)
         if len(out) > 12:
@@ -616,6 +619,7 @@ class ProductUpdate(BaseModel):
     @classmethod
     def _validate_images(cls, v):
         return _clean_image_urls(v)
+
     # ---- Per-product reorder configuration. Moved here from the retired
     # /admin/products PUT (the Reorder dashboard's only writer) so reorder
     # settings persist through the validated path. All optional + additive. ----
@@ -1696,6 +1700,74 @@ async def get_brand_options(
     except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
         logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)
         return {"brands": []}
+
+
+class DescriptionGenerateRequest(BaseModel):
+    """Input for the Add-Product form's "Auto-fill with AI" button."""
+
+    category: str
+    attributes: Dict[str, Any]
+    max_length: int = Field(default=350, ge=80, le=1000)
+
+
+@router.post("/generate-description")
+async def generate_product_description(
+    body: DescriptionGenerateRequest,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Draft a customer-facing product description from the filled attribute
+    fields via Claude (haiku by default) -- the Add-Product form's
+    "Auto-fill with AI" button (owner request 2026-07-04; button-only, the
+    operator reviews/edits before save).
+
+    ALWAYS returns 200 with a `status` the FE keys on -- never a 5xx -- so an
+    unavailable model can never block the product-create flow:
+      GENERATED         -> description holds the draft text
+      EMPTY_ATTRIBUTES  -> nothing usable to write from (fill brand/model first)
+      FAILED_NO_KEY     -> no Anthropic key configured (Settings -> Integrations)
+      FAILED_GENERATION -> model call failed/timed out (retry later)
+    """
+    from agents.claude_client import call_claude, is_claude_available
+
+    # Only non-empty, human-meaningful fields feed the prompt.
+    filled = {
+        str(k): str(v).strip()
+        for k, v in (body.attributes or {}).items()
+        if v is not None and str(v).strip() != ""
+    }
+    if not filled:
+        return {"description": "", "status": "EMPTY_ATTRIBUTES"}
+
+    if not is_claude_available():
+        return {"description": "", "status": "FAILED_NO_KEY"}
+
+    spec = _pm.category_spec(body.category)
+    category_name = spec.display if spec is not None else str(body.category)
+
+    system = (
+        "You are a product copywriter for an Indian optical retail chain. "
+        "Write a customer-facing retail description for the product described "
+        "by the attributes given. Rules: 2-3 sentences, under "
+        f"{body.max_length} characters, plain text only (no markdown, no "
+        "headings, no bullet points, no emojis). Use ONLY the attributes "
+        "provided -- never invent specifications, certifications or claims "
+        "that are not in the data. Natural, confident retail tone; mention "
+        "the brand and model naturally; no superlatives like 'best' or "
+        "'world-class'."
+    )
+    lines = "\n".join(f"{k}: {v}" for k, v in sorted(filled.items()))
+    user_msg = f"Product category: {category_name}\nAttributes:\n{lines}"
+
+    text = await call_claude(system, user_msg, max_tokens=300, timeout=20.0)
+    if not text or not text.strip():
+        return {"description": "", "status": "FAILED_GENERATION"}
+
+    # Hard-trim to the requested cap (the model usually respects it; this is
+    # the guarantee) at a word boundary.
+    out = text.strip()
+    if len(out) > body.max_length:
+        out = out[: body.max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
+    return {"description": out, "status": "GENERATED"}
 
 
 @router.get("/categories/list")
