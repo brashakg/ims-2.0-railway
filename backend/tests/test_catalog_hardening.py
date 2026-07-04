@@ -290,7 +290,14 @@ class TestCatalogSpineWriteIsHardGate:
         # the response is an error with no product (no orphan catalog-only doc).
         assert "product" not in resp.json()
 
-    def test_spine_duplicate_maps_to_409(self, client, auth_headers, monkeypatch):
+    def test_spine_duplicate_is_tolerated_same_identity_variant(
+        self, client, auth_headers, monkeypatch
+    ):
+        """A DuplicateKeyError means the identity already has a (billable) spine.
+        The catalog/PIM door legitimately holds same-identity variants, so the
+        create is TOLERATED and still saves the catalog doc (200) -- it must NOT
+        hard-fail (that would break the by-design form+catalog dual-door flow)."""
+
         class DuplicateKeyError(Exception):
             pass
 
@@ -304,10 +311,8 @@ class TestCatalogSpineWriteIsHardGate:
             json=_frame_payload(mrp=4000, offer_price=3600),
             headers=auth_headers,
         )
-        assert resp.status_code == 409, resp.text
-        # Hard fail: the spine write raises BEFORE the catalog doc is saved, so
-        # the response is an error with no product (no orphan catalog-only doc).
-        assert "product" not in resp.json()
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["product"]["id"]
 
     def test_spine_success_saves_catalog_doc(self, client, auth_headers, monkeypatch):
         saved = []

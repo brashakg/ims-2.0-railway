@@ -43,7 +43,10 @@ _VENDOR_BODY = {
 }
 _PO_BODY = {
     "vendor_id": "v1",
-    "delivery_store_id": "store-001",
+    # Match the caller's own store (BV-TEST-01): this is a ROLE-gating test, and a
+    # PO is legitimately raised for one's own store. Cross-store PO creation is
+    # denied by validate_store_access -- covered by test_po_store_boundary.py.
+    "delivery_store_id": "BV-TEST-01",
     "items": [
         {
             "product_id": "p1",

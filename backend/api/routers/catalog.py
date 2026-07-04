@@ -1462,15 +1462,22 @@ async def create_catalog_product(
     _spine["product_id"] = product_id
     _spine["id"] = product_id
     _spine["sku"] = sku
-    # F6: persist the spine as a HARD gate. The products spine is REQUIRED -- POS
-    # / PO / Buy Desk resolve the catalog id straight to it, and the order-create
-    # spine guard (3) fails loud without it. Previously a spine-write error was
-    # swallowed and the catalog doc saved anyway, leaving a hidden catalog-only
-    # product that couldn't be billed until a sale surfaced the gap. Now a
-    # spine-write failure aborts the create BEFORE the catalog doc is saved:
-    # a duplicate identity/SKU -> 409, any other failure (incl. a swallowed None
-    # return) -> 500. When there is no DB (_pr is None) the catalog save below
-    # also falls back to in-memory, so there is no orphan to guard against.
+    # F6: persist the spine as a HARD gate on a GENUINE write failure. The products
+    # spine is REQUIRED -- POS / PO / Buy Desk resolve the catalog id straight to
+    # it, and the order-create spine guard (3) fails loud without it. Previously a
+    # spine-write error was swallowed and the catalog doc saved anyway, leaving a
+    # hidden catalog-only product that couldn't be billed until a sale surfaced the
+    # gap. Now a REAL spine-write failure (a transient DB error -> create() returns
+    # None, or a non-duplicate exception) aborts the create BEFORE the catalog doc
+    # is saved -> 500.
+    #
+    # A DuplicateKeyError is DELIBERATELY tolerated: the catalog/PIM door
+    # legitimately holds same-identity variants (see the build_canonical_product
+    # note above -- the spine is inserted directly precisely to NOT impose the
+    # identity duplicate-block here), and that identity already has a billable
+    # spine. Failing it would break the by-design "accept the same product at the
+    # form AND catalog doors" flow. When there is no DB (_pr is None) the catalog
+    # save below also falls back to in-memory, so there is no orphan to guard.
     _pr = get_product_repository()
     if _pr is not None:
         try:
@@ -1479,27 +1486,29 @@ async def create_catalog_product(
             raise
         except Exception as err:  # noqa: BLE001
             if err.__class__.__name__ == "DuplicateKeyError":
-                logger.warning("[CATALOG] spine duplicate for %s (%s)", product_id, sku)
+                # Same-identity variant: the spine already exists (billable).
+                # Tolerate + proceed to save the catalog/PIM doc, as before.
+                logger.info(
+                    "[CATALOG] spine already exists for the identity of %s (%s); "
+                    "saving catalog variant",
+                    product_id,
+                    sku,
+                )
+                _spine_created = True
+            else:
+                logger.error(
+                    "[CATALOG] spine write FAILED for %s (%s); aborting catalog create",
+                    product_id,
+                    sku,
+                    exc_info=True,
+                )
                 raise HTTPException(
-                    status_code=409,
+                    status_code=500,
                     detail=(
-                        "A product with the same identity or SKU already exists. "
-                        "The catalog product was not created."
+                        "Failed to create the product's billing record. The "
+                        "product was not saved -- please retry."
                     ),
                 ) from err
-            logger.error(
-                "[CATALOG] spine write FAILED for %s (%s); aborting catalog create",
-                product_id,
-                sku,
-                exc_info=True,
-            )
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Failed to create the product's billing record. The product "
-                    "was not saved -- please retry."
-                ),
-            ) from err
         if not _spine_created:
             # create() returns None on a swallowed (non-duplicate) DB error;
             # treat that as a hard failure too rather than saving an orphan.
