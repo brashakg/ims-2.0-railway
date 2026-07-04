@@ -64,4 +64,17 @@ export interface POItem {
   unitCost: number;
   taxRate: number;
   total: number;
+  /** Units received so far (per-line received_qty, falling back to the PO
+   *  header received_qty_by_product for pre-S1 POs). Drives the "N of M
+   *  lines received" progress chip on the PO list. */
+  receivedQty?: number;
 }
+
+/** PO statuses the Goods-Receipt cockpit can receive against (mirrors the
+ *  backend _RECEIVABLE_PO_STATUSES tuple in vendors.py). */
+export const RECEIVABLE_PO_STATUSES: readonly POStatus[] = [
+  'SENT',
+  'ACKNOWLEDGED',
+  'PARTIAL',
+  'PARTIALLY_RECEIVED',
+];

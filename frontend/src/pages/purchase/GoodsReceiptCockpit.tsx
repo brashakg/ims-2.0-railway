@@ -9,7 +9,8 @@
 //      attachment gate before the "Create GRN" button is enabled
 //   4. Submit -> GRN created -> optional label-print dialog
 
-import { useState, useCallback, useRef, startTransition } from 'react';
+import { useState, useCallback, useEffect, useRef, startTransition } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Package,
   Upload,
@@ -53,12 +54,26 @@ interface ReceiveLine {
   // units for FEFO). Left blank for frames / undated spectacle lenses.
   batch_code: string;
   expiry_date: string;
+  // Phase 1 (read-only context): the PO's agreed unit price for this line,
+  // straight from the cockpit payload. Display only — receiving never edits it.
+  unit_price: number | null;
 }
 
 // ---- Helpers ---------------------------------------------------------------
 
 const fmt = (n: number | null | undefined) =>
   n == null ? '—' : n.toLocaleString('en-IN');
+
+const fmtMoney = (n: number | null | undefined) =>
+  n == null
+    ? null
+    : `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+
+const fmtDate = (iso: string | null | undefined) => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString('en-IN');
+};
 
 // ---- Sub-components --------------------------------------------------------
 
@@ -427,6 +442,27 @@ export function GoodsReceiptCockpit() {
     startTransition(() => loadCockpit(vid));
   };
 
+  // ---- Deep-link support: /purchase/receive?vendor_id=&po_id= --------------
+  // The PO list's "Receive" button lands here with vendor + PO preselected:
+  // pick the vendor, auto-load the cockpit, then (below, once the payload is
+  // in) open that PO's receive form. Runs once; fail-soft — an unknown
+  // vendor_id just loads an empty cockpit, an unknown po_id leaves the
+  // worklists showing.
+  const [searchParams] = useSearchParams();
+  const deepLinkDone = useRef(false);
+  const pendingPoId = useRef<string | null>(null);
+  useEffect(() => {
+    if (deepLinkDone.current) return;
+    deepLinkDone.current = true;
+    const vid = searchParams.get('vendor_id');
+    if (!vid) return;
+    pendingPoId.current = searchParams.get('po_id');
+    void ensureVendors(); // so the picker shows the vendor's name, not a blank
+    setVendorId(vid);
+    startTransition(() => loadCockpit(vid));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ---- Select a PO to receive against -------------------------------------
   const onSelectPO = (po: CockpitOpenPO) => {
     setActivePO(po);
@@ -444,9 +480,21 @@ export function GoodsReceiptCockpit() {
       rejection_reason: '',
       batch_code: '',
       expiry_date: '',
+      unit_price: l.unit_price ?? null,
     }));
     setReceiveLines(lines);
   };
+
+  // Second half of the deep link: once the cockpit payload for the deep-linked
+  // vendor is in, open the requested PO's receive form (if it is still open).
+  useEffect(() => {
+    const poId = pendingPoId.current;
+    if (!poId || !cockpit) return;
+    pendingPoId.current = null;
+    const po = cockpit.open_pos.find((p) => p.po_id === poId);
+    if (po) onSelectPO(po);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cockpit]);
 
   const onCancelPO = () => {
     setActivePO(null);
@@ -823,6 +871,26 @@ export function GoodsReceiptCockpit() {
                                 style={{ color: 'var(--ink-4)' }}
                               >
                                 {line.sku}
+                              </div>
+                            )}
+                            {/* Phase 1: READ-ONLY purchase context from the PO —
+                                the agreed unit price for this line and the PO's
+                                expected date. Muted; receiving never edits them. */}
+                            {(line.unit_price != null || activePO.expected_date) && (
+                              <div
+                                className="text-xs"
+                                style={{ color: 'var(--ink-4)', marginTop: 2 }}
+                              >
+                                {[
+                                  line.unit_price != null
+                                    ? `PO price ${fmtMoney(line.unit_price)}`
+                                    : null,
+                                  fmtDate(activePO.expected_date)
+                                    ? `expected ${fmtDate(activePO.expected_date)}`
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
                               </div>
                             )}
                             {/* P2: optional batch + expiry -- fill for contact

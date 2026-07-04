@@ -65,15 +65,19 @@ function mapVendorToSupplier(v: any): Supplier {
 // ============================================================================
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
+  // Per-product header fallback for POs created before the per-line
+  // received_qty field (S1) existed.
+  const headerReceived: Record<string, number> = po.received_qty_by_product ?? {};
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const items = (po.items ?? []).map((item: any) => ({
     productId: item.product_id ?? '',
     productName: item.product_name ?? '',
     sku: item.sku ?? '',
-    quantity: item.quantity ?? 0,
+    quantity: item.ordered_qty ?? item.quantity ?? 0,
     unitCost: item.unit_price ?? item.unit_cost ?? 0,
     taxRate: item.tax_rate ?? 18,
     total: item.total ?? (item.quantity ?? 0) * (item.unit_price ?? item.unit_cost ?? 0) * (1 + (item.tax_rate ?? 18) / 100),
+    receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
   }));
 
   return {
