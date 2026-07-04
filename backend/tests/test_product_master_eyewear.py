@@ -71,27 +71,35 @@ def audit_repo():
     return AuditRepository(MockCollection("audit_logs"))
 
 
-# The rich eyewear keys we expect on BOTH FRAME and SUNGLASS.
+# The rich eyewear keys we expect on BOTH FRAME and SUNGLASS (owner-locked
+# 2026-07-04 form rework: model_name added; full_model_no / lens_usp /
+# product_usp / usp / gender_label REMOVED from the registry -- legacy values
+# on existing docs persist, see the legacy-attribute test below).
 _SHARED_EYEWEAR_KEYS = (
     "label",
-    "full_model_no",
+    "model_name",
     "shape",
     "frame_color",
     "temple_color",
     "temple_material",
     "bridge_width",
     "temple_length",
-    "lens_usp",
-    "product_usp",
     "usp_1",
     "usp_2",
-    "usp",
     "gender",
-    "gender_label",
     "country_of_origin",
     "warranty",
     "upc",
     "gtin",
+)
+
+# Keys the 2026-07-04 rework REMOVED from the FRAME/SUNGLASS registry.
+_REMOVED_EYEWEAR_KEYS = (
+    "full_model_no",
+    "lens_usp",
+    "product_usp",
+    "usp",
+    "gender_label",
 )
 
 # A representative rich FRAME attribute payload (shared keys + frame-only key).
@@ -100,7 +108,7 @@ _FRAME_RICH_ATTRS = {
     "model_no": "RB-2140",
     "colour_code": "BLK",
     "label": "Wayfarer Classic",
-    "full_model_no": "RB2140-901-50",
+    "model_name": "Wayfarer",
     "shape": "Wayfarer",
     "frame_color": "Black",
     "temple_color": "Black",
@@ -111,13 +119,9 @@ _FRAME_RICH_ATTRS = {
     "bridge_width": "22",
     "temple_length": "150",
     "blue_cut_lens": "Yes",
-    "lens_usp": "Anti-glare",
-    "product_usp": "Iconic classic",
     "usp_1": "Durable",
     "usp_2": "UV block",
-    "usp": "Timeless",
     "gender": "Unisex",
-    "gender_label": "Men & Women",
     "country_of_origin": "Italy",
     "warranty": "1 year",
     "upc": "805289126575",
@@ -130,7 +134,7 @@ _SUNGLASS_RICH_ATTRS = {
     "model_no": "OO9208",
     "colour_code": "PRIZM",
     "label": "Radar EV Path",
-    "full_model_no": "OO9208-51-38",
+    "model_name": "Radar EV",
     "shape": "Wrap",
     "frame_color": "Matte Black",
     "temple_color": "Black",
@@ -145,13 +149,9 @@ _SUNGLASS_RICH_ATTRS = {
     "tint": "Prizm Road",
     "lens_colour": "Rose",
     "lens_material": "Polycarbonate",
-    "lens_usp": "Prizm contrast",
-    "product_usp": "Sport performance",
     "usp_1": "Impact resistant",
     "usp_2": "Grippy",
-    "usp": "Elite sport",
     "gender": "Men",
-    "gender_label": "Men",
     "country_of_origin": "USA",
     "warranty": "2 years",
     "upc": "888392287533",
@@ -168,8 +168,9 @@ def test_frame_optional_list_includes_new_eyewear_keys():
     opt = set(pm.optional_fields("FRAME"))
     for key in _SHARED_EYEWEAR_KEYS + ("blue_cut_lens",):
         assert key in opt, f"FRAME optional missing '{key}'"
-    # The pre-existing FRAME optionals are preserved (additive, not a rewrite).
-    for key in ("subbrand", "size", "frame_material", "frame_type"):
+    # The surviving pre-rework FRAME optionals are preserved ('size' left the
+    # registry with the 2026-07-04 rework -- it was never rendered on the form).
+    for key in ("subbrand", "frame_material", "frame_type"):
         assert key in opt
 
 
@@ -177,9 +178,21 @@ def test_sunglass_optional_list_includes_new_eyewear_keys():
     opt = set(pm.optional_fields("SUNGLASS"))
     for key in _SHARED_EYEWEAR_KEYS + ("lens_colour", "lens_material"):
         assert key in opt, f"SUNGLASS optional missing '{key}'"
-    # The pre-existing SUNGLASS optionals are preserved.
+    # The surviving pre-rework SUNGLASS optionals are preserved.
     for key in ("subbrand", "lens_size", "polarization", "uv_protection", "tint"):
         assert key in opt
+
+
+def test_removed_keys_left_the_frame_and_sunglass_registry():
+    """2026-07-04 rework: full_model_no / lens_usp / product_usp / usp /
+    gender_label (and FRAME's never-rendered 'size') are no longer
+    registry-known on FRAME/SUNGLASS -- the form must not surface them."""
+    frame_opt = set(pm.optional_fields("FRAME"))
+    sun_opt = set(pm.optional_fields("SUNGLASS"))
+    for key in _REMOVED_EYEWEAR_KEYS:
+        assert key not in frame_opt, f"'{key}' should have left FRAME optional"
+        assert key not in sun_opt, f"'{key}' should have left SUNGLASS optional"
+    assert "size" not in frame_opt
 
 
 def test_all_category_specs_surfaces_new_keys_with_labels():
@@ -196,9 +209,17 @@ def test_all_category_specs_surfaces_new_keys_with_labels():
     assert frame_fields["gtin"]["label"] == "GTIN (mfr)"
     assert frame_fields["blue_cut_lens"]["label"] == "Blue-Cut Lens"
     assert frame_fields["shape"]["required"] is False
+    # Owner-locked labels from the 2026-07-04 rework.
+    assert frame_fields["model_name"]["label"] == "Model Name"
+    assert frame_fields["frame_material"]["label"] == "Frame Front Material"
+    assert frame_fields["bridge_width"]["label"] == "Bridge Size"
+    assert frame_fields["usp_1"]["label"] == "Product USP 1"
+    assert frame_fields["usp_2"]["label"] == "Product USP 2"
     sun_fields = {f["name"]: f for f in sunglass["fields"]}
     assert sun_fields["lens_colour"]["label"] == "Lens Colour"
     assert sun_fields["lens_material"]["label"] == "Lens Material"
+    assert sun_fields["frame_material"]["label"] == "Frame Front Material"
+    assert sun_fields["bridge_width"]["label"] == "Bridge Size"
 
 
 # ---------------------------------------------------------------------------
@@ -319,3 +340,29 @@ def test_plain_frame_without_rich_keys_still_validates():
     # None of the new keys were fabricated onto a payload that didn't send them.
     for key in _SHARED_EYEWEAR_KEYS + ("blue_cut_lens",):
         assert key not in doc["attributes"]
+
+
+def test_legacy_attribute_keys_still_persist_after_registry_removal():
+    """Keys the 2026-07-04 rework removed from the registry (full_model_no,
+    product_usp, ...) are NOT stripped when supplied -- attributes persist
+    unfiltered, so legacy docs / imports keep their old values."""
+    doc = pm.build_canonical_product(
+        {
+            "category": "FRAME",
+            "attributes": {
+                "brand_name": "Ray-Ban",
+                "model_no": "RB-2140",
+                "colour_code": "BLK",
+                "full_model_no": "RB2140-901-50",
+                "product_usp": "Iconic classic",
+                "gender_label": "Men & Women",
+            },
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+        },
+        source="FORM",
+    )
+    attrs = doc["attributes"]
+    assert attrs.get("full_model_no") == "RB2140-901-50"
+    assert attrs.get("product_usp") == "Iconic classic"
+    assert attrs.get("gender_label") == "Men & Women"
