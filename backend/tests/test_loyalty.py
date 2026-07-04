@@ -713,3 +713,102 @@ def test_account_snapshot_returns_recent_txns(client, auth_headers, patched_loya
     assert body["recent_transactions"][0]["type"] == "EARN"
     # settings echo
     assert body["settings"]["points_per_rupee"] == 0.01
+
+
+# ============================================================================
+# Category canonicalisation (plural settings keys vs canonical order items)
+# ============================================================================
+# Products store canonical singular categories (SUNGLASS, OPTICAL_LENS, ...)
+# while the settings screen historically offered plural keys (SUNGLASSES,
+# RX_LENSES, ...). These tests pin that a rule configured either way matches
+# a real order line -- the original bug was a plural-keyed config silently
+# earning at 1.0x for every canonical item.
+
+
+def test_default_category_multiplier_keys_are_canonical():
+    """DEFAULT_SETTINGS must only use canonical product-master keys."""
+    from api.services.product_master import resolve_category
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    for key in DEFAULT_SETTINGS["category_multipliers"]:
+        assert resolve_category(key) == key, f"non-canonical default key: {key}"
+
+
+def test_earn_calc_plural_config_matches_canonical_sunglass_item():
+    """A multiplier stored under SUNGLASSES applies to a SUNGLASS line."""
+    from api.services.loyalty_engine import calc_earn_points
+
+    settings = {
+        "enabled": True,
+        "points_per_rupee": 0.01,
+        "category_multipliers": {"SUNGLASSES": 2.0},
+        "tier_multipliers": {"BRONZE": 1.0},
+    }
+    items = [{"category": "SUNGLASS", "item_total": 10000}]
+    out = calc_earn_points(10000.0, items, "BRONZE", settings)
+    # 10000 x 2.0 (SUNGLASSES rule) x 0.01 = 200 -- NOT the 100 a silent
+    # non-match would produce.
+    assert out["points"] == 200
+
+
+def test_earn_calc_rx_lenses_config_matches_lens_item_type():
+    """RX_LENSES config matches both OPTICAL_LENS category and LENS item_type."""
+    from api.services.loyalty_engine import category_multiplier
+
+    settings = {"category_multipliers": {"RX_LENSES": 1.5}}
+    assert category_multiplier("OPTICAL_LENS", settings) == 1.5
+    assert category_multiplier("LENS", settings) == 1.5
+    # And the reverse: canonical config, plural/alias item spelling.
+    settings2 = {"category_multipliers": {"OPTICAL_LENS": 1.5}}
+    assert category_multiplier("RX_LENSES", settings2) == 1.5
+    # Unknown category still falls back to 1.0.
+    assert category_multiplier("GIFT_CARD", settings) == 1.0
+
+
+def test_settings_get_collapses_plural_doc_key_over_default():
+    """A stored SUNGLASSES value must override the default SUNGLASS value,
+    and the merged dict must expose ONLY the canonical key."""
+    from database.repositories.loyalty_repository import LoyaltySettingsRepository
+
+    coll = FakeCollection()
+    coll.insert_one(
+        {"_id": "loyalty_settings", "category_multipliers": {"SUNGLASSES": 2.0}}
+    )
+    repo = LoyaltySettingsRepository(coll)
+    mults = repo.get()["category_multipliers"]
+    assert mults["SUNGLASS"] == 2.0  # doc beats the 0.5 default
+    assert "SUNGLASSES" not in mults
+
+
+def test_sunglass_item_earns_with_multiplier_saved_from_settings_screen(
+    client, auth_headers, patched_loyalty
+):
+    """Regression (full loop): save a SUNGLASSES multiplier exactly the way the
+    old settings screen did, then earn on a canonical SUNGLASS order item --
+    the multiplier must actually apply."""
+    resp = client.put(
+        "/api/v1/loyalty/settings",
+        json={"category_multipliers": {"SUNGLASSES": 2.0, "RX_LENSES": 1.8}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    mults = resp.json()["category_multipliers"]
+    # Stored + echoed canonical.
+    assert mults["SUNGLASS"] == 2.0
+    assert mults["OPTICAL_LENS"] == 1.8
+    assert "SUNGLASSES" not in mults and "RX_LENSES" not in mults
+
+    patched_loyalty["orders"].seed("ORD-SG", "cust-sg", 10000.0)
+    resp = client.post(
+        "/api/v1/loyalty/earn",
+        json={
+            "customer_id": "cust-sg",
+            "order_id": "ORD-SG",
+            "items": [{"category": "SUNGLASS", "item_total": 10000}],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    # 10000 x 2.0 x 0.01 x 1.0 (BRONZE) = 200. The pre-fix engine silently
+    # earned 100 here (multiplier never matched).
+    assert resp.json()["awarded"] == 200

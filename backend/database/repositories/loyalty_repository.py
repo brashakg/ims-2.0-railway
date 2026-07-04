@@ -289,17 +289,20 @@ class LoyaltyTransactionRepository(BaseRepository):
 
 
 # Loyalty rule defaults. Centralised so the engine + the frontend share
-# one source of truth.
+# one source of truth. category_multipliers keys MUST be the canonical
+# product-master categories (product_master._CATEGORY_SPECS) -- order lines
+# carry the canonical form, and canonicalise_category_multipliers collapses
+# any legacy plural/alias key stored in Mongo onto these.
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "enabled": True,
     "points_per_rupee": 0.01,        # 1 point per 100 rupees
     "category_multipliers": {
-        "FRAME": 1.0, "FRAMES": 1.0,
-        "LENS": 1.5, "LENSES": 1.5, "RX_LENSES": 1.5,
-        "SUNGLASS": 0.5, "SUNGLASSES": 0.5,
-        "CONTACT_LENS": 1.0, "CONTACT_LENSES": 1.0,
+        "FRAME": 1.0,
+        "OPTICAL_LENS": 1.5,
+        "SUNGLASS": 0.5,
+        "CONTACT_LENS": 1.0,
         "WATCH": 0.0,
-        "ACCESSORY": 0.0, "ACCESSORIES": 0.0,
+        "ACCESSORIES": 0.0,
     },
     "min_order_for_earn": 0.0,
     "expiry_days": 365,
@@ -318,6 +321,32 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "PLATINUM": 1.5,
     },
 }
+
+
+def canonicalise_category_multipliers(
+    mults: Optional[Dict[str, Any]],
+) -> Dict[str, float]:
+    """Collapse category-multiplier keys onto the canonical product-master
+    vocabulary (SUNGLASSES -> SUNGLASS, RX_LENSES -> OPTICAL_LENS, ...).
+
+    When two keys collapse to the same canonical key, the LATER one wins --
+    callers put defaults first and user-stored values second so the user's
+    tuning overrides the default. Unknown keys are kept uppercased (fail-open,
+    consistent with the catalog dictionary) so a bespoke key still
+    round-trips. Non-numeric values are dropped.
+    """
+    from api.services.product_master import resolve_category
+
+    out: Dict[str, float] = {}
+    for key, value in (mults or {}).items():
+        canon = resolve_category(key) or str(key).strip().upper().replace(" ", "_")
+        if not canon:
+            continue
+        try:
+            out[canon] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 class LoyaltySettingsRepository(BaseRepository):
@@ -353,6 +382,14 @@ class LoyaltySettingsRepository(BaseRepository):
                     merged[k] = {**merged[k], **v}
                 else:
                     merged[k] = v
+        # Collapse legacy plural/alias keys onto the canonical vocabulary.
+        # Defaults were merged first, doc keys after -- so a doc key stored as
+        # SUNGLASSES lands AFTER the default SUNGLASS and wins the collapse
+        # (the owner's tuning beats the default, plural or not).
+        if isinstance(merged.get("category_multipliers"), dict):
+            merged["category_multipliers"] = canonicalise_category_multipliers(
+                merged["category_multipliers"]
+            )
         return merged
 
     def update(self, patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -361,6 +398,12 @@ class LoyaltySettingsRepository(BaseRepository):
         try:
             existing = self.collection.find_one({"_id": self.SINGLETON_ID}) or {}
             merged: Dict[str, Any] = {**existing, **patch}
+            # Persist canonical keys so the stored doc self-heals on every
+            # save (legacy plural keys collapse; patch keys win over existing).
+            if isinstance(merged.get("category_multipliers"), dict):
+                merged["category_multipliers"] = canonicalise_category_multipliers(
+                    merged["category_multipliers"]
+                )
             merged["_id"] = self.SINGLETON_ID
             merged["updated_at"] = datetime.now()
             # upsert

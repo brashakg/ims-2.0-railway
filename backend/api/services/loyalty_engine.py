@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from api.services.product_master import resolve_category
+
 # ============================================================================
 # Tier helpers
 # ============================================================================
@@ -48,9 +50,17 @@ def tier_multiplier(tier: str, settings: Dict[str, Any]) -> float:
 
 
 def category_multiplier(category: str, settings: Dict[str, Any]) -> float:
-    """Default 1.0 if the category isn't configured. Lookup is case-insensitive."""
+    """Default 1.0 if the category isn't configured.
+
+    Lookup is case-insensitive AND canonical: both the order line's category
+    and the configured keys are resolved through the product master's
+    resolve_category, so a config stored under a legacy plural key
+    (SUNGLASSES) still matches a canonical order line (SUNGLASS) and vice
+    versa. Without this, a rule saved from the settings screen could
+    silently never match any real order item.
+    """
     mults = settings.get("category_multipliers", {}) or {}
-    if not category:
+    if not category or not isinstance(mults, dict):
         return 1.0
     cat_upper = str(category).upper()
     # Try exact case + uppercase + a few common aliases.
@@ -58,6 +68,15 @@ def category_multiplier(category: str, settings: Dict[str, Any]) -> float:
         if key in mults:
             try:
                 return float(mults[key])
+            except (TypeError, ValueError):
+                continue
+    canon = resolve_category(category)
+    if canon is None:
+        return 1.0
+    for key, value in mults.items():
+        if key == canon or resolve_category(key) == canon:
+            try:
+                return float(value)
             except (TypeError, ValueError):
                 continue
     return 1.0

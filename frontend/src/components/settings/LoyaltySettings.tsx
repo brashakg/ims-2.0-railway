@@ -15,7 +15,19 @@ import { useToast } from '../../context/ToastContext';
 // Tier thresholds + multipliers share the same key set in practice but
 // are stored separately on the doc; we render them side-by-side.
 const KNOWN_TIERS = ['BRONZE', 'SILVER', 'GOLD', 'PLATINUM'];
-const KNOWN_CATEGORIES = ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'SUNGLASSES', 'WATCHES', 'ACCESSORIES'];
+// Canonical product categories (backend product_master._CATEGORY_SPECS) --
+// order lines carry these exact keys, so a multiplier saved under any other
+// spelling would never match. The server also canonicalises aliases
+// (SUNGLASSES -> SUNGLASS) on save as a backstop.
+const KNOWN_CATEGORIES = [
+  'FRAME',
+  'OPTICAL_LENS',
+  'READING_GLASSES',
+  'CONTACT_LENS',
+  'SUNGLASS',
+  'WATCH',
+  'ACCESSORIES',
+];
 
 export function LoyaltySettingsSection() {
   const { hasRole } = useAuth();
