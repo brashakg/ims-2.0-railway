@@ -628,7 +628,16 @@ export function QuickAddPage() {
         toast.success(
           createdSku
             ? `Product created — SKU ${createdSku}${createdBarcode ? ` · barcode ${createdBarcode}` : ''}.`
-            : 'Product created successfully!'
+            : 'Product created successfully!',
+          8000,
+          // Procurement Phase 1: one-click hop to the Buy Desk with the new
+          // product preselected (?add_product= handled in BuyDeskPage).
+          newId
+            ? {
+                label: 'Order this now',
+                onClick: () => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(newId)}`),
+              }
+            : undefined
         );
         if (saveAndNew) {
           resetForm(true);

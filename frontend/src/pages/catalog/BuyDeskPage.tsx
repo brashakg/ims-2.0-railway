@@ -7,8 +7,8 @@
 // Read-only data (GET /buy-desk/rows); the Purchase action routes to the
 // existing Purchase module. Restrained/neutral styling, one accent.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Loader2,
   Search,
@@ -101,6 +101,31 @@ export default function BuyDeskPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Deep link from Quick Add's "Order this now" toast: ?add_product=<id>
+  // preselects that product's row once rows are in. Runs once; fail-soft —
+  // an unknown id is ignored, and a not-yet-purchasable product is surfaced
+  // via the search box instead (its row shows what's missing).
+  const [searchParams] = useSearchParams();
+  const addProductHandled = useRef(false);
+  useEffect(() => {
+    if (addProductHandled.current || loading) return;
+    const pid = searchParams.get('add_product');
+    if (!pid) {
+      addProductHandled.current = true;
+      return;
+    }
+    addProductHandled.current = true;
+    const row = rows.find((r) => r.product_id === pid);
+    if (!row) return;
+    if (row.purchasable) {
+      setSelected((prev) => new Set(prev).add(pid));
+    } else {
+      // Not selectable yet — filter the table down to it so the operator sees
+      // the readiness chip explaining what's missing.
+      setQuery(row.sku || row.name || pid);
+    }
+  }, [loading, rows, searchParams]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

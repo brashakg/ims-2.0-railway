@@ -77,7 +77,20 @@ export default function BuyDeskDraftPOModal({
         const resp = await vendorsApi.getVendors({ is_active: true });
         if (cancelled) return;
         const raw: Record<string, unknown>[] = resp?.vendors ?? [];
-        setVendors(raw.map(mapVendor).filter((v) => v.id));
+        const options = raw.map(mapVendor).filter((v) => v.id);
+        setVendors(options);
+        // Procurement Phase 1: preselect the vendor from the products'
+        // preferred_vendor_id — but ONLY when every selected row that has a
+        // preference agrees on ONE vendor and that vendor is actually in the
+        // active list. Anything else (no preference, mixed vendors, inactive
+        // vendor) fails soft to today's manual pick. Never overrides a choice
+        // the user already made.
+        const preferred = [
+          ...new Set(rows.map((r) => r.preferred_vendor_id).filter((v): v is string => !!v)),
+        ];
+        if (preferred.length === 1 && options.some((v) => v.id === preferred[0])) {
+          setVendorId((prev) => prev || preferred[0]);
+        }
       } catch {
         if (!cancelled) toast.error('Could not load vendors');
       } finally {

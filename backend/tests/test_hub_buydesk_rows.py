@@ -88,6 +88,33 @@ def test_build_row_shape():
     assert row["on_hand"] == 4 and row["on_order"] == 2
     assert row["buy_signal"] == 14 - 4 - 2  # 8
     assert row["purchasable"] is True
+    # Additive Phase-1 field: absent on the product -> None (never a KeyError).
+    assert row["preferred_vendor_id"] is None
+
+
+def test_build_row_preferred_vendor_passthrough():
+    """preferred_vendor_id rides along when the product carries one (the
+    draft-PO modal preselects it); blank/None normalises to None."""
+    readiness = {"complete": True, "missing": [], "blockers": [], "purchasable": True}
+    row = bd.build_row(
+        {"product_id": "P2", "preferred_vendor_id": "V-9"},
+        readiness=readiness,
+        push_locked=False,
+        on_hand=0,
+        on_order=0,
+        velocity_per_day=None,
+    )
+    assert row["preferred_vendor_id"] == "V-9"
+
+    row_blank = bd.build_row(
+        {"product_id": "P3", "preferred_vendor_id": ""},
+        readiness=readiness,
+        push_locked=False,
+        on_hand=0,
+        on_order=0,
+        velocity_per_day=None,
+    )
+    assert row_blank["preferred_vendor_id"] is None
 
 
 # ---------------------------------------------------------------------------

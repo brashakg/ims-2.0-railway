@@ -102,4 +102,8 @@ def build_row(
         "on_order": int(on_order or 0),
         "buy_signal": buy_signal(velocity_per_day, on_hand, on_order, lead_days),
         "purchasable": bool(readiness.get("purchasable")),
+        # Additive (procurement Phase 1): the product's preferred vendor, when
+        # set — the draft-PO modal preselects it (fail-soft to manual pick).
+        # Same field the demand-forecast PO generator groups by (vendors.py).
+        "preferred_vendor_id": product.get("preferred_vendor_id") or None,
     }
