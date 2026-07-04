@@ -5190,6 +5190,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/brands/list",
         "allowed": "AUTHENTICATED",
     },
+    # AI description draft for the Add-Product form (catalog write roles;
+    # SUPERADMIN auto-passes). Always 200 with a status field -- see products.py.
+    {
+        "method": "POST",
+        "path": "/api/v1/products/generate-description",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/products/bulk-create",
