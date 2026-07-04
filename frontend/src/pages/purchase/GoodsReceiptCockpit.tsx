@@ -1,16 +1,18 @@
 // ============================================================================
-// IMS 2.0 - Goods-Receipt Cockpit  (Purchase P1 / S4)
+// IMS 2.0 - Deliveries Inbox / Goods-Receipt Cockpit  (procurement Phase 2)
 // ============================================================================
-// Vendor-first receiving screen for OPS users (SUPERADMIN / ADMIN / STORE_MANAGER).
-// Flow:
-//   1. Pick vendor  ->  fetch cockpit payload (3 worklists)
-//   2. Start receipt against an open PO  ->  enter rec/accepted/rejected per line
-//   3. MANDATORY: upload vendor invoice / challan (image or PDF) via the
-//      attachment gate before the "Create GRN" button is enabled
-//   4. Submit -> GRN created -> optional label-print dialog
+// LANDING (no vendor picked): a deliveries INBOX — every receivable PO across
+// all vendors for the user's store scope, one card per PO with the owner's
+// 5-word status chip and a [Receive this box] button. Tapping a card (or the
+// ?vendor_id=&po_id= deep link from the PO list) opens the guided 3-step
+// EXPRESS receive panel (bill first -> check items -> one confirm).
+//
+// The classic vendor-first cockpit stays reachable via a quiet "Receive
+// without a PO / Delivery Challan" link, and the two-step create+accept form
+// remains as the automatic fallback whenever a delivery is not clean.
 
 import { useState, useCallback, useEffect, useRef, startTransition } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Package,
   Upload,
@@ -23,6 +25,7 @@ import {
   Loader2,
   FileText,
   Truck,
+  Inbox,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { grnCockpitApi } from '../../services/api/grnCockpit';
@@ -37,6 +40,11 @@ import type {
   GRNItemInput,
   UploadDocResult,
 } from '../../services/api/grnCockpit';
+import { AttachmentZone } from './AttachmentZone';
+import { ExpressReceivePanel } from './ExpressReceivePanel';
+import type { TwoStepPrefill } from './ExpressReceivePanel';
+import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
+import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
 
 // ---- Local types -----------------------------------------------------------
 
@@ -179,109 +187,20 @@ function PrintLabelsDialog({ grnId, productIds, onClose }: PrintLabelsDialogProp
   );
 }
 
-// ---- Attachment upload zone ------------------------------------------------
+// ---- Deliveries-inbox card row ----------------------------------------------
+// One receivable PO across ANY vendor for the user's store scope. Mapped
+// client-side from the existing GET /vendors/purchase-orders payload (the same
+// endpoint PurchaseManagementPage uses) — no new backend endpoint.
 
-interface AttachmentZoneProps {
-  uploaded: UploadDocResult | null;
-  uploading: boolean;
-  onSelect: (file: File) => void;
-  onRemove: () => void;
-}
-
-function AttachmentZone({ uploaded, uploading, onSelect, onRemove }: AttachmentZoneProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files[0];
-    if (file) onSelect(file);
-  };
-
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) onSelect(file);
-    // Reset so the same file can be re-selected after remove
-    e.target.value = '';
-  };
-
-  if (uploaded && uploaded.file_id) {
-    return (
-      <div
-        className="flex items-center gap-3 rounded-lg px-4 py-3"
-        style={{
-          border: '1.5px solid var(--ok)',
-          background: 'rgba(34,197,94,0.06)',
-        }}
-      >
-        <CheckCircle2 className="w-5 h-5 flex-shrink-0" style={{ color: 'var(--ok)' }} />
-        <div className="flex-1 min-w-0">
-          <p
-            className="text-sm font-medium truncate"
-            style={{ color: 'var(--ink)' }}
-          >
-            {uploaded.filename}
-          </p>
-          <p className="text-xs" style={{ color: 'var(--ink-4)' }}>
-            {(uploaded.size / 1024).toFixed(0)} KB &middot;{' '}
-            {uploaded.persisted ? 'Saved to file store' : 'Buffered (not yet persisted)'}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="btn sm"
-          onClick={onRemove}
-          title="Remove and upload a different file"
-        >
-          <X className="w-3.5 h-3.5" />
-          Replace
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className="rounded-lg flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors"
-      style={{
-        border: '2px dashed var(--line)',
-        minHeight: 100,
-        padding: '20px 16px',
-      }}
-      onClick={() => inputRef.current?.click()}
-      onDrop={handleDrop}
-      onDragOver={(e) => e.preventDefault()}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => e.key === 'Enter' && inputRef.current?.click()}
-      aria-label="Upload vendor invoice or challan"
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*,application/pdf"
-        onChange={handleChange}
-        style={{ display: 'none' }}
-      />
-      {uploading ? (
-        <>
-          <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--bv)' }} />
-          <span className="text-sm" style={{ color: 'var(--ink-3)' }}>
-            Uploading…
-          </span>
-        </>
-      ) : (
-        <>
-          <Upload className="w-6 h-6" style={{ color: 'var(--ink-4)' }} />
-          <span className="text-sm font-medium" style={{ color: 'var(--ink-2)' }}>
-            Drag &amp; drop or click to upload
-          </span>
-          <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
-            Vendor invoice or delivery challan &middot; Image or PDF &middot; max 25 MB
-          </span>
-        </>
-      )}
-    </div>
-  );
+interface InboxPO {
+  po_id: string;
+  po_number: string;
+  vendor_id: string;
+  vendor_name: string;
+  status: string;
+  expected_date: string | null;
+  item_count: number;
+  pending_units: number;
 }
 
 // ============================================================================
@@ -303,7 +222,20 @@ export function GoodsReceiptCockpit() {
   const [cockpit, setCockpit] = useState<CockpitPayload | null>(null);
   const [loadingCockpit, setLoadingCockpit] = useState(false);
 
-  // ---- Open-PO receive form ------------------------------------------------
+  // ---- Deliveries inbox (landing) -------------------------------------------
+  // Receivable POs across ALL vendors for the store scope; null = loading.
+  const [inboxPOs, setInboxPOs] = useState<InboxPO[] | null>(null);
+  // The classic vendor-first picker stays reachable via a quiet link.
+  const [showClassicPicker, setShowClassicPicker] = useState(false);
+
+  // ---- Express receive panel (guided 3-step; procurement Phase 2) -----------
+  const [expressPO, setExpressPO] = useState<CockpitOpenPO | null>(null);
+  // Set when the flow fell back from express -> two-step (visible note).
+  const [twoStepNote, setTwoStepNote] = useState<string | null>(null);
+  // GRN to visually highlight in the pending-receipts panel (EXPRESS_PARTIAL).
+  const [highlightGrn, setHighlightGrn] = useState<string | null>(null);
+
+  // ---- Open-PO receive form (two-step create+accept — the fallback path) ----
   const [activePO, setActivePO] = useState<CockpitOpenPO | null>(null);
   const [receiveLines, setReceiveLines] = useState<ReceiveLine[]>([]);
   const [vendorInvoiceNo, setVendorInvoiceNo] = useState('');
@@ -369,8 +301,10 @@ export function GoodsReceiptCockpit() {
         `GRN ${grnNumber} accepted — ${res.units_added ?? 0} units added to stock` +
           (res.po_status ? ` · PO ${res.po_status}` : ''),
       );
+      if (highlightGrn === grnNumber) setHighlightGrn(null);
       await loadPendingGrns(vendorId);
       await loadCockpit(vendorId);
+      void loadInbox();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : `Failed to accept GRN ${grnNumber}`);
     } finally {
@@ -384,6 +318,7 @@ export function GoodsReceiptCockpit() {
     try {
       await vendorsApi.voidGRN(grnId);
       toast.success(`GRN ${grnNumber} voided`);
+      if (highlightGrn === grnNumber) setHighlightGrn(null);
       await loadPendingGrns(vendorId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : `Failed to void GRN ${grnNumber}`);
@@ -407,12 +342,83 @@ export function GoodsReceiptCockpit() {
     }
   }, [vendorsLoaded, storeId, toast]);
 
+  // ---- Deliveries inbox: receivable POs across ALL vendors ------------------
+  // Reuses GET /vendors/purchase-orders (the PurchaseManagementPage endpoint)
+  // and filters client-side to the receivable statuses. Fail-soft -> empty
+  // inbox; the quiet classic-picker link still works.
+  const loadInbox = useCallback(async () => {
+    try {
+      const res = await vendorsApi.getPurchaseOrders(
+        storeId ? { store_id: storeId } : {},
+      );
+      const raw: Array<Record<string, unknown>> = Array.isArray(
+        res?.purchase_orders,
+      )
+        ? res.purchase_orders
+        : [];
+      const rows: InboxPO[] = raw
+        .filter((p) =>
+          (RECEIVABLE_PO_STATUSES as readonly string[]).includes(
+            String(p.status ?? ''),
+          ),
+        )
+        .map((p) => {
+          const items = Array.isArray(p.items)
+            ? (p.items as Array<Record<string, unknown>>)
+            : [];
+          const headerReceived = (p.received_qty_by_product ?? {}) as Record<
+            string,
+            number
+          >;
+          let pendingUnits = 0;
+          for (const it of items) {
+            const ordered = Number(it.ordered_qty ?? it.quantity ?? 0) || 0;
+            const received =
+              Number(
+                it.received_qty ??
+                  headerReceived[String(it.product_id ?? '')] ??
+                  0,
+              ) || 0;
+            pendingUnits += Math.max(0, ordered - received);
+          }
+          return {
+            po_id: String(p.po_id ?? p._id ?? ''),
+            po_number: String(p.po_number ?? ''),
+            vendor_id: String(p.vendor_id ?? ''),
+            vendor_name:
+              String(p.vendor_name ?? '').trim() || String(p.vendor_id ?? ''),
+            status: String(p.status ?? ''),
+            expected_date: p.expected_date ? String(p.expected_date) : null,
+            item_count: items.length,
+            pending_units: pendingUnits,
+          };
+        })
+        // Soonest expected first; undated boxes sink to the bottom.
+        .sort((a, b) => {
+          if (a.expected_date && b.expected_date)
+            return a.expected_date.localeCompare(b.expected_date);
+          if (a.expected_date) return -1;
+          if (b.expected_date) return 1;
+          return a.po_number.localeCompare(b.po_number);
+        });
+      setInboxPOs(rows);
+    } catch {
+      setInboxPOs([]);
+    }
+  }, [storeId]);
+
+  useEffect(() => {
+    void loadInbox();
+  }, [loadInbox]);
+
   // ---- Fetch cockpit after vendor is picked --------------------------------
   const loadCockpit = useCallback(
     async (vid: string) => {
       if (!vid) {
         setCockpit(null);
         setActivePO(null);
+        setExpressPO(null);
+        setTwoStepNote(null);
         setReceiveLines([]);
         return;
       }
@@ -424,6 +430,8 @@ export function GoodsReceiptCockpit() {
         });
         setCockpit(data);
         setActivePO(null);
+        setExpressPO(null);
+        setTwoStepNote(null);
         setReceiveLines([]);
         setUploadResult(null);
         // Surface any created-but-unaccepted GRNs alongside the worklists.
@@ -463,36 +471,66 @@ export function GoodsReceiptCockpit() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- Select a PO to receive against -------------------------------------
-  const onSelectPO = (po: CockpitOpenPO) => {
-    setActivePO(po);
-    setUploadResult(null);
-    setVendorInvoiceNo('');
-    setNotes('');
-    const lines: ReceiveLine[] = po.lines.map((l) => ({
-      product_id: l.product_id ?? '',
-      product_name: l.product_name ?? l.product_id ?? '',
-      sku: l.sku,
-      ordered_qty: l.ordered_qty,
-      received_qty: l.pending_qty,   // default: receive all pending
-      accepted_qty: l.pending_qty,
-      rejected_qty: 0,
-      rejection_reason: '',
-      batch_code: '',
-      expiry_date: '',
-      unit_price: l.unit_price ?? null,
-    }));
-    setReceiveLines(lines);
+  // ---- Open the guided EXPRESS receive panel for a PO -----------------------
+  // This is THE receive path now (deliveries-inbox cards, deep links and the
+  // classic cockpit's open-PO buttons all land here); the two-step form below
+  // remains as the automatic fallback for non-clean deliveries.
+  const openExpress = (po: CockpitOpenPO) => {
+    setActivePO(null);
+    setReceiveLines([]);
+    setTwoStepNote(null);
+    setHighlightGrn(null);
+    setExpressPO(po);
   };
 
-  // Second half of the deep link: once the cockpit payload for the deep-linked
-  // vendor is in, open the requested PO's receive form (if it is still open).
+  // ---- Deliveries-inbox card tap: same path as the ?vendor_id=&po_id= deep
+  // link — select the vendor, load its cockpit, then (below, once the payload
+  // is in) open the express panel for that PO.
+  const onInboxReceive = (row: InboxPO) => {
+    pendingPoId.current = row.po_id;
+    void ensureVendors();
+    setVendorId(row.vendor_id);
+    startTransition(() => loadCockpit(row.vendor_id));
+  };
+
+  // ---- Fallback: open the EXISTING two-step create+accept form prefilled with
+  // the express panel's state (any non-clean delivery lands here — either the
+  // user edited a line in step 2, or the server answered EXPRESS_NOT_CLEAN).
+  const openTwoStepPrefilled = (po: CockpitOpenPO, prefill: TwoStepPrefill) => {
+    setExpressPO(null);
+    setActivePO(po);
+    setVendorInvoiceNo(prefill.vendorInvoiceNo);
+    setUploadResult(prefill.upload);
+    setNotes('');
+    setReceiveLines(
+      prefill.lines.map((l) => ({
+        product_id: l.product_id,
+        product_name: l.product_name,
+        sku: l.sku,
+        ordered_qty: l.ordered_qty,
+        received_qty: l.received_qty,
+        accepted_qty: l.accepted_qty,
+        rejected_qty: l.rejected_qty,
+        rejection_reason: '',
+        batch_code: l.batch_code,
+        expiry_date: l.expiry_date,
+        unit_price: l.unit_price,
+      })),
+    );
+    setTwoStepNote(
+      'This delivery has differences — using the step-by-step receive.',
+    );
+  };
+
+  // Second half of the deep link (and of an inbox-card tap): once the cockpit
+  // payload for the vendor is in, open the express panel for that PO (if it is
+  // still open).
   useEffect(() => {
     const poId = pendingPoId.current;
     if (!poId || !cockpit) return;
     pendingPoId.current = null;
     const po = cockpit.open_pos.find((p) => p.po_id === poId);
-    if (po) onSelectPO(po);
+    if (po) openExpress(po);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cockpit]);
 
@@ -502,6 +540,7 @@ export function GoodsReceiptCockpit() {
     setUploadResult(null);
     setVendorInvoiceNo('');
     setNotes('');
+    setTwoStepNote(null);
   };
 
   // ---- Line qty edits -------------------------------------------------------
@@ -634,9 +673,10 @@ export function GoodsReceiptCockpit() {
       const productIds = [...new Set(items.map((i) => i.product_id))];
       setPrintDialog({ grnId: result.grn_id, productIds });
 
-      // Refresh cockpit
+      // Refresh cockpit + deliveries inbox
       onCancelPO();
       await loadCockpit(vendorId);
+      void loadInbox();
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: unknown } } })
         ?.response?.data?.detail;
@@ -683,71 +723,169 @@ export function GoodsReceiptCockpit() {
             <div className="eyebrow" style={{ marginBottom: 6 }}>
               Purchase &middot; receive
             </div>
-            <h1>Goods-receipt cockpit.</h1>
+            <h1>Deliveries inbox.</h1>
             <p className="text-sm mt-1" style={{ color: 'var(--ink-4)' }}>
-              Select a vendor to see open POs, pending items, and catalogued
-              products. Receive against an open PO — upload the vendor invoice
-              first.
+              {vendorId
+                ? 'Receive against an open PO — the bill goes in first, then the box goes on the shelf.'
+                : 'Every box on its way to you, across all vendors. Tap one when it lands — bill first, then stock.'}
             </p>
           </div>
+          {vendorId && (
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => onVendorChange('')}
+            >
+              <Inbox className="w-3.5 h-3.5" /> All deliveries
+            </button>
+          )}
         </div>
 
-        {/* ── Vendor picker ── */}
-        <div className="card mb-4">
-          <div className="card-head">
-            <h3 className="flex items-center gap-2">
-              <Truck className="w-4 h-4" /> Select vendor
-            </h3>
-          </div>
-          <div className="card-body">
-            <div className="flex gap-3 items-end flex-wrap">
-              <div className="flex-1 min-w-48">
-                <label
-                  className="block text-xs font-medium mb-1"
-                  style={{ color: 'var(--ink-4)' }}
-                >
-                  Vendor
-                </label>
-                <select
-                  value={vendorId}
-                  onChange={(e) => onVendorChange(e.target.value)}
-                  onFocus={ensureVendors}
-                  className="input w-full"
-                  disabled={loadingVendors}
-                >
-                  <option value="">
-                    {loadingVendors ? 'Loading vendors…' : 'Select a vendor…'}
-                  </option>
-                  {vendors.map((v) => (
-                    <option key={v.vendor_id} value={v.vendor_id}>
-                      {v.display_name ?? v.trade_name ?? v.legal_name ?? v.vendor_id}
+        {/* ── Vendor picker (classic vendor-first cockpit) ── */}
+        {(showClassicPicker || vendorId) && (
+          <div className="card mb-4">
+            <div className="card-head">
+              <h3 className="flex items-center gap-2">
+                <Truck className="w-4 h-4" /> Select vendor
+              </h3>
+            </div>
+            <div className="card-body">
+              <div className="flex gap-3 items-end flex-wrap">
+                <div className="flex-1 min-w-48">
+                  <label
+                    className="block text-xs font-medium mb-1"
+                    style={{ color: 'var(--ink-4)' }}
+                  >
+                    Vendor
+                  </label>
+                  <select
+                    value={vendorId}
+                    onChange={(e) => onVendorChange(e.target.value)}
+                    onFocus={ensureVendors}
+                    className="input w-full"
+                    disabled={loadingVendors}
+                  >
+                    <option value="">
+                      {loadingVendors ? 'Loading vendors…' : 'Select a vendor…'}
                     </option>
-                  ))}
-                </select>
-              </div>
-              {loadingCockpit && (
-                <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--ink-4)' }}>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Loading…
+                    {vendors.map((v) => (
+                      <option key={v.vendor_id} value={v.vendor_id}>
+                        {v.display_name ?? v.trade_name ?? v.legal_name ?? v.vendor_id}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-              )}
+                {loadingCockpit && (
+                  <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--ink-4)' }}>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Loading…
+                  </div>
+                )}
+              </div>
+              <p className="text-xs mt-2" style={{ color: 'var(--ink-4)' }}>
+                Goods that arrived with a delivery challan (tax invoice to
+                follow) are logged on the{' '}
+                <Link
+                  to="/purchase/grn"
+                  className="underline"
+                  style={{ color: 'var(--bv)' }}
+                >
+                  classic GRN screen
+                </Link>
+                {' '}— that flow is unchanged.
+              </p>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* ── No vendor selected ── */}
+        {/* ── Deliveries inbox (landing — no vendor picked) ── */}
         {!vendorId && (
-          <div
-            className="card text-center py-12"
-            style={{ color: 'var(--ink-4)' }}
-          >
-            <Package className="w-10 h-10 mx-auto mb-3" style={{ color: 'var(--ink-5)' }} />
-            <p className="font-medium">Select a vendor to get started</p>
-            <p className="text-sm mt-1" style={{ color: 'var(--ink-5)' }}>
-              The cockpit shows open POs, items pending receipt, and catalogued
-              products for the selected vendor.
-            </p>
-          </div>
+          <>
+            {inboxPOs === null ? (
+              <div
+                className="card text-center py-12"
+                style={{ color: 'var(--ink-4)' }}
+              >
+                <Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin" />
+                <p className="text-sm">Checking for deliveries…</p>
+              </div>
+            ) : inboxPOs.length === 0 ? (
+              <div
+                className="card text-center py-12"
+                style={{ color: 'var(--ink-4)' }}
+              >
+                <Package
+                  className="w-10 h-10 mx-auto mb-3"
+                  style={{ color: 'var(--ink-5)' }}
+                />
+                <p className="font-medium">No deliveries waiting</p>
+                <p className="text-sm mt-1" style={{ color: 'var(--ink-5)' }}>
+                  Every purchase order with the vendor has been received. New
+                  boxes appear here the moment a PO is sent.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
+                {inboxPOs.map((row) => (
+                  <div
+                    key={row.po_id}
+                    className="card"
+                    style={{ padding: 16 }}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className="font-semibold text-sm truncate"
+                          style={{ color: 'var(--ink)' }}
+                        >
+                          {row.vendor_name}
+                        </p>
+                        <p
+                          className="mono text-xs mt-0.5"
+                          style={{ color: 'var(--ink-4)' }}
+                        >
+                          {row.po_number}
+                        </p>
+                        <p
+                          className="text-xs mt-1"
+                          style={{ color: 'var(--ink-4)' }}
+                        >
+                          {row.item_count} item{row.item_count === 1 ? '' : 's'}
+                          {row.pending_units > 0 &&
+                            ` · ${fmt(row.pending_units)} units due`}
+                          {fmtDate(row.expected_date) &&
+                            ` · expected ${fmtDate(row.expected_date)}`}
+                        </p>
+                      </div>
+                      <PurchaseStatusChip status={row.status} />
+                    </div>
+                    <button
+                      type="button"
+                      className="btn accent w-full mt-3 justify-center"
+                      onClick={() => onInboxReceive(row)}
+                    >
+                      <Package className="w-4 h-4" />
+                      Receive this box
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Quiet escape hatch to the classic vendor-first cockpit / DC */}
+            {!showClassicPicker && (
+              <div className="mt-4 text-center">
+                <button
+                  type="button"
+                  className="text-xs underline"
+                  style={{ color: 'var(--ink-4)' }}
+                  onClick={() => setShowClassicPicker(true)}
+                >
+                  Receive without a PO / Delivery Challan
+                </button>
+              </div>
+            )}
+          </>
         )}
 
         {/* ── Cockpit content (vendor selected) ── */}
@@ -774,9 +912,50 @@ export function GoodsReceiptCockpit() {
               </div>
             </div>
 
-            {/* ── Receive form (when a PO is selected) ── */}
-            {activePO ? (
+            {/* ── Guided express receive (procurement Phase 2) ── */}
+            {expressPO ? (
+              <ExpressReceivePanel
+                key={expressPO.po_id}
+                po={expressPO}
+                vendorName={
+                  vendors.find((v) => v.vendor_id === vendorId)?.display_name
+                }
+                onCancel={() => setExpressPO(null)}
+                onReceived={async () => {
+                  setExpressPO(null);
+                  await loadCockpit(vendorId);
+                  void loadInbox();
+                }}
+                onFallbackToTwoStep={(prefill) =>
+                  openTwoStepPrefilled(expressPO, prefill)
+                }
+                onOpenPendingReceipts={async (grnNumber) => {
+                  setHighlightGrn(grnNumber || null);
+                  setExpressPO(null);
+                  await loadCockpit(vendorId);
+                  void loadInbox();
+                }}
+              />
+            ) : activePO ? (
               <div className="space-y-4">
+                {/* Fallback note: this delivery broke the clean express path */}
+                {twoStepNote && (
+                  <div
+                    className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm"
+                    style={{
+                      border: '1.5px solid var(--warn)',
+                      background: 'rgba(245,158,11,0.08)',
+                      color: 'var(--ink-2)',
+                    }}
+                    role="status"
+                  >
+                    <AlertCircle
+                      className="w-4 h-4 flex-shrink-0"
+                      style={{ color: 'var(--warn)' }}
+                    />
+                    {twoStepNote}
+                  </div>
+                )}
                 {/* PO header */}
                 <div className="card">
                   <div className="card-head">
@@ -1130,9 +1309,15 @@ export function GoodsReceiptCockpit() {
                         <div
                           key={g.grn_id}
                           className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2"
+                          style={
+                            highlightGrn === g.grn_number
+                              ? { boxShadow: '0 0 0 2px var(--warn)' }
+                              : undefined
+                          }
                         >
                           <div className="min-w-0 text-sm">
-                            <span className="font-medium text-gray-900">{g.grn_number}</span>
+                            <span className="font-medium text-gray-900">{g.grn_number}</span>{' '}
+                            <PurchaseStatusChip status="PENDING" kind="grn" />
                             {g.vendor_invoice_no && (
                               <span className="text-gray-500"> · Inv {g.vendor_invoice_no}</span>
                             )}
@@ -1198,12 +1383,15 @@ export function GoodsReceiptCockpit() {
                           }}
                         >
                           <div className="flex-1 min-w-0">
-                            <p
-                              className="font-semibold mono text-sm"
-                              style={{ color: 'var(--ink)' }}
-                            >
-                              {po.po_number}
-                            </p>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p
+                                className="font-semibold mono text-sm"
+                                style={{ color: 'var(--ink)' }}
+                              >
+                                {po.po_number}
+                              </p>
+                              <PurchaseStatusChip status={po.status} />
+                            </div>
                             <p
                               className="text-xs mt-0.5"
                               style={{ color: 'var(--ink-4)' }}
@@ -1242,9 +1430,9 @@ export function GoodsReceiptCockpit() {
                           <button
                             type="button"
                             className="btn sm accent flex-shrink-0"
-                            onClick={() => onSelectPO(po)}
+                            onClick={() => openExpress(po)}
                           >
-                            Receive
+                            Receive this box
                           </button>
                         </div>
                       ))}
