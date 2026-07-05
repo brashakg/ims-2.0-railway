@@ -509,6 +509,20 @@ def _sync_existing_order_status(
     if not existing:
         return False
 
+    # HISTORICAL import guard: a pre-IMS order imported for customer-360
+    # history only (scripts/migrate_bvi_pim.py orders leg; status="HISTORICAL",
+    # source="bvi_import") was settled OUTSIDE IMS books and is excluded from
+    # every revenue/GST/P&L aggregation BY ITS STATUS. A late Shopify
+    # orders/updated webhook (e.g. the owner archiving an old order) must
+    # never flip that status to DELIVERED/CONFIRMED -- that would silently
+    # start counting the order as IMS revenue.
+    if existing.get("historical") or existing.get("source") == "bvi_import":
+        logger.info(
+            "[ONLINE_MAP] skip status sync for HISTORICAL import shopify_order=%s",
+            shopify_order_id,
+        )
+        return False
+
     st = _derive_statuses(payload)
     grand_total = _f(existing.get("grand_total"))
     update: Dict[str, Any] = {

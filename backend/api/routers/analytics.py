@@ -383,8 +383,9 @@ def _safe_float(val: Any) -> float:
 
 # Statuses that do NOT represent real revenue.  CANCELLED orders were never
 # fulfilled; DRAFT orders were never confirmed.  Including them inflated the
-# dashboard revenue/order-count metrics (RPT-1).
-_EXCLUDED_ORDER_STATUSES = frozenset({"CANCELLED", "DRAFT"})
+# dashboard revenue/order-count metrics (RPT-1).  HISTORICAL = a pre-IMS order
+# imported for customer-360 history only (settled outside IMS books).
+_EXCLUDED_ORDER_STATUSES = frozenset({"CANCELLED", "DRAFT", "HISTORICAL"})
 
 
 def _is_billable(order: dict) -> bool:

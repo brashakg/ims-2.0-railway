@@ -293,7 +293,7 @@ class OracleAgent(JarvisAgent):
             return []
         try:
             pipeline = [
-                {"$match": {"status": {"$nin": ["DRAFT", "CANCELLED", "draft", "cancelled"]},
+                {"$match": {"status": {"$nin": ["DRAFT", "CANCELLED", "draft", "cancelled", "HISTORICAL", "historical"]},
                             "customer_id": {"$nin": [None, ""]}}},
                 {"$group": {"_id": "$customer_id",
                             "ltv": {"$sum": {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}},
@@ -463,7 +463,7 @@ class OracleAgent(JarvisAgent):
         # 1. Booked-order demand over the trailing 30 days (Python-side tally).
         try:
             orders = list(orders_coll.find({
-                "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
                 "created_at": {"$gte": now - timedelta(days=30)},
             }))
         except Exception as e:

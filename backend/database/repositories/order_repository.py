@@ -631,7 +631,7 @@ class OrderRepository(BaseRepository):
                     "$gte": ist_day_start_utc(from_date),
                     "$lte": ist_day_start_utc(to_date + timedelta(days=1))
                 },
-                "status": {"$nin": ["CANCELLED", "DRAFT"]}
+                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
             }},
             {"$group": {
                 "_id": None,
@@ -663,7 +663,7 @@ class OrderRepository(BaseRepository):
                     "$gte": ist_day_start_utc(from_date),
                     "$lte": ist_day_start_utc(to_date + timedelta(days=1))
                 },
-                "status": {"$nin": ["CANCELLED", "DRAFT"]}
+                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
             }},
             {"$group": {
                 "_id": "$salesperson_id",
@@ -684,7 +684,7 @@ class OrderRepository(BaseRepository):
             {"$match": {
                 "store_id": store_id,
                 "created_at": {"$gte": start_date},
-                "status": {"$nin": ["CANCELLED", "DRAFT"]}
+                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
             }},
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at", "timezone": "+05:30"}},

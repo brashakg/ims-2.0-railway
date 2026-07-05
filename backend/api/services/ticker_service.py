@@ -23,8 +23,11 @@ from typing import Any, Dict, List, Optional
 from api.utils.ist import ist_today, ist_day_start_utc
 
 # Mirror finance.py exactly (single source of truth for "real" revenue).
+# HISTORICAL = pre-IMS imported order (settled outside IMS books; never revenue).
 _REVENUE_EXPR = {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}
-_EXCLUDED_ORDER_STATUSES = ["CANCELLED", "DRAFT", "cancelled", "draft"]
+_EXCLUDED_ORDER_STATUSES = [
+    "CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical",
+]
 _REAL_ORDER_STATUS_FILTER = {"$nin": _EXCLUDED_ORDER_STATUSES}
 
 # Roles that may see raw rupee figures + per-store breakdown + pace.

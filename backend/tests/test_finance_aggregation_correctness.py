@@ -136,6 +136,31 @@ def _excludes_draft_cancelled(match):
 
 
 # ============================================================================
+# 0. HISTORICAL exclusion pin (BVI pre-IMS order import)
+# ============================================================================
+
+
+class TestHistoricalStatusExcluded:
+    """Pre-IMS orders imported by scripts/migrate_bvi_pim.py (orders leg) carry
+    status="HISTORICAL": they were transacted + settled OUTSIDE IMS books and
+    IMS never minted their invoice, so they must NEVER count in revenue / GST /
+    P&L / cash-flow / AR / Tally export. The single lever is the shared
+    excluded-status list -- pin it so a refactor can't silently drop it."""
+
+    def test_finance_excluded_statuses_include_historical(self):
+        assert "HISTORICAL" in finance._EXCLUDED_ORDER_STATUSES
+        assert "historical" in finance._EXCLUDED_ORDER_STATUSES
+        # The derived filter every finance aggregation reuses.
+        assert "HISTORICAL" in finance._REAL_ORDER_STATUS_FILTER["$nin"]
+
+    def test_ticker_mirror_includes_historical(self):
+        from api.services import ticker_service
+
+        assert "HISTORICAL" in ticker_service._EXCLUDED_ORDER_STATUSES
+        assert "historical" in ticker_service._EXCLUDED_ORDER_STATUSES
+
+
+# ============================================================================
 # 1. Pure helpers: _parse_range_dt / _apply_created_at_range
 # ============================================================================
 

@@ -74,7 +74,12 @@ _DISCOUNT_EXPR = {"$ifNull": ["$discount_total", {"$ifNull": ["$discount_amount"
 # reports.py (`status: {"$nin": ["CANCELLED", "DRAFT"]}`). The original finance
 # queries had NO status filter, so cancelled + still-draft orders inflated
 # revenue, P&L, GST collected, and cash inflow. Lowercase variants tolerated.
-_EXCLUDED_ORDER_STATUSES = ["CANCELLED", "DRAFT", "cancelled", "draft"]
+# HISTORICAL = a pre-IMS order imported for customer-360 history only
+# (scripts/migrate_bvi_pim.py orders leg): transacted + settled OUTSIDE IMS
+# books, never invoiced by IMS -- so it is NOT revenue/tax/GST either.
+_EXCLUDED_ORDER_STATUSES = [
+    "CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical",
+]
 _REAL_ORDER_STATUS_FILTER = {"$nin": _EXCLUDED_ORDER_STATUSES}
 
 

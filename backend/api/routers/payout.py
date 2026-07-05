@@ -179,7 +179,7 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
                     {
                         "$match": {
                             "store_id": store_id,
-                            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
                             "created_at": {"$gte": start_dt, "$lt": next_first},
                         }
                     },
@@ -210,7 +210,7 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
                         continue
                 else:
                     continue
-                if d.get("status") in ("CANCELLED", "DRAFT"):
+                if d.get("status") in ("CANCELLED", "DRAFT", "HISTORICAL"):
                     continue
                 out["sales"] += float(d.get("grand_total") or 0)
                 out["discount"] += float(d.get("total_discount") or 0)

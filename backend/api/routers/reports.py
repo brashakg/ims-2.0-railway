@@ -73,7 +73,7 @@ def _orders_in_window(
     `order_repo.find_many` which preserves the datetime objects."""
     flt: dict = {
         "created_at": {"$gte": start_dt, "$lte": end_dt},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+        "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
     }
     if store_id:
         flt["store_id"] = store_id
@@ -605,7 +605,7 @@ async def sales_by_salesperson(
         {
             "store_id": active_store,
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },
         limit=0,
     )
@@ -1010,7 +1010,7 @@ async def outstanding_report(
         {
             "store_id": active_store,
             "balance_due": {"$gt": 0},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },
         limit=0,
     )
@@ -1141,7 +1141,7 @@ async def gst_report(
             # Datetime objects, NOT .isoformat() strings -- created_at is a
             # BSON datetime and a string comparison never matches.
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+            "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
         },
         limit=0,  # 0 -> no cap: a GST report must include every invoice.
     )
@@ -1436,7 +1436,7 @@ async def profit_by_category(
         {
             "store_id": active_store,
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },
         limit=0,
     )
@@ -1496,7 +1496,7 @@ async def profit_by_store(
     orders = order_repo.find_many(
         {
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },
         limit=0,
     )
@@ -2586,7 +2586,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             # silently never matches (this was the original GSTR bug).
             query = {
                 "store_id": active_store,
-                "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+                "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
 
@@ -3173,7 +3173,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             for order in orders_col.find(
                 {
                     "store_id": active_store,
-                    "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+                    "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
                     "created_at": {"$gte": from_dt, "$lt": to_dt},
                 }
             ):
@@ -3536,7 +3536,7 @@ async def non_moving_stock(
             {
                 "$match": {
                     "store_id": active_store,
-                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                    "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
                 }
             },
             {"$unwind": "$items"},
@@ -4388,7 +4388,7 @@ async def purchase_recommendations(
             {
                 "$match": {
                     "store_id": active_store,
-                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                    "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
                     "created_at": {"$gte": cutoff},
                 }
             },
