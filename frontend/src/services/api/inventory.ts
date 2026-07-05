@@ -448,6 +448,14 @@ export const vendorsApi = {
     return response.data;
   },
 
+  // PO lifecycle timeline (backend PR #869): chronological owner-vocabulary
+  // events (Ordered / Sent / Box received / On shelf / Bill settled) plus the
+  // raw linked GRNs + purchase invoices. 404s on cross-store access.
+  getPOTimeline: async (poId: string) => {
+    const response = await api.get(`/vendors/purchase-orders/${poId}/timeline`);
+    return response.data;
+  },
+
   createPurchaseOrder: async (po: {
     vendor_id: string;
     delivery_store_id: string;
