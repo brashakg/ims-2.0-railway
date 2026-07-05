@@ -34,11 +34,14 @@ def test_summary_mounts_and_returns_status(client, auth_headers):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["module"] == "online_store"
-    assert body["status"] == "foundation"
-    assert body["phase"] == 1
-    # Single-writer safety: writes are OFF in Phase 1.
+    # 2026-07-05 truth refresh: phases 1-5 shipped; the summary now reports the
+    # REAL push gate (not hardcoded foundation values).
+    assert body["status"] == "cutover-ready"
+    assert body["phase"] == 5
+    # Single-writer safety: the triple gate is unarmed in tests -> writes OFF.
     assert body["shopify_writes_enabled"] is False
-    # Planned feature list is surfaced so the owner sees the roadmap.
+    assert body["push_mode"] is None or body["push_mode"].get("is_live") is False
+    # Feature list is surfaced so the owner sees the roadmap + status.
     keys = {f["key"] for f in body["planned_features"]}
     assert {"collections", "mega_menu", "image_design_queue", "shopify_push"} <= keys
     # Foundation counts present + fail-soft (all ints, never missing). The
