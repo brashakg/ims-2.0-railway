@@ -1,33 +1,21 @@
 // ============================================================================
-// IMS 2.0 - Create Purchase Order Modal
+// IMS 2.0 - Create Purchase Order (manual full form)
 // ============================================================================
+// Thin wrapper: page chrome (overlay + header + close) around the shared
+// <PurchaseOrderComposer/> so the manual form and the Buy Desk quick draft use
+// ONE PO body with identical fields, labels, cost pre-fill and validation
+// (owner ruling, procurement Phase 2C). What's local to this door: the
+// searchable product picker per line (ProductSearchSelect) and the ability to
+// add/remove lines -- both fed to the composer via props.
 
 import { useState, useEffect, useRef } from 'react';
-import {
-  FileText,
-  Plus,
-  X as XIcon,
-  Trash2,
-  Loader2,
-  Search,
-} from 'lucide-react';
+import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi, productApi } from '../../services/api';
+import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
+import type { ComposerVendorOption } from '../../components/purchase/PurchaseOrderComposer';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
-
-// A PO line now carries a REAL catalogued product_id (set by the picker), never
-// a fabricated `new-<timestamp>` id. With the Hub Phase-2 PO catalog gate ON,
-// the backend rejects any line whose product_id is not on the products spine
-// (422 UNKNOWN_PRODUCT) -- so the form must hand it a genuine product.
-interface POFormItem {
-  productId: string;
-  productName: string;
-  sku: string;
-  quantity: number;
-  unitCost: number;
-  taxRate: number;
-}
 
 interface PickedProduct {
   productId: string;
@@ -208,137 +196,16 @@ interface PurchaseOrderFormProps {
   onCreated: (po: PurchaseOrder) => void;
 }
 
+// Map the purchase module's Supplier down to the composer's vendor option.
+function supplierToVendor(s: Supplier): ComposerVendorOption {
+  return { id: s.id, name: s.name, code: s.code };
+}
+
 export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreated }: PurchaseOrderFormProps) {
   const toast = useToast();
   const { user } = useAuth();
 
-  const [supplierId, setSupplierId] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-  const [expectedDelivery, setExpectedDelivery] = useState('');
-  const [notes, setNotes] = useState('');
-  const [items, setItems] = useState<POFormItem[]>([
-    { productId: '', productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 },
-  ]);
-
-  const addItem = () => {
-    setItems(prev => [...prev, { productId: '', productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 }]);
-  };
-
-  const removeItem = (index: number) => {
-    setItems(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const updateItem = (index: number, field: string, value: string | number) => {
-    setItems(prev => prev.map((item, i) => i === index ? { ...item, [field]: value } : item));
-  };
-
-  const pickProduct = (index: number, p: PickedProduct) => {
-    setItems(prev => prev.map((item, i) => i === index
-      ? {
-          ...item,
-          productId: p.productId,
-          productName: p.productName,
-          sku: p.sku,
-          // Prefill cost from the catalog only when the line still has none; the
-          // buyer can always override the negotiated PO price.
-          unitCost: item.unitCost > 0 ? item.unitCost : p.costPrice,
-        }
-      : item));
-  };
-
-  const clearProduct = (index: number) => {
-    setItems(prev => prev.map((item, i) => i === index
-      ? { ...item, productId: '', productName: '', sku: '' }
-      : item));
-  };
-
-  const calcLineTotal = (item: POFormItem) => {
-    return item.quantity * item.unitCost * (1 + item.taxRate / 100);
-  };
-
-  const calcSubtotal = () => items.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
-  const calcTax = () => items.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
-  const calcGrandTotal = () => calcSubtotal() + calcTax();
-
-  const handleCreate = async () => {
-    if (!supplierId) {
-      toast.error('Please select a supplier');
-      return;
-    }
-    if (!expectedDelivery) {
-      toast.error('Please set an expected delivery date');
-      return;
-    }
-    // A valid line must reference a REAL catalogued product (product_id set by
-    // the picker) plus a positive qty + cost. Lines without a picked product are
-    // dropped -- they would be rejected by the PO catalog gate anyway.
-    const validItems = items.filter(item => item.productId && item.quantity > 0 && item.unitCost > 0);
-    if (validItems.length === 0) {
-      toast.error('Add at least one catalogued product with a quantity and unit cost');
-      return;
-    }
-    const unpicked = items.filter(item => !item.productId && (item.quantity > 0 || item.unitCost > 0));
-    if (unpicked.length > 0) {
-      toast.error('Pick a catalogued product for every line (or remove the empty line)');
-      return;
-    }
-
-    const storeId = user?.activeStoreId ?? 'default';
-    const supplier = suppliers.find(s => s.id === supplierId);
-
-    setIsSaving(true);
-    try {
-      const resp = await vendorsApi.createPurchaseOrder({
-        vendor_id: supplierId,
-        delivery_store_id: storeId,
-        expected_date: expectedDelivery,
-        notes: notes || undefined,
-        items: validItems.map((item) => ({
-          product_id: item.productId,
-          product_name: item.productName,
-          sku: item.sku || 'N/A',
-          quantity: item.quantity,
-          unit_price: item.unitCost,
-        })),
-      });
-
-      const poItems: POItem[] = validItems.map((item) => ({
-        productId: item.productId,
-        productName: item.productName,
-        sku: item.sku || 'N/A',
-        quantity: item.quantity,
-        unitCost: item.unitCost,
-        taxRate: item.taxRate,
-        total: calcLineTotal(item),
-      }));
-
-      const subtotal = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
-      const taxAmount = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
-
-      const newPO: PurchaseOrder = {
-        id: resp.po_id ?? `po-${Date.now()}`,
-        poNumber: resp.po_number ?? `PO-${String(existingPOCount + 1).padStart(3, '0')}`,
-        supplierId,
-        supplierName: supplier?.name ?? 'Unknown',
-        date: new Date().toISOString().split('T')[0],
-        expectedDelivery,
-        status: 'DRAFT',
-        items: poItems,
-        subtotal,
-        taxAmount,
-        total: resp.total_amount ?? subtotal + taxAmount,
-        notes: notes || undefined,
-      };
-
-      onCreated(newPO);
-      toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Failed to create purchase order';
-      toast.error(msg);
-    } finally {
-      setIsSaving(false);
-    }
-  };
+  const vendorOptions = suppliers.map(supplierToVendor);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
@@ -357,161 +224,75 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
           </button>
         </div>
 
-        {/* Body */}
-        <div className="p-6 space-y-6">
-          {/* Supplier & Delivery Date */}
-          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Supplier *</label>
-              <select
-                value={supplierId}
-                onChange={(e) => setSupplierId(e.target.value)}
-                className="input-field"
-              >
-                <option value="">Select a supplier...</option>
-                {suppliers.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.code})</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Expected Delivery Date *</label>
-              <input
-                type="date"
-                value={expectedDelivery}
-                onChange={(e) => setExpectedDelivery(e.target.value)}
-                className="input-field"
+        {/* Body — shared composer */}
+        <div className="p-6">
+          <PurchaseOrderComposer
+            mode="page"
+            vendors={vendorOptions}
+            allowAddLine
+            allowRemoveLine
+            renderProductCell={({ line, pickProduct, clearProduct }) => (
+              <ProductSearchSelect
+                picked={{ productId: line.productId, productName: line.productName, sku: line.sku }}
+                onPick={(p) =>
+                  pickProduct({
+                    productId: p.productId,
+                    productName: p.productName,
+                    sku: p.sku,
+                    costPrice: p.costPrice,
+                  })
+                }
+                onClear={clearProduct}
               />
-            </div>
-          </div>
-
-          {/* Line Items */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <label className="block text-sm font-medium text-gray-700">Line Items *</label>
-              <button
-                onClick={addItem}
-                className="text-sm text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1"
-              >
-                <Plus className="w-4 h-4" />
-                Add Item
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {items.map((item, index) => (
-                <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                  <div className="grid grid-cols-12 gap-2 items-end">
-                    <div className="col-span-12 tablet:col-span-5">
-                      <label className="block text-xs text-gray-600 mb-1">Product</label>
-                      <ProductSearchSelect
-                        picked={{ productId: item.productId, productName: item.productName, sku: item.sku }}
-                        onPick={(p) => pickProduct(index, p)}
-                        onClear={() => clearProduct(index)}
-                      />
-                    </div>
-                    <div className="col-span-6 tablet:col-span-1">
-                      <label className="block text-xs text-gray-600 mb-1">Qty</label>
-                      <input
-                        type="number"
-                        min="1"
-                        value={item.quantity}
-                        onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 0)}
-                        className="input-field text-sm"
-                      />
-                    </div>
-                    <div className="col-span-6 tablet:col-span-2">
-                      <label className="block text-xs text-gray-600 mb-1">Unit Cost ({'₹'})</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={item.unitCost}
-                        onChange={(e) => updateItem(index, 'unitCost', parseFloat(e.target.value) || 0)}
-                        className="input-field text-sm"
-                      />
-                    </div>
-                    <div className="col-span-4 tablet:col-span-1">
-                      <label className="block text-xs text-gray-600 mb-1">Tax %</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="28"
-                        value={item.taxRate}
-                        onChange={(e) => updateItem(index, 'taxRate', parseFloat(e.target.value) || 0)}
-                        className="input-field text-sm"
-                      />
-                    </div>
-                    <div className="col-span-6 tablet:col-span-2 text-right">
-                      <label className="block text-xs text-gray-600 mb-1">Total</label>
-                      <p className="text-sm font-semibold text-gray-900 py-2">{'₹'}{calcLineTotal(item).toLocaleString()}</p>
-                    </div>
-                    <div className="col-span-2 tablet:col-span-1 flex justify-end">
-                      <button
-                        onClick={() => removeItem(index)}
-                        disabled={items.length === 1}
-                        className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Totals */}
-          <div className="flex justify-end">
-            <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Subtotal</span>
-                <span className="font-medium text-gray-900">{'₹'}{calcSubtotal().toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Tax</span>
-                <span className="font-medium text-gray-900">{'₹'}{calcTax().toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between text-sm font-bold border-t border-gray-300 pt-2">
-                <span className="text-gray-900">Grand Total</span>
-                <span className="text-gray-900">{'₹'}{calcGrandTotal().toLocaleString()}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Notes */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Any additional notes for this purchase order..."
-              rows={3}
-              className="input-field"
-            />
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleCreate}
-            disabled={isSaving}
-            className="btn-primary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {isSaving ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <FileText className="w-4 h-4" />
             )}
-            {isSaving ? 'Creating...' : 'Create as Draft'}
-          </button>
+            submitLabel="Create as Draft"
+            submittingLabel="Creating..."
+            onCancel={onClose}
+            onSubmit={async (payload) => {
+              const storeId = user?.activeStoreId ?? 'default';
+              const resp = await vendorsApi.createPurchaseOrder({
+                vendor_id: payload.vendorId,
+                delivery_store_id: storeId,
+                expected_date: payload.expectedDate || undefined,
+                notes: payload.notes || undefined,
+                items: payload.items.map((it) => ({
+                  product_id: it.product_id,
+                  product_name: it.product_name,
+                  sku: it.sku,
+                  quantity: it.quantity,
+                  unit_price: it.unit_price,
+                })),
+              });
+
+              const poItems: POItem[] = payload.items.map((it) => ({
+                productId: it.product_id,
+                productName: it.product_name,
+                sku: it.sku,
+                quantity: it.quantity,
+                unitCost: it.unit_price,
+                taxRate: it.taxRate,
+                total: it.lineTotal,
+              }));
+
+              const newPO: PurchaseOrder = {
+                id: resp.po_id ?? `po-${Date.now()}`,
+                poNumber: resp.po_number ?? `PO-${String(existingPOCount + 1).padStart(3, '0')}`,
+                supplierId: payload.vendorId,
+                supplierName: payload.vendorName,
+                date: new Date().toISOString().split('T')[0],
+                expectedDelivery: payload.expectedDate,
+                status: 'DRAFT',
+                items: poItems,
+                subtotal: payload.subtotal,
+                taxAmount: payload.taxAmount,
+                total: resp.total_amount ?? payload.grandTotal,
+                notes: payload.notes || undefined,
+              };
+
+              onCreated(newPO);
+              toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+            }}
+          />
         </div>
       </div>
     </div>
