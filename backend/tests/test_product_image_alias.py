@@ -28,6 +28,10 @@ class _Repo:
     def find_many(self, flt=None, skip=0, limit=100):
         return [dict(d) for d in self.docs]
 
+    def count(self, flt=None):
+        # list_products now also reports total_count (additive) via count().
+        return len(self.docs)
+
     def find_by_id(self, pid):
         for d in self.docs:
             if d.get("product_id") == pid:

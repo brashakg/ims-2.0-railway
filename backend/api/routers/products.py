@@ -650,6 +650,12 @@ class ProductUpdate(BaseModel):
     # retired (unvalidated) /admin/products PUT so the Inventory "Save barcode"
     # action writes through the SAME validated update path as every other field.
     barcode: Optional[str] = None
+    # Catalog Manager edit-in-place: the two QuickAdd-captured fields the update
+    # schema lacked. `description` mirrors onto the catalog_products twin below
+    # (same fail-soft block as price/gst); `weight` is grams, matching the
+    # create form's top-level field.
+    description: Optional[str] = None
+    weight: Optional[float] = Field(None, ge=0)
     # Product images (replaces the whole array; same validation as create).
     images: Optional[List[str]] = None
 
@@ -797,6 +803,16 @@ async def list_products(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
+    is_active: Optional[str] = Query(
+        None,
+        pattern="^(true|false|all)$",
+        description=(
+            "Tri-state active filter. Absent = legacy per-path behaviour "
+            "(default path returns inactive too; search/brand/category paths "
+            "are active-only). 'true'/'false' filter explicitly; 'all' returns "
+            "everything (Catalog Manager 'include inactive')."
+        ),
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """List active catalog products with optional search / brand / category
@@ -822,6 +838,7 @@ async def list_products(
     active_store = store_id or current_user.get("active_store_id", "")
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
+        f":{is_active}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -830,14 +847,47 @@ async def list_products(
     repo = get_product_repository()
 
     if repo is not None:
-        if search:
-            products = repo.search_products(search, category)
-        elif brand:
-            products = repo.find_by_brand(brand, category)
-        elif category:
-            products = repo.find_by_category(category)
+        # Tri-state is_active resolution. When the param is ABSENT each path
+        # keeps its legacy behaviour EXACTLY: the filtered paths force
+        # active-only (repo default True) and the default no-filter path
+        # returns inactive products too (no filter). An explicit value applies
+        # uniformly: true -> active only, false -> inactive only, all -> no
+        # filter.
+        if is_active is None:
+            filtered_active: Optional[bool] = True
+            default_active: Optional[bool] = None
+        elif is_active == "all":
+            filtered_active = None
+            default_active = None
         else:
-            products = repo.find_many({}, skip=skip, limit=limit)
+            filtered_active = is_active == "true"
+            default_active = filtered_active
+
+        if search:
+            products = repo.search_products(
+                search, category, is_active=filtered_active, skip=skip, limit=limit
+            )
+            total_count = repo.count_search_products(
+                search, category, is_active=filtered_active
+            )
+        elif brand:
+            products = repo.find_by_brand(
+                brand, category, is_active=filtered_active, skip=skip, limit=limit
+            )
+            total_count = repo.count_by_brand(
+                brand, category, is_active=filtered_active
+            )
+        elif category:
+            products = repo.find_by_category(
+                category, is_active=filtered_active, skip=skip, limit=limit
+            )
+            total_count = repo.count_by_category(category, is_active=filtered_active)
+        else:
+            _default_filter = (
+                {} if default_active is None else {"is_active": default_active}
+            )
+            products = repo.find_many(_default_filter, skip=skip, limit=limit)
+            total_count = repo.count(_default_filter)
 
         # Tag filter (step-12). Normalise the requested tag the SAME way tags are
         # stored, then keep products whose normalised `tags` array contains it.
@@ -877,12 +927,15 @@ async def list_products(
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     p["image_url"] = imgs[0]
 
+        # LEGACY CONTRACT: `total` stays the PAGE length (pinned by existing
+        # consumers/tests). `total_count` is the additive true pre-slice count
+        # of the applied repo filter, feeding the Catalog Manager pagination.
         total = len(products)
-        result = {"products": products, "total": total}
+        result = {"products": products, "total": total, "total_count": total_count}
         cache.set(cache_key, result, ttl=cache.TTL_MEDIUM)
         return result
 
-    return {"products": [], "total": 0}
+    return {"products": [], "total": 0, "total_count": 0}
 
 
 @router.post("", status_code=201)
@@ -2364,6 +2417,8 @@ async def update_product(
                     _cat_patch["gst_rate"] = update_data["gst_rate"]
                 if "is_active" in update_data:
                     _cat_patch["is_active"] = update_data["is_active"]
+                if "description" in update_data:
+                    _cat_patch["description"] = update_data["description"]
                 if _cat_patch:
                     from ..dependencies import get_db as _gdb
 

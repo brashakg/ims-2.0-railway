@@ -45,6 +45,7 @@ import {
   ExternalLink,
   Lock,
   CopyPlus,
+  Pencil,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -200,6 +201,15 @@ export function QuickAddPage() {
   // Copied-but-unconfirmed fields (attribute names + form-level keys like
   // 'mrp'/'offer_price'). Amber ring until the operator touches the field.
   const [flaggedFields, setFlaggedFields] = useState<Set<string>>(new Set());
+
+  // ---- EDIT-IN-PLACE mode (Catalog Manager drawer -> /catalog/add?edit=<id>)
+  // editingId != null -> handleSubmit issues ONE PUT /products/{id} instead of
+  // a create: SKU/barcode/category are identity (read-only), reorder_point
+  // rides inside the same PUT, and the dup-rescue popup can't trigger (only
+  // createProduct throws DuplicateProductError). Success returns the owner to
+  // the Catalog Manager with the drawer re-opened (?focus=<id>).
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingSku, setEditingSku] = useState('');
 
   const firstFieldRef = useRef<HTMLSelectElement | HTMLInputElement | null>(null);
   // Bump on registry load so the field list (required markers sourced from the
@@ -784,6 +794,38 @@ export function QuickAddPage() {
 
       setIsSubmitting(true);
       try {
+        if (editingId) {
+          // EDIT-IN-PLACE: one validated PUT. Identity (SKU/barcode/category)
+          // is never sent — it is immutable through this door; reorder_point
+          // rides inside the same PUT (no follow-up write), and the 409
+          // dup-rescue branch can't fire (PUT never throws DuplicateProductError).
+          const payload = buildProductPayload(values);
+          const reorderNum = Number(reorderLevel);
+          await productApi.updateProduct(editingId, {
+            brand: payload.brand,
+            model: payload.model,
+            attributes: payload.attributes,
+            mrp: payload.mrp,
+            offer_price: payload.offer_price,
+            hsn_code: payload.hsn_code,
+            gst_rate: payload.gst_rate,
+            description: values.description || undefined,
+            weight: payload.weight,
+            cost_price: payload.cost_price,
+            images: payload.images,
+            ...(payload.discount_category
+              ? { discount_category: payload.discount_category }
+              : {}),
+            ...(Number.isFinite(reorderNum) && reorderNum >= 0
+              ? { reorder_point: reorderNum }
+              : {}),
+          });
+          toast.success(
+            editingSku ? `Updated ${editingSku} — same SKU, no new product.` : 'Product updated.'
+          );
+          navigate(`/catalog?focus=${encodeURIComponent(editingId)}`);
+          return;
+        }
         const created = await productApi.createProduct(buildProductPayload(values));
         // Persist the reorder level via a follow-up update on the new product_id
         // (ProductCreate doesn't model reorder_point; ProductUpdate does). The
@@ -844,7 +886,10 @@ export function QuickAddPage() {
         setIsSubmitting(false);
       }
     },
-    [currentValues, toast, resetForm, navigate, variantCtx, startNextVariant]
+    [
+      currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
+      editingId, editingSku, reorderLevel,
+    ]
   );
 
   // Keyboard-first: Ctrl+Enter = Save, Ctrl+Shift+Enter = Save + New.
@@ -1010,6 +1055,45 @@ export function QuickAddPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloneId]);
+
+  // Deep-link edit: /catalog/add?edit=<productId> loads that product into the
+  // form for EDIT-IN-PLACE (verbatim shape of the ?clone= loader above —
+  // getProduct -> productToFormValues -> applyFormValues) and flips the page
+  // into edit mode. Runs once per id; clears the param so a manual reset
+  // isn't re-clobbered.
+  const editId = searchParams.get('edit');
+  useEffect(() => {
+    if (!editId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const product = (await productApi.getProduct(editId)) as ProductDoc;
+        if (!cancelled && product) {
+          // Edit replaces the whole form — leave variant mode if active.
+          setVariantCtx(null);
+          setFlaggedFields(new Set());
+          applyFormValues(productToFormValues(product));
+          setEditingId(editId);
+          setEditingSku(String(product.sku || ''));
+          // Prefill the reorder level so the single PUT round-trips it.
+          const rp = Number((product as { reorder_point?: unknown }).reorder_point);
+          setReorderLevel(Number.isFinite(rp) && rp >= 0 ? String(rp) : '5');
+        }
+      } catch {
+        if (!cancelled) toast.error('Could not load the product to edit.');
+      } finally {
+        if (!cancelled) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('edit');
+          setSearchParams(next, { replace: true });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editId]);
 
   // Deep-link variant: /catalog/add?variant=<productId> enters VARIANT MODE
   // seeded from that product — the same code path the duplicate-rescue popup's
@@ -1321,15 +1405,25 @@ export function QuickAddPage() {
       {/* Editorial header (mode toggle is rendered by the route shell) */}
       <div className="inv-head">
         <div>
-          <div className="eyebrow mb-1.5">Catalog · Add product</div>
-          <h1>One screen. One SKU. Fast.</h1>
+          <div className="eyebrow mb-1.5">
+            {editingId ? 'Catalog · Edit product' : 'Catalog · Add product'}
+          </div>
+          <h1>{editingId ? `Editing ${editingSku || 'product'}` : 'One screen. One SKU. Fast.'}</h1>
           <div className="hint">
-            Fill the essentials and hit <kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> to save.
-            Category sets HSN + GST automatically.
+            {editingId ? (
+              <>Saving updates this product in place — it will NOT create a new SKU.</>
+            ) : (
+              <>
+                Fill the essentials and hit <kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> to save.
+                Category sets HSN + GST automatically.
+              </>
+            )}
           </div>
         </div>
 
-        {/* Templates + clone affordance */}
+        {/* Templates + clone affordance (hidden while editing — a template or
+            clone load would silently overwrite the product being edited) */}
+        {!editingId && (
         <div className="relative">
           <button
             type="button"
@@ -1470,7 +1564,28 @@ export function QuickAddPage() {
             </>
           )}
         </div>
+        )}
       </div>
+
+      {/* EDIT MODE banner: which product is being edited + the escape hatch. */}
+      {editingId && (
+        <div className="mb-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex flex-wrap items-center gap-3">
+          <Pencil className="w-4 h-4 text-blue-600 shrink-0" />
+          <p className="text-sm text-blue-900 flex-1 min-w-[200px]">
+            You're editing <span className="font-semibold">{editingSku || 'this product'}</span>.
+            SKU, barcode and category are locked — saving updates the product, it will NOT create
+            a new SKU. Wrong category? Use <span className="font-medium">Clone as new SKU</span>{' '}
+            from the Catalog drawer instead.
+          </p>
+          <button
+            type="button"
+            onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editingId)}`)}
+            className="btn-secondary !py-1.5 !px-3 text-xs"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Single full-width column: the review moved to the bottom of the page,
           freeing the old 320px right rail for 3-4 field columns. */}
@@ -1478,7 +1593,8 @@ export function QuickAddPage() {
         {/* ---- Form column ---- */}
         <div className="space-y-3">
           {/* AUTO-FILL FROM WEB (inline Catalog Autopilot) — collapsed by default
-              so the normal manual flow is unchanged. */}
+              so the normal manual flow is unchanged. Hidden while editing. */}
+          {!editingId && (
           <div className="card !p-0 overflow-hidden">
             <button
               type="button"
@@ -1614,6 +1730,7 @@ export function QuickAddPage() {
               </div>
             )}
           </div>
+          )}
 
           {/* AUTOPILOT FILL SUMMARY — "operator verifies" strip. Lists how many
               fields/images were auto-filled, where the data came from, and the
@@ -1723,7 +1840,10 @@ export function QuickAddPage() {
             onToggle={toggleSection}
           >
             {/* Category picker (locked in variant mode — a sibling variant is
-                by definition the same category as its model) */}
+                by definition the same category as its model — AND in edit mode:
+                category is identity; changing it on an ACTIVE row would skip
+                the forward-only restamp, so v1 locks it. Clone-as-new-SKU is
+                the wrong-category workaround.) */}
             <div className="mb-5">
               <label className="block text-xs font-medium text-gray-700 mb-2">
                 Category <span className="text-red-500">*</span>
@@ -1735,20 +1855,30 @@ export function QuickAddPage() {
                     <Lock className="w-2.5 h-2.5" /> model
                   </span>
                 )}
+                {editingId && (
+                  <span
+                    className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
+                    title="Category is locked while editing — use Clone as new SKU to re-categorise"
+                  >
+                    <Lock className="w-2.5 h-2.5" /> locked
+                  </span>
+                )}
               </label>
               <div className="grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 gap-2">
                 {CATEGORIES.map((c) => (
                   <button
                     key={c.code}
                     type="button"
-                    disabled={Boolean(variantCtx) && selectedCategory !== c.code}
+                    disabled={
+                      (Boolean(variantCtx) || Boolean(editingId)) && selectedCategory !== c.code
+                    }
                     onClick={() => setSelectedCategory(c.code)}
                     className={clsx(
                       'flex flex-col items-center gap-1 px-2 py-2 rounded-lg border text-center transition-all',
                       selectedCategory === c.code
                         ? 'border-bv bg-bv-50 ring-1 ring-bv'
                         : 'border-gray-200 hover:border-gray-300',
-                      Boolean(variantCtx) && selectedCategory !== c.code &&
+                      (Boolean(variantCtx) || Boolean(editingId)) && selectedCategory !== c.code &&
                         'opacity-40 cursor-not-allowed hover:border-gray-200'
                     )}
                   >
@@ -2303,21 +2433,35 @@ export function QuickAddPage() {
             className="btn-primary flex items-center gap-2"
           >
             {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {variantCtx ? 'Save variant' : 'Save product'}
+            {editingId ? 'Save changes' : variantCtx ? 'Save variant' : 'Save product'}
           </button>
-          <button
-            type="button"
-            onClick={() => handleSubmit(true)}
-            disabled={isSubmitting}
-            className="btn-secondary flex items-center gap-2"
-          >
-            <RotateCcw className="w-4 h-4" />
-            Save + New
-          </button>
+          {editingId ? (
+            <button
+              type="button"
+              onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editingId)}`)}
+              disabled={isSubmitting}
+              className="btn-secondary flex items-center gap-2"
+            >
+              <X className="w-4 h-4" />
+              Cancel
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => handleSubmit(true)}
+              disabled={isSubmitting}
+              className="btn-secondary flex items-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Save + New
+            </button>
+          )}
           <span className="ml-auto hidden tablet:flex items-center gap-4 text-xs text-gray-500">
             <Keyboard className="w-4 h-4" />
             <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> Save</span>
-            <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> Save + New</span>
+            {!editingId && (
+              <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> Save + New</span>
+            )}
           </span>
         </div>
       </div>

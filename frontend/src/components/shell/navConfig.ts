@@ -85,7 +85,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // WORKSHOP_STAFF, who cannot open /purchase at all.
       { id: 'vendor-returns', label: 'Vendor Returns', to: '/purchase/vendor-returns', icon: 'refresh', requireRoles: ['WORKSHOP_STAFF'] },
       { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
-      { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      // Catalog Manager: the browse/review landing at /catalog ("+ Add product"
+      // inside it links on to /catalog/add — no second sidebar entry).
+      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
       // Catalog Autopilot is now merged INLINE into the Add Product screen (the
       // "Auto-fill from web" panel), so its standalone nav item was removed. The
       // /catalog/autopilot route still resolves (it redirects to /catalog/add)

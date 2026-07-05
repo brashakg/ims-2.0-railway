@@ -893,6 +893,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/catalog/products/{product_id}/inventory/adjust",
         "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN", "WORKSHOP_STAFF"],
     },
+    # Catalog Manager review queue: promote an imported catalog doc to a
+    # POS-sellable `products` spine row (the only writer of needs_review/
+    # pos_ready). Mirrors the catalog-mutation role set.
+    {
+        "method": "POST",
+        "path": "/api/v1/catalog/products/{product_id}/promote",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/catalog/products/{product_id}/sync-shopify",
