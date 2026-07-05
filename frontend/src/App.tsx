@@ -10,6 +10,16 @@ import { ToastProvider } from './context/ToastContext';
 import { ModuleProvider } from './context/ModuleContext';
 import { AppearanceProvider } from './context/AppearanceContext';
 import { AppLayout } from './components/layout/AppLayout';
+
+// Deep-link landing for "book the invoice for this receipt": the express-
+// receive accountant task and the PO timeline drawer both link
+// /purchase/invoices/book?grn_id=<id>. Redirect into the Purchase page's
+// Invoices tab, which auto-opens the from-GRN draft for that grn_id.
+function InvoiceBookRedirect() {
+  const grnId = new URLSearchParams(window.location.search).get('grn_id') || '';
+  const suffix = grnId ? `&grn_id=${encodeURIComponent(grnId)}` : '';
+  return <Navigate to={`/purchase?tab=purchase-invoices${suffix}`} replace />;
+}
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
@@ -1011,6 +1021,9 @@ function App() {
                       </ProtectedRoute>
                     }
                   />
+
+                  {/* Deep-link: book the invoice for an accepted receipt. */}
+                  <Route path="purchase/invoices/book" element={<InvoiceBookRedirect />} />
 
                   {/* Phase 4: Purchase Orders — retired dead-duplicate dashboard.
                       Redirect to the real Purchase Management module (POs tab). */}
