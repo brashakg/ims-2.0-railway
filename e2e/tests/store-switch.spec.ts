@@ -47,6 +47,13 @@ test.describe('Store switcher', () => {
     // overrides the <button>'s implicit role -- so query by 'option', not 'button'.
     await listbox.getByRole('option', { name: new RegExp(target) }).click();
 
+    // Picking a different store now opens a confirmation dialog first (the
+    // switch clears the POS cart + in-progress forms) — confirm it. The token
+    // is only re-issued after this click.
+    const confirmDialog = page.getByRole('dialog', { name: 'Confirm store switch' });
+    await expect(confirmDialog).toBeVisible();
+    await confirmDialog.getByRole('button', { name: 'Switch store' }).click();
+
     // #327: the token must be re-issued with the new active_store_id.
     await expect
       .poll(() => activeStoreFromToken(page), {

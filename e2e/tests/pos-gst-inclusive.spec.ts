@@ -9,6 +9,11 @@
  * Source of truth = the persisted order (verified via API). The UI checks
  * confirm the customer is shown the same all-in figure.
  *
+ * CONDENSED FLOW (#783/#790): a quick sale is Customer -> Products -> Payment.
+ * The Review step no longer exists for quick sales (QUICK_STEPS parity), so the
+ * pre-payment totals the customer sees live in the CART SIDEBAR
+ * (Subtotal / GST / "Total (incl. GST)"), asserted on the Products step.
+ *
  * Mode-aware: if the backend reports exclusive pricing (legacy), the same
  * spec asserts the exclusive expectation (Rs 1048.95) instead, so it stays
  * honest whichever mode is live.
@@ -17,6 +22,9 @@ import { test, expect } from '../fixtures/test';
 import { PosPage } from '../fixtures/pos-page';
 import { lineGst, cartGst } from '../fixtures/gst-math';
 import { SEED } from '../fixtures/constants';
+
+/** The cart sidebar renders whole-rupee en-IN figures, e.g. "₹2,179". */
+const rupees = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 
 test.describe('POS — GST-inclusive sale', () => {
   test('Rs 999 frame: GST extracted within, customer pays Rs 999, order PAID', async ({
@@ -38,17 +46,16 @@ test.describe('POS — GST-inclusive sale', () => {
     await pos.goto();
     await pos.selectFirstSalespersonAndWalkin();
     await pos.addProductByName(SEED.frame.name);
-    await pos.continueFromProducts();
 
-    // --- Review step: the Grand Total the customer is shown ---
+    // --- Products step, cart sidebar: the all-in total the customer is shown.
     // getGrandTotal() is inclusive under #331, so this equals the counter
     // price (Rs 999), NOT price + GST-on-top (Rs 1048.95).
-    const grandTotalCell = pos.reviewRowValue('Grand Total');
-    await expect(grandTotalCell).toHaveText(
-      new RegExp(`${Math.round(expected.grandTotal).toLocaleString('en-IN')}`)
+    await expect(pos.cartRowValue('Total (incl. GST)')).toHaveText(
+      rupees(expected.grandTotal)
     );
 
-    await pos.continueFromReview();
+    // Quick sale: Continue goes STRAIGHT to Payment (no Review step).
+    await pos.continueFromProducts();
 
     // --- Payment step: "Total Due (incl. GST)" headline ---
     await expect(pos.totalDueHeadline).toHaveText(
@@ -101,14 +108,13 @@ test.describe('POS — GST-inclusive sale', () => {
     await pos.selectFirstSalespersonAndWalkin();
     await pos.addProductByName(SEED.frame.name);
     await pos.addProductByName(SEED.sunglass.name);
-    await pos.continueFromProducts();
 
-    const grandTotalCell = pos.reviewRowValue('Grand Total');
-    await expect(grandTotalCell).toHaveText(
-      new RegExp(`${Math.round(expected.grandTotal).toLocaleString('en-IN')}`)
+    // The cart's all-in total equals the sum of the inclusive line prices.
+    await expect(pos.cartRowValue('Total (incl. GST)')).toHaveText(
+      rupees(expected.grandTotal)
     );
 
-    await pos.continueFromReview();
+    await pos.continueFromProducts();
     await pos.payFullCashAndComplete();
     const orderNumber = await pos.waitForOrderCreated();
 
@@ -127,16 +133,22 @@ test.describe('POS — GST-inclusive sale', () => {
   });
 
   /**
-   * The wizard Review panel (StepReview) GST split. PR #333 + #335 migrated its
-   * taxBreakdown to be flag-aware (gstRuntime.isInclusivePricing): in the
-   * default INCLUSIVE mode the CGST/SGST are now EXTRACTED from WITHIN the
-   * Rs 999 (taxable = gross/(1+rate)) rather than added on top, and the panel's
-   * Grand Total stays the inclusive Rs 999. This guards that fix.
+   * Condensed-flow behavior guard (#783/#790, QUICK_STEPS parity): a quick
+   * sale must go STRAIGHT from Products to Payment — the Review panel
+   * ("Order Review") must never render — and the GST the cart shows is the
+   * component EXTRACTED WITHIN the inclusive total (₹48 within ₹999 at 5%),
+   * not added on top (which would show ~₹50 over a ₹1,049 total).
    *
-   * Mode-aware: in exclusive mode the same rule yields cgst/sgst on-top while
-   * Grand Total = price + GST, so the assertion stays honest either way.
+   * (The Review panel's own CGST/SGST split — the old #333/#335 guard — now
+   * only exists inside a prescription order's merged "Pay & Review" group and
+   * is covered by the component tests in POSCondensedFlow.test.tsx; the
+   * paisa-level split of the persisted order is asserted via API in the
+   * Rs 999 spec above, and on the Tax Invoice in gst-invoice.spec.ts.)
+   *
+   * Mode-aware: in exclusive mode the same rows must show the on-top figures
+   * (GST ₹50, total ₹1,049), so the assertion stays honest either way.
    */
-  test('wizard Review shows CGST/SGST split per mode, reconciling to the Grand Total (#333/#335)', async ({
+  test('quick sale skips Review: cart shows GST extracted within the inclusive total', async ({
     page,
     mode,
   }) => {
@@ -146,21 +158,26 @@ test.describe('POS — GST-inclusive sale', () => {
     await pos.goto();
     await pos.selectFirstSalespersonAndWalkin();
     await pos.addProductByName(SEED.frame.name);
+
+    // Cart sidebar: GST is the extracted-within component; the total stays the
+    // inclusive counter price. (Whole-rupee display: 47.57 -> ₹48, 999 -> ₹999.
+    // A regression to on-top math would show ₹50 / ₹1,049 in inclusive mode.)
+    await expect(pos.cartRowValue('Subtotal')).toHaveText(rupees(SEED.frame.price));
+    await expect(pos.cartRowValue('GST')).toHaveText(rupees(expected.tax));
+    await expect(pos.cartRowValue('Total (incl. GST)')).toHaveText(
+      rupees(expected.grandTotal)
+    );
+
+    // Continue from Products lands DIRECTLY on Payment: the Total-Due headline
+    // appears and no "Order Review" panel ever renders.
     await pos.continueFromProducts();
-
-    // CGST/SGST are shown WITHIN the inclusive price (23.78 / 23.79), not the
-    // on-top 24.97 / 24.98 that the pre-#333 local calc produced.
-    const cgst = pos.reviewTaxRowValue('CGST');
-    const sgst = pos.reviewTaxRowValue('SGST');
-    await expect(cgst).toHaveText(new RegExp(expected.cgst.toFixed(2).replace('.', '\\.')));
-    await expect(sgst).toHaveText(new RegExp(expected.sgst.toFixed(2).replace('.', '\\.')));
-
-    // The Grand Total still equals the inclusive counter price (Rs 999) — the
-    // split is WITHIN it, not added on top.
-    const grandTotalCell = pos.reviewRowValue('Grand Total');
-    await expect(grandTotalCell).toHaveText(
+    await expect(pos.totalDueHeadline).toBeVisible();
+    await expect(pos.totalDueHeadline).toHaveText(
       new RegExp(`${Math.round(expected.grandTotal).toLocaleString('en-IN')}`)
     );
+    await expect(
+      page.getByRole('heading', { name: 'Order Review' })
+    ).toHaveCount(0);
   });
 
   // NB: the GST invoice paisa-split equality (line-item CGST === HSN-summary

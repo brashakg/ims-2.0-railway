@@ -24,8 +24,8 @@ async function sellFrameAndOpenInvoice(page: any): Promise<{ orderNumber: string
   await pos.goto();
   await pos.selectFirstSalespersonAndWalkin();
   await pos.addProductByName(SEED.frame.name);
+  // Condensed quick sale (#783/#790): Products -> Payment directly, no Review.
   await pos.continueFromProducts();
-  await pos.continueFromReview();
   await pos.payFullCashAndComplete();
   const orderNumber = await pos.waitForOrderCreated();
   await pos.openTaxInvoice();
