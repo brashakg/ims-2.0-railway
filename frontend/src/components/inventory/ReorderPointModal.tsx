@@ -25,7 +25,9 @@ interface ReorderPointModalProps {
     brand: string;
     currentStock: number;
     reorderPoint?: number;
-    reorderQuantity?: number;
+    // Real value from the product master: null/undefined = never configured;
+    // <= 0 (the -1 sentinel) = auto-reorder explicitly DISABLED.
+    reorderQuantity?: number | null;
     maxStock?: number;
     averageSalesPerDay?: number;
     leadTimeDays?: number;
@@ -36,6 +38,7 @@ interface ReorderPointModalProps {
 export interface ReorderPointData {
   productId: string;
   reorderPoint: number;
+  // -1 = auto-reorder disabled (backend sentinel); otherwise >= 1.
   reorderQuantity: number;
   maxStock: number;
   leadTimeDays: number;
@@ -44,9 +47,20 @@ export interface ReorderPointData {
 export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderPointModalProps) {
   const toast = useToast();
 
+  // Seed from the REAL master value only. <= 0 (the -1 sentinel) means the
+  // owner disabled auto-reorder -> start in the disabled state; null means
+  // never configured -> empty field. NEVER a fabricated 50: an untouched
+  // save must not silently flip a disabled product back on.
+  const startDisabled = product.reorderQuantity != null && product.reorderQuantity <= 0;
+
   const [isSaving, setIsSaving] = useState(false);
   const [reorderPoint, setReorderPoint] = useState(product.reorderPoint || 10);
-  const [reorderQuantity, setReorderQuantity] = useState(product.reorderQuantity || 50);
+  const [autoReorderOff, setAutoReorderOff] = useState(startDisabled);
+  const [reorderQuantity, setReorderQuantity] = useState<number | ''>(
+    product.reorderQuantity != null && product.reorderQuantity >= 1
+      ? product.reorderQuantity
+      : ''
+  );
   const [maxStock, setMaxStock] = useState(product.maxStock || 100);
   const [leadTimeDays, setLeadTimeDays] = useState(product.leadTimeDays || 7);
   const [autoCalculate, setAutoCalculate] = useState(false);
@@ -63,16 +77,19 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
       setReorderPoint(calculatedReorderPoint);
 
       // Reorder Quantity = Average Daily Sales × (Lead Time + Review Period)
-      // Using 30-day review period
+      // Using 30-day review period. Never overrides an explicit
+      // "auto-reorder disabled" choice.
       const reviewPeriod = 30;
       const calculatedReorderQty = Math.ceil(avgSalesPerDay * (leadTimeDays + reviewPeriod));
-      setReorderQuantity(calculatedReorderQty);
+      if (!autoReorderOff) {
+        setReorderQuantity(calculatedReorderQty);
+      }
 
       // Max Stock = Reorder Point + Reorder Quantity
       const calculatedMaxStock = calculatedReorderPoint + calculatedReorderQty;
       setMaxStock(calculatedMaxStock);
     }
-  }, [autoCalculate, avgSalesPerDay, leadTimeDays, leadTimeStock, safetyStock]);
+  }, [autoCalculate, autoReorderOff, avgSalesPerDay, leadTimeDays, leadTimeStock, safetyStock]);
 
   const handleSubmit = async () => {
     // Validation
@@ -80,9 +97,18 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
       toast.error('Reorder point must be greater than 0');
       return;
     }
-    if (reorderQuantity <= 0) {
-      toast.error('Reorder quantity must be greater than 0');
-      return;
+    // Resolve the quantity to persist: -1 (the backend's "auto-reorder off"
+    // sentinel) when disabled, otherwise a real qty >= 1. An untouched save
+    // on a disabled product therefore KEEPS it disabled.
+    let reorderQuantityToSave: number;
+    if (autoReorderOff) {
+      reorderQuantityToSave = -1;
+    } else {
+      if (typeof reorderQuantity !== 'number' || reorderQuantity < 1) {
+        toast.error('Reorder quantity must be at least 1 (or tick "Auto-reorder disabled")');
+        return;
+      }
+      reorderQuantityToSave = reorderQuantity;
     }
     if (maxStock < reorderPoint) {
       toast.error('Max stock must be greater than or equal to reorder point');
@@ -98,7 +124,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
       await onSave({
         productId: product.id,
         reorderPoint,
-        reorderQuantity,
+        reorderQuantity: reorderQuantityToSave,
         maxStock,
         leadTimeDays,
       });
@@ -238,21 +264,36 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
               </p>
             </div>
 
-            {/* Reorder Quantity */}
+            {/* Reorder Quantity + explicit auto-reorder off toggle */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Reorder Quantity (Units) *
+              </label>
+              <label className="flex items-center gap-2 mb-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoReorderOff}
+                  onChange={(e) => setAutoReorderOff(e.target.checked)}
+                  disabled={isSaving}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                />
+                <span className="text-sm text-gray-700">Auto-reorder disabled</span>
               </label>
               <input
                 type="number"
                 min="1"
                 value={reorderQuantity}
-                onChange={(e) => setReorderQuantity(parseInt(e.target.value) || 1)}
-                disabled={autoCalculate || isSaving}
-                className="input-field w-full"
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  setReorderQuantity(Number.isNaN(v) ? '' : v);
+                }}
+                disabled={autoReorderOff || autoCalculate || isSaving}
+                className="input-field w-full disabled:bg-gray-100 disabled:text-gray-400"
               />
               <p className="text-xs text-gray-500 mt-1">
-                {autoCalculate ? (
+                {autoReorderOff ? (
+                  'This product will never be auto-suggested or auto-ordered (saved as -1)'
+                ) : autoCalculate ? (
                   <>Optimized for 30-day inventory cycle</>
                 ) : (
                   'Quantity to order when reorder point is reached'

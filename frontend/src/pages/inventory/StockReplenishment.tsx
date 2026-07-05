@@ -67,6 +67,9 @@ export function StockReplenishment() {
   const [activeTab, setActiveTab] = useState<'suggestions' | 'abc-analysis' | 'dead-stock' | 'eoq'>('suggestions');
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<ReplenishmentItem[]>([]);
+  // Low-stock products the owner explicitly opted OUT of auto-reorder
+  // (reorder_quantity = -1) — dropped from suggestions, counted for honesty.
+  const [autoReorderOffCount, setAutoReorderOffCount] = useState(0);
   const [deadStock, setDeadStock] = useState<DeadStockItem[]>([]);
   const [deadStockLoading, setDeadStockLoading] = useState(false);
   const [, setIsLoading] = useState(true);
@@ -82,7 +85,16 @@ export function StockReplenishment() {
         const storeId = user?.activeStoreId || '';
         const response = await inventoryApi.getLowStock(storeId);
         const raw = response?.items ?? (Array.isArray(response) ? response : response.data || []);
-        const transformedSuggestions: ReplenishmentItem[] = (raw as any[]).map((item: any) => {
+        // The low-stock feed flags products whose auto-reorder is explicitly
+        // OFF (product master reorder_quantity <= 0, the -1 sentinel). Those
+        // must never be SUGGESTED for a PO — drop them here, count them for
+        // the honest note below.
+        const feedRows = raw as Array<any & { auto_reorder_disabled?: boolean }>;
+        const skippedOff = feedRows.filter((item) => item.auto_reorder_disabled === true);
+        setAutoReorderOffCount(skippedOff.length);
+        const transformedSuggestions: ReplenishmentItem[] = feedRows
+          .filter((item) => item.auto_reorder_disabled !== true)
+          .map((item: any) => {
           const currentStock = item.current_stock ?? item.stock ?? item.quantity ?? 0;
           const reorderLevel = item.reorder_level ?? item.lowStockThreshold ?? item.minStock ?? item.min_stock ?? 0;
           // Real gap to refill back up to the reorder point; at least 1.
@@ -224,6 +236,11 @@ export function StockReplenishment() {
       {/* Tab Content */}
       {activeTab === 'suggestions' && (
         <div className="space-y-4">
+          {autoReorderOffCount > 0 && (
+            <p className="text-sm text-gray-500">
+              {autoReorderOffCount} product{autoReorderOffCount === 1 ? '' : 's'} skipped (auto-reorder off)
+            </p>
+          )}
           {criticalItems.length > 0 && (
             <div className="bg-red-50 border border-red-700 rounded-lg p-4 flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
