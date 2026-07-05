@@ -98,6 +98,9 @@ class PushResult:
     payload: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     reason: Optional[str] = None
+    # Product pushes only: the attribute->metafield side channel. SIMULATED ->
+    # the planned rows; LIVE -> {"set": n, "errors": [...]}. None elsewhere.
+    metafields: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -393,6 +396,87 @@ def build_product_input(
     return inp
 
 
+# Owner 2026-07-05 ("CREATE WITH METAFIELDS"): category attributes (frame
+# material, temple length, UV protection, ...) push to Shopify as STRUCTURED
+# metafields under the `ims` namespace -- not only baked into the description.
+# Storefront filtering then only needs the owner to add metafield definitions
+# in Shopify admin (Search & Discovery); the data is already on every product.
+_METAFIELD_NAMESPACE = "ims"
+_METAFIELDS_PER_CALL = 25  # Shopify metafieldsSet hard cap per mutation
+_MAX_METAFIELDS = 50  # sanity cap per product (attributes are short lists)
+
+_METAFIELDS_SET = """
+mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id key }
+    userErrors { field message }
+  }
+}
+"""
+
+
+def build_product_metafields(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Map the product's `attributes` dict (the canonical home of the
+    category-specific fields) onto Shopify MetafieldsSetInput rows (without
+    ownerId -- the pusher stamps that once the product gid is known).
+
+    Pure + deterministic: scalar attributes only (dict/list/None/blank
+    skipped), keys lowercased snake_case truncated to Shopify's 30-char key
+    limit, values stringified, sorted by key, capped at _MAX_METAFIELDS."""
+    attrs = product.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for k, v in attrs.items():
+        if v is None or isinstance(v, (dict, list, tuple)):
+            continue
+        value = str(v).strip()
+        if not value:
+            continue
+        key = str(k).strip().lower().replace(" ", "_").replace("-", "_")[:30]
+        if not key:
+            continue
+        rows.append(
+            {
+                "namespace": _METAFIELD_NAMESPACE,
+                "key": key,
+                "type": "single_line_text_field",
+                "value": value[:500],
+            }
+        )
+    # Deterministic order on the NORMALIZED key (raw keys mix cases/spaces).
+    rows.sort(key=lambda r: r["key"])
+    return rows[:_MAX_METAFIELDS]
+
+
+async def _set_product_metafields(
+    db, product_gid: str, metafields: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """LIVE-only: upsert the product's attribute metafields via metafieldsSet
+    (idempotent on owner+namespace+key), chunked at the Shopify per-call cap.
+    Fail-SOFT: a metafield error must never undo/fail the product push itself --
+    returns {"set": n, "errors": [...]} for the result/audit row."""
+    set_count = 0
+    errors: List[str] = []
+    for i in range(0, len(metafields), _METAFIELDS_PER_CALL):
+        chunk = [
+            {**m, "ownerId": product_gid}
+            for m in metafields[i : i + _METAFIELDS_PER_CALL]
+        ]
+        try:
+            body = await _graphql(db, _METAFIELDS_SET, {"metafields": chunk})
+            field_obj = (body.get("data") or {}).get("metafieldsSet") or {}
+            errs = field_obj.get("userErrors") or []
+            if errs:
+                errors.extend(
+                    f"{(e.get('field') or '?')}: {e.get('message')}" for e in errs
+                )
+            set_count += len(field_obj.get("metafields") or [])
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            errors.append(str(e))
+    return {"set": set_count, "errors": errors}
+
+
 def _derive_options(variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build Shopify productOptions (Color / Size) from the variant option axes
     that are actually present. Returns [] when no variant carries an option."""
@@ -607,6 +691,9 @@ async def push_product(
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
     payload = build_product_input(product, variants)
+    # Attribute -> metafield side channel (owner 2026-07-05): planned in the
+    # dry-run, upserted via metafieldsSet after a LIVE product write succeeds.
+    metafields = build_product_metafields(product)
     action = "update" if existing_gid else "create"
 
     live, reason = _live_or_reason(db)
@@ -620,6 +707,7 @@ async def push_product(
             shopify_id=existing_gid,
             payload=payload,
             reason=reason,
+            metafields=metafields or None,
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -641,6 +729,11 @@ async def push_product(
         new_gid = prod.get("id") or existing_gid
         if new_gid and pid:
             _writeback_product(db, pid, new_gid)
+        # Metafields ride AFTER the product write so the gid always exists.
+        # Fail-soft: their errors are reported on the result, never flip ok.
+        mf_summary = None
+        if metafields and new_gid:
+            mf_summary = await _set_product_metafields(db, new_gid, metafields)
         return PushResult(
             mode=MODE_LIVE,
             entity="product",
@@ -649,6 +742,7 @@ async def push_product(
             ok=True,
             shopify_id=new_gid,
             payload=payload,
+            metafields=mf_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(
