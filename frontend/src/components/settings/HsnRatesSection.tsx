@@ -13,8 +13,16 @@ import { useToast } from '../../context/ToastContext';
 import { hsnApi, type HsnRate } from '../../services/api/hsn';
 import { loadHsnRates } from '../../constants/gstRuntime';
 
+// NOTE: these are the backend's REPORTING-HINT buckets (gst_rates.py
+// _CATEGORY_HINT normalized spellings), NOT the browse vocabulary in
+// utils/categoryNormalize.ts — resolve_gst_rate matches the stored hint
+// against THIS vocabulary, so swapping in CATEGORY_BROWSE_OPTIONS values
+// (OPTICAL_LENS / SUNGLASS / ...) would make master overrides silently no-op.
 const CATEGORY_HINTS = [
-  'CONTACT_LENS', 'LENS', 'FRAME', 'SPECTACLE', 'SUNGLASSES',
+  'CONTACT_LENS',
+  // Owner 2026-07-05 CL split: colour/cosmetic lenses are their own bucket.
+  'COLORED_CONTACT_LENS',
+  'LENS', 'FRAME', 'SPECTACLE', 'SUNGLASSES',
   'WATCH', 'SMARTWATCH', 'ACCESSORIES', 'SERVICE', 'HEARING_AID',
 ];
 
