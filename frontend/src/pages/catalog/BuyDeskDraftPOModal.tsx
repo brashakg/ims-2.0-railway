@@ -2,34 +2,32 @@
 // IMS 2.0 - Buy Desk -> bulk draft Purchase Order
 // ============================================================================
 // Multi-select rows on the Buy Desk, pick ONE vendor, confirm per-line qty +
-// (optional) cost, and create a single DRAFT PO via the existing
-// POST /vendors/purchase-orders. Every line carries the row's REAL catalogued
-// product_id, so the PO catalog gate (now ON) accepts it. Cost is optional at
-// draft -- it legitimately arrives at receiving (GRN backfills it). Buyers who
-// want lines from different vendors just create one draft per vendor.
+// cost, and create a single DRAFT PO. Thin modal shell around the shared
+// <PurchaseOrderComposer/> (procurement Phase 2C, owner ruling: one PO form
+// everywhere) so this quick-draft door shows the IDENTICAL field set, labels,
+// cost pre-fill ("last paid Rs X on <date>") and validation as the manual PO
+// form. Every line carries the row's REAL catalogued product_id, so the PO
+// catalog gate (ON) accepts it. Cost is REQUIRED up front here too: accept_grn
+// reads the PO's unit price, so a zero-cost line would mint stock with no cost
+// basis -- the composer enforces unit_cost > 0 on every line (matching the
+// manual form). Buyers who want lines from different vendors create one draft
+// per vendor. What's local to this door: it fetches the active vendor list,
+// preselects the single agreed preferred vendor, and shows each line's product
+// read-only (no picker / no add-remove) since the rows are chosen upstream.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, Loader2, X as XIcon } from 'lucide-react';
+import { FileText, X as XIcon } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { vendorsApi } from '../../services/api';
+import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
+import type {
+  ComposerVendorOption,
+  ComposerLine,
+} from '../../components/purchase/PurchaseOrderComposer';
 import type { BuyDeskRow } from '../../services/api/buyDesk';
 
-interface VendorOption {
-  id: string;
-  name: string;
-  code: string;
-}
-
-interface DraftLine {
-  product_id: string;
-  name: string;
-  sku: string;
-  quantity: number;
-  unitCost: number;
-}
-
-function mapVendor(v: Record<string, unknown>): VendorOption {
+function mapVendor(v: Record<string, unknown>): ComposerVendorOption {
   const id = String(v.vendor_id ?? v._id ?? '');
   return {
     id,
@@ -50,27 +48,38 @@ export default function BuyDeskDraftPOModal({
   const toast = useToast();
   const { user } = useAuth();
 
-  const [vendors, setVendors] = useState<VendorOption[]>([]);
+  const [vendors, setVendors] = useState<ComposerVendorOption[]>([]);
   const [vendorsLoading, setVendorsLoading] = useState(true);
-  const [vendorId, setVendorId] = useState('');
-  const [expectedDelivery, setExpectedDelivery] = useState('');
-  const [notes, setNotes] = useState('');
-  const [saving, setSaving] = useState(false);
-  // Synchronous re-entry guard: `disabled={saving}` only takes effect on the next
-  // render, so a same-tick double-click could otherwise fire two POSTs.
-  const submittingRef = useRef(false);
-  const [lines, setLines] = useState<DraftLine[]>(
-    rows.map((r) => ({
-      product_id: r.product_id,
-      name: r.name || r.sku || r.product_id,
-      sku: r.sku || '',
-      // Default to the netted buy signal when we have one, else 1.
-      quantity: r.buy_signal && r.buy_signal > 0 ? r.buy_signal : 1,
-      unitCost: 0,
-    })),
+  const [preferredVendorId, setPreferredVendorId] = useState('');
+
+  // The preselected rows become the composer's initial lines (fixed set). Qty
+  // defaults to the netted buy signal when we have one, else 1. Cost starts
+  // blank -- the composer's last-cost prefill fills it from PO history per the
+  // chosen vendor, and the buyer can override.
+  const initialLines: ComposerLine[] = useMemo(
+    () =>
+      rows.map((r) => ({
+        productId: r.product_id,
+        productName: r.name || r.sku || r.product_id,
+        sku: r.sku || '',
+        quantity: r.buy_signal && r.buy_signal > 0 ? r.buy_signal : 1,
+        unitCost: 0,
+        taxRate: 18,
+        costTouched: false,
+        lastPaid: null,
+      })),
+    [rows],
   );
 
+  // Load active vendors once, then apply the single-preferred-vendor preselect
+  // (#863): only when every selected row that has a preference agrees on ONE
+  // vendor AND that vendor is in the active list. Anything else (no preference,
+  // mixed vendors, inactive vendor) fails soft to a manual pick. Never overrides
+  // a choice the user already made -- the composer only adopts an empty slot.
+  const loadedRef = useRef(false);
   useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
     let cancelled = false;
     (async () => {
       try {
@@ -79,17 +88,11 @@ export default function BuyDeskDraftPOModal({
         const raw: Record<string, unknown>[] = resp?.vendors ?? [];
         const options = raw.map(mapVendor).filter((v) => v.id);
         setVendors(options);
-        // Procurement Phase 1: preselect the vendor from the products'
-        // preferred_vendor_id — but ONLY when every selected row that has a
-        // preference agrees on ONE vendor and that vendor is actually in the
-        // active list. Anything else (no preference, mixed vendors, inactive
-        // vendor) fails soft to today's manual pick. Never overrides a choice
-        // the user already made.
         const preferred = [
           ...new Set(rows.map((r) => r.preferred_vendor_id).filter((v): v is string => !!v)),
         ];
         if (preferred.length === 1 && options.some((v) => v.id === preferred[0])) {
-          setVendorId((prev) => prev || preferred[0]);
+          setPreferredVendorId(preferred[0]);
         }
       } catch {
         if (!cancelled) toast.error('Could not load vendors');
@@ -103,66 +106,9 @@ export default function BuyDeskDraftPOModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const updateLine = (idx: number, field: 'quantity' | 'unitCost', value: number) => {
-    setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, [field]: value } : l)));
-  };
-
-  const subtotal = useMemo(
-    () => lines.reduce((s, l) => s + l.quantity * l.unitCost, 0),
-    [lines],
-  );
-
-  const handleCreate = async () => {
-    if (!vendorId) {
-      toast.error('Pick a vendor for this draft PO');
-      return;
-    }
-    const linesWithProduct = lines.filter((l) => l.product_id && l.quantity > 0);
-    if (linesWithProduct.length === 0) {
-      toast.error('Every line needs a quantity of at least 1');
-      return;
-    }
-    // Cost arrives on the PO, not at GRN: accept_grn reads the PO's unit price,
-    // so a zero-cost line would mint stock with no cost basis. Require a positive
-    // unit cost up front, matching the manual PO form's gate.
-    const zeroCost = linesWithProduct.filter((l) => !(l.unitCost > 0));
-    if (zeroCost.length > 0) {
-      toast.error('Every line needs a unit cost above 0 — cost cannot be added later at receiving.');
-      return;
-    }
-    const validLines = linesWithProduct;
-    if (submittingRef.current) return;
-    submittingRef.current = true;
-    const storeId = user?.activeStoreId ?? 'default';
-    setSaving(true);
-    try {
-      const resp = await vendorsApi.createPurchaseOrder({
-        vendor_id: vendorId,
-        delivery_store_id: storeId,
-        expected_date: expectedDelivery || undefined,
-        notes: notes || undefined,
-        items: validLines.map((l) => ({
-          product_id: l.product_id,
-          product_name: l.name,
-          sku: l.sku || 'N/A',
-          quantity: l.quantity,
-          unit_price: l.unitCost,
-        })),
-      });
-      toast.success(`Draft PO ${resp.po_number ?? ''} created with ${validLines.length} line(s)`);
-      onCreated();
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Failed to create draft PO';
-      toast.error(msg);
-    } finally {
-      submittingRef.current = false;
-      setSaving(false);
-    }
-  };
-
   return (
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl my-8">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl my-8">
         <div className="flex items-center justify-between p-5 border-b border-gray-200">
           <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
@@ -173,112 +119,44 @@ export default function BuyDeskDraftPOModal({
           </button>
         </div>
 
-        <div className="p-5 space-y-5">
-          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Vendor *</label>
-              <select
-                value={vendorId}
-                onChange={(e) => setVendorId(e.target.value)}
-                disabled={vendorsLoading}
-                className="input-field"
-              >
-                <option value="">{vendorsLoading ? 'Loading vendors…' : 'Select a vendor…'}</option>
-                {vendors.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name}
-                    {v.code ? ` (${v.code})` : ''}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-gray-400">
-                One vendor per draft. For multiple vendors, create a draft per group.
-              </p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Expected delivery</label>
-              <input
-                type="date"
-                value={expectedDelivery}
-                onChange={(e) => setExpectedDelivery(e.target.value)}
-                className="input-field"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Lines</label>
-            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-              {lines.map((l, idx) => (
-                <div key={l.product_id} className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-6 min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">{l.name}</div>
-                    <div className="text-xs text-gray-500 truncate">{l.sku}</div>
-                  </div>
-                  <div className="col-span-3">
-                    <label className="block text-[10px] uppercase text-gray-400">Qty</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={l.quantity}
-                      onChange={(e) => updateLine(idx, 'quantity', parseInt(e.target.value) || 0)}
-                      className="input-field text-sm"
-                    />
-                  </div>
-                  <div className="col-span-3">
-                    <label className="block text-[10px] uppercase text-gray-400">Unit cost ({'₹'})</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={l.unitCost}
-                      onChange={(e) => updateLine(idx, 'unitCost', parseFloat(e.target.value) || 0)}
-                      className="input-field text-sm"
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-            <p className="mt-2 text-xs text-gray-400">
-              Cost is optional on a draft — it can be confirmed when goods are received.
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder="Optional notes for this PO…"
-              className="input-field"
-            />
-          </div>
-
-          <div className="flex items-center justify-between rounded-lg bg-gray-50 px-4 py-2 text-sm">
-            <span className="text-gray-600">Subtotal (excl. tax)</span>
-            <span className="font-semibold text-gray-900">
-              {'₹'}
-              {subtotal.toLocaleString()}
-            </span>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-end gap-3 p-5 border-t border-gray-200">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleCreate}
-            disabled={saving}
-            className="btn-primary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-            {saving ? 'Creating…' : 'Create draft PO'}
-          </button>
+        <div className="p-5">
+          <PurchaseOrderComposer
+            mode="modal"
+            vendors={vendors}
+            vendorsLoading={vendorsLoading}
+            initialVendorId={preferredVendorId}
+            initialLines={initialLines}
+            vendorHint="One vendor per draft. For multiple vendors, create a draft per group."
+            renderProductCell={({ line }) => (
+              <div className="min-w-0 px-1 py-2">
+                <div className="text-sm font-medium text-gray-900 truncate">{line.productName}</div>
+                <div className="text-xs text-gray-500 truncate">{line.sku}</div>
+              </div>
+            )}
+            submitLabel="Create draft PO"
+            submittingLabel="Creating…"
+            onCancel={onClose}
+            onSubmit={async (payload) => {
+              const storeId = user?.activeStoreId ?? 'default';
+              const resp = await vendorsApi.createPurchaseOrder({
+                vendor_id: payload.vendorId,
+                delivery_store_id: storeId,
+                expected_date: payload.expectedDate || undefined,
+                notes: payload.notes || undefined,
+                items: payload.items.map((it) => ({
+                  product_id: it.product_id,
+                  product_name: it.product_name,
+                  sku: it.sku,
+                  quantity: it.quantity,
+                  unit_price: it.unit_price,
+                })),
+              });
+              toast.success(
+                `Draft PO ${resp.po_number ?? ''} created with ${payload.items.length} line(s)`,
+              );
+              onCreated();
+            }}
+          />
         </div>
       </div>
     </div>
