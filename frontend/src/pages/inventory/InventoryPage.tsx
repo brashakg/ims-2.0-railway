@@ -65,6 +65,8 @@ import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockW
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
 import { ContactLensInventoryWidget, ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget, TransferRecommendationsWidget } from '../../components/inventory/AdvancedInventoryFeatures';
 import { QuarantineQueue } from '../../components/inventory/QuarantineQueue';
+import { BrandInsightsWidget } from '../../components/inventory/BrandInsightsWidget';
+import { CollectionInsightsWidget } from '../../components/inventory/CollectionInsightsWidget';
 import { DisplayLayoutPanel } from '../../components/inventory/DisplayLayoutPanel';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
@@ -122,7 +124,7 @@ type StockMovement = StockMovementEntry;
 // Page size for the Movements tab's load-more paging (?skip=).
 const MOVEMENTS_PAGE_SIZE = 50;
 
-type ViewTab = 'alerts' | 'catalog' | 'display-layout' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock' | 'rebalance' | 'quarantine';
+type ViewTab = 'alerts' | 'catalog' | 'display-layout' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock' | 'brand-insights' | 'collection-insights' | 'rebalance' | 'quarantine';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -176,7 +178,7 @@ export function InventoryPage() {
     const tabParam = searchParams.get('tab');
     const fixtureParam = searchParams.get('fixture');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: ViewTab[] = ['alerts', 'catalog', 'display-layout', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock', 'rebalance', 'quarantine'];
+      const validTabs: ViewTab[] = ['alerts', 'catalog', 'display-layout', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock', 'brand-insights', 'collection-insights', 'rebalance', 'quarantine'];
       if (validTabs.includes(tabParam as ViewTab)) {
         setActiveTab(tabParam as ViewTab);
       }
@@ -665,6 +667,8 @@ export function InventoryPage() {
     { id: 'power-grid',     label: 'Lens power grid', icon: BarChart3 },
     { id: 'sell-through',   label: 'Sell-through',    icon: TrendingDown },
     { id: 'overstock',      label: 'Overstock',       icon: Boxes },
+    { id: 'brand-insights', label: 'Brands',          icon: BarChart3 },
+    { id: 'collection-insights', label: 'Collections', icon: Boxes },
     { id: 'rebalance',      label: 'Rebalance',       icon: ArrowRightLeft },
     { id: 'quarantine',     label: 'Quarantine',      icon: AlertTriangle, count: quarantineUnlabeled || undefined },
   ];
@@ -691,7 +695,7 @@ export function InventoryPage() {
     { id: 'health',   label: 'Stock health',icon: AlertTriangle,   members: ['low-stock', 'non-moving', 'aging', 'alerts'] },
     { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'stock-count', 'quarantine'] },
     { id: 'optical',  label: 'Optical',     icon: Eye,             members: ['serial-numbers', 'contact-lens', 'power-grid'] },
-    { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock'] },
+    { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock', 'brand-insights', 'collection-insights'] },
   ];
   const activeGroupId: GroupId =
     tabGroups.find((g) => g.members.includes(activeTab))?.id ?? 'catalog';
@@ -1433,6 +1437,16 @@ export function InventoryPage() {
       {/* Overstock Analysis Tab */}
       {activeTab === 'overstock' && (
         <OverstockAnalysisWidget />
+      )}
+
+      {/* Brand-wise KPI insights */}
+      {activeTab === 'brand-insights' && (
+        <BrandInsightsWidget />
+      )}
+
+      {/* Collection-wise KPI insights (shared summary with /collections) */}
+      {activeTab === 'collection-insights' && (
+        <CollectionInsightsWidget />
       )}
 
       {/* Rebalance: inter-store transfer suggestions + stock accountability */}
