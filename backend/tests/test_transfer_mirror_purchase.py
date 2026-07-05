@@ -200,8 +200,10 @@ def test_mirror_writes_bill_inter_entity_intrastate():
     b = bills[0]
     assert b["source_transfer_id"] == "trf_003"
     assert b["taxable_amount"] == 10000.0
-    # 18% tax
-    assert b["tax_amount"] == round(10000.0 * 0.18, 2)
+    # NEW-GST-TRANSFER-RATES: no per-item cost data -> aggregate fallback taxed
+    # at the app-wide resolve_gst_rate default (5% optical-dominant), replacing
+    # the old arbitrary flat 18%.
+    assert b["tax_amount"] == round(10000.0 * 0.05, 2)
     # Intra-state: CGST + SGST == tax; IGST == 0
     assert b["igst_total"] == 0.0
     assert round(b["cgst_total"] + b["sgst_total"], 2) == b["tax_amount"]
@@ -212,6 +214,11 @@ def test_mirror_writes_bill_inter_entity_intrastate():
     assert b["vendor_gstin"] == "20AAPFU0939F1ZV"  # from_entity's GSTIN
     assert b["vendor_id"] == "ent_1"
     assert b["entity_id"] == "ent_2"
+    # NEW-GST-TRANSFER-OUTWARD: fields the sender-side GSTR-1/3B and the
+    # receiver-side ITC scoping key on.
+    assert b["recipient_entity_id"] == "ent_2"
+    assert b["from_store_id"] == "store_a"
+    assert b["to_store_id"] == "store_b"
 
 
 def test_mirror_writes_bill_inter_entity_interstate():
@@ -243,11 +250,15 @@ def test_mirror_writes_bill_inter_entity_interstate():
     assert len(bills) == 1
     b = bills[0]
     assert b["interstate"] is True
-    assert b["igst_total"] == round(5000.0 * 0.18, 2)
+    # Aggregate fallback (no per-item cost data) -> 5% app default, all IGST.
+    assert b["igst_total"] == round(5000.0 * 0.05, 2)
     assert b["cgst_total"] == 0.0
     assert b["sgst_total"] == 0.0
     # place_of_supply = sending (JH) store's state code
     assert b["place_of_supply"] == "20"
+    # supply_place_recipient = receiving (MH) store's state code (the sender's
+    # outward place of supply reported on its GSTR-1 B2B row).
+    assert b["supply_place_recipient"] == "27"
 
 
 # ============================================================================
@@ -404,8 +415,20 @@ def test_mirror_value_from_items():
 
     # 3*500 + 2*250 = 2000
     assert len(bills) == 1
-    assert bills[0]["taxable_amount"] == 2000.0
-    assert bills[0]["tax_amount"] == round(2000.0 * 0.18, 2)
+    b = bills[0]
+    assert b["taxable_amount"] == 2000.0
+    # NEW-GST-TRANSFER-RATES: per-line path. Products are unknown to the fake
+    # master -> each line resolves via the app-wide 5% optical-dominant default.
+    assert b["tax_amount"] == round(2000.0 * 0.05, 2)
+    # Per-line detail present, and header == sum(lines) to the paisa.
+    assert len(b["lines"]) == 2
+    assert round(sum(ln["taxable"] for ln in b["lines"]), 2) == b["taxable_amount"]
+    assert (
+        round(
+            sum(ln["cgst"] + ln["sgst"] + ln["igst"] for ln in b["lines"]), 2
+        )
+        == b["tax_amount"]
+    )
 
 
 def test_mirror_writes_bill_same_entity_interstate():
@@ -441,6 +464,7 @@ def test_mirror_writes_bill_same_entity_interstate():
     assert len(bills) == 1, "same-entity interstate transfer must book an IGST mirror bill"
     b = bills[0]
     assert b["interstate"] is True
-    assert b["igst_total"] == round(10000.0 * 0.18, 2)
+    # Aggregate fallback (no per-item cost data) -> 5% app default, all IGST.
+    assert b["igst_total"] == round(10000.0 * 0.05, 2)
     assert round(b["cgst_total"] + b["sgst_total"], 2) == 0.0
     assert b["vendor_id"] == "ent_1" and b["entity_id"] == "ent_1"

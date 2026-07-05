@@ -2541,6 +2541,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     b2cl: list = []
     b2cs_map: dict = {}
     validation_issues: list = []
+    # NEW-GST-TRANSFER-OUTWARD: per-line HSN detail of the sender-side transfer
+    # deemed-supply bills (filled below; merged into the HSN summary instead of
+    # the row-level dominant HSN so mixed 5%/18% transfers stay exact).
+    transfer_hsn_lines: list = []
 
     # Store header (gstin + legalName + home state for intra/inter split)
     store_gstin = ""
@@ -2739,6 +2743,37 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         except Exception:
             pass
 
+        # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender side of inter-GSTIN
+        # stock transfers. A Schedule I deemed supply to a distinct person (a
+        # sister entity, or our own GSTIN in another state) is an OUTWARD B2B
+        # supply of the SENDING GSTIN -- previously it flowed only into the
+        # receiver's ITC (via the transfer mirror vendor_bill) and the sender
+        # under-reported outward IGST. The mirror bill itself is the sender's
+        # tax invoice, so its rows come from vendor_bills keyed by
+        # from_store_id; the recipient GSTIN is our sister GSTIN. Rows are
+        # flagged deemedSupply=True; the HSN summary uses their PER-LINE detail
+        # (merged below) so a mixed 5%/18% transfer stays rate-exact.
+        try:
+            _t_bills = _transfer_outward_bills(
+                db, active_store, year, mon, monthrange(year, mon)[1]
+            )
+            _t_rows, transfer_hsn_lines = _transfer_b2b_rows(_t_bills)
+            for _t_row in _t_rows:
+                if not _t_row.get("customerGSTIN"):
+                    validation_issues.append(
+                        {
+                            "level": "warn",
+                            "invoice": _t_row.get("invoiceNumber"),
+                            "issue": (
+                                "Transfer deemed-supply invoice missing recipient "
+                                "GSTIN — it will be dropped from the portal B2B upload"
+                            ),
+                        }
+                    )
+            b2b.extend(_t_rows)
+        except Exception:
+            transfer_hsn_lines = []
+
     b2cs = [
         {
             **v,
@@ -2836,6 +2871,12 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     for inv in b2b + b2cl:
         if not isinstance(inv, dict):
             continue
+        if inv.get("deemedSupply"):
+            # Transfer deemed-supply rows carry PER-LINE HSN detail (a transfer
+            # can mix 5% frames with 18% sunglasses) -- merged from
+            # transfer_hsn_lines below; skipping the single row-level HSN here
+            # avoids double-counting and rate-lumping.
+            continue
         hsn = str(inv.get("hsnCode", "9004"))
         rate = float(inv.get("gstRate", 0))
         key = f"{hsn}|{rate}"
@@ -2872,6 +2913,28 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         hsn_by_rate[key]["cgst"] += float(b2cs_row.get("cgst", 0))
         hsn_by_rate[key]["sgst"] += float(b2cs_row.get("sgst", 0))
         hsn_by_rate[key]["igst"] += float(b2cs_row.get("igst", 0))
+
+    # NEW-GST-TRANSFER-OUTWARD: merge the transfer deemed-supply PER-LINE HSN
+    # detail (the b2b/b2cl loop above skipped these rows).
+    for t_line in transfer_hsn_lines:
+        if not isinstance(t_line, dict):
+            continue
+        hsn = str(t_line.get("hsn") or "9004")
+        rate = float(t_line.get("gst_rate", 0) or 0)
+        key = f"{hsn}|{rate}"
+        if key not in hsn_by_rate:
+            hsn_by_rate[key] = {
+                "hsnCode": hsn,
+                "gstRate": int(rate),
+                "taxableValue": 0.0,
+                "cgst": 0.0,
+                "sgst": 0.0,
+                "igst": 0.0,
+            }
+        hsn_by_rate[key]["taxableValue"] += float(t_line.get("taxable", 0) or 0)
+        hsn_by_rate[key]["cgst"] += float(t_line.get("cgst", 0) or 0)
+        hsn_by_rate[key]["sgst"] += float(t_line.get("sgst", 0) or 0)
+        hsn_by_rate[key]["igst"] += float(t_line.get("igst", 0) or 0)
 
     for cn in cdnr:
         if not isinstance(cn, dict):
@@ -3006,6 +3069,20 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
                 {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
                 {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
             ],
+            # NEW-GST-TRANSFER-OUTWARD: a transfer mirror bill is the RECEIVING
+            # store's ITC -- never any other store's. The $nor excludes mirror
+            # bills (docs with source_transfer_id) whose to_store_id is not this
+            # store; regular purchase bills (no source_transfer_id) are
+            # untouched. Without this, on a same-entity cross-state transfer the
+            # SENDING store's 3B would claim ITC on its own outward supply
+            # (netting its 3.1(a) liability to zero), and every sister store of
+            # the receiving entity would double-count the credit.
+            "$nor": [
+                {
+                    "source_transfer_id": {"$exists": True},
+                    "to_store_id": {"$ne": active_store},
+                }
+            ],
         }
         if entity_id:
             vb_match["recipient_entity_id"] = entity_id
@@ -3031,6 +3108,151 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
     except Exception:
         pass
     return 0.0, 0.0, 0.0
+
+
+def _transfer_outward_bills(db, active_store, year, mon, last_day):
+    """NEW-GST-TRANSFER-OUTWARD (GAP A): the SENDING side of an inter-GSTIN
+    stock transfer (Schedule I deemed supply between distinct persons).
+
+    transfers._book_mirror_purchase writes ONE vendor_bills doc per cross-GSTIN
+    transfer -- the RECEIVING entity's ITC record. That SAME doc is the sending
+    GSTIN's outward tax invoice, so the sender's GSTR-1 B2B rows and GSTR-3B
+    3.1(a) totals are read from it here, keyed by from_store_id == the sending
+    store. Reading one shared doc for both sides makes the two filings
+    reconcile BY CONSTRUCTION: sender outward IGST == receiver ITC claim,
+    paisa-exact.
+
+    Same string-date month window as _itc_from_vendor_bills, so the sender
+    reports the outward supply in the SAME period the receiver claims the ITC.
+    Only forward-charge deemed supply lives here -- RCM inward supplies are a
+    separate flow (_rcm_from_vendor_bills; vendor_bills.reverse_charge=True).
+    Fail-soft -> [].
+    """
+    if db is None:
+        return []
+    try:
+        month_lo = f"{year:04d}-{mon:02d}-01"
+        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
+        query = {
+            "source_transfer_id": {"$exists": True, "$ne": None},
+            "from_store_id": active_store,
+            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
+            "$or": [
+                {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
+                {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
+            ],
+        }
+        return [b for b in db["vendor_bills"].find(query) if isinstance(b, dict)]
+    except Exception:
+        return []
+
+
+def _transfer_b2b_rows(bills):
+    """Map sender-side transfer mirror bills to (GSTR-1 B2B rows, HSN lines).
+
+    Pure -- no I/O. Each bill becomes one B2B invoice row (the recipient is our
+    own sister GSTIN, i.e. a registered person -> B2B section 4A) flagged
+    deemedSupply=True so the UI/CA can tell it from a customer sale and the
+    HSN-summary builder knows to use the PER-LINE detail instead of the
+    row-level dominant HSN (a transfer can mix 5% frames with 18% sunglasses).
+
+    Returns (rows, hsn_lines) where hsn_lines is a flat list of
+    {hsn, gst_rate, taxable, cgst, sgst, igst} dicts across all bills. Bills
+    without per-line detail (legacy) contribute one header-level HSN line.
+    """
+    rows = []
+    hsn_lines = []
+    for b in bills:
+        if not isinstance(b, dict):
+            continue
+        taxable = float(b.get("taxable_amount", b.get("taxable_total", 0)) or 0)
+        cgst = float(b.get("cgst_total", 0) or 0)
+        sgst = float(b.get("sgst_total", 0) or 0)
+        igst = float(b.get("igst_total", 0) or 0)
+        tax = float(b.get("tax_amount", 0) or 0) or round(cgst + sgst + igst, 2)
+        lines = [ln for ln in (b.get("lines") or []) if isinstance(ln, dict)]
+
+        recipient_gstin = str(b.get("recipient_gstin", "") or "").strip()
+        recipient_state = str(b.get("supply_place_recipient", "") or "").strip()
+        if not recipient_state and len(recipient_gstin) >= 2 and recipient_gstin[:2].isdigit():
+            recipient_state = recipient_gstin[:2]
+
+        first = lines[0] if lines else {}
+        try:
+            dominant_rate = float(first.get("gst_rate"))
+        except (TypeError, ValueError):
+            # Legacy header-only bill: derive the effective rate from the money.
+            dominant_rate = round(tax / taxable * 100.0, 2) if taxable else 0.0
+
+        raw_date = str(b.get("invoice_date") or b.get("bill_date") or "")
+        rows.append(
+            {
+                "invoiceNumber": str(
+                    b.get("invoice_number") or b.get("bill_number") or ""
+                ),
+                "invoiceDate": raw_date[:10],
+                "customerName": str(
+                    b.get("recipient_name") or b.get("entity_id") or ""
+                ),
+                "customerGSTIN": recipient_gstin,
+                "customerState": recipient_state,
+                "placeOfSupply": recipient_state or "Unknown",
+                "invoiceValue": round(
+                    float(b.get("total_amount", 0) or 0) or (taxable + tax), 2
+                ),
+                "taxableValue": round(taxable, 2),
+                "cgst": round(cgst, 2),
+                "sgst": round(sgst, 2),
+                "igst": round(igst, 2),
+                "totalTax": round(tax, 2),
+                "hsnCode": str(first.get("hsn") or "9004"),
+                "gstRate": dominant_rate,
+                # Markers: deemed supply on an inter-GSTIN stock transfer.
+                "deemedSupply": True,
+                "documentType": "STOCK_TRANSFER",
+                "sourceTransferId": b.get("source_transfer_id"),
+            }
+        )
+
+        if lines:
+            for ln in lines:
+                hsn_lines.append(
+                    {
+                        "hsn": str(ln.get("hsn") or "9004"),
+                        "gst_rate": float(ln.get("gst_rate", 0) or 0),
+                        "taxable": float(ln.get("taxable", 0) or 0),
+                        "cgst": float(ln.get("cgst", 0) or 0),
+                        "sgst": float(ln.get("sgst", 0) or 0),
+                        "igst": float(ln.get("igst", 0) or 0),
+                    }
+                )
+        else:
+            hsn_lines.append(
+                {
+                    "hsn": "9004",
+                    "gst_rate": dominant_rate,
+                    "taxable": round(taxable, 2),
+                    "cgst": round(cgst, 2),
+                    "sgst": round(sgst, 2),
+                    "igst": round(igst, 2),
+                }
+            )
+    return rows, hsn_lines
+
+
+def _transfer_outward_totals(db, active_store, year, mon, last_day):
+    """Sum (igst, cgst, sgst, taxable) of the sender-side transfer mirror bills
+    for GSTR-3B Table 3.1(a). Sums the SAME header fields the receiver's ITC
+    aggregation reads (igst/cgst/sgst_total, taxable_amount), so the sender's
+    outward figure equals the receiver's ITC claim to the paisa. Fail-soft ->
+    zeros (via _transfer_outward_bills)."""
+    igst = cgst = sgst = taxable = 0.0
+    for b in _transfer_outward_bills(db, active_store, year, mon, last_day):
+        igst = round(igst + float(b.get("igst_total", 0) or 0), 2)
+        cgst = round(cgst + float(b.get("cgst_total", 0) or 0), 2)
+        sgst = round(sgst + float(b.get("sgst_total", 0) or 0), 2)
+        taxable = round(taxable + float(b.get("taxable_amount", 0) or 0), 2)
+    return igst, cgst, sgst, taxable
 
 
 def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
@@ -3198,6 +3420,18 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                     out_sgst += tax / 2
         except Exception:
             pass
+
+        # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender's deemed outward supply
+        # on inter-GSTIN stock transfers -> Table 3.1(a). Reads the SAME mirror
+        # vendor_bills docs the receiver claims ITC from, so sender outward tax
+        # == receiver ITC claim by construction (paisa-exact).
+        t_igst, t_cgst, t_sgst, t_taxable = _transfer_outward_totals(
+            db, active_store, year, mon, last_day
+        )
+        out_igst += t_igst
+        out_cgst += t_cgst
+        out_sgst += t_sgst
+        out_taxable += t_taxable
 
         # BUG-138: ITC from recorded purchase invoices (vendor_bills), not the
         # qty-only `grns` collection that made ITC always 0 (-> GST over-paid).
