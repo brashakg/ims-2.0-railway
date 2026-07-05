@@ -656,6 +656,22 @@ def _ledger_row(
         # that put stock of this product on this store's shelf, or None.
         # Shape: {"grn_number": str, "qty": int, "date": "YYYY-MM-DD"}.
         "last_grn": last_grn or None,
+        # Owner 2026-07-05: product images on the Inventory screen. The first
+        # image as the row thumbnail + the full array for the click-to-zoom
+        # lightbox. Spine docs carry images[] (image_url is a serve-time alias).
+        "image_url": (
+            product.get("image_url")
+            or (
+                product["images"][0]
+                if isinstance(product.get("images"), list)
+                and product.get("images")
+                and isinstance(product["images"][0], str)
+                else None
+            )
+        ),
+        "images": (
+            product.get("images") if isinstance(product.get("images"), list) else []
+        ),
     }
 
 
