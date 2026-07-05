@@ -131,3 +131,98 @@ def test_update_requires_admin_role(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(update_integration("razorpay", cfg, {"roles": ["SALES_STAFF"]}))
     assert exc.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Owner-hit bugs 2026-07-05 (Shopify enable during the go-live prep):
+# 1. A save that omits secret fields (the modal always renders them blank and
+#    the FE drops blank fields) used to REPLACE the whole config -> flipping
+#    the Enabled toggle silently wiped the stored access_token. The write path
+#    must MERGE submitted keys over the stored config.
+# 2. GET /settings/integrations returned raw docs (with `enabled`) while the
+#    IntegrationsHub cards key on `is_enabled`/`is_configured` -> every card
+#    rendered OFF regardless of the saved state.
+# ---------------------------------------------------------------------------
+
+
+def test_enable_only_save_keeps_stored_secrets(monkeypatch):
+    """Flipping Enabled without retyping secrets must not wipe them."""
+    coll = _FakeColl()
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+
+    # 1. Initial save: full creds, disabled.
+    asyncio.run(
+        update_integration(
+            "shopify",
+            IntegrationConfig(
+                integration_type="shopify",
+                enabled=False,
+                config={"shop_url": "x.myshopify.com", "access_token": "shpat_secret1"},
+            ),
+            SUPER,
+        )
+    )
+    # 2. Enable-only save: secret field blank -> FE omits it entirely.
+    asyncio.run(
+        update_integration(
+            "shopify",
+            IntegrationConfig(
+                integration_type="shopify",
+                enabled=True,
+                config={"shop_url": "x.myshopify.com"},
+            ),
+            SUPER,
+        )
+    )
+    doc = coll.store["shopify"]
+    assert doc["enabled"] is True
+    stored = settings_router._decrypt_config(doc["config"])
+    assert stored.get("access_token") == "shpat_secret1"  # survived the toggle
+    assert stored.get("shop_url") == "x.myshopify.com"
+
+
+def test_submitted_secret_still_overwrites_stored(monkeypatch):
+    """Merging must not prevent a deliberate secret rotation."""
+    coll = _FakeColl()
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+
+    for token in ("shpat_old", "shpat_new"):
+        asyncio.run(
+            update_integration(
+                "shopify",
+                IntegrationConfig(
+                    integration_type="shopify",
+                    enabled=True,
+                    config={"access_token": token},
+                ),
+                SUPER,
+            )
+        )
+    stored = settings_router._decrypt_config(coll.store["shopify"]["config"])
+    assert stored.get("access_token") == "shpat_new"
+
+
+def test_list_integrations_normalizes_is_enabled(monkeypatch):
+    """The list endpoint carries is_enabled/is_configured like the single-get."""
+    from api.routers.settings import list_integrations
+
+    coll = _FakeColl()
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+    asyncio.run(
+        update_integration(
+            "shopify",
+            IntegrationConfig(
+                integration_type="shopify",
+                enabled=True,
+                config={"shop_url": "x.myshopify.com", "access_token": "shpat_1"},
+            ),
+            SUPER,
+        )
+    )
+    # _get_integrations_from_db does a find({}) over the collection.
+    coll.find = lambda flt=None: [dict(v) for v in coll.store.values()]  # type: ignore[attr-defined]
+    res = asyncio.run(list_integrations(SUPER))
+    rows = res["integrations"]
+    assert len(rows) == 1
+    assert rows[0]["is_enabled"] is True
+    assert rows[0]["is_configured"] is True

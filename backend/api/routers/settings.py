@@ -1713,12 +1713,17 @@ async def list_anthropic_models(
 
 @router.get("/integrations")
 async def list_integrations(current_user: dict = Depends(require_roles("ADMIN"))):
-    """List all integration configurations (ADMIN/SUPERADMIN only)."""
+    """List all integration configurations (ADMIN/SUPERADMIN only).
+
+    Each row is normalized with is_enabled / is_configured (same contract as
+    GET /integrations/{type}) -- the IntegrationsHub cards key on those, and
+    the raw docs only carry `enabled`, so every card used to render as OFF
+    no matter what was saved (owner-hit display bug 2026-07-05)."""
     integrations = _get_integrations_from_db()
-    if integrations:
-        return {"integrations": integrations}
-    # Return empty list when no database
-    return {"integrations": []}
+    for i in integrations:
+        i["is_enabled"] = bool(i.get("enabled"))
+        i["is_configured"] = bool(i.get("config"))
+    return {"integrations": integrations}
 
 
 @router.get("/integrations/{integration_type}")
@@ -1787,6 +1792,20 @@ async def update_integration(
 
     collection = _get_settings_collection("integrations")
     if collection is not None:
+        # MERGE over the stored config (owner-hit bug 2026-07-05): the modal
+        # always renders secret fields BLANK and the FE omits blank fields, so
+        # a save that only flips the Enabled toggle used to REPLACE the config
+        # and silently wipe stored secrets (enabling Shopify erased the saved
+        # access_token). Submitted keys win; omitted keys keep their stored
+        # value. To clear a field deliberately, submit it as a new value.
+        merged = dict(cfg)
+        try:
+            existing = collection.find_one({"type": integration_type.lower()}) or {}
+            stored_cfg = existing.get("config")
+            if isinstance(stored_cfg, dict) and stored_cfg:
+                merged = {**_decrypt_config(stored_cfg), **cfg}
+        except Exception:  # noqa: BLE001 - merge is protective, never fatal
+            merged = dict(cfg)
         collection.update_one(
             {"type": integration_type.lower()},
             {
@@ -1794,7 +1813,7 @@ async def update_integration(
                     "type": integration_type.lower(),
                     "enabled": bool(payload.get("enabled")),
                     # BUG-155: encrypt secrets at rest (was stored plaintext).
-                    "config": _encrypt_config(cfg),
+                    "config": _encrypt_config(merged),
                     "updated_at": datetime.now().isoformat(),
                 }
             },
