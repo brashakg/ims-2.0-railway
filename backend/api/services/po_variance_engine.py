@@ -50,6 +50,19 @@ _ACCEPTED_GRN_STATUSES = {"ACCEPTED"}
 # from OVERDUE to CRITICALLY_OVERDUE (and its task from P2 to P1).
 DEFAULT_CRITICAL_THRESHOLD_DAYS = 14
 
+# PO statuses in which goods are still awaited at the delivery store (for the
+# store-side overdue-delivery reminder). "PARTIAL" is the legacy single-word
+# status; PARTIALLY_RECEIVED POs are still awaiting the remaining lines.
+AWAITING_DELIVERY_STATUSES = {"SENT", "ACKNOWLEDGED", "PARTIAL", "PARTIALLY_RECEIVED"}
+
+# A PO sent with NO expected_date becomes overdue for the store-side reminder
+# once this many whole days have passed since sent_at.
+DEFAULT_NO_ETA_OVERDUE_DAYS = 7
+
+# The store-side reminder re-fires every this-many days via the stage bucket
+# in its dedupe ref (stage = days_overdue // repeat): weekly, never per tick.
+REMINDER_REPEAT_DAYS = 7
+
 
 def _int(v: Any) -> int:
     """Coerce to int; garbage/None -> 0 so nothing here ever raises."""
@@ -334,6 +347,84 @@ def variance_report_lines(
                 continue
             out.append(row)
     return out
+
+
+def overdue_po_reminder_specs(
+    pos: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+    no_eta_days: int = DEFAULT_NO_ETA_OVERDUE_DAYS,
+    repeat_days: int = REMINDER_REPEAT_DAYS,
+) -> List[Dict[str, Any]]:
+    """Task specs for the TASKMASTER store-side overdue-PO reminder. PURE.
+
+    "PO sent, no delivery logged": a PO is OVERDUE for its delivery store when
+    it is still awaiting goods (status SENT / ACKNOWLEDGED / PARTIAL /
+    PARTIALLY_RECEIVED) AND either:
+      * its expected_date is parseable and >= 1 whole day past, or
+      * it has NO parseable expected_date and sent_at is >= no_eta_days
+        (default 7) whole days past.
+
+    Whole-day counting reuses days_overdue(), i.e. the SAME naive-local
+    datetime convention as the rest of this module (_parse_dt strips tz; now
+    defaults to datetime.now()) -- no new timezone rules are invented here.
+
+    stage = days_overdue // repeat_days buckets repeats so the dedupe ref
+    ("po_overdue:{po_id}:{stage}") advances weekly: a fresh reminder can fire
+    once per week, never once per 5-minute tick.
+
+    Emits one spec per overdue PO:
+        {
+          po_id, po_number, vendor_id, vendor_name, delivery_store_id,
+          status, days_overdue, overdue_basis,   # "expected_date" | "sent_at"
+          expected_date, sent_date,              # date-only ISO strings/None
+          stage, source_ref                      # "po_overdue:{po_id}:{stage}"
+        }
+    """
+    now = now or datetime.now()
+    specs: List[Dict[str, Any]] = []
+    for po in pos or []:
+        if not isinstance(po, dict):
+            continue
+        po_id = po.get("po_id")
+        if not po_id:
+            continue
+        status = str(po.get("status", "") or "").upper()
+        if status not in AWAITING_DELIVERY_STATUSES:
+            continue
+        exp = _parse_dt(po.get("expected_date"))
+        sent = _parse_dt(po.get("sent_at"))
+        if exp is not None:
+            od = days_overdue(exp, now=now)
+            if od < 1:
+                continue
+            basis = "expected_date"
+        else:
+            # No (parseable) ETA: fall back to "sent N+ days ago, nothing
+            # received". A PO with neither timestamp has nothing to measure.
+            if sent is None:
+                continue
+            od = days_overdue(sent, now=now)
+            if od < max(1, int(no_eta_days)):
+                continue
+            basis = "sent_at"
+        stage = od // max(1, int(repeat_days))
+        specs.append(
+            {
+                "po_id": po_id,
+                "po_number": po.get("po_number"),
+                "vendor_id": po.get("vendor_id"),
+                "vendor_name": po.get("vendor_name"),
+                "delivery_store_id": po.get("delivery_store_id"),
+                "status": status,
+                "days_overdue": od,
+                "overdue_basis": basis,
+                "expected_date": exp.date().isoformat() if exp is not None else None,
+                "sent_date": sent.date().isoformat() if sent is not None else None,
+                "stage": stage,
+                "source_ref": f"po_overdue:{po_id}:{stage}",
+            }
+        )
+    return specs
 
 
 def aged_backorder_tasks_needed(

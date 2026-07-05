@@ -59,6 +59,7 @@ class TaskmasterAgent(JarvisAgent):
         "auto_reorder_draft",
         "sop_verification",
         "expense_anomaly_action",
+        "po_overdue_reminder",
         "audit_logged_execution",
     ]
 
@@ -80,6 +81,13 @@ class TaskmasterAgent(JarvisAgent):
         # get an accountable P2 task (P1 once critically overdue 14d+). Tier 1
         # auto-act -- task creation is fully reversible. Fail-soft.
         actions.extend(await self._sweep_aged_backorders())
+
+        # 2c. Overdue-PO store reminder: "PO sent, no delivery logged" pings
+        # the DELIVERY STORE (STORE_MANAGER worklist + bell) with a P2 task,
+        # re-firing weekly via a stage-bucketed dedupe ref. Store-side
+        # counterpart of the accountant express-receive task. Tier 1 auto-act
+        # -- task creation is fully reversible. Fail-soft.
+        actions.extend(await self._remind_overdue_pos())
 
         # 3. E4: expire stale approval requests past their 60-min TTL. This is a
         # status flip (REQUESTED -> EXPIRED), not a delete -- rows stay
@@ -778,6 +786,148 @@ class TaskmasterAgent(JarvisAgent):
                     logger.warning(
                         f"[TASKMASTER] backorder escalate failed for {ref}: {e}"
                     )
+        return actions
+
+    async def _remind_overdue_pos(self) -> List[Dict[str, Any]]:
+        """Store-side overdue-PO reminder: "PO sent, no delivery logged".
+
+        Scans POs still awaiting goods (SENT/ACKNOWLEDGED/PARTIAL/
+        PARTIALLY_RECEIVED, capped at 300). A PO is overdue when its
+        expected_date is >= 1 day past, or -- when no expected_date was given
+        -- when sent_at is >= 7 days past (both whole-day, naive-local, via
+        the SAME po_variance_engine date helpers the F8 backorder sweep uses).
+        Each overdue PO raises ONE P2 "Purchase" task on the DELIVERY store's
+        worklist (store_id = delivery_store_id, assigned_to STORE_MANAGER) so
+        it lands on that store's bell. The dedupe ref is stage-bucketed
+        ("po_overdue:{po_id}:{stage}", stage = days_overdue // 7) so a fresh
+        reminder fires weekly, never per 5-minute tick -- and a reminder the
+        manager already closed is NOT re-filed within the same week (any-state
+        dedupe, same rule as the expired-refund sweep). Tier 1 auto-act --
+        task creation is fully reversible. Fail-soft throughout: a per-PO
+        failure skips that PO; nothing here can break the tick."""
+        po_coll = self.get_collection("purchase_orders")
+        tasks_coll = self.get_collection("tasks")
+        if po_coll is None or tasks_coll is None:
+            return []
+
+        try:
+            from api.services import po_variance_engine
+            from api.services.task_triggers import create_system_task
+            from database.repositories.task_repository import TaskRepository
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] overdue-PO reminder imports failed: %s", e)
+            return []
+
+        # Canonical system-task path (same repo + creator as the backorder and
+        # refund sweeps) so the reminder carries task_number + due_at + the
+        # standard SYSTEM shape.
+        task_repo = TaskRepository(tasks_coll)
+
+        actions: List[Dict[str, Any]] = []
+        now = datetime.now()
+        try:
+            pos = list(
+                po_coll.find(
+                    {
+                        "status": {
+                            "$in": [
+                                "SENT",
+                                "ACKNOWLEDGED",
+                                "PARTIAL",
+                                "PARTIALLY_RECEIVED",
+                            ]
+                        }
+                    }
+                ).limit(300)
+            )
+            specs = po_variance_engine.overdue_po_reminder_specs(pos, now=now)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TASKMASTER] overdue-PO scan error: %s", e)
+            return []
+
+        for spec in specs:
+            try:
+                ref = spec.get("source_ref")
+                if not ref:
+                    continue
+                # Any-state dedupe: once this stage's reminder exists (even if
+                # the manager completed it), never re-file within the same
+                # week. Next week the stage advances and a fresh one fires.
+                try:
+                    if tasks_coll.find_one({"source_ref": ref}) is not None:
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass  # dedupe is best-effort; create_system_task re-checks
+
+                po_label = spec.get("po_number") or spec.get("po_id")
+                vendor = (
+                    spec.get("vendor_name") or spec.get("vendor_id") or "vendor"
+                )
+                if spec.get("overdue_basis") == "expected_date":
+                    when = f"expected {spec.get('expected_date')}"
+                else:
+                    when = f"sent {spec.get('sent_date')}, no expected date"
+                title = f"Overdue delivery: PO {po_label} ({vendor}) - {when}"
+                description = (
+                    f"PO {po_label} to {vendor} was sent but no delivery has "
+                    f"been logged; it is {spec.get('days_overdue')} day(s) "
+                    f"overdue ({when}). Chase the vendor, or record the GRN "
+                    f"if the goods have arrived."
+                )
+                created = create_system_task(
+                    task_repo,
+                    title=title,
+                    description=description,
+                    priority="P2",
+                    category="Purchase",
+                    store_id=spec.get("delivery_store_id"),
+                    assigned_to="STORE_MANAGER",
+                    dedupe_ref=ref,
+                    extra={
+                        "link": "/purchase?tab=purchase-orders",
+                        "payload": {
+                            "po_id": spec.get("po_id"),
+                            "po_number": spec.get("po_number"),
+                            "vendor_id": spec.get("vendor_id"),
+                            "days_overdue": spec.get("days_overdue"),
+                        },
+                    },
+                )
+                if created:
+                    await self._audit_log(
+                        action="po_overdue_reminder",
+                        target=str(spec.get("po_id")),
+                        before={
+                            "po_status": spec.get("status"),
+                            "days_overdue": spec.get("days_overdue"),
+                        },
+                        after={
+                            "task_id": created.get("task_id"),
+                            "store_id": spec.get("delivery_store_id"),
+                            "stage": spec.get("stage"),
+                        },
+                        tier=1,
+                    )
+                    actions.append(
+                        {
+                            "action": "po_overdue_reminder",
+                            "po_id": spec.get("po_id"),
+                            "store_id": spec.get("delivery_store_id"),
+                            "stage": spec.get("stage"),
+                            "task_id": created.get("task_id"),
+                        }
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[TASKMASTER] overdue-PO reminder failed for %s: %s",
+                    spec.get("po_id"),
+                    e,
+                )
+                continue
+        if actions:
+            logger.info(
+                "[TASKMASTER] raised %d overdue-PO reminder(s)", len(actions)
+            )
         return actions
 
     async def _audit_log(
