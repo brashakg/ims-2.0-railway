@@ -3352,6 +3352,15 @@ POLICY: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
         "store_scoped": True,
     },
+    # Movements ledger (Movements tab): merged GRN/order/transfer event feed.
+    # Mirrors the /inventory/stock row -- any authenticated role may read its
+    # own store's ledger; store_scoped stops cross-store reads via ?store_id=.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/movements",
+        "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
     {
         "method": "GET",
         "path": "/api/v1/inventory/non-moving",
