@@ -203,26 +203,25 @@ def test_submitted_secret_still_overwrites_stored(monkeypatch):
 
 
 def test_list_integrations_normalizes_is_enabled(monkeypatch):
-    """The list endpoint carries is_enabled/is_configured like the single-get."""
+    """The list endpoint carries is_enabled/is_configured like the single-get.
+
+    Hermetic: patches the module's own read helper directly -- the first
+    version faked the whole collection round-trip and flaked under the full
+    CI suite (came back empty), which is orthogonal to what this test guards:
+    the NORMALIZATION of raw docs into the shape the IntegrationsHub reads."""
     from api.routers.settings import list_integrations
 
-    coll = _FakeColl()
-    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
-    asyncio.run(
-        update_integration(
-            "shopify",
-            IntegrationConfig(
-                integration_type="shopify",
-                enabled=True,
-                config={"shop_url": "x.myshopify.com", "access_token": "shpat_1"},
-            ),
-            SUPER,
-        )
+    monkeypatch.setattr(
+        settings_router,
+        "_get_integrations_from_db",
+        lambda: [
+            {"type": "shopify", "enabled": True, "config": {"shop_url": "x"}},
+            {"type": "razorpay", "enabled": False, "config": {}},
+        ],
     )
-    # _get_integrations_from_db does a find({}) over the collection.
-    coll.find = lambda flt=None: [dict(v) for v in coll.store.values()]  # type: ignore[attr-defined]
     res = asyncio.run(list_integrations(SUPER))
-    rows = res["integrations"]
-    assert len(rows) == 1
-    assert rows[0]["is_enabled"] is True
-    assert rows[0]["is_configured"] is True
+    rows = {r["type"]: r for r in res["integrations"]}
+    assert rows["shopify"]["is_enabled"] is True
+    assert rows["shopify"]["is_configured"] is True
+    assert rows["razorpay"]["is_enabled"] is False
+    assert rows["razorpay"]["is_configured"] is False
