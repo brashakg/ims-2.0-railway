@@ -3055,13 +3055,37 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
         return 0.0, 0.0, 0.0
     try:
         entity_id = None
+        store_gstin = ""
         try:
-            _srow = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
+            _srow = db["stores"].find_one(
+                {"store_id": active_store}, {"entity_id": 1, "gstin": 1}
+            )
             entity_id = (_srow or {}).get("entity_id")
+            store_gstin = str((_srow or {}).get("gstin", "") or "").strip()
         except Exception:
             entity_id = None
         month_lo = f"{year:04d}-{mon:02d}-01"
         month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
+
+        # NEW-GST-TRANSFER-OUTWARD: a transfer mirror bill's ITC belongs to the
+        # RECEIVING GSTIN -- the same scope the return itself is filed under.
+        # Keep a transfer bill only when its recipient_gstin matches the GSTIN
+        # being filed (so every store of a multi-store GSTIN produces the SAME
+        # Table 4 for that GSTIN -- one GSTIN, one filing); when the bill has no
+        # recipient GSTIN on file, fall back to to_store_id == this store. The
+        # outer $nor excludes transfer bills matching NEITHER keep-condition;
+        # regular purchase bills (no source_transfer_id) are untouched. Without
+        # this, on a same-entity cross-state transfer the SENDING store's 3B
+        # would claim ITC on its own outward supply (netting its 3.1(a)
+        # liability to zero). source_transfer_id uses {$exists,$ne None} to stay
+        # aligned with the sender-side collector (_transfer_outward_bills) --
+        # a None-valued field must not produce a one-sided claim.
+        transfer_keep: list = []
+        if store_gstin:
+            transfer_keep.append({"recipient_gstin": store_gstin})
+        transfer_keep.append(
+            {"recipient_gstin": {"$in": ["", None]}, "to_store_id": active_store}
+        )
         vb_match: dict = {
             "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
             "itc_eligible": {"$ne": False},
@@ -3069,18 +3093,10 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
                 {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
                 {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
             ],
-            # NEW-GST-TRANSFER-OUTWARD: a transfer mirror bill is the RECEIVING
-            # store's ITC -- never any other store's. The $nor excludes mirror
-            # bills (docs with source_transfer_id) whose to_store_id is not this
-            # store; regular purchase bills (no source_transfer_id) are
-            # untouched. Without this, on a same-entity cross-state transfer the
-            # SENDING store's 3B would claim ITC on its own outward supply
-            # (netting its 3.1(a) liability to zero), and every sister store of
-            # the receiving entity would double-count the credit.
             "$nor": [
                 {
-                    "source_transfer_id": {"$exists": True},
-                    "to_store_id": {"$ne": active_store},
+                    "source_transfer_id": {"$exists": True, "$ne": None},
+                    "$nor": transfer_keep,
                 }
             ],
         }
@@ -3159,6 +3175,17 @@ def _transfer_b2b_rows(bills):
     Returns (rows, hsn_lines) where hsn_lines is a flat list of
     {hsn, gst_rate, taxable, cgst, sgst, igst} dicts across all bills. Bills
     without per-line detail (legacy) contribute one header-level HSN line.
+
+    Each row also carries `rateLines`: the bill's lines AGGREGATED PER GST
+    RATE. The portal's B2B invoice entry is a list of itm_det blocks, ONE PER
+    RATE -- a single blended block (e.g. rt=5 with the tax of a 5%+18% mix)
+    fails the offline tool's txval*rt==iamt validation. gstn_export._build_b2b
+    emits one itm per rateLines entry; rows without rateLines (normal order
+    rows) keep the single-item path.
+
+    Zero-value bills (taxable <= 0 and tax <= 0, e.g. a cost-less transfer)
+    are SKIPPED entirely -- an all-zero rt=0 invoice is portal noise that the
+    offline tool rejects, and it contributes nothing to any total.
     """
     rows = []
     hsn_lines = []
@@ -3170,6 +3197,9 @@ def _transfer_b2b_rows(bills):
         sgst = float(b.get("sgst_total", 0) or 0)
         igst = float(b.get("igst_total", 0) or 0)
         tax = float(b.get("tax_amount", 0) or 0) or round(cgst + sgst + igst, 2)
+        if taxable <= 0 and tax <= 0:
+            # Zero-value bill: nothing to report outward (see docstring).
+            continue
         lines = [ln for ln in (b.get("lines") or []) if isinstance(ln, dict)]
 
         recipient_gstin = str(b.get("recipient_gstin", "") or "").strip()
@@ -3183,6 +3213,19 @@ def _transfer_b2b_rows(bills):
         except (TypeError, ValueError):
             # Legacy header-only bill: derive the effective rate from the money.
             dominant_rate = round(tax / taxable * 100.0, 2) if taxable else 0.0
+
+        # Per-rate aggregation for the portal itm_det blocks (one per rate).
+        rate_map: dict = {}
+        for ln in lines:
+            r = float(ln.get("gst_rate", 0) or 0)
+            bucket = rate_map.setdefault(
+                r, {"rate": r, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
+            )
+            bucket["taxable"] = round(bucket["taxable"] + float(ln.get("taxable", 0) or 0), 2)
+            bucket["cgst"] = round(bucket["cgst"] + float(ln.get("cgst", 0) or 0), 2)
+            bucket["sgst"] = round(bucket["sgst"] + float(ln.get("sgst", 0) or 0), 2)
+            bucket["igst"] = round(bucket["igst"] + float(ln.get("igst", 0) or 0), 2)
+        rate_lines = [rate_map[r] for r in sorted(rate_map)]
 
         raw_date = str(b.get("invoice_date") or b.get("bill_date") or "")
         rows.append(
@@ -3207,6 +3250,9 @@ def _transfer_b2b_rows(bills):
                 "totalTax": round(tax, 2),
                 "hsnCode": str(first.get("hsn") or "9004"),
                 "gstRate": dominant_rate,
+                # Per-rate tax blocks for the portal export (one itm per rate;
+                # empty for legacy header-only bills -> single-item path).
+                "rateLines": rate_lines,
                 # Markers: deemed supply on an inter-GSTIN stock transfer.
                 "deemedSupply": True,
                 "documentType": "STOCK_TRANSFER",

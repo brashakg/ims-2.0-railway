@@ -21,11 +21,25 @@ THE ROUND-TRIP INVARIANT (asserted paisa-exact below, with mixed 5%/18% lines):
 
 Also covered: the same-entity same-state gate books NOTHING (unchanged);
 idempotent re-run; the sending store never claims ITC on its own outward
-supply; a sister store of the receiving entity does not double-claim the ITC.
+supply. ITC scope is the RECEIVING GSTIN: every store filing under that GSTIN
+sees the same Table 4 (one GSTIN = one filing), while stores under any OTHER
+GSTIN -- including the sender's -- claim nothing.
+
+Adversarial-review hardening (PR #899 follow-up), all tested here:
+  * portal B2B emits ONE itm_det PER RATE (a blended block fails the offline
+    tool's txval*rt==iamt check); normal order rows keep the single-item shape.
+  * a missing destination-state GSTIN stays EMPTY (never the sender's own
+    GSTIN via the old gstins[0] fallback) -> loud validation + dropped row.
+  * short-ship: quantity_received==0 bills NOTHING for that line (no ITC on
+    goods never received); requested is only a fallback when the field is
+    absent (legacy docs).
+  * zero-value bills emit no GSTR-1 row (portal rejects all-zero invoices).
+  * bill dates are IST-frame, so the deemed supply files in the same IST month
+    as the orders in the return.
 
 All tests are pure (no live DB) via a small in-memory Mongo-subset evaluator
-(handles the exact operators the collectors use: $exists/$ne/$nin/$gte/$lte/
-$or/$nor and aggregate $match+$group/$sum).
+(handles the exact operators the collectors use: $exists/$ne/$nin/$in/$gte/
+$lte/$or/$nor and aggregate $match+$group/$sum).
 """
 
 from __future__ import annotations
@@ -76,6 +90,11 @@ def _match(doc, query):
                         return False
                 elif op == "$nin":
                     if val in arg:
+                        return False
+                elif op == "$in":
+                    # Mongo: {$in: [null]} also matches a MISSING field --
+                    # doc.get() returning None reproduces that.
+                    if val not in arg:
                         return False
                 elif op == "$gte":
                     if val is None or not (val >= arg):
@@ -488,10 +507,17 @@ def test_roundtrip_sender_outward_equals_receiver_itc(static_rates, monkeypatch)
         == 460.0
     )
 
-    # The sender must NOT claim ITC on its own outward supply...
+    # The sender must NOT claim ITC on its own outward supply.
     assert sender_3b["itcAvailable"]["integratedTax"] == 0.0
-    # ...and the receiving entity's SISTER store must not double-claim it.
-    assert sister_3b["itcAvailable"]["integratedTax"] == 0.0
+    # ITC scope is the RECEIVING GSTIN: mh_store_2 files under the SAME GSTIN
+    # as mh_store, so its Table 4 is the SAME filing and must show the SAME
+    # credit (one GSTIN = one GSTR-3B; a store-scoped Table 4 would be correct
+    # under no filing convention for a multi-store GSTIN).
+    assert (
+        sister_3b["itcAvailable"]["integratedTax"]
+        == receiver_3b["itcAvailable"]["integratedTax"]
+        == 460.0
+    )
 
     # Receiver reports no outward supply from this transfer.
     assert receiver_3b["outwardTaxableSupplies"]["integratedTax"] == 0.0
@@ -535,8 +561,9 @@ def test_roundtrip_same_entity_cross_state_odd_paise(static_rates, monkeypatch):
     assert sender_3b["outwardTaxableSupplies"]["integratedTax"] == expected_igst
     assert receiver_3b["itcAvailable"]["integratedTax"] == expected_igst
 
-    # The sender's OWN report must not also claim the credit (same entity!),
-    # nor may any other same-entity store.
+    # The sender's GSTIN (20...) must not claim the credit -- the bill belongs
+    # to the 27... GSTIN of the SAME entity. jh_store_2 files under the same
+    # 20... GSTIN as the sender, so it claims nothing either.
     assert sender_3b["itcAvailable"]["integratedTax"] == 0.0
     assert sender_sister_3b["itcAvailable"]["integratedTax"] == 0.0
     # And the sister store reports no outward either (it didn't send anything).
@@ -568,3 +595,244 @@ def test_regular_purchase_bill_itc_unaffected(static_rates, monkeypatch):
     # A regular purchase bill is nobody's outward supply.
     assert rep["outwardTaxableSupplies"]["integratedTax"] == 0.0
     assert rep["outwardTaxableSupplies"]["centralTax"] == 0.0
+
+
+# ============================================================================
+# REVIEW BLOCKER 1: portal B2B emits one itm_det PER RATE
+# ============================================================================
+
+
+def test_portal_b2b_one_item_per_rate(static_rates, monkeypatch):
+    """A mixed 5%/18% deemed-supply invoice must export one itm_det per rate,
+    each self-consistent (txval * rt == iamt) -- a single blended block (rt=5
+    carrying the whole 460 of tax on 4000 taxable) fails the offline tool's
+    item validation and the upload is rejected."""
+    from api.services.gstn_export import to_gstr1_json
+
+    db = _mini_db()
+    _book(db, _mixed_transfer())
+    monkeypatch.setattr(reports, "_get_raw_db", lambda: db)
+    rep = reports._compute_gstr1("2026-06", "jh_store")
+    out = to_gstr1_json(rep, gstin=rep["gstin"], period="2026-06")
+
+    assert len(out["b2b"]) == 1
+    bucket = out["b2b"][0]
+    assert bucket["ctin"] == RECV_GSTIN_MH
+    inv = bucket["inv"][0]
+    assert inv["val"] == 4460.0
+    itms = inv["itms"]
+    assert [it["num"] for it in itms] == [1, 2]
+
+    by_rate = {it["itm_det"]["rt"]: it["itm_det"] for it in itms}
+    assert set(by_rate) == {5.0, 18.0}
+    for rt, det in by_rate.items():
+        # Self-validation the portal enforces per item.
+        assert round(det["txval"] * rt / 100.0, 2) == det["iamt"]
+        assert det["camt"] == 0.0 and det["samt"] == 0.0
+    assert by_rate[5.0]["txval"] == 2000.0 and by_rate[5.0]["iamt"] == 100.0
+    assert by_rate[18.0]["txval"] == 2000.0 and by_rate[18.0]["iamt"] == 360.0
+    # Items reconcile with the invoice value.
+    assert (
+        round(sum(d["txval"] + d["iamt"] for d in by_rate.values()), 2)
+        == inv["val"]
+    )
+
+
+def test_portal_b2b_single_item_unchanged_for_order_rows():
+    """Rows WITHOUT rateLines (normal order-derived B2B rows) keep the original
+    single-item export shape byte-identically."""
+    from api.services.gstn_export import _build_b2b
+
+    row = {
+        "customerGSTIN": "07AAACR0000A1ZZ",
+        "invoiceNumber": "INV-1",
+        "invoiceDate": "2026-06-10",
+        "invoiceValue": 1050.0,
+        "taxableValue": 1000.0,
+        "cgst": 25.0,
+        "sgst": 25.0,
+        "igst": 0.0,
+        "gstRate": 5,
+        "placeOfSupply": "Delhi",
+    }
+    out = _build_b2b([row], "Delhi")
+    assert len(out) == 1
+    inv = out[0]["inv"][0]
+    assert len(inv["itms"]) == 1
+    assert inv["itms"][0]["num"] == 1
+    assert inv["itms"][0]["itm_det"] == {
+        "rt": 5.0,
+        "txval": 1000.0,
+        "iamt": 0.0,
+        "camt": 25.0,
+        "samt": 25.0,
+        "csamt": 0.0,
+    }
+
+
+# ============================================================================
+# REVIEW BLOCKER 2: missing destination-state GSTIN stays EMPTY (and loud)
+# ============================================================================
+
+
+def test_missing_destination_gstin_stays_empty_and_loud(static_rates, monkeypatch):
+    """Same PAN, cross-state, but the entity has NO destination-state GSTIN on
+    file. The old gstins[0] fallback stamped the SENDER's own GSTIN as the
+    recipient (a supply-to-self B2B row the portal rejects) and the validation
+    never fired. Now: recipient stays '', the GSTR-1 validation flags it, the
+    portal export drops the row, and the ITC falls back to the RECEIVING store
+    only."""
+    from api.services.gstn_export import to_gstr1_json
+
+    db = _mini_db()
+    for e in db["entities"].docs:
+        if e["entity_id"] == "ent_send":
+            # Only the sender-state GSTIN is registered.
+            e["gstins"] = [{"state_code": "20", "gstin": SEND_GSTIN_JH}]
+    t = _mixed_transfer(
+        from_store="jh_store", to_store="mh_send_branch", tid="trf_gst_3"
+    )
+    _book(db, t)
+
+    b = db["vendor_bills"].docs[0]
+    assert b["recipient_gstin"] == ""  # NOT the sender's own GSTIN
+    assert b["recipient_gstin"] != SEND_GSTIN_JH
+    assert b["vendor_gstin"] == SEND_GSTIN_JH
+
+    monkeypatch.setattr(reports, "_get_raw_db", lambda: db)
+    rep = reports._compute_gstr1("2026-06", "jh_store")
+    # Loud: the CA sees the broken bill in the validation report...
+    assert any(
+        "recipient GSTIN" in i["issue"] for i in rep["validation"]["issues"]
+    )
+    # ...and the portal export drops the row instead of misfiling it.
+    out = to_gstr1_json(rep, gstin=rep["gstin"], period="2026-06")
+    assert out["b2b"] == []
+
+    # ITC fallback: recipient GSTIN empty -> only the RECEIVING store claims.
+    recv_3b = reports._compute_gstr3b("2026-06", "mh_send_branch")
+    send_3b = reports._compute_gstr3b("2026-06", "jh_store")
+    assert recv_3b["itcAvailable"]["integratedTax"] == 460.0
+    assert send_3b["itcAvailable"]["integratedTax"] == 0.0
+
+
+# ============================================================================
+# REVIEW BLOCKER 3: short-ship -- received qty is authoritative
+# ============================================================================
+
+
+def test_short_ship_line_not_billed(static_rates):
+    """A line received == 0 on a completed transfer must NOT be billed -- the
+    old `received or requested` fallback billed the FULL requested qty and
+    handed the receiver ITC on goods never received."""
+    db = _mini_db()
+    t = _mixed_transfer()
+    t["items"][1]["quantity_received"] = 0  # sunglass never arrived
+    _book(db, t)
+
+    b = db["vendor_bills"].docs[0]
+    assert [ln["product_id"] for ln in b["lines"]] == ["prod_frame"]
+    assert b["taxable_amount"] == 2000.0
+    assert b["igst_total"] == 100.0  # frame only, 5%
+
+
+def test_partial_receipt_bills_received_qty(static_rates):
+    """1 received of 10 requested bills exactly 1."""
+    db = _mini_db()
+    t = _mixed_transfer()
+    t["items"][0].update({"quantity_requested": 10, "quantity_received": 1})
+    t["items"][1]["quantity_received"] = 0
+    _book(db, t)
+
+    b = db["vendor_bills"].docs[0]
+    assert len(b["lines"]) == 1
+    assert b["lines"][0]["qty"] == 1.0
+    assert b["taxable_amount"] == 1000.0  # 1 x 1000, not 10 x 1000
+    assert b["igst_total"] == 50.0
+
+
+def test_all_lines_short_shipped_zero_bill(static_rates):
+    """Every line received 0 -> ZERO bill; the request-time total_value must
+    NOT resurrect through the aggregate fallback."""
+    db = _mini_db()
+    t = _mixed_transfer()
+    t["items"][0]["quantity_received"] = 0
+    t["items"][1]["quantity_received"] = 0
+    _book(db, t)
+
+    b = db["vendor_bills"].docs[0]
+    assert b["taxable_amount"] == 0.0
+    assert b["tax_amount"] == 0.0
+    assert b["lines"] == []
+
+
+def test_legacy_items_without_received_key_bill_requested(static_rates):
+    """Items with NO quantity_received field at all (legacy pre-receive docs)
+    still bill the requested qty."""
+    db = _mini_db()
+    t = _mixed_transfer()
+    for it in t["items"]:
+        it.pop("quantity_received")
+    _book(db, t)
+
+    b = db["vendor_bills"].docs[0]
+    assert b["taxable_amount"] == 4000.0
+    assert b["igst_total"] == 460.0
+
+
+# ============================================================================
+# REVIEW ITEM 5: zero-value bills are not exported
+# ============================================================================
+
+
+def test_zero_value_bill_emits_no_gstr1_row(static_rates, monkeypatch):
+    db = _mini_db()
+    t = _mixed_transfer()
+    t["items"][0]["quantity_received"] = 0
+    t["items"][1]["quantity_received"] = 0
+    _book(db, t)
+    assert len(db["vendor_bills"].docs) == 1  # bill still booked (audit trail)
+
+    monkeypatch.setattr(reports, "_get_raw_db", lambda: db)
+    rep = reports._compute_gstr1("2026-06", "jh_store")
+    assert rep["b2b"] == []  # an all-zero rt=0 invoice is portal noise
+    assert rep["totalTax"] == 0.0
+    assert rep["hsnSummary"] == []
+    sender_3b = reports._compute_gstr3b("2026-06", "jh_store")
+    assert sender_3b["outwardTaxableSupplies"]["integratedTax"] == 0.0
+    assert sender_3b["outwardTaxableValue"] == 0.0
+
+
+# ============================================================================
+# REVIEW ITEM 7: IST filing month
+# ============================================================================
+
+
+def test_ist_month_boundary_files_bill_in_ist_month(static_rates, monkeypatch):
+    """completed_at 30-Jun 20:00 naive-UTC == 1-Jul 01:30 IST: the deemed
+    supply must file in JULY alongside the rest of the IST-month return --
+    BOTH sides (sender outward AND receiver ITC) move together, so the
+    reconciliation invariant survives the boundary."""
+    db = _mini_db()
+    t = _mixed_transfer(tid="trf_gst_4")
+    t["completed_at"] = "2026-06-30T20:00:00"
+    _book(db, t)
+
+    b = db["vendor_bills"].docs[0]
+    assert b["invoice_date"].startswith("2026-07-01T01:30")
+
+    monkeypatch.setattr(reports, "_get_raw_db", lambda: db)
+    assert reports._compute_gstr1("2026-06", "jh_store")["b2b"] == []
+    july = reports._compute_gstr1("2026-07", "jh_store")
+    assert len(july["b2b"]) == 1
+    assert july["totalTax"] == 460.0
+
+    # Receiver's ITC lands in the SAME (July) period -- invariant intact.
+    assert (
+        reports._compute_gstr3b("2026-07", "mh_store")["itcAvailable"]["integratedTax"]
+        == 460.0
+    )
+    assert (
+        reports._compute_gstr3b("2026-06", "mh_store")["itcAvailable"]["integratedTax"]
+        == 0.0
+    )

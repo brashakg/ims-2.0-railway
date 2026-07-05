@@ -1760,7 +1760,17 @@ def _store_entity(db, store_id: str) -> str:
 
 
 def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
-    """Return the GSTIN the entity bills under in `state_code`; '' on miss."""
+    """Return the GSTIN the entity bills under in `state_code`; '' on miss.
+
+    STRICT state match only -- NO first-GSTIN fallback. The old gstins[0]
+    fallback could return a GSTIN from the WRONG state: on a same-entity
+    cross-state transfer with no destination-state GSTIN on file it stamped the
+    SENDER's own filing GSTIN as the recipient (a supply-to-self B2B row the
+    portal rejects), and the empty-recipient-GSTIN validation warning never
+    fired because the field wasn't empty. Returning '' keeps the miss LOUD:
+    reports._compute_gstr1 flags the bill and the portal export drops the row
+    instead of uploading a wrong counterparty.
+    """
     if db is None or not entity_id:
         return ""
     try:
@@ -1773,10 +1783,6 @@ def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
         for g in entity.get("gstins") or []:
             if str(g.get("state_code") or g.get("state") or "")[:2] == state_code:
                 return str(g.get("gstin") or "")
-        # Fall back to any GSTIN registered under this entity.
-        gstins = entity.get("gstins") or []
-        if gstins:
-            return str(gstins[0].get("gstin") or "")
     except Exception as exc:  # noqa: BLE001 - fail-soft
         logger.warning(
             "[TRANSFER] GSTIN lookup failed entity=%s state=%s: %s",
@@ -1802,6 +1808,35 @@ def _tax_split(tax: float, interstate: bool):
     return half, sgst, 0.0
 
 
+def _bill_date_ist(completed_at_raw) -> str:
+    """IST wall-clock ISO string for the mirror bill's bill/invoice date.
+
+    transfer.completed_at is stamped with naive ``datetime.now()`` == the
+    server (UTC on Railway) wall clock, but the GST tax period is the IST
+    calendar month and the vendor-bill month windows (_itc_from_vendor_bills /
+    _transfer_outward_bills) compare these date STRINGS in calendar frame. So
+    the instant must be shifted to IST before it becomes the filing date --
+    otherwise a completion at 00:00-05:29 IST files one month EARLY relative to
+    the orders in the same return (which use ist_day_start_utc windows).
+
+    Naive input is treated as UTC (the codebase convention -- see utils/ist.py
+    module docstring). Fail-soft: unparseable/missing -> IST "now".
+    """
+    from datetime import timezone as _tz
+
+    from ..utils.ist import IST, now_ist_naive
+
+    try:
+        if completed_at_raw:
+            dt = datetime.fromisoformat(str(completed_at_raw))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt.astimezone(IST).replace(tzinfo=None).isoformat()
+    except Exception:  # noqa: BLE001 - fail-soft
+        pass
+    return now_ist_naive().isoformat()
+
+
 def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
     """Per-line taxable + GST for a transfer mirror bill (NEW-GST-TRANSFER-RATES).
 
@@ -1819,10 +1854,15 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
     header totals (the sums of these) == sum(lines) to the paisa -- the same
     invariant compute_invoice keeps for real purchase invoices.
 
-    Quantity: quantity_received preferred (the units that actually arrived --
-    what the receiving side is billed for, mirroring GRN accepted-qty billing),
-    falling back to quantity_requested. Lines with no cost or no quantity are
-    skipped (the caller falls back to the legacy aggregate on total_value).
+    Quantity: quantity_received, USED AS-IS when the item carries it (the units
+    that actually arrived -- what the receiving side is billed for, mirroring
+    GRN accepted-qty billing). received == 0 means the line was SHORT-SHIPPED
+    and must NOT be billed (a `received or requested` fallback would bill the
+    full requested qty and hand the receiver ITC on goods never received).
+    quantity_requested is the fallback ONLY when the item has no
+    quantity_received field at all (legacy pre-receive docs). Lines with no
+    cost or no quantity are skipped (the caller falls back to the legacy
+    aggregate on total_value only when NO item carried usable cost data).
 
     Fail-soft: any product-master lookup error degrades that line to the
     app-wide resolve_gst_rate fallback (optical-dominant 5%); never raises.
@@ -1839,14 +1879,13 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
     for item in transfer.get("items") or []:
         if not isinstance(item, dict):
             continue
+        # SHORT-SHIP: an explicit quantity_received (including 0) is
+        # authoritative; only a missing/None field falls back to requested.
+        qty_raw = item.get("quantity_received")
+        if qty_raw is None:
+            qty_raw = item.get("quantity_requested")
         try:
-            qty = int(
-                float(
-                    item.get("quantity_received")
-                    or item.get("quantity_requested")
-                    or 0
-                )
-            )
+            qty = int(float(qty_raw or 0))
         except (TypeError, ValueError):
             qty = 0
         try:
@@ -1985,9 +2024,29 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             # consistent with how POS bills an uncategorised item, replacing
             # the old arbitrary flat 18%. The CA can correct the bill if the
             # actual mix differs.
+            #
+            # SHORT-SHIP GUARD: the fallback fires ONLY when no item carried
+            # usable cost data. If cost-bearing items exist but produced no
+            # line, every one of them was received == 0 (short-shipped) -- the
+            # bill must then be ZERO, not the request-time total_value, or the
+            # receiver would claim ITC on goods that never arrived.
             from ..services.gst_rates import resolve_gst_rate
 
-            taxable = round(float(transfer.get("total_value") or 0), 2)
+            has_costed_items = False
+            for _it in transfer.get("items") or []:
+                if not isinstance(_it, dict):
+                    continue
+                try:
+                    if float(_it.get("unit_cost") or 0) > 0:
+                        has_costed_items = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+
+            if has_costed_items:
+                taxable = 0.0
+            else:
+                taxable = round(float(transfer.get("total_value") or 0), 2)
             fallback_rate = resolve_gst_rate()
             tax = round(taxable * fallback_rate / 100.0, 2)
             cgst, sgst, igst = _tax_split(tax, interstate)
@@ -2018,13 +2077,16 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         # Bill number mirrors the transfer number so it is traceable.
         bill_number = f"TRF/{transfer.get('transfer_number', transfer.get('id', ''))}"
         now_iso = datetime.now().isoformat()
+        # Filing date in IST frame (the GST tax period is the IST calendar
+        # month); completed_at is a naive-UTC stamp -- see _bill_date_ist.
+        bill_date_iso = _bill_date_ist(transfer.get("completed_at"))
 
         doc = {
             "bill_id": bill_id,
             "bill_number": bill_number,
             "invoice_number": bill_number,
-            "bill_date": transfer.get("completed_at") or now_iso,
-            "invoice_date": transfer.get("completed_at") or now_iso,
+            "bill_date": bill_date_iso,
+            "invoice_date": bill_date_iso,
             # Link back to the transfer for traceability.
             "source_transfer_id": transfer.get("id"),
             "source_transfer_number": transfer.get("transfer_number"),
