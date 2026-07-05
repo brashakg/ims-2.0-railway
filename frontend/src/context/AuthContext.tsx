@@ -212,6 +212,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             // Only clear storage on auth errors (401), not network errors
             if (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Invalid or expired token')) {
               localStorage.removeItem('ims_token');
+              localStorage.removeItem('ims_refresh_token');
               localStorage.removeItem('ims_user');
               localStorage.removeItem('ims_login_time');
               localStorage.removeItem('ims_active_module');
@@ -222,6 +223,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             } else {
               // Other errors - clear storage as safety measure
               localStorage.removeItem('ims_token');
+              localStorage.removeItem('ims_refresh_token');
               localStorage.removeItem('ims_user');
               localStorage.removeItem('ims_login_time');
               localStorage.removeItem('ims_active_module');
@@ -231,6 +233,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         } catch (error) {
           // JSON parsing or token format error
           localStorage.removeItem('ims_token');
+          localStorage.removeItem('ims_refresh_token');
           localStorage.removeItem('ims_user');
           localStorage.removeItem('ims_login_time');
           localStorage.removeItem('ims_active_module');
@@ -259,6 +262,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
         // Store auth data
         localStorage.setItem('ims_token', response.token);
+        // Rotating refresh token (2026-07 token hardening): stored beside the
+        // access token; the api client exchanges it for a fresh pair while the
+        // user is active. Absent (pre-upgrade backend) -> clear any stale one.
+        if (response.refreshToken) {
+          localStorage.setItem('ims_refresh_token', response.refreshToken);
+        } else {
+          localStorage.removeItem('ims_refresh_token');
+        }
         localStorage.setItem('ims_user', JSON.stringify(response.user));
         localStorage.setItem('ims_login_time', Date.now().toString());
         // Reset the sidebar to grouped/expanded on every login (key owned by
@@ -289,6 +300,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // Ignore logout errors
     } finally {
       localStorage.removeItem('ims_token');
+      localStorage.removeItem('ims_refresh_token');
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_login_time');
       localStorage.removeItem('ims_active_module');

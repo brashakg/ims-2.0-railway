@@ -2,7 +2,7 @@
 // IMS 2.0 - Auth API
 // ============================================================================
 
-import api, { getSecureApiUrl } from './client';
+import api, { getSecureApiUrl, refreshAccessToken } from './client';
 import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../../types';
 
 // Mirrors backend/api/services/role_caps.py. Only used as a fallback when
@@ -30,6 +30,11 @@ export const authApi = {
       access_token: string;
       token_type: string;
       expires_in: number;
+      // Rotating refresh token (2026-07 token hardening). Optional so pre-fix
+      // backends still work: absent -> the client refreshes via the legacy
+      // access-token contract until the backend is upgraded.
+      refresh_token?: string;
+      refresh_expires_in?: number;
       user: {
         user_id: string;
         username: string;
@@ -63,6 +68,7 @@ export const authApi = {
       return {
         success: true,
         token: data.access_token,
+        refreshToken: data.refresh_token,
         user: {
           id: data.user.user_id,
           email: data.user.username, // Using username as email for compatibility
@@ -111,12 +117,17 @@ export const authApi = {
   logout: async (): Promise<void> => {
     await api.post('/auth/logout');
     localStorage.removeItem('ims_token');
+    localStorage.removeItem('ims_refresh_token');
     localStorage.removeItem('ims_user');
   },
 
-  refreshToken: async (): Promise<{ token: string }> => {
-    const response = await api.post<{ token: string }>('/auth/refresh');
-    return response.data;
+  // Exchange the stored rotating refresh token (or, pre-upgrade, the access
+  // token via the deprecated legacy contract) for a fresh pair. Delegates to
+  // the shared single-flight helper in client.ts, which also persists the new
+  // pair to localStorage. Returns { token: null } on failure.
+  refreshToken: async (): Promise<{ token: string | null }> => {
+    const token = await refreshAccessToken();
+    return { token };
   },
 
   // Re-issue the JWT with a new active store. The backend bakes

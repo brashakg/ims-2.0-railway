@@ -113,6 +113,10 @@ export interface LoginCredentials {
 export interface LoginResponse {
   success: boolean;
   token?: string;
+  /** Rotating refresh token (2026-07 token hardening). Present when the
+   *  backend supports it; stored alongside the access token and exchanged at
+   *  /auth/refresh for a new pair. */
+  refreshToken?: string;
   user?: User;
   message?: string;
   requiresStoreSelection?: boolean;
