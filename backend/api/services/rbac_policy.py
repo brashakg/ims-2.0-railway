@@ -3398,6 +3398,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/inventory/sell-through-analysis",
         "allowed": "AUTHENTICATED",
     },
+    {
+        # Brand-wise KPI rollup for the Inventory Insights tab (2026-07-05).
+        # Same posture as the sell-through/overstock reads above: any
+        # authenticated role; data is store-scoped inside the endpoint.
+        "method": "GET",
+        "path": "/api/v1/inventory/brand-insights",
+        "allowed": "AUTHENTICATED",
+    },
     # ------------------------------------------------------------------
     # E3 item-event ledger (/api/v1/items). Reads are store-scoped to any
     # authenticated role; quarantine + serial-bind + sell are inventory/

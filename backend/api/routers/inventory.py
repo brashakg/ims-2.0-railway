@@ -3454,6 +3454,113 @@ async def get_sell_through_analysis(
 
 
 # ============================================================================
+# 5b. BRAND-WISE INVENTORY INSIGHTS (Inventory > Insights > Brands)
+# ============================================================================
+
+
+@router.get("/brand-insights")
+async def get_brand_insights(
+    days: int = Query(30, ge=1, le=365),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Brand-wise KPI rollup: on-hand units, stock value (offer-price basis,
+    mrp fallback), units sold + revenue over the window, sell-through % and
+    days of cover -- KPI math shared with collection_insights so the Brands
+    and Collections insights tabs agree.
+
+    GET /inventory/brand-insights?days=30
+
+    Unlike /sell-through-analysis this does NO per-item product lookups:
+    ONE projected products scan (brand + prices), ONE stock_units rollup
+    (_on_hand_by_product: canonical ON_HAND/EXCLUDED status conventions) and
+    ONE orders aggregation (qty/item_total fields as in
+    collection_insights._movement_pipeline). Blank brands fold to "Unknown".
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    # Resolve the caller's store reach BEFORE the catch-all try so a
+    # legitimate 403 from validate_store_access is not swallowed into a 500.
+    active_store = resolve_store_scope(store_id, current_user)
+
+    try:
+        from ..services import brand_insights as _bi
+
+        # ONE projected spine scan: brand + unit pricing for every product.
+        product_docs = list(
+            db.get_collection("products").find(
+                {},
+                {"_id": 1, "product_id": 1, "brand": 1, "offer_price": 1, "mrp": 1},
+            )
+        )
+
+        # On-hand rollup over every known pid (both id conventions), reusing
+        # the canonical on-hand status allowlist/exclusions.
+        pids: List[str] = []
+        seen: set = set()
+        for doc in product_docs:
+            for key in (doc.get("product_id"), doc.get("_id")):
+                if key is None:
+                    continue
+                pid = str(key)
+                if pid and pid not in seen:
+                    pids.append(pid)
+                    seen.add(pid)
+        on_hand = _on_hand_by_product(db, pids, active_store)
+
+        # ONE pass over the window's sold orders: units + line revenue per
+        # product. Same field conventions as the collections movement math
+        # (qty | quantity | 1 for units; item_total for line revenue).
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        order_match: Dict = {
+            "created_at": {"$gte": cutoff_date},
+            "status": {"$in": _SOLD_STATUSES},
+        }
+        if active_store:
+            order_match["store_id"] = active_store
+        qty_expr = {"$ifNull": ["$items.qty", {"$ifNull": ["$items.quantity", 1]}]}
+        sales_by_pid: Dict[str, Dict] = {}
+        try:
+            sales_rows = db.get_collection("orders").aggregate(
+                [
+                    {"$match": order_match},
+                    {"$unwind": "$items"},
+                    {
+                        "$group": {
+                            "_id": "$items.product_id",
+                            "units": {"$sum": qty_expr},
+                            "revenue": {"$sum": {"$ifNull": ["$items.item_total", 0]}},
+                        }
+                    },
+                ]
+            )
+            for row in sales_rows:
+                if not isinstance(row, dict):
+                    continue
+                pid = row.get("_id")
+                units = row.get("units")
+                # Defend against the mock aggregate stub (echoes raw docs):
+                # a real group row has a scalar _id and a numeric units sum.
+                if not pid or isinstance(pid, dict) or not isinstance(units, (int, float)):
+                    continue
+                sales_by_pid[str(pid)] = {
+                    "units": int(units or 0),
+                    "revenue": float(row.get("revenue") or 0),
+                }
+        except Exception as agg_exc:  # noqa: BLE001 - fail-soft to zero sales
+            logger.warning(f"brand-insights sales aggregation failed: {agg_exc}")
+
+        rows = _bi.fold_brand_rows(product_docs, on_hand, sales_by_pid, days)
+        return {"period_days": days, "store_id": active_store, "brands": rows}
+
+    except Exception as e:
+        logger.error(f"get_brand_insights error: {e}")
+        raise HTTPException(status_code=500, detail="Error calculating brand insights")
+
+
+# ============================================================================
 # 6. STOCK DUMP ANALYSIS (OVERSTOCK)
 # ============================================================================
 

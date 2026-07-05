@@ -168,6 +168,19 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // ----- Insights: brand-wise KPI rollup (Inventory > Insights > Brands) ----
+  // On-hand, stock value (offer basis, mrp fallback), sold + revenue over the
+  // window, sell-through % and days of cover — per brand, "Unknown" folded.
+  brandInsights: async (
+    days: number = 30,
+    storeId?: string,
+  ): Promise<BrandInsightsResponse> => {
+    const response = await api.get('/inventory/brand-insights', {
+      params: { days, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data as BrandInsightsResponse;
+  },
+
   // ----- Contact-lens (CL) inventory ---------------------------------------
   // Grouped CL stock by brand x power x base-curve x modality, with on-hand
   // qty, nearest expiry, pack info + batch. Store-scoped + fail-soft backend.
@@ -431,6 +444,26 @@ export interface CLExpiryStatusResponse {
     safe_count: number;
     undated_count: number;
   };
+}
+
+// Brand insights (GET /inventory/brand-insights) — one KPI row per brand,
+// blank/missing brands folded into "Unknown", sorted by revenue desc.
+export interface BrandInsightRow {
+  brand: string;
+  units_on_hand: number;
+  stock_value: number;
+  units_sold: number;
+  revenue: number;
+  /** 0..100 percentage; null = no signal (no stock AND no sales). */
+  sell_through_percent: number | null;
+  /** Days of cover, capped at 999; null = no signal. */
+  days_cover: number | null;
+}
+
+export interface BrandInsightsResponse {
+  period_days: number;
+  store_id: string | null;
+  brands: BrandInsightRow[];
 }
 
 // ============================================================================
