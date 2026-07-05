@@ -106,51 +106,6 @@ export const HSN_CODES: Record<string, HSNCode> = {
   },
 };
 
-// Simplified 4-digit HSN codes for businesses with turnover up to ₹5 Cr
-export const HSN_CODES_4_DIGIT: Record<string, HSNCode> = {
-  '9001': {
-    code: '9001',
-    description: 'Optical lenses, prisms, mirrors',
-    gstRate: 5,    // GST 2.0
-    category: 'LENS',
-  },
-  '9003': {
-    code: '9003',
-    description: 'Frames and mountings for spectacles',
-    gstRate: 5,    // GST 2.0: reduced from 18%
-    category: 'FRAME',
-  },
-  '9004': {
-    code: '9004',
-    description: 'Spectacles, goggles and the like',
-    gstRate: 5,    // GST 2.0: corrective = 5%, sunglasses = 18%
-    category: 'SPECTACLE',
-  },
-  '9101': {
-    code: '9101',
-    description: 'Wrist watches',
-    gstRate: 18,
-    category: 'WATCH',
-  },
-  '9102': {
-    code: '9102',
-    description: 'Electronic watches, smart watches',
-    gstRate: 18,
-    category: 'SMARTWATCH',
-  },
-  '9105': {
-    code: '9105',
-    description: 'Clocks (wall / alarm)',
-    gstRate: 18,
-    category: 'CLOCK',
-  },
-  '9021': {
-    code: '9021',
-    description: 'Hearing aids (complete device) — NIL/exempt; parts 18%',
-    gstRate: 0,
-    category: 'HEARING_AID',
-  },
-};
 
 // ============================================================================
 // Category → GST Rate mapping (used by POS for quick rate lookup)
@@ -225,10 +180,10 @@ export function getGSTRateByCategory(category: string): number {
 }
 
 // Get HSN code by product category
-export function getHSNByCategory(category: string, use6Digit: boolean = false): HSNCode | null {
+export function getHSNByCategory(category: string): HSNCode | null {
   // Accepts canonical enum codes, seed plural forms, and the short UI codes
   // (FR/LS/RG/CL/SG/WT/CK/HA/ACC/SMT*) used on AddProductPage.
-  if (use6Digit) {
+  // 6-digit codes only (owner 2026-07-05) — the 4-digit variant was removed.
     switch (category.toUpperCase()) {
       case 'CONTACT_LENS':
       case 'CONTACT_LENSES':
@@ -285,52 +240,6 @@ export function getHSNByCategory(category: string, use6Digit: boolean = false): 
       default:
         return HSN_CODES['900490']; // Default to corrective spectacles (5%)
     }
-  } else {
-    switch (category.toUpperCase()) {
-      case 'CONTACT_LENS':
-      case 'CONTACT_LENSES':
-      case 'COLORED_CONTACT_LENS':
-      case 'COLOUR_CONTACTS':
-      case 'CL':
-      case 'LENS':
-      case 'RX_LENSES':
-      case 'OPTICAL_LENS':
-      case 'EYEGLASS_LENS':
-      case 'LS':
-        return HSN_CODES_4_DIGIT['9001'];
-      case 'FRAME':
-      case 'FRAMES':
-      case 'EYEGLASS_FRAME':
-      case 'FR':
-        return HSN_CODES_4_DIGIT['9003'];
-      case 'SPECTACLE':
-      case 'COMPLETE_SPECTACLE':
-      case 'READING_GLASSES':
-      case 'RG':
-      case 'SUNGLASSES':
-      case 'SUNGLASS':
-      case 'SG':
-        return HSN_CODES_4_DIGIT['9004'];
-      case 'WRIST_WATCHES':
-      case 'WATCH':
-      case 'WT':
-        return HSN_CODES_4_DIGIT['9101'];
-      case 'SMARTWATCHES':
-      case 'SMARTWATCH':
-      case 'SMTWT':
-        return HSN_CODES_4_DIGIT['9102'];
-      case 'WALL_CLOCK':
-      case 'WALL_CLOCKS':
-      case 'CK':
-        return HSN_CODES_4_DIGIT['9105'];
-      case 'HEARING_AID':
-      case 'HEARING_AIDS':
-      case 'HA':
-        return HSN_CODES_4_DIGIT['9021'];
-      default:
-        return HSN_CODES_4_DIGIT['9004'];
-    }
-  }
 }
 
 // Calculate GST components
@@ -374,9 +283,10 @@ export function validateGSTNumber(gstin: string): boolean {
   return gstRegex.test(gstin);
 }
 
-// Get all HSN codes as dropdown options
-export function getHSNOptions(use6Digit: boolean = false): Array<{ value: string; label: string; gstRate: number }> {
-  const codes = use6Digit ? HSN_CODES : HSN_CODES_4_DIGIT;
+// Get all HSN codes as dropdown options. 6-digit only (owner 2026-07-05):
+// the 4-digit "turnover <= 5 Cr" simplification was removed app-wide.
+export function getHSNOptions(): Array<{ value: string; label: string; gstRate: number }> {
+  const codes = HSN_CODES;
   return Object.values(codes).map((hsn) => ({
     value: hsn.code,
     label: `${hsn.code} - ${hsn.description} (GST: ${hsn.gstRate}%)`,
@@ -406,7 +316,6 @@ export const GSTR3B_TABLES = {
 
 export default {
   HSN_CODES,
-  HSN_CODES_4_DIGIT,
   getHSNByCategory,
   calculateGST,
   calculateIGST,

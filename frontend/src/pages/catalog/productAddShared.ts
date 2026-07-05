@@ -564,11 +564,11 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
 }
 
 // Resolve the auto HSN/GST for a category. Mirrors the wizard's useEffect:
-// HSN code comes from getHSNByCategory, the RATE from getGSTRateByCategory (so
-// categories that share a 4-digit HSN heading at different rates still get the
-// correct per-category rate).
-export function resolveHsnGst(category: string, use6Digit: boolean): { hsnCode: string; gstRate: string } {
-  const hsnData = getHSNByCategory(category, use6Digit);
+// HSN code comes from getHSNByCategory (always 6-digit, owner 2026-07-05),
+// the RATE from getGSTRateByCategory (so categories that share an HSN heading
+// at different rates still get the correct per-category rate).
+export function resolveHsnGst(category: string): { hsnCode: string; gstRate: string } {
+  const hsnData = getHSNByCategory(category);
   return {
     hsnCode: hsnData ? hsnData.code : '',
     gstRate: getGSTRateByCategory(category).toString(),
@@ -1268,7 +1268,7 @@ export function mapAutopilotCandidate(
   const description = str(c.description) || str(c.usp);
 
   // HSN/GST: prefer the candidate's explicit suggestions; else, if we resolved a
-  // category, fall back to that category's canonical 4-digit HSN + rate; else
+  // category, fall back to that category's canonical 6-digit HSN + rate; else
   // leave blank so the Quick Add category-change autofill fills them in.
   let hsnCode = str(c.suggested_hsn);
   let gstRate =
@@ -1276,7 +1276,7 @@ export function mapAutopilotCandidate(
       ? String(c.suggested_gst_rate)
       : '';
   if ((!hsnCode || !gstRate) && category) {
-    const resolved = resolveHsnGst(category, false);
+    const resolved = resolveHsnGst(category);
     if (!hsnCode) hsnCode = resolved.hsnCode;
     if (!gstRate) gstRate = resolved.gstRate;
   }
