@@ -1,8 +1,9 @@
 """Movements ledger -- GET /inventory/movements.
 
-Merges RECEIVED (grns ACCEPTED), SOLD (orders in _SOLD_STATUSES) and
-TRANSFER_IN / TRANSFER_OUT (stock_transfers legs) into one reverse-
-chronological ledger. Driven directly with a fake db monkeypatched over
+Merges RECEIVED (grns ACCEPTED), SOLD (orders in _SOLD_STATUSES),
+TRANSFER_IN / TRANSFER_OUT (stock_transfers legs) and OPENING_STOCK
+(opening_stock_batches commit summaries) into one reverse-chronological
+ledger. Driven directly with a fake db monkeypatched over
 inventory._get_db -- no Mongo, no HTTP (test_grn_cockpit.py style).
 
 Covers: merge order, sign conventions, store scoping (incl. the 403 on a
@@ -260,7 +261,12 @@ def test_merge_is_reverse_chronological_across_sources():
     assert ats == sorted(ats, reverse=True)
     # Newest first: the SOLD event (1 day ago) leads the ledger.
     assert res["items"][0]["type"] == "SOLD"
-    assert res["sources"] == {"grns": "ok", "orders": "ok", "transfers": "ok"}
+    assert res["sources"] == {
+        "grns": "ok",
+        "orders": "ok",
+        "transfers": "ok",
+        "opening_stock": "ok",
+    }
 
 
 def test_sign_conventions_and_qtys():
@@ -412,6 +418,85 @@ def test_no_db_returns_empty_envelope(monkeypatch):
     monkeypatch.setattr(inv, "_get_db", lambda: None)
     res = _run()
     assert res["items"] == [] and res["total"] == 0 and res["has_more"] is False
+
+
+# ---------------------------------------------------------------------------
+# OPENING_STOCK source (opening_stock_batches summary docs)
+# ---------------------------------------------------------------------------
+
+
+def _opening_batches():
+    return [
+        {
+            "batch_id": "OSB-1",
+            "store_id": "S1",
+            "committed_by": "u1",
+            "committed_at": _iso(4),
+            "lines": [
+                {
+                    "product_id": "P1",
+                    "sku": "FA",
+                    "product_name": "Frame A",
+                    "qty": 12,
+                    "unit_cost": 900.0,
+                },
+                # Zero-qty line (nothing actually minted) -> no event.
+                {"product_id": "P2", "sku": "SB", "product_name": "Sun B", "qty": 0},
+            ],
+            "total_units": 12,
+            "total_value": 10800.0,
+        }
+    ]
+
+
+def test_opening_stock_events_come_from_batch_docs(monkeypatch):
+    db = _db(opening_stock_batches=_FakeColl(_opening_batches()))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    res = _run()
+    by_id = {e["id"]: e for e in res["items"]}
+    ev = by_id["OPENING_STOCK:OSB-1:P1:0"]
+    assert ev["type"] == "OPENING_STOCK"
+    assert ev["qty"] == 12  # stock in -> positive
+    assert ev["ref"] == "OSB-1" and ev["ref_id"] == "OSB-1"
+    assert ev["store_id"] == "S1"
+    assert ev["product_name"] == "Frame A" and ev["sku"] == "FA"
+    assert "Opening stock" in ev["detail"]
+    # The zero-qty line never becomes an event.
+    assert "OPENING_STOCK:OSB-1:P2:1" not in by_id
+    assert res["sources"]["opening_stock"] == "ok"
+
+
+def test_opening_stock_type_filter_and_store_scope(monkeypatch):
+    db = _db(opening_stock_batches=_FakeColl(_opening_batches()))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    only = _run(movement_type="OPENING_STOCK")
+    assert only["items"]
+    assert {e["type"] for e in only["items"]} == {"OPENING_STOCK"}
+    # The S1 batch is invisible in an S2-scoped ledger.
+    s2_user = {
+        "user_id": "u3",
+        "roles": ["STORE_MANAGER"],
+        "active_store_id": "S2",
+        "store_ids": ["S2"],
+    }
+    res = _run(user=s2_user)
+    assert not any(e["type"] == "OPENING_STOCK" for e in res["items"])
+
+
+def test_opening_stock_product_filter(monkeypatch):
+    db = _db(opening_stock_batches=_FakeColl(_opening_batches()))
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    res = _run(product_id="P1", movement_type="OPENING_STOCK")
+    assert [e["product_id"] for e in res["items"]] == ["P1"]
+
+
+def test_opening_stock_source_fail_soft(monkeypatch):
+    db = _db(opening_stock_batches=_BoomColl())
+    monkeypatch.setattr(inv, "_get_db", lambda: db)
+    res = _run()
+    assert res["sources"]["opening_stock"] == "error"
+    # The rest of the ledger still flows.
+    assert any(e["type"] == "SOLD" for e in res["items"])
 
 
 # ---------------------------------------------------------------------------

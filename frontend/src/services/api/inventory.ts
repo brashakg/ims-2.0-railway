@@ -264,8 +264,9 @@ export const inventoryApi = {
   },
 
   // Movements ledger (Movements tab): merged RECEIVED (GRN) / SOLD (orders) /
-  // TRANSFER_IN / TRANSFER_OUT (transfer legs) event feed, newest first.
-  // type accepts RECEIVED | SOLD | TRANSFER_IN | TRANSFER_OUT | TRANSFER.
+  // TRANSFER_IN / TRANSFER_OUT (transfer legs) / OPENING_STOCK (import
+  // batches) event feed, newest first. type accepts RECEIVED | SOLD |
+  // TRANSFER_IN | TRANSFER_OUT | OPENING_STOCK | TRANSFER.
   getMovements: async (params?: {
     store_id?: string;
     product_id?: string;
@@ -286,11 +287,12 @@ export const inventoryApi = {
 };
 
 // One merged stock-movement event. qty is SIGNED: positive = stock in
-// (RECEIVED / TRANSFER_IN), negative = stock out (SOLD / TRANSFER_OUT).
+// (RECEIVED / TRANSFER_IN / OPENING_STOCK), negative = stock out
+// (SOLD / TRANSFER_OUT).
 export interface StockMovementEntry {
   id: string;
   at: string;
-  type: 'RECEIVED' | 'SOLD' | 'TRANSFER_IN' | 'TRANSFER_OUT';
+  type: 'RECEIVED' | 'SOLD' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'OPENING_STOCK';
   product_id: string;
   product_name: string;
   sku: string;
@@ -360,10 +362,13 @@ export interface QuarantineLabel {
 }
 
 // One opening-stock import row (product identified by product_id OR sku).
+// unit_cost (optional, per unit) stamps GRN-style cost fields on every minted
+// unit so opening stock enters the books at a real valuation.
 export interface OpeningStockInputRow {
   product_id?: string;
   sku?: string;
   quantity: number;
+  unit_cost?: number;
   location_code?: string;
   batch_code?: string;
   expiry_date?: string;
@@ -385,6 +390,7 @@ export interface OpeningStockResultRow {
   quantity?: number;
   existing?: number;
   added?: number;
+  unit_cost?: number | null;
   message: string;
 }
 
@@ -397,6 +403,10 @@ export interface OpeningStockResponse {
     units_added?: number;
     rows_skipped?: number;
     rows_with_errors: number;
+    /** Valuation of the units to add / added (rows carrying a unit_cost). */
+    total_value?: number;
+    /** Movements-ledger batch reference (commit only; null if none written). */
+    batch_id?: string | null;
     skip_if_existing?: boolean;
   };
 }
