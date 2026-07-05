@@ -205,21 +205,25 @@ def test_submitted_secret_still_overwrites_stored(monkeypatch):
 def test_list_integrations_normalizes_is_enabled(monkeypatch):
     """The list endpoint carries is_enabled/is_configured like the single-get.
 
-    Hermetic: patches the module's own read helper directly -- the first
-    version faked the whole collection round-trip and flaked under the full
-    CI suite (came back empty), which is orthogonal to what this test guards:
-    the NORMALIZATION of raw docs into the shape the IntegrationsHub reads."""
-    from api.routers.settings import list_integrations
+    Hermetic AND reload-proof: under the full CI suite `api.routers.settings`
+    can exist as a SECOND module object (another suite re-imports the app), so
+    patching this file's import-time binding while calling a function imported
+    separately hits two different copies (the previous version failed with
+    KeyError only in the full run). Resolve BOTH the patch target and the
+    endpoint from sys.modules at runtime so they are always the same object.
+    The test guards the NORMALIZATION of raw docs into the IntegrationsHub
+    shape -- not the Mongo plumbing."""
+    mod = sys.modules.get("api.routers.settings") or settings_router
 
     monkeypatch.setattr(
-        settings_router,
+        mod,
         "_get_integrations_from_db",
         lambda: [
             {"type": "shopify", "enabled": True, "config": {"shop_url": "x"}},
             {"type": "razorpay", "enabled": False, "config": {}},
         ],
     )
-    res = asyncio.run(list_integrations(SUPER))
+    res = asyncio.run(mod.list_integrations(SUPER))
     rows = {r["type"]: r for r in res["integrations"]}
     assert rows["shopify"]["is_enabled"] is True
     assert rows["shopify"]["is_configured"] is True
