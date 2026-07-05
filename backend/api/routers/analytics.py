@@ -157,7 +157,15 @@ def _build_product_master_map(stock_rows: list) -> dict:
     Falls back to catalog_products for catalog-only products (the convergence
     spine) using the same helper the inventory/orders paths use, so a Cartier
     that only exists in the catalog still resolves. Fail-soft: a product that
-    cannot be resolved simply yields an empty dict for that id."""
+    cannot be resolved simply yields an empty dict for that id.
+
+    PERF: batched. This used to be a per-distinct-pid find_by_id plus a
+    per-miss 3-way $or catalog find_one (the same N+1 as the reports-side
+    _stock_category_map). Now it is ONE products `$in` query for every id,
+    then ONE catalog_products query for the ids the master does not know at
+    all. Resolution semantics are unchanged (master hit never falls through
+    to the catalog). Repos whose collection cannot batch (e.g. test fakes
+    that only implement find_by_id) fall back to the original per-id loop."""
     pids = {
         str(r.get("product_id"))
         for r in (stock_rows or [])
@@ -169,23 +177,116 @@ def _build_product_master_map(stock_rows: list) -> dict:
 
     product_repo = get_product_repository()
     catalog_resolver = None
+    catalog_coll_getter = None
     try:
+        from .orders import _get_catalog_collection as catalog_coll_getter
         from .orders import _resolve_catalog_product_doc as catalog_resolver
     except Exception:  # noqa: BLE001
         catalog_resolver = None
+        catalog_coll_getter = None
+
+    ordered_pids = sorted(pids)
+    resolved: dict = {}  # pid -> flat product dict (master OR mapped catalog)
+
+    # -- Pass 1: product master, ONE $in query ------------------------------
+    if product_repo is not None:
+        batched = False
+        coll = getattr(product_repo, "collection", None)
+        if coll is not None:
+            try:
+                master_hits: dict = {}
+                for doc in coll.find(
+                    {"product_id": {"$in": ordered_pids}},
+                    {
+                        "product_id": 1,
+                        "sku": 1,
+                        "name": 1,
+                        "model": 1,
+                        "category": 1,
+                        "cost_price": 1,
+                        "mrp": 1,
+                    },
+                ):
+                    pid = str(doc.get("product_id"))
+                    # First doc in natural order wins == find_one semantics.
+                    if pid not in master_hits:
+                        master_hits[pid] = doc
+                resolved.update(master_hits)
+                batched = True
+            except Exception:  # noqa: BLE001
+                batched = False
+        if not batched:
+            # Per-id fallback (mock/fake collections that cannot batch).
+            for pid in ordered_pids:
+                try:
+                    product = product_repo.find_by_id(pid)
+                except Exception:  # noqa: BLE001
+                    product = None
+                if product:
+                    resolved[pid] = product
+
+    # -- Pass 2: catalog fallback for ids the master has NO doc for ---------
+    # (_resolve_catalog_product_doc returns None for a falsy pid, so blank
+    # ids are excluded up front exactly as before.) Each catalog hit is
+    # flattened to the same fields _resolve_catalog_product_doc surfaces
+    # (title->name, nested pricing -> flat cost_price/mrp).
+    misses = [pid for pid in ordered_pids if pid and pid not in resolved]
+    if misses and catalog_resolver is not None:
+        batched = False
+        try:
+            coll = catalog_coll_getter() if catalog_coll_getter is not None else None
+        except Exception:  # noqa: BLE001
+            coll = None
+        if coll is not None:
+            try:
+                catalog_hits: dict = {}
+                miss_set = set(misses)
+                for doc in coll.find(
+                    {
+                        "$or": [
+                            {"id": {"$in": misses}},
+                            {"sku": {"$in": misses}},
+                            {"_id": {"$in": misses}},
+                        ]
+                    },
+                    {
+                        "id": 1,
+                        "sku": 1,
+                        "title": 1,
+                        "name": 1,
+                        "category": 1,
+                        "pricing": 1,
+                    },
+                ):
+                    pricing = doc.get("pricing") or {}
+                    flat = {
+                        "sku": doc.get("sku"),
+                        "name": doc.get("title") or doc.get("name"),
+                        "model": doc.get("title") or doc.get("name"),
+                        "category": doc.get("category"),
+                        "cost_price": pricing.get("cost_price"),
+                        "mrp": pricing.get("mrp"),
+                    }
+                    # First doc in natural order matching the pid by ANY of
+                    # the three keys wins == the old per-pid $or find_one.
+                    for key in (doc.get("id"), doc.get("sku"), doc.get("_id")):
+                        if key in miss_set and key not in catalog_hits:
+                            catalog_hits[key] = flat
+                resolved.update(catalog_hits)
+                batched = True
+            except Exception:  # noqa: BLE001
+                batched = False
+        if not batched:
+            for pid in misses:
+                try:
+                    product = catalog_resolver(pid)
+                except Exception:  # noqa: BLE001
+                    product = None
+                if product:
+                    resolved[pid] = product
 
     for pid in pids:
-        product = None
-        if product_repo is not None:
-            try:
-                product = product_repo.find_by_id(pid)
-            except Exception:  # noqa: BLE001
-                product = None
-        if not product and catalog_resolver is not None:
-            try:
-                product = catalog_resolver(pid)
-            except Exception:  # noqa: BLE001
-                product = None
+        product = resolved.get(pid)
         if not product:
             continue
         out[pid] = {

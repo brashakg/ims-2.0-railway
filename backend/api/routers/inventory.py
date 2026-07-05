@@ -3396,29 +3396,59 @@ async def get_sell_through_analysis(
         if active_store:
             _order_q["store_id"] = active_store
 
-        # Get sales by brand from completed orders
-        sales_by_brand = {}
-        orders = orders_coll.find(_order_q)
+        # PERF: this endpoint used to run products.find_one PER ORDER ITEM and
+        # PER PHYSICAL STOCK UNIT (thousands of round-trips on a live store).
+        # Same batched shape as /brand-insights below: one orders pass + one
+        # stock pass collect quantities per product_id, then ONE products
+        # query maps product_id -> brand and the totals fold to brand level.
+        # The old code resolved each id with find_one({"_id": pid}); _id is
+        # unique, so a single {"_id": {"$in": [...]}} fetch resolves exactly
+        # the same docs (a pid with no products doc stays skipped, as before).
 
+        # Pass 1: units sold per product from completed orders
+        sold_by_pid: Dict[str, Any] = {}
+        orders = orders_coll.find(_order_q)
         for order in orders:
             for item in order.get("items", []):
                 product_id = item.get("product_id")
-                product = products_coll.find_one({"_id": product_id})
-                if product:
-                    brand = product.get("brand", "Unknown")
-                    qty = item.get("quantity", 0)
-                    sales_by_brand[brand] = sales_by_brand.get(brand, 0) + qty
+                if product_id is None:
+                    continue
+                qty = item.get("quantity", 0)
+                sold_by_pid[product_id] = sold_by_pid.get(product_id, 0) + qty
 
-        # Get current stock by brand (same store-scope as sales above)
-        stock_by_brand = {}
+        # Pass 2: units on hand per product (same store-scope as sales above)
+        stocked_by_pid: Dict[str, Any] = {}
         stocks = stock_coll.find({"store_id": active_store} if active_store else {})
         for stock in stocks:
-            product = products_coll.find_one({"_id": stock.get("product_id")})
-            if product:
-                brand = product.get("brand", "Unknown")
-                # One serialized stock row == one physical unit; a row with no
-                # `quantity` field still represents one unit on hand.
-                qty = stock.get("quantity", 1)
+            product_id = stock.get("product_id")
+            if product_id is None:
+                continue
+            # One serialized stock row == one physical unit; a row with no
+            # `quantity` field still represents one unit on hand.
+            qty = stock.get("quantity", 1)
+            stocked_by_pid[product_id] = stocked_by_pid.get(product_id, 0) + qty
+
+        # ONE products lookup for every product seen on either side.
+        all_pids = list({*sold_by_pid, *stocked_by_pid})
+        brand_by_pid: Dict[str, Any] = {}
+        if all_pids:
+            for product in products_coll.find(
+                {"_id": {"$in": all_pids}}, {"brand": 1}
+            ):
+                brand_by_pid[product["_id"]] = product.get("brand", "Unknown")
+
+        # Fold product totals to brand level (unresolved pids skipped, exactly
+        # as the per-item find_one behaved when it found no product).
+        sales_by_brand = {}
+        for pid, qty in sold_by_pid.items():
+            if pid in brand_by_pid:
+                brand = brand_by_pid[pid]
+                sales_by_brand[brand] = sales_by_brand.get(brand, 0) + qty
+
+        stock_by_brand = {}
+        for pid, qty in stocked_by_pid.items():
+            if pid in brand_by_pid:
+                brand = brand_by_pid[pid]
                 stock_by_brand[brand] = stock_by_brand.get(brand, 0) + qty
 
         # Calculate sell-through %
