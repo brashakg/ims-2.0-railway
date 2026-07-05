@@ -67,6 +67,7 @@ import { ContactLensInventoryWidget, ContactLensExpiryWidget, LensPowerGridWidge
 import { QuarantineQueue } from '../../components/inventory/QuarantineQueue';
 import { DisplayLayoutPanel } from '../../components/inventory/DisplayLayoutPanel';
 import { Pagination } from '../../components/common/Pagination';
+import { ImageLightbox } from '../../components/common/ImageLightbox';
 import clsx from 'clsx';
 
 // Category configuration
@@ -108,6 +109,10 @@ interface StockItem {
   /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED
    *  GRN that stocked this product at this store, or null/absent. */
   last_grn?: { grn_number?: string; qty?: number; date?: string } | null;
+  /** Owner 2026-07-05: product images on the inventory ledger. image_url =
+   *  first image (row thumbnail); images = full array for the lightbox. */
+  image_url?: string | null;
+  images?: string[];
 }
 
 // Stock movement row = the backend ledger entry: RECEIVED (GRN) / SOLD
@@ -160,6 +165,9 @@ export function InventoryPage() {
 
   // Deep-link target for Display Layout (cleared once consumed inside the panel).
   const [pendingFixtureId, setPendingFixtureId] = useState<string | null>(null);
+
+  // Owner 2026-07-05: click a row thumbnail -> full-size image lightbox.
+  const [lightbox, setLightbox] = useState<{ images: string[]; alt: string } | null>(null);
 
   // Sync active tab from URL query params (e.g. /inventory?tab=transfers).
   // Also accepts ?fixture={fixture_id} as a deep-link from the Stock Ledger
@@ -992,20 +1000,51 @@ export function InventoryPage() {
                     return (
                       <tr key={item.id || item.sku || `row-${i}`} className="hover:bg-gray-50">
                         <td className="px-4 py-3">
-                          <div>
-                            <p className="font-medium text-gray-900">{item.name}</p>
-                            <p className="text-sm text-gray-500">{item.brand}</p>
-                            {/* Procurement Phase 1: muted source chip — where the
-                                recent inbound stock came from (latest ACCEPTED GRN). */}
-                            {item.last_grn?.grn_number && (item.last_grn.qty ?? 0) > 0 && (
-                              <p
-                                className="text-xs text-gray-400 mt-0.5"
-                                title="Most recent goods receipt for this product at this store"
+                          <div className="flex items-start gap-3">
+                            {/* Owner 2026-07-05: row thumbnail; click -> full-size lightbox. */}
+                            {item.image_url ? (
+                              <button
+                                type="button"
+                                className="flex-shrink-0 w-10 h-10 rounded-md border border-gray-200 bg-white overflow-hidden cursor-zoom-in hover:ring-2 hover:ring-blue-300"
+                                title="View full-size image"
+                                onClick={() =>
+                                  setLightbox({
+                                    images:
+                                      item.images && item.images.length > 0
+                                        ? item.images
+                                        : [item.image_url as string],
+                                    alt: item.name,
+                                  })
+                                }
                               >
-                                +{item.last_grn.qty} via {item.last_grn.grn_number}
-                                {item.last_grn.date ? `, ${item.last_grn.date}` : ''}
-                              </p>
+                                <img
+                                  src={item.image_url}
+                                  alt={item.name}
+                                  loading="lazy"
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full object-contain"
+                                />
+                              </button>
+                            ) : (
+                              <div className="flex-shrink-0 w-10 h-10 rounded-md border border-gray-100 bg-gray-50 flex items-center justify-center">
+                                <Package className="w-4 h-4 text-gray-300" strokeWidth={1.6} />
+                              </div>
                             )}
+                            <div>
+                              <p className="font-medium text-gray-900">{item.name}</p>
+                              <p className="text-sm text-gray-500">{item.brand}</p>
+                              {/* Procurement Phase 1: muted source chip — where the
+                                  recent inbound stock came from (latest ACCEPTED GRN). */}
+                              {item.last_grn?.grn_number && (item.last_grn.qty ?? 0) > 0 && (
+                                <p
+                                  className="text-xs text-gray-400 mt-0.5"
+                                  title="Most recent goods receipt for this product at this store"
+                                >
+                                  +{item.last_grn.qty} via {item.last_grn.grn_number}
+                                  {item.last_grn.date ? `, ${item.last_grn.date}` : ''}
+                                </p>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{item.sku}</td>
@@ -1631,6 +1670,15 @@ export function InventoryPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Full-size product image viewer (owner 2026-07-05) */}
+      {lightbox && (
+        <ImageLightbox
+          images={lightbox.images}
+          alt={lightbox.alt}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </div>
   );
