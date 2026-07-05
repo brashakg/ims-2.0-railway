@@ -942,6 +942,12 @@ async def online_store_parity(
     at a local /uploads/... path rather than a durable https:// URL. These are
     a HARD prereq for the Shopify cutover (Shopify cannot pull a private path).
 
+    (c) bvi_nightly: the LATEST stored snapshot from the nightly BVI-Postgres
+    vs IMS-Mongo parity monitor (SENTINEL, ~02:30 IST; see
+    api/services/bvi_parity.py) plus whether that monitor is enabled
+    (BVI_PARITY_MONITOR env, default on). `latest` is None until the first
+    nightly run has stored a snapshot.
+
     Read-only + fail-soft. Never 500s."""
     if "SUPERADMIN" not in (current_user.get("roles", []) or []):
         raise HTTPException(
@@ -949,11 +955,20 @@ async def online_store_parity(
             detail="Parity oracle is restricted to SUPERADMIN",
         )
     from ..services.online_sync_health import parity_summary, uploads_image_audit
+    from ..services.bvi_parity import latest_parity_snapshot, monitor_enabled
 
     db = _sync_health_db()
+    try:
+        bvi_latest = latest_parity_snapshot(db)
+    except Exception:  # noqa: BLE001 -- the service is fail-soft; belt+braces
+        bvi_latest = None
     return {
         "parity": parity_summary(db),
         "uploads_audit": uploads_image_audit(db),
+        "bvi_nightly": {
+            "monitor_enabled": monitor_enabled(),
+            "latest": bvi_latest,
+        },
     }
 
 
