@@ -131,3 +131,101 @@ def test_update_requires_admin_role(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(update_integration("razorpay", cfg, {"roles": ["SALES_STAFF"]}))
     assert exc.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Owner-hit bugs 2026-07-05 (Shopify enable during the go-live prep):
+# 1. A save that omits secret fields (the modal always renders them blank and
+#    the FE drops blank fields) used to REPLACE the whole config -> flipping
+#    the Enabled toggle silently wiped the stored access_token. The write path
+#    must MERGE submitted keys over the stored config.
+# 2. GET /settings/integrations returned raw docs (with `enabled`) while the
+#    IntegrationsHub cards key on `is_enabled`/`is_configured` -> every card
+#    rendered OFF regardless of the saved state.
+# ---------------------------------------------------------------------------
+
+
+def test_enable_only_save_keeps_stored_secrets(monkeypatch):
+    """Flipping Enabled without retyping secrets must not wipe them."""
+    coll = _FakeColl()
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+
+    # 1. Initial save: full creds, disabled.
+    asyncio.run(
+        update_integration(
+            "shopify",
+            IntegrationConfig(
+                integration_type="shopify",
+                enabled=False,
+                config={"shop_url": "x.myshopify.com", "access_token": "shpat_secret1"},
+            ),
+            SUPER,
+        )
+    )
+    # 2. Enable-only save: secret field blank -> FE omits it entirely.
+    asyncio.run(
+        update_integration(
+            "shopify",
+            IntegrationConfig(
+                integration_type="shopify",
+                enabled=True,
+                config={"shop_url": "x.myshopify.com"},
+            ),
+            SUPER,
+        )
+    )
+    doc = coll.store["shopify"]
+    assert doc["enabled"] is True
+    stored = settings_router._decrypt_config(doc["config"])
+    assert stored.get("access_token") == "shpat_secret1"  # survived the toggle
+    assert stored.get("shop_url") == "x.myshopify.com"
+
+
+def test_submitted_secret_still_overwrites_stored(monkeypatch):
+    """Merging must not prevent a deliberate secret rotation."""
+    coll = _FakeColl()
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda name: coll)
+
+    for token in ("shpat_old", "shpat_new"):
+        asyncio.run(
+            update_integration(
+                "shopify",
+                IntegrationConfig(
+                    integration_type="shopify",
+                    enabled=True,
+                    config={"access_token": token},
+                ),
+                SUPER,
+            )
+        )
+    stored = settings_router._decrypt_config(coll.store["shopify"]["config"])
+    assert stored.get("access_token") == "shpat_new"
+
+
+def test_list_integrations_normalizes_is_enabled(monkeypatch):
+    """The list endpoint carries is_enabled/is_configured like the single-get.
+
+    Hermetic AND reload-proof: under the full CI suite `api.routers.settings`
+    can exist as a SECOND module object (another suite re-imports the app), so
+    patching this file's import-time binding while calling a function imported
+    separately hits two different copies (the previous version failed with
+    KeyError only in the full run). Resolve BOTH the patch target and the
+    endpoint from sys.modules at runtime so they are always the same object.
+    The test guards the NORMALIZATION of raw docs into the IntegrationsHub
+    shape -- not the Mongo plumbing."""
+    mod = sys.modules.get("api.routers.settings") or settings_router
+
+    monkeypatch.setattr(
+        mod,
+        "_get_integrations_from_db",
+        lambda: [
+            {"type": "shopify", "enabled": True, "config": {"shop_url": "x"}},
+            {"type": "razorpay", "enabled": False, "config": {}},
+        ],
+    )
+    res = asyncio.run(mod.list_integrations(SUPER))
+    rows = {r["type"]: r for r in res["integrations"]}
+    assert rows["shopify"]["is_enabled"] is True
+    assert rows["shopify"]["is_configured"] is True
+    assert rows["razorpay"]["is_enabled"] is False
+    assert rows["razorpay"]["is_configured"] is False
