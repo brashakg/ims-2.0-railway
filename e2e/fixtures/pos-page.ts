@@ -1,11 +1,17 @@
 /**
- * Page object for the POS wizard (Quick Sale path).
+ * Page object for the POS condensed checkout (Quick Sale path).
  *
- * Encapsulates the 4-step quick-sale flow so the specs read as intent:
- *   Customer (salesperson + walk-in) -> Products -> Review -> Payment -> Complete.
+ * The condensed 3-step grouping is the SOLE checkout flow since PR #783/#790
+ * (the classic 4-step wizard was removed). For a QUICK SALE the groups are
+ *   Customer -> Products -> Payment
+ * — there is NO Review step (QUICK_STEPS parity: the review panel only exists
+ * inside the merged "Pay & Review" group of a prescription order).
  *
- * Selectors are role/label-based and match POSLayout.tsx / POSPayment.tsx /
- * POSInvoice.tsx as they exist on origin/main (PR #331 era).
+ * Totals the customer sees before Payment therefore live in the CART SIDEBAR
+ * (right column, `aside.pos-cart-col`): Subtotal / GST / "Total (incl. GST)".
+ *
+ * Selectors are role/label-based and match POSLayout.tsx / POSCart.tsx /
+ * POSPayment.tsx / POSInvoice.tsx as they exist on origin/main.
  */
 import { type Page, type Locator, expect } from '@playwright/test';
 
@@ -14,13 +20,17 @@ export class PosPage {
   readonly salespersonSelect: Locator;
   readonly continueButton: Locator;
   readonly completeOrderButton: Locator;
+  /** Right cart column (inline on desktop) — scopes the totals rows. */
+  readonly cart: Locator;
 
   constructor(page: Page) {
     this.page = page;
     this.salespersonSelect = page.getByLabel('Select salesperson');
-    // Footer CTA — "Continue" on every step except payment ("Complete order").
+    // Bottom action bar CTA — "Continue" on every input group except the
+    // final one, where it reads "Complete order" (POSLayout pos-footer).
     this.continueButton = page.getByRole('button', { name: 'Continue' });
     this.completeOrderButton = page.getByRole('button', { name: 'Complete order' });
+    this.cart = page.locator('aside.pos-cart-col');
   }
 
   async goto() {
@@ -43,6 +53,7 @@ export class PosPage {
     await this.salespersonSelect.selectOption(firstRealValue!);
 
     // The CUSTOMER button (not the sidebar "+1 walk-in" footfall button).
+    // Picking it also forces sale_type = quick_sale.
     await this.page
       .getByRole('button', { name: 'Walk-in (Quick Sale only)' })
       .click();
@@ -56,44 +67,33 @@ export class PosPage {
     await this.continueButton.click();
   }
 
-  /** Step 2 (Products): add a product tile by visible name, then continue. */
+  /** Step 2 (Products): add a product tile by visible name. */
   async addProductByName(name: string) {
     const tile = this.page.getByRole('button', { name: new RegExp(escapeRe(name)) });
     await expect(tile.first()).toBeVisible();
     await tile.first().click();
   }
 
+  /**
+   * Leave the Products step. For a quick sale this lands DIRECTLY on the
+   * Payment step (no Review group exists — QUICK_STEPS parity).
+   */
   async continueFromProducts() {
     await this.continueButton.click();
   }
 
-  /** Locate a Review-step total row (Subtotal / Grand Total) value cell. */
-  reviewRowValue(label: 'Subtotal' | 'Grand Total'): Locator {
-    // Each total row is a flex div: <span>label</span><span>value</span>.
-    return this.page
-      .locator('div', { has: this.page.getByText(label, { exact: true }) })
-      .filter({ hasText: '₹' })
-      .last()
-      .locator('span')
-      .last();
-  }
-
   /**
-   * Locate the value cell of a Review-step GST row by its label PREFIX.
-   * The label span renders the rate too ("CGST (2.5%)"), so match on prefix:
-   *   <div class="flex justify-between"><span>CGST (2.5%)</span><span>₹23.78</span></div>
+   * Locate a cart-sidebar totals row value by its exact label.
+   * Each row is `<div><span>label</span><span class="figure">₹value</span></div>`
+   * (POSCart.tsx totals footer). The value span carries the ₹-prefixed,
+   * whole-rupee en-IN formatted amount (e.g. "₹2,179").
    */
-  reviewTaxRowValue(prefix: 'CGST' | 'SGST'): Locator {
-    const labelSpan = this.page.getByText(new RegExp(`^${prefix}\\s*\\(`));
-    return this.page
-      .locator('div.flex.justify-between', { has: labelSpan })
+  cartRowValue(label: 'Subtotal' | 'GST' | 'Total (incl. GST)'): Locator {
+    return this.cart
+      .locator('div', { has: this.page.getByText(label, { exact: true }) })
       .last()
       .locator('span')
       .last();
-  }
-
-  async continueFromReview() {
-    await this.continueButton.click();
   }
 
   /** Step 4 (Payment): the "Total Due (incl. GST)" headline amount. */
