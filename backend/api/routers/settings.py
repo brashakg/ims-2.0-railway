@@ -15,9 +15,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-import hashlib
 import os
-import base64
 import re
 import time
 import logging
@@ -51,8 +49,10 @@ router = APIRouter()
 #   enc:<b64>       -- legacy XOR ciphertext  (read-only, back-compat)
 #   <plain>         -- unencrypted legacy value  (passthrough)
 #
-# Fail-soft: if neither key env var is set, encryption/decryption is skipped
-# and values are stored/returned as plaintext (same behaviour as before).
+# Fail-loud: if neither key env var is set, this module refuses to import; if
+# Fernet is unavailable, cred_crypto refuses NEW credential writes (legacy
+# values remain readable). The actual crypto lives in api.services.cred_crypto;
+# the wrappers below delegate so every path shares ONE key and ONE code path.
 
 # Source the at-rest credential key from env. Prefer a dedicated
 # CREDENTIAL_ENCRYPTION_KEY, fall back to the app's JWT_SECRET_KEY. We do NOT
@@ -67,26 +67,6 @@ if not _CRED_SECRET:
         "CREDENTIAL_ENCRYPTION_KEY or JWT_SECRET_KEY environment variable is "
         "required to encrypt integration credentials at rest. "
         "Generate one with: openssl rand -hex 32"
-    )
-
-# Build a Fernet instance keyed on SHA-256(_CRED_SECRET) -> urlsafe-b64.
-# Fernet requires exactly 32 bytes encoded as URL-safe base64 (44 chars with =
-# padding).  Any arbitrary string the owner already uses as their key will
-# derive the same 32-byte secret deterministically.
-try:
-    from cryptography.fernet import Fernet as _Fernet, InvalidToken as _InvalidToken
-
-    _fernet_raw_key = hashlib.sha256(_CRED_SECRET.encode()).digest()  # 32 bytes
-    _fernet_key = base64.urlsafe_b64encode(_fernet_raw_key)  # valid Fernet key
-    _fernet_instance: "_Fernet | None" = _Fernet(_fernet_key)
-    del _fernet_raw_key, _fernet_key  # don't leave derived key material in module scope
-except Exception as _fernet_init_err:  # pragma: no cover
-    # cryptography not installed or key derivation failed; fall back to XOR.
-    _fernet_instance = None
-    _InvalidToken = Exception  # type: ignore[assignment,misc]
-    logger.warning(
-        "[CRED] Fernet init failed (%s); falling back to legacy XOR encryption.",
-        _fernet_init_err,
     )
 
 # Sensitive config field names that must be encrypted at rest & masked on read
@@ -129,56 +109,24 @@ def _mask_config(config: dict) -> dict:
 
 
 def _encrypt_value(plaintext: str) -> str:
-    """Encrypt a credential for at-rest storage.
+    """Encrypt a credential for at-rest storage (delegates to cred_crypto).
 
-    Writes Fernet authenticated ciphertext (prefix ``fernet:``) when the
-    cryptography library is available, otherwise falls back to the legacy XOR
-    scheme (prefix ``enc:``) so the app never silently stores plaintext.
+    Fail-loud: raises RuntimeError instead of silently degrading new writes
+    to the weak legacy XOR scheme when Fernet is unavailable. Legacy ``enc:``
+    rows remain readable via _decrypt_value.
     """
-    if _fernet_instance is not None:
-        token = _fernet_instance.encrypt(plaintext.encode("utf-8"))
-        return "fernet:" + token.decode("ascii")
-    # Fallback: legacy XOR (retained for envs where cryptography is absent)
-    key = hashlib.sha256(_CRED_SECRET.encode()).digest()
-    encoded = plaintext.encode("utf-8")
-    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded))
-    return "enc:" + base64.b64encode(xored).decode("ascii")
+    return cred_crypto.encrypt_value(plaintext)
 
 
 def _decrypt_value(ciphertext: str) -> str:
-    """Decrypt a stored credential.
+    """Decrypt a stored credential (delegates to cred_crypto).
 
     Handles all three storage formats transparently:
     - ``fernet:<token>``  -- current Fernet format (authenticated AES-128-CBC)
     - ``enc:<b64>``       -- legacy XOR format (back-compat read)
     - anything else       -- plain / legacy unencrypted value (passthrough)
     """
-    if ciphertext.startswith("fernet:"):
-        if _fernet_instance is None:
-            # cryptography not available -- return as-is; will look garbled but
-            # avoids a hard crash.
-            logger.warning(
-                "[CRED] Cannot decrypt Fernet value: cryptography not available."
-            )
-            return ciphertext
-        try:
-            return _fernet_instance.decrypt(ciphertext[7:].encode("ascii")).decode(
-                "utf-8"
-            )
-        except _InvalidToken:
-            logger.warning("[CRED] Fernet decryption failed (bad token or wrong key).")
-            return ciphertext
-    if ciphertext.startswith("enc:"):
-        # Legacy XOR -- decrypt and return; caller can re-encrypt on next save.
-        try:
-            raw = base64.b64decode(ciphertext[4:])
-            key = hashlib.sha256(_CRED_SECRET.encode()).digest()
-            return bytes(b ^ key[i % len(key)] for i, b in enumerate(raw)).decode(
-                "utf-8"
-            )
-        except Exception:
-            return ciphertext  # Corrupt -- return as-is
-    return ciphertext  # Unencrypted legacy value
+    return cred_crypto.decrypt_value(ciphertext)
 
 
 def _encrypt_config(config: dict) -> dict:
@@ -1394,8 +1342,10 @@ async def test_notification(
     try:
         from agents.providers import send_whatsapp, dispatch_mode
     except Exception as exc:  # pragma: no cover - provider import failure
+        logger.exception("Notification provider import failed")
         raise HTTPException(
-            status_code=503, detail=f"Notification provider unavailable: {exc}"
+            status_code=503,
+            detail="Notification provider unavailable - contact support",
         ) from exc
 
     mode = dispatch_mode()
@@ -1806,6 +1756,14 @@ async def update_integration(
                 merged = {**_decrypt_config(stored_cfg), **cfg}
         except Exception:  # noqa: BLE001 - merge is protective, never fatal
             merged = dict(cfg)
+        try:
+            encrypted_cfg = _encrypt_config(merged)
+        except RuntimeError:
+            logger.exception("Credential encryption unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="Credential encryption unavailable - contact support",
+            )
         collection.update_one(
             {"type": integration_type.lower()},
             {
@@ -1813,7 +1771,7 @@ async def update_integration(
                     "type": integration_type.lower(),
                     "enabled": bool(payload.get("enabled")),
                     # BUG-155: encrypt secrets at rest (was stored plaintext).
-                    "config": _encrypt_config(merged),
+                    "config": encrypted_cfg,
                     "updated_at": datetime.now().isoformat(),
                 }
             },
@@ -1955,7 +1913,14 @@ async def update_marketplace_channels(
             continue  # ignore channels we don't support yet
         entry = cfg.model_dump()
         if isinstance(entry.get("config"), dict):
-            entry["config"] = _encrypt_config(entry["config"])
+            try:
+                entry["config"] = _encrypt_config(entry["config"])
+            except RuntimeError:
+                logger.exception("Credential encryption unavailable")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Credential encryption unavailable - contact support",
+                )
         to_store[ch] = entry
 
     coll = _get_settings_collection("marketplace_channels")

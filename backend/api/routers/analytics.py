@@ -6,7 +6,6 @@ Provides comprehensive analytics and business intelligence endpoints
 from fastapi import APIRouter, Depends, Query, HTTPException
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-import traceback
 import logging
 
 logger = logging.getLogger(__name__)
@@ -478,9 +477,11 @@ async def get_dashboard_summary(
     except HTTPException:
         # Propagate validate_store_access's 403 (cross-store) — don't mask it as 500.
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Dashboard summary calculation failed")
         raise HTTPException(
-            status_code=500, detail=f"Error calculating dashboard summary: {str(e)}"
+            status_code=500,
+            detail="Could not calculate the dashboard summary - try again or contact support",
         )
 
 
@@ -603,9 +604,11 @@ async def get_revenue_trends(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Revenue trends fetch failed")
         raise HTTPException(
-            status_code=500, detail=f"Error fetching revenue trends: {str(e)}"
+            status_code=500,
+            detail="Could not load revenue trends - try again or contact support",
         )
 
 
@@ -764,9 +767,11 @@ async def get_store_performance(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Store performance fetch failed")
         raise HTTPException(
-            status_code=500, detail=f"Error fetching store performance: {str(e)}"
+            status_code=500,
+            detail="Could not load store performance - try again or contact support",
         )
 
 
@@ -907,9 +912,11 @@ async def get_inventory_intelligence(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Inventory intelligence fetch failed")
         raise HTTPException(
-            status_code=500, detail=f"Error fetching inventory intelligence: {str(e)}"
+            status_code=500,
+            detail="Could not load inventory intelligence - try again or contact support",
         )
 
 
@@ -1060,9 +1067,11 @@ async def get_customer_insights(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Customer insights fetch failed")
         raise HTTPException(
-            status_code=500, detail=f"Error fetching customer insights: {str(e)}"
+            status_code=500,
+            detail="Could not load customer insights - try again or contact support",
         )
 
 
@@ -1310,9 +1319,9 @@ async def get_enterprise_kpis(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Enterprise KPIs error: {str(e)}")
-        logger.error(traceback.format_exc())
+    except Exception:
+        logger.exception("Enterprise KPIs fetch failed")
         raise HTTPException(
-            status_code=500, detail=f"Error fetching enterprise KPIs: {str(e)}"
+            status_code=500,
+            detail="Could not load enterprise KPIs - try again or contact support",
         )

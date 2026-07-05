@@ -47,7 +47,8 @@ except Exception as _fernet_init_err:  # pragma: no cover
     _fernet_instance = None
     _InvalidToken = Exception  # type: ignore[assignment,misc]
     logger.warning(
-        "[CRED] Fernet init failed (%s); falling back to legacy XOR encryption.",
+        "[CRED] Fernet init failed (%s); new credential writes will be REFUSED "
+        "(legacy enc:/plaintext values remain readable).",
         _fernet_init_err,
     )
 
@@ -101,14 +102,18 @@ def mask_config(config: dict) -> dict:
 
 
 def encrypt_value(plaintext: str) -> str:
-    """Encrypt a credential for at-rest storage (Fernet, prefix ``fernet:``)."""
-    if _fernet_instance is not None:
-        token = _fernet_instance.encrypt(plaintext.encode("utf-8"))
-        return "fernet:" + token.decode("ascii")
-    key = hashlib.sha256(_CRED_SECRET.encode()).digest()
-    encoded = plaintext.encode("utf-8")
-    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded))
-    return "enc:" + base64.b64encode(xored).decode("ascii")
+    """Encrypt a credential for at-rest storage (Fernet, prefix ``fernet:``).
+
+    Fail-loud: if Fernet is unavailable (cryptography missing / init failed)
+    we REFUSE to write rather than silently degrading new writes to the weak
+    legacy XOR scheme. decrypt_value keeps reading legacy ``enc:`` rows.
+    """
+    if _fernet_instance is None:
+        raise RuntimeError(
+            "credential encryption unavailable - refusing weak-encryption write"
+        )
+    token = _fernet_instance.encrypt(plaintext.encode("utf-8"))
+    return "fernet:" + token.decode("ascii")
 
 
 def decrypt_value(ciphertext: str) -> str:

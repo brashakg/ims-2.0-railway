@@ -4,6 +4,8 @@ IMS 2.0 - Reports Router
 Real database queries for dashboard and reports
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
@@ -25,6 +27,8 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -4973,7 +4977,7 @@ async def create_day_end_close(
 
     try:
         closes.insert_one(dict(doc))
-    except Exception as e:  # pragma: no cover - surfaced as 500 by FastAPI
+    except Exception:  # pragma: no cover - surfaced as 500 by FastAPI
         # A duplicate-key race (two closes at once) lands here too; re-read and
         # report the winner as a 409 rather than a 500.
         winner = closes.find_one({"store_id": sid, "date": body.date})
@@ -4985,8 +4989,10 @@ async def create_day_end_close(
                     "close": _day_end_doc_public(winner),
                 },
             )
+        logger.exception("Day-end close record failed")
         raise HTTPException(
-            status_code=500, detail=f"Failed to record day-end close: {e}"
+            status_code=500,
+            detail="Could not record the day-end close - try again or contact support",
         )
 
     # Audit (fail-soft: an audit hiccup must not undo the business record).

@@ -384,7 +384,11 @@ def _save_row(
                 status_code=409,
                 detail="Already logged. Delete first to re-save.",
             )
-        raise HTTPException(status_code=500, detail=f"Save failed: {e}")
+        logger.exception("Points log save failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save the points entry - try again or contact support",
+        )
     if saved is None:
         raise HTTPException(status_code=500, detail="Save returned None")
     _audit(

@@ -83,6 +83,17 @@ def _stub_dependencies():
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="module", autouse=True)
+def _unpollute_cred_crypto():
+    """This module reloads api.services.cred_crypto under a fixture key. Reload
+    it again under the REAL env on teardown so later test files (policy engine,
+    integrations, ...) don't encrypt/decrypt with a stale key."""
+    yield
+    import api.services.cred_crypto as _cc
+    importlib.reload(_cc)
+    sys.modules.pop("api.routers.settings", None)
+
+
 @pytest.fixture(scope="module")
 def settings_mod():
     """Return the settings module loaded with a known test key."""

@@ -631,8 +631,12 @@ async def run_agent_now(agent_id: str, user: dict = Depends(require_superadmin))
                 else str(agent._status)
             ),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent run failed: {str(e)}")
+    except Exception:
+        logger.exception("Agent run failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Agent run failed - try again or contact support",
+        )
 
 
 @router.get("/agents/{agent_id}/logs")
