@@ -5,6 +5,7 @@
 // services don't resolve through the barrel re-export (TS2614).
 
 import api from './client';
+import type { ReconBlock } from './purchaseRecon';
 
 // ---- Types -------------------------------------------------------------
 export interface VendorBill {
@@ -112,6 +113,16 @@ export interface PurchaseInvoice {
   match_detail?: PurchaseInvoiceMatch | null;
   // Recorded when an ON_HOLD_EXCEPTION was approved (control-bypass audit).
   exception_override?: ExceptionOverride;
+  // F9 — grn_ids of the Delivery Challans this consolidated invoice covers
+  // (present only on DC bulk invoices). Used by the Recon Console to tell a
+  // truly UNLINKED invoice (no PO, no GRN, no DCs) from a DC-backed one.
+  linked_dc_ids?: string[];
+  // F9 — DC-vs-invoice tally verdict ("N_A" for non-DC invoices).
+  dc_match_status?: string | null;
+  // S6 — accountant recon ticks. The list endpoint returns full stored docs,
+  // so this is usually embedded; the Recon Console seeds from it and only
+  // falls back to GET /{id}/recon for rows missing it (kills the old N+1).
+  recon?: ReconBlock | null;
 }
 
 // ---- Phase 2: 3-way match + inventory valuation -------------------------
