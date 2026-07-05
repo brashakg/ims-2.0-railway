@@ -2,21 +2,33 @@
 """
 IMS 2.0 -- BVI PIM Migration: Postgres (BVI) -> Mongo (IMS)
 ============================================================
-Migrates the four PIM entities from the BVI Next.js/Postgres catalog into
+Migrates the five PIM entities from the BVI Next.js/Postgres catalog into
 the IMS Mongo collections built in BVI Phases 1-4:
 
+  Product              -> catalog_products   (parent PIM master; runs FIRST)
   ProductVariant       -> catalog_variants   (NO qty/location cols)
   Collection+CP        -> ecom_collections   (embedded products[{sku,position}])
   Menu+MenuItem        -> ecom_menus         (recursive items tree)
   ProductImage+Variant -> product_images     (kind/status/url/alt/position)
+
+PRODUCTS LEG SAFETY (billing exposure)
+--------------------------------------
+Imported catalog_products docs are NOT POS-billable: the order-create path
+(backend/api/routers/orders.py, products-convergence guard 3) resolves the
+`products` SPINE first and fails LOUD (400 "exists only in the catalog and has
+no billing master record") for anything that resolves only from
+catalog_products. This migration writes ONLY catalog_products (no spine row),
+and additionally stamps pos_ready=False + needs_review=True on every imported
+doc. ecom.locally_modified is False so the Shopify push queue does NOT try to
+re-push ~4k products that are already live on Shopify.
 
 SAFETY CONTRACT
 ---------------
 - Read-ONLY on Postgres; NEVER writes or deletes a BVI row.
 - --dry-run is the DEFAULT.  Nothing is written to Mongo unless you also
   pass --commit.
-- Upserts are IDEMPOTENT keyed on stable natural keys (sku, handle, bvi_image_id).
-  Re-running with --commit on the same data is safe.
+- Upserts are IDEMPOTENT keyed on stable natural keys (bvi_product_id, sku,
+  handle, bvi_image_id).  Re-running with --commit on the same data is safe.
 - Requires ECOMMERCE_DATABASE_URL (Railway env) for the Postgres connection and
   MONGODB_URL / MONGO_URL for Mongo.  Missing env -> the affected mapper is
   skipped (fail-soft), the others continue.
@@ -40,16 +52,18 @@ Usage
     --mongo-url mongodb://... \\
     --db ims_2_0
 
---entities accepts a comma-separated subset of: variants,collections,menus,images
-(default: all four).
+--entities accepts a comma-separated subset of:
+products,variants,collections,menus,images (default: all five, products FIRST
+since variants reference their parent product).
 
 Exit codes: 0 = success or dry-run OK;  1 = fatal import/connection error.
 
 Notes
 -----
-- The 4 mapper functions (map_variant, map_collection, map_menu, map_image) are
-  PURE functions: (pg_row_dict) -> mongo_doc.  They have no side effects and are
-  unit-testable without a database (see backend/tests/test_migrate_bvi_pim.py).
+- The 5 mapper functions (map_product, map_variant, map_collection, map_menu,
+  map_image) are PURE functions: (pg_row_dict) -> mongo_doc.  They have no side
+  effects and are unit-testable without a database (see
+  backend/tests/test_migrate_bvi_pim.py).
 - No emojis -- Windows cp1252 safe.
 """
 from __future__ import annotations
@@ -450,6 +464,289 @@ def map_image(row: Dict, *, is_variant_image: bool = False) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# MAPPER 5: Product -> catalog_products  (parent leg; runs FIRST)
+# ---------------------------------------------------------------------------
+
+def _backend_on_path() -> None:
+    """Make backend/ importable (same pattern as _normalize_rules_for_ims)."""
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _backend = os.path.join(os.path.dirname(_here), "backend")
+    if _backend not in sys.path:
+        sys.path.insert(0, _backend)
+
+
+# Inline fail-soft fallbacks, used ONLY when the backend package is unavailable
+# (standalone run with a stripped checkout). They mirror the canonical tables in
+# api/services/ecom_category_map.py (_TABLE) and api/services/gst_rates.py
+# (GST_CATEGORY_TABLE); the canonical modules win whenever importable.
+_BVI_TO_IMS_FALLBACK: Dict[str, str] = {
+    "SPECTACLES": "FRAME",
+    "SUNGLASSES": "SUNGLASS",
+    "LENSES": "OPTICAL_LENS",
+    "CONTACT_LENSES": "CONTACT_LENS",
+    "COLOR_CONTACT_LENSES": "COLORED_CONTACT_LENS",
+    "READING_GLASSES": "READING_GLASSES",
+    "WATCHES": "WATCH",
+    "SMARTWATCHES": "SMARTWATCH",
+    "SMARTGLASSES": "SMARTGLASSES",
+    "CLOCKS": "WALL_CLOCK",
+    "ACCESSORIES": "ACCESSORIES",
+    "SOLUTIONS": "ACCESSORIES",
+    "SERVICES": "SERVICES",
+}
+_HSN_GST_FALLBACK: Dict[str, Tuple[str, float]] = {
+    "FRAME": ("900311", 5.0),
+    "OPTICAL_LENS": ("900150", 5.0),
+    "READING_GLASSES": ("900490", 5.0),
+    "CONTACT_LENS": ("900130", 5.0),
+    "COLORED_CONTACT_LENS": ("900130", 5.0),
+    "SUNGLASS": ("900410", 18.0),
+    "WATCH": ("910111", 18.0),
+    "SMARTWATCH": ("910221", 18.0),
+    "SMARTGLASSES": ("852580", 18.0),
+    "WALL_CLOCK": ("910500", 18.0),
+    "ACCESSORIES": ("392690", 18.0),
+    "SERVICES": ("998599", 18.0),
+}
+
+
+def map_bvi_category(bvi_category: Any) -> Tuple[str, bool]:
+    """BVI category -> (IMS category, unmapped_flag).
+
+    Uses the CANONICAL bridge in api/services/ecom_category_map.py. A BVI
+    category the bridge does not know falls back to the safe default
+    "ACCESSORIES" and is FLAGGED (category_unmapped=True on the doc) so it can
+    be reviewed instead of silently passing through as a non-IMS enum value
+    (the bridge's own passthrough contract is wrong for catalog_products docs,
+    which must carry a real IMS category for GST/HSN derivation)."""
+    key = _str(bvi_category).upper().replace("-", "_").replace(" ", "_")
+    try:
+        _backend_on_path()
+        from api.services.ecom_category_map import bvi_to_ims, is_known_bvi  # noqa: PLC0415
+
+        if is_known_bvi(key):
+            return bvi_to_ims(key), False
+        return "ACCESSORIES", True
+    except ImportError:
+        if key in _BVI_TO_IMS_FALLBACK:
+            return _BVI_TO_IMS_FALLBACK[key], False
+        return "ACCESSORIES", True
+
+
+def hsn_gst_for_ims_category(ims_category: str) -> Tuple[Optional[str], float]:
+    """(hsn_code, gst_rate) for an IMS category via the canonical
+    api/services/gst_rates.py table (the same table POS bills from), with the
+    inline fallback for a stripped standalone run."""
+    try:
+        _backend_on_path()
+        from api.services.gst_rates import (  # noqa: PLC0415
+            gst_rate_for_category,
+            hsn_for_category,
+        )
+
+        return hsn_for_category(ims_category), gst_rate_for_category(ims_category)
+    except ImportError:
+        entry = _HSN_GST_FALLBACK.get(_str(ims_category).upper())
+        if entry:
+            return entry
+        return None, 5.0  # optical-dominant default (see gst_rates.py)
+
+
+def fold_variant_prices(variant_rows: Optional[List[Dict]]) -> Tuple[float, float]:
+    """Fold a product's ProductVariant pricing rows into (offer_price, mrp).
+
+    - offer_price = MIN variant selling price > 0 (discountedPrice, falling
+      back to the variant's own mrp when discountedPrice is 0/absent).
+    - mrp         = MAX compareAtPrice > 0 across variants; when no variant
+      carries a compareAtPrice, mrp = offer_price (no strikethrough).
+    - offer <= mrp is ENFORCED by lifting mrp to offer (never lowering the
+      real selling price).
+    Returns (0.0, 0.0) when no variant carries a usable price."""
+    prices: List[float] = []
+    compare_ats: List[float] = []
+    for v in variant_rows or []:
+        price = _float(v.get("discountedPrice"))
+        if price <= 0:
+            price = _float(v.get("mrp"))
+        if price > 0:
+            prices.append(price)
+        cap = _float(v.get("compareAtPrice"))
+        if cap > 0:
+            compare_ats.append(cap)
+    offer = min(prices) if prices else 0.0
+    mrp = max(compare_ats) if compare_ats else offer
+    if offer > mrp:
+        mrp = offer
+    return offer, mrp
+
+
+def _handle_from_page_url(page_url: str) -> str:
+    """Derive the storefront handle from BVI's pageUrl (last path segment,
+    query/hash stripped). BVI has no dedicated handle column."""
+    url = _str(page_url)
+    if not url:
+        return ""
+    path = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    seg = path.rsplit("/", 1)[-1] if "/" in path else path
+    return seg.strip().lower()
+
+
+def map_product(
+    row: Dict,
+    variant_rows: Optional[List[Dict]] = None,
+    image_rows: Optional[List[Dict]] = None,
+) -> Dict:
+    """Pure mapper: BVI Product PG row (+ its variant pricing rows + its
+    ProductImage rows) -> IMS catalog_products doc.
+
+    Key design decisions (owner-approved 2026-07):
+    - `id` = the BVI Product.id (CUID). catalog_variants.parent_product_id
+      already carries this exact value (variants leg committed first), and the
+      push engine + catalog CRUD key on `id` -- so the parent<->variant link
+      works with NO backfill.
+    - Natural key / upsert key: `bvi_product_id` (same CUID, kept explicit for
+      reversibility; `source: "bvi_import"` marks every doc).
+    - category via map_bvi_category (canonical bridge; unmapped -> ACCESSORIES
+      + category_unmapped=True). hsn_code/gst_rate derived from the MAPPED IMS
+      category via the canonical gst_rates table.
+    - Pricing folded from variants (fold_variant_prices); falls back to the
+      Product row's own base pricing when no variant carries a price.
+    - is_active from BVI status: ACTIVE/PUBLISHED -> True, else False.
+    - pos_ready=False + needs_review=True: billing's catalog_products fallback
+      exists (orders.py C-1) but guard 3 already 400s catalog-only products;
+      these flags are the explicit belt-and-braces marker.
+    - ecom.locally_modified=False: these products are ALREADY live on Shopify;
+      the push queue must not consider them dirty.
+    - sku is OMITTED when blank: catalog_products.sku carries a UNIQUE SPARSE
+      index (connection.py) -- writing "" for many docs would E11000-collide on
+      the first blank (same gotcha as catalog_variants.store_barcode).
+    """
+    bvi_id = _str(row.get("id"))
+    brand = _str(row.get("brand"))
+    model_no = _str(row.get("modelNo")) or _str(row.get("fullModelNo"))
+    title = (
+        _str(row.get("title"))
+        or _str(row.get("productName"))
+        or " ".join(x for x in (brand, model_no) if x)
+    )
+    status = _str(row.get("status")).upper()
+    is_active = status in ("ACTIVE", "PUBLISHED")
+
+    ims_category, unmapped = map_bvi_category(row.get("category"))
+    hsn_code, gst_rate = hsn_gst_for_ims_category(ims_category)
+
+    # Pricing: variants first; Product base pricing as the no-variant fallback.
+    offer, mrp = fold_variant_prices(variant_rows)
+    if offer <= 0:
+        offer = _float(row.get("discountedPrice"))
+        if offer <= 0:
+            offer = _float(row.get("mrp"))
+        base_cap = _float(row.get("compareAtPrice"))
+        mrp = base_cap if base_cap > 0 else _float(row.get("mrp"))
+        if mrp <= 0:
+            mrp = offer
+        if offer > mrp:
+            mrp = offer
+
+    # First few durable image URLs (Shopify CDN) so list pages render without
+    # a join; the full image set lives in product_images (images leg).
+    sorted_imgs = sorted(image_rows or [], key=lambda r: _int(r.get("position")))
+    images = [u for u in (_str(r.get("url")) for r in sorted_imgs) if u][:3]
+
+    tags_list = [t.strip() for t in _str(row.get("tags")).split(",") if t.strip()]
+
+    # Shared attributes block (catalog list filters read attributes.brand_name).
+    attributes: Dict[str, Any] = {}
+    for attr_key, col in (
+        ("brand_name", "brand"),
+        ("sub_brand", "subBrand"),
+        ("product_name", "productName"),
+        ("gender", "gender"),
+        ("shape", "shape"),
+        ("frame_material", "frameMaterial"),
+        ("frame_type", "frameType"),
+    ):
+        val = _str(row.get(col))
+        if val:
+            attributes[attr_key] = val
+    if model_no:
+        attributes["model_no"] = model_no
+
+    handle = _handle_from_page_url(_str(row.get("pageUrl")))
+    imported_at = _now_utc().isoformat()
+
+    seo: Dict[str, Any] = {}
+    if _str(row.get("seoTitle")):
+        seo["title"] = _str(row.get("seoTitle"))
+    if _str(row.get("seoDescription")):
+        seo["description"] = _str(row.get("seoDescription"))
+    if tags_list:
+        seo["tags"] = tags_list
+
+    ecom: Dict[str, Any] = {
+        # As stored in BVI (incl. gid form if that is what BVI keeps) -- the
+        # push engine updates the SAME Shopify object instead of duplicating.
+        "shopify_product_id": _str(row.get("shopifyProductId")) or None,
+        "handle": handle,
+        "status": status,
+        "page_url": _str(row.get("pageUrl")) or None,
+        "theme_suffix": _str(row.get("themeSuffix")) or None,
+        "seo": seo,
+        "source": "bvi_import",
+        "imported_at": imported_at,
+        # CRITICAL: born CLEAN. These ~4k products are already live on Shopify;
+        # locally_modified=True would flood the push queue with no-op re-pushes.
+        "locally_modified": False,
+        "last_synced_at": None,
+    }
+
+    doc: Dict[str, Any] = {
+        # Identity (id == BVI CUID == catalog_variants.parent_product_id)
+        "id": bvi_id,
+        "bvi_product_id": bvi_id,
+        "sku": _str(row.get("sku")),
+        # Display
+        "title": title,
+        "name": title,
+        "brand": brand,
+        "description": _str(row.get("htmlDescription"))
+        or _str(row.get("aboutProduct")),
+        # Category + tax (derived from the MAPPED IMS category)
+        "category": ims_category,
+        "bvi_category": _str(row.get("category")),
+        "hsn_code": hsn_code,
+        "gst_rate": gst_rate,
+        # Pricing: top-level for generic consumers + the nested `pricing` block
+        # the order-create catalog fallback reads (orders.py C-1).
+        "mrp": mrp,
+        "offer_price": offer,
+        "pricing": {"mrp": mrp, "offer_price": offer},
+        # Media / attrs / tags
+        "images": images,
+        "attributes": attributes,
+        "tags": tags_list,
+        "rxable": _bool(row.get("rxable"), False),
+        # Lifecycle + safety flags
+        "is_active": is_active,
+        "pos_ready": False,     # NOT a billing master (no `products` spine row)
+        "needs_review": True,   # imported half-configured; review before POS use
+        "reorder_quantity": -1,  # auto-reorder OFF (catalog default policy)
+        # Online-store sub-doc (push engine reads ecom.*)
+        "ecom": ecom,
+        # Audit / reversibility
+        "source": "bvi_import",
+        "migrated_at": _now_utc(),
+    }
+    if unmapped:
+        doc["category_unmapped"] = True
+    # UNIQUE SPARSE index on catalog_products.sku: omit blanks entirely so the
+    # sparse index skips these docs (writing "" would dup-collide).
+    if not doc.get("sku"):
+        doc.pop("sku", None)
+    return doc
+
+
+# ---------------------------------------------------------------------------
 # Postgres connection (mirrors online_catalog._connect)
 # ---------------------------------------------------------------------------
 
@@ -532,6 +829,95 @@ def _upsert_one(
 # ---------------------------------------------------------------------------
 # Migration runners (one per entity)
 # ---------------------------------------------------------------------------
+
+def run_products(
+    pg_conn,
+    mongo_db,
+    *,
+    dry_run: bool,
+    sample_n: int = 3,
+) -> Dict:
+    """Migrate Product rows to catalog_products (runs FIRST: variants,
+    collections and images all reference their BVI parent product id)."""
+    logger.info("[PRODUCTS] fetching from Postgres...")
+    rows = _pg_fetchall(pg_conn, 'SELECT * FROM "Product" ORDER BY id')
+    total = len(rows)
+    logger.info("[PRODUCTS] %d rows found", total)
+
+    # Variant pricing aggregation: only the three price columns, grouped by
+    # productId in Python so the fold logic stays in ONE testable pure function.
+    price_rows = _pg_fetchall(
+        pg_conn,
+        'SELECT "productId", mrp, "discountedPrice", "compareAtPrice" '
+        'FROM "ProductVariant"',
+    )
+    prices_by_pid: Dict[str, List[Dict]] = {}
+    for pr in price_rows:
+        prices_by_pid.setdefault(_str(pr.get("productId")), []).append(pr)
+
+    # First few product-level image URLs for the doc's images[] convenience list.
+    img_rows = _pg_fetchall(
+        pg_conn,
+        'SELECT "productId", url, position FROM "ProductImage" '
+        'ORDER BY "productId", position',
+    )
+    imgs_by_pid: Dict[str, List[Dict]] = {}
+    for ir in img_rows:
+        imgs_by_pid.setdefault(_str(ir.get("productId")), []).append(ir)
+
+    logger.info(
+        "[PRODUCTS] %d variant price rows, %d image rows joined",
+        len(price_rows),
+        len(img_rows),
+    )
+
+    docs = [
+        map_product(
+            r,
+            prices_by_pid.get(_str(r.get("id")), []),
+            imgs_by_pid.get(_str(r.get("id")), []),
+        )
+        for r in rows
+    ]
+    docs = [d for d in docs if d.get("bvi_product_id")]  # guard null-id rows
+
+    if dry_run:
+        logger.info(
+            "[PRODUCTS] [DRY-RUN] would upsert %d docs (keyed on bvi_product_id)",
+            len(docs),
+        )
+        unmapped = sum(1 for d in docs if d.get("category_unmapped"))
+        if unmapped:
+            logger.info(
+                "[PRODUCTS] %d docs have an UNMAPPED BVI category "
+                "(fell back to ACCESSORIES, flagged category_unmapped)",
+                unmapped,
+            )
+        if docs:
+            logger.info("[PRODUCTS] sample (first %d):", min(sample_n, len(docs)))
+            for d in docs[:sample_n]:
+                logger.info(
+                    "  id=%s title=%.40s category=%s%s offer=%s mrp=%s "
+                    "active=%s shopify=%s",
+                    d.get("id"),
+                    d.get("title", ""),
+                    d.get("category"),
+                    " (UNMAPPED)" if d.get("category_unmapped") else "",
+                    d.get("offer_price"),
+                    d.get("mrp"),
+                    d.get("is_active"),
+                    "yes" if (d.get("ecom") or {}).get("shopify_product_id") else "no",
+                )
+        return {"entity": "products", "pg_rows": total, "upserted": 0, "dry_run": True}
+
+    coll = mongo_db["catalog_products"]
+    upserted = sum(
+        1 for d in docs
+        if _upsert_one(coll, {"bvi_product_id": d["bvi_product_id"]}, d)
+    )
+    logger.info("[PRODUCTS] upserted %d / %d", upserted, len(docs))
+    return {"entity": "products", "pg_rows": total, "upserted": upserted, "dry_run": False}
+
 
 def run_variants(
     pg_conn,
@@ -717,7 +1103,7 @@ def run_images(
 # CLI
 # ---------------------------------------------------------------------------
 
-_ALL_ENTITIES = ("variants", "collections", "menus", "images")
+_ALL_ENTITIES = ("products", "variants", "collections", "menus", "images")
 
 
 def main() -> None:
@@ -740,9 +1126,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--entities",
-        default="variants,collections,menus,images",
+        default="products,variants,collections,menus,images",
         help="Comma-separated subset to migrate "
-             "(variants,collections,menus,images). Default: all.",
+             "(products,variants,collections,menus,images). Default: all, "
+             "products first (variants reference their parent product).",
     )
     parser.add_argument(
         "--pg-url",
@@ -826,6 +1213,7 @@ def main() -> None:
     # Run each requested mapper.
     results: List[Dict] = []
     runner_map = {
+        "products": run_products,
         "variants": run_variants,
         "collections": run_collections,
         "menus": run_menus,

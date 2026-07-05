@@ -1,5 +1,5 @@
 """
-Unit tests for scripts/migrate_bvi_pim.py -- the four PURE mapper functions.
+Unit tests for scripts/migrate_bvi_pim.py -- the five PURE mapper functions.
 
 No database is needed: mappers are pure (pg_row_dict -> mongo_doc) so we can
 exercise every branch with simple dicts and assert the exact Mongo doc shape.
@@ -15,6 +15,14 @@ Key assertions per mapper:
   4. map_image      -- ProductImage (is_variant_image=False) sets variant_id=None;
                        VariantImage sets variant_id; role->kind->status mapping
                        is correct (RAW->QUEUED, EDITED->APPROVED).
+  5. map_product    -- BVI Product -> catalog_products: category via the
+                       canonical bridge (unmapped -> ACCESSORIES + flag);
+                       HSN/GST from the mapped category; pricing folded from
+                       variants (min price / max compareAt, offer<=mrp);
+                       status->is_active; ecom.locally_modified=False (already
+                       live on Shopify -- push queue must not re-push);
+                       pos_ready=False (NOT POS-billable); keyed on
+                       bvi_product_id.
 """
 from __future__ import annotations
 
@@ -33,6 +41,8 @@ from migrate_bvi_pim import (
     map_collection,
     map_menu,
     map_image,
+    map_product,
+    fold_variant_prices,
     _build_item_tree,
 )
 
@@ -623,3 +633,258 @@ class TestMapImage:
         doc = map_image(vi, is_variant_image=True)
         assert doc["kind"] == "RAW"
         assert doc["status"] == "QUEUED"
+
+
+# ===========================================================================
+# MAPPER 5: map_product (+ fold_variant_prices)
+# ===========================================================================
+
+def _bvi_product(overrides: dict | None = None) -> dict:
+    base = {
+        "id": "cuid_product_001",
+        "category": "SPECTACLES",
+        "status": "PUBLISHED",
+        "shopifyProductId": "gid://shopify/Product/1234567",
+        "imageDesignStatus": None,
+        "brand": "BOSS",
+        "subBrand": None,
+        "label": None,
+        "productName": None,
+        "modelNo": "1234",
+        "fullModelNo": "BOSS 1234/S",
+        "shape": "Rectangle",
+        "frameMaterial": "Acetate",
+        "templeMaterial": None,
+        "frameType": "Full Rim",
+        "gender": "Men",
+        "countryOfOrigin": "Italy",
+        "warranty": "1 year",
+        "lensMaterial": None,
+        "lensUSP": None,
+        "polarization": None,
+        "uvProtection": None,
+        "productUSP": None,
+        "recommendedFor": None,
+        "instructions": None,
+        "ingredients": None,
+        "benefits": None,
+        "aboutProduct": None,
+        "mrp": 7500.0,
+        "discountedPrice": 6500.0,
+        "compareAtPrice": 7500.0,
+        "title": "BOSS 1234 Rectangle Acetate Eyeglasses",
+        "sku": "SP-BOSS-1234",
+        "seoTitle": "BOSS 1234 | Better Vision",
+        "seoDescription": "Shop BOSS 1234 eyeglasses",
+        "pageUrl": "https://bettervision.in/products/boss-1234-rectangle",
+        "tags": "boss, rectangle, acetate",
+        "htmlDescription": "<p>BOSS 1234 premium acetate frame</p>",
+        "gtin": None,
+        "upc": None,
+        "rxable": True,
+        "themeSuffix": None,
+        "categorySpecific": None,
+        "createdById": None,
+        "createdAt": "2025-01-01T00:00:00",
+        "updatedAt": "2025-06-01T00:00:00",
+    }
+    if overrides:
+        base.update(overrides)
+    return base
+
+
+def _price_rows() -> list:
+    """ProductVariant pricing rows for cuid_product_001 (two colourways)."""
+    return [
+        {"productId": "cuid_product_001", "mrp": 7500.0,
+         "discountedPrice": 6500.0, "compareAtPrice": 7500.0},
+        {"productId": "cuid_product_001", "mrp": 7900.0,
+         "discountedPrice": 6900.0, "compareAtPrice": 7900.0},
+    ]
+
+
+class TestFoldVariantPrices:
+    def test_min_price_and_max_compare_at(self):
+        offer, mrp = fold_variant_prices(_price_rows())
+        assert offer == 6500.0   # min selling price
+        assert mrp == 7900.0     # max compareAtPrice
+
+    def test_zero_discounted_price_falls_back_to_variant_mrp(self):
+        rows = [{"productId": "p", "mrp": 5000.0, "discountedPrice": 0,
+                 "compareAtPrice": 0}]
+        offer, mrp = fold_variant_prices(rows)
+        assert offer == 5000.0
+        assert mrp == 5000.0     # no compareAt -> mrp = offer
+
+    def test_no_compare_at_mrp_equals_offer(self):
+        rows = [{"productId": "p", "mrp": 0, "discountedPrice": 3000.0,
+                 "compareAtPrice": 0}]
+        offer, mrp = fold_variant_prices(rows)
+        assert (offer, mrp) == (3000.0, 3000.0)
+
+    def test_offer_never_exceeds_mrp(self):
+        """compareAt below the selling price -> mrp is LIFTED to offer."""
+        rows = [{"productId": "p", "mrp": 0, "discountedPrice": 4000.0,
+                 "compareAtPrice": 3500.0}]
+        offer, mrp = fold_variant_prices(rows)
+        assert offer == 4000.0
+        assert mrp == 4000.0
+        assert offer <= mrp
+
+    def test_zero_prices_excluded_from_min(self):
+        rows = _price_rows() + [
+            {"productId": "cuid_product_001", "mrp": 0,
+             "discountedPrice": 0, "compareAtPrice": 0},
+        ]
+        offer, mrp = fold_variant_prices(rows)
+        assert offer == 6500.0   # the all-zero variant does not drag min to 0
+
+    def test_empty_rows(self):
+        assert fold_variant_prices([]) == (0.0, 0.0)
+        assert fold_variant_prices(None) == (0.0, 0.0)
+
+
+class TestMapProduct:
+    def test_happy_path_identity_and_category(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        # id == BVI CUID == catalog_variants.parent_product_id (no backfill)
+        assert doc["id"] == "cuid_product_001"
+        assert doc["bvi_product_id"] == "cuid_product_001"
+        assert doc["sku"] == "SP-BOSS-1234"
+        assert doc["title"] == "BOSS 1234 Rectangle Acetate Eyeglasses"
+        assert doc["name"] == doc["title"]
+        assert doc["brand"] == "BOSS"
+        # SPECTACLES -> FRAME via the canonical bridge; not flagged
+        assert doc["category"] == "FRAME"
+        assert doc["bvi_category"] == "SPECTACLES"
+        assert "category_unmapped" not in doc
+
+    def test_hsn_gst_derived_from_mapped_category(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        # FRAME -> 9003 frames -> 5% (gst_rates.py canonical table)
+        assert doc["hsn_code"] == "900311"
+        assert doc["gst_rate"] == 5.0
+
+    def test_sunglasses_category_gets_18_percent(self):
+        doc = map_product(_bvi_product({"category": "SUNGLASSES"}), _price_rows())
+        assert doc["category"] == "SUNGLASS"
+        assert doc["gst_rate"] == 18.0
+
+    def test_unmapped_category_falls_back_flagged(self):
+        doc = map_product(_bvi_product({"category": "GADGETS"}), _price_rows())
+        assert doc["category"] == "ACCESSORIES"
+        assert doc["category_unmapped"] is True
+        assert doc["bvi_category"] == "GADGETS"
+        # HSN/GST follow the FALLBACK category (accessories -> 18%)
+        assert doc["gst_rate"] == 18.0
+
+    def test_solutions_maps_to_accessories_not_flagged(self):
+        """SOLUTIONS is a KNOWN BVI category (lens care fluids -> ACCESSORIES)."""
+        doc = map_product(_bvi_product({"category": "SOLUTIONS"}), _price_rows())
+        assert doc["category"] == "ACCESSORIES"
+        assert "category_unmapped" not in doc
+
+    def test_pricing_folded_from_variants(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["offer_price"] == 6500.0   # min variant price
+        assert doc["mrp"] == 7900.0           # max compareAtPrice
+        assert doc["offer_price"] <= doc["mrp"]
+        # Nested pricing block (orders.py catalog fallback reads this shape)
+        assert doc["pricing"] == {"mrp": 7900.0, "offer_price": 6500.0}
+
+    def test_pricing_falls_back_to_product_base_when_no_variants(self):
+        doc = map_product(_bvi_product(), [])
+        assert doc["offer_price"] == 6500.0   # Product.discountedPrice
+        assert doc["mrp"] == 7500.0           # Product.compareAtPrice
+        assert doc["offer_price"] <= doc["mrp"]
+
+    def test_status_published_is_active(self):
+        doc = map_product(_bvi_product({"status": "PUBLISHED"}), _price_rows())
+        assert doc["is_active"] is True
+
+    def test_status_active_is_active(self):
+        doc = map_product(_bvi_product({"status": "ACTIVE"}), _price_rows())
+        assert doc["is_active"] is True
+
+    def test_status_draft_and_archived_inactive(self):
+        for status in ("DRAFT", "ARCHIVED"):
+            doc = map_product(_bvi_product({"status": status}), _price_rows())
+            assert doc["is_active"] is False, status
+
+    def test_ecom_locally_modified_false(self):
+        """CRITICAL: already live on Shopify -- push queue must NOT re-push."""
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["ecom"]["locally_modified"] is False
+
+    def test_ecom_subdoc_shape(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        ecom = doc["ecom"]
+        # gid kept exactly as BVI stores it
+        assert ecom["shopify_product_id"] == "gid://shopify/Product/1234567"
+        assert ecom["handle"] == "boss-1234-rectangle"  # from pageUrl
+        assert ecom["status"] == "PUBLISHED"
+        assert ecom["source"] == "bvi_import"
+        assert "imported_at" in ecom
+        assert ecom["seo"]["title"] == "BOSS 1234 | Better Vision"
+
+    def test_pos_safety_flags(self):
+        """Imported docs must NOT silently become POS-billable half-configured
+        items: no `products` spine row is written (order-create guard 3 fails
+        loud), and the explicit flags mark them for review."""
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["pos_ready"] is False
+        assert doc["needs_review"] is True
+
+    def test_reorder_quantity_disabled(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["reorder_quantity"] == -1
+
+    def test_source_bvi_import_top_level(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["source"] == "bvi_import"
+        assert "migrated_at" in doc
+
+    def test_blank_sku_omitted(self):
+        """catalog_products.sku has a UNIQUE SPARSE index: blank skus must be
+        OMITTED entirely, never written as '' (E11000 on the first blank)."""
+        doc = map_product(_bvi_product({"sku": None}), _price_rows())
+        assert "sku" not in doc
+
+    def test_images_first_three_by_position(self):
+        imgs = [
+            {"productId": "cuid_product_001", "url": f"https://cdn/img{i}.jpg",
+             "position": i}
+            for i in (3, 0, 2, 1)
+        ]
+        doc = map_product(_bvi_product(), _price_rows(), imgs)
+        assert doc["images"] == [
+            "https://cdn/img0.jpg",
+            "https://cdn/img1.jpg",
+            "https://cdn/img2.jpg",
+        ]
+
+    def test_no_images_leaves_empty_list(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["images"] == []
+
+    def test_tags_split_to_list(self):
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["tags"] == ["boss", "rectangle", "acetate"]
+        assert doc["ecom"]["seo"]["tags"] == ["boss", "rectangle", "acetate"]
+
+    def test_title_fallback_brand_model(self):
+        doc = map_product(
+            _bvi_product({"title": None, "productName": None}), _price_rows()
+        )
+        assert doc["title"] == "BOSS 1234"
+
+    def test_attributes_brand_name_for_catalog_filter(self):
+        """Catalog list filters on attributes.brand_name."""
+        doc = map_product(_bvi_product(), _price_rows())
+        assert doc["attributes"]["brand_name"] == "BOSS"
+        assert doc["attributes"]["model_no"] == "1234"
+
+    def test_null_id_product_maps_to_blank_key(self):
+        """A row with no id maps but bvi_product_id='' (caller filters these)."""
+        doc = map_product({}, [])
+        assert doc["bvi_product_id"] == ""
