@@ -50,6 +50,8 @@ import { productApi, type CreateProductPayload } from '../../services/api/produc
 // to dodge the TS2614 re-export resolution issue documented in CLAUDE.md.
 import { displayPlacementsApi, type DisplayPlacement } from '../../services/api/displayPlacements';
 import { displayFixturesApi, type DisplayFixture } from '../../services/api/displayFixtures';
+// Movements-ledger entry type comes DIRECT from the module (TS2614 barrel dodge).
+import { type StockMovementEntry } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
@@ -108,17 +110,12 @@ interface StockItem {
   last_grn?: { grn_number?: string; qty?: number; date?: string } | null;
 }
 
-// Stock movement type
-interface StockMovement {
-  id: string;
-  type: 'IN' | 'OUT' | 'TRANSFER' | 'ADJUSTMENT';
-  productName: string;
-  sku: string;
-  quantity: number;
-  reason: string;
-  createdAt: string;
-  createdBy: string;
-}
+// Stock movement row = the backend ledger entry: RECEIVED (GRN) / SOLD
+// (order) / TRANSFER_IN / TRANSFER_OUT, with a SIGNED qty (+in / -out).
+type StockMovement = StockMovementEntry;
+
+// Page size for the Movements tab's load-more paging (?skip=).
+const MOVEMENTS_PAGE_SIZE = 50;
 
 type ViewTab = 'alerts' | 'catalog' | 'display-layout' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock' | 'rebalance' | 'quarantine';
 
@@ -136,6 +133,10 @@ export function InventoryPage() {
   const [onlineStatus, setOnlineStatus] = useState<Record<string, OnlineStatus>>({});
   const [movementFilter, setMovementFilter] = useState<StockMovement['type'] | 'ALL'>('ALL');
   const [movementSearch, setMovementSearch] = useState('');
+  // Movements-tab fetch state (server-paged via ?skip=; type filter server-side).
+  const [movementsLoading, setMovementsLoading] = useState(false);
+  const [movementsTotal, setMovementsTotal] = useState(0);
+  const [movementsHasMore, setMovementsHasMore] = useState(false);
 
   // v2-2b: placements + fixtures map for the Zone column on the Stock ledger.
   // Batched: one list call for placements + one for fixtures per visible store
@@ -339,9 +340,8 @@ export function InventoryPage() {
         lowStockThreshold: item.lowStockThreshold || item.minStock || 5,
       })) : []);
 
-      // Stock movements are recorded by the backend when inventory changes occur.
-      // No mock data is generated here - movements will populate as real events are logged.
-      setMovements([]);
+      // Stock movements load in their own effect (below) from
+      // GET /inventory/movements whenever the Movements tab is active.
     } catch {
       setError('Failed to load inventory. Please try again.');
     } finally {
@@ -353,6 +353,43 @@ export function InventoryPage() {
   useEffect(() => {
     setCurrentPage(1);
   }, [searchQuery, selectedCategory, availabilityFilter, storeFilter]);
+
+  // Movements ledger: fetch from GET /inventory/movements. skip=0 replaces the
+  // list; skip>0 appends (the Load-more path). Type filter is server-side.
+  const loadMovements = async (skip = 0) => {
+    const sid = storeFilter || user?.activeStoreId;
+    if (!sid) return;
+    setMovementsLoading(true);
+    try {
+      const res = await inventoryApi.getMovements({
+        store_id: sid,
+        type: movementFilter === 'ALL' ? undefined : movementFilter,
+        limit: MOVEMENTS_PAGE_SIZE,
+        skip,
+      });
+      const items = res.items || [];
+      setMovements(prev => (skip === 0 ? items : [...prev, ...items]));
+      setMovementsTotal(res.total || 0);
+      setMovementsHasMore(Boolean(res.has_more));
+    } catch {
+      if (skip === 0) {
+        setMovements([]);
+        setMovementsTotal(0);
+      }
+      setMovementsHasMore(false);
+    } finally {
+      setMovementsLoading(false);
+    }
+  };
+
+  // Refetch page 1 whenever the tab is opened, the viewed store changes, or
+  // the type filter changes. Stale data from a previous store never lingers
+  // because every trigger goes through skip=0 (full replace).
+  useEffect(() => {
+    if (activeTab !== 'movements') return;
+    loadMovements(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, storeFilter, movementFilter, user?.activeStoreId]);
 
   // Online status for an item, matched by sku -> barcode -> storeBarcode.
   const getOnline = (item: StockItem): OnlineStatus | undefined => {
@@ -1173,27 +1210,29 @@ export function InventoryPage() {
         </div>
       )}
 
-      {/* Movements Tab - Double-Entry Stock Audit Trail */}
+      {/* Movements Tab - real stock ledger from GET /inventory/movements */}
       {activeTab === 'movements' && (() => {
+        // Type filtering is server-side (?type=); only the free-text search
+        // narrows the loaded rows client-side.
         const filteredMovements = movements.filter(m => {
-          const matchesType = movementFilter === 'ALL' || m.type === movementFilter;
-          const matchesSearch = !movementSearch ||
-            m.productName.toLowerCase().includes(movementSearch.toLowerCase()) ||
-            m.sku.toLowerCase().includes(movementSearch.toLowerCase()) ||
-            m.reason.toLowerCase().includes(movementSearch.toLowerCase());
-          return matchesType && matchesSearch;
+          const q = movementSearch.toLowerCase();
+          return !q ||
+            (m.product_name || '').toLowerCase().includes(q) ||
+            (m.sku || '').toLowerCase().includes(q) ||
+            (m.ref || '').toLowerCase().includes(q) ||
+            (m.detail || '').toLowerCase().includes(q);
         });
         const movementStats = {
-          totalIn: movements.filter(m => m.type === 'IN').reduce((s, m) => s + m.quantity, 0),
-          totalOut: movements.filter(m => m.type === 'OUT').reduce((s, m) => s + m.quantity, 0),
-          transfers: movements.filter(m => m.type === 'TRANSFER').length,
-          adjustments: movements.filter(m => m.type === 'ADJUSTMENT').length,
+          totalIn: movements.filter(m => m.qty > 0).reduce((s, m) => s + m.qty, 0),
+          totalOut: movements.filter(m => m.qty < 0).reduce((s, m) => s - m.qty, 0),
+          transfers: movements.filter(m => m.type === 'TRANSFER_IN' || m.type === 'TRANSFER_OUT').length,
+          sales: movements.filter(m => m.type === 'SOLD').length,
         };
         const typeConfig: Record<StockMovement['type'], { label: string; color: string; bg: string; prefix: string }> = {
-          IN: { label: 'Stock In', color: 'text-green-700', bg: 'bg-green-100', prefix: '+' },
-          OUT: { label: 'Stock Out', color: 'text-red-700', bg: 'bg-red-100', prefix: '-' },
-          TRANSFER: { label: 'Transfer', color: 'text-blue-700', bg: 'bg-blue-100', prefix: '→' },
-          ADJUSTMENT: { label: 'Adjustment', color: 'text-amber-700', bg: 'bg-amber-100', prefix: '±' },
+          RECEIVED: { label: 'Received', color: 'text-green-700', bg: 'bg-green-100', prefix: '+' },
+          SOLD: { label: 'Sold', color: 'text-red-700', bg: 'bg-red-100', prefix: '-' },
+          TRANSFER_IN: { label: 'Transfer In', color: 'text-blue-700', bg: 'bg-blue-100', prefix: '+' },
+          TRANSFER_OUT: { label: 'Transfer Out', color: 'text-amber-700', bg: 'bg-amber-100', prefix: '-' },
         };
         return (
           <div className="space-y-4">
@@ -1212,8 +1251,8 @@ export function InventoryPage() {
                 <p className="text-xs text-blue-600">Transfers</p>
               </div>
               <div className="bg-amber-50 rounded-lg border border-amber-200 p-3">
-                <p className="text-2xl font-bold text-amber-600">{movementStats.adjustments}</p>
-                <p className="text-xs text-amber-600">Adjustments</p>
+                <p className="text-2xl font-bold text-amber-600">{movementStats.sales}</p>
+                <p className="text-xs text-amber-600">Sales</p>
               </div>
             </div>
 
@@ -1225,12 +1264,12 @@ export function InventoryPage() {
                   type="text"
                   value={movementSearch}
                   onChange={e => setMovementSearch(e.target.value)}
-                  placeholder="Search product, SKU, or reason..."
+                  placeholder="Search product, SKU, or reference..."
                   className="input-field pl-10 text-sm"
                 />
               </div>
               <div className="flex gap-1">
-                {(['ALL', 'IN', 'OUT', 'TRANSFER', 'ADJUSTMENT'] as const).map(t => (
+                {(['ALL', 'RECEIVED', 'SOLD', 'TRANSFER_IN', 'TRANSFER_OUT'] as const).map(t => (
                   <button
                     key={t}
                     onClick={() => setMovementFilter(t)}
@@ -1249,24 +1288,24 @@ export function InventoryPage() {
 
             {/* Movements Table */}
             <div className="card overflow-hidden">
-              {isLoading ? (
+              {movementsLoading && movements.length === 0 ? (
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
                 </div>
               ) : filteredMovements.length === 0 ? (
                 <div className="text-center py-12 text-gray-500">
                   <ArrowRightLeft className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p className="font-medium">No stock movements recorded yet</p>
-                  <p className="text-sm mt-1">Stock movements will appear here as inventory changes are recorded</p>
+                  <p className="font-medium">No stock movements in the last 90 days</p>
+                  <p className="text-sm mt-1">GRN receipts, sales and transfers will appear here as they happen</p>
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-[auto_1fr_120px_80px_100px_100px] gap-2 px-4 py-2 bg-gray-50 border-b text-xs font-medium text-gray-500 uppercase">
+                  <div className="grid grid-cols-[auto_1fr_120px_80px_120px_100px] gap-2 px-4 py-2 bg-gray-50 border-b text-xs font-medium text-gray-500 uppercase">
                     <div className="w-8">Type</div>
-                    <div>Product / Reason</div>
+                    <div>Product / Detail</div>
                     <div>SKU</div>
                     <div className="text-right">Qty</div>
-                    <div>By</div>
+                    <div>Ref</div>
                     <div>Time</div>
                   </div>
                   <div className="divide-y divide-gray-100 max-h-[500px] overflow-y-auto">
@@ -1274,9 +1313,8 @@ export function InventoryPage() {
                       const tc = typeConfig[movement.type];
                       return (
                         <div key={movement.id} className={clsx(
-                          'grid grid-cols-[auto_1fr_120px_80px_100px_100px] gap-2 px-4 py-3 items-center text-sm',
-                          movement.type === 'IN' ? 'bg-green-50/30' :
-                          movement.type === 'OUT' ? 'bg-red-50/30' : ''
+                          'grid grid-cols-[auto_1fr_120px_80px_120px_100px] gap-2 px-4 py-3 items-center text-sm',
+                          movement.qty > 0 ? 'bg-green-50/30' : 'bg-red-50/30'
                         )}>
                           <div>
                             <span className={clsx('inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-bold', tc.bg, tc.color)}>
@@ -1284,26 +1322,38 @@ export function InventoryPage() {
                             </span>
                           </div>
                           <div>
-                            <p className="font-medium text-gray-900">{movement.productName}</p>
-                            <p className="text-xs text-gray-500">{movement.reason}</p>
+                            <p className="font-medium text-gray-900">{movement.product_name || movement.product_id}</p>
+                            <p className="text-xs text-gray-500">{movement.detail}</p>
                           </div>
                           <div className="text-xs text-gray-500 font-mono">{movement.sku}</div>
-                          <div className={clsx('text-right font-bold', tc.color)}>
-                            {tc.prefix}{movement.quantity}
+                          <div className={clsx('text-right font-bold', movement.qty > 0 ? 'text-green-700' : 'text-red-700')}>
+                            {movement.qty > 0 ? `+${movement.qty}` : movement.qty}
                           </div>
-                          <div className="text-xs text-gray-600">{movement.createdBy}</div>
+                          <div className="text-xs text-gray-600 font-mono truncate" title={movement.ref}>{movement.ref}</div>
                           <div className="text-xs text-gray-500">
-                            {new Date(movement.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                            {new Date(movement.at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                             <br />
-                            {new Date(movement.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                            {new Date(movement.at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
                           </div>
                         </div>
                       );
                     })}
                   </div>
-                  <div className="px-4 py-2 bg-gray-50 border-t text-xs text-gray-500">
-                    Showing {filteredMovements.length} of {movements.length} movements
-                    {movementFilter !== 'ALL' && ' (filtered)'}
+                  <div className="px-4 py-2 bg-gray-50 border-t text-xs text-gray-500 flex items-center justify-between">
+                    <span>
+                      Showing {filteredMovements.length} of {movementsTotal} movements
+                      {movementFilter !== 'ALL' && ' (filtered)'}
+                      {movementSearch && ' (search)'}
+                    </span>
+                    {movementsHasMore && (
+                      <button
+                        onClick={() => loadMovements(movements.length)}
+                        disabled={movementsLoading}
+                        className="px-3 py-1 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50"
+                      >
+                        {movementsLoading ? 'Loading...' : 'Load more'}
+                      </button>
+                    )}
                   </div>
                 </>
               )}

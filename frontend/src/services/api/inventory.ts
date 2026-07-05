@@ -250,12 +250,56 @@ export const inventoryApi = {
     return response.data as QuarantineQueueResponse;
   },
 
+  // Movements ledger (Movements tab): merged RECEIVED (GRN) / SOLD (orders) /
+  // TRANSFER_IN / TRANSFER_OUT (transfer legs) event feed, newest first.
+  // type accepts RECEIVED | SOLD | TRANSFER_IN | TRANSFER_OUT | TRANSFER.
+  getMovements: async (params?: {
+    store_id?: string;
+    product_id?: string;
+    type?: string;
+    days?: number;
+    limit?: number;
+    skip?: number;
+  }): Promise<StockMovementsResponse> => {
+    const response = await api.get('/inventory/movements', { params });
+    return response.data as StockMovementsResponse;
+  },
+
   // Build + register the red "DO NOT SHELVE" label and flip the printed flag.
   printQuarantineLabel: async (stockId: string): Promise<QuarantineLabel> => {
     const response = await api.post(`/labels/quarantine/${stockId}`);
     return response.data as QuarantineLabel;
   },
 };
+
+// One merged stock-movement event. qty is SIGNED: positive = stock in
+// (RECEIVED / TRANSFER_IN), negative = stock out (SOLD / TRANSFER_OUT).
+export interface StockMovementEntry {
+  id: string;
+  at: string;
+  type: 'RECEIVED' | 'SOLD' | 'TRANSFER_IN' | 'TRANSFER_OUT';
+  product_id: string;
+  product_name: string;
+  sku: string;
+  qty: number;
+  /** Human reference: GRN / invoice / order / transfer number. */
+  ref: string;
+  ref_id: string;
+  store_id: string;
+  detail: string;
+}
+
+export interface StockMovementsResponse {
+  items: StockMovementEntry[];
+  total: number;
+  skip: number;
+  limit: number;
+  has_more: boolean;
+  days: number;
+  store_id: string | null;
+  /** Per-source health: 'ok' | 'error' | 'skipped' for grns/orders/transfers. */
+  sources: Record<string, string>;
+}
 
 export interface QuarantineUnit {
   stock_id: string;
