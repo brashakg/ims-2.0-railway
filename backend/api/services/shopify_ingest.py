@@ -279,6 +279,137 @@ def _online_fulfillment_store_id(payload: Dict[str, Any]) -> str:
     )
 
 
+def _fallback_enabled() -> bool:
+    """Multi-store fulfillment fallback (owner 2026-07-05): when the preferred
+    online fulfillment store can't cover a line, claim the units from whichever
+    OTHER store actually holds them. Default ON; set
+    ONLINE_FULFILLMENT_FALLBACK=off to pin claims to the preferred store only."""
+    import os
+
+    return (os.getenv("ONLINE_FULFILLMENT_FALLBACK") or "on").strip().lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
+
+
+def _available_stores_for_product(db, product_id: str) -> List[str]:
+    """Store ids holding AVAILABLE serialized units of this product, most stock
+    first. Fail-soft -> []. Deterministic tie-break on store_id so re-ingests
+    behave identically."""
+    try:
+        coll = (
+            db.get_collection("stock_units")
+            if hasattr(db, "get_collection")
+            else db["stock_units"]
+        )
+        rows = list(
+            coll.aggregate(
+                [
+                    {"$match": {"product_id": product_id, "status": "AVAILABLE"}},
+                    {"$group": {"_id": "$store_id", "n": {"$sum": 1}}},
+                    {"$sort": {"n": -1, "_id": 1}},
+                ]
+            )
+        )
+        return [str(r.get("_id")) for r in rows if r.get("_id")]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] fallback store lookup failed for %s: %s",
+            product_id,
+            exc,
+        )
+        return []
+
+
+def _claim_units_multistore(
+    db,
+    order_id: str,
+    decrement_items: List[Dict[str, Any]],
+    preferred_store: str,
+):
+    """Claim sold units for an online order, preferring `preferred_store` and
+    falling back per line to whichever other store holds AVAILABLE units
+    (largest holding first). Returns (claimed_total, breakdown) where breakdown
+    rows are {product_id, store_id, qty}. Reuses the atomic FIFO claim in
+    orders._mark_units_sold, so two concurrent orders can never grab the same
+    unit even across the fallback path."""
+    from ..routers.orders import _mark_units_sold
+
+    breakdown: List[Dict[str, Any]] = []
+    claimed_total = 0
+    for line in decrement_items:
+        pid = line.get("product_id") or ""
+        qty = int(line.get("quantity") or 1)
+        if not pid or qty < 1:
+            continue
+        remaining = qty
+        stores: List[str] = [preferred_store] if preferred_store else []
+        if _fallback_enabled():
+            for s in _available_stores_for_product(db, pid):
+                if s not in stores:
+                    stores.append(s)
+        for s in stores:
+            if remaining <= 0:
+                break
+            marked = _mark_units_sold(order_id, [{**line, "quantity": remaining}], s)
+            if marked:
+                claimed_total += len(marked)
+                breakdown.append(
+                    {"product_id": pid, "store_id": s, "qty": len(marked)}
+                )
+                remaining -= len(marked)
+    return claimed_total, breakdown
+
+
+def _raise_fallback_ship_tasks(
+    db,
+    order_id: str,
+    order_ref: str,
+    breakdown: List[Dict[str, Any]],
+    preferred: str,
+) -> None:
+    """One task per NON-preferred store that fulfilled units, so its staff know
+    to ship them (deduped per order+store). Fail-soft side channel."""
+    stores = sorted(
+        {
+            str(r["store_id"])
+            for r in breakdown
+            if r.get("store_id") and str(r["store_id"]) != (preferred or "")
+        }
+    )
+    if not stores:
+        return
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        repo = get_task_repository()
+        for s in stores:
+            lines = [r for r in breakdown if str(r.get("store_id")) == s]
+            units = sum(int(r.get("qty") or 0) for r in lines)
+            create_system_task(
+                repo,
+                title=f"Online order {order_ref}: ship {units} unit(s) from your store",
+                description=(
+                    "The preferred online fulfillment store did not have stock, so "
+                    f"{units} unit(s) of this paid online order were allocated from "
+                    "your store. Pack and hand them to dispatch. Products: "
+                    + ", ".join(str(r.get("product_id")) for r in lines)
+                ),
+                priority="P2",
+                category="ONLINE_ORDER",
+                store_id=s,
+                dedupe_ref=f"online_fallback_ship:{order_id}:{s}",
+                extra={"link": "/orders", "payload": {"order_id": order_id}},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] fallback ship task skipped for %s: %s", order_id, exc
+        )
+
+
 def _record_stock_miss(db, order_id, store_id, reason, detail=None) -> None:
     """Fail-LOUD record of an online stock-decrement miss (an oversell: a paid
     online order whose physical units could not all be claimed). Logs at ERROR
@@ -674,6 +805,7 @@ def ingest_shopify_order(
     # ingestion -- the invoice is booked regardless and the reconcile sweep
     # (online_sync_health) catches any miss.
     fulfillment_store = _online_fulfillment_store_id(payload)
+    fulfilled_stores: List[str] = []
     try:
         # _mark_units_sold claims by IMS product_id; map each line's resolved
         # ims_product_id onto product_id (the Shopify product_id is NOT the IMS
@@ -684,30 +816,74 @@ def ingest_shopify_order(
             if it.get("ims_product_id")
         ]
         if decrement_items:
-            from ..routers.orders import _mark_units_sold
-
             expected = sum(int(it.get("quantity") or 1) for it in decrement_items)
-            marked = _mark_units_sold(order_id, decrement_items, fulfillment_store)
+            # Owner 2026-07-05: multi-store fulfillment. Prefer the configured
+            # fulfillment store, then claim any shortfall from whichever other
+            # store actually holds the units (see _claim_units_multistore).
+            claimed, breakdown = _claim_units_multistore(
+                db, order_id, decrement_items, fulfillment_store
+            )
+            fulfilled_stores.extend(sorted({str(r["store_id"]) for r in breakdown}))
+            if breakdown:
+                try:
+                    coll = (
+                        db.get_collection("orders")
+                        if hasattr(db, "get_collection")
+                        else db["orders"]
+                    )
+                    coll.update_one(
+                        {"order_id": order_id},
+                        {
+                            "$set": {
+                                "fulfillment_breakdown": breakdown,
+                                "fulfillment_stores": fulfilled_stores,
+                            }
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[SHOPIFY_INGEST] breakdown persist skipped for %s: %s",
+                        order_id,
+                        exc,
+                    )
+                _raise_fallback_ship_tasks(
+                    db,
+                    order_id,
+                    order_doc.get("order_number") or shopify_order_id,
+                    breakdown,
+                    fulfillment_store,
+                )
             # FAIL LOUD on an under-claim: we booked a paid online order but could
-            # NOT decrement every serialized unit (out of physical on-hand at the
-            # fulfillment store, or it has no stock_units at all). The invoice
-            # stands (Shopify took payment) but this is an oversell that needs
-            # operator action -- record it loudly so the sync-health tile + Sentry
-            # surface it instead of it slipping by as a warning.
-            if len(marked) < expected:
+            # NOT decrement every serialized unit (no store in the chain had
+            # enough physical on-hand). The invoice stands (Shopify took payment)
+            # but this is an oversell that needs operator action -- record it
+            # loudly so the sync-health tile + Sentry surface it instead of it
+            # slipping by as a warning.
+            if claimed < expected:
                 _record_stock_miss(
                     db,
                     order_id,
                     fulfillment_store,
                     "under_claim",
-                    {"expected": expected, "claimed": len(marked)},
+                    {
+                        "expected": expected,
+                        "claimed": claimed,
+                        "stores_tried": fulfilled_stores or [fulfillment_store],
+                    },
                 )
     except Exception as exc:  # noqa: BLE001
         _record_stock_miss(db, order_id, fulfillment_store, "exception", str(exc))
     try:
         from .online_stock_writeback import writeback_after_sale
 
-        writeback_after_sale(db, items, fulfillment_store)
+        # Re-publish the reduced online quantity for EVERY store that actually
+        # gave up units (fallback included), not just the preferred store.
+        wb_stores = [fulfillment_store]
+        for s in fulfilled_stores:
+            if s not in wb_stores:
+                wb_stores.append(s)
+        for s in wb_stores:
+            writeback_after_sale(db, items, s)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[SHOPIFY_INGEST] online stock writeback skipped for %s: %s",
