@@ -51,14 +51,25 @@ def test_generated_happy_path(monkeypatch):
         assert "invent" in system  # no-invented-specs rule present
         # SEO contract (owner 2026-07-04): keyword rules + front-loading present.
         assert "SEO" in system and "keyword" in system.lower()
-        assert "Front-load" in system and "stuffing" in system
+        assert "front-load" in system.lower() and "stuffing" in system
         return "Classic Ray-Ban RB3025 aviators with polarized Green G-15 lenses in a gold frame."
 
     monkeypatch.setattr(claude_client, "is_claude_available", lambda: True)
     monkeypatch.setattr(claude_client, "call_claude", fake_call)
     out = asyncio.run(products_mod.generate_product_description(_req(_ATTRS), _user()))
     assert out["status"] == "GENERATED"
-    assert out["description"].startswith("Classic Ray-Ban")
+    # Owner 2026-07-05: the description is now the FULL Shopify-format HTML --
+    # deterministic template sections with the AI paragraph inside a <p>.
+    assert out["description"].startswith("<h4>Product Details</h4>")
+    assert "<p>Classic Ray-Ban" in out["description"]
+    assert "<h4>Technical Specifications</h4>" in out["description"]
+    assert "<h4>General Information</h4>" in out["description"]
+    # Spec rows come from the FILLED fields only.
+    assert "<td>Polarization</td>" in out["description"]
+    assert "<td>Yes</td>" in out["description"]
+    assert "empty_field" not in out["description"]
+    # The raw paragraph is also returned for FE preview/edit.
+    assert out["paragraph"].startswith("Classic Ray-Ban")
 
 
 def test_no_key_returns_failed_no_key(monkeypatch):
@@ -102,8 +113,44 @@ def test_overlong_output_is_trimmed_to_max_length(monkeypatch):
         products_mod.generate_product_description(_req(_ATTRS, max_length=120), _user())
     )
     assert out["status"] == "GENERATED"
-    assert len(out["description"]) <= 121  # cap + closing period
-    assert out["description"].endswith(".")
+    # The cap applies to the AI PARAGRAPH (the spec tables are deterministic
+    # template output and not counted against it).
+    assert len(out["paragraph"]) <= 121  # cap + closing period
+    assert out["paragraph"].endswith(".")
+    assert f"<p>{out['paragraph']}</p>" in out["description"]
+
+
+def test_shopify_template_builder_pure():
+    """The deterministic template: sections render only when fields exist,
+    values are HTML-escaped, and the warranty section links the store page."""
+    from api.services.product_description import (
+        build_model_line,
+        build_shopify_description_html,
+    )
+
+    attrs = {
+        "brand_name": "Ray-Ban",
+        "model_no": "RB3025",
+        "colour_code": "L0205",
+        "lens_size": "58",
+        "frame_material": "Metal & <Gold>",
+        "warranty": "2 Years",
+        "gender": "Unisex",
+    }
+    html = build_shopify_description_html("Sunglass", attrs, "A paragraph.")
+    assert html.startswith("<h4>Product Details</h4>")
+    assert "<h5>Model Number: Ray-Ban RB3025 L0205 58 Sunglass</h5>" in html
+    assert "<p>A paragraph.</p>" in html
+    # Category row injected; escaping applied to the material value.
+    assert "<td>Product Category</td>" in html and "<td>Sunglass</td>" in html
+    assert "Metal &amp; &lt;Gold&gt;" in html
+    assert "<td>Gender</td>" in html
+    assert 'href="https://bettervision.in/pages/warranty"' in html
+    assert "warranty of 2 Years" in html
+    # No warranty field -> no warranty section; empty attrs -> headers only.
+    html2 = build_shopify_description_html("Sunglass", {"brand_name": "X"}, "")
+    assert "<h4>Warranty</h4>" not in html2
+    assert build_model_line("Frame", {"brand_name": "B", "model_no": "M1"}) == "B M1 Frame"
 
 
 def test_rbac_row_catalogued():

@@ -1823,19 +1823,30 @@ async def generate_product_description(
     body: DescriptionGenerateRequest,
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
-    """Draft a customer-facing product description from the filled attribute
-    fields via Claude (haiku by default) -- the Add-Product form's
-    "Auto-fill with AI" button (owner request 2026-07-04; button-only, the
-    operator reviews/edits before save).
+    """Draft the product description from the filled attribute fields -- the
+    Add-Product form's "Auto-fill with AI" button.
+
+    Owner 2026-07-05: the output now matches the DELIBERATE Shopify format the
+    live store already uses (Product Details header + model line + ONE
+    marketing paragraph + Technical Specifications table + General Information
+    table + Warranty section). Shopify has no structured spec fields, so the
+    description IS the spec sheet. The tables are built deterministically in
+    code from the filled fields (services/product_description.py) -- Claude
+    (haiku) writes ONLY the marketing paragraph, in the store's established
+    voice, so the structure can never drift and no spec can be invented.
 
     ALWAYS returns 200 with a `status` the FE keys on -- never a 5xx -- so an
     unavailable model can never block the product-create flow:
-      GENERATED         -> description holds the draft text
+      GENERATED         -> description holds the full HTML draft
       EMPTY_ATTRIBUTES  -> nothing usable to write from (fill brand/model first)
       FAILED_NO_KEY     -> no Anthropic key configured (Settings -> Integrations)
       FAILED_GENERATION -> model call failed/timed out (retry later)
     """
     from agents.claude_client import call_claude, is_claude_available
+    from ..services.product_description import (
+        build_model_line,
+        build_shopify_description_html,
+    )
 
     # Only non-empty, human-meaningful fields feed the prompt.
     filled = {
@@ -1851,26 +1862,26 @@ async def generate_product_description(
 
     spec = _pm.category_spec(body.category)
     category_name = spec.display if spec is not None else str(body.category)
+    model_line = build_model_line(category_name, filled)
 
     system = (
-        "You are an SEO product copywriter for an Indian optical retail chain. "
-        "Write a customer-facing, search-optimised retail description for the "
-        "product described by the attributes given. Rules: 2-3 sentences, under "
-        f"{body.max_length} characters, plain text only (no markdown, no "
-        "headings, no bullet points, no emojis). Use ONLY the attributes "
-        "provided -- never invent specifications, certifications or claims "
-        "that are not in the data. SEO KEYWORD RULES (owner requirement): the "
-        "text MUST naturally contain the search phrases shoppers type -- the "
-        "brand name, the model number and model name, the product-type word "
-        "(e.g. 'sunglasses', 'spectacle frames', 'reading glasses'), the "
-        "gender when given (e.g. 'men's sunglasses', 'unisex frames'), the "
-        "colour, and the key feature terms present in the data (e.g. "
-        "'polarized', 'UV400 protection', 'metal frame', 'blue-cut lenses'). "
-        "Weave them into natural sentences -- NO keyword stuffing, no comma "
-        "lists of keywords, each keyword at most twice. Front-load the most "
-        "important phrase (brand + model + product type) in the first "
-        "sentence. Natural, confident retail tone; no superlatives like "
-        "'best' or 'world-class'."
+        "You are the product copywriter for Better Vision, an Indian optical "
+        "retail chain. Write ONE marketing paragraph (the store's established "
+        "voice) for the product described by the attributes given. It will be "
+        "placed under the product's spec tables on the storefront. STYLE "
+        "(match the store's existing descriptions): open with a line like "
+        "'Reflect your style with {brand + model + colour + product type}', "
+        "mention the colour/material/look, who it suits (gender) and the size "
+        "when given, then close with the store promise sentence: 'Enjoy best "
+        "discounts and guaranteed authentic and genuine products, ensuring "
+        "you have the ultimate eyewear shopping experience. Discover your "
+        "perfect pair at Better Vision today!'. Rules: 3-4 sentences, under "
+        f"{body.max_length} characters, PLAIN TEXT only (no markdown, no HTML, "
+        "no headings, no bullets, no emojis). Use ONLY the attributes provided "
+        "-- never invent specifications, certifications or claims. SEO: "
+        "naturally include the brand name, model number, product-type word, "
+        "gender and colour; no keyword stuffing, each phrase at most twice; "
+        "front-load brand + model + product type in the first sentence."
     )
     lines = "\n".join(f"{k}: {v}" for k, v in sorted(filled.items()))
     user_msg = f"Product category: {category_name}\nAttributes:\n{lines}"
@@ -1879,12 +1890,21 @@ async def generate_product_description(
     if not text or not text.strip():
         return {"description": "", "status": "FAILED_GENERATION"}
 
-    # Hard-trim to the requested cap (the model usually respects it; this is
-    # the guarantee) at a word boundary.
-    out = text.strip()
-    if len(out) > body.max_length:
-        out = out[: body.max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
-    return {"description": out, "status": "GENERATED"}
+    # Hard-trim the PARAGRAPH to the requested cap at a word boundary (the
+    # spec tables are deterministic and not counted against the cap).
+    paragraph = text.strip()
+    if len(paragraph) > body.max_length:
+        paragraph = (
+            paragraph[: body.max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
+        )
+
+    html = build_shopify_description_html(category_name, filled, paragraph)
+    return {
+        "description": html,
+        "paragraph": paragraph,
+        "model_line": model_line,
+        "status": "GENERATED",
+    }
 
 
 @router.get("/categories/list")
