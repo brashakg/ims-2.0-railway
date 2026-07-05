@@ -142,6 +142,12 @@ def test_resolve_category_is_idempotent_on_canonical_keys(canonical):
         ("LS", "OPTICAL_LENS"),
         ("LENS", "OPTICAL_LENS"),
         ("CL", "CONTACT_LENS"),
+        # 2026-07-05 split: colour contact lenses resolve to their own canonical
+        ("CCL", "COLORED_CONTACT_LENS"),
+        ("ccl", "COLORED_CONTACT_LENS"),
+        ("colour contact lens", "COLORED_CONTACT_LENS"),
+        ("Colour-Contact-Lenses", "COLORED_CONTACT_LENS"),
+        ("COLOUR_CONTACTS", "COLORED_CONTACT_LENS"),
         ("WT", "WATCH"),
         ("CK", "WALL_CLOCK"),
         ("HA", "HEARING_AID"),
@@ -152,6 +158,19 @@ def test_resolve_category_is_idempotent_on_canonical_keys(canonical):
 )
 def test_resolve_category_normalises_aliases(alias, expected):
     assert pm.resolve_category(alias) == expected
+
+
+def test_colour_contact_lens_spec_split():
+    """Owner 2026-07-05: COLORED_CONTACT_LENS is a first-class category with
+    its own SKU prefix and a REQUIRED colour_name (its defining attribute)."""
+    spec = pm._CATEGORY_SPECS["COLORED_CONTACT_LENS"]
+    assert spec.prefix == "CCL"
+    assert "colour_name" in spec.required
+    assert "modality" in spec.optional
+    # The plain contact lens keeps its CL prefix and does NOT require colour.
+    cl = pm._CATEGORY_SPECS["CONTACT_LENS"]
+    assert cl.prefix == "CL"
+    assert "colour_name" not in cl.required
 
 
 @pytest.mark.parametrize("junk", ["", None, "  ", "NOT_A_CATEGORY", "XYZ"])

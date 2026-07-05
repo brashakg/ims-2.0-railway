@@ -214,10 +214,13 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
     ),
     "COLORED_CONTACT_LENS": CategorySpec(
         "COLORED_CONTACT_LENS",
-        "CL",
-        "Colored Contact Lens",
-        required=("brand_name", "model_name", "power", "expiry_date"),
-        optional=("subbrand", "colour_name", "pack"),
+        # Own SKU prefix (was "CL", which collided with CONTACT_LENS) so the
+        # two contact-lens categories stay distinct in SKUs and reports.
+        "CCL",
+        "Colour Contact Lens",
+        # colour_name is the defining attribute of a colour lens -> required.
+        required=("brand_name", "model_name", "power", "expiry_date", "colour_name"),
+        optional=("subbrand", "pack", "modality"),
     ),
     "WATCH": CategorySpec(
         "WATCH",
@@ -303,6 +306,12 @@ _CATEGORY_ALIASES: Dict[str, str] = {
     "SUNGLASSES": "SUNGLASS",
     "OPTICAL_LENSES": "OPTICAL_LENS",
     "CONTACT_LENSES": "CONTACT_LENS",
+    # colour contact lenses (canonical = COLORED_CONTACT_LENS)
+    "CCL": "COLORED_CONTACT_LENS",
+    "COLOUR_CONTACT_LENS": "COLORED_CONTACT_LENS",
+    "COLOUR_CONTACT_LENSES": "COLORED_CONTACT_LENS",
+    "COLORED_CONTACT_LENSES": "COLORED_CONTACT_LENS",
+    "COLOUR_CONTACTS": "COLORED_CONTACT_LENS",
     "WATCHES": "WATCH",
     "ACCESSORY": "ACCESSORIES",
     "RX_LENS": "OPTICAL_LENS",

@@ -40,6 +40,7 @@ export type ProductCategory =
   | 'CONTACT_LENS'
   | 'CL'
   | 'COLORED_CONTACT_LENS'
+  | 'CCL'
   | 'WATCH'
   | 'WT'
   | 'SMARTWATCH'

@@ -23,6 +23,9 @@ export const CATEGORIES = [
   { code: 'SG', name: 'Sunglass', icon: '🕶️' },
   { code: 'FR', name: 'Frame', icon: '👓' },
   { code: 'CL', name: 'Contact Lens', icon: '👁️' },
+  // Owner 2026-07-05 split: colour/cosmetic lenses are their own category
+  // (canonical COLORED_CONTACT_LENS, SKU prefix CCL).
+  { code: 'CCL', name: 'Colour Contact Lens', icon: '👁️' },
   { code: 'LS', name: 'Optical Lens', icon: '🔍' },
   { code: 'RG', name: 'Reading Glasses', icon: '📖' },
   { code: 'WT', name: 'Wrist Watch', icon: '⌚' },
@@ -130,6 +133,23 @@ export const CATEGORY_FIELDS: Record<string, CategoryField[]> = {
     // Contact lenses are medical devices with a shelf life -- the canonical
     // product-create registry (step-9) hard-requires expiry_date at every door,
     // so the wizard must block submit inline rather than 422 after POST.
+    { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: true },
+  ],
+  // Colour Contact Lens (owner 2026-07-05 split, canonical COLORED_CONTACT_LENS,
+  // SKU prefix CCL). Same clinical fields as CL; Lens Colour is REQUIRED (it is
+  // the defining attribute — the backend registry enforces it too).
+  CCL: [
+    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Bausch & Lomb', 'Johnson & Johnson', 'Alcon', 'CooperVision', 'Acuvue'] },
+    { name: 'cl_series', label: 'Series', type: 'text', required: false, placeholder: 'e.g. FreshLook Colorblends' },
+    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
+    { name: 'colour_name', label: 'Lens Colour', type: 'text', required: true, placeholder: 'e.g. Hazel, Grey, Turquoise' },
+    { name: 'modality', label: 'Modality', type: 'select', required: false, options: ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY'] },
+    { name: 'power', label: 'Power (SPH)', type: 'text', required: true, placeholder: '0.00 (plano) or -6.00 to +6.00' },
+    { name: 'base_curve', label: 'Base Curve (BC)', type: 'number', required: false, placeholder: '8.6' },
+    { name: 'diameter', label: 'Diameter (DIA)', type: 'number', required: false, placeholder: '14.2' },
+    { name: 'cl_cyl', label: 'Cylinder (toric)', type: 'number', required: false },
+    { name: 'cl_axis', label: 'Axis (toric, 0-180)', type: 'number', required: false },
+    { name: 'pack', label: 'Pack Size', type: 'select', required: false, options: ['1', '2', '3', '6', '30', '90'] },
     { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: true },
   ],
   LS: [
@@ -252,6 +272,7 @@ const FE_CODE_TO_CANONICAL: Record<string, string> = {
   SG: 'SUNGLASS',
   FR: 'FRAME',
   CL: 'CONTACT_LENS',
+  CCL: 'COLORED_CONTACT_LENS',
   LS: 'OPTICAL_LENS',
   RG: 'READING_GLASSES',
   WT: 'WATCH',

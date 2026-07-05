@@ -39,6 +39,10 @@ CL_CATEGORIES = {
     "CONTACT LENSES",
     "CL",
     "CONTACTS",
+    # Colour contact lenses are contact lenses too -> same refill reminders.
+    "COLORED_CONTACT_LENS",
+    "COLOUR_CONTACT_LENS",
+    "CCL",
 }
 
 DAILY_MODALITIES = {"DAILY", "DAILY DISPOSABLE", "1-DAY"}
