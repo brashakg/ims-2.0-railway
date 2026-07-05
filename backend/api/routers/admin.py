@@ -969,3 +969,82 @@ async def online_store_rehost_images(
     from ..services.online_sync_health import rehost_uploads_images
 
     return rehost_uploads_images(_sync_health_db(), dry_run=dry_run, limit=limit)
+
+
+class RegisterWebhooksRequest(BaseModel):
+    """Body for POST /online-store/register-webhooks."""
+
+    callback_base_url: str = Field(
+        ...,
+        description=(
+            "Public https base URL of the IMS backend (e.g. the Railway "
+            "domain). The receiver path /api/v1/webhooks/shopify is appended."
+        ),
+    )
+    topics: List[str] = Field(default_factory=lambda: ["orders/create"])
+    apply: bool = False
+
+
+@router.post("/online-store/register-webhooks")
+async def online_store_register_webhooks(
+    body: RegisterWebhooksRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN-only Shopify webhook registrar (Phase-6 cutover step).
+
+    Ensures Shopify webhookSubscriptions exist for the requested topics
+    (default orders/create) pointing at IMS's signed receiver
+    {callback_base_url}/api/v1/webhooks/shopify.
+
+    DRY-RUN by default (apply=False): lists what WOULD be registered and (when
+    the push gates are LIVE) what already exists -- no mutation. Mutations run
+    ONLY with apply=True AND the same triple push gate (IMS_SHOPIFY_WRITES +
+    SHOPIFY_DISPATCH_MODE=live + Shopify creds in `integrations`), and only
+    for topics not already subscribed at this exact callback URL (idempotent).
+
+    VERIFICATION PREREQ: API-created webhooks are HMAC-signed with the custom
+    app's API SECRET KEY; the receiver verifies against the shopify
+    `integrations` doc's `webhook_secret`. The owner must store that API
+    secret key there or every delivery 401s. Fail-soft; writes an audit row
+    per attempt; never 500s."""
+    if "SUPERADMIN" not in (current_user.get("roles", []) or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Webhook registration is restricted to SUPERADMIN",
+        )
+    from ..services import shopify_push
+
+    result = await shopify_push.register_webhooks(
+        _sync_health_db(),
+        body.callback_base_url,
+        topics=body.topics,
+        apply=body.apply,
+    )
+    # Chained audit row for every registration ATTEMPT (dry-run or applied).
+    # Fail-soft: an audit error never undoes/blocks the registration result.
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "ONLINE_STORE_WEBHOOK_REGISTER",
+                    "entity_type": "webhook-subscription",
+                    "entity_id": result.get("callback_url"),
+                    "user_id": current_user.get("user_id"),
+                    "severity": "INFO" if result.get("ok") else "WARNING",
+                    "details": {
+                        "mode": result.get("mode"),
+                        "applied": result.get("applied"),
+                        "ok": result.get("ok"),
+                        "topics": result.get("topics"),
+                        "created": result.get("created"),
+                        "errors": result.get("errors"),
+                        "reason": result.get("reason"),
+                    },
+                }
+            )
+    except Exception:  # noqa: BLE001 -- audit must never break the call
+        pass
+    return result

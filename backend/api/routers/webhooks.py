@@ -174,6 +174,16 @@ def _load_secret(vendor: str) -> Optional[str]:
         if not doc:
             return None
         cfg = doc.get("config") or {}
+        # BUG-155 parity: the Settings hub Fernet-encrypts webhook_secret at
+        # rest (cred_crypto.SENSITIVE_FIELDS), so compare HMACs against the
+        # DECRYPTED value. decrypt_config is a passthrough on legacy plaintext
+        # rows; on any decrypt error fall back to the raw value (fail-soft).
+        try:
+            from ..services.cred_crypto import decrypt_config
+
+            cfg = decrypt_config(cfg)
+        except Exception:  # noqa: BLE001
+            pass
         return cfg.get("webhook_secret") or None
     except Exception as e:
         logger.debug(f"[WEBHOOKS] secret lookup failed for {vendor}: {e}")

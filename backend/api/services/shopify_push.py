@@ -49,8 +49,10 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import logging
 import os
+import random
 
 import httpx
 
@@ -79,7 +81,7 @@ class PushResult:
     and recorded verbatim on the chained audit row by the router.
 
     mode         SIMULATED (dry-run, no network) | LIVE (a real Shopify write).
-    entity       product | variant | collection | menu | image.
+    entity       product | variant | variant-prices | collection | menu | image.
     action       create | update | skip | noop (what we did / would do).
     target_id    the IMS doc id we were asked to push.
     ok           True unless an error occurred (a SIMULATED dry-run is ok=True).
@@ -101,6 +103,11 @@ class PushResult:
     # Product pushes only: the attribute->metafield side channel. SIMULATED ->
     # the planned rows; LIVE -> {"set": n, "errors": [...]}. None elsewhere.
     metafields: Optional[Any] = None
+    # Product pushes only: the variant price/barcode side channel (owner
+    # priority: "change MRP in IMS -> website updates"). SIMULATED -> the
+    # planned ProductVariantsBulkInput rows; LIVE -> a summary dict. None
+    # elsewhere (and None when the product has no variants).
+    variant_prices: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -220,11 +227,65 @@ def _blocked_result(entity: str, target_id: Optional[str], reason: str) -> "Push
 # ===========================================================================
 
 
+# Bounded retry for Shopify throttling (HTTP 429 / GraphQL THROTTLED) and
+# transient faults (5xx, timeouts). The Phase-6 queue-drain of ~4,400 products
+# WILL hit the Shopify rate limiter; without a retry every throttled push
+# becomes a spurious ok=False. _MAX_RETRIES is TOTAL attempts (1 original +
+# up to 3 retries), base 1s doubling + jitter, Retry-After honored when sent.
+# 4xx user errors are NEVER retried (they are deterministic failures).
+_MAX_RETRIES = 4
+_RETRY_BASE_DELAY = 1.0  # seconds; doubles per attempt
+_RETRY_MAX_DELAY = 30.0  # cap, also applied to a vendor Retry-After
+
+
+def _is_throttled_body(body: Any) -> bool:
+    """True when a transport-200 GraphQL body carries a top-level THROTTLED
+    error (Shopify's cost-based rate limiter). Fail-soft -> False."""
+    try:
+        for e in (body or {}).get("errors") or []:
+            if (
+                isinstance(e, dict)
+                and (e.get("extensions") or {}).get("code") == "THROTTLED"
+            ):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _retry_delay(attempt: int, retry_after: Optional[str]) -> float:
+    """Backoff before retry N (attempt is 1-based): honor a vendor Retry-After
+    header when present, else exponential base-1s doubling plus jitter."""
+    if retry_after:
+        try:
+            ra = float(retry_after)
+            if ra > 0:
+                return min(ra, _RETRY_MAX_DELAY)
+        except (TypeError, ValueError):
+            pass
+    delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
+    return min(delay, _RETRY_MAX_DELAY)
+
+
+async def _post_once(
+    url: str, headers: Dict[str, str], payload: Dict[str, Any]
+) -> httpx.Response:
+    """One raw HTTP POST to Shopify. Split out of _graphql as the retry seam --
+    tests monkeypatch THIS to simulate 429/THROTTLED/5xx sequences while the
+    retry loop above it stays real."""
+    async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
+        return await client.post(url, headers=headers, json=payload)
+
+
 async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     """POST one GraphQL operation to the Shopify Admin API and return the parsed
     JSON body. This is the ONLY function that performs a Shopify network call --
     it is reached ONLY on the LIVE branch (all three gates passed). Tests
     monkeypatch this so no real call is ever made.
+
+    RESILIENT: retries up to _MAX_RETRIES total attempts on 429 / GraphQL
+    THROTTLED / 5xx / timeout with exponential backoff (+ Retry-After when
+    present). Non-retryable 4xx raises immediately.
 
     Returns the raw GraphQL response dict ({"data": ...} and/or {"errors": ...}).
     Raises httpx/ValueError on a transport-level failure; the caller catches and
@@ -241,13 +302,66 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         "X-Shopify-Access-Token": access_token,
         "content-type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
-        resp = await client.post(
-            url, headers=headers, json={"query": query, "variables": variables}
-        )
-    if resp.status_code not in (200, 201):
-        raise ValueError(f"status {resp.status_code}: {resp.text[:200]}")
-    return resp.json() or {}
+    payload = {"query": query, "variables": variables}
+
+    last_error = "unknown"
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            resp = await _post_once(url, headers, payload)
+        except httpx.TimeoutException as e:
+            last_error = f"timeout: {e}"
+            if attempt >= _MAX_RETRIES:
+                raise ValueError(
+                    f"shopify request failed after {attempt} attempts ({last_error})"
+                )
+            logger.warning(
+                "[SHOPIFY_PUSH] timeout on attempt %d/%d; retrying",
+                attempt,
+                _MAX_RETRIES,
+            )
+            await asyncio.sleep(_retry_delay(attempt, None))
+            continue
+
+        status = resp.status_code
+        if status in (200, 201):
+            body = resp.json() or {}
+            if _is_throttled_body(body):
+                last_error = "graphql THROTTLED"
+                if attempt >= _MAX_RETRIES:
+                    # Give the caller the real body: _user_errors turns the
+                    # top-level errors into a fail-soft ok=False result.
+                    return body
+                logger.warning(
+                    "[SHOPIFY_PUSH] THROTTLED on attempt %d/%d; retrying",
+                    attempt,
+                    _MAX_RETRIES,
+                )
+                await asyncio.sleep(
+                    _retry_delay(attempt, resp.headers.get("Retry-After"))
+                )
+                continue
+            return body
+
+        if status == 429 or status >= 500:
+            last_error = f"status {status}: {resp.text[:200]}"
+            if attempt >= _MAX_RETRIES:
+                raise ValueError(
+                    f"shopify request failed after {attempt} attempts ({last_error})"
+                )
+            logger.warning(
+                "[SHOPIFY_PUSH] retryable status %d on attempt %d/%d; retrying",
+                status,
+                attempt,
+                _MAX_RETRIES,
+            )
+            await asyncio.sleep(_retry_delay(attempt, resp.headers.get("Retry-After")))
+            continue
+
+        # A non-retryable 4xx (bad token, bad payload...) fails immediately --
+        # replaying a deterministic user error only burns the rate budget.
+        raise ValueError(f"status {status}: {resp.text[:200]}")
+
+    raise ValueError(f"shopify request failed ({last_error})")  # unreachable guard
 
 
 def _user_errors(body: Dict[str, Any], mutation_field: str) -> Optional[str]:
@@ -341,6 +455,24 @@ mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
   }
 }
 """
+
+# Variant price/barcode push (owner priority: "change MRP in IMS -> website
+# updates"). Shopify retired productVariantUpdate; the current path is
+# productVariantsBulkUpdate keyed on the PARENT product gid (mirrors BVI's
+# ecommerce/src/lib/shopify.ts updateVariantPrice). `barcode` is a top-level
+# ProductVariantsBulkInput field in our pinned API version.
+_VARIANTS_BULK_UPDATE = """
+mutation imsVariantPricesUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id price compareAtPrice barcode }
+    userErrors { field message }
+  }
+}
+"""
+
+# Shopify caps productVariantsBulkUpdate at 250 variants per call (eyewear
+# products carry a handful, but the cap keeps a pathological doc safe).
+_VARIANTS_PER_CALL = 250
 
 
 # ===========================================================================
@@ -502,6 +634,81 @@ def _dedupe(seq: List[str]) -> List[str]:
             seen.add(x)
             out.append(x)
     return out
+
+
+def _price_float(v: Any) -> float:
+    """A usable positive price, else 0.0. Fail-soft on junk."""
+    try:
+        f = float(v)
+        return f if f > 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _resolve_variant_pricing(
+    product: Dict[str, Any], variant: Dict[str, Any]
+) -> Tuple[float, float]:
+    """Resolve (selling_price, mrp) for ONE variant.
+
+    Selling price: the variant's own discounted_price, else its mrp, else the
+    parent product's offer_price / pricing.offer_price, else the product mrp.
+    MRP (the compare-at side): the variant's compare_at_price, else its mrp,
+    else the product mrp. Returns 0.0 legs when nothing usable exists."""
+    pricing = product.get("pricing") or {}
+    price = (
+        _price_float(variant.get("discounted_price"))
+        or _price_float(variant.get("mrp"))
+        or _price_float(product.get("offer_price"))
+        or _price_float(pricing.get("offer_price"))
+        or _price_float(product.get("mrp"))
+        or _price_float(pricing.get("mrp"))
+    )
+    mrp = (
+        _price_float(variant.get("compare_at_price"))
+        or _price_float(variant.get("mrp"))
+        or _price_float(product.get("mrp"))
+        or _price_float(pricing.get("mrp"))
+    )
+    return price, mrp
+
+
+def build_variant_price_inputs(
+    product: Dict[str, Any], variants: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Build the ProductVariantsBulkInput rows for a price/barcode push. Pure.
+
+    Per variant: id (the stored shopify_variant_id gid), price (selling),
+    compareAtPrice (mrp when > price, else EXPLICIT null so a stale
+    strikethrough on Shopify is cleared), barcode (the variant's `gtin` --
+    the two-barcode model: gtin/barcode IS the GTIN pushed to Shopify;
+    `store_barcode` is the physical join key and is NEVER pushed).
+
+    SKIPS (counted, returned as the second tuple member):
+      - variants with no stored shopify_variant_id -- they get their gid when
+        the product's variants first sync; we never CREATE variants here.
+      - variants with no resolvable positive price (never push a 0 price).
+    """
+    rows: List[Dict[str, Any]] = []
+    skipped = 0
+    for v in variants or []:
+        gid = v.get("shopify_variant_id")
+        if not gid:
+            skipped += 1
+            continue
+        price, mrp = _resolve_variant_pricing(product, v)
+        if price <= 0:
+            skipped += 1
+            continue
+        row: Dict[str, Any] = {
+            "id": _as_shopify_gid(gid, "ProductVariant"),
+            "price": f"{price:.2f}",
+            "compareAtPrice": f"{mrp:.2f}" if mrp > price else None,
+        }
+        barcode = v.get("gtin") or v.get("barcode")
+        if barcode:
+            row["barcode"] = str(barcode)
+        rows.append(row)
+    return rows, skipped
 
 
 def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
@@ -698,6 +905,12 @@ async def push_product(
 
     live, reason = _live_or_reason(db)
     if not live:
+        # Variant price/barcode plan rides on the dry-run too (owner priority:
+        # a price change must be visibly part of the push plan).
+        vp_plan = None
+        if variants:
+            vp_rows, vp_skipped = build_variant_price_inputs(product, variants)
+            vp_plan = {"variants": vp_rows, "skipped_no_gid_or_price": vp_skipped}
         return PushResult(
             mode=MODE_SIMULATED,
             entity="product",
@@ -708,6 +921,7 @@ async def push_product(
             payload=payload,
             reason=reason,
             metafields=metafields or None,
+            variant_prices=vp_plan,
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -734,6 +948,25 @@ async def push_product(
         mf_summary = None
         if metafields and new_gid:
             mf_summary = await _set_product_metafields(db, new_gid, metafields)
+        # Variant price/barcode push rides after the product write too (same
+        # fail-soft side-channel contract: an error is reported on the result,
+        # never flips the product push's ok). push_variant_prices never raises.
+        vp_summary = None
+        if variants and new_gid:
+            vp_product = dict(product)
+            vp_ecom = dict(vp_product.get("ecom") or {})
+            vp_ecom["shopify_product_id"] = new_gid
+            vp_product["ecom"] = vp_ecom
+            vp_res = await push_variant_prices(db, vp_product, variants)
+            vp_summary = {
+                "ok": vp_res.ok,
+                "action": vp_res.action,
+                "pushed": len((vp_res.payload or {}).get("variants") or []),
+                "skipped_no_gid_or_price": (vp_res.payload or {}).get(
+                    "skipped_no_gid_or_price", 0
+                ),
+                "error": vp_res.error,
+            }
         return PushResult(
             mode=MODE_LIVE,
             entity="product",
@@ -743,6 +976,7 @@ async def push_product(
             shopify_id=new_gid,
             payload=payload,
             metafields=mf_summary,
+            variant_prices=vp_summary,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(
@@ -751,6 +985,113 @@ async def push_product(
             action=action,
             target_id=pid,
             ok=False,
+            payload=payload,
+            error=str(e),
+        )
+
+
+async def push_variant_prices(
+    db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+) -> PushResult:
+    """Push variant price / compareAtPrice / barcode for ONE product's mapped
+    variants via productVariantsBulkUpdate (owner priority: "change MRP in IMS
+    -> website updates").
+
+    UPDATE-only by design: a variant with no stored shopify_variant_id is
+    SKIPPED (counted in the payload) -- variants get their gid when the
+    product's variants first sync; creating variants here would fork that
+    ownership. DARK by default -> SIMULATED plan with the exact
+    ProductVariantsBulkInput rows and NO network call; LIVE only behind the
+    same three gates. Never raises (fail-soft PushResult contract)."""
+    pid = product.get("id") or product.get("product_id")
+    # Hub Phase 5 push-lock, FIRST gate (fail-closed): a locked brand's prices
+    # must never reach Shopify either.
+    _lock = push_lock_reason(db, "product", product)
+    if _lock:
+        return _blocked_result("variant-prices", pid, _lock)
+
+    ecom = product.get("ecom") or {}
+    raw_gid = ecom.get("shopify_product_id")
+    product_gid = _as_shopify_gid(raw_gid, "Product") if raw_gid else None
+    rows, skipped = build_variant_price_inputs(product, variants or [])
+    payload: Dict[str, Any] = {
+        "productId": product_gid,
+        "variants": rows,
+        "skipped_no_gid_or_price": skipped,
+    }
+    action = "update" if rows else "noop"
+
+    live, reason = _live_or_reason(db)
+    if not live:
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="variant-prices",
+            action=action,
+            target_id=pid,
+            ok=True,
+            shopify_id=product_gid,
+            payload=payload,
+            reason=reason,
+        )
+
+    if not rows:
+        # Nothing mapped (or nothing priced) -> a clean no-op, not an error.
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="variant-prices",
+            action="noop",
+            target_id=pid,
+            ok=True,
+            shopify_id=product_gid,
+            payload=payload,
+        )
+    if not product_gid:
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="variant-prices",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            payload=payload,
+            error="parent product not on Shopify yet (push the product first)",
+        )
+    try:
+        for i in range(0, len(rows), _VARIANTS_PER_CALL):
+            chunk = rows[i : i + _VARIANTS_PER_CALL]
+            body = await _graphql(
+                db,
+                _VARIANTS_BULK_UPDATE,
+                {"productId": product_gid, "variants": chunk},
+            )
+            err = _user_errors(body, "productVariantsBulkUpdate")
+            if err:
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="variant-prices",
+                    action=action,
+                    target_id=pid,
+                    ok=False,
+                    shopify_id=product_gid,
+                    payload=payload,
+                    error=err,
+                )
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="variant-prices",
+            action=action,
+            target_id=pid,
+            ok=True,
+            shopify_id=product_gid,
+            payload=payload,
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="variant-prices",
+            action=action,
+            target_id=pid,
+            ok=False,
+            shopify_id=product_gid,
             payload=payload,
             error=str(e),
         )
@@ -1073,3 +1414,183 @@ def _writeback_image(db, image_id: str, shopify_id: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] image write-back failed {image_id}: {e}")
+
+
+# ===========================================================================
+# WEBHOOK SUBSCRIPTION REGISTRATION (Phase-6 cutover: Shopify must call IMS)
+# ===========================================================================
+# Today orders flow Shopify -> BVI. At the baton cutover Shopify must instead
+# POST signed webhooks at IMS's already-live receiver POST /api/v1/webhooks/
+# shopify (routers/webhooks.py: HMAC-verified against the `integrations` doc's
+# shopify webhook_secret, persisted to webhook_inbox, drained by NEXUS). This
+# registrar creates the missing webhookSubscriptions via the Admin API.
+#
+# NOTE for verification: webhooks created via the Admin API are signed by
+# Shopify with the CUSTOM APP's API SECRET KEY (the app whose access token we
+# push with) -- NOT the "Notifications" shared secret shown in the Shopify
+# admin UI. The owner must store that API secret key as `webhook_secret` on
+# the shopify `integrations` config or every delivery will 401.
+
+_WEBHOOK_SUBSCRIPTIONS_QUERY = """
+query imsWebhookSubscriptions($first: Int!) {
+  webhookSubscriptions(first: $first) {
+    edges {
+      node {
+        id
+        topic
+        endpoint {
+          __typename
+          ... on WebhookHttpEndpoint { callbackUrl }
+        }
+      }
+    }
+  }
+}
+"""
+
+_WEBHOOK_SUBSCRIPTION_CREATE = """
+mutation imsWebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+    webhookSubscription { id topic }
+    userErrors { field message }
+  }
+}
+"""
+
+# The receiver route the subscriptions point at (mounted under /api/v1).
+_WEBHOOK_RECEIVER_PATH = "/api/v1/webhooks/shopify"
+
+
+def _topic_enum(topic: str) -> str:
+    """'orders/create' -> 'ORDERS_CREATE' (Shopify WebhookSubscriptionTopic).
+    Already-enum input ('ORDERS_CREATE') passes through unchanged."""
+    return str(topic or "").strip().replace("/", "_").replace(".", "_").upper()
+
+
+async def register_webhooks(
+    db,
+    callback_base_url: str,
+    topics: Optional[List[str]] = None,
+    apply: bool = False,
+) -> Dict[str, Any]:
+    """Ensure Shopify webhookSubscriptions exist for `topics`, pointing at
+    {callback_base_url}/api/v1/webhooks/shopify. Fail-soft: returns a structured
+    dict, never raises.
+
+    DRY-RUN by default (apply=False): reports what WOULD be registered. When
+    the three push gates are LIVE the dry-run also QUERIES the existing
+    subscriptions (a read); when DARK it makes NO network call at all.
+    Mutations happen ONLY when apply=True AND the gates are LIVE, and only for
+    topics not already subscribed at this exact callback URL (idempotent)."""
+    topic_enums = [_topic_enum(t) for t in (topics or ["orders/create"]) if _topic_enum(t)]
+    base = str(callback_base_url or "").strip().rstrip("/")
+    callback_url = base + _WEBHOOK_RECEIVER_PATH
+
+    live, reason = _live_or_reason(db)
+    result: Dict[str, Any] = {
+        "ok": True,
+        "mode": MODE_LIVE if live else MODE_SIMULATED,
+        "applied": False,
+        "callback_url": callback_url,
+        "topics": topic_enums,
+        "existing": [],
+        "already_registered": [],
+        "missing": list(topic_enums),
+        "conflicts": [],
+        "created": [],
+        "errors": [],
+        "reason": reason,
+    }
+    if not base.startswith("https://"):
+        result["ok"] = False
+        result["errors"].append(
+            "callback_base_url must be https:// (Shopify rejects non-https "
+            "webhook endpoints)"
+        )
+        return result
+    if not topic_enums:
+        result["ok"] = False
+        result["errors"].append("no topics requested")
+        return result
+
+    if not live:
+        # DARK: no network at all (not even the read). The plan lists every
+        # requested topic as missing; existing subscriptions are unknown.
+        result["note"] = (
+            "SIMULATED: push gates closed -- no Shopify call made; existing "
+            "subscriptions unknown, every requested topic listed as missing."
+        )
+        return result
+
+    try:
+        body = await _graphql(db, _WEBHOOK_SUBSCRIPTIONS_QUERY, {"first": 100})
+        if not isinstance(body, dict) or body.get("errors"):
+            result["ok"] = False
+            result["errors"].append(
+                f"webhookSubscriptions query failed: {str((body or {}).get('errors'))[:300]}"
+            )
+            return result
+        edges = (
+            ((body.get("data") or {}).get("webhookSubscriptions") or {}).get("edges")
+        ) or []
+        existing: List[Dict[str, Any]] = []
+        for e in edges:
+            node = (e or {}).get("node") or {}
+            endpoint = node.get("endpoint") or {}
+            existing.append(
+                {
+                    "id": node.get("id"),
+                    "topic": node.get("topic"),
+                    "callback_url": endpoint.get("callbackUrl"),
+                }
+            )
+        result["existing"] = existing
+        already = {
+            x["topic"]
+            for x in existing
+            if x.get("topic") in topic_enums
+            and x.get("callback_url") == callback_url
+        }
+        # Same topic subscribed at a DIFFERENT URL (e.g. still pointing at
+        # BVI): surfaced so the owner sees the double-delivery risk; we still
+        # treat OUR url as missing.
+        result["conflicts"] = [
+            x
+            for x in existing
+            if x.get("topic") in topic_enums
+            and x.get("callback_url")
+            and x.get("callback_url") != callback_url
+        ]
+        result["already_registered"] = sorted(already)
+        result["missing"] = [t for t in topic_enums if t not in already]
+
+        if not apply:
+            return result
+
+        result["applied"] = True
+        for t in result["missing"]:
+            body = await _graphql(
+                db,
+                _WEBHOOK_SUBSCRIPTION_CREATE,
+                {
+                    "topic": t,
+                    "webhookSubscription": {
+                        "callbackUrl": callback_url,
+                        "format": "JSON",
+                    },
+                },
+            )
+            err = _user_errors(body, "webhookSubscriptionCreate")
+            if err:
+                result["ok"] = False
+                result["errors"].append(f"{t}: {err}")
+                continue
+            sub = (
+                (body.get("data") or {}).get("webhookSubscriptionCreate") or {}
+            ).get("webhookSubscription") or {}
+            result["created"].append({"topic": t, "id": sub.get("id")})
+        return result
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        result["ok"] = False
+        result["errors"].append(str(e))
+        return result

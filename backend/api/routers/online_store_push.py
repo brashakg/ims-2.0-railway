@@ -260,6 +260,12 @@ async def push_all_pending(
     default all). `limit` caps the total number of pushes in one sweep (a safety
     valve against a runaway batch).
 
+    `variant-prices` is an OPT-IN extra entity (NOT in the default set): a
+    normal product push already carries the variant price/barcode side channel,
+    so sweeping it by default would double-push. Select it explicitly
+    (?entities=variant-prices) to re-sync price/compareAtPrice/barcode for
+    EVERY product already mapped to Shopify -- the "bulk MRP revision" resync.
+
     DARK by default -- each push is SIMULATED (a dry-run plan, NO Shopify network
     call) unless the same three gates are open (IMS_SHOPIFY_WRITES + DISPATCH_MODE
     =live + creds). The current posture is returned in `mode` so the caller knows
@@ -302,6 +308,24 @@ async def push_all_pending(
             data = (await shopify_push.push_product(db, doc, variants)).to_dict()
             _write_audit(data, current_user)
             _tally("products", data)
+
+    # OPT-IN price/barcode resync (never in the default set -- the product
+    # sweep above already pushes prices as part of each product push). Targets
+    # every product ALREADY mapped to Shopify that has variants; the engine
+    # itself skips gid-less/priceless variants and no-ops cleanly.
+    if "variant-prices" in selected:
+        for doc in _all_docs(db, "catalog_products"):
+            if len(results) >= limit:
+                break
+            ecom = doc.get("ecom")
+            if not ecom or not ecom.get("shopify_product_id"):
+                continue
+            variants = _get_variants_for_product(db, doc)
+            if not variants:
+                continue
+            data = (await shopify_push.push_variant_prices(db, doc, variants)).to_dict()
+            _write_audit(data, current_user)
+            _tally("variant-prices", data)
 
     if "collections" in selected:
         for doc in _all_docs(db, "ecom_collections"):

@@ -880,3 +880,216 @@ def test_live_metafield_errors_do_not_fail_the_push(monkeypatch):
     assert res.metafields["set"] == 0
     assert any("boom" in e for e in res.metafields["errors"])
     assert len(spy.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Shopify connection hardening (owner 2026-07-05 "make the connection
+# stronger"): variant price/barcode push, throttle retries, webhook
+# registration. Same gate + fail-soft contracts as the rest of the engine.
+# ---------------------------------------------------------------------------
+
+
+def test_build_variant_price_inputs_pure():
+    product = {"mrp": 12990, "offer_price": 10990}
+    variants = [
+        # mapped + priced: uses its own pricing, mrp > price -> compareAt set
+        {"shopify_variant_id": "111", "discounted_price": 8000,
+         "compare_at_price": 9000, "gtin": "8056597857239"},
+        # mapped, falls back to product pricing (offer 10990 / mrp 12990)
+        {"shopify_variant_id": "222"},
+        # no gid -> SKIPPED (update-only by design)
+        {"discounted_price": 5000},
+    ]
+    rows, skipped = shopify_push.build_variant_price_inputs(product, variants)
+    assert skipped == 1
+    assert [r["id"] for r in rows] == [
+        "gid://shopify/ProductVariant/111",
+        "gid://shopify/ProductVariant/222",
+    ]
+    assert rows[0]["price"] == "8000.00"
+    assert rows[0]["compareAtPrice"] == "9000.00"
+    assert rows[0]["barcode"] == "8056597857239"
+    assert rows[1]["price"] == "10990.00"
+    assert rows[1]["compareAtPrice"] == "12990.00"
+    # price == mrp -> compareAtPrice EXPLICIT None (clears stale strikethrough)
+    rows2, _ = shopify_push.build_variant_price_inputs(
+        {"mrp": 5000}, [{"shopify_variant_id": "9", "discounted_price": 5000,
+                         "compare_at_price": 5000}]
+    )
+    assert rows2[0]["compareAtPrice"] is None
+    # nothing priced at all -> skipped, no row
+    rows3, skipped3 = shopify_push.build_variant_price_inputs(
+        {}, [{"shopify_variant_id": "10"}]
+    )
+    assert rows3 == [] and skipped3 == 1
+
+
+def test_push_variant_prices_simulated_plans_no_network(monkeypatch):
+    _force_dark(monkeypatch, "writes_off")
+    product = {"id": "P1", "mrp": 100, "offer_price": 90,
+               "ecom": {"shopify_product_id": "77"}}
+    variants = [{"shopify_variant_id": "111"}]
+    res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
+    assert res.mode == "SIMULATED" and res.ok is True
+    assert res.entity == "variant-prices" and res.action == "update"
+    assert res.payload["productId"] == "gid://shopify/Product/77"
+    assert len(res.payload["variants"]) == 1
+
+
+def test_push_variant_prices_live_bulk_update(monkeypatch):
+    spy = _force_live(monkeypatch, {
+        "data": {"productVariantsBulkUpdate": {
+            "productVariants": [{"id": "gid://shopify/ProductVariant/111"}],
+            "userErrors": [],
+        }}
+    })
+    product = {"id": "P1", "mrp": 100, "offer_price": 90,
+               "ecom": {"shopify_product_id": "77"}}
+    variants = [{"shopify_variant_id": "111", "gtin": "123"}]
+    res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
+    assert res.mode == "LIVE" and res.ok is True
+    assert len(spy.calls) == 1
+    v = spy.calls[0]["variables"]
+    assert v["productId"] == "gid://shopify/Product/77"
+    assert v["variants"][0]["barcode"] == "123"
+
+
+def test_push_variant_prices_live_requires_parent_gid(monkeypatch):
+    spy = _force_live(monkeypatch, {"data": {}})
+    product = {"id": "P1", "mrp": 100, "ecom": {}}  # never pushed yet
+    variants = [{"shopify_variant_id": "111", "discounted_price": 90}]
+    res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
+    assert res.ok is False
+    assert "push the product first" in (res.error or "")
+    assert spy.calls == []  # no mutation without the parent gid
+
+
+# --- _graphql retry behaviour (via the _post_once seam) --------------------
+
+
+class _FakeResp:
+    def __init__(self, status, body=None, headers=None, text=""):
+        self.status_code = status
+        self._body = body or {}
+        self.headers = headers or {}
+        self.text = text
+
+    def json(self):
+        return self._body
+
+
+def _wire_graphql(monkeypatch, responses):
+    """Point _graphql at canned _post_once responses; kill real sleeps."""
+    calls = {"n": 0}
+
+    async def fake_post_once(url, headers, payload):
+        i = min(calls["n"], len(responses) - 1)
+        calls["n"] += 1
+        r = responses[i]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(shopify_push, "_post_once", fake_post_once)
+    monkeypatch.setattr(shopify_push.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        shopify_push, "_load_integration_config",
+        lambda db, t: {"shop_url": "x.myshopify.com", "access_token": "t"},
+    )
+    return calls
+
+
+def test_graphql_retries_429_then_succeeds(monkeypatch):
+    ok_body = {"data": {"ok": True}}
+    calls = _wire_graphql(monkeypatch, [
+        _FakeResp(429, headers={"Retry-After": "0"}),
+        _FakeResp(200, body=ok_body),
+    ])
+    body = _run(shopify_push._graphql(None, "query { x }", {}))
+    assert body == ok_body
+    assert calls["n"] == 2
+
+
+def test_graphql_does_not_retry_plain_4xx(monkeypatch):
+    calls = _wire_graphql(monkeypatch, [_FakeResp(401, text="bad token")])
+    with pytest.raises(ValueError):
+        _run(shopify_push._graphql(None, "query { x }", {}))
+    assert calls["n"] == 1  # immediate failure, no retry
+
+
+def test_graphql_gives_up_after_max_retries(monkeypatch):
+    calls = _wire_graphql(monkeypatch, [_FakeResp(429)])
+    with pytest.raises(ValueError):
+        _run(shopify_push._graphql(None, "query { x }", {}))
+    assert calls["n"] == shopify_push._MAX_RETRIES
+
+
+def test_graphql_retries_graphql_throttled_body(monkeypatch):
+    throttled = {"errors": [{"extensions": {"code": "THROTTLED"}}]}
+    ok_body = {"data": {"ok": True}}
+    calls = _wire_graphql(monkeypatch, [
+        _FakeResp(200, body=throttled),
+        _FakeResp(200, body=ok_body),
+    ])
+    body = _run(shopify_push._graphql(None, "query { x }", {}))
+    assert body == ok_body and calls["n"] == 2
+
+
+# --- register_webhooks ------------------------------------------------------
+
+
+def test_register_webhooks_dark_makes_no_network_call(monkeypatch):
+    _force_dark(monkeypatch, "writes_off")  # _graphql explodes if touched
+    res = _run(shopify_push.register_webhooks(
+        _EngineDB(), "https://api.example.com", topics=["orders/create"]
+    ))
+    assert res["mode"] == "SIMULATED" and res["ok"] is True
+    assert res["callback_url"] == "https://api.example.com/api/v1/webhooks/shopify"
+    assert res["missing"] == ["ORDERS_CREATE"]
+    assert res["applied"] is False
+
+
+def test_register_webhooks_rejects_non_https(monkeypatch):
+    _force_dark(monkeypatch, "writes_off")
+    res = _run(shopify_push.register_webhooks(_EngineDB(), "http://insecure"))
+    assert res["ok"] is False
+    assert any("https" in e for e in res["errors"])
+
+
+def test_register_webhooks_apply_creates_only_missing(monkeypatch):
+    cb = "https://api.example.com/api/v1/webhooks/shopify"
+    spy = _force_live(monkeypatch, {
+        "data": {
+            "webhookSubscriptions": {"edges": [
+                # orders/create ALREADY at our URL -> not recreated
+                {"node": {"id": "gid://shopify/WebhookSubscription/1",
+                          "topic": "ORDERS_CREATE",
+                          "endpoint": {"__typename": "WebhookHttpEndpoint",
+                                       "callbackUrl": cb}}},
+                # same family topic still pointed at BVI -> conflict surfaced
+                {"node": {"id": "gid://shopify/WebhookSubscription/2",
+                          "topic": "ORDERS_UPDATED",
+                          "endpoint": {"__typename": "WebhookHttpEndpoint",
+                                       "callbackUrl": "https://old-bvi.app/hook"}}},
+            ]},
+            "webhookSubscriptionCreate": {
+                "webhookSubscription": {"id": "gid://shopify/WebhookSubscription/9",
+                                        "topic": "ORDERS_UPDATED"},
+                "userErrors": [],
+            },
+        }
+    })
+    res = _run(shopify_push.register_webhooks(
+        _EngineDB(), "https://api.example.com",
+        topics=["orders/create", "orders/updated"], apply=True,
+    ))
+    assert res["ok"] is True and res["applied"] is True
+    assert res["already_registered"] == ["ORDERS_CREATE"]
+    assert res["missing"] == ["ORDERS_UPDATED"]
+    assert [c["topic"] for c in res["created"]] == ["ORDERS_UPDATED"]
+    assert len(res["conflicts"]) == 1  # the BVI-pointed sub is surfaced
+    # 1 query + 1 create (only the missing topic)
+    assert len(spy.calls) == 2
