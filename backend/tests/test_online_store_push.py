@@ -757,3 +757,126 @@ def test_push_mode_live_via_shopify_override_only(monkeypatch):
     assert st["is_live"] is True
     assert st["dispatch_mode"] == "live"
     assert st["mode"] == "LIVE"
+
+
+# ---------------------------------------------------------------------------
+# Attribute -> Shopify metafields (owner 2026-07-05 "CREATE WITH METAFIELDS"):
+# category attributes push as structured `ims`-namespace metafields --
+# planned in the dry-run, metafieldsSet after a LIVE product write.
+# ---------------------------------------------------------------------------
+
+
+def test_build_product_metafields_pure():
+    product = {
+        "attributes": {
+            "frame_material": "Acetate",
+            "Temple Length": 145,
+            "uv_protection": "UV400",
+            "empty": "   ",
+            "nested": {"skip": "me"},
+            "listy": ["skip"],
+            "none": None,
+        }
+    }
+    rows = shopify_push.build_product_metafields(product)
+    keys = [r["key"] for r in rows]
+    # scalars only, lowercased snake_case, deterministic sorted order
+    assert keys == ["frame_material", "temple_length", "uv_protection"]
+    assert all(r["namespace"] == "ims" for r in rows)
+    assert all(r["type"] == "single_line_text_field" for r in rows)
+    assert {r["key"]: r["value"] for r in rows}["temple_length"] == "145"
+    # no attributes -> no rows, and non-dict attributes are safe
+    assert shopify_push.build_product_metafields({}) == []
+    assert shopify_push.build_product_metafields({"attributes": "junk"}) == []
+
+
+def test_dark_push_plans_metafields_no_network(monkeypatch):
+    _force_dark(monkeypatch, "writes_off")
+    product = {
+        "id": "P1",
+        "title": "RB",
+        "attributes": {"frame_material": "Metal"},
+        "ecom": {"status": "PUBLISHED"},
+    }
+    res = _run(shopify_push.push_product(_EngineDB(), product, []))
+    assert res.mode == "SIMULATED"
+    assert res.metafields == [
+        {
+            "namespace": "ims",
+            "key": "frame_material",
+            "type": "single_line_text_field",
+            "value": "Metal",
+        }
+    ]
+
+
+def test_live_push_sets_metafields_after_create(monkeypatch):
+    spy = _force_live(
+        monkeypatch,
+        {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/222"},
+                    "userErrors": [],
+                },
+                "metafieldsSet": {
+                    "metafields": [{"id": "gid://shopify/Metafield/1", "key": "frame_material"},
+                                    {"id": "gid://shopify/Metafield/2", "key": "uv_protection"}],
+                    "userErrors": [],
+                },
+            }
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        {
+            "id": "P1",
+            "title": "RB",
+            "attributes": {"frame_material": "Metal", "uv_protection": "UV400"},
+            "ecom": {"status": "PUBLISHED", "locally_modified": True},
+        }
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.mode == "LIVE" and res.ok is True
+    # Two network calls: productCreate, then ONE metafieldsSet chunk.
+    assert len(spy.calls) == 2
+    assert "metafieldsSet" in spy.calls[1]["query"]
+    mfs = spy.calls[1]["variables"]["metafields"]
+    assert all(m["ownerId"] == "gid://shopify/Product/222" for m in mfs)
+    assert sorted(m["key"] for m in mfs) == ["frame_material", "uv_protection"]
+    assert res.metafields == {"set": 2, "errors": []}
+
+
+def test_live_metafield_errors_do_not_fail_the_push(monkeypatch):
+    spy = _force_live(
+        monkeypatch,
+        {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/333"},
+                    "userErrors": [],
+                },
+                "metafieldsSet": {
+                    "metafields": [],
+                    "userErrors": [{"field": ["metafields"], "message": "boom"}],
+                },
+            }
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        {
+            "id": "P1",
+            "title": "RB",
+            "attributes": {"frame_material": "Metal"},
+            "ecom": {"status": "PUBLISHED"},
+        }
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.ok is True  # the product write itself succeeded
+    assert res.mode == "LIVE"
+    assert res.metafields["set"] == 0
+    assert any("boom" in e for e in res.metafields["errors"])
+    assert len(spy.calls) == 2
