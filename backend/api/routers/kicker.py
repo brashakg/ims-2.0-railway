@@ -192,7 +192,11 @@ async def log_product_sale(
                 status_code=409,
                 detail="This order line already has a product-incentive entry.",
             )
-        raise HTTPException(status_code=500, detail=f"Save failed: {e}")
+        logger.exception("Product-incentive save failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save the entry - try again or contact support",
+        )
     if saved is None:
         raise HTTPException(status_code=500, detail="Save returned None")
     _audit(

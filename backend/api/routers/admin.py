@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from .auth import get_current_user
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def _simulated_integration_response(
@@ -106,7 +109,14 @@ def _save_integration_config(integration_type: str, config_data: dict) -> bool:
 
         to_store = dict(config_data)
         if isinstance(to_store.get("config"), dict):
-            to_store["config"] = cred_crypto.encrypt_config(to_store["config"])
+            try:
+                to_store["config"] = cred_crypto.encrypt_config(to_store["config"])
+            except RuntimeError:
+                logger.exception("Credential encryption unavailable")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Credential encryption unavailable - contact support",
+                )
         collection.update_one(
             {"type": integration_type.lower()},
             {"$set": {**to_store, "type": integration_type.lower()}},
@@ -712,8 +722,12 @@ async def regenerate_tally_export(
         )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Tally regenerate failed: {e}")
+    except Exception:
+        logger.exception("Tally regenerate failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not regenerate the Tally export - try again or contact support",
+        )
 
     return {
         "ok": getattr(result, "ok", False),

@@ -3,6 +3,7 @@
 import calendar
 import csv
 import io
+import logging
 import uuid
 from datetime import datetime, timedelta, date
 from ..utils.ist import (
@@ -31,6 +32,8 @@ from ..services import name_resolver
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
 # which the frontend financeApi (it calls /finance/*) never hit — so the whole
 # Finance dashboard 404'd. Dropping it aligns the routes with the client.
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["finance"])
 
 # Separate router for the F34 target-ticker GET. The main finance_router is
@@ -2731,8 +2734,12 @@ async def mark_b2b_invoices_exported(
             {"$set": {"tally_status": "IN_TALLY", "tally_in_tally_at": now}},
         )
         modified = getattr(res, "modified_count", 0)
-    except Exception as exc:  # noqa: BLE001 -- fail loudly, do not pretend success
-        raise HTTPException(status_code=503, detail=f"Mark-exported failed: {exc}")
+    except Exception:  # noqa: BLE001 -- fail loudly, do not pretend success
+        logger.exception("Tally mark-exported failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not mark the export - try again or contact support",
+        )
     return {"ok": True, "marked": modified, "exported_by": who}
 
 
@@ -2758,8 +2765,12 @@ async def mark_b2b_invoice_done(
             },
         )
         matched = getattr(res, "matched_count", 0)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Mark-done failed: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Tally mark-done failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not mark as done - try again or contact support",
+        )
     if not matched:
         raise HTTPException(status_code=404, detail="B2B invoice not found")
     return {"ok": True, "order_id": order_id, "tally_status": "DONE", "done_by": who}
@@ -2789,8 +2800,12 @@ async def set_b2b_attention_note(
             },
         )
         matched = getattr(res, "matched_count", 0)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Attention-note save failed: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Attention-note save failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save the attention note - try again or contact support",
+        )
     if not matched:
         raise HTTPException(status_code=404, detail="B2B invoice not found")
     return {"ok": True, "order_id": order_id, "attention_note": note}
@@ -3239,8 +3254,12 @@ async def open_cash_register(
     }
     try:
         coll.insert_one(dict(doc))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Could not open session: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Cash session open failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not open the cash session - try again or contact support",
+        )
     doc.pop("_id", None)
     return doc
 
@@ -3338,8 +3357,12 @@ async def close_cash_register(
     }
     try:
         coll.update_one({"session_id": body.session_id}, {"$set": update})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Could not close session: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Cash session close failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not close the cash session - try again or contact support",
+        )
 
     merged = dict(session)
     merged.update(update)
@@ -3812,8 +3835,12 @@ async def cash_reconciliation_signoff(
             {"$set": record},
             upsert=True,
         )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Could not record sign-off: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Cash reconciliation sign-off failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not record the sign-off - try again or contact support",
+        )
 
     # Audit the review (fail-soft; never undoes the sign-off write).
     try:

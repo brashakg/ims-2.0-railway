@@ -5,6 +5,7 @@ Complete task management with auto-escalation and SOP templates
 """
 
 import io
+import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
@@ -53,6 +54,8 @@ from ..services.sop_checklist import (
     merge_checklist,
     progress_of,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -1703,8 +1706,12 @@ async def create_sop_template(
     }
     try:
         col.insert_one(doc)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not save SOP: {e}")
+    except Exception:
+        logger.exception("SOP save failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save the SOP - try again or contact support",
+        )
     doc.pop("_id", None)
     return {"template_id": template_id, "template": doc, "message": "SOP created"}
 

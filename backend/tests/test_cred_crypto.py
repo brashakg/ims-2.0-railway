@@ -8,8 +8,12 @@ non-sensitive fields are left untouched.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import sys
+
+import pytest
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,3 +65,24 @@ def test_mask_config_hides_secret():
     assert masked["api_key"] != "ABCD1234EFGH"
     assert masked["api_key"].startswith("ABCD")
     assert masked["label"] == "prod"
+
+
+def test_encrypt_refuses_weak_write_when_fernet_unavailable(monkeypatch):
+    """Fail-loud (security P2): a broken Fernet init must REFUSE new credential
+    writes instead of silently degrading them to the weak legacy XOR scheme."""
+    monkeypatch.setattr(cc, "_fernet_instance", None)
+    with pytest.raises(RuntimeError, match="credential encryption unavailable"):
+        cc.encrypt_value("secret-value")
+    # encrypt_config hits the same guard for any sensitive field.
+    with pytest.raises(RuntimeError, match="credential encryption unavailable"):
+        cc.encrypt_config({"api_secret": "secret-value"})
+
+
+def test_decrypt_legacy_xor_still_reads_when_fernet_unavailable(monkeypatch):
+    """Back-compat: legacy ``enc:`` rows stay readable even with Fernet down."""
+    key = hashlib.sha256(cc._CRED_SECRET.encode()).digest()
+    encoded = "old-xor-secret".encode("utf-8")
+    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded))
+    legacy = "enc:" + base64.b64encode(xored).decode("ascii")
+    monkeypatch.setattr(cc, "_fernet_instance", None)
+    assert cc.decrypt_value(legacy) == "old-xor-secret"

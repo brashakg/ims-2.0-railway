@@ -526,7 +526,11 @@ async def lock(
                 status_code=409,
                 detail=f"Already locked for {payload.year}-{payload.month:02d}. Mark as paid or delete first.",
             )
-        raise HTTPException(status_code=500, detail=f"Lock failed: {e}")
+        logger.exception("Payout lock failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not lock the payout - try again or contact support",
+        )
     if saved is None:
         raise HTTPException(status_code=500, detail="Lock returned None")
     _audit(

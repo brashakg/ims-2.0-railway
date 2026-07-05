@@ -371,7 +371,13 @@ def set_policy(key: str, value: Any, scope: dict, *, actor: Optional[dict] = Non
     stored = clean
     if spec.secret:
         enc, _ = _enc()
-        stored = enc(clean if isinstance(clean, str) else json.dumps(clean))
+        try:
+            stored = enc(clean if isinstance(clean, str) else json.dumps(clean))
+        except RuntimeError:
+            # cred_crypto refuses weak-encryption writes when Fernet is down.
+            raise PolicyError(
+                "credential encryption unavailable - contact support", status=503
+            )
 
     coll = _coll()
     if coll is None:

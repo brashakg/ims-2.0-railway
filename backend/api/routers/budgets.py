@@ -27,6 +27,7 @@ always matches what those modules report:
 Fail-soft contract: no DB -> empty list / zeroed variance, never a 500.
 """
 
+import logging
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -46,6 +47,8 @@ from ..dependencies import (
 # Reuse the proven order-revenue aggregation from reports.py verbatim so the
 # budget variance can never drift from what the Reports module shows.
 from . import reports as _reports
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -266,8 +269,12 @@ async def upsert_budget(
     try:
         coll.update_one(key, update, upsert=True)
         doc = coll.find_one(key)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Failed to save budget: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Budget save failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save the budget - try again or contact support",
+        )
 
     return {"budget": _clean_budget_doc(doc or {}), "persisted": True}
 
@@ -325,8 +332,12 @@ async def delete_budget(
 
     try:
         coll.delete_one({"budget_id": budget_id})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Failed to delete budget: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.exception("Budget delete failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete the budget - try again or contact support",
+        )
     return {"deleted": True, "budget_id": budget_id}
 
 
