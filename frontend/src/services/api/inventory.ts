@@ -465,6 +465,33 @@ export const vendorsApi = {
     return response.data;
   },
 
+  // Procurement Phase 2C: most-recent agreed purchase price per product for a
+  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
+  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
+  // server: no history / DB trouble yields an empty `costs` map. Batch every
+  // line's product_id into ONE call.
+  getLastCost: async (
+    vendorId: string,
+    productIds: string[],
+  ): Promise<{
+    costs: Record<
+      string,
+      { unit_price: number; po_number?: string | null; po_id?: string | null; date?: string | null }
+    >;
+  }> => {
+    const ids = productIds.filter(Boolean);
+    if (!vendorId || ids.length === 0) return { costs: {} };
+    try {
+      const response = await api.get('/vendors/last-cost', {
+        params: { vendor_id: vendorId, product_ids: ids.join(',') },
+      });
+      return response.data ?? { costs: {} };
+    } catch {
+      // Read-only convenience lookup -- never block PO creation on it.
+      return { costs: {} };
+    }
+  },
+
   sendPurchaseOrder: async (poId: string) => {
     const response = await api.post(`/vendors/purchase-orders/${poId}/send`);
     return response.data;
