@@ -6574,6 +6574,13 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders/{po_id}",
         "allowed": "AUTHENTICATED",
     },
+    # PO lifecycle timeline (read-only; the endpoint store-scopes the PO like
+    # get_po). Any authenticated user, same as reading the PO itself.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
+        "allowed": "AUTHENTICATED",
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/cancel",

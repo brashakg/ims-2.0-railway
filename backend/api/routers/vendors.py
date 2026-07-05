@@ -1506,6 +1506,160 @@ async def get_last_purchase_cost(
     return {"costs": costs}
 
 
+@router.get("/purchase-orders/{po_id}/timeline")
+async def get_po_timeline(po_id: str, current_user: dict = Depends(get_current_user)):
+    """The full life of a PO on one read (procurement Phase 3): ordered ->
+    sent -> box received (GRNs) -> on shelf (accepted) -> bill (purchase
+    invoices). One click from any PO number opens the drawer that renders this.
+
+    Read-only; store-scoped exactly like get_po (a store role only sees its own
+    PO -> 404 otherwise). Fail-soft: a GRN/invoice lookup problem degrades to a
+    shorter timeline, never a 5xx. Returns chronological events with the owner-
+    facing five-word status vocabulary the FE chip maps.
+
+    Shape: {"po_id", "po_number", "status", "events": [{kind, label, at, ref,
+    detail}], "grns": [...], "invoices": [...]}.
+    """
+    po_repo = get_purchase_order_repository()
+    if po_repo is None:
+        return {"po_id": po_id, "events": []}
+
+    po = po_repo.find_by_id(po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    # Same object-level store boundary as get_po (hide other stores' POs).
+    if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    events: list = []
+    events.append(
+        {
+            "kind": "ordered",
+            "label": "Ordered",
+            "at": po.get("created_at"),
+            "ref": po.get("po_number"),
+            "detail": f"PO created by {po.get('created_by') or 'system'}",
+        }
+    )
+    if po.get("sent_at"):
+        events.append(
+            {
+                "kind": "sent",
+                "label": "Sent",
+                "at": po.get("sent_at"),
+                "ref": po.get("po_number"),
+                "detail": "PO sent to the vendor",
+            }
+        )
+    if po.get("cancelled_at"):
+        events.append(
+            {
+                "kind": "cancelled",
+                "label": "Cancelled",
+                "at": po.get("cancelled_at"),
+                "ref": po.get("po_number"),
+                "detail": po.get("cancellation_reason") or "PO cancelled",
+            }
+        )
+
+    # GRNs against this PO -> "Box received" (PENDING) + "On shelf" (ACCEPTED).
+    grns_out: list = []
+    grn_ids: list = []
+    try:
+        grn_repo = get_grn_repository()
+        if grn_repo is not None:
+            grns = grn_repo.find_many({"po_id": po_id}, limit=200) or []
+            for g in grns:
+                gid = g.get("grn_id")
+                if gid:
+                    grn_ids.append(gid)
+                grns_out.append(
+                    {
+                        "grn_id": gid,
+                        "grn_number": g.get("grn_number"),
+                        "status": g.get("status"),
+                        "created_at": g.get("created_at"),
+                        "accepted_at": g.get("accepted_at"),
+                        "total_accepted": g.get("total_accepted"),
+                    }
+                )
+                if g.get("status") == "VOID":
+                    continue
+                events.append(
+                    {
+                        "kind": "box_received",
+                        "label": "Box received",
+                        "at": g.get("created_at"),
+                        "ref": g.get("grn_number"),
+                        "detail": f"Goods receipt logged ({g.get('total_received') or 0} units)",
+                    }
+                )
+                if g.get("accepted_at"):
+                    events.append(
+                        {
+                            "kind": "on_shelf",
+                            "label": "On shelf",
+                            "at": g.get("accepted_at"),
+                            "ref": g.get("grn_number"),
+                            "detail": f"{g.get('total_accepted') or 0} units accepted into stock",
+                        }
+                    )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[VENDOR] po-timeline grn lookup failed: %s", e)
+
+    # Purchase invoices linked to this PO or any of its GRNs -> "Bill settled".
+    invoices_out: list = []
+    try:
+        db = _get_db()
+        if db is not None:
+            or_terms: list = [{"po_id": po_id}]
+            if grn_ids:
+                or_terms.append({"grn_id": {"$in": grn_ids}})
+            rows = list(
+                db.get_collection("vendor_bills").find(
+                    {"doc_type": "PURCHASE_INVOICE", "$or": or_terms},
+                    {"_id": 0},
+                )
+            )
+            for r in rows:
+                invoices_out.append(
+                    {
+                        "bill_id": r.get("bill_id"),
+                        "invoice_number": r.get("invoice_number")
+                        or r.get("bill_number"),
+                        "status": r.get("status"),
+                        "total": r.get("total"),
+                        "created_at": r.get("created_at"),
+                    }
+                )
+                events.append(
+                    {
+                        "kind": "bill_settled",
+                        "label": "Bill settled",
+                        "at": r.get("created_at"),
+                        "ref": r.get("invoice_number") or r.get("bill_number"),
+                        "detail": f"Purchase invoice booked ({r.get('status') or 'OUTSTANDING'})",
+                    }
+                )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[VENDOR] po-timeline invoice lookup failed: %s", e)
+
+    # Chronological (blank timestamps sort last, stable).
+    events.sort(key=lambda e: (e.get("at") is None, e.get("at") or ""))
+
+    return {
+        "po_id": po_id,
+        "po_number": po.get("po_number"),
+        "status": po.get("status"),
+        "vendor_id": po.get("vendor_id"),
+        "vendor_name": po.get("vendor_name"),
+        "delivery_store_id": po.get("delivery_store_id"),
+        "events": events,
+        "grns": grns_out,
+        "invoices": invoices_out,
+    }
+
+
 @router.get("/purchase-orders/{po_id}")
 async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Get purchase order details"""
