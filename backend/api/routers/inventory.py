@@ -652,6 +652,13 @@ def _ledger_row(
         "cl_series": product.get("cl_series"),
         "base_curve": product.get("base_curve"),
         "diameter": product.get("diameter"),
+        # Reorder policy passthrough (raw; None when the master doc has no
+        # value). reorder_quantity <= 0 (the -1 default the create door
+        # stamps) means auto-reorder is DISABLED for this product -- see
+        # api/services/reorder_policy.py. The Reorder dashboard renders that
+        # state honestly instead of fabricating a quantity.
+        "reorder_quantity": product.get("reorder_quantity"),
+        "reorder_point": product.get("reorder_point"),
         # Procurement Phase 1 (additive, optional): the latest ACCEPTED GRN
         # that put stock of this product on this store's shelf, or None.
         # Shape: {"grn_number": str, "qty": int, "date": "YYYY-MM-DD"}.
@@ -1256,15 +1263,44 @@ async def get_low_stock_alerts(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get low stock alerts"""
+    """Get low stock alerts.
+
+    Each item carries `auto_reorder_disabled` (per-product policy, see
+    api/services/reorder_policy.py): True when the product master has
+    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel). The alert
+    list itself is UNCHANGED -- every low-stock product is still returned
+    so managers see the state; the flag lets consumers (Reorder dashboard,
+    Stock Replenishment suggestions) decide whether to propose a PO.
+    """
     repo = get_stock_repository()
     active_store = validate_store_access(store_id, current_user)
 
-    if repo is not None:
-        items = repo.find_low_stock(active_store)
-        return {"items": items}
+    if repo is None:
+        return {"items": []}
 
-    return {"items": []}
+    items = repo.find_low_stock(active_store)
+
+    # Join the product masters in ONE $in query (fail-soft: a join failure
+    # only means the flag stays False, i.e. legacy-enabled behaviour).
+    products_by_id: Dict[str, Dict] = {}
+    product_repo = get_product_repository()
+    pids = [str(i.get("_id") or "") for i in items if i.get("_id")]
+    if product_repo is not None and pids:
+        try:
+            for prod in product_repo.find_many(
+                {"product_id": {"$in": pids}}, limit=len(pids)
+            ):
+                key = str(prod.get("product_id") or prod.get("_id") or "")
+                if key:
+                    products_by_id[key] = prod
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("[INVENTORY] low-stock reorder-policy join failed: %s", exc)
+
+    for item in items:
+        pid = str(item.get("_id") or "")
+        item["auto_reorder_disabled"] = _reorder_disabled(products_by_id.get(pid, {}))
+
+    return {"items": items}
 
 
 @router.get("/barcode/{barcode}")

@@ -30,7 +30,11 @@ interface Product {
   currentStock: number;
   reservedStock: number;
   reorderPoint: number;
-  reorderQuantity: number;
+  // Real reorder_quantity from the product master. null = never configured
+  // (legacy-enabled, nothing to show). <= 0 (the -1 sentinel) = the owner
+  // explicitly DISABLED auto-reorder for this product.
+  reorderQuantity: number | null;
+  autoReorderDisabled: boolean;
   maxStock: number;
   leadTimeDays: number;
   averageSalesPerDay: number;
@@ -39,6 +43,14 @@ interface Product {
   supplierName?: string;
   unitCost?: number;
 }
+
+// Auto-reorder is OFF when the product master says so explicitly (value
+// present and <= 0, i.e. the -1 sentinel) or the low-stock feed flagged it.
+const isAutoReorderOff = (p: Product) => p.autoReorderDisabled;
+
+// A row that auto-reorder can actually order: enabled AND a real qty >= 1.
+const hasOrderableQty = (p: Product) =>
+  !isAutoReorderOff(p) && p.reorderQuantity != null && p.reorderQuantity >= 1;
 
 export function ReorderDashboard() {
   const { user } = useAuth();
@@ -68,8 +80,8 @@ export function ReorderDashboard() {
         inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
       ]);
 
-      // getLowStock returns { items: [{ _id: productId, quantity }] }
-      const lowStockItems: Array<{ _id: string; quantity: number }> =
+      // getLowStock returns { items: [{ _id: productId, quantity, auto_reorder_disabled }] }
+      const lowStockItems: Array<{ _id: string; quantity: number; auto_reorder_disabled?: boolean }> =
         Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
 
       // getStock returns { items: [...stock unit docs] }
@@ -103,6 +115,18 @@ export function ReorderDashboard() {
           : Number(item.quantity ?? 0);
         const reservedStock = stockEntry?.reserved ?? 0;
 
+        // REAL reorder_quantity only (ledger rows now pass it through from
+        // the product master; null when never configured). NO fabricated
+        // fallback -- a fake 20 here used to become a real PO line.
+        const rawReorderQty = raw.reorder_quantity ?? raw.reorder_qty;
+        const reorderQuantity =
+          rawReorderQty == null || Number.isNaN(Number(rawReorderQty))
+            ? null
+            : Number(rawReorderQty);
+        const autoReorderDisabled =
+          (reorderQuantity != null && reorderQuantity <= 0) ||
+          item.auto_reorder_disabled === true;
+
         return {
           id: pid,
           sku: raw.sku ?? raw.barcode ?? pid.slice(-8).toUpperCase(),
@@ -112,7 +136,8 @@ export function ReorderDashboard() {
           currentStock,
           reservedStock,
           reorderPoint: Number(raw.reorder_point ?? raw.reorder_level ?? 10),
-          reorderQuantity: Number(raw.reorder_quantity ?? raw.reorder_qty ?? 20),
+          reorderQuantity,
+          autoReorderDisabled,
           maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
           leadTimeDays: Number(raw.lead_time_days ?? raw.lead_time ?? 7),
           averageSalesPerDay: Number(raw.average_sales_per_day ?? raw.avg_daily_sales ?? 0),
@@ -147,6 +172,7 @@ export function ReorderDashboard() {
               ...p,
               reorderPoint: data.reorderPoint,
               reorderQuantity: data.reorderQuantity,
+              autoReorderDisabled: data.reorderQuantity <= 0,
               maxStock: data.maxStock,
               leadTimeDays: data.leadTimeDays,
             }
@@ -167,9 +193,31 @@ export function ReorderDashboard() {
 
     const selectedItems = products.filter(p => selectedProducts.has(p.id));
 
+    // NEVER order a product the owner explicitly opted out of (-1 sentinel).
+    const disabledItems = selectedItems.filter(isAutoReorderOff);
+    if (disabledItems.length > 0) {
+      toast.error(
+        `${disabledItems.length} product(s) skipped - auto-reorder is turned off for them. ` +
+        `Enable it via the settings icon to order.`
+      );
+    }
+
+    // A row with no configured order quantity has nothing honest to order
+    // (we no longer fabricate a 20). Ask the user to set one first.
+    const noQtyItems = selectedItems.filter(p => !isAutoReorderOff(p) && !hasOrderableQty(p));
+    if (noQtyItems.length > 0) {
+      toast.error(
+        `${noQtyItems.length} product(s) have no order quantity configured. ` +
+        `Set one via the settings icon first.`
+      );
+    }
+
+    const orderableItems = selectedItems.filter(hasOrderableQty);
+    if (orderableItems.length === 0) return;
+
     // Separate products with and without a known supplier
-    const withSupplier = selectedItems.filter(p => p.supplierId);
-    const withoutSupplier = selectedItems.filter(p => !p.supplierId);
+    const withSupplier = orderableItems.filter(p => p.supplierId);
+    const withoutSupplier = orderableItems.filter(p => !p.supplierId);
 
     if (withoutSupplier.length > 0) {
       toast.error(
@@ -204,7 +252,8 @@ export function ReorderDashboard() {
             product_id: p.id,
             product_name: p.name,
             sku: p.sku,
-            quantity: p.reorderQuantity,
+            // Safe: only hasOrderableQty rows reach here (real qty >= 1).
+            quantity: p.reorderQuantity as number,
             unit_price: p.unitCost ?? 0,
           })),
           notes: `Auto-generated from Reorder Dashboard`,
@@ -213,7 +262,7 @@ export function ReorderDashboard() {
       }
 
       const totalCost = withSupplier.reduce(
-        (sum, p) => sum + ((p.unitCost ?? 0) * p.reorderQuantity),
+        (sum, p) => sum + ((p.unitCost ?? 0) * (p.reorderQuantity ?? 0)),
         0
       );
 
@@ -274,7 +323,11 @@ export function ReorderDashboard() {
   const filteredProducts = getFilteredProducts();
   const criticalCount = products.filter(p => ['critical', 'out-of-stock'].includes(getStockStatus(p))).length;
   const lowCount = products.filter(p => getStockStatus(p) === 'low').length;
-  const totalValue = filteredProducts.reduce((sum, p) => sum + ((p.unitCost || 0) * p.reorderQuantity), 0);
+  // Only rows auto-reorder can actually order contribute to the estimate.
+  const totalValue = filteredProducts.reduce(
+    (sum, p) => sum + (hasOrderableQty(p) ? (p.unitCost || 0) * (p.reorderQuantity ?? 0) : 0),
+    0
+  );
 
   return (
     <div className="space-y-4">
@@ -487,12 +540,24 @@ export function ReorderDashboard() {
                         {product.reorderPoint}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <span className="font-medium text-purple-600">{product.reorderQuantity}</span>
-                        {product.unitCost && (
-                          <p className="text-xs text-gray-500">
-                            {/* F35: cost masked to "-" for non-cost-visible roles */}
-                            <CostCell value={product.unitCost * product.reorderQuantity} />
-                          </p>
+                        {isAutoReorderOff(product) ? (
+                          // Owner explicitly disabled auto-reorder (-1 sentinel).
+                          <span className="px-2 py-1 bg-gray-100 text-gray-500 text-xs font-medium rounded-full whitespace-nowrap">
+                            Auto-reorder off
+                          </span>
+                        ) : product.reorderQuantity == null ? (
+                          // Never configured - show an honest dash, not a fake 20.
+                          <span className="text-gray-400">&mdash;</span>
+                        ) : (
+                          <>
+                            <span className="font-medium text-purple-600">{product.reorderQuantity}</span>
+                            {product.unitCost && (
+                              <p className="text-xs text-gray-500">
+                                {/* F35: cost masked to "-" for non-cost-visible roles */}
+                                <CostCell value={product.unitCost * product.reorderQuantity} />
+                              </p>
+                            )}
+                          </>
                         )}
                       </td>
                       <td className="px-4 py-3">

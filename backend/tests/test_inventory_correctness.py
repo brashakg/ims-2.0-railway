@@ -263,6 +263,69 @@ class TestNonMovingStockFixes:
 
 
 # ============================================================================
+# Reorder -1 sentinel: inventory feeds must carry the policy fields
+# ============================================================================
+# Owner decision 2026-07-04: reorder_quantity <= 0 (the -1 default) means
+# auto-reorder is DISABLED (api/services/reorder_policy.py). The inventory-
+# side UI reads two feeds that previously dropped this signal:
+#   * /inventory/stock ledger rows must pass reorder_quantity/reorder_point
+#     through RAW (None when absent) -- no fabricated defaults.
+#   * /inventory/low-stock items must carry auto_reorder_disabled so
+#     consumers can skip opted-out products without hiding the alert.
+
+
+class TestReorderMinus1Passthrough:
+    def test_stock_ledger_passes_reorder_fields_through_raw(self, inv_client, mongo_db):
+        """Ledger rows carry reorder_quantity / reorder_point verbatim:
+        -1 stays -1 (disabled sentinel), a missing field stays None (legacy),
+        and a real value stays itself. Nothing is defaulted to 10/20."""
+        pid_off = _add_product(mongo_db, reorder_quantity=-1, reorder_point=5)
+        pid_legacy = _add_product(mongo_db)  # no reorder fields at all
+        pid_on = _add_product(mongo_db, reorder_quantity=12, reorder_point=4)
+
+        resp = inv_client.get("/inventory/stock")
+        assert resp.status_code == 200, resp.text
+        rows = {r["product_id"]: r for r in resp.json()["items"]}
+
+        assert pid_off in rows and pid_legacy in rows and pid_on in rows
+        assert rows[pid_off]["reorder_quantity"] == -1, (
+            "the -1 'auto-reorder off' sentinel must survive the ledger row"
+        )
+        assert rows[pid_off]["reorder_point"] == 5
+        assert rows[pid_legacy]["reorder_quantity"] is None, (
+            "a legacy product without the field must yield None, not a "
+            "fabricated default"
+        )
+        assert rows[pid_legacy]["reorder_point"] is None
+        assert rows[pid_on]["reorder_quantity"] == 12
+        assert rows[pid_on]["reorder_point"] == 4
+
+    def test_low_stock_items_carry_auto_reorder_disabled_flag(self, inv_client, mongo_db):
+        """/inventory/low-stock items get auto_reorder_disabled: True for a
+        product with reorder_quantity=-1, False for reorder_quantity=5, and
+        False (legacy-enabled) when the field is missing. The alert list
+        still contains ALL low-stock products -- the flag only informs."""
+        pid_off = _add_product(mongo_db, reorder_quantity=-1)
+        pid_on = _add_product(mongo_db, reorder_quantity=5)
+        pid_legacy = _add_product(mongo_db)
+        for pid in (pid_off, pid_on, pid_legacy):
+            _add_unit(mongo_db, pid)  # 1 AVAILABLE unit -> low stock
+
+        resp = inv_client.get("/inventory/low-stock")
+        assert resp.status_code == 200, resp.text
+        items = {i["_id"]: i for i in resp.json()["items"]}
+
+        assert pid_off in items, "disabled product must STILL appear in alerts"
+        assert items[pid_off]["auto_reorder_disabled"] is True
+        assert pid_on in items
+        assert items[pid_on]["auto_reorder_disabled"] is False
+        assert pid_legacy in items
+        assert items[pid_legacy]["auto_reorder_disabled"] is False, (
+            "missing reorder_quantity is legacy-ENABLED until backfilled"
+        )
+
+
+# ============================================================================
 # C-I: Transfer input validation (pure, no DB)
 # ============================================================================
 
