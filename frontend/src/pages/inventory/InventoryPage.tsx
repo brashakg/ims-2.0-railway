@@ -119,7 +119,8 @@ interface StockItem {
 }
 
 // Stock movement row = the backend ledger entry: RECEIVED (GRN) / SOLD
-// (order) / TRANSFER_IN / TRANSFER_OUT, with a SIGNED qty (+in / -out).
+// (order) / TRANSFER_IN / TRANSFER_OUT / OPENING_STOCK (import batch), with a
+// SIGNED qty (+in / -out).
 type StockMovement = StockMovementEntry;
 
 // Page size for the Movements tab's load-more paging (?skip=).
@@ -1277,6 +1278,7 @@ export function InventoryPage() {
           SOLD: { label: 'Sold', color: 'text-red-700', bg: 'bg-red-100', prefix: '-' },
           TRANSFER_IN: { label: 'Transfer In', color: 'text-blue-700', bg: 'bg-blue-100', prefix: '+' },
           TRANSFER_OUT: { label: 'Transfer Out', color: 'text-amber-700', bg: 'bg-amber-100', prefix: '-' },
+          OPENING_STOCK: { label: 'Opening stock', color: 'text-purple-700', bg: 'bg-purple-100', prefix: '+' },
         };
         return (
           <div className="space-y-4">
@@ -1313,7 +1315,7 @@ export function InventoryPage() {
                 />
               </div>
               <div className="flex gap-1">
-                {(['ALL', 'RECEIVED', 'SOLD', 'TRANSFER_IN', 'TRANSFER_OUT'] as const).map(t => (
+                {(['ALL', 'RECEIVED', 'SOLD', 'TRANSFER_IN', 'TRANSFER_OUT', 'OPENING_STOCK'] as const).map(t => (
                   <button
                     key={t}
                     onClick={() => setMovementFilter(t)}

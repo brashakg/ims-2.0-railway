@@ -17,14 +17,15 @@ import type {
   OpeningStockInputRow, OpeningStockResultRow, OpeningStockResponse,
 } from '../../services/api/inventory';
 
-const SAMPLE = `sku,quantity,location_code
-RB3025-001,12,Counter-A
-ZEISS-15-HMC,8,Shelf-2
-CL-ACUVUE-OASYS,20,`;
+const SAMPLE = `sku,quantity,unit_cost,location_code
+RB3025-001,12,3450,Counter-A
+ZEISS-15-HMC,8,1120,Shelf-2
+CL-ACUVUE-OASYS,20,780,`;
 
 /** Minimal CSV parser (no quoted-comma support) -> import rows. First line is
- *  the header; recognized columns: product_id, sku, quantity, location_code,
- *  batch_code, expiry_date. A row needs product_id OR sku, and quantity > 0. */
+ *  the header; recognized columns: product_id, sku, quantity, unit_cost,
+ *  location_code, batch_code, expiry_date. A row needs product_id OR sku, and
+ *  quantity > 0; unit_cost (per unit, optional) drives the valuation. */
 function parseCsv(text: string): { rows: OpeningStockInputRow[]; skipped: number } {
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length < 2) return { rows: [], skipped: 0 };
@@ -44,10 +45,12 @@ function parseCsv(text: string): { rows: OpeningStockInputRow[]; skipped: number
       skipped += 1;
       continue;
     }
+    const unitCost = Number(get('unit_cost') || 0);
     rows.push({
       ...(product_id ? { product_id } : {}),
       ...(sku ? { sku } : {}),
       quantity: Math.floor(qty),
+      ...(Number.isFinite(unitCost) && unitCost > 0 ? { unit_cost: unitCost } : {}),
       ...(get('location_code') ? { location_code: get('location_code') } : {}),
       ...(get('batch_code') ? { batch_code: get('batch_code') } : {}),
       ...(get('expiry_date') ? { expiry_date: get('expiry_date') } : {}),
@@ -160,8 +163,9 @@ export function OpeningStockImport() {
         />
         <p className="text-xs text-gray-500">
           First line is the header. Columns: <code>product_id</code> or <code>sku</code> (one
-          required), <code>quantity</code>, and optional <code>location_code</code>,{' '}
-          <code>batch_code</code>, <code>expiry_date</code> (YYYY-MM-DD).
+          required), <code>quantity</code>, and optional <code>unit_cost</code> (per-unit cost,
+          for valuation), <code>location_code</code>, <code>batch_code</code>,{' '}
+          <code>expiry_date</code> (YYYY-MM-DD).
         </p>
 
         <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -200,7 +204,7 @@ export function OpeningStockImport() {
             </h3>
           </div>
 
-          <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
+          <div className={`grid grid-cols-2 gap-3 ${(result.summary.total_value ?? 0) > 0 ? 'tablet:grid-cols-5' : 'tablet:grid-cols-4'}`}>
             <div className="bg-white rounded p-3 border border-gray-100">
               <p className="text-xs text-gray-500">Rows</p>
               <p className="text-lg font-bold text-gray-900 tabular-nums">{result.summary.total_rows}</p>
@@ -223,6 +227,14 @@ export function OpeningStockImport() {
                 {result.summary.rows_with_errors}
               </p>
             </div>
+            {(result.summary.total_value ?? 0) > 0 && (
+              <div className="bg-white rounded p-3 border border-gray-100">
+                <p className="text-xs text-gray-500">{isCommitted ? 'Value added' : 'Value to add'}</p>
+                <p className="text-lg font-bold text-gray-900 tabular-nums">
+                  ₹{(result.summary.total_value ?? 0).toLocaleString('en-IN')}
+                </p>
+              </div>
+            )}
           </div>
 
           {!isCommitted && (result.summary.units_to_add ?? 0) > 0 && (
@@ -240,6 +252,7 @@ export function OpeningStockImport() {
                   <th className="text-left py-2 px-2 font-medium">Product</th>
                   <th className="text-right py-2 px-2 font-medium">Existing</th>
                   <th className="text-right py-2 px-2 font-medium">Qty</th>
+                  <th className="text-right py-2 px-2 font-medium">Cost</th>
                   <th className="text-left py-2 px-2 font-medium">Result</th>
                 </tr>
               </thead>
@@ -253,6 +266,9 @@ export function OpeningStockImport() {
                     </td>
                     <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{r.existing ?? '—'}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums">{r.added ?? r.quantity ?? '—'}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">
+                      {r.unit_cost != null ? `₹${r.unit_cost.toLocaleString('en-IN')}` : '—'}
+                    </td>
                     <td className="py-1.5 px-2">
                       <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded mr-1 ${STATUS_STYLE[r.status]}`}>
                         {r.status.replace(/_/g, ' ')}

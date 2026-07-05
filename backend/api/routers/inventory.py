@@ -845,12 +845,14 @@ async def barcode_lifecycle_trace(
 # ============================================================================
 # STOCK MOVEMENTS LEDGER (Movements tab)
 # ============================================================================
-# One reverse-chronological ledger merged from the three real event sources
-# that move stock today:
-#   RECEIVED     <- `grns` (status ACCEPTED)          qty positive
-#   SOLD         <- `orders` (status in _SOLD_STATUSES) qty negative
-#   TRANSFER_OUT <- `stock_transfers` shipped leg     qty negative (from store)
-#   TRANSFER_IN  <- `stock_transfers` received leg    qty positive (to store)
+# One reverse-chronological ledger merged from the real event sources that
+# move stock today:
+#   RECEIVED      <- `grns` (status ACCEPTED)          qty positive
+#   SOLD          <- `orders` (status in _SOLD_STATUSES) qty negative
+#   TRANSFER_OUT  <- `stock_transfers` shipped leg     qty negative (from store)
+#   TRANSFER_IN   <- `stock_transfers` received leg    qty positive (to store)
+#   OPENING_STOCK <- `opening_stock_batches` commit summaries, qty positive
+#                    (one event per commit batch x product line)
 #
 # DELIBERATELY EXCLUDED for now: stock_units status flips (QUARANTINED /
 # lift-quarantine / stock-count reconcile). Those are unit-level state changes
@@ -862,7 +864,7 @@ async def barcode_lifecycle_trace(
 # `days` window) and FAIL-SOFT: a source that errors shortens the ledger and is
 # reported in `sources`, it never 5xxes the endpoint.
 
-_MOVEMENT_TYPES = ("RECEIVED", "SOLD", "TRANSFER_IN", "TRANSFER_OUT")
+_MOVEMENT_TYPES = ("RECEIVED", "SOLD", "TRANSFER_IN", "TRANSFER_OUT", "OPENING_STOCK")
 _MOVEMENTS_PER_SOURCE_CAP = 300
 
 
@@ -1120,6 +1122,65 @@ def _collect_transfer_events(
     return events
 
 
+def _collect_opening_stock_events(
+    db, store_id: Optional[str], cutoff_iso: str, product_id: Optional[str]
+) -> List[Dict]:
+    """OPENING_STOCK events (qty positive) from `opening_stock_batches` -- the
+    compact one-doc-per-commit summary the importer writes. One event per
+    batch x product line; committed_at is an ISO string (see
+    _write_opening_stock_batch)."""
+    flt: Dict = {"committed_at": {"$gte": cutoff_iso}}
+    if store_id:
+        flt["store_id"] = store_id
+    if product_id:
+        flt["lines.product_id"] = product_id
+    events: List[Dict] = []
+    cur = (
+        db.get_collection("opening_stock_batches")
+        .find(
+            flt,
+            {
+                "_id": 0,
+                "batch_id": 1,
+                "store_id": 1,
+                "committed_at": 1,
+                "lines": 1,
+            },
+        )
+        .sort("committed_at", -1)
+        .limit(_MOVEMENTS_PER_SOURCE_CAP)
+    )
+    for batch in cur:
+        at = _movement_iso(batch.get("committed_at"))
+        ref = batch.get("batch_id") or ""
+        for idx, line in enumerate(batch.get("lines") or []):
+            pid = line.get("product_id")
+            if not pid or (product_id and pid != product_id):
+                continue
+            try:
+                qty = int(line.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty <= 0:
+                continue
+            events.append(
+                {
+                    "id": f"OPENING_STOCK:{ref}:{pid}:{idx}",
+                    "at": at,
+                    "type": "OPENING_STOCK",
+                    "product_id": pid,
+                    "product_name": line.get("product_name") or "",
+                    "sku": line.get("sku") or "",
+                    "qty": qty,
+                    "ref": ref,
+                    "ref_id": ref,
+                    "store_id": batch.get("store_id") or "",
+                    "detail": f"Opening stock import {ref}",
+                }
+            )
+    return events
+
+
 def _enrich_movement_products(db, events: List[Dict]) -> None:
     """Fill product_name / sku on events whose source line didn't carry them
     (e.g. GRN items) with ONE batched products lookup. Fail-soft: any error
@@ -1174,8 +1235,8 @@ async def get_stock_movements(
         None,
         alias="type",
         description=(
-            "RECEIVED | SOLD | TRANSFER_IN | TRANSFER_OUT | TRANSFER "
-            "(TRANSFER = both legs). Omit for all types."
+            "RECEIVED | SOLD | TRANSFER_IN | TRANSFER_OUT | OPENING_STOCK | "
+            "TRANSFER (TRANSFER = both legs). Omit for all types."
         ),
     ),
     days: int = Query(90, ge=1, le=365),
@@ -1212,7 +1273,12 @@ async def get_stock_movements(
         "has_more": False,
         "days": days,
         "store_id": active_store,
-        "sources": {"grns": "skipped", "orders": "skipped", "transfers": "skipped"},
+        "sources": {
+            "grns": "skipped",
+            "orders": "skipped",
+            "transfers": "skipped",
+            "opening_stock": "skipped",
+        },
     }
     db = _get_db()
     if db is None:
@@ -1227,6 +1293,7 @@ async def get_stock_movements(
         ("grns", lambda: _collect_received_events(db, active_store, cutoff_iso, product_id)),
         ("orders", lambda: _collect_sold_events(db, active_store, cutoff_dt, product_id)),
         ("transfers", lambda: _collect_transfer_events(db, active_store, cutoff_iso, product_id)),
+        ("opening_stock", lambda: _collect_opening_stock_events(db, active_store, cutoff_iso, product_id)),
     )
     for name, collect in collectors:
         try:
@@ -1451,12 +1518,15 @@ async def add_stock(
 # OPENING-STOCK IMPORTER (go-live)
 # ============================================================================
 # Bulk-seed shelf quantities at go-live: the owner uploads a CSV (parsed to JSON
-# rows client-side) of {product_id|sku, quantity, [location_code, batch_code,
-# expiry_date]}. PREVIEW validates every row and (critically) flags products
-# that ALREADY hold stock so a re-run can't silently double inventory. COMMIT
-# mints the serialized stock_units rows via the same path as /stock/add, with a
-# skip_if_existing guard. Control-over-convenience: preview is the default; the
-# owner sees exactly what will happen before any write.
+# rows client-side) of {product_id|sku, quantity, [unit_cost, location_code,
+# batch_code, expiry_date]}. PREVIEW validates every row, flags products that
+# ALREADY hold stock so a re-run can't silently double inventory, and shows the
+# total valuation. COMMIT mints the serialized stock_units rows via the same
+# path as /stock/add (stamping GRN-style cost fields when unit_cost is given),
+# with a skip_if_existing guard; it then writes ONE `opening_stock_batches`
+# summary doc (feeds the movements ledger) and ONE compliance audit row -- both
+# fail-soft. Control-over-convenience: preview is the default; the owner sees
+# exactly what will happen before any write.
 
 
 class OpeningStockRow(BaseModel):
@@ -1468,6 +1538,12 @@ class OpeningStockRow(BaseModel):
     location_code: Optional[str] = None
     batch_code: Optional[str] = None
     expiry_date: Optional[date] = None
+    # Optional per-unit landed cost. When provided (> 0) every minted unit is
+    # stamped with unit_cost / cost_price / cost_source="OPENING_STOCK" -- the
+    # same cost fields the GRN accept path stamps (vendors.py) -- so opening
+    # stock enters the books at a real valuation. Absent/0 -> units mint
+    # exactly as before (no cost fields).
+    unit_cost: Optional[float] = Field(None, ge=0)
 
 
 class OpeningStockImport(BaseModel):
@@ -1495,6 +1571,71 @@ def _resolve_opening_stock_row(row, product_repo, stock_repo, active_store):
     return product, existing, None
 
 
+def _opening_stock_cost_fields(row) -> Dict:
+    """Cost fields to stamp on every unit minted for this row. Mirrors the GRN
+    accept path (vendors.py): unit_cost + cost_price (same value) +
+    cost_source. Empty dict when no usable cost -> mint exactly as before."""
+    if row.unit_cost and row.unit_cost > 0:
+        unit_cost = round(float(row.unit_cost), 2)
+        return {
+            "unit_cost": unit_cost,
+            "cost_price": unit_cost,
+            "cost_source": "OPENING_STOCK",
+        }
+    return {}
+
+
+def _write_opening_stock_batch(
+    db, store_id, user_id, skip_if_existing, lines, total_units, total_value
+) -> Optional[str]:
+    """Persist ONE compact `opening_stock_batches` summary doc per commit (one
+    line per product actually minted). The movements ledger reads THIS doc --
+    one small query instead of a giant per-unit stock_units scan. Fail-soft:
+    any error is logged and swallowed (the minted stock always wins); returns
+    the batch_id on success, None when nothing was written."""
+    if db is None or not lines:
+        return None
+    batch_id = f"OSB-{uuid.uuid4().hex[:10].upper()}"
+    try:
+        db.get_collection("opening_stock_batches").insert_one(
+            {
+                "batch_id": batch_id,
+                "store_id": store_id,
+                "committed_by": user_id,
+                "committed_at": datetime.utcnow().isoformat(),
+                "skip_if_existing": skip_if_existing,
+                "lines": lines,
+                "total_units": total_units,
+                "total_value": round(total_value, 2),
+            }
+        )
+        return batch_id
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] opening-stock batch summary failed: %s", exc)
+        return None
+
+
+def _opening_stock_audit(batch_id, store_id, user_id, details: Dict) -> None:
+    """ONE compliance audit row per opening-stock commit (who/when/store/
+    counts/value). Fail-soft: an audit hiccup never undoes the import that
+    triggered it (mirrors _quarantine_audit / online_store_push._write_audit)."""
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "OPENING_STOCK_IMPORT",
+                    "entity_type": "OPENING_STOCK_BATCH",
+                    "entity_id": batch_id or "",
+                    "store_id": store_id,
+                    "user_id": user_id,
+                    "details": details,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] opening-stock audit failed: %s", exc)
+
+
 @router.post("/opening-stock/preview")
 async def opening_stock_preview(
     payload: OpeningStockImport,
@@ -1513,6 +1654,7 @@ async def opening_stock_preview(
     to_add = 0
     will_skip = 0
     errors = 0
+    total_value = 0.0
     for i, row in enumerate(payload.rows):
         product, existing, err = _resolve_opening_stock_row(
             row, product_repo, stock_repo, active_store
@@ -1528,6 +1670,7 @@ async def opening_stock_preview(
                 }
             )
             continue
+        unit_cost = _opening_stock_cost_fields(row).get("unit_cost")
         already = existing > 0
         if already and payload.skip_if_existing:
             will_skip += 1
@@ -1535,6 +1678,8 @@ async def opening_stock_preview(
             msg = f"Already has {existing} in stock — will be skipped."
         else:
             to_add += row.quantity
+            if unit_cost:
+                total_value += unit_cost * row.quantity
             status = "WILL_ADD" if not already else "WILL_ADD_ON_TOP"
             msg = (
                 f"Will add {row.quantity}."
@@ -1550,6 +1695,7 @@ async def opening_stock_preview(
                 "name": product.get("model") or product.get("name") or "",
                 "quantity": row.quantity,
                 "existing": existing,
+                "unit_cost": unit_cost,
                 "message": msg,
             }
         )
@@ -1561,6 +1707,9 @@ async def opening_stock_preview(
             "units_to_add": to_add,
             "rows_to_skip": will_skip,
             "rows_with_errors": errors,
+            # Valuation the operator is about to put on the shelf (only rows
+            # that WILL add units and carry a unit_cost contribute).
+            "total_value": round(total_value, 2),
             "skip_if_existing": payload.skip_if_existing,
         },
     }
@@ -1588,6 +1737,8 @@ async def opening_stock_commit(
     units_added = 0
     rows_skipped = 0
     rows_errored = 0
+    total_value = 0.0
+    batch_lines: List[Dict] = []
     for i, row in enumerate(payload.rows):
         product, existing, err = _resolve_opening_stock_row(
             row, product_repo, stock_repo, active_store
@@ -1618,6 +1769,7 @@ async def opening_stock_commit(
             continue
 
         pid = product.get("product_id")
+        cost_fields = _opening_stock_cost_fields(row)
         created_count = 0
         for _ in range(row.quantity):
             barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
@@ -1636,10 +1788,23 @@ async def opening_stock_commit(
                 "barcode_printed": False,
                 "created_by": current_user.get("user_id"),
                 "source": "OPENING_STOCK",
+                **cost_fields,
             }
             if stock_repo.create(stock_data):
                 created_count += 1
         units_added += created_count
+        if cost_fields:
+            total_value += cost_fields["unit_cost"] * created_count
+        if created_count > 0:
+            batch_lines.append(
+                {
+                    "product_id": pid,
+                    "sku": product.get("sku"),
+                    "product_name": product.get("model") or product.get("name") or "",
+                    "qty": created_count,
+                    "unit_cost": cost_fields.get("unit_cost"),
+                }
+            )
         results.append(
             {
                 "index": i,
@@ -1647,9 +1812,37 @@ async def opening_stock_commit(
                 "product_id": pid,
                 "sku": product.get("sku"),
                 "added": created_count,
+                "unit_cost": cost_fields.get("unit_cost"),
                 "message": f"Added {created_count} unit(s).",
             }
         )
+
+    # ONE compact summary doc per commit -- the movements ledger's
+    # OPENING_STOCK source reads this (never a per-unit stock_units scan).
+    batch_id = _write_opening_stock_batch(
+        _db,
+        active_store,
+        current_user.get("user_id"),
+        payload.skip_if_existing,
+        batch_lines,
+        units_added,
+        total_value,
+    )
+    # ONE compliance audit row per commit (who/when/store/counts/value).
+    _opening_stock_audit(
+        batch_id,
+        active_store,
+        current_user.get("user_id"),
+        {
+            "total_rows": len(payload.rows),
+            "products_count": len(batch_lines),
+            "units_minted": units_added,
+            "rows_skipped": rows_skipped,
+            "rows_with_errors": rows_errored,
+            "total_value": round(total_value, 2),
+            "skip_if_existing": payload.skip_if_existing,
+        },
+    )
 
     return {
         "rows": results,
@@ -1658,6 +1851,8 @@ async def opening_stock_commit(
             "units_added": units_added,
             "rows_skipped": rows_skipped,
             "rows_with_errors": rows_errored,
+            "total_value": round(total_value, 2),
+            "batch_id": batch_id,
         },
     }
 
