@@ -51,6 +51,7 @@ EXPECTED_RATES = [
     ("COLORED_CONTACT_LENS", 5.0),
     ("COLOUR_CONTACTS", 5.0),
     ("CL", 5.0),
+    ("CCL", 5.0),
     ("SPECTACLE", 5.0),
     ("COMPLETE_SPECTACLE", 5.0),
     # --- 18% : sunglasses / watches / smartwatches / clocks / accessories ---

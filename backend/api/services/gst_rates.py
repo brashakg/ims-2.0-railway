@@ -108,6 +108,7 @@ GST_CATEGORY_TABLE: dict = {
     "LS": ("900150", 5.0),  # Optical Lens
     "RG": ("900490", 5.0),  # Reading Glasses (corrective)
     "CL": ("900130", 5.0),  # Contact Lens
+    "CCL": ("900130", 5.0),  # Colour Contact Lens (own prefix since 2026-07-05)
     "SG": ("900410", 18.0),  # Sunglass
     "WT": ("910111", 18.0),  # Wrist Watch
     "CK": ("910500", 18.0),  # Clock
@@ -190,9 +191,13 @@ _CATEGORY_HINT = {
     "LS": "LENS",
     "CONTACT_LENS": "CONTACT_LENS",
     "CONTACT_LENSES": "CONTACT_LENS",
-    "COLORED_CONTACT_LENS": "CONTACT_LENS",
-    "COLORED_CONTACT_LENSES": "CONTACT_LENS",
-    "COLOUR_CONTACTS": "CONTACT_LENS",
+    # Owner 2026-07-05: colour contact lenses are their OWN reporting bucket
+    # (were rolled up into CONTACT_LENS before the category split).
+    "COLORED_CONTACT_LENS": "COLORED_CONTACT_LENS",
+    "COLORED_CONTACT_LENSES": "COLORED_CONTACT_LENS",
+    "COLOUR_CONTACT_LENS": "COLORED_CONTACT_LENS",
+    "COLOUR_CONTACTS": "COLORED_CONTACT_LENS",
+    "CCL": "COLORED_CONTACT_LENS",
     "CL": "CONTACT_LENS",
     "READING_GLASSES": "SPECTACLE",
     "SPECTACLE": "SPECTACLE",

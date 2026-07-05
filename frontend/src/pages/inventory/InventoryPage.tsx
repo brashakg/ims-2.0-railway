@@ -79,6 +79,7 @@ const CATEGORIES: { code: ProductCategory; label: string; icon: LucideIcon }[] =
   { code: 'RG', label: 'Reading Glasses', icon: BookOpen },
   { code: 'LS', label: 'Optical Lenses', icon: Lens },
   { code: 'CL', label: 'Contact Lenses', icon: Eye },
+  { code: 'CCL', label: 'Colour Contacts', icon: Eye },
   { code: 'WT', label: 'Watches', icon: Watch },
   { code: 'SMTWT', label: 'Smartwatches', icon: Smartphone },
   { code: 'SMTSG', label: 'Smart Sunglasses', icon: Sparkles },

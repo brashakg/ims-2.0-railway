@@ -301,6 +301,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "OPTICAL_LENS": 1.5,
         "SUNGLASS": 0.5,
         "CONTACT_LENS": 1.0,
+        # Split category (owner 2026-07-05): same earn rate as normal CLs.
+        "COLORED_CONTACT_LENS": 1.0,
         "WATCH": 0.0,
         "ACCESSORIES": 0.0,
     },

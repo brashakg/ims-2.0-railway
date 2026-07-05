@@ -205,8 +205,9 @@ def _on_hand_by_product(
 # ----------------------------------------------------------------------------
 
 # Categories that count as contact lenses across the codebase. "CL" is the
-# legacy short code; the full enums are the current schema values.
-CL_CATEGORY_CODES = ["CL", "CONTACT_LENS", "COLORED_CONTACT_LENS"]
+# legacy short code; "CCL" is the colour-contact short code (2026-07-05 split);
+# the full enums are the current schema values.
+CL_CATEGORY_CODES = ["CL", "CCL", "CONTACT_LENS", "COLORED_CONTACT_LENS"]
 
 
 def _parse_expiry(value) -> Optional[datetime]:
