@@ -372,7 +372,8 @@ export default function OnlineStorePage() {
       </div>
 
       <p className="mt-6 text-xs text-gray-400">
-        Online Store module · Phase 1 foundation. See the BVI merge blueprint for the full roadmap.
+        Online Store module · all screens live (phases 1–5 shipped). Shopify publishing stays in
+        dry-run until the go-live switch is armed — see the banner above for the current posture.
       </p>
     </div>
   );

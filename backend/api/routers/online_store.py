@@ -4,12 +4,13 @@ IMS 2.0 - Online Store Module Router  (BVI Phase 1 foundation)
 The "Online Store" module folds BVI's Shopify PIM into IMS as ONE app. Full
 target architecture + phased roadmap: docs/reference/BVI_MERGE_PLAN.md.
 
-THIS IS PHASE-1 FOUNDATION ONLY. The actual PIM features (collections editor,
-mega-menu, image design-queue, Shopify push) land in later phases. This router
-ships:
-  - the module SKELETON mounted at /api/v1/online-store, and
-  - a STUB `GET /online-store/summary` that reports module status + the planned
-    feature list + live counts (catalog_variants, products-with-ecom).
+STATUS 2026-07-05: phases 1-5 of the blueprint are SHIPPED (variants,
+collections, menus, order ingestion, image queue, gated Shopify push). This
+router ships:
+  - the module skeleton mounted at /api/v1/online-store, and
+  - `GET /online-store/summary` reporting the feature list, live counts AND the
+    real push gate (shopify_push.push_mode_status) -- no more hardcoded
+    "foundation/phase 1" values.
 
 ROLE GATE (router-level): SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER.
 SUPERADMIN passes implicitly via require_roles. DESIGN_MANAGER is the new
@@ -36,46 +37,49 @@ router = APIRouter()
 # rbac_policy.POLICY rows for every /api/v1/online-store route.
 _ECOM_ROLES = ("ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER")
 
-# The differentiator surfaces this module will deliver, in roadmap order
-# (BVI_MERGE_PLAN.md section B). Surfaced by the summary so the owner sees the
-# plan even before the screens exist. STATUS is "planned" for all of them in
-# Phase 1 -- the skeleton is live, the features are not.
+# The module's feature list in roadmap order (BVI_MERGE_PLAN.md section B).
+# 2026-07-05 status refresh: phases 1-5 all SHIPPED across prior sessions --
+# only the Phase-6 baton cutover (arm the gates, flip BVI's writer off) is
+# pending, and that is an owner/config action, not code.
 _PLANNED_FEATURES = [
     {
         "key": "catalog_variants",
         "name": "Variant identity + Shopify mapping",
         "phase": 1,
-        "status": "foundation",
+        "status": "live",
     },
     {
         "key": "collections",
         "name": "Collections (custom + smart, auto-lineage)",
         "phase": 2,
-        "status": "planned",
+        "status": "live",
     },
     {
         "key": "mega_menu",
         "name": "Menus / Mega-menu editor",
         "phase": 3,
-        "status": "planned",
+        "status": "live",
     },
     {
         "key": "online_orders",
         "name": "Online-order ingestion into IMS books",
         "phase": 3,
-        "status": "planned",
+        "status": "live",
     },
     {
         "key": "image_design_queue",
         "name": "Image design workflow (RAW -> EDITED)",
         "phase": 4,
-        "status": "planned",
+        "status": "live",
     },
     {
+        # Engine + screens are BUILT; every push runs as a dry-run PLAN until
+        # the Phase-6 triple gate is armed (IMS_SHOPIFY_WRITES=1 +
+        # DISPATCH_MODE=live + Shopify creds in the integrations collection).
         "key": "shopify_push",
         "name": "Shopify GraphQL push (single-writer, gated)",
         "phase": 5,
-        "status": "planned",
+        "status": "built-gated",
     },
 ]
 
@@ -141,12 +145,24 @@ async def online_store_summary(
         # Online orders (Phase 3b -- orders ingested from Shopify webhooks).
         "orders": _safe_count(db, "orders", {"channel": "ONLINE"}),
     }
+    # Truthful posture (owner 2026-07-05): phases 1-5 are BUILT; the module is
+    # waiting on the Phase-6 baton cutover (arm the triple gate + flip BVI's
+    # writer off). Report the REAL push gate instead of hardcoded foundation
+    # values -- the landing page kept saying "Phase 1 / push OFF" even though
+    # the engine + screens shipped long ago.
+    try:
+        from ..services import shopify_push
+
+        push_mode = shopify_push.push_mode_status(db)
+    except Exception:  # noqa: BLE001 - status endpoint must never 500
+        push_mode = None
     return {
         "module": "online_store",
-        "status": "foundation",
-        "phase": 1,
+        "status": "cutover-ready",
+        "phase": 5,
         "db_connected": db is not None,
-        "shopify_writes_enabled": False,  # IMS_SHOPIFY_WRITES default OFF (gated)
+        "shopify_writes_enabled": bool(push_mode and push_mode.get("is_live")),
+        "push_mode": push_mode,
         "planned_features": _PLANNED_FEATURES,
         "counts": counts,
         "blueprint": "docs/reference/BVI_MERGE_PLAN.md",
