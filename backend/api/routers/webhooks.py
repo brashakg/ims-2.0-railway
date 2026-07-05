@@ -15,6 +15,9 @@ Auth model:
   the `integrations` collection.
 
 Fail-soft contract:
+- Over the per-vendor+IP rate limit → 429 with a generic detail (checked
+  FIRST, before the body is read or any secret is looked up, so unsigned
+  garbage can't be used to burn Mongo lookups + HMAC computes).
 - Secret missing in DB → return 200 with `{"status":"skipped"}` so the
   vendor's retry queue treats this as "delivered, ignored". Returning
   4xx/5xx would cause Razorpay/Shopify/Shiprocket to retry every minute
@@ -23,6 +26,9 @@ Fail-soft contract:
 - Bad signature → 401 + `{"detail":"invalid signature"}`. Vendors that
   re-attempt on 401 will be silently swallowed but the legitimate
   delivery is rejected so a leaked URL can't be abused.
+- Replayed delivery (same vendor event id already ingested) → 200 with
+  `{"status":"duplicate"}` and NO re-dispatch. Webhooks must 2xx or the
+  vendor retries forever; the original inbox row is the durable record.
 - Mongo down → log + 200 (we don't want vendor retries to overwhelm us).
 - Event dispatch failure → still 200 (the inbox row is the durable record;
   NEXUS can sweep it on next tick).
@@ -52,6 +58,7 @@ import hmac
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
@@ -120,6 +127,118 @@ def _filter_headers(request: Request) -> Dict[str, str]:
 
 
 # ============================================================================
+# Endpoint-level rate limiting — per vendor+IP sliding window
+# ============================================================================
+# Why: every unsigned garbage POST used to cost a Mongo `integrations` lookup
+# plus an HMAC compute; the only cover was main.py's global in-memory
+# 120/min/IP limiter (per-process — 4 workers means ~480/min effective — and
+# it resets on every restart). This limiter is checked FIRST in every
+# receiver — before the body is read and before any secret lookup — and goes
+# through the shared cache seam (api/services/cache.py): Redis-backed when
+# configured, so the window is shared across workers and survives restarts;
+# in-memory fallback otherwise, which is no worse than today's global limiter.
+# ============================================================================
+
+_WEBHOOK_RATE_WINDOW_SECONDS = 60
+_WEBHOOK_RATE_LIMIT_DEFAULT = 60  # per vendor+IP per minute
+
+
+def _webhook_rate_limit_per_min() -> int:
+    """Requests allowed per vendor+IP per minute. Env-overridable via
+    WEBHOOK_RATE_LIMIT_PER_MIN; read at call time so ops can tune without a
+    deploy-time code change. Garbage / non-positive values fall back safely."""
+    raw = os.getenv("WEBHOOK_RATE_LIMIT_PER_MIN", "")
+    try:
+        return max(1, int(raw)) if raw else _WEBHOOK_RATE_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        return _WEBHOOK_RATE_LIMIT_DEFAULT
+
+
+def _client_ip(request: Request) -> str:
+    """Client IP for rate-limit bucketing. Reuses main.py's trusted-proxy-aware
+    extractor (Railway sits behind a proxy, so X-Forwarded-For handling must
+    match the global limiter's) with a plain socket fallback."""
+    try:
+        from api.main import _extract_client_ip
+
+        return _extract_client_ip(request)
+    except Exception:
+        return request.client.host if request.client else "unknown"
+
+
+def _check_webhook_rate_limit(vendor: str, client_ip: str) -> bool:
+    """Sliding-window limiter keyed per vendor+IP via the shared cache seam.
+    Returns True when the request is allowed. Fail-open on any cache error —
+    a broken cache must never take the receivers down (main.py's global
+    limiter still applies as outer cover). The stamp list is bounded by the
+    limit itself (we stop appending once over), and the key TTL equals the
+    window so idle buckets expire on their own."""
+    try:
+        from api.services.cache import cache
+
+        key = f"webhook_rl:{vendor}:{client_ip}"
+        now = time.time()
+        cutoff = now - _WEBHOOK_RATE_WINDOW_SECONDS
+        stamps = cache.get(key)
+        if not isinstance(stamps, list):
+            stamps = []
+        stamps = [t for t in stamps if isinstance(t, (int, float)) and t > cutoff]
+        if len(stamps) >= _webhook_rate_limit_per_min():
+            return False
+        stamps.append(now)
+        cache.set(key, stamps, ttl=_WEBHOOK_RATE_WINDOW_SECONDS)
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _enforce_webhook_rate_limit(request: Request, vendor: str) -> None:
+    """Raise 429 when the vendor+IP bucket is over its per-minute budget.
+    Called FIRST in every receiver. The detail string deliberately reveals
+    nothing about limits, windows, or backing stores."""
+    ip = _client_ip(request)
+    if not _check_webhook_rate_limit(vendor, ip):
+        logger.warning(
+            "[WEBHOOKS] rate limit exceeded vendor=%s ip=%s", vendor, ip
+        )
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+
+# ============================================================================
+# Event-id replay dedupe
+# ============================================================================
+# Vendor delivery-id headers — when present we dedupe on them so a replayed,
+# correctly-signed envelope inside the timestamp window (webhook_verify.
+# is_replay allows ~5 min) can't be re-ingested as a second inbox row and
+# re-dispatched (the Razorpay reconcile hook reads the most recent unprocessed
+# inbox row, so replay duplicates would feed payment reconciliation).
+# Shiprocket sends no delivery-id header (x-shiprocket-event is the event
+# TYPE, shared by many deliveries) so it keeps timestamp-window-only cover —
+# same as today. This is receiver-level and additive: shopify_ingest keeps its
+# own order-id + webhook-id idempotency layers untouched.
+# ============================================================================
+
+_EVENT_ID_HEADERS = {
+    "razorpay": "x-razorpay-event-id",
+    "shopify": "x-shopify-webhook-id",
+}
+
+
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    """True when `exc` is a (pymongo) DuplicateKeyError. Name-based check
+    first so test fakes without pymongo installed still match (same pattern
+    as base_repository / order_repository)."""
+    if exc.__class__.__name__ == "DuplicateKeyError":
+        return True
+    try:
+        from pymongo.errors import DuplicateKeyError as _DKE
+
+        return isinstance(exc, _DKE)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# ============================================================================
 # DB access — direct, no repository layer (one collection, three writes)
 # ============================================================================
 
@@ -152,6 +271,21 @@ def _get_inbox_collection():
         # Lookup index — we look up by webhook_id from NEXUS
         try:
             coll.create_index("webhook_id", unique=False)
+        except Exception:
+            pass
+        # Replay dedupe — UNIQUE partial index on (vendor, event_id) so a
+        # replayed delivery carrying the same vendor event id is physically
+        # impossible to double-insert even under a multi-worker race.
+        # PARTIAL: only docs that actually carry an event_id string, so
+        # vendors without a delivery-id header (and all legacy rows) are
+        # unaffected. Mirrors shopify_ingest.ensure_shopify_order_index.
+        try:
+            coll.create_index(
+                [("vendor", 1), ("event_id", 1)],
+                unique=True,
+                partialFilterExpression={"event_id": {"$type": "string"}},
+                name="uniq_webhook_event_id",
+            )
         except Exception:
             pass
         return coll
@@ -204,15 +338,22 @@ async def _ingest(
     """
     Shared receiver pipeline for all three vendors. Steps:
 
+      0. Rate-limit check (per vendor+IP). Over budget → 429. FIRST —
+         before the body is read and before any secret lookup, so unsigned
+         garbage can't burn Mongo lookups + HMAC computes.
       1. Read RAW body (HMAC depends on the unparsed bytes).
       2. Look up secret. Missing → 200 skipped (vendor must not retry).
       3. Verify signature. Bad → 401.
       4. Parse JSON.
       5. Replay-check via payload['event_timestamp'] (best-effort).
-      6. Persist inbox doc.
-      7. Dispatch event. Returns webhook_id.
-      8. 200.
+      6. Event-id dedupe (vendors that send a delivery-id header).
+         Already ingested → 200 duplicate, no re-dispatch.
+      7. Persist inbox doc (unique partial index backstops the race).
+      8. Dispatch event. Returns webhook_id.
+      9. 200.
     """
+    _enforce_webhook_rate_limit(request, vendor)
+
     raw_body = await request.body()
     sig = request.headers.get(signature_header_name) or request.headers.get(
         signature_header_name.lower()
@@ -264,6 +405,35 @@ async def _ingest(
         )
         return {"status": "skipped", "reason": "replay_window_exceeded"}
 
+    # Event-id replay dedupe — only for vendors that send a delivery-id
+    # header, and only AFTER the signature verified (an attacker without the
+    # secret can't use forged ids to suppress legitimate deliveries). The
+    # find_one is the fast path; the unique partial index on
+    # (vendor, event_id) is the hard backstop under a multi-worker race.
+    event_id_header = _EVENT_ID_HEADERS.get(vendor)
+    event_id: Optional[str] = None
+    if event_id_header:
+        event_id = request.headers.get(event_id_header) or None
+
+    coll = _get_inbox_collection()
+
+    if coll is not None and event_id:
+        try:
+            existing = coll.find_one({"vendor": vendor, "event_id": event_id})
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing is not None:
+            # 200, not 4xx: webhooks must be ACKed or the vendor retries
+            # forever. The original inbox row is the durable record; we do
+            # NOT re-dispatch.
+            logger.warning(
+                "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
+                "(already ingested)",
+                vendor,
+                event_id,
+            )
+            return {"status": "duplicate", "vendor": vendor, "event_id": event_id}
+
     webhook_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     inbox_doc = {
@@ -276,13 +446,28 @@ async def _ingest(
         "processed": False,
         "processed_at": None,
         "skipped_reason": None,
+        "event_id": event_id,
     }
 
-    coll = _get_inbox_collection()
     if coll is not None:
         try:
             coll.insert_one(dict(inbox_doc))
         except Exception as e:
+            if event_id and _is_duplicate_key_error(e):
+                # Race backstop: a concurrent worker ingested the same
+                # delivery between our pre-check and this insert. ACK it and
+                # do NOT re-dispatch — the winner's row is the record.
+                logger.warning(
+                    "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
+                    "(unique index race backstop)",
+                    vendor,
+                    event_id,
+                )
+                return {
+                    "status": "duplicate",
+                    "vendor": vendor,
+                    "event_id": event_id,
+                }
             # Mongo down — the receiver MUST stay green so vendors don't
             # back up their retry queue. Log loud, swallow.
             logger.error(f"[WEBHOOKS] inbox insert failed for {vendor}: {e}")
@@ -354,9 +539,12 @@ async def receive_msg91_delivery(request: Request):
     DLR's request id. Stub-level handler: it does the lookup + status advance
     and records the raw DLR; it does not (yet) fan out further events.
 
-    Fail-soft like the other receivers: missing secret -> 200 skipped (so MSG91
-    won't hammer its retry queue), bad signature -> 401, Mongo down -> 200.
+    Fail-soft like the other receivers: over rate limit -> 429, missing
+    secret -> 200 skipped (so MSG91 won't hammer its retry queue), bad
+    signature -> 401, Mongo down -> 200.
     """
+    _enforce_webhook_rate_limit(request, "msg91")
+
     raw_body = await request.body()
     sig = request.headers.get("X-MSG91-Signature") or request.headers.get(
         "x-msg91-signature"
@@ -464,10 +652,15 @@ async def receive_razorpay(request: Request):
     #
     # We pass the parsed webhook payload via a background best-effort
     # path.  Fail-soft: any error is caught + logged; never raises.
-    try:
-        _reconcile_razorpay_payment_bg(request)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[WEBHOOKS] razorpay reconcile hook skipped: %s", exc)
+    # Gated on a FRESH ingest: a duplicate delivery (event-id dedupe) or a
+    # skipped one wrote no new inbox row, so re-running the hook would just
+    # re-read the ORIGINAL unprocessed row and re-feed reconciliation —
+    # exactly the replay double-count this hardening closes.
+    if result.get("status") == "received":
+        try:
+            _reconcile_razorpay_payment_bg(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[WEBHOOKS] razorpay reconcile hook skipped: %s", exc)
 
     return result
 
@@ -740,12 +933,15 @@ async def receive_whatsapp_inbound(request: Request):
     Meta inbound message webhook (POST).
 
     Steps:
+      0. Rate-limit check (per vendor+IP). Over budget -> 429.
       1. Read raw body.
       2. Verify X-Hub-Signature-256 (skip if WABA_APP_SECRET unset).
       3. Parse payload -> extract messages.
       4. For each message: upsert conversation thread + dispatch intent.
       5. Return 200 (never 5xx to Meta).
     """
+    _enforce_webhook_rate_limit(request, "whatsapp")
+
     raw_body = await request.body()
     sig = (
         request.headers.get("X-Hub-Signature-256")
