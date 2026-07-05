@@ -879,6 +879,9 @@ class MockCollection:
                     elif op == "$ne":
                         if doc_value == op_value:
                             return False
+                    elif op == "$exists":
+                        if bool(op_value) != (key in doc):
+                            return False
             else:
                 # Direct equality check
                 if doc.get(key) != value:
@@ -932,6 +935,7 @@ class MockCollection:
         update: Dict,
         upsert: bool = False,
         return_document: Any = False,
+        sort: Any = None,
         **kwargs,
     ) -> Optional[Dict]:
         """Atomic find-and-update for no-Mongo mode.
@@ -943,8 +947,23 @@ class MockCollection:
         Single-threaded, so the real concurrency guarantee is moot here -- this
         just preserves FUNCTIONAL behaviour. return_document follows pymongo's
         ReturnDocument (AFTER == True -> post-update doc; default -> pre-image).
+        sort: pymongo-style [(field, direction)] list; picks WHICH matching doc
+        is updated (FEFO expiry-first claim relies on this in mock mode). Values
+        are compared as strings (missing/None last), which orders ISO dates and
+        datetimes chronologically -- good enough for the mock.
         """
-        doc = self.find_one(filter)
+        if sort:
+            candidates = [
+                d for d in self._data.values() if self._matches_filter(d, filter)
+            ]
+            for sort_key, direction in reversed(list(sort)):
+                candidates.sort(
+                    key=lambda d, k=sort_key: (d.get(k) is None, str(d.get(k))),
+                    reverse=direction == -1,
+                )
+            doc = candidates[0] if candidates else None
+        else:
+            doc = self.find_one(filter)
         if doc is None:
             if not upsert:
                 return None

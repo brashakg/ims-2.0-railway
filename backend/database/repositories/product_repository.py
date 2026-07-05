@@ -206,7 +206,7 @@ class StockRepository(BaseRepository):
         order_id: str,
         exclude_ids=None,
     ) -> Optional[str]:
-        """Atomically claim the first AVAILABLE unit for product+store and flip it
+        """Atomically claim one AVAILABLE unit for product+store and flip it
         SOLD; return its stock_id, or None when none is available.
 
         Concurrency-safe: a single find_one_and_update with a status="AVAILABLE"
@@ -214,6 +214,19 @@ class StockRepository(BaseRepository):
         loser gets the next unit or None). Replaces the old find_by_product_store
         + mark_sold check-then-act FIFO path, which let two concurrent last-unit
         sales both mark the SAME unit SOLD.
+
+        FEFO (First-Expiry-First-Out): expirable stock (contact lenses, solutions)
+        carries expiry_date stamped at GRN. The claim is TWO-PHASE:
+          1. Among DATED units (expiry_date exists and is not null) claim the
+             EARLIEST expiry first (sort ascending). Dispensing near-expiry units
+             first is a clinical/inventory-correctness requirement.
+          2. Only when no dated unit is available, fall back to the original
+             unsorted claim for undated units -- so plain products (frames,
+             sunglasses) behave exactly as before.
+        A naive single ascending sort would pick null/undated units FIRST under
+        BSON ordering (null sorts before dates), hence the two phases. Each phase
+        is still one atomic find_one_and_update, so the no-double-claim contract
+        is unchanged.
         """
         flt = {
             "product_id": product_id,
@@ -222,19 +235,29 @@ class StockRepository(BaseRepository):
         }
         if exclude_ids:
             flt["stock_id"] = {"$nin": list(exclude_ids)}
+        update = {
+            "$set": {
+                "status": "SOLD",
+                "sold_at": datetime.now(),
+                "order_id": order_id,
+            }
+        }
+        # Phase 1 (FEFO): earliest-expiring DATED unit first.
+        dated_flt = dict(flt)
+        dated_flt["expiry_date"] = {"$exists": True, "$ne": None}
         try:
             doc = self.collection.find_one_and_update(
-                flt,
-                {
-                    "$set": {
-                        "status": "SOLD",
-                        "sold_at": datetime.now(),
-                        "order_id": order_id,
-                    }
-                },
+                dated_flt, update, sort=[("expiry_date", 1)]
             )
         except Exception:
-            return None
+            doc = None
+        if not doc:
+            # Phase 2: no dated unit available -> claim any undated unit
+            # (identical to the pre-FEFO behaviour).
+            try:
+                doc = self.collection.find_one_and_update(flt, update)
+            except Exception:
+                return None
         if not doc:
             return None
         return doc.get("stock_id") or doc.get("_id")

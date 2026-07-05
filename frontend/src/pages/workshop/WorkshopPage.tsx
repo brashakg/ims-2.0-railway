@@ -149,6 +149,13 @@ export function WorkshopPage() {
   const [statusFilter, setStatusFilter] = useState<JobStatus | 'ALL' | 'ACTIVE'>('ACTIVE');
   const [priorityFilter, setPriorityFilter] = useState<JobPriority | 'ALL'>('ALL');
 
+  // Pickup record for READY -> DELIVERED: who collected the job. Optional —
+  // a record, not a gate (delivery is never blocked on it). Reset per job.
+  const [pickupName, setPickupName] = useState('');
+  useEffect(() => {
+    setPickupName('');
+  }, [selectedJob?.id]);
+
   // QC checklist modal — opened from a COMPLETED / QC_FAILED job's detail panel.
   const [qcModalJob, setQcModalJob] = useState<Job | null>(null);
   // Who may run QC. Workshop floor + store/area management + optometrist
@@ -354,8 +361,15 @@ const loadJobs = async () => {
 
   const handleStatusChange = async (jobId: string, newStatus: string) => {
     try {
-      await workshopApi.updateJobStatus(jobId, newStatus);
+      // On DELIVERED, send the optional "collected by" record along with the
+      // PATCH. Empty name -> omitted entirely (never blocks the delivery).
+      const pickup =
+        newStatus === 'DELIVERED' && pickupName.trim()
+          ? { picked_up_by_name: pickupName.trim() }
+          : undefined;
+      await workshopApi.updateJobStatus(jobId, newStatus, undefined, pickup);
       toast.success(`Job status updated to ${newStatus}`);
+      setPickupName('');
       setSelectedJob(null);
       await loadJobs();
       // Auto-print the appropriate label on a forward transition (fail-soft;
@@ -1014,7 +1028,17 @@ const loadJobs = async () => {
                     </>
                   )}
                   {selectedJob.status === 'READY' && (
-                    <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <input
+                        type="text"
+                        value={pickupName}
+                        onChange={(e) => setPickupName(e.target.value)}
+                        placeholder="Collected by (name, optional)"
+                        className="input-field text-sm w-56"
+                        maxLength={80}
+                      />
+                      <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
+                    </div>
                   )}
                   {['COMPLETED', 'READY'].includes(selectedJob.status) && (
                     <button

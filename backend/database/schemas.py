@@ -694,7 +694,11 @@ INDEXES = {
         {"keys": [("product_id", 1), ("store_id", 1)]},
         {"keys": [("store_id", 1), ("status", 1)]},
         {"keys": [("assigned_to", 1)]},
-        {"keys": [("expiry_date", 1)], "sparse": True}
+        {"keys": [("expiry_date", 1)], "sparse": True},
+        # FEFO dispense: claim_one_available filters product+store+status and
+        # sorts dated units by expiry_date ascending (earliest expiry first),
+        # so the atomic claim can walk this index instead of scanning.
+        {"keys": [("product_id", 1), ("store_id", 1), ("status", 1), ("expiry_date", 1)]}
     ],
     "customers": [
         {"keys": [("mobile", 1)], "unique": True},
