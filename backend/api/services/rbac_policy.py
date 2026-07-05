@@ -563,6 +563,14 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/admin/online-store/rehost-images",
         "allowed": ["SUPERADMIN"],
     },
+    # Phase-6 cutover: register Shopify webhookSubscriptions pointing at IMS's
+    # signed receiver (/api/v1/webhooks/shopify). Dry-run by default; mutation
+    # only behind apply=True + the triple push gate. SUPERADMIN inline.
+    {
+        "method": "POST",
+        "path": "/api/v1/admin/online-store/register-webhooks",
+        "allowed": ["SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/admin/products",
