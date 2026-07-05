@@ -17,7 +17,8 @@
 //   2. Manual invoice   -> blank form (no GRN link).
 // The user reviews / edits, then Books it (POST).
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Plus, X, Loader2, FileText, PackageCheck, Trash2, AlertTriangle, RefreshCw,
   CheckCircle2, ShieldCheck, Scale, ShieldAlert,
@@ -414,6 +415,50 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
   }, []);
 
   const openManual = () => setForm({ prefill: {}, lines: [blankLine()] });
+
+  // Deep-link auto-open: /purchase?tab=purchase-invoices&grn_id=<id> (the
+  // /purchase/invoices/book redirect used by the express-receive accountant
+  // task and the PO timeline drawer). Fetch the from-GRN draft ONCE and open
+  // the booking form prefilled; clear the param so refresh/back doesn't
+  // re-open. Fail-soft: a blocked draft (e.g. GRN not ACCEPTED) surfaces the
+  // server's message as a toast and leaves the tab usable.
+  const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const autoOpenRanRef = useRef(false);
+  useEffect(() => {
+    const grnId = searchParams.get('grn_id');
+    if (!grnId || autoOpenRanRef.current) return;
+    autoOpenRanRef.current = true;
+    (async () => {
+      try {
+        const draft = await purchaseInvoicesApi.createFromGrn(grnId);
+        openFromGrnDraft(
+          {
+            vendor_id: draft.vendor_id,
+            vendor_name: draft.vendor_name,
+            vendor_invoice_no: draft.vendor_invoice_no,
+            vendor_invoice_date: draft.vendor_invoice_date,
+            po_id: draft.po_id,
+            po_number: draft.po_number,
+            grn_id: draft.grn_id ?? grnId,
+            grn_number: draft.grn_number,
+            place_of_supply: draft.place_of_supply,
+            recipient_gstin: draft.recipient_gstin,
+            store_id: draft.store_id,
+          },
+          draft.lines ?? [],
+        );
+      } catch (e) {
+        toast.error(errMsg(e, 'Could not open the invoice draft for this receipt'));
+      } finally {
+        // Drop grn_id but keep the tab param so the URL stays truthful.
+        const next = new URLSearchParams(searchParams);
+        next.delete('grn_id');
+        setSearchParams(next, { replace: true });
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const openFromGrnDraft = (prefill: Partial<PurchaseInvoice>, lines: PurchaseInvoiceLine[]) => {
     setPickingGrn(false);
