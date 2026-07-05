@@ -2,6 +2,7 @@
 // IMS 2.0 - Purchase Orders List
 // ============================================================================
 
+import { useState } from 'react';
 import {
   Eye,
   Download,
@@ -11,6 +12,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { getStatusBadge } from './statusBadge';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
+import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
 import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
 import type { PurchaseOrder } from './purchaseTypes';
@@ -79,6 +81,9 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
   // is never handed a button that lands on /unauthorized. Phase 2: ACCOUNTANT
   // added — express receive is for ALL receiving roles (backend gate matches).
   const canReceive = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
+  // Phase 2: clicking the PO number opens the lifecycle drawer (timeline +
+  // GRNs + invoices + one derived next-step action).
+  const [timelinePO, setTimelinePO] = useState<PurchaseOrder | null>(null);
 
   return (
     <div className="space-y-4">
@@ -91,7 +96,17 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
           <div className="flex items-start justify-between mb-4">
             <div className="flex-1">
               <div className="flex items-center gap-3 mb-2">
-                <h3 className="text-lg font-semibold text-gray-900">{po.poNumber}</h3>
+                {/* PO number opens the lifecycle drawer (keyboard accessible). */}
+                <h3 className="text-lg font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => setTimelinePO(po)}
+                    title="View PO lifecycle timeline"
+                    className="text-gray-900 hover:text-blue-700 hover:underline underline-offset-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  >
+                    {po.poNumber}
+                  </button>
+                </h3>
                 {getStatusBadge(po.status)}
               </div>
               <p className="text-sm text-gray-600">{po.supplierName}</p>
@@ -177,6 +192,22 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
           <Package className="w-12 h-12 text-gray-500 mx-auto mb-3" />
           <p className="text-gray-500">No purchase orders found</p>
         </div>
+      )}
+
+      {/* PO lifecycle drawer — "Send to vendor" (DRAFT) routes through the
+          existing send path: close the drawer and open the PO detail modal,
+          where the submit/send action lives. */}
+      {timelinePO && (
+        <POLifecycleDrawer
+          poId={timelinePO.id}
+          poNumber={timelinePO.poNumber}
+          onClose={() => setTimelinePO(null)}
+          onSendToVendor={() => {
+            const po = timelinePO;
+            setTimelinePO(null);
+            onViewPO(po);
+          }}
+        />
       )}
     </div>
   );
