@@ -72,7 +72,7 @@ def _force_live(monkeypatch, graphql_response):
     symbols by value) and replace the network boundary with a spy. Returns the
     spy so a test can assert calls + inspect variables."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
-    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
     monkeypatch.setattr(
         shopify_push, "_load_integration_config",
         lambda db, t: {"shop_url": "test.myshopify.com", "access_token": "shpat_test"},
@@ -87,17 +87,17 @@ def _force_dark(monkeypatch, reason="writes_off"):
     called (the dark branch must never reach the network)."""
     if reason == "writes_off":
         monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
-        monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+        monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
         monkeypatch.setattr(shopify_push, "_load_integration_config",
                             lambda db, t: {"shop_url": "x", "access_token": "y"})
     elif reason == "dispatch_off":
         monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
-        monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "off")
+        monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
         monkeypatch.setattr(shopify_push, "_load_integration_config",
                             lambda db, t: {"shop_url": "x", "access_token": "y"})
     elif reason == "no_creds":
         monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
-        monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+        monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
         monkeypatch.setattr(shopify_push, "_load_integration_config", lambda db, t: {})
 
     async def _boom(db, query, variables):  # pragma: no cover - must never run
@@ -147,7 +147,7 @@ def test_mode_is_dark_by_default(monkeypatch):
     """With writes off (the default per #262), the posture is SIMULATED and the
     three gate components are reported."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
-    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "off")
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
     status = shopify_push.push_mode_status(None)
     assert status["mode"] == "SIMULATED"
     assert status["is_live"] is False
@@ -167,7 +167,7 @@ def test_mode_is_live_only_when_all_three_align(monkeypatch):
 
 def test_mode_dark_when_creds_missing_even_if_gates_on(monkeypatch):
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
-    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "live")
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
     monkeypatch.setattr(shopify_push, "_load_integration_config", lambda db, t: {})
     status = shopify_push.push_mode_status(object())
     assert status["mode"] == "SIMULATED" and status["creds_present"] is False
@@ -521,7 +521,7 @@ def test_status_endpoint_reports_dark_and_counts(client, auth_headers, patched_d
     conn, _ = patched_db
     # Force DARK explicitly (default), regardless of process env.
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
-    monkeypatch.setattr(shopify_push, "dispatch_mode", lambda: "off")
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
     # Seed a staged + pushed product and a pending collection.
     conn.db["catalog_products"].insert_one({"id": "P1", "ecom": {"locally_modified": True}})
     conn.db["catalog_products"].insert_one(
@@ -704,3 +704,56 @@ def test_push_all_pending_503_no_db(client, auth_headers, monkeypatch):
     monkeypatch.setattr(deps, "get_db", lambda: None)
     r = client.post("/api/v1/online-store/push/all-pending", headers=auth_headers)
     assert r.status_code == 503, r.text
+
+
+# ---------------------------------------------------------------------------
+# SHOPIFY_DISPATCH_MODE decouple (owner 2026-07-05): Shopify can go live
+# WITHOUT arming the global DISPATCH_MODE (which also arms WhatsApp/SMS and
+# the other NEXUS writes). Unset -> identical to the old behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_shopify_dispatch_mode_override_and_fallback(monkeypatch):
+    from agents import nexus_providers as nx
+
+    # No override -> falls back to the global mode (off).
+    monkeypatch.setattr(nx, "dispatch_mode", lambda: "off")
+    monkeypatch.delenv("SHOPIFY_DISPATCH_MODE", raising=False)
+    assert nx.shopify_dispatch_mode() == "off"
+    assert nx._is_shopify_write_allowed() is False
+
+    # Override LIVE while global stays off -> Shopify (and ONLY Shopify) live.
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "live")
+    assert nx.shopify_dispatch_mode() == "live"
+    assert nx._is_shopify_write_allowed() is True
+    assert nx._is_destructive_allowed() is False  # global gate untouched
+
+    # Garbage override -> ignored, falls back to the global mode.
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "banana")
+    assert nx.shopify_dispatch_mode() == "off"
+
+    # Override can also force Shopify OFF while the global mode is live.
+    monkeypatch.setattr(nx, "dispatch_mode", lambda: "live")
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "off")
+    assert nx.shopify_dispatch_mode() == "off"
+    monkeypatch.delenv("SHOPIFY_DISPATCH_MODE")
+    assert nx.shopify_dispatch_mode() == "live"
+
+
+def test_push_mode_live_via_shopify_override_only(monkeypatch):
+    """Full gate: writes on + creds + SHOPIFY_DISPATCH_MODE=live -> LIVE even
+    though the global DISPATCH_MODE stays off."""
+    from agents import nexus_providers as nx
+
+    monkeypatch.setattr(nx, "dispatch_mode", lambda: "off")
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "live")
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(
+        shopify_push,
+        "_load_integration_config",
+        lambda db, t: {"shop_url": "x.myshopify.com", "access_token": "tok"},
+    )
+    st = shopify_push.push_mode_status(None)
+    assert st["is_live"] is True
+    assert st["dispatch_mode"] == "live"
+    assert st["mode"] == "LIVE"

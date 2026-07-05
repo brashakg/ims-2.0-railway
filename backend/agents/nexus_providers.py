@@ -76,6 +76,28 @@ def _is_destructive_allowed() -> bool:
     return dispatch_mode() == "live"
 
 
+def shopify_dispatch_mode() -> str:
+    """Effective dispatch mode for SHOPIFY writes only.
+
+    Owner 2026-07-05 (Phase-6 cutover): going Shopify-live must NOT require
+    arming the global DISPATCH_MODE=live, which would also arm WhatsApp/SMS
+    (MEGAPHONE) and every other NEXUS write the moment their creds appear.
+    SHOPIFY_DISPATCH_MODE, when set, OVERRIDES the global mode for Shopify
+    write paths (values: off/test/live). Unset -> global DISPATCH_MODE as
+    before, so existing deployments behave identically."""
+    import os
+
+    override = (os.getenv("SHOPIFY_DISPATCH_MODE") or "").strip().lower()
+    if override in ("off", "test", "live"):
+        return override
+    return dispatch_mode()
+
+
+def _is_shopify_write_allowed() -> bool:
+    """Shopify-specific live gate (see shopify_dispatch_mode)."""
+    return shopify_dispatch_mode() == "live"
+
+
 def ims_shopify_writes_enabled() -> bool:
     """The e-commerce app (BVI) is now the SINGLE owner of the Shopify catalog,
     so IMS Shopify WRITES are retired by default -- this prevents two systems
@@ -149,12 +171,12 @@ async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
             notes="RETIRED — Shopify catalog is owned by the e-commerce app (BVI); "
             "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
         )
-    if not _is_destructive_allowed():
+    if not _is_shopify_write_allowed():
         return SyncResult(
             ok=True,
             provider="shopify",
             kind="push",
-            notes=f"SIMULATED — dispatch_mode={dispatch_mode()}",
+            notes=f"SIMULATED — shopify_dispatch_mode={shopify_dispatch_mode()}",
         )
 
     cfg = _load_integration_config(db, "shopify")
@@ -264,7 +286,7 @@ async def shopify_set_inventory_available(
             error=f"non-integer available={available!r}",
         )
 
-    if not _is_destructive_allowed():
+    if not _is_shopify_write_allowed():
         # off/test/unknown -> log only, no live write. Identical to today's
         # default behaviour (no outbound Shopify call).
         return SyncResult(
@@ -272,7 +294,7 @@ async def shopify_set_inventory_available(
             provider="shopify",
             kind="push",
             items_synced=0,
-            notes=f"SIMULATED -- dispatch_mode={dispatch_mode()}; would set "
+            notes=f"SIMULATED -- shopify_dispatch_mode={shopify_dispatch_mode()}; would set "
             f"{inv_gid} @ {loc_gid} -> available={qty}",
             payload={
                 "inventory_item_id": inv_gid,

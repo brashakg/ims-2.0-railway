@@ -15,8 +15,9 @@ UNLESS ALL THREE hold:
   1. ims_shopify_writes_enabled()  -- IMS_SHOPIFY_WRITES is on (default OFF). Per
      #262 BVI is the SINGLE Shopify writer; the IMS push stays retired until the
      owner flips this gate as part of the Phase-6 baton cutover.
-  2. dispatch_mode() == "live"     -- the same destructive-write gate the rest of
-     NEXUS uses (nexus_providers / providers.py).
+  2. shopify_dispatch_mode() == "live" -- SHOPIFY_DISPATCH_MODE when set (owner
+     2026-07-05: lets Shopify go live WITHOUT arming the global DISPATCH_MODE,
+     which would also arm WhatsApp/SMS), else the global DISPATCH_MODE.
   3. Shopify creds present         -- shop_url + access_token in the `integrations`
      Mongo collection (NOT env): _load_integration_config(db, "shopify").
 Default / missing-creds / gate-off  ->  mode="SIMULATED", no Shopify call.
@@ -24,7 +25,7 @@ Default / missing-creds / gate-off  ->  mode="SIMULATED", no Shopify call.
 We REUSE the existing, code-verified safety primitives rather than reinvent them:
   - nexus_providers.ims_shopify_writes_enabled()  (the single-writer kill-switch)
   - nexus_providers._load_integration_config(db, "shopify")  (creds from Mongo)
-  - nexus_providers.dispatch_mode() / _as_shopify_gid()  (live gate + GID helper)
+  - nexus_providers.shopify_dispatch_mode() / _as_shopify_gid()  (live gate + GID helper)
 
 IDEMPOTENT: on a LIVE push the Shopify gid returned by the mutation is written
 BACK onto the IMS doc (ecom.shopify_product_id / shopify_variant_id /
@@ -57,10 +58,10 @@ import httpx
 from agents.nexus_providers import (
     _load_integration_config,
     ims_shopify_writes_enabled,
+    shopify_dispatch_mode,
     _as_shopify_gid,
     SHOPIFY_API_VERSION,
 )
-from agents.providers import dispatch_mode
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ def push_mode_status(db) -> Dict[str, Any]:
       mode            -- LIVE only when all three align, else SIMULATED.
     """
     writes = ims_shopify_writes_enabled()
-    disp = dispatch_mode()
+    disp = shopify_dispatch_mode()
     creds = _has_shopify_creds(db)
     live = bool(writes and disp == "live" and creds)
     return {
@@ -131,7 +132,8 @@ def push_mode_status(db) -> Dict[str, Any]:
         "api_version": SHOPIFY_API_VERSION,
         "single_writer_note": (
             "BVI is the single Shopify writer until the Phase-6 baton cutover; "
-            "IMS push is DARK until IMS_SHOPIFY_WRITES=1 AND DISPATCH_MODE=live."
+            "IMS push is DARK until IMS_SHOPIFY_WRITES=1 AND "
+            "SHOPIFY_DISPATCH_MODE=live (or global DISPATCH_MODE=live)."
         ),
     }
 
@@ -154,8 +156,12 @@ def _live_or_reason(db) -> Tuple[bool, Optional[str]]:
             False,
             "writes_disabled (IMS_SHOPIFY_WRITES off -- BVI is the single writer)",
         )
-    if dispatch_mode() != "live":
-        return False, f"dispatch_mode={dispatch_mode()} (need live)"
+    if shopify_dispatch_mode() != "live":
+        return (
+            False,
+            f"shopify_dispatch_mode={shopify_dispatch_mode()} (need live; set "
+            "SHOPIFY_DISPATCH_MODE=live or global DISPATCH_MODE=live)",
+        )
     if not _has_shopify_creds(db):
         return False, "shopify creds not configured (shop_url/access_token)"
     return True, None
