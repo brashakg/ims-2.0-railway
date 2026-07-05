@@ -130,7 +130,7 @@ export function DayEndReport({ storeId, onClose, entity, store, overrides }: Day
         categoryBreakup[cat].tax += lineTax;
 
         // HSN summary
-        const hsnInfo = getHSNByCategory(cat, true);
+        const hsnInfo = getHSNByCategory(cat);
         const hsnCode = hsnInfo?.code || '9004';
         if (!hsnSummary[hsnCode]) {
           hsnSummary[hsnCode] = {

@@ -108,7 +108,7 @@ export function GSTInvoice({
   const lineItems: InvoiceLineItem[] = safeItems.map(item => {
     const grossLine = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
-    const hsnInfo = getHSNByCategory(category, true);
+    const hsnInfo = getHSNByCategory(category);
     const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo?.code);
     const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
 

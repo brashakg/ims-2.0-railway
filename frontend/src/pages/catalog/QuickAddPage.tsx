@@ -161,7 +161,6 @@ export function QuickAddPage() {
   // UI state
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [useAdvancedHSN, setUseAdvancedHSN] = useState(false);
   // HSN / GST / weight open by default: they auto-fill from the category, so the
   // operator sees + can tweak them without the extra "Advanced" click.
   const [showAdvanced, setShowAdvanced] = useState(true);
@@ -241,11 +240,11 @@ export function QuickAddPage() {
       return;
     }
     if (selectedCategory) {
-      const { hsnCode: hc, gstRate: gr } = resolveHsnGst(selectedCategory, useAdvancedHSN);
+      const { hsnCode: hc, gstRate: gr } = resolveHsnGst(selectedCategory);
       if (hc) setHsnCode(hc);
       setGstRate(gr);
     }
-  }, [selectedCategory, useAdvancedHSN]);
+  }, [selectedCategory]);
 
   // Keyboard-first: when a category is picked, move focus to the first
   // category field so the user can start typing without reaching for the mouse.
@@ -1867,15 +1866,6 @@ export function QuickAddPage() {
 
                   {showAdvanced && (
                     <div className="mt-3 space-y-3">
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={useAdvancedHSN}
-                          onChange={(e) => setUseAdvancedHSN(e.target.checked)}
-                          className="w-4 h-4 rounded border-gray-300"
-                        />
-                        <span className="text-gray-600">Use 6-digit HSN (turnover &gt; ₹5 Cr)</span>
-                      </label>
                       <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                         <div>
                           <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -1886,7 +1876,7 @@ export function QuickAddPage() {
                             value={hsnCode}
                             onChange={(e) => {
                               setHsnCode(e.target.value);
-                              const option = getHSNOptions(useAdvancedHSN).find((o) => o.value === e.target.value);
+                              const option = getHSNOptions().find((o) => o.value === e.target.value);
                               if (option) setGstRate(option.gstRate.toString());
                               clearFlag('hsn_code');
                               clearFlag('gst_rate');
@@ -1897,7 +1887,7 @@ export function QuickAddPage() {
                             )}
                           >
                             <option value="">Select HSN Code</option>
-                            {getHSNOptions(useAdvancedHSN).map((o) => (
+                            {getHSNOptions().map((o) => (
                               <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                           </select>
@@ -1919,13 +1909,6 @@ export function QuickAddPage() {
                         {!isEyewear && renderWeightInput()}
                       </div>
 
-                      {/* GST-compliance note (parity with the Guided wizard). */}
-                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-700">
-                        <p>
-                          <strong>Note:</strong> {useAdvancedHSN ? '6-digit' : '4-digit'} HSN code is mandatory for GST compliance.
-                          {!useAdvancedHSN && ' Use 6-digit HSN if your annual turnover exceeds ₹5 Cr.'}
-                        </p>
-                      </div>
                     </div>
                   )}
                 </div>
