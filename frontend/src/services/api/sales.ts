@@ -464,8 +464,15 @@ export const workshopApi = {
     return response.data;
   },
 
-  updateJobStatus: async (jobId: string, status: string, notes?: string) => {
-    const response = await api.patch(`/workshop/jobs/${jobId}/status`, { status, notes });
+  updateJobStatus: async (
+    jobId: string,
+    status: string,
+    notes?: string,
+    // Pickup record for READY -> DELIVERED: who collected the job. Optional --
+    // a record, not a gate; the backend ignores it on other transitions.
+    extra?: { picked_up_by_name?: string; picked_up_by_phone?: string },
+  ) => {
+    const response = await api.patch(`/workshop/jobs/${jobId}/status`, { status, notes, ...extra });
     return response.data;
   },
 

@@ -72,6 +72,8 @@ class WorkshopJobRepository(BaseRepository):
         status: str,
         by_user: str = None,
         notes: str = None,
+        picked_up_by_name: str = None,
+        picked_up_by_phone: str = None,
     ) -> bool:
         now = datetime.now()
         update: Dict[str, Any] = {"status": status, "status_updated_at": now}
@@ -83,6 +85,34 @@ class WorkshopJobRepository(BaseRepository):
             update["completed_at"] = now
         if status == "DELIVERED":
             update["delivered_at"] = now
+            # Pickup record: WHO collected the job (customer / relative /
+            # driver). Optional -- never gates the delivery, purely a record.
+            if picked_up_by_name:
+                update["picked_up_by_name"] = picked_up_by_name
+            if picked_up_by_phone:
+                update["picked_up_by_phone"] = picked_up_by_phone
+        # Append this transition to status_history so every step (and the
+        # DELIVERED pickup record) is preserved -- mirrors the qc_history
+        # read-append-write pattern. Fail-soft: a missing/unreadable job doc
+        # never blocks the status write itself.
+        try:
+            existing = self.find_by_id(job_id)
+        except Exception:
+            existing = None
+        if isinstance(existing, dict):
+            entry: Dict[str, Any] = {"status": status, "at": now.isoformat()}
+            if by_user:
+                entry["by_user"] = by_user
+            if notes:
+                entry["notes"] = notes
+            if status == "DELIVERED":
+                if picked_up_by_name:
+                    entry["picked_up_by_name"] = picked_up_by_name
+                if picked_up_by_phone:
+                    entry["picked_up_by_phone"] = picked_up_by_phone
+            update["status_history"] = list(
+                existing.get("status_history") or []
+            ) + [entry]
         return self.update(job_id, update)
 
     def assign_technician(self, job_id: str, technician_id: str) -> bool:

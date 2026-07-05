@@ -138,9 +138,21 @@ class FakeRepo:
         return False
 
     def update_status(
-        self, job_id: str, status: str, by_user: str = None, notes: str = None
+        self,
+        job_id: str,
+        status: str,
+        by_user: str = None,
+        notes: str = None,
+        picked_up_by_name: str = None,
+        picked_up_by_phone: str = None,
     ) -> bool:
         self._status_updated.append((job_id, status))
+        pickup = {}
+        if status == "DELIVERED":
+            if picked_up_by_name:
+                pickup["picked_up_by_name"] = picked_up_by_name
+            if picked_up_by_phone:
+                pickup["picked_up_by_phone"] = picked_up_by_phone
         return self.update(
             job_id,
             {
@@ -148,6 +160,7 @@ class FakeRepo:
                 "status_updated_at": datetime.now().isoformat(),
                 **({"completed_at": datetime.now().isoformat()} if status == "COMPLETED" else {}),
                 **({"delivered_at": datetime.now().isoformat()} if status == "DELIVERED" else {}),
+                **pickup,
             },
         )
 
@@ -296,6 +309,51 @@ class TestStatusEndpointBodyAndAlias:
         client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
         resp = client.patch("/workshop/jobs/j1/status", json={"status": "NONEXISTENT"})
         assert resp.status_code == 400
+
+
+class TestDeliveredPickupRecord:
+    """READY -> DELIVERED may carry WHO collected the job. Optional record,
+    never a gate: delivery succeeds with or without it."""
+
+    def test_delivered_with_pickup_name_persists(self, monkeypatch):
+        job = _mk_job("j1", "READY")
+        repo = FakeRepo([job])
+        client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
+        resp = client.patch(
+            "/workshop/jobs/j1/status",
+            json={
+                "status": "DELIVERED",
+                "picked_up_by_name": "  Ramesh Kumar  ",
+                "picked_up_by_phone": "9812345678",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        stored = repo._jobs["j1"]
+        assert stored["status"] == "DELIVERED"
+        assert stored["picked_up_by_name"] == "Ramesh Kumar"  # trimmed
+        assert stored["picked_up_by_phone"] == "9812345678"
+
+    def test_delivered_without_pickup_name_still_succeeds(self, monkeypatch):
+        job = _mk_job("j1", "READY")
+        repo = FakeRepo([job])
+        client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
+        resp = client.patch("/workshop/jobs/j1/status", json={"status": "DELIVERED"})
+        assert resp.status_code == 200, resp.text
+        stored = repo._jobs["j1"]
+        assert stored["status"] == "DELIVERED"
+        assert "picked_up_by_name" not in stored
+        assert "picked_up_by_phone" not in stored
+
+    def test_pickup_name_ignored_on_non_delivered_transition(self, monkeypatch):
+        job = _mk_job("j1", "PENDING")
+        repo = FakeRepo([job])
+        client = _client_with(monkeypatch, ["SUPERADMIN"], repo)
+        resp = client.patch(
+            "/workshop/jobs/j1/status",
+            json={"status": "IN_PROGRESS", "picked_up_by_name": "Someone"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert "picked_up_by_name" not in repo._jobs["j1"]
 
 
 class TestUpdateJobImmutabilityGuard:
@@ -645,6 +703,47 @@ class TestWorkshopRepositoryUpdateStatus:
         result = repo.update_status("j1", "DELIVERED", "u1")
         assert result is True
         assert "delivered_at" in store["j1"], "delivered_at must be stamped on DELIVERED"
+
+    def test_delivered_with_pickup_persists_fields_and_history(self):
+        job = _mk_job("j1", "READY")
+        repo, store = self._make_repo_with_job(job)
+        result = repo.update_status(
+            "j1",
+            "DELIVERED",
+            "u1",
+            picked_up_by_name="Ramesh Kumar",
+            picked_up_by_phone="9812345678",
+        )
+        assert result is True
+        assert store["j1"]["picked_up_by_name"] == "Ramesh Kumar"
+        assert store["j1"]["picked_up_by_phone"] == "9812345678"
+        history = store["j1"].get("status_history") or []
+        assert history, "DELIVERED transition must append a status_history entry"
+        last = history[-1]
+        assert last["status"] == "DELIVERED"
+        assert last["picked_up_by_name"] == "Ramesh Kumar"
+        assert last["picked_up_by_phone"] == "9812345678"
+
+    def test_delivered_without_pickup_still_succeeds(self):
+        job = _mk_job("j1", "READY")
+        repo, store = self._make_repo_with_job(job)
+        result = repo.update_status("j1", "DELIVERED", "u1")
+        assert result is True
+        assert "picked_up_by_name" not in store["j1"]
+        assert "picked_up_by_phone" not in store["j1"]
+        history = store["j1"].get("status_history") or []
+        assert history and history[-1]["status"] == "DELIVERED"
+        assert "picked_up_by_name" not in history[-1]
+
+    def test_status_history_appends_across_transitions(self):
+        job = _mk_job("j1", "IN_PROGRESS")
+        repo, store = self._make_repo_with_job(job)
+        repo.update_status("j1", "COMPLETED", "u1")
+        repo.update_status("j1", "DELIVERED", "u2", picked_up_by_name="Sita")
+        history = store["j1"]["status_history"]
+        assert [h["status"] for h in history] == ["COMPLETED", "DELIVERED"]
+        assert history[1]["by_user"] == "u2"
+        assert history[1]["picked_up_by_name"] == "Sita"
 
     def test_completed_stamps_completed_at(self):
         job = _mk_job("j1", "IN_PROGRESS")

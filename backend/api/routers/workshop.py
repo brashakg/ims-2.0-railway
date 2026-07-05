@@ -409,6 +409,12 @@ class StatusBody(BaseModel):
     # F9 DC HARDLOCK override (ADMIN+ + reason) when advancing an external-lab
     # (lens_status=ORDERED) job to IN_PROGRESS with no logged Delivery Challan.
     override_reason: Optional[str] = None
+    # Pickup record for the READY -> DELIVERED transition: who actually
+    # collected the job (customer, relative, driver...). OPTIONAL -- a record,
+    # not a gate: a delivery is never blocked on it. Ignored for any other
+    # transition.
+    picked_up_by_name: Optional[str] = None
+    picked_up_by_phone: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1258,7 +1264,19 @@ async def update_job_status(
                     ),
                 )
 
-        if repo.update_status(job_id, status, current_user.get("user_id"), notes):
+        # Pickup record: only meaningful when the transition lands on DELIVERED.
+        # Passed as kwargs ONLY when supplied so older repo doubles/mocks with
+        # the 4-arg signature keep working untouched.
+        pickup_kwargs = {}
+        if status == "DELIVERED" and body is not None:
+            if body.picked_up_by_name and body.picked_up_by_name.strip():
+                pickup_kwargs["picked_up_by_name"] = body.picked_up_by_name.strip()
+            if body.picked_up_by_phone and body.picked_up_by_phone.strip():
+                pickup_kwargs["picked_up_by_phone"] = body.picked_up_by_phone.strip()
+
+        if repo.update_status(
+            job_id, status, current_user.get("user_id"), notes, **pickup_kwargs
+        ):
             if is_rework:
                 # Count this rework so the cap is enforced on the next attempt.
                 try:
