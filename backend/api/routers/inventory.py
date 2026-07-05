@@ -6,7 +6,7 @@ Stock management, stock count/audit, aging analysis, barcode operations
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 from datetime import date, datetime, timedelta, timezone
 import uuid
 import logging
