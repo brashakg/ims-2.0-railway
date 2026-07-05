@@ -122,7 +122,7 @@ const ALL_PAGES: JumpPage[] = [
   { label: 'Activity Log', route: '/admin/activity-log', requireRoles: ['SUPERADMIN'] },
   { label: 'Print', route: '/print', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF'] },
   { label: 'Settings', route: '/settings', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Store Onboarding', route: '/setup', requireRoles: ['SUPERADMIN', 'ADMIN'] },
+  { label: 'Staff Onboarding', route: '/setup', requireRoles: ['SUPERADMIN', 'ADMIN'] },
   { label: 'Organization', route: '/organization', requireRoles: ['SUPERADMIN', 'ADMIN'] },
 ];
 
