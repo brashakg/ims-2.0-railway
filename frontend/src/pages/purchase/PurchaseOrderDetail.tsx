@@ -10,10 +10,12 @@ import {
   Truck,
   Package,
   Printer,
+  History,
 } from 'lucide-react';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
 import { POPrint } from '../../components/print/POPrint';
+import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
@@ -26,6 +28,7 @@ interface PurchaseOrderDetailProps {
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
   const { user } = useAuth();
   const [showPrint, setShowPrint] = useState(false);
+  const [showTimeline, setShowTimeline] = useState(false);
 
   // Resolve the issuing (buyer) store + its legal entity from the PO's own
   // store_id (falls back to the user's active store) so the PO header shows the
@@ -88,6 +91,16 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
         onClose={() => setShowPrint(false)}
       />
     )}
+    {/* Lifecycle drawer layers over this modal (z-60 > z-50). No
+        onSendToVendor here — for a DRAFT the send action is the modal's own
+        "Submit for Approval" button right behind the drawer. */}
+    {showTimeline && (
+      <POLifecycleDrawer
+        poId={po.id}
+        poNumber={po.poNumber}
+        onClose={() => setShowTimeline(false)}
+      />
+    )}
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl my-8">
         {/* Header */}
@@ -99,14 +112,25 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
             </h2>
             <p className="text-sm text-gray-500 mt-1">{po.supplierName}</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            <XIcon className="w-5 h-5 text-gray-500" />
-          </button>
+          <div className="flex items-center gap-2">
+            {/* PO lifecycle drawer (timeline + GRNs + invoices) */}
+            <button
+              type="button"
+              onClick={() => setShowTimeline(true)}
+              className="px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-1.5"
+            >
+              <History className="w-4 h-4" />
+              Timeline
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            >
+              <XIcon className="w-5 h-5 text-gray-500" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
