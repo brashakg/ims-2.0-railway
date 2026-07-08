@@ -26,8 +26,9 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 # Orders in these states never count as a conversion (F24 packet + reports.py
-# _orders_in_window mirror the same exclusion).
-_NON_CONVERTING_STATUSES = {"CANCELLED", "DRAFT"}
+# _orders_in_window mirror the same exclusion). HISTORICAL = a pre-IMS order
+# imported for customer-360 history only -- it can never convert an eye test.
+_NON_CONVERTING_STATUSES = {"CANCELLED", "DRAFT", "HISTORICAL"}
 
 
 def _empty() -> Dict:

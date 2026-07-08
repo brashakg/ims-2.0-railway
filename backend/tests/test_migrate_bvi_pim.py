@@ -1,5 +1,5 @@
 """
-Unit tests for scripts/migrate_bvi_pim.py -- the five PURE mapper functions.
+Unit tests for scripts/migrate_bvi_pim.py -- the seven PURE mapper functions.
 
 No database is needed: mappers are pure (pg_row_dict -> mongo_doc) so we can
 exercise every branch with simple dicts and assert the exact Mongo doc shape.
@@ -23,11 +23,22 @@ Key assertions per mapper:
                        live on Shopify -- push queue must not re-push);
                        pos_ready=False (NOT POS-billable); keyed on
                        bvi_product_id.
+  6. map_customer   -- mobile normalized EXACTLY like the IMS write path
+                       (canonical api/services/phone rules), stored under BOTH
+                       mobile+phone; source="bvi_import"; canonical skeleton;
+                       enrichment merge never overwrites a non-empty IMS value.
+  7. map_order      -- PURE HISTORICAL record: status="HISTORICAL" (excluded
+                       from every revenue/GST/P&L aggregation; CANCELLED kept
+                       honest), historical=True, NO invoice_number, payments=[],
+                       balance_due=0; shopify_order_id normalized to the bare
+                       webhook form (omitted when blank -- unique partial
+                       index); keyed on bvi_order_id.
 """
 from __future__ import annotations
 
 import sys
 import os
+from datetime import datetime
 
 # Make the scripts directory importable without installing.
 _REPO_ROOT = os.path.abspath(
@@ -42,8 +53,14 @@ from migrate_bvi_pim import (
     map_menu,
     map_image,
     map_product,
+    map_customer,
+    map_order,
+    map_order_item,
+    customer_enrichment_fields,
+    normalize_shopify_order_id,
     fold_variant_prices,
     _build_item_tree,
+    _ALL_ENTITIES,
 )
 
 
@@ -888,3 +905,494 @@ class TestMapProduct:
         """A row with no id maps but bvi_product_id='' (caller filters these)."""
         doc = map_product({}, [])
         assert doc["bvi_product_id"] == ""
+
+
+# ===========================================================================
+# MAPPER 6: map_customer (+ customer_enrichment_fields)
+# ===========================================================================
+
+def _bvi_customer(overrides: dict | None = None) -> dict:
+    base = {
+        "id": "cuid_cust_001",
+        "shopifyCustomerId": "gid://shopify/Customer/555",
+        "email": "Asha.Rao@Example.com",
+        "phone": "+91 98765 43210",
+        "firstName": "Asha",
+        "lastName": "Rao",
+        "address1": "12 MG Road",
+        "address2": "Flat 3B",
+        "city": "Ranchi",
+        "state": "Jharkhand",
+        "zip": "834001",
+        "country": "India",
+        "ordersCount": 3,
+        "totalSpent": 12500.0,
+        "tags": "vip, newsletter",
+        "note": "Prefers WhatsApp",
+        "acceptsMarketing": True,
+        "taxExempt": False,
+        "verified": True,
+        "createdAt": datetime(2024, 5, 1, 10, 0, 0),
+        "updatedAt": datetime(2025, 1, 1, 10, 0, 0),
+    }
+    if overrides:
+        base.update(overrides)
+    return base
+
+
+class TestMapCustomer:
+    def test_mobile_normalized_like_ims_write_path(self):
+        """'+91 98765 43210' collapses to the bare 10-digit canonical form --
+        the SAME rule the customers router / customer_service apply -- so the
+        dedupe key matches natively-created customers."""
+        doc = map_customer(_bvi_customer())
+        assert doc["mobile"] == "9876543210"
+        # Stored under BOTH keys (find_by_mobile ORs phone|mobile).
+        assert doc["phone"] == "9876543210"
+        # Verbatim input preserved for traceability.
+        assert doc["raw_phone"] == "+91 98765 43210"
+
+    def test_invalid_phone_stores_empty_never_fake(self):
+        """A foreign / junk number must NOT be persisted as a fake mobile that
+        can never dedupe (mirrors the online_order_mapper contract)."""
+        doc = map_customer(_bvi_customer({"phone": "+1 555 0100"}))
+        assert doc["mobile"] == ""
+        assert doc["phone"] == ""
+        assert doc["raw_phone"] == "+1 555 0100"
+
+    def test_zero_trunk_prefix_stripped(self):
+        doc = map_customer(_bvi_customer({"phone": "09876543210"}))
+        assert doc["mobile"] == "9876543210"
+
+    def test_source_and_channel_tags(self):
+        doc = map_customer(_bvi_customer())
+        assert doc["source"] == "bvi_import"
+        assert doc["channel"] == "ONLINE"
+        assert "imported_at" in doc
+        assert "migrated_at" in doc
+
+    def test_stable_customer_id_and_natural_key(self):
+        """customer_id derives from the BVI CUID (stable across re-runs, NOT a
+        fresh uuid) and bvi_customer_id is the runner's idempotency key."""
+        doc = map_customer(_bvi_customer())
+        assert doc["customer_id"] == "bvi-cuid_cust_001"
+        assert doc["bvi_customer_id"] == "cuid_cust_001"
+
+    def test_canonical_skeleton_shape(self):
+        """Mirrors customer_service._build_skeleton: all four store keys +
+        zeroed counters, so the doc shows in every store-scoped list."""
+        doc = map_customer(_bvi_customer())
+        assert doc["customer_type"] == "B2C"
+        assert doc["is_active"] is True
+        assert doc["loyalty_points"] == 0
+        assert doc["store_credit"] == 0.0
+        assert doc["total_purchases"] == 0
+        assert doc["patients"] == []
+        store = doc["home_store_id"]
+        assert store  # online bucket
+        assert doc["preferred_store_id"] == store
+        assert doc["primary_store_id"] == store
+        assert doc["store_ids"] == [store]
+
+    def test_bvi_stats_do_not_touch_ims_counters(self):
+        """BVI lifetime stats land under bvi_* -- IMS total_purchases stays 0
+        so no pre-IMS rupee ever leaks into IMS-side counters."""
+        doc = map_customer(_bvi_customer())
+        assert doc["bvi_orders_count"] == 3
+        assert doc["bvi_total_spent"] == 12500.0
+        assert doc["total_purchases"] == 0
+
+    def test_name_email_and_address(self):
+        doc = map_customer(_bvi_customer())
+        assert doc["name"] == "Asha Rao"
+        assert doc["email"] == "Asha.Rao@Example.com"
+        assert doc["billing_address"] == {
+            "line1": "12 MG Road",
+            "line2": "Flat 3B",
+            "city": "Ranchi",
+            "state": "Jharkhand",
+            "pincode": "834001",
+            "country": "India",
+        }
+
+    def test_tags_split_and_shopify_id(self):
+        doc = map_customer(_bvi_customer())
+        assert doc["tags"] == ["vip", "newsletter"]
+        assert doc["shopify_customer_id"] == "gid://shopify/Customer/555"
+
+    def test_blank_shopify_id_omitted(self):
+        doc = map_customer(_bvi_customer({"shopifyCustomerId": None}))
+        assert "shopify_customer_id" not in doc
+
+    def test_original_creation_time_preserved(self):
+        """created_at carries the BVI creation time (runner uses it on INSERT
+        only) so the customer sorts into their true place in history."""
+        doc = map_customer(_bvi_customer())
+        assert doc["created_at"] == datetime(2024, 5, 1, 10, 0, 0)
+
+    def test_name_falls_back_when_blank(self):
+        doc = map_customer(
+            _bvi_customer({"firstName": None, "lastName": None, "email": None})
+        )
+        assert doc["name"] == "9876543210"
+
+    def test_null_id_maps_to_blank_key(self):
+        doc = map_customer({})
+        assert doc["bvi_customer_id"] == ""
+
+
+class TestCustomerEnrichment:
+    """customer_enrichment_fields: the pure merge that ENRICHES a matched
+    existing IMS customer. Contract: fill EMPTY fields only, never overwrite a
+    non-empty IMS value, never touch identity/store/money keys, {} = no-op."""
+
+    def test_fills_missing_email_and_shopify_id(self):
+        existing = {"customer_id": "u-1", "name": "Asha", "mobile": "9876543210"}
+        update = customer_enrichment_fields(existing, map_customer(_bvi_customer()))
+        assert update["email"] == "Asha.Rao@Example.com"
+        assert update["shopify_customer_id"] == "gid://shopify/Customer/555"
+        assert update["billing_address"]["city"] == "Ranchi"
+
+    def test_never_overwrites_non_empty_ims_values(self):
+        existing = {
+            "customer_id": "u-1",
+            "name": "Asha R (POS)",
+            "mobile": "9876543210",
+            "email": "asha@ims.example",
+            "shopify_customer_id": "gid://shopify/Customer/999",
+            "billing_address": {"line1": "IMS Street"},
+        }
+        update = customer_enrichment_fields(existing, map_customer(_bvi_customer()))
+        assert "email" not in update
+        assert "shopify_customer_id" not in update
+        assert "billing_address" not in update
+        assert "name" not in update
+
+    def test_identity_and_money_keys_never_touched(self):
+        existing = {"customer_id": "u-1", "name": "X", "mobile": "9876543210"}
+        update = customer_enrichment_fields(existing, map_customer(_bvi_customer()))
+        for forbidden in (
+            "mobile", "phone", "customer_id", "source", "channel",
+            "loyalty_points", "store_credit", "total_purchases",
+            "home_store_id", "store_ids",
+        ):
+            assert forbidden not in update, forbidden
+
+    def test_bvi_link_stamped_once(self):
+        existing = {"customer_id": "u-1", "name": "X", "mobile": "9876543210"}
+        update = customer_enrichment_fields(existing, map_customer(_bvi_customer()))
+        assert update["bvi_customer_id"] == "cuid_cust_001"
+        # A second BVI row deduping onto the SAME (already linked) IMS customer
+        # keeps the original link.
+        already = {**existing, "bvi_customer_id": "cuid_cust_000",
+                   "email": "a@b.c", "shopify_customer_id": "s",
+                   "billing_address": {"line1": "x"}}
+        assert customer_enrichment_fields(already, map_customer(_bvi_customer())) == {}
+
+    def test_fully_enriched_match_is_a_noop(self):
+        mapped = map_customer(_bvi_customer())
+        existing = dict(mapped)  # everything already present
+        assert customer_enrichment_fields(existing, mapped) == {}
+
+    def test_name_filled_only_when_existing_blank(self):
+        existing = {"customer_id": "u-1", "name": "", "mobile": "9876543210"}
+        update = customer_enrichment_fields(existing, map_customer(_bvi_customer()))
+        assert update["name"] == "Asha Rao"
+
+
+# ===========================================================================
+# MAPPER 7: map_order (+ map_order_item, normalize_shopify_order_id)
+# ===========================================================================
+
+def _bvi_order(overrides: dict | None = None) -> dict:
+    base = {
+        "id": "cuid_order_001",
+        "shopifyOrderId": "5551112223334",
+        "orderNumber": "1042",
+        "name": "#1042",
+        "email": "asha.rao@example.com",
+        "phone": "+91 98765 43210",
+        "totalPrice": 6500.0,
+        "subtotalPrice": 6500.0,
+        "totalTax": 309.52,
+        "totalDiscount": 0.0,
+        "currency": "INR",
+        "financialStatus": "paid",
+        "fulfillmentStatus": "fulfilled",
+        "orderStatus": "CLOSED",
+        "customerId": "cuid_cust_001",
+        "shippingAddress": '{"city": "Ranchi", "province": "Jharkhand"}',
+        "billingAddress": None,
+        "note": None,
+        "tags": "online, prepaid",
+        "source": "web",
+        "cancelReason": None,
+        "cancelledAt": None,
+        "closedAt": datetime(2024, 6, 5, 12, 0, 0),
+        "processedAt": datetime(2024, 6, 1, 9, 30, 0),
+        "createdAt": datetime(2024, 6, 1, 9, 31, 0),
+        "updatedAt": datetime(2024, 6, 5, 12, 0, 0),
+    }
+    if overrides:
+        base.update(overrides)
+    return base
+
+
+def _bvi_line_items() -> list:
+    return [
+        {
+            "id": "cuid_line_001",
+            "orderId": "cuid_order_001",
+            "productId": "cuid_product_001",
+            "variantId": "gid://shopify/ProductVariant/9876",
+            "shopifyLineItemId": "111",
+            "title": "BOSS 1234 Rectangle Acetate Eyeglasses",
+            "variantTitle": "086 / 55",
+            "sku": "SP-BOSS-1234-086-55",
+            "quantity": 1,
+            "price": 6500.0,
+            "totalDiscount": 0.0,
+        },
+    ]
+
+
+class TestNormalizeShopifyOrderId:
+    def test_bare_numeric_passthrough(self):
+        assert normalize_shopify_order_id("5551112223334") == "5551112223334"
+
+    def test_gid_form_stripped_to_bare(self):
+        """The webhook ingest stores str(payload['id']) -- the BARE numeric --
+        so its Layer-1 dedupe guard only matches if we store the same form."""
+        assert (
+            normalize_shopify_order_id("gid://shopify/Order/5551112223334")
+            == "5551112223334"
+        )
+
+    def test_blank_and_none(self):
+        assert normalize_shopify_order_id(None) == ""
+        assert normalize_shopify_order_id("") == ""
+
+
+class TestMapOrderItem:
+    def test_display_shape_and_math(self):
+        item = map_order_item(_bvi_line_items()[0])
+        assert item["item_id"] == "bvi-cuid_line_001"
+        assert item["product_name"] == "BOSS 1234 Rectangle Acetate Eyeglasses"
+        assert item["sku"] == "SP-BOSS-1234-086-55"
+        assert item["quantity"] == 1
+        assert item["unit_price"] == 6500.0
+        assert item["item_total"] == 6500.0
+        # product_id is the BVI CUID == imported catalog_products.id
+        assert item["product_id"] == "cuid_product_001"
+
+    def test_no_tax_fields_fabricated(self):
+        """IMS never invoiced these lines: minting hsn/gst per line would
+        fabricate a GST liability that was settled outside IMS books."""
+        item = map_order_item(_bvi_line_items()[0])
+        for forbidden in ("hsn_code", "gst_rate", "taxable_value", "tax_amount"):
+            assert forbidden not in item, forbidden
+
+    def test_line_discount_reduces_total_never_negative(self):
+        row = {**_bvi_line_items()[0], "quantity": 2, "price": 100.0,
+               "totalDiscount": 250.0}
+        item = map_order_item(row)
+        assert item["item_total"] == 0.0  # clamped, never negative
+
+
+class TestMapOrder:
+    def test_status_historical_never_counted(self):
+        """THE core invariant: status='HISTORICAL' is (a) listed by the
+        customer-360 orders endpoint (which applies NO status filter) and
+        (b) excluded from every revenue aggregation: it is outside the
+        inventory/crm _SOLD_STATUSES $in sets by construction, and inside
+        every $nin excluded-status list (finance/ticker/reports/payout/
+        collection_insights/oracle/order_repository)."""
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["status"] == "HISTORICAL"
+        assert doc["historical"] is True
+        assert doc["source"] == "bvi_import"
+        assert doc["channel"] == "ONLINE"
+
+    def test_historical_status_is_pinned_in_finance_exclusions(self):
+        """Cross-check the other half of the mechanism: the finance central
+        excluded-status list actually carries HISTORICAL (the ticker mirror is
+        pinned in test_finance_aggregation_correctness)."""
+        from api.routers.finance import _EXCLUDED_ORDER_STATUSES
+
+        assert "HISTORICAL" in _EXCLUDED_ORDER_STATUSES
+
+    def test_bvi_cancelled_order_stays_cancelled(self):
+        doc = map_order(
+            _bvi_order({"cancelledAt": datetime(2024, 7, 1), "orderStatus": "CANCELLED"}),
+            _bvi_line_items(),
+        )
+        assert doc["status"] == "CANCELLED"
+
+    def test_no_invoice_no_payments_no_balance(self):
+        """Settled OUTSIDE IMS books: IMS minted no invoice, holds no
+        receivable, and Tally export / AR / cash-flow can never pick it up."""
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["invoice_number"] is None
+        assert doc["payments"] == []
+        assert doc["balance_due"] == 0.0
+
+    def test_idempotency_keys_present(self):
+        """The runner upserts on bvi_order_id; order_id/order_number/item ids
+        are all derived-stable so a re-run rewrites identical values."""
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["bvi_order_id"] == "cuid_order_001"
+        assert doc["order_id"] == "bvi-cuid_order_001"
+        assert doc["order_number"] == "BVI-1042"
+        # Mapping twice yields the same identity fields (no fresh uuids).
+        doc2 = map_order(_bvi_order(), _bvi_line_items())
+        assert doc2["order_id"] == doc["order_id"]
+        assert doc2["items"][0]["item_id"] == doc["items"][0]["item_id"]
+
+    def test_shopify_order_id_bare_form_for_webhook_idempotency(self):
+        """Stored in the SAME bare-numeric form shopify_ingest writes, so its
+        Layer-1 guard (find_one on orders.shopify_order_id) treats a future
+        webhook replay of this order as a duplicate -- no second order, no
+        invoice, no stock decrement."""
+        doc = map_order(
+            _bvi_order({"shopifyOrderId": "gid://shopify/Order/5551112223334"}),
+            _bvi_line_items(),
+        )
+        assert doc["shopify_order_id"] == "5551112223334"
+
+    def test_blank_shopify_order_id_omitted(self):
+        """uniq_shopify_order_id is UNIQUE+partial on $type string: '' would
+        dup-collide across docs, so blanks are omitted entirely."""
+        doc = map_order(_bvi_order({"shopifyOrderId": None}), _bvi_line_items())
+        assert "shopify_order_id" not in doc
+
+    def test_payment_and_fulfillment_status_mapping(self):
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["payment_status"] == "PAID"
+        assert doc["fulfillment_status"] == "FULFILLED"
+        assert doc["amount_paid"] == 6500.0
+        # Raw BVI statuses preserved for audit.
+        assert doc["bvi_financial_status"] == "paid"
+        assert doc["bvi_order_status"] == "CLOSED"
+
+    def test_blank_financial_status_defaults_paid(self):
+        """Pre-IMS history is settled by definition (owner decision)."""
+        doc = map_order(_bvi_order({"financialStatus": None}), _bvi_line_items())
+        assert doc["payment_status"] == "PAID"
+
+    def test_customer_linkage_and_phone_snapshot(self):
+        """customer_id = the deduped IMS id the runner resolves; the phone
+        snapshot is NORMALIZED so customer-360 (which ORs customer_id and
+        customer_phone) matches either way."""
+        cust = {"id": "cuid_cust_001", "firstName": "Asha", "lastName": "Rao",
+                "email": "asha.rao@example.com", "phone": "+91 98765 43210"}
+        doc = map_order(_bvi_order(), _bvi_line_items(),
+                        ims_customer_id="bvi-cuid_cust_001", customer_row=cust)
+        assert doc["customer_id"] == "bvi-cuid_cust_001"
+        assert doc["customer_name"] == "Asha Rao"
+        assert doc["customer_phone"] == "9876543210"
+
+    def test_guest_order_keeps_null_customer_link(self):
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["customer_id"] is None
+
+    def test_money_totals_from_bvi(self):
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["grand_total"] == 6500.0
+        assert doc["subtotal"] == 6500.0
+        assert doc["tax_amount"] == 309.52
+        assert doc["currency"] == "INR"
+
+    def test_original_order_time_preserved(self):
+        """created_at = processedAt (true Shopify order time), which the
+        runner moves into $setOnInsert so re-runs never shift it."""
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["created_at"] == datetime(2024, 6, 1, 9, 30, 0)
+
+    def test_addresses_parsed_from_json_strings(self):
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        assert doc["shipping_address"] == {"city": "Ranchi", "province": "Jharkhand"}
+        assert doc["billing_address"] is None
+
+    def test_no_stock_or_task_side_channel_fields(self):
+        """Pure historical record: nothing for the stock decrement / task
+        engine to key on."""
+        doc = map_order(_bvi_order(), _bvi_line_items())
+        for forbidden in ("fulfillment_breakdown", "fulfillment_stores",
+                          "rx_pending", "fulfillment_hold"):
+            assert forbidden not in doc, forbidden
+
+    def test_null_id_maps_to_blank_key(self):
+        doc = map_order({}, [])
+        assert doc["bvi_order_id"] == ""
+
+
+# ===========================================================================
+# Registration + webhook status-sync guard
+# ===========================================================================
+
+class TestEntityRegistration:
+    def test_customers_and_orders_registered(self):
+        assert "customers" in _ALL_ENTITIES
+        assert "orders" in _ALL_ENTITIES
+
+    def test_customers_run_before_orders(self):
+        """Orders link to the customer ids the customers leg deduped."""
+        assert _ALL_ENTITIES.index("customers") < _ALL_ENTITIES.index("orders")
+
+
+class _GuardColl:
+    """Minimal orders collection: find_one returns the canned doc; update_one
+    records that a write happened (the guard must prevent it)."""
+
+    def __init__(self, doc):
+        self._doc = doc
+        self.updated = []
+
+    def find_one(self, *_a, **_k):
+        return self._doc
+
+    def update_one(self, flt, update, **_k):
+        self.updated.append((flt, update))
+
+
+class _GuardDB:
+    def __init__(self, coll):
+        self._coll = coll
+
+    def get_collection(self, _name):
+        return self._coll
+
+
+class TestHistoricalStatusSyncGuard:
+    """A late Shopify orders/updated webhook for an imported HISTORICAL order
+    must NOT flip its status (that would silently start counting it as IMS
+    revenue). online_order_mapper._sync_existing_order_status skips them."""
+
+    def test_bvi_import_order_is_never_status_synced(self):
+        from api.services.online_order_mapper import _sync_existing_order_status
+
+        coll = _GuardColl(
+            {"order_id": "bvi-x", "shopify_order_id": "555",
+             "status": "HISTORICAL", "historical": True, "source": "bvi_import"}
+        )
+        synced = _sync_existing_order_status(
+            _GuardDB(coll), "555",
+            {"financial_status": "paid", "fulfillment_status": "fulfilled"},
+        )
+        assert synced is False
+        assert coll.updated == []
+
+    def test_live_shopify_order_still_syncs(self):
+        from api.services.online_order_mapper import _sync_existing_order_status
+
+        coll = _GuardColl(
+            {"order_id": "o-1", "shopify_order_id": "777",
+             "status": "CONFIRMED", "source": "shopify", "grand_total": 100.0}
+        )
+        synced = _sync_existing_order_status(
+            _GuardDB(coll), "777",
+            {"financial_status": "paid", "fulfillment_status": "fulfilled"},
+        )
+        assert synced is True
+        assert len(coll.updated) == 1
+        assert coll.updated[0][1]["$set"]["status"] == "DELIVERED"

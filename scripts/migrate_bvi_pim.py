@@ -2,7 +2,7 @@
 """
 IMS 2.0 -- BVI PIM Migration: Postgres (BVI) -> Mongo (IMS)
 ============================================================
-Migrates the five PIM entities from the BVI Next.js/Postgres catalog into
+Migrates the seven BVI entities from the BVI Next.js/Postgres catalog into
 the IMS Mongo collections built in BVI Phases 1-4:
 
   Product              -> catalog_products   (parent PIM master; runs FIRST)
@@ -10,6 +10,41 @@ the IMS Mongo collections built in BVI Phases 1-4:
   Collection+CP        -> ecom_collections   (embedded products[{sku,position}])
   Menu+MenuItem        -> ecom_menus         (recursive items tree)
   ProductImage+Variant -> product_images     (kind/status/url/alt/position)
+  Customer             -> customers          (DEDUPE by normalized mobile/email;
+                                              ENRICH matches, never duplicate)
+  Order+OrderLineItem  -> orders             (HISTORICAL records; runs LAST)
+
+CUSTOMERS LEG (dedupe contract)
+-------------------------------
+An IMS customer matching the BVI row (by canonical bare-10-digit mobile FIRST,
+then case-insensitive email) is ENRICHED in place: shopify_customer_id and any
+MISSING fields are filled; a non-empty IMS value is NEVER overwritten and NO
+duplicate is created. Unmatched rows become new docs tagged source="bvi_import"
+with the same canonical skeleton shape customer_service._build_skeleton mints
+(mobile normalized exactly like the IMS write path: api/services/phone.py).
+
+ORDERS LEG SAFETY (pre-IMS history; finance must NEVER count these)
+-------------------------------------------------------------------
+The 9 BVI orders were transacted + settled OUTSIDE IMS books (Shopify era,
+pre-migration). They are imported as PURE historical records so they (a) show
+in the customer's order history (customers.py get_customer_orders applies NO
+status filter) but (b) never count in IMS revenue / GST / P&L:
+  * status="HISTORICAL" -- a terminal, display-only status. Every $in-based
+    sold-status site (inventory/crm _SOLD_STATUSES) excludes it naturally, and
+    "HISTORICAL" is added to every $nin-based excluded-status list (finance.py
+    _EXCLUDED_ORDER_STATUSES + ticker/reports/payout/collection_insights/
+    oracle/order_repository) -- a BVI order that was cancelled in Shopify keeps
+    the honest CANCELLED status instead.
+  * source="bvi_import" + historical=True belt-and-braces markers.
+  * NO invoice_number (IMS never invoiced these), NO stock decrement, NO tasks.
+  * shopify_order_id is stored in the BARE-numeric form the webhook ingest
+    uses, so shopify_ingest's Layer-1 guard treats any future webhook replay of
+    these orders as a duplicate (naturally idempotent); a live webhook-created
+    order with the same shopify_order_id is NEVER clobbered (pre-checked, the
+    unique partial index uniq_shopify_order_id is the hard backstop).
+    online_order_mapper._sync_existing_order_status also SKIPS historical
+    docs so a late orders/updated webhook cannot flip them into a counted
+    status.
 
 PRODUCTS LEG SAFETY (billing exposure)
 --------------------------------------
@@ -53,17 +88,18 @@ Usage
     --db ims_2_0
 
 --entities accepts a comma-separated subset of:
-products,variants,collections,menus,images (default: all five, products FIRST
-since variants reference their parent product).
+products,variants,collections,menus,images,customers,orders (default: all
+seven; products FIRST since variants reference their parent product, customers
+BEFORE orders since orders link to the deduped customer ids).
 
 Exit codes: 0 = success or dry-run OK;  1 = fatal import/connection error.
 
 Notes
 -----
-- The 5 mapper functions (map_product, map_variant, map_collection, map_menu,
-  map_image) are PURE functions: (pg_row_dict) -> mongo_doc.  They have no side
-  effects and are unit-testable without a database (see
-  backend/tests/test_migrate_bvi_pim.py).
+- The 7 mapper functions (map_product, map_variant, map_collection, map_menu,
+  map_image, map_customer, map_order) are PURE functions:
+  (pg_row_dict) -> mongo_doc.  They have no side effects and are unit-testable
+  without a database (see backend/tests/test_migrate_bvi_pim.py).
 - No emojis -- Windows cp1252 safe.
 """
 from __future__ import annotations
@@ -72,6 +108,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -747,6 +784,373 @@ def map_product(
 
 
 # ---------------------------------------------------------------------------
+# MAPPER 6: Customer -> customers
+# ---------------------------------------------------------------------------
+
+def _default_online_store_id() -> str:
+    """The store bucket ONLINE customers/orders are homed to. Mirrors the
+    fallback chain tail of online_order_mapper._resolve_online_store_id."""
+    return _str(os.getenv("ONLINE_STORE_ID")) or "BV-ONLINE-01"
+
+
+def _normalize_mobile_safe(phone: Any) -> str:
+    """Canonical Indian-mobile normalization -- the SAME rules the IMS write
+    path uses (api/services/phone.normalize_indian_mobile), so a BVI phone
+    dedupes against natively-created customers. Fail-soft: an unparseable /
+    foreign number returns '' (no fake mobile is ever stored). The inline
+    fallback is an exact copy of the canonical rules for a stripped
+    standalone checkout; the canonical module wins whenever importable."""
+    raw = _str(phone)
+    if not raw:
+        return ""
+    try:
+        _backend_on_path()
+        from api.services.phone import normalize_indian_mobile  # noqa: PLC0415
+
+        try:
+            return normalize_indian_mobile(raw) or ""
+        except ValueError:
+            return ""
+    except ImportError:
+        digits = re.sub(r"\D", "", raw)
+        if not digits:
+            return ""
+        if len(digits) == 13 and digits.startswith("091"):
+            digits = digits[3:]
+        elif len(digits) == 12 and digits.startswith("91"):
+            digits = digits[2:]
+        elif len(digits) == 11 and digits.startswith("0"):
+            digits = digits[1:]
+        return digits if re.match(r"^[6-9]\d{9}$", digits) else ""
+
+
+def map_customer(row: Dict) -> Dict:
+    """Pure mapper: BVI Customer PG row -> IMS customers doc (create shape).
+
+    Key design decisions:
+    - customer_id is STABLE ("bvi-" + the BVI CUID) so re-runs are idempotent
+      on every field, not just the upsert key.
+    - mobile is normalized EXACTLY like the IMS write path (canonical
+      api/services/phone.py); stored under BOTH `mobile` and `phone` (the
+      repo's find_by_mobile ORs the two), verbatim input kept in raw_phone.
+      An unparseable number stores '' -- mirroring the online_order_mapper
+      email-only create -- so a junk number can never fake-dedupe.
+    - Skeleton mirrors customer_service._build_skeleton (all four store keys,
+      loyalty/credit/purchases zeroed, patients []) + the Shopify linkage
+      (shopify_customer_id, email) online_order_mapper stamps.
+    - BVI's own lifetime stats land in bvi_orders_count / bvi_total_spent
+      (NOT the IMS total_purchases counter -- IMS counters stay untouched).
+    - Natural key: bvi_customer_id. The runner dedupes by normalized mobile
+      then case-insensitive email BEFORE creating (see run_customers).
+    """
+    bvi_id = _str(row.get("id"))
+    first = _str(row.get("firstName"))
+    last = _str(row.get("lastName"))
+    name = " ".join(x for x in (first, last) if x)
+    raw_phone = _str(row.get("phone"))
+    mobile = _normalize_mobile_safe(raw_phone)
+    email = _str(row.get("email"))
+    store = _default_online_store_id()
+    tags_list = [t.strip() for t in _str(row.get("tags")).split(",") if t.strip()]
+
+    billing: Dict[str, Any] = {}
+    for key, col in (
+        ("line1", "address1"),
+        ("line2", "address2"),
+        ("city", "city"),
+        ("state", "state"),
+        ("pincode", "zip"),
+        ("country", "country"),
+    ):
+        val = _str(row.get(col))
+        if val:
+            billing[key] = val
+
+    doc: Dict[str, Any] = {
+        # Identity (stable across re-runs; bvi_customer_id is the natural key)
+        "customer_id": f"bvi-{bvi_id}",
+        "bvi_customer_id": bvi_id,
+        "name": name or email or mobile or "Online Customer",
+        # Canonical phone shape (both keys, like every IMS door)
+        "mobile": mobile,
+        "phone": mobile,
+        "raw_phone": raw_phone,
+        "email": email,
+        # Canonical skeleton (mirrors customer_service._build_skeleton)
+        "customer_type": "B2C",
+        "source": "bvi_import",
+        "channel": "ONLINE",
+        "home_store_id": store,
+        "preferred_store_id": store,
+        "primary_store_id": store,
+        "store_ids": [store],
+        "is_active": True,
+        "loyalty_points": 0,
+        "store_credit": 0.0,
+        "total_purchases": 0,
+        "patients": [],
+        # Shopify-era metadata (informational; NOT the IMS consent flag)
+        "accepts_marketing": _bool(row.get("acceptsMarketing"), False),
+        "tax_exempt": _bool(row.get("taxExempt"), False),
+        "tags": tags_list,
+        # BVI lifetime stats kept under bvi_* so IMS counters stay honest
+        "bvi_orders_count": _int(row.get("ordersCount")),
+        "bvi_total_spent": _float(row.get("totalSpent")),
+        "shopify_customer_id": _str(row.get("shopifyCustomerId")),
+        # Audit / reversibility
+        "imported_at": _now_utc().isoformat(),
+        "migrated_at": _now_utc(),
+        # Historical creation time (run_customers uses it on INSERT only)
+        "created_at": row.get("createdAt") or _now_utc(),
+        "updated_at": _now_utc(),
+    }
+    if billing:
+        doc["billing_address"] = billing
+    note = _str(row.get("note"))
+    if note:
+        doc["note"] = note
+    if not doc["shopify_customer_id"]:
+        doc.pop("shopify_customer_id", None)
+    return doc
+
+
+# Fields a matched existing IMS customer may be ENRICHED with (target empty
+# only). Deliberately EXCLUDES identity/money/store keys: mobile, phone,
+# source, channel, store homing, loyalty_points, store_credit and
+# total_purchases are NEVER touched on an existing record.
+_CUSTOMER_ENRICH_FIELDS = (
+    "email",
+    "shopify_customer_id",
+    "billing_address",
+)
+
+
+def customer_enrichment_fields(existing: Dict, mapped: Dict) -> Dict:
+    """Pure merge: the $set payload that ENRICHES an existing IMS customer
+    with BVI data. Never overwrites a non-empty IMS value; never touches
+    identity (mobile/phone), source/channel, store homing or money counters.
+    Returns {} when there is nothing to add (caller then skips the write)."""
+    update: Dict[str, Any] = {}
+    for field in _CUSTOMER_ENRICH_FIELDS:
+        new_val = mapped.get(field)
+        if new_val in (None, "", [], {}):
+            continue
+        if existing.get(field) in (None, "", [], {}):
+            update[field] = new_val
+    # Name only when the existing record has none (placeholder-free rule:
+    # an existing non-empty name always wins).
+    if not _str(existing.get("name")) and _str(mapped.get("name")):
+        update["name"] = mapped["name"]
+    # BVI linkage stamped once (first BVI row to match wins; a second BVI row
+    # deduping onto the same IMS customer keeps the original link).
+    if not _str(existing.get("bvi_customer_id")) and _str(mapped.get("bvi_customer_id")):
+        update["bvi_customer_id"] = mapped["bvi_customer_id"]
+        update["bvi_orders_count"] = mapped.get("bvi_orders_count", 0)
+        update["bvi_total_spent"] = mapped.get("bvi_total_spent", 0.0)
+        update["bvi_enriched_at"] = _now_utc()
+    return update
+
+
+# ---------------------------------------------------------------------------
+# MAPPER 7: Order + OrderLineItem -> orders  (HISTORICAL records; runs LAST)
+# ---------------------------------------------------------------------------
+
+# BVI financialStatus -> canonical IMS payment_status (same table as
+# online_order_mapper._PAYMENT_STATUS_MAP). Blank -> PAID: these orders are
+# pre-IMS history, already settled outside IMS books (owner decision).
+_BVI_FINANCIAL_TO_PAYMENT = {
+    "paid": "PAID",
+    "partially_paid": "PARTIAL",
+    "authorized": "UNPAID",
+    "pending": "UNPAID",
+    "voided": "CANCELLED",
+    "refunded": "REFUNDED",
+    "partially_refunded": "PARTIAL_REFUND",
+}
+
+# BVI fulfillmentStatus -> canonical IMS fulfillment_status (same table as
+# online_order_mapper._FULFILLMENT_STATUS_MAP).
+_BVI_FULFILLMENT_MAP = {
+    "fulfilled": "FULFILLED",
+    "partial": "PARTIAL",
+    "restocked": "RESTOCKED",
+    "": "UNFULFILLED",
+}
+
+
+def normalize_shopify_order_id(v: Any) -> str:
+    """Reduce a Shopify order id to the BARE numeric string form the webhook
+    ingest stores (shopify_ingest uses str(payload['id'])). BVI may keep the
+    gid form ('gid://shopify/Order/123...'); stripping it here means the
+    ingest Layer-1 guard (find_one on orders.shopify_order_id) matches our
+    imported doc, so a future webhook replay is naturally idempotent."""
+    s = _str(v)
+    if s.startswith("gid://"):
+        s = s.rsplit("/", 1)[-1]
+    return s
+
+
+def map_order_item(row: Dict) -> Dict:
+    """Pure mapper: BVI OrderLineItem row -> embedded IMS order item dict.
+
+    Display-shaped only (product_name/sku/qty/price/discount/item_total) --
+    deliberately NO hsn/gst/taxable fields: IMS never invoiced these orders,
+    so minting per-line tax would fabricate a GST liability that was settled
+    outside IMS books. product_id is the BVI Product CUID, which IS the
+    imported catalog_products.id (products leg), so the line links to the
+    real catalog record."""
+    qty = _int(row.get("quantity"), 1) or 1
+    unit_price = _float(row.get("price"))
+    line_discount = _float(row.get("totalDiscount"))
+    gross = round(unit_price * qty - line_discount, 2)
+    if gross < 0:
+        gross = 0.0
+    return {
+        "item_id": f"bvi-{_str(row.get('id'))}",
+        "product_id": _str(row.get("productId")) or None,
+        "product_name": _str(row.get("title")),
+        "variant_title": _str(row.get("variantTitle")) or None,
+        "sku": _str(row.get("sku")),
+        "quantity": qty,
+        "unit_price": unit_price,
+        "discount_percent": 0.0,
+        "discount_amount": line_discount,
+        "item_total": gross,
+        "shopify_line_item_id": _str(row.get("shopifyLineItemId")) or None,
+        "shopify_variant_id": _str(row.get("variantId")) or None,
+    }
+
+
+def map_order(
+    row: Dict,
+    item_rows: Optional[List[Dict]] = None,
+    ims_customer_id: Optional[str] = None,
+    customer_row: Optional[Dict] = None,
+) -> Dict:
+    """Pure mapper: BVI Order PG row (+ its OrderLineItem rows + the resolved
+    IMS customer id) -> IMS orders doc, as a PURE HISTORICAL record.
+
+    Key design decisions (see module docstring, ORDERS LEG SAFETY):
+    - status="HISTORICAL" (terminal, display-only; excluded from every
+      revenue/GST/P&L aggregation) -- except a BVI-cancelled order, which
+      keeps the honest "CANCELLED" (also excluded everywhere).
+    - invoice_number=None (IMS never minted a GST invoice for these),
+      payments=[] and balance_due=0.0 (settled outside IMS books) -- so AR,
+      cash-flow and Tally export can never pick them up.
+    - shopify_order_id normalized to the bare-numeric webhook form (omitted
+      entirely when blank: uniq_shopify_order_id is a UNIQUE partial index on
+      $type string, so a '' value would dup-collide across docs).
+    - customer_phone stores the NORMALIZED mobile so the customer-360 orders
+      endpoint (which ORs customer_id and customer_phone) matches even when
+      the customer link is missing.
+    - created_at = the ORIGINAL Shopify order time (processedAt, falling back
+      to createdAt) so the order sorts into its true place in history; the
+      runner moves it into $setOnInsert so re-runs never shift it.
+    - Natural key / upsert key: bvi_order_id.
+    """
+    bvi_id = _str(row.get("id"))
+    fin = _str(row.get("financialStatus")).lower()
+    ful = _str(row.get("fulfillmentStatus")).lower()
+    cancelled = bool(row.get("cancelledAt")) or (
+        _str(row.get("orderStatus")).upper() == "CANCELLED"
+    )
+
+    items = [map_order_item(r) for r in (item_rows or [])]
+    items_total = round(sum(_float(i.get("item_total")) for i in items), 2)
+
+    order_number = (
+        _str(row.get("orderNumber"))
+        or _str(row.get("name")).lstrip("#")
+        or bvi_id
+    )
+
+    grand_total = _float(row.get("totalPrice"))
+    payment_status = _BVI_FINANCIAL_TO_PAYMENT.get(fin, "PAID" if not fin else "UNPAID")
+
+    customer_name = ""
+    customer_email = _str(row.get("email"))
+    raw_phone = _str(row.get("phone"))
+    if customer_row:
+        customer_name = " ".join(
+            x
+            for x in (
+                _str(customer_row.get("firstName")),
+                _str(customer_row.get("lastName")),
+            )
+            if x
+        )
+        customer_email = customer_email or _str(customer_row.get("email"))
+        raw_phone = raw_phone or _str(customer_row.get("phone"))
+    customer_phone = _normalize_mobile_safe(raw_phone)
+    if not customer_name:
+        customer_name = customer_email or customer_phone or "Online Customer"
+
+    doc: Dict[str, Any] = {
+        # Identity (stable across re-runs; bvi_order_id is the upsert key)
+        "order_id": f"bvi-{bvi_id}",
+        "bvi_order_id": bvi_id,
+        "order_number": f"BVI-{order_number}",
+        # Channel + historical markers ((b): NEVER counted as IMS revenue)
+        "channel": "ONLINE",
+        "source": "bvi_import",
+        "historical": True,
+        "status": "CANCELLED" if cancelled else "HISTORICAL",
+        "payment_status": payment_status,
+        "fulfillment_status": _BVI_FULFILLMENT_MAP.get(ful, "UNFULFILLED"),
+        # Raw BVI statuses preserved verbatim for audit
+        "bvi_order_status": _str(row.get("orderStatus")),
+        "bvi_financial_status": fin,
+        "bvi_fulfillment_status": ful,
+        # Shopify linkage (bare-numeric; webhook-replay idempotency key)
+        "shopify_order_id": normalize_shopify_order_id(row.get("shopifyOrderId")),
+        "shopify_order_name": _str(row.get("name")) or None,
+        "store_id": _default_online_store_id(),
+        # Customer linkage (deduped IMS id resolved by the runner) + snapshot
+        "customer_id": ims_customer_id,
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "customer_email": customer_email,
+        # Lines + money (as BVI/Shopify recorded them; informational)
+        "items": items,
+        "subtotal": _float(row.get("subtotalPrice")) or items_total,
+        "tax_amount": _float(row.get("totalTax")),
+        "total_discount": _float(row.get("totalDiscount")),
+        "grand_total": grand_total,
+        "currency": _str(row.get("currency"), "INR"),
+        "pricing_model": "inclusive",
+        # NEVER invoiced by IMS; settled outside IMS books
+        "invoice_number": None,
+        "amount_paid": (
+            grand_total
+            if payment_status in ("PAID", "PARTIAL", "REFUNDED", "PARTIAL_REFUND")
+            else 0.0
+        ),
+        "balance_due": 0.0,
+        "payments": [],
+        # Addresses (BVI stores them as JSON strings)
+        "shipping_address": _json(row.get("shippingAddress")),
+        "billing_address": _json(row.get("billingAddress")),
+        # Meta
+        "note": _str(row.get("note")) or None,
+        "tags": [t.strip() for t in _str(row.get("tags")).split(",") if t.strip()],
+        "cancelled_at": row.get("cancelledAt"),
+        "closed_at": row.get("closedAt"),
+        "processed_at": row.get("processedAt"),
+        # Original order time (runner moves this into $setOnInsert)
+        "created_at": row.get("processedAt") or row.get("createdAt") or _now_utc(),
+        # Audit / reversibility
+        "imported_at": _now_utc().isoformat(),
+        "migrated_at": _now_utc(),
+    }
+    # uniq_shopify_order_id is UNIQUE+partial on $type string: omit blanks so
+    # the index skips these docs ('' would dup-collide, same gotcha as
+    # catalog_variants.store_barcode).
+    if not doc.get("shopify_order_id"):
+        doc.pop("shopify_order_id", None)
+    return doc
+
+
+# ---------------------------------------------------------------------------
 # Postgres connection (mirrors online_catalog._connect)
 # ---------------------------------------------------------------------------
 
@@ -804,9 +1208,14 @@ def _upsert_one(
     collection,
     filter_doc: Dict,
     doc: Dict,
+    created_at: Optional[datetime] = None,
 ) -> bool:
     """Idempotent upsert using update_one with upsert=True.
-    Returns True on success."""
+    Returns True on success.
+
+    `created_at` (optional) overrides the insert-time stamp -- the orders leg
+    passes the ORIGINAL Shopify order time so a historical order sorts into
+    its true place in history. Default (None) keeps the import time."""
     try:
         now = datetime.now(tz=timezone.utc)
         # created_at must live ONLY in $setOnInsert -- having it in BOTH $set
@@ -817,7 +1226,7 @@ def _upsert_one(
         doc["updated_at"] = now
         collection.update_one(
             filter_doc,
-            {"$set": doc, "$setOnInsert": {"created_at": now}},
+            {"$set": doc, "$setOnInsert": {"created_at": created_at or now}},
             upsert=True,
         )
         return True
@@ -1099,11 +1508,273 @@ def run_images(
     return {"entity": "images", "pg_rows": total_pg, "upserted": upserted, "dry_run": False}
 
 
+def run_customers(
+    pg_conn,
+    mongo_db,
+    *,
+    dry_run: bool,
+    sample_n: int = 3,
+) -> Dict:
+    """Migrate Customer rows to customers with DEDUPE-then-ENRICH semantics.
+
+    For every mapped BVI customer, the FIRST match wins in this order:
+      1. bvi_customer_id (already imported by a previous run -> idempotent);
+      2. normalized mobile against `phone` OR `mobile` (exactly the repo's
+         find_by_mobile contract);
+      3. case-insensitive exact email.
+    A match is ENRICHED (customer_enrichment_fields: only fills EMPTY fields,
+    never overwrites, never duplicates). No match -> a fresh doc tagged
+    source="bvi_import" is inserted with the BVI creation time preserved.
+    """
+    logger.info("[CUSTOMERS] fetching from Postgres...")
+    rows = _pg_fetchall(pg_conn, 'SELECT * FROM "Customer" ORDER BY id')
+    total = len(rows)
+    logger.info("[CUSTOMERS] %d rows found", total)
+
+    docs = [map_customer(r) for r in rows]
+    docs = [d for d in docs if d.get("bvi_customer_id")]  # guard null-id rows
+
+    if dry_run:
+        with_mobile = sum(1 for d in docs if d.get("mobile"))
+        with_email = sum(1 for d in docs if d.get("email"))
+        logger.info(
+            "[CUSTOMERS] [DRY-RUN] would process %d docs "
+            "(dedupe by mobile-then-email happens at commit time): "
+            "%d carry a valid Indian mobile, %d carry an email",
+            len(docs), with_mobile, with_email,
+        )
+        if docs:
+            logger.info("[CUSTOMERS] sample (first %d):", min(sample_n, len(docs)))
+            for d in docs[:sample_n]:
+                logger.info(
+                    "  bvi_id=%s name=%.30s mobile=%s email=%s shopify=%s",
+                    d.get("bvi_customer_id"),
+                    d.get("name", ""),
+                    d.get("mobile") or "-",
+                    d.get("email") or "-",
+                    "yes" if d.get("shopify_customer_id") else "no",
+                )
+        return {"entity": "customers", "pg_rows": total, "upserted": 0, "dry_run": True}
+
+    coll = mongo_db["customers"]
+    created = enriched = unchanged = failed = 0
+    now = datetime.now(tz=timezone.utc)
+    for d in docs:
+        existing = None
+        try:
+            existing = coll.find_one({"bvi_customer_id": d["bvi_customer_id"]})
+            if existing is None and d.get("mobile"):
+                # Same contract as CustomerRepository.find_by_mobile.
+                existing = coll.find_one(
+                    {"$or": [{"phone": d["mobile"]}, {"mobile": d["mobile"]}]}
+                )
+            if existing is None and d.get("email"):
+                existing = coll.find_one(
+                    {"email": {"$regex": f"^{re.escape(d['email'])}$", "$options": "i"}}
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[CUSTOMERS] dedupe lookup failed for %s: %s",
+                           d.get("bvi_customer_id"), e)
+            failed += 1
+            continue
+
+        if existing is not None:
+            update = customer_enrichment_fields(existing, d)
+            if not update:
+                unchanged += 1
+                continue
+            update["updated_at"] = now
+            try:
+                coll.update_one({"_id": existing["_id"]}, {"$set": update})
+                enriched += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[CUSTOMERS] enrich failed for %s: %s",
+                               d.get("bvi_customer_id"), e)
+                failed += 1
+            continue
+
+        try:
+            coll.insert_one(dict(d))
+            created += 1
+        except Exception as e:  # noqa: BLE001
+            # E.g. a unique-mobile race / index edge: log + continue, never
+            # abort the whole leg for one row.
+            logger.warning("[CUSTOMERS] insert failed for %s: %s",
+                           d.get("bvi_customer_id"), e)
+            failed += 1
+
+    logger.info(
+        "[CUSTOMERS] created=%d enriched=%d unchanged=%d failed=%d (of %d)",
+        created, enriched, unchanged, failed, len(docs),
+    )
+    return {
+        "entity": "customers",
+        "pg_rows": total,
+        "upserted": created + enriched,
+        "created": created,
+        "enriched": enriched,
+        "unchanged": unchanged,
+        "failed": failed,
+        "dry_run": False,
+    }
+
+
+def _resolve_order_customer(coll, customer_row: Optional[Dict]) -> Optional[str]:
+    """The IMS customer_id for a BVI order's Customer row: by bvi_customer_id
+    first (the customers leg just wrote/enriched it), then normalized mobile,
+    then case-insensitive email. Fail-soft -> None (the order still carries
+    the name/phone snapshot, and customer-360 also matches on phone)."""
+    if coll is None or not customer_row:
+        return None
+    try:
+        found = coll.find_one({"bvi_customer_id": _str(customer_row.get("id"))})
+        if found is None:
+            mobile = _normalize_mobile_safe(customer_row.get("phone"))
+            if mobile:
+                found = coll.find_one(
+                    {"$or": [{"phone": mobile}, {"mobile": mobile}]}
+                )
+        if found is None:
+            email = _str(customer_row.get("email"))
+            if email:
+                found = coll.find_one(
+                    {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}}
+                )
+        if found:
+            return _str(found.get("customer_id")) or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ORDERS] customer resolve failed: %s", e)
+    return None
+
+
+def run_orders(
+    pg_conn,
+    mongo_db,
+    *,
+    dry_run: bool,
+    sample_n: int = 3,
+) -> Dict:
+    """Migrate Order + OrderLineItem rows to orders as HISTORICAL records
+    (runs LAST: orders link to the customer ids the customers leg deduped).
+
+    Safety (see map_order):
+      - upsert keyed on bvi_order_id;
+      - a LIVE (webhook-created, non-bvi_import) order with the same
+        shopify_order_id is NEVER clobbered -- the row is skipped loudly;
+      - NO stock decrement, NO invoice minting, NO task creation.
+    """
+    logger.info("[ORDERS] fetching from Postgres...")
+    rows = _pg_fetchall(pg_conn, 'SELECT * FROM "Order" ORDER BY "createdAt"')
+    item_rows = _pg_fetchall(
+        pg_conn, 'SELECT * FROM "OrderLineItem" ORDER BY "orderId", id'
+    )
+    cust_rows = _pg_fetchall(pg_conn, 'SELECT * FROM "Customer" ORDER BY id')
+    total = len(rows)
+    logger.info(
+        "[ORDERS] %d orders, %d line items, %d customers joined",
+        total, len(item_rows), len(cust_rows),
+    )
+
+    items_by_order: Dict[str, List[Dict]] = {}
+    for ir in item_rows:
+        items_by_order.setdefault(_str(ir.get("orderId")), []).append(ir)
+    cust_by_id: Dict[str, Dict] = {_str(c.get("id")): c for c in cust_rows}
+
+    customers_coll = None
+    if not dry_run and mongo_db is not None:
+        customers_coll = mongo_db["customers"]
+
+    docs: List[Dict] = []
+    for r in rows:
+        customer_row = cust_by_id.get(_str(r.get("customerId")))
+        ims_customer_id = _resolve_order_customer(customers_coll, customer_row)
+        docs.append(
+            map_order(
+                r,
+                items_by_order.get(_str(r.get("id")), []),
+                ims_customer_id=ims_customer_id,
+                customer_row=customer_row,
+            )
+        )
+    docs = [d for d in docs if d.get("bvi_order_id")]  # guard null-id rows
+
+    if dry_run:
+        logger.info(
+            "[ORDERS] [DRY-RUN] would upsert %d HISTORICAL docs (keyed on "
+            "bvi_order_id; customer ids resolve at commit time)",
+            len(docs),
+        )
+        if docs:
+            logger.info("[ORDERS] sample (first %d):", min(sample_n, len(docs)))
+            for d in docs[:sample_n]:
+                logger.info(
+                    "  order=%s status=%s total=%s items=%d shopify=%s customer=%.30s",
+                    d.get("order_number"),
+                    d.get("status"),
+                    d.get("grand_total"),
+                    len(d.get("items") or []),
+                    "yes" if d.get("shopify_order_id") else "no",
+                    d.get("customer_name", ""),
+                )
+        return {"entity": "orders", "pg_rows": total, "upserted": 0, "dry_run": True}
+
+    coll = mongo_db["orders"]
+    upserted = skipped_live = 0
+    for d in docs:
+        sid = d.get("shopify_order_id")
+        if sid:
+            live = None
+            try:
+                live = coll.find_one(
+                    {"shopify_order_id": sid, "source": {"$ne": "bvi_import"}}
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[ORDERS] live-order pre-check failed for %s: %s",
+                               sid, e)
+            if live:
+                # A webhook already booked this Shopify order as a REAL IMS
+                # order (with invoice + revenue). NEVER overwrite it with a
+                # historical record; the uniq_shopify_order_id index would
+                # also physically block the insert.
+                logger.warning(
+                    "[ORDERS] SKIP bvi_order_id=%s: shopify_order_id=%s is "
+                    "already a LIVE IMS order (%s) -- not clobbering",
+                    d.get("bvi_order_id"), sid, live.get("order_id"),
+                )
+                skipped_live += 1
+                continue
+        # Original Shopify order time -> $setOnInsert (stable across re-runs).
+        hist_created = d.pop("created_at", None)
+        if _upsert_one(
+            coll, {"bvi_order_id": d["bvi_order_id"]}, d, created_at=hist_created
+        ):
+            upserted += 1
+    logger.info(
+        "[ORDERS] upserted %d / %d (skipped %d already-live)",
+        upserted, len(docs), skipped_live,
+    )
+    return {
+        "entity": "orders",
+        "pg_rows": total,
+        "upserted": upserted,
+        "skipped_live": skipped_live,
+        "dry_run": False,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-_ALL_ENTITIES = ("products", "variants", "collections", "menus", "images")
+_ALL_ENTITIES = (
+    "products",
+    "variants",
+    "collections",
+    "menus",
+    "images",
+    "customers",
+    "orders",
+)
 
 
 def main() -> None:
@@ -1126,10 +1797,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--entities",
-        default="products,variants,collections,menus,images",
+        default="products,variants,collections,menus,images,customers,orders",
         help="Comma-separated subset to migrate "
-             "(products,variants,collections,menus,images). Default: all, "
-             "products first (variants reference their parent product).",
+             "(products,variants,collections,menus,images,customers,orders). "
+             "Default: all; products first (variants reference their parent "
+             "product), customers before orders (orders link to the deduped "
+             "customer ids).",
     )
     parser.add_argument(
         "--pg-url",
@@ -1218,6 +1891,8 @@ def main() -> None:
         "collections": run_collections,
         "menus": run_menus,
         "images": run_images,
+        "customers": run_customers,
+        "orders": run_orders,
     }
     for entity in entities:
         try:

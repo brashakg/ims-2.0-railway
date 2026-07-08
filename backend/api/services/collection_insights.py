@@ -436,7 +436,7 @@ def _movement_pipeline(
 ) -> List[Dict]:
     match: Dict[str, Any] = {
         "created_at": {"$gte": cutoff},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+        "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         "items.product_id": {"$in": chunk},
     }
     if store_id:

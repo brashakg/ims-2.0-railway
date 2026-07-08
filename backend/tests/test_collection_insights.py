@@ -380,7 +380,8 @@ def test_movement_store_filter_reaches_the_match_stage():
     ci.movement_summary(db, {"product_ids": ["P1"]}, store_id="BV-02")
     match = coll.pipelines[0][0]["$match"]
     assert match["store_id"] == "BV-02"
-    assert match["status"] == {"$nin": ["CANCELLED", "DRAFT"]}
+    # HISTORICAL = pre-IMS imported order (bvi_import) -- never movement/revenue.
+    assert match["status"] == {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
     # the day sub-group is IST-truncated
     gid = coll.pipelines[0][3]["$group"]["_id"]
     assert gid["day"]["$dateTrunc"]["timezone"] == "Asia/Kolkata"
