@@ -1760,7 +1760,17 @@ def _store_entity(db, store_id: str) -> str:
 
 
 def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
-    """Return the GSTIN the entity bills under in `state_code`; '' on miss."""
+    """Return the GSTIN the entity bills under in `state_code`; '' on miss.
+
+    STRICT state match only -- NO first-GSTIN fallback. The old gstins[0]
+    fallback could return a GSTIN from the WRONG state: on a same-entity
+    cross-state transfer with no destination-state GSTIN on file it stamped the
+    SENDER's own filing GSTIN as the recipient (a supply-to-self B2B row the
+    portal rejects), and the empty-recipient-GSTIN validation warning never
+    fired because the field wasn't empty. Returning '' keeps the miss LOUD:
+    reports._compute_gstr1 flags the bill and the portal export drops the row
+    instead of uploading a wrong counterparty.
+    """
     if db is None or not entity_id:
         return ""
     try:
@@ -1773,10 +1783,6 @@ def _entity_gstin_for_state(db, entity_id: str, state_code: str) -> str:
         for g in entity.get("gstins") or []:
             if str(g.get("state_code") or g.get("state") or "")[:2] == state_code:
                 return str(g.get("gstin") or "")
-        # Fall back to any GSTIN registered under this entity.
-        gstins = entity.get("gstins") or []
-        if gstins:
-            return str(gstins[0].get("gstin") or "")
     except Exception as exc:  # noqa: BLE001 - fail-soft
         logger.warning(
             "[TRANSFER] GSTIN lookup failed entity=%s state=%s: %s",
@@ -1800,6 +1806,134 @@ def _tax_split(tax: float, interstate: bool):
     half = round(tax / 2, 2)
     sgst = round(tax - half, 2)
     return half, sgst, 0.0
+
+
+def _bill_date_ist(completed_at_raw) -> str:
+    """IST wall-clock ISO string for the mirror bill's bill/invoice date.
+
+    transfer.completed_at is stamped with naive ``datetime.now()`` == the
+    server (UTC on Railway) wall clock, but the GST tax period is the IST
+    calendar month and the vendor-bill month windows (_itc_from_vendor_bills /
+    _transfer_outward_bills) compare these date STRINGS in calendar frame. So
+    the instant must be shifted to IST before it becomes the filing date --
+    otherwise a completion at 00:00-05:29 IST files one month EARLY relative to
+    the orders in the same return (which use ist_day_start_utc windows).
+
+    Naive input is treated as UTC (the codebase convention -- see utils/ist.py
+    module docstring). Fail-soft: unparseable/missing -> IST "now".
+    """
+    from datetime import timezone as _tz
+
+    from ..utils.ist import IST, now_ist_naive
+
+    try:
+        if completed_at_raw:
+            dt = datetime.fromisoformat(str(completed_at_raw))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt.astimezone(IST).replace(tzinfo=None).isoformat()
+    except Exception:  # noqa: BLE001 - fail-soft
+        pass
+    return now_ist_naive().isoformat()
+
+
+def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
+    """Per-line taxable + GST for a transfer mirror bill (NEW-GST-TRANSFER-RATES).
+
+    Resolves each transferred product's GST rate the SAME way the rest of the
+    app does -- gst_rates.resolve_gst_rate over the product master's hsn_code /
+    category (editable hsn_gst_master first, static table fallback) -- instead
+    of the old flat 18%. Frames / optical lenses / contact lenses are 5% under
+    GST 2.0; sunglasses / watches / accessories are 18%. A flat 18% over-taxed
+    the majority of an optical chain's stock moves AND fed the wrong number
+    into both entities' GST returns.
+
+    Line shape mirrors purchase_invoices lines (purchase_invoice_engine.
+    split_line_gst): {product_id, description, hsn, qty, unit_price, taxable,
+    gst_rate, cgst, sgst, igst, line_total}. Per-line values are rounded, so
+    header totals (the sums of these) == sum(lines) to the paisa -- the same
+    invariant compute_invoice keeps for real purchase invoices.
+
+    Quantity: quantity_received, USED AS-IS when the item carries it (the units
+    that actually arrived -- what the receiving side is billed for, mirroring
+    GRN accepted-qty billing). received == 0 means the line was SHORT-SHIPPED
+    and must NOT be billed (a `received or requested` fallback would bill the
+    full requested qty and hand the receiver ITC on goods never received).
+    quantity_requested is the fallback ONLY when the item has no
+    quantity_received field at all (legacy pre-receive docs). Lines with no
+    cost or no quantity are skipped (the caller falls back to the legacy
+    aggregate on total_value only when NO item carried usable cost data).
+
+    Fail-soft: any product-master lookup error degrades that line to the
+    app-wide resolve_gst_rate fallback (optical-dominant 5%); never raises.
+    """
+    from ..services.gst_rates import hsn_for_category, resolve_gst_rate
+    from ..services.purchase_invoice_engine import split_line_gst
+
+    try:
+        products_coll = db.get_collection("products") if db is not None else None
+    except Exception:  # noqa: BLE001 - fail-soft
+        products_coll = None
+
+    lines: List[Dict] = []
+    for item in transfer.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        # SHORT-SHIP: an explicit quantity_received (including 0) is
+        # authoritative; only a missing/None field falls back to requested.
+        qty_raw = item.get("quantity_received")
+        if qty_raw is None:
+            qty_raw = item.get("quantity_requested")
+        try:
+            qty = int(float(qty_raw or 0))
+        except (TypeError, ValueError):
+            qty = 0
+        try:
+            cost = float(item.get("unit_cost") or 0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        if qty <= 0 or cost <= 0:
+            continue
+
+        product = None
+        product_id = item.get("product_id")
+        if products_coll is not None and product_id:
+            try:
+                product = products_coll.find_one(
+                    {"product_id": product_id},
+                    {"_id": 0, "hsn_code": 1, "category": 1},
+                )
+            except Exception:  # noqa: BLE001 - fail-soft per line
+                product = None
+        product = product if isinstance(product, dict) else {}
+
+        category = item.get("category") or product.get("category")
+        hsn = str(
+            item.get("hsn_code")
+            or product.get("hsn_code")
+            or hsn_for_category(category)
+            or ""
+        ).strip()
+        rate = resolve_gst_rate(hsn_code=hsn or None, category=category)
+
+        taxable = round(qty * cost, 2)
+        split = split_line_gst(taxable, rate, interstate)
+        lines.append(
+            {
+                "product_id": product_id,
+                "description": item.get("product_name") or product_id,
+                "hsn": hsn or None,
+                "qty": float(qty),
+                "unit_price": round(cost, 2),
+                "taxable": split["taxable"],
+                "gst_rate": split["gst_rate"],
+                "cgst": split["cgst"],
+                "sgst": split["sgst"],
+                "igst": split["igst"],
+                "line_total": split["line_total"],
+            }
+        )
+    return lines
 
 
 def _book_mirror_purchase(transfer: Dict) -> None:
@@ -1854,41 +1988,84 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         return
 
     try:
-        # Value = total_value on the transfer (sum of unit_cost * qty for each line).
-        # Tax is computed at a fixed 18% (optics default: sunglasses/accessories) if
-        # no per-line tax rate is captured; the CA can correct the bill if needed.
-        # We store taxable_amount + tax_amount separately so the ITC register picks
-        # them up correctly via itc_reconcile.build_itc_register.
-        transfer_value = float(transfer.get("total_value") or 0)
-        # Fall back: compute from items if total_value is zero.
-        if transfer_value == 0:
-            for item in transfer.get("items") or []:
-                qty = int(
-                    float(
-                        item.get("quantity_received")
-                        or item.get("quantity_requested")
-                        or 0
-                    )
-                )
-                cost = float(item.get("unit_cost") or 0)
-                transfer_value += qty * cost
-        transfer_value = round(transfer_value, 2)
-
         # GST: detect intra/inter-state from the sending (supply) store's state
         # vs the receiving store's state (consistent with GST Act -- place of
         # supply = location of goods at time of supply for stock transfers within
         # the same taxpayer group treated as deemed sale under Sch I Entry 2).
-        from_state = _store_state_code(db, from_store_id)
-        to_state = _store_state_code(db, to_store_id)
+        # from_state / to_state were already resolved for the GSTIN-boundary gate
+        # above; reuse them here.
         interstate = bool(from_state and to_state and from_state != to_state)
 
-        # Standard 18% GST rate for accessories; the CA adjusts if different.
-        # Using 18% = 9+9 CGST+SGST (intra) or 18 IGST (inter).
-        # If no cost data, taxable = 0 and no tax either.
-        gst_rate = 0.18
-        taxable = transfer_value  # transfer_value is cost (ex-GST)
-        tax = round(taxable * gst_rate, 2)
-        cgst, sgst, igst = _tax_split(tax, interstate)
+        # NEW-GST-TRANSFER-RATES (GAP B): per-line taxable + GST at each
+        # product's REAL rate via gst_rates.resolve_gst_rate (was: flat 18% on
+        # the whole transfer value -- wrong for 5% frames/lenses). Header totals
+        # are sums of the ROUNDED per-line values, so header == sum(lines) to
+        # the paisa. These lines also feed the SENDER's GSTR-1 HSN summary
+        # (reports._compute_gstr1), so per-line hsn/rate precision here is what
+        # makes both entities' filings correct.
+        lines = _mirror_bill_lines(db, transfer, interstate)
+        if lines:
+            taxable = 0.0
+            cgst = 0.0
+            sgst = 0.0
+            igst = 0.0
+            for ln in lines:
+                taxable = round(taxable + ln["taxable"], 2)
+                cgst = round(cgst + ln["cgst"], 2)
+                sgst = round(sgst + ln["sgst"], 2)
+                igst = round(igst + ln["igst"], 2)
+            tax = round(cgst + sgst + igst, 2)
+        else:
+            # Legacy aggregate fallback: no usable per-item cost data (older
+            # transfer docs / cost-less lines). Value = total_value (sum of
+            # unit_cost * qty at request time). The rate resolves through the
+            # SAME resolve_gst_rate path with nothing known -> the app-wide
+            # optical-dominant default (5%, see gst_rates.DEFAULT_GST_RATE) --
+            # consistent with how POS bills an uncategorised item, replacing
+            # the old arbitrary flat 18%. The CA can correct the bill if the
+            # actual mix differs.
+            #
+            # SHORT-SHIP GUARD: the fallback fires ONLY when no item carried
+            # usable cost data. If cost-bearing items exist but produced no
+            # line, every one of them was received == 0 (short-shipped) -- the
+            # bill must then be ZERO, not the request-time total_value, or the
+            # receiver would claim ITC on goods that never arrived.
+            from ..services.gst_rates import resolve_gst_rate
+
+            has_costed_items = False
+            for _it in transfer.get("items") or []:
+                if not isinstance(_it, dict):
+                    continue
+                try:
+                    if float(_it.get("unit_cost") or 0) > 0:
+                        has_costed_items = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+
+            if has_costed_items:
+                taxable = 0.0
+            else:
+                taxable = round(float(transfer.get("total_value") or 0), 2)
+            fallback_rate = resolve_gst_rate()
+            tax = round(taxable * fallback_rate / 100.0, 2)
+            cgst, sgst, igst = _tax_split(tax, interstate)
+            if taxable > 0:
+                lines = [
+                    {
+                        "product_id": None,
+                        "description": "Stock transfer (aggregate -- no per-item cost data)",
+                        "hsn": None,
+                        "qty": 0.0,
+                        "unit_price": 0.0,
+                        "taxable": taxable,
+                        "gst_rate": fallback_rate,
+                        "cgst": cgst,
+                        "sgst": sgst,
+                        "igst": igst,
+                        "line_total": round(taxable + tax, 2),
+                    }
+                ]
 
         # Sending entity's GSTIN (acts as the "vendor" for the receiving entity).
         from_gstin = _entity_gstin_for_state(db, from_entity, from_state) or ""
@@ -1900,26 +2077,49 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         # Bill number mirrors the transfer number so it is traceable.
         bill_number = f"TRF/{transfer.get('transfer_number', transfer.get('id', ''))}"
         now_iso = datetime.now().isoformat()
+        # Filing date in IST frame (the GST tax period is the IST calendar
+        # month); completed_at is a naive-UTC stamp -- see _bill_date_ist.
+        bill_date_iso = _bill_date_ist(transfer.get("completed_at"))
 
         doc = {
             "bill_id": bill_id,
             "bill_number": bill_number,
             "invoice_number": bill_number,
-            "bill_date": transfer.get("completed_at") or now_iso,
-            "invoice_date": transfer.get("completed_at") or now_iso,
+            "bill_date": bill_date_iso,
+            "invoice_date": bill_date_iso,
             # Link back to the transfer for traceability.
             "source_transfer_id": transfer.get("id"),
             "source_transfer_number": transfer.get("transfer_number"),
+            # NEW-GST-TRANSFER-OUTWARD: both stores of the move, so the SENDING
+            # store's GSTR-1/3B can pick this bill up as its outward deemed
+            # supply (reports._transfer_outward_bills keys on from_store_id) and
+            # the ITC lands ONLY in the RECEIVING store's GSTR-3B (to_store_id).
+            "from_store_id": from_store_id,
+            "to_store_id": to_store_id,
             # The "vendor" is the sending entity.
             "vendor_id": from_entity,
             "vendor_name": transfer.get("from_location_name") or from_entity,
             "vendor_gstin": from_gstin,
-            # Receiving entity's details.
+            # Receiving entity's details. recipient_entity_id matches the field
+            # purchase_invoices writes -- reports._itc_from_vendor_bills scopes
+            # GSTR-3B Table 4 on it, so without it the receiver's ITC claim from
+            # transfer bills silently dropped out of the return.
             "entity_id": to_entity,
+            "recipient_entity_id": to_entity,
+            "recipient_name": transfer.get("to_location_name") or to_entity,
             "recipient_gstin": to_gstin,
-            # GST place-of-supply: the sending store's state (Sch I deemed supply).
+            # GST place-of-supply: the sending store's state (Sch I deemed supply)
+            # -- what itc_reconcile compares against the recipient entity state.
             "place_of_supply": from_state,
+            # The recipient-side (legal outward) place of supply, mirroring the
+            # purchase_invoices field of the same name; the sender's GSTR-1 B2B
+            # row reports THIS as the place of supply.
+            "supply_place_recipient": to_state,
             "interstate": interstate,
+            # Per-line detail (hsn / gst_rate / taxable / cgst / sgst / igst per
+            # line, purchase_invoices line shape) -- feeds the sender's GSTR-1
+            # HSN summary with mixed-rate precision.
+            "lines": lines,
             # Amounts.
             "taxable_amount": taxable,
             "tax_amount": tax,

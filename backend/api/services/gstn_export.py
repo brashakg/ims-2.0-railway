@@ -191,7 +191,16 @@ def to_gstr1_json(
 
 
 def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
-    """Group B2B invoices by counterparty GSTIN (ctin)."""
+    """Group B2B invoices by counterparty GSTIN (ctin).
+
+    An invoice's `itms` list carries ONE itm_det block PER GST RATE. Rows that
+    provide per-rate detail (`rateLines`, e.g. transfer deemed-supply rows
+    mixing 5% frames with 18% sunglasses) emit one block per rate, each
+    self-consistent (txval * rt == tax) -- a single blended block (rt=5 with
+    the whole 5%+18% tax) fails the offline tool's item validation. Rows
+    without `rateLines` (normal order rows) keep the original single-item
+    shape unchanged.
+    """
     by_ctin: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         if not isinstance(r, dict):
@@ -204,14 +213,26 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
         pos = _state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
-        inv = {
-            "inum": str(r.get("invoiceNumber") or r.get("inum") or ""),
-            "idt": _fmt_date(r.get("invoiceDate") or r.get("idt") or ""),
-            "val": _num(r.get("invoiceValue") or r.get("val")),
-            "pos": pos,
-            "rchrg": "N",
-            "inv_typ": "R",
-            "itms": [
+        rate_lines = r.get("rateLines")
+        itms: List[Dict[str, Any]] = []
+        if isinstance(rate_lines, list):
+            itms = [
+                {
+                    "num": i,
+                    "itm_det": _itm(
+                        rl.get("rate"),
+                        rl.get("taxable"),
+                        rl.get("igst"),
+                        rl.get("cgst"),
+                        rl.get("sgst"),
+                    ),
+                }
+                for i, rl in enumerate(
+                    (rl for rl in rate_lines if isinstance(rl, dict)), start=1
+                )
+            ]
+        if not itms:
+            itms = [
                 {
                     "num": 1,
                     "itm_det": _itm(
@@ -222,7 +243,15 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
                         r.get("sgst"),
                     ),
                 }
-            ],
+            ]
+        inv = {
+            "inum": str(r.get("invoiceNumber") or r.get("inum") or ""),
+            "idt": _fmt_date(r.get("invoiceDate") or r.get("idt") or ""),
+            "val": _num(r.get("invoiceValue") or r.get("val")),
+            "pos": pos,
+            "rchrg": "N",
+            "inv_typ": "R",
+            "itms": itms,
         }
         bucket = by_ctin.setdefault(ctin, {"ctin": ctin, "inv": []})
         bucket["inv"].append(inv)
