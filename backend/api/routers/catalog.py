@@ -1015,6 +1015,12 @@ class ProductCreateInput(BaseModel):
 
 
 class ProductUpdateInput(BaseModel):
+    # Catalog Manager review mini-form: re-categorise an imported doc (unmapped
+    # BVI categories were dumped into ACCESSORIES + category_unmapped=True).
+    # Canonicalised via product_master.resolve_category in the handler; when the
+    # patch changes category and carries no explicit hsn_code/gst_rate, both are
+    # re-derived from the new category (same helper the migration used).
+    category: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None
     description: Optional[str] = None
     hsn_code: Optional[str] = None
@@ -1321,12 +1327,38 @@ async def get_brands(
 # ============================================================================
 
 
+def _catalog_sort_key(p: Dict) -> str:
+    """Coalesce(created_at, migrated_at) as a sortable ISO string. The 4,393
+    BVI-imported docs carry `migrated_at` (datetime) but no `created_at`, so a
+    created_at-only sort sank them all to the bottom en masse."""
+    v = p.get("created_at") or p.get("migrated_at") or ""
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    return str(v)
+
+
 @router.get("/products")
 async def list_catalog_products(
-    category: Optional[ProductCategory] = None,
+    category: Optional[str] = None,
     brand: Optional[str] = None,
     search: Optional[str] = None,
-    is_active: bool = True,
+    is_active: str = Query(
+        default="true",
+        pattern="^(true|false|all|True|False)$",
+        description=(
+            "Active filter. Default 'true' preserves the legacy behaviour "
+            "(active only). 'all' surfaces inactive docs too -- the review "
+            "queue needs it because BVI DRAFT/ARCHIVED imports carry "
+            "is_active=False."
+        ),
+    ),
+    needs_review: Optional[bool] = Query(
+        default=None,
+        description="Filter to imported docs awaiting review (Catalog Manager).",
+    ),
+    source: Optional[str] = Query(
+        default=None, description="Filter by import source, e.g. 'bvi_import'."
+    ),
     limit: int = Query(default=50, ge=1, le=250),
     page: int = Query(default=1, ge=1),
     current_user: dict = Depends(get_current_user),
@@ -1336,7 +1368,17 @@ async def list_catalog_products(
 
     # Apply filters
     if category:
-        products = [p for p in products if p.get("category") == category.value]
+        # Canonicalise BOTH sides: imported docs store the canonical long form
+        # (FRAME/SUNGLASS), native docs store the short prefix code (FR/SG),
+        # and the shared browse vocabulary sends canonical values. Fail-open to
+        # a raw match when either side is unresolvable -- this can only ADD
+        # matches for legacy callers sending short codes.
+        want = _pm.resolve_category(category) or category
+        products = [
+            p
+            for p in products
+            if (_pm.resolve_category(p.get("category")) or p.get("category")) == want
+        ]
     if brand:
         products = [
             p for p in products if p.get("attributes", {}).get("brand_name") == brand
@@ -1350,11 +1392,19 @@ async def list_catalog_products(
             or search_lower in p.get("sku", "").lower()
             or search_lower in str(p.get("attributes", {})).lower()
         ]
-    if is_active is not None:
-        products = [p for p in products if p.get("is_active") == is_active]
+    if needs_review is not None:
+        products = [
+            p for p in products if bool(p.get("needs_review", False)) == needs_review
+        ]
+    if source:
+        products = [p for p in products if p.get("source") == source]
+    # 'all' = no active filter; otherwise the legacy boolean equality match.
+    if is_active != "all":
+        active_bool = is_active in ("true", "True")
+        products = [p for p in products if p.get("is_active") == active_bool]
 
-    # Sort by created date
-    products.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    # Sort by created date (imported docs coalesce to migrated_at)
+    products.sort(key=_catalog_sort_key, reverse=True)
 
     total = len(products)
     start = (page - 1) * limit
@@ -1640,12 +1690,53 @@ async def update_catalog_product(
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # Category change (Catalog Manager review mini-form). Canonicalised via the
+    # shared registry resolver; unknown values are rejected loudly. When the
+    # patch changes the category and does NOT explicitly send hsn_code/gst_rate,
+    # both are re-derived from the NEW category via the same canonical table the
+    # BVI migration used -- this un-does the ACCESSORIES dumping ground without
+    # silently overriding an explicit HSN/GST the caller sent alongside.
+    if product.category is not None:
+        canonical = _pm.resolve_category(product.category)
+        if canonical is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown product category '{product.category}'.",
+            )
+        category_changed = (
+            _pm.resolve_category(existing.get("category")) or existing.get("category")
+        ) != canonical
+        existing["category"] = canonical
+        if category_changed:
+            existing["category_unmapped"] = False
+            if product.hsn_code is None:
+                existing["hsn_code"] = hsn_for_category(canonical)
+            if product.gst_rate is None:
+                existing["gst_rate"] = gst_rate_for_category(canonical)
+
     # Update fields
     if product.attributes:
-        existing["attributes"].update(product.attributes)
-        existing["title"] = generate_product_title(
-            ProductCategory(existing["category"]), existing["attributes"]
-        )
+        # Catalog Dictionary parity with the spine PUT (products.py): when the
+        # owner configured allowed values for a field, an attributes patch must
+        # match them (case-canonicalising). Fail-soft when no db.
+        merged_attrs = {**(existing.get("attributes") or {}), **product.attributes}
+        try:
+            merged_attrs = _pm.enforce_dictionary_values(
+                existing.get("category"), merged_attrs, db=_get_db()
+            )
+        except _pm.ProductMasterError as err:
+            raise HTTPException(status_code=err.status, detail=err.message) from err
+        existing["attributes"] = merged_attrs
+        # Title regen is BEST-EFFORT: imported (BVI) docs store the canonical
+        # long-form category ("FRAME"), which is not a ProductCategory short
+        # code -- ProductCategory("FRAME") raises and previously 500'd any
+        # attributes patch on an imported doc. Keep the existing title then.
+        try:
+            existing["title"] = generate_product_title(
+                ProductCategory(existing["category"]), existing["attributes"]
+            )
+        except (ValueError, KeyError):
+            pass
 
     if product.description is not None:
         existing["description"] = product.description
@@ -1679,6 +1770,14 @@ async def update_catalog_product(
                     status_code=400, detail="Offer price cannot exceed MRP"
                 )
         existing["pricing"] = merged_pricing
+        # Imported (BVI) docs carry the price BOTH top-level (generic
+        # consumers, incl. the promote payload) and nested under `pricing`
+        # (orders' catalog fallback). Keep the two in sync on edit so a
+        # review-form price fix is never shadowed by a stale top-level value.
+        if "mrp" in existing and merged_pricing.get("mrp") is not None:
+            existing["mrp"] = merged_pricing["mrp"]
+        if "offer_price" in existing and merged_pricing.get("offer_price") is not None:
+            existing["offer_price"] = merged_pricing["offer_price"]
     if product.images is not None:
         existing["images"] = product.images
     if product.is_active is not None:
@@ -1719,6 +1818,327 @@ async def update_catalog_product(
     return {
         "product": mask_cost(existing, current_user, context="catalog_edit"),
         "message": "Product updated successfully",
+    }
+
+
+# ============================================================================
+# PROMOTE (Catalog Manager review queue -> POS-sellable spine row)
+# ============================================================================
+# The ONE thing that clears needs_review. The 4,393 BVI-imported docs live only
+# in catalog_products (no `products` spine row), so POS order-create 400s them
+# via convergence guard 3 (orders.py). "Re-save via the door" would mint a NEW
+# product_id and strand the BVI CUID doc (catalog_variants.parent_product_id +
+# ecom.* hang off that id) -- so approval is an IN-PLACE promotion: validate
+# through the door's build_canonical_product (no validation fork), then insert
+# a spine row PRESERVING the existing id (and sku when present).
+
+
+def _promote_payload_from_doc(doc: Dict, actor: Optional[str]) -> Dict[str, Any]:
+    """Map a catalog_products doc onto the canonical door payload. Pricing
+    prefers the nested `pricing` block (the shape PUT /catalog/products
+    edits) and falls back to the top-level mirror the BVI migration wrote."""
+    pricing = doc.get("pricing") or {}
+    mrp = pricing.get("mrp", doc.get("mrp"))
+    offer = pricing.get("offer_price", doc.get("offer_price"))
+    if offer in (None, 0):
+        offer = mrp
+    return {
+        "category": doc.get("category"),
+        "attributes": dict(doc.get("attributes") or {}),
+        "sku": doc.get("sku") or None,
+        "mrp": mrp,
+        "offer_price": offer,
+        "cost_price": pricing.get("cost_price"),
+        "discount_category": pricing.get("discount_category"),
+        "hsn_code": doc.get("hsn_code"),
+        "gst_rate": doc.get("gst_rate"),
+        "tags": doc.get("tags"),
+        "created_by": actor,
+    }
+
+
+def _promote_extra_fields(doc: Dict) -> Dict[str, Any]:
+    """Additive top-level spine columns carried over from the catalog doc
+    (images/description/display name/weight). None values are dropped by the
+    door core; canonical keys are never overridden."""
+    return {
+        "images": doc.get("images") or None,
+        "description": doc.get("description") or None,
+        "name": doc.get("name") or doc.get("title") or None,
+        "weight": doc.get("weight"),
+    }
+
+
+def _gaps_from_pm_error(err: "_pm.ProductMasterError") -> List[Dict[str, Any]]:
+    """Explode a door validation error into per-field checklist rows. The
+    aggregated missing-required message names every gap in one string; split it
+    so the FE renders one amber row per field. Other breaches stay one row."""
+    msg = err.message or "Validation failed"
+    prefix = "Cannot save product -- missing required: "
+    if err.status == 422 and msg.startswith(prefix):
+        names = [n.strip() for n in msg[len(prefix):].split(",") if n.strip()]
+        if names:
+            return [
+                {
+                    "field": name,
+                    "label": _pm.field_label(name),
+                    "message": f"{_pm.field_label(name)} is required",
+                }
+                for name in names
+            ]
+    return [
+        {
+            "field": err.field,
+            "label": _pm.field_label(err.field) if err.field else None,
+            "message": msg,
+        }
+    ]
+
+
+def _promote_duplicate_warnings(repo, doc: Dict) -> List[Dict[str, Any]]:
+    """SOFT duplicate signals against the spine (one $or query): an exact
+    barcode match or a brand+model match. Warnings only -- the reviewer
+    decides; the hard gates stay the id/sku 409s."""
+    attrs = doc.get("attributes") or {}
+    brand = str(attrs.get("brand_name") or doc.get("brand") or "").strip()
+    model = str(attrs.get("model_no") or attrs.get("model_name") or "").strip()
+    barcode = str(doc.get("barcode") or "").strip()
+    or_terms: List[Dict[str, Any]] = []
+    if barcode:
+        or_terms.append({"barcode": barcode})
+    if brand and model:
+        or_terms.append({"brand": brand, "model": model})
+    if not or_terms:
+        return []
+    warnings: List[Dict[str, Any]] = []
+    try:
+        for match in repo.find_many({"$or": or_terms}, limit=5):
+            reason = (
+                "same barcode"
+                if barcode and match.get("barcode") == barcode
+                else "same brand + model"
+            )
+            warnings.append(
+                {
+                    "product_id": match.get("product_id") or match.get("id"),
+                    "sku": match.get("sku"),
+                    "brand": match.get("brand"),
+                    "model": match.get("model"),
+                    "name": match.get("name"),
+                    "reason": reason,
+                }
+            )
+    except Exception:  # noqa: BLE001 - warnings are best-effort, never block
+        logger.warning("[CATALOG] promote duplicate-warning query failed", exc_info=True)
+    return warnings
+
+
+@router.post("/products/{product_id}/promote")
+async def promote_catalog_product(
+    product_id: str,
+    dry_run: bool = Query(
+        default=False,
+        description=(
+            "true = validate only: returns {ok, gaps, duplicate_warnings} "
+            "with ZERO writes. false = insert the spine row and clear "
+            "needs_review."
+        ),
+    ),
+    current_user: dict = Depends(require_roles("ADMIN", "CATALOG_MANAGER")),
+):
+    """Approve an imported catalog product for POS: validate it through the
+    canonical product door and insert a `products` spine row that PRESERVES
+    this catalog id (and sku when present), then stamp the catalog doc
+    needs_review=false / pos_ready=true. The door's gates (required
+    attributes, MRP>=offer, HSN/GST, dictionary values) are THE approval
+    gates -- there is no separate validation fork, so bulk approval can never
+    force an invalid product into POS."""
+    from ..dependencies import get_product_repository
+
+    doc = _get_catalog_product(product_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Product database is unavailable -- cannot promote right now.",
+        )
+
+    # HARD collision gates (id, then sku) -- plain-English, naming the row.
+    existing_by_id = repo.find_by_id(product_id)
+    if existing_by_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{doc.get('name') or doc.get('title') or product_id}' is already "
+                f"a billing product (SKU {existing_by_id.get('sku') or 'unknown'}). "
+                "It does not need approval again."
+            ),
+        )
+    doc_sku = str(doc.get("sku") or "").strip()
+    if doc_sku:
+        existing_by_sku = repo.find_by_sku(doc_sku)
+        if existing_by_sku is not None:
+            _clash_name = " ".join(
+                x
+                for x in (existing_by_sku.get("brand"), existing_by_sku.get("model"))
+                if x
+            ) or existing_by_sku.get("name") or existing_by_sku.get("product_id")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"SKU {doc_sku} already belongs to '{_clash_name}' in the "
+                    "product master. Change this imported item's SKU (or retire "
+                    "the duplicate) before approving it."
+                ),
+            )
+
+    payload = _promote_payload_from_doc(doc, current_user.get("user_id"))
+    if dry_run and not payload.get("sku"):
+        # ZERO-writes contract: minting the real SKU would $inc the shared
+        # counters collection. Validate with a placeholder instead; the real
+        # promote mints the canonical SKU.
+        payload["sku"] = "DRYRUN-PLACEHOLDER"
+
+    db = _get_db()
+    try:
+        spine = _pm.build_canonical_product(
+            payload,
+            source="CATALOG",
+            extra_fields=_promote_extra_fields(doc),
+            product_repo=repo,
+            db=db,
+        )
+    except _pm.ProductMasterError as err:
+        if dry_run:
+            return {
+                "ok": False,
+                "gaps": _gaps_from_pm_error(err),
+                "duplicate_warnings": _promote_duplicate_warnings(repo, doc),
+            }
+        # Same shape as the create door's validation failures (message string).
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+
+    if dry_run:
+        return {
+            "ok": True,
+            "gaps": [],
+            "duplicate_warnings": _promote_duplicate_warnings(repo, doc),
+        }
+
+    # PRESERVE the catalog identity: the spine row shares this doc's id (BVI
+    # CUID -- catalog_variants.parent_product_id + ecom.* hang off it; the
+    # orders $or resolver is format-agnostic). The door-minted SKU is kept only
+    # when the doc had none, and is written back to the doc below.
+    spine["product_id"] = product_id
+    spine["id"] = product_id
+    minted_sku = None if doc_sku else spine.get("sku")
+
+    try:
+        created = repo.create(spine, raise_on_duplicate=True)
+    except HTTPException:
+        raise
+    except Exception as err:  # noqa: BLE001
+        if err.__class__.__name__ == "DuplicateKeyError":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A billing product with this id or SKU appeared while "
+                    "approving -- refresh the review queue and try again."
+                ),
+            ) from err
+        logger.error(
+            "[CATALOG] promote spine write FAILED for %s", product_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to create the product's billing record. Nothing was "
+                "approved -- please retry."
+            ),
+        ) from err
+    if not created:
+        logger.error(
+            "[CATALOG] promote spine write returned no doc for %s", product_id
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to create the product's billing record. Nothing was "
+                "approved -- please retry."
+            ),
+        )
+
+    # Stamp the catalog doc (partial $set -- promote is the ONLY writer of
+    # these flags). Fail-soft: the spine row is the sellability truth; a
+    # failed stamp leaves a stale queue entry, never an unsellable product.
+    stamp: Dict[str, Any] = {
+        "needs_review": False,
+        "pos_ready": True,
+        "promoted_at": datetime.now().isoformat(),
+        "promoted_by": current_user.get("user_id"),
+        "updated_at": datetime.now().isoformat(),
+    }
+    if minted_sku:
+        stamp["sku"] = minted_sku
+    try:
+        coll = _catalog_coll()
+        if coll is not None:
+            coll.update_one({"id": product_id}, {"$set": stamp})
+        else:
+            CATALOG_PRODUCTS.setdefault(product_id, doc).update(stamp)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG] promote flag stamp failed for %s", product_id, exc_info=True
+        )
+
+    # Activity log (immutable audit chain). Fail-soft.
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit_repo = get_audit_repository()
+        if audit_repo is not None:
+            audit_repo.create(
+                {
+                    "action": "catalog_product.promoted",
+                    "actor": current_user.get("user_id"),
+                    "user_id": current_user.get("user_id"),
+                    "entity_type": "product",
+                    "entity_id": product_id,
+                    "timestamp": datetime.now(),
+                    "ts": datetime.now().isoformat(),
+                    "after": {
+                        "product_id": product_id,
+                        "sku": spine.get("sku"),
+                        "category": spine.get("category"),
+                        "mrp": spine.get("mrp"),
+                        "offer_price": spine.get("offer_price"),
+                        "source": doc.get("source"),
+                    },
+                }
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG] promote audit write failed for %s", product_id, exc_info=True
+        )
+
+    # Bust the TTL_MEDIUM GET /products list cache so the newly sellable item
+    # is immediately searchable at POS (same pattern as the bulk price ops).
+    try:
+        from ..services.cache import cache
+
+        cache.delete_pattern("products:*")
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "message": "Product approved for POS",
+        "product_id": product_id,
+        "sku": spine.get("sku"),
+        "needs_review": False,
+        "pos_ready": True,
     }
 
 

@@ -312,7 +312,14 @@ class BaseRepository(ABC, Generic[T]):
             query.update(filter)
         return self.find_many(query)
 
-    def search(self, text: str, fields: List[str], filter: Dict = None) -> List[Dict]:
+    def search(
+        self,
+        text: str,
+        fields: List[str],
+        filter: Dict = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> List[Dict]:
         """
         Tokenized text search across fields.
 
@@ -333,36 +340,52 @@ class BaseRepository(ABC, Generic[T]):
             text: Search text (one or more whitespace-separated tokens)
             fields: Fields to search
             filter: Additional filter
+            skip / limit: pagination passthrough to find_many. Defaults match
+                find_many's own defaults so existing callers are unchanged.
 
         Returns:
             Matching documents
         """
         try:
-            import re
-
-            tokens = [t for t in (text or "").split() if t]
-            if not tokens:
-                # Empty query -> apply only the caller's filter (match-all
-                # within scope), matching the pre-tokenization empty-string
-                # behaviour where `$regex: ""` matched everything.
-                return self.find_many(filter or {})
-
-            and_clauses = []
-            for tok in tokens:
-                # Anchor with ^ for prefix matching so indexes can be used.
-                # ^ prevents full scans and keeps the result semantics
-                # (e.g., searching "ray" no longer matches "spray" or "primary").
-                regex = {"$regex": "^" + re.escape(tok), "$options": "i"}
-                and_clauses.append({"$or": [{field: regex} for field in fields]})
-
-            query = {"$and": and_clauses}
-            if filter:
-                query["$and"].append(filter)
-
-            return self.find_many(query)
+            query = self._search_query(text, fields, filter)
+            return self.find_many(query, skip=skip, limit=limit)
         except Exception as e:
             print(f"Error searching {self.entity_name}s: {e}")
             return []
+
+    def search_count(self, text: str, fields: List[str], filter: Dict = None) -> int:
+        """Count of documents the SAME search() query would match (pre-slice),
+        so a paginated caller can render a true total. Fail-soft 0."""
+        try:
+            return self.count(self._search_query(text, fields, filter))
+        except Exception as e:
+            print(f"Error counting {self.entity_name} search: {e}")
+            return 0
+
+    def _search_query(self, text: str, fields: List[str], filter: Dict = None) -> Dict:
+        """Build the tokenized-prefix search query search() executes. Shared
+        with search_count so the list and its total can never drift."""
+        import re
+
+        tokens = [t for t in (text or "").split() if t]
+        if not tokens:
+            # Empty query -> apply only the caller's filter (match-all
+            # within scope), matching the pre-tokenization empty-string
+            # behaviour where `$regex: ""` matched everything.
+            return filter or {}
+
+        and_clauses = []
+        for tok in tokens:
+            # Anchor with ^ for prefix matching so indexes can be used.
+            # ^ prevents full scans and keeps the result semantics
+            # (e.g., searching "ray" no longer matches "spray" or "primary").
+            regex = {"$regex": "^" + re.escape(tok), "$options": "i"}
+            and_clauses.append({"$or": [{field: regex} for field in fields]})
+
+        query = {"$and": and_clauses}
+        if filter:
+            query["$and"].append(filter)
+        return query
 
     def aggregate(self, pipeline: List[Dict]) -> List[Dict]:
         """

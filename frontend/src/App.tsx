@@ -126,6 +126,10 @@ const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => (
 const OpeningStockImport = lazy(() => import('./pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const ActivityLogPage = lazy(() => import('./pages/admin/ActivityLogPage'));
+// /catalog — the Catalog Manager: photo-grid browse over the product spine +
+// the imported-needs-review queue, with the slide-over drawer (view / edit /
+// approve). The sidebar "Catalog" item lands here; "+ Add product" links on.
+const CatalogManagerPage = lazy(() => import('./pages/catalog/CatalogManagerPage'));
 // /catalog/add — the single product-add door (Quick Add). Guided + Bulk modes
 // were removed; Quick Add absorbed every field/section Guided had.
 const QuickAddPage = lazy(() => import('./pages/catalog/QuickAddPage'));
@@ -1355,6 +1359,17 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN']}>
                         <ActivityLogPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Catalog Manager — browse the spine + review the imported
+                      queue; roles mirror the navConfig 'catalog' item. */}
+                  <Route
+                    path="catalog"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+                        <CatalogManagerPage />
                       </ProtectedRoute>
                     }
                   />

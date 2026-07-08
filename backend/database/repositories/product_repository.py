@@ -9,9 +9,19 @@ from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
 from .base_repository import BaseRepository
 
+# Sentinel for "caller did not pass is_active" so the legacy active_only
+# behaviour of find_by_category is preserved byte-for-byte while new callers
+# (the Catalog Manager list) can request an explicit tri-state filter
+# (True = active only, False = inactive only, None = everything).
+_LEGACY = object()
+
 
 class ProductRepository(BaseRepository):
     """Repository for Product operations"""
+
+    # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
+    # passthrough): it can only ADD matches for existing callers, never remove.
+    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
 
     @property
     def entity_name(self) -> str:
@@ -39,23 +49,100 @@ class ProductRepository(BaseRepository):
             return None
         return self.find_one({"barcode": barcode})
 
-    def find_by_category(self, category: str, active_only: bool = True) -> List[Dict]:
+    def _category_filter(self, category: str, is_active: Optional[bool]) -> Dict:
         filter = {"category": category}
-        if active_only:
-            filter["is_active"] = True
-        return self.find_many(filter, sort=[("brand", 1), ("model", 1)])
+        if is_active is not None:
+            filter["is_active"] = is_active
+        return filter
 
-    def find_by_brand(self, brand: str, category: str = None) -> List[Dict]:
-        filter = {"brand": brand, "is_active": True}
+    def find_by_category(
+        self,
+        category: str,
+        active_only: bool = True,
+        *,
+        is_active=_LEGACY,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> List[Dict]:
+        # Legacy contract preserved: active_only=True -> is_active True filter,
+        # active_only=False -> no filter. The keyword-only `is_active` tri-state
+        # (True/False/None) wins when passed explicitly (Catalog Manager).
+        if is_active is _LEGACY:
+            is_active = True if active_only else None
+        return self.find_many(
+            self._category_filter(category, is_active),
+            sort=[("brand", 1), ("model", 1)],
+            skip=skip,
+            limit=limit,
+        )
+
+    def count_by_category(self, category: str, *, is_active: Optional[bool] = True) -> int:
+        return self.count(self._category_filter(category, is_active))
+
+    def _brand_filter(
+        self, brand: str, category: Optional[str], is_active: Optional[bool]
+    ) -> Dict:
+        filter: Dict = {"brand": brand}
+        if is_active is not None:
+            filter["is_active"] = is_active
         if category:
             filter["category"] = category
-        return self.find_many(filter, sort=[("model", 1)])
+        return filter
 
-    def search_products(self, query: str, category: str = None) -> List[Dict]:
-        filter = {"is_active": True}
+    def find_by_brand(
+        self,
+        brand: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> List[Dict]:
+        return self.find_many(
+            self._brand_filter(brand, category, is_active),
+            sort=[("model", 1)],
+            skip=skip,
+            limit=limit,
+        )
+
+    def count_by_brand(
+        self, brand: str, category: str = None, *, is_active: Optional[bool] = True
+    ) -> int:
+        return self.count(self._brand_filter(brand, category, is_active))
+
+    def _search_extra_filter(
+        self, category: Optional[str], is_active: Optional[bool]
+    ) -> Dict:
+        filter: Dict = {}
+        if is_active is not None:
+            filter["is_active"] = is_active
         if category:
             filter["category"] = category
-        return self.search(query, ["brand", "model", "sku", "variant"], filter)
+        return filter
+
+    def search_products(
+        self,
+        query: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> List[Dict]:
+        return self.search(
+            query,
+            list(self.SEARCH_FIELDS),
+            self._search_extra_filter(category, is_active),
+            skip=skip,
+            limit=limit,
+        )
+
+    def count_search_products(
+        self, query: str, category: str = None, *, is_active: Optional[bool] = True
+    ) -> int:
+        return self.search_count(
+            query, list(self.SEARCH_FIELDS), self._search_extra_filter(category, is_active)
+        )
 
     def update_price(
         self, product_id: str, mrp: float, offer_price: float, updated_by: str

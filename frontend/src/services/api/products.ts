@@ -164,11 +164,25 @@ export interface UpdateProductPayload {
   brand?: string;
   model?: string;
   color?: string;
+  // Partial attributes patch — DEEP-MERGED onto the existing attributes by the
+  // backend (an explicit value wins; other keys are preserved). Dictionary
+  // enforcement runs on the merged result.
+  attributes?: Record<string, string | number>;
   mrp?: number;
   offer_price?: number;
+  cost_price?: number;
   hsn_code?: string;
   gst_rate?: number;
   is_active?: boolean;
+  description?: string;
+  /** Weight in grams (matches the create form's top-level field). */
+  weight?: number;
+  // Governed product tags; an explicit empty list clears all tags.
+  tags?: string[];
+  // Discount cap tier (MASS/PREMIUM/LUXURY/...).
+  discount_category?: string;
+  // Product images — replaces the WHOLE array.
+  images?: string[];
   // Scan-to-sell barcode persisted on the product master.
   barcode?: string;
   // Per-product reorder configuration (Reorder dashboard).
@@ -236,7 +250,19 @@ export const catalogApi = {
 };
 
 export const productApi = {
-  getProducts: async (params?: { category?: string; brand?: string; search?: string; store_id?: string }) => {
+  // GET /products (the billing/stock SPINE list). `total` is the LEGACY page
+  // length; `total_count` is the true pre-slice count of the applied filter
+  // (feeds pagination). `is_active`: absent = legacy per-path behaviour,
+  // 'true'/'false' filter explicitly, 'all' = everything (include inactive).
+  getProducts: async (params?: {
+    category?: string;
+    brand?: string;
+    search?: string;
+    store_id?: string;
+    skip?: number;
+    limit?: number;
+    is_active?: 'true' | 'false' | 'all';
+  }) => {
     const response = await api.get('/products', { params });
     return response.data;
   },
