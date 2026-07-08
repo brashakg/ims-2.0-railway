@@ -241,6 +241,16 @@ def _reset_auth_singletons():
             blacklist._revoked.clear()
     except Exception:  # noqa: BLE001 - test hygiene must never break a test
         pass
+    # Rotating refresh-token store (2026-07 token hardening): clear the
+    # in-memory fallback used when Mongo is absent so refresh chains cannot
+    # leak across tests. (On CI's real mongo the `refresh_tokens` collection is
+    # transactional and already wiped by _isolate_db's denylist clear.)
+    try:
+        from api.services.refresh_tokens import refresh_token_store
+
+        refresh_token_store._mem.clear()
+    except Exception:  # noqa: BLE001
+        pass
     yield
 
 

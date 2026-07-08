@@ -4,6 +4,7 @@
 
 import axios from 'axios';
 import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
+import { LAST_ACTIVITY_KEY } from '../../hooks/useIdleLogout';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
@@ -73,15 +74,155 @@ const api: AxiosInstance = axios.create({
 // the browser. Sending it as an `x-retry-count` header triggered a CORS preflight
 // that the backend's allow_headers list didn't cover, causing every request to
 // fail with "Network error" before even reaching the backend.
-type RetryTrackedConfig = InternalAxiosRequestConfig & { __retryCount?: number };
+type RetryTrackedConfig = InternalAxiosRequestConfig & {
+  __retryCount?: number;
+  // 401 refresh-and-retry guard: exactly ONE refresh attempt per request.
+  __retried401?: boolean;
+};
+
+// ── Token refresh (rotating refresh tokens, 2026-07 hardening) ─────────────
+// Access tokens are now short-lived (45 min); the 8h session survives via a
+// single-use rotating refresh token from /auth/login. Two triggers:
+//   PROACTIVE: when the access token is within 5 min of expiry AND the user is
+//   genuinely ACTIVE (see below) — so an active cashier never sees a 401.
+//   REACTIVE: on a 401, refresh once and retry the request (covers laptop-wake,
+//   throttled background tabs, races).
+// CRITICAL idle-logout interplay: "active" is read from the SAME localStorage
+// key useIdleLogout maintains from real user input (ims_last_activity). This
+// module only READS that key and NEVER writes it, so the refresh loop cannot
+// keep an unattended session alive — an idle user's token dies and the 15-min
+// idle logout stays authoritative.
+
+export const TOKEN_STORAGE_KEY = 'ims_token';
+export const REFRESH_TOKEN_STORAGE_KEY = 'ims_refresh_token';
+
+// Refresh when the access token has less than this long to live...
+const PROACTIVE_REFRESH_WINDOW_MS = 5 * 60_000;
+// ...but only if real user activity happened within this window. Must stay
+// comfortably above useIdleLogout's 5s write throttle and well below the
+// 15-min idle timeout (an idle user must NOT be refreshed).
+const ACTIVITY_FRESHNESS_MS = 5 * 60_000;
+
+/** Exp claim of a JWT in epoch MILLISECONDS, or null if unparseable. */
+export function decodeJwtExpMs(token: string): number | null {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure decision helper (unit-tested): refresh proactively ONLY when the token
+ * is inside the expiry window AND the user was recently active. An idle user
+ * returns false no matter how close the token is to death — their token is
+ * allowed to die so idle logout is never defeated by the refresh loop.
+ */
+export function shouldProactivelyRefresh(
+  expMs: number | null,
+  nowMs: number,
+  lastActivityMs: number | null,
+): boolean {
+  if (expMs === null) return false;
+  if (lastActivityMs === null || nowMs - lastActivityMs > ACTIVITY_FRESHNESS_MS) {
+    return false; // idle -> let the token die (idle logout is authoritative)
+  }
+  return expMs - nowMs <= PROACTIVE_REFRESH_WINDOW_MS;
+}
+
+function readLastActivityMs(): number | null {
+  try {
+    const raw = localStorage.getItem(LAST_ACTIVITY_KEY);
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+// Single-flight: concurrent callers (proactive tick + several 401 retries)
+// share ONE network refresh so the single-use rotating token isn't raced
+// within this tab (cross-tab races are absorbed by the server's grace window).
+let refreshInFlight: Promise<string | null> | null = null;
+
+export function refreshAccessToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = performRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function performRefresh(): Promise<string | null> {
+  let access: string | null = null;
+  let refresh: string | null = null;
+  try {
+    access = localStorage.getItem(TOKEN_STORAGE_KEY);
+    refresh = localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (!access && !refresh) return null;
+  const body: Record<string, string> = {};
+  // Preferred: the rotating refresh token. The access token rides along for
+  // claim continuity (active store), and doubles as the DEPRECATED legacy
+  // refresh credential when no refresh token exists yet (deploy window).
+  if (refresh) body.refresh_token = refresh;
+  if (access) body.token = access;
+  try {
+    // Raw axios (NOT the `api` instance): must bypass the interceptors so a
+    // failing refresh can never recurse into another refresh.
+    const resp = await axios.post(`${getSecureApiUrl()}/auth/refresh`, body, {
+      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const newAccess: string | undefined = resp.data?.access_token;
+    if (!newAccess) return null;
+    localStorage.setItem(TOKEN_STORAGE_KEY, newAccess);
+    if (resp.data?.refresh_token) {
+      localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
+    }
+    return newAccess;
+  } catch {
+    return null;
+  }
+}
+
+/** Fire-and-forget proactive check; cheap enough to run per-request + on a timer. */
+function maybeProactiveRefresh(): void {
+  let token: string | null = null;
+  try {
+    token = localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return;
+  }
+  if (!token) return;
+  if (shouldProactivelyRefresh(decodeJwtExpMs(token), Date.now(), readLastActivityMs())) {
+    void refreshAccessToken();
+  }
+}
+
+// Steady 30s cadence covers active users who aren't currently firing API calls
+// (e.g. building a POS cart). Guarded out of vitest so tests own their timers.
+if (typeof window !== 'undefined' && import.meta.env.MODE !== 'test') {
+  window.setInterval(maybeProactiveRefresh, 30_000);
+}
 
 // Request interceptor - add auth token (retry counter lives on the config object)
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    const token = localStorage.getItem('ims_token');
+    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    // Active user making requests near token expiry -> renew in the background
+    // (fire-and-forget; never blocks or fails this request).
+    maybeProactiveRefresh();
     return config;
   },
   (error) => Promise.reject(error)
@@ -90,8 +231,10 @@ api.interceptors.request.use(
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
   if (error.response?.status === 401) {
-    // Clear auth state on unauthorized
-    localStorage.removeItem('ims_token');
+    // Clear auth state on unauthorized (refresh already failed or was not
+    // possible by the time we get here -> same logout flow as before).
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
     localStorage.removeItem('ims_user');
     window.location.href = '/login';
   }
@@ -177,6 +320,28 @@ api.interceptors.response.use(
     // Don't retry if no config
     if (!config) {
       return handleFinalError(error);
+    }
+
+    // Reactive refresh-and-retry, ONCE per request: an expired access token
+    // (laptop wake, throttled tab that missed the proactive window) gets one
+    // silent refresh + replay instead of a logout. Auth endpoints themselves
+    // are excluded (a failed login/refresh/logout must never loop), and a
+    // failed refresh falls through to handleFinalError -> logout as before.
+    const status401 = error.response?.status === 401;
+    const reqUrl = String(config.url || '');
+    const isAuthEndpoint =
+      reqUrl.includes('/auth/login') ||
+      reqUrl.includes('/auth/refresh') ||
+      reqUrl.includes('/auth/logout');
+    if (status401 && !isAuthEndpoint && !config.__retried401) {
+      config.__retried401 = true;
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        if (config.headers) {
+          config.headers.Authorization = `Bearer ${newToken}`;
+        }
+        return api.request(config);
+      }
     }
 
     const retryCount = config.__retryCount ?? 0;

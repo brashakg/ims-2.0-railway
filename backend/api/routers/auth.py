@@ -56,7 +56,23 @@ if not SECRET_KEY:
         "Generate one with: openssl rand -hex 32"
     )
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
+
+# 2026-07 token hardening: access tokens are SHORT-LIVED (45 min) and the 8h
+# working session survives via a single-use ROTATING refresh token persisted
+# server-side (api/services/refresh_tokens.py, Mongo `refresh_tokens`). The
+# absolute cap (first login + REFRESH_ABSOLUTE_HOURS) matches the previous 8h
+# access-token lifetime exactly, so staff shift UX is unchanged. Both values
+# are env-overridable with deploy-safe defaults (unset envs = these numbers).
+# BACK-COMPAT: tokens minted BEFORE this deploy (8h access tokens) validate
+# exactly as before -- decode_token only checks signature + exp.
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "45") or "45")
+REFRESH_ABSOLUTE_HOURS = int(os.getenv("REFRESH_ABSOLUTE_HOURS", "8") or "8")
+
+# Lifetime access tokens had BEFORE the hardening deploy. Pre-deploy tokens
+# carry no `sess_start` claim, so their session start is derived as
+# exp - 480min (they were always minted with an 8h exp). Used only on the
+# DEPRECATED legacy refresh path + switch-store claim preservation.
+_LEGACY_ACCESS_TOKEN_MINUTES = 480
 
 # BUG-027: the password every seed account ships with (also public in the repo).
 # Used ONLY to force a change-on-login for any account still using it -- never to
@@ -230,6 +246,12 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: dict
+    # ADDITIVE (2026-07 token hardening): single-use rotating refresh token.
+    # Exchange at /auth/refresh for a new access+refresh pair. None when the
+    # refresh store was unavailable at login (client falls back to the
+    # deprecated legacy access-token refresh). Old clients ignore these fields.
+    refresh_token: Optional[str] = None
+    refresh_expires_in: Optional[int] = None  # seconds to the ABSOLUTE session cap
 
 
 class TokenData(BaseModel):
@@ -247,7 +269,13 @@ class ChangePasswordRequest(BaseModel):
 
 
 class RefreshTokenRequest(BaseModel):
-    token: str
+    # DEPRECATED back-compat (keep for ONE release, then require refresh_token):
+    # a still-valid ACCESS token, the pre-2026-07 refresh contract. On the
+    # rotating path it also rides along purely for claim continuity
+    # (active_store_id) -- it grants nothing there.
+    token: Optional[str] = None
+    # Preferred: the single-use rotating refresh token.
+    refresh_token: Optional[str] = None
 
 
 # ============================================================================
@@ -311,6 +339,72 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def _decode_token_allow_expired(token: str) -> Optional[dict]:
+    """Signature-verify a JWT but TOLERATE an expired exp claim.
+
+    Used only on the rotating-refresh path for CLAIM CONTINUITY (preserving
+    active_store_id / module_access across a refresh whose access token already
+    lapsed). The authority to refresh comes from the server-side refresh token,
+    NEVER from here -- an invalid signature returns None and the claims are
+    simply not used."""
+    try:
+        return jwt.decode(
+            token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False}
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _epoch_utc(dt: datetime) -> int:
+    """Epoch seconds for a NAIVE-UTC datetime (the codebase convention --
+    datetime.utcnow() everywhere). datetime.timestamp() on a naive value would
+    interpret it as LOCAL time (off by the server's UTC offset, e.g. -5h30m on
+    IST), silently corrupting the absolute session cap on any non-UTC host."""
+    from datetime import timezone as _tz
+
+    return int(dt.replace(tzinfo=_tz.utc).timestamp())
+
+
+def _derive_session_start(payload: dict) -> Optional[int]:
+    """Epoch seconds of this session's first login. New tokens carry it as the
+    `sess_start` claim; pre-deploy tokens (no claim) derive it from their 8h
+    exp. Fail-soft -> None (no cap applied -- matches pre-deploy behaviour)."""
+    sess_start = payload.get("sess_start")
+    if sess_start:
+        try:
+            return int(sess_start)
+        except (TypeError, ValueError):
+            return None
+    exp = payload.get("exp")
+    if exp:
+        try:
+            return int(exp) - _LEGACY_ACCESS_TOKEN_MINUTES * 60
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _mint_access_token(token_data: dict) -> Tuple[str, int]:
+    """Mint an access token whose exp NEVER crosses the absolute session cap
+    (sess_start + REFRESH_ABSOLUTE_HOURS). Returns (token, lifetime_seconds).
+    Raises 401 when the cap has already passed. Claims without sess_start
+    (pre-deploy tokens, direct test mints) get the plain 45-min lifetime."""
+    lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    sess_start = token_data.get("sess_start")
+    if sess_start:
+        cap_at = datetime.utcfromtimestamp(float(sess_start)) + timedelta(
+            hours=REFRESH_ABSOLUTE_HOURS
+        )
+        remaining = cap_at - datetime.utcnow()
+        if remaining.total_seconds() <= 0:
+            raise HTTPException(
+                status_code=401, detail="Session expired. Please log in again."
+            )
+        if remaining < lifetime:
+            lifetime = remaining
+    return create_access_token(token_data, lifetime), int(lifetime.total_seconds())
 
 
 async def get_current_user(
@@ -702,7 +796,37 @@ async def login(request: LoginRequest, req: Request = None):
         "module_access": module_access,
     }
 
-    access_token = create_access_token(token_data)
+    # Rotating refresh session (2026-07 token hardening): the access token is
+    # short-lived; the 8h SESSION survives via a single-use rotating refresh
+    # token persisted server-side. Two additive JWT claims:
+    #   sess_start -- epoch of FIRST login; anchors the ABSOLUTE cap that no
+    #                 amount of refreshing can extend.
+    #   sid        -- the refresh-token family (chain) id, so /auth/logout can
+    #                 revoke the whole chain from the access token alone.
+    # FAIL-SOFT: a refresh-store hiccup must never block a login -- the client
+    # then simply has no refresh_token and uses the legacy refresh path.
+    session_start = datetime.utcnow()
+    token_data["sess_start"] = _epoch_utc(session_start)
+    refresh_token_value: Optional[str] = None
+    refresh_expires_in: Optional[int] = None
+    try:
+        from api.services.refresh_tokens import refresh_token_store
+
+        issued = refresh_token_store.issue(
+            user_id=token_data["user_id"],
+            username=token_data["username"],
+            session_start=session_start,
+        )
+        if issued is not None:
+            refresh_token_value, rt_doc = issued
+            token_data["sid"] = rt_doc["family_id"]
+            refresh_expires_in = int(
+                (rt_doc["expires_at"] - session_start).total_seconds()
+            )
+    except Exception as e:  # noqa: BLE001 - login must never break on the refresh store
+        logger.warning("login: refresh-token issue failed (fail-soft): %s", e)
+
+    access_token, access_expires_in = _mint_access_token(token_data)
 
     # Record successful login (clears lockouts)
     _login_limiter.record(client_ip, request.username, success=True)
@@ -726,7 +850,9 @@ async def login(request: LoginRequest, req: Request = None):
 
     return LoginResponse(
         access_token=access_token,
-        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        expires_in=access_expires_in,
+        refresh_token=refresh_token_value,
+        refresh_expires_in=refresh_expires_in,
         user={
             "user_id": token_data["user_id"],
             "username": user.get("username", ""),
@@ -764,6 +890,19 @@ async def logout(
         except (TypeError, ValueError):
             expires_at = None
         _token_blacklist.revoke(credentials.credentials, expires_at)
+    # Revoke the rotating refresh CHAIN too (sid = family id carried in the
+    # JWT), so a logged-out session can't be resurrected with a leftover
+    # refresh token. Pre-deploy tokens have no sid (and no chain) -- no-op.
+    # Fail-soft: chain-revoke errors never block a logout (the access-token
+    # blacklist above already landed).
+    try:
+        sid = current_user.get("sid")
+        if sid:
+            from api.services.refresh_tokens import refresh_token_store
+
+            refresh_token_store.revoke_family(sid, reason="logout")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logout: refresh-chain revoke failed (fail-soft): %s", e)
     _audit_auth_event(
         action="logout",
         user_id=current_user.get("user_id"),
@@ -895,31 +1034,27 @@ async def ecommerce_sso(current_user: dict = Depends(get_current_user)):
     return {"url": f"{base}/sso?token={token}", "expires_in": 90}
 
 
-@router.post("/refresh")
-async def refresh_token(request: RefreshTokenRequest):
-    """
-    Refresh access token
-    """
-    payload = decode_token(request.token)
-
-    # Re-validate against the LIVE user record so a disabled or role-downgraded
-    # account cannot keep elevated access for another 8h by refreshing. The access
-    # token is stateless, so /refresh is the natural session re-check point.
-    # Fail-soft: if the DB is unavailable, fall back to the token's own claims
-    # (the prior behaviour) rather than blocking a refresh.
+def _lookup_live_user(user_id: Optional[str], username: Optional[str]):
+    """LIVE user re-check for /refresh so a disabled or role-downgraded account
+    cannot keep elevated access by refreshing. Fail-soft -> None when the DB is
+    unavailable (callers fall back to token claims, the pre-hardening
+    behaviour)."""
     from ..dependencies import get_user_repository
 
-    db_user = None
     try:
         user_repo = get_user_repository()
         if user_repo:
-            db_user = user_repo.collection.find_one(
-                {"user_id": payload.get("user_id")}
-            ) or user_repo.collection.find_one({"username": payload.get("username")})
+            return user_repo.collection.find_one(
+                {"user_id": user_id}
+            ) or user_repo.collection.find_one({"username": username})
     except Exception as e:  # noqa: BLE001
         logger.warning("refresh: live user re-check failed: %s", e)
-        db_user = None
+    return None
 
+
+def _resolve_refresh_claims(payload: dict, db_user: Optional[dict]) -> dict:
+    """Merge the live DB record over the presented claims for a token re-issue.
+    Shared by both refresh modes. Raises 403 for a disabled account."""
     if db_user is not None:
         if not db_user.get("is_active", True):
             raise HTTPException(status_code=403, detail="Account is disabled")
@@ -934,8 +1069,7 @@ async def refresh_token(request: RefreshTokenRequest):
         must_change = bool(payload.get("must_change_password", False))
 
     # Normalize deprecated role aliases on the LIVE-record roles too (the DB doc
-    # may still carry SALES_CASHIER pre-migration); the token claims were already
-    # normalized by decode_token above. backlog #12.
+    # may still carry SALES_CASHIER pre-migration). backlog #12.
     from api.services.user_roles import normalize_roles
 
     roles = normalize_roles(roles)
@@ -950,12 +1084,14 @@ async def refresh_token(request: RefreshTokenRequest):
         and not any(r in ("ADMIN", "SUPERADMIN") for r in roles)
     ):
         active_store = store_ids[0]
+    # Rotating refresh with no rider access token (claims empty): mirror
+    # login's default rather than issuing a store-less token.
+    if not active_store and store_ids:
+        active_store = store_ids[0]
 
-    # Create new token (preserve the force-password-change flag + the deny-only
-    # module override across refresh so the restriction survives a re-issue).
-    token_data = {
-        "user_id": payload["user_id"],
-        "username": payload["username"],
+    return {
+        "user_id": payload.get("user_id"),
+        "username": payload.get("username"),
         "roles": roles,
         "store_ids": store_ids,
         "active_store_id": active_store,
@@ -963,12 +1099,162 @@ async def refresh_token(request: RefreshTokenRequest):
         "module_access": module_access,
     }
 
-    new_token = create_access_token(token_data)
+
+@router.post("/refresh")
+async def refresh_token(request: RefreshTokenRequest):
+    """
+    Exchange credentials for a fresh access token. Two modes (see the
+    `refresh_mode` response field):
+
+    * "rotating" (preferred): body carries `refresh_token`, the SINGLE-USE
+      opaque token from /auth/login or a previous refresh. It is consumed and a
+      new access+refresh pair is returned. Presenting an already-spent token is
+      the stolen-token CANARY: the whole chain is revoked and the caller gets
+      401 (a short grace window tolerates two tabs racing one rotation).
+    * "legacy_access" (DEPRECATED -- back-compat for the deploy window, remove
+      after one release): body carries `token`, a still-valid ACCESS token --
+      the exact pre-2026-07 contract, so sessions started before the deploy
+      keep refreshing. The response upgrades the caller to a rotating pair.
+
+    NEITHER mode can extend a session past absolute_session_start +
+    REFRESH_ABSOLUTE_HOURS: the new access token's exp is capped at the session
+    end and the refresh itself 401s after it.
+    """
+    from api.services.refresh_tokens import refresh_token_store
+
+    # ------------------------------------------------------------------
+    # Mode 1: rotating refresh token (preferred)
+    # ------------------------------------------------------------------
+    if request.refresh_token:
+        status, rt_doc = refresh_token_store.consume(request.refresh_token)
+        if status == "reused":
+            # Canary tripped: consume() already revoked the whole chain.
+            raise HTTPException(
+                status_code=401,
+                detail="Refresh token already used; session revoked. Please log in again.",
+            )
+        if status == "expired":
+            raise HTTPException(
+                status_code=401, detail="Session expired. Please log in again."
+            )
+        if status != "ok" or rt_doc is None:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        # Claim continuity: the (possibly expired) access token rides along so
+        # the re-issued JWT keeps active_store_id / module_access. Signature IS
+        # verified; exp deliberately is NOT. It grants nothing -- authority
+        # comes from the consumed refresh token -- and must match the owner.
+        claims = (
+            _decode_token_allow_expired(request.token) if request.token else None
+        )
+        if claims is not None and claims.get("user_id") != rt_doc.get("user_id"):
+            claims = None
+
+        db_user = _lookup_live_user(rt_doc.get("user_id"), rt_doc.get("username"))
+        if db_user is None and claims is None:
+            # No live record AND no verifiable claims -> cannot safely rebuild
+            # a token (roles/stores unknown).
+            raise HTTPException(
+                status_code=401,
+                detail="Unable to refresh session. Please log in again.",
+            )
+        if db_user is not None and not db_user.get("is_active", True):
+            refresh_token_store.revoke_family(
+                rt_doc.get("family_id"), reason="account_disabled"
+            )
+            raise HTTPException(status_code=403, detail="Account is disabled")
+
+        base = dict(claims or {})
+        base["user_id"] = rt_doc.get("user_id")
+        base["username"] = rt_doc.get("username")
+        token_data = _resolve_refresh_claims(base, db_user)
+
+        session_start_dt = rt_doc.get("absolute_session_start") or rt_doc.get(
+            "issued_at"
+        )
+        token_data["sess_start"] = _epoch_utc(session_start_dt)
+        token_data["sid"] = rt_doc.get("family_id")
+
+        # 401s past the absolute cap; otherwise exp is capped at the cap.
+        new_access, access_expires_in = _mint_access_token(token_data)
+
+        reissued = refresh_token_store.issue(
+            user_id=token_data["user_id"],
+            username=token_data["username"],
+            session_start=session_start_dt,
+            family_id=rt_doc.get("family_id"),
+            rotated_from=rt_doc.get("token_hash"),
+        )
+        if reissued is None:
+            raise HTTPException(
+                status_code=401, detail="Session expired. Please log in again."
+            )
+        new_refresh, new_doc = reissued
+
+        return {
+            "access_token": new_access,
+            "token_type": "bearer",
+            "expires_in": access_expires_in,
+            "refresh_token": new_refresh,
+            "refresh_expires_in": int(
+                (new_doc["expires_at"] - datetime.utcnow()).total_seconds()
+            ),
+            "refresh_mode": "rotating",
+        }
+
+    # ------------------------------------------------------------------
+    # Mode 2: DEPRECATED legacy access-token refresh (pre-deploy contract).
+    # Keep for ONE release so sessions/clients from before the deploy keep
+    # working, then require refresh_token.
+    # ------------------------------------------------------------------
+    if not request.token:
+        raise HTTPException(
+            status_code=400, detail="refresh_token (or legacy token) is required"
+        )
+
+    payload = decode_token(request.token)  # still-valid access token, as before
+    token_data = _resolve_refresh_claims(payload, _lookup_live_user(
+        payload.get("user_id"), payload.get("username")
+    ))
+
+    # Anchor the absolute cap. Pre-deploy tokens carry no sess_start; derive it
+    # from their 8h exp so the chain dies exactly when the old token would have.
+    sess_start = _derive_session_start(payload)
+    if sess_start is not None:
+        token_data["sess_start"] = sess_start
+
+    # Upgrade the caller to a rotating pair (new family). Fail-soft: a refresh
+    # store hiccup still returns a usable access token, exactly as before.
+    new_refresh = None
+    refresh_expires_in = None
+    try:
+        issued = refresh_token_store.issue(
+            user_id=token_data["user_id"],
+            username=token_data["username"],
+            session_start=(
+                datetime.utcfromtimestamp(sess_start)
+                if sess_start is not None
+                else None
+            ),
+        )
+        if issued is not None:
+            new_refresh, rt_doc = issued
+            token_data["sid"] = rt_doc["family_id"]
+            refresh_expires_in = int(
+                (rt_doc["expires_at"] - datetime.utcnow()).total_seconds()
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh(legacy): refresh-token issue failed: %s", e)
+
+    new_token, access_expires_in = _mint_access_token(token_data)
 
     return {
         "access_token": new_token,
         "token_type": "bearer",
-        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "expires_in": access_expires_in,
+        "refresh_token": new_refresh,
+        "refresh_expires_in": refresh_expires_in,
+        "refresh_mode": "legacy_access",
     }
 
 
@@ -1054,6 +1340,17 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
         "module_access": current_user.get("module_access") or {},
     }
 
-    new_token = create_access_token(token_data)
+    # Preserve the session anchors (2026-07 token hardening): sess_start keeps
+    # the ABSOLUTE 8h cap intact across a store switch (derived from exp for
+    # pre-deploy tokens), and sid keeps /auth/logout able to revoke the refresh
+    # chain. Without these, switching stores would mint an uncapped, orphaned
+    # token. _mint_access_token also caps the new exp at the session end.
+    sess_start = _derive_session_start(current_user)
+    if sess_start is not None:
+        token_data["sess_start"] = sess_start
+    if current_user.get("sid"):
+        token_data["sid"] = current_user["sid"]
+
+    new_token, _expires_in = _mint_access_token(token_data)
 
     return {"access_token": new_token, "active_store_id": store_id}
