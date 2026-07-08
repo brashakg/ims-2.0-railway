@@ -105,11 +105,11 @@ describe('autopilotCandidateToFormValues', () => {
   });
 
   it('falls back to the category HSN/GST when no suggestion is present', () => {
-    // Frame -> 4-digit HSN 9003 @ 5% per the canonical GST 2.0 map.
+    // Frame -> 6-digit HSN 900311 @ 5% (getHSNByCategory is 6-digit only, owner 2026-07-05).
     const v = autopilotCandidateToFormValues(
       candidate({ brand: 'Ray-Ban', model: 'RX5154', category: 'Frame' })
     );
-    expect(v.hsnCode).toBe('9003');
+    expect(v.hsnCode).toBe('900311');
     expect(v.gstRate).toBe('5');
   });
 
