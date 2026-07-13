@@ -93,12 +93,12 @@ export function BaseModal({
 
   return (
     <div
-      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 ims-modal-backdrop"
       onClick={handleBackdropClick}
     >
       <div
         className={clsx(
-          'bg-white rounded-lg shadow-xl',
+          'bg-white rounded-lg shadow-xl ims-modal-panel',
           'w-full max-h-[90vh] overflow-hidden flex flex-col',
           MODAL_SIZES[size],
           className

@@ -152,7 +152,12 @@ export function AppLayout() {
         </div>
       )}
       <main style={{ padding: '0' }}>
-        <Outlet />
+        {/* Route-mount motion: keying on pathname remounts the wrapper so the
+            page-body eases in on every navigation (reduced-motion-safe via the
+            global guard in index.css). */}
+        <div key={location.pathname} className="ims-anim-page">
+          <Outlet />
+        </div>
       </main>
     </Shell>
   );
