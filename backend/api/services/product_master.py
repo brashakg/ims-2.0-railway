@@ -1033,6 +1033,7 @@ def normalise_payload(
     weight_grams: Optional[float] = None,
     tags: Any = None,
     created_by: Optional[str] = None,
+    created_by_name: Optional[str] = None,
     as_draft: bool = False,
     force_draft: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
@@ -1169,6 +1170,11 @@ def normalise_payload(
         "is_active": True,
         "created_by": created_by,
     }
+    # Cataloguer attribution: the creator's human-readable name rides next to
+    # the id so the Inventory "catalogued by" surface never needs a per-row
+    # users join. Additive -- only stamped when known (older docs simply lack it).
+    if created_by_name:
+        doc["created_by_name"] = created_by_name
     # Identity columns only when present (additive -- keep doc lean).
     if ids["color"] is not None:
         doc["color"] = ids["color"]
@@ -1498,6 +1504,7 @@ def build_canonical_product(
         weight_grams=p.get("weight_grams"),
         tags=p.get("tags"),
         created_by=p.get("created_by") or p.get("actor"),
+        created_by_name=p.get("created_by_name") or p.get("actor_name"),
         as_draft=bool(p.get("as_draft", False)),
         extra_fields=extra_fields,
         product_repo=product_repo,
@@ -1505,11 +1512,37 @@ def build_canonical_product(
     )
 
 
+def resolve_actor_name(actor: Optional[str], db=None) -> Optional[str]:
+    """Best-effort display name for an actor user_id (cataloguer attribution).
+
+    Routers that hold the JWT pass the username straight through as
+    `actor_name`; this fallback covers doors that only carry the id (the
+    catalog promote/import paths) by looking the user up once at write time.
+    FAIL-SOFT: no db / unknown user / any error -> None (the doc simply
+    carries no created_by_name, exactly like legacy rows).
+    """
+    if not actor or db is None:
+        return None
+    try:
+        users = db.get_collection("users")
+        if users is None:
+            return None
+        rec = users.find_one(
+            {"user_id": actor}, {"_id": 0, "username": 1, "full_name": 1}
+        )
+        if not rec:
+            return None
+        return rec.get("username") or rec.get("full_name") or None
+    except Exception:  # noqa: BLE001 - attribution must never block a write
+        return None
+
+
 def create_via_door(
     payload: Dict[str, Any],
     *,
     source: str,
     actor: str,
+    actor_name: Optional[str] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -1543,6 +1576,7 @@ def create_via_door(
         mrp=p.get("mrp"),
         offer_price=p.get("offer_price"),
         actor=actor,
+        actor_name=actor_name,
         sku=p.get("sku"),
         cost_price=p.get("cost_price"),
         discount_category=p.get("discount_category"),
@@ -1685,6 +1719,7 @@ def create_product(
     mrp: float,
     offer_price: float,
     actor: str,
+    actor_name: Optional[str] = None,
     sku: Optional[str] = None,
     cost_price: Optional[float] = None,
     discount_category: Optional[str] = None,
@@ -1734,6 +1769,10 @@ def create_product(
         weight_grams=weight_grams,
         tags=tags,
         created_by=actor,
+        # Attribution: a router-supplied username wins (no DB hit); doors that
+        # only carry the id (catalog promote / import) fall back to a one-shot,
+        # fail-soft users lookup so EVERY create door stamps the name coherently.
+        created_by_name=actor_name or resolve_actor_name(actor, db=db),
         as_draft=as_draft,
         force_draft=force_draft,
         extra_fields=extra_fields,
@@ -1841,6 +1880,7 @@ def update_product(
     product_id: str,
     patch: Dict[str, Any],
     actor: str,
+    actor_name: Optional[str] = None,
     product_repo=None,
     catalog_repo=None,
     audit_repo=None,
@@ -1894,6 +1934,17 @@ def update_product(
     # None-strip above (a caller intending to clear sends [] not None).
     if "tags" in (patch or {}) and patch.get("tags") is not None:
         clean["tags"] = normalise_tags(patch.get("tags"))
+
+    # Cataloguer attribution: stamp WHO edited (id + display name) on the doc.
+    # Creation attribution is immutable -- a patch may never rewrite
+    # created_by / created_by_name, so strip them defensively before the $set.
+    clean.pop("created_by", None)
+    clean.pop("created_by_name", None)
+    if actor:
+        clean["updated_by"] = actor
+        resolved_name = actor_name or resolve_actor_name(actor, db=db)
+        if resolved_name:
+            clean["updated_by_name"] = resolved_name
 
     before = {k: current.get(k) for k in clean.keys()}
 

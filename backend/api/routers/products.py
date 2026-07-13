@@ -470,6 +470,9 @@ def _create_via_canonical_door(
             _canonical_door_payload(product, as_draft=as_draft),
             source=source,
             actor=current_user.get("user_id"),
+            # Cataloguer attribution: the JWT already carries the username, so
+            # the display name is stamped without a users lookup.
+            actor_name=current_user.get("username"),
             extra_fields=extra,
             product_repo=get_product_repository(),
             variant_repo=variant_repo,
@@ -482,7 +485,7 @@ def _create_via_canonical_door(
         ) from err
 
 
-def _build_product_data(product: "ProductCreate", created_by) -> dict:
+def _build_product_data(product: "ProductCreate", created_by, created_by_name=None) -> dict:
     """Map a validated ProductCreate into the persisted product doc.
 
     Single source of truth for the create payload shape, shared by the single
@@ -516,6 +519,10 @@ def _build_product_data(product: "ProductCreate", created_by) -> dict:
         "is_active": True,
         "created_by": created_by,
     }
+    # Cataloguer attribution (additive): display name alongside the id, matching
+    # the canonical door's normalise_payload stamp.
+    if created_by_name:
+        product_data["created_by_name"] = created_by_name
 
     # Persist optional identity fields top-level only when provided (additive).
     for _f in _OPTIONAL_PRODUCT_FIELDS:
@@ -800,6 +807,13 @@ async def list_products(
     tag: Optional[str] = Query(
         None, description="Filter to products carrying this normalised tag"
     ),
+    created_by: Optional[str] = Query(
+        None,
+        description=(
+            "Cataloguer attribution filter: only products created by this "
+            "user_id (the value stamped in each product's created_by)."
+        ),
+    ),
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
@@ -824,6 +838,13 @@ async def list_products(
     from ..services.cache import cache
     from ..services.product_master import resolve_category
 
+    # Direct-call safety: several unit suites invoke this handler as a plain
+    # function WITHOUT the newer kwargs, so `created_by` arrives as its
+    # truthy FastAPI Query default object. Treat anything that is not a
+    # non-blank string as "absent" (HTTP callers always deliver a str/None).
+    if not isinstance(created_by, str) or not created_by.strip():
+        created_by = None
+
     # Category-filter fix: products store CANONICAL categories (SUNGLASS/FRAME),
     # but callers send short codes (SG/FR) or legacy plurals. Normalise the param
     # to canonical when resolvable (fail-open pass-through otherwise) BEFORE the
@@ -838,7 +859,7 @@ async def list_products(
     active_store = store_id or current_user.get("active_store_id", "")
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
-        f":{is_active}"
+        f":{is_active}:{created_by}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -865,27 +886,45 @@ async def list_products(
 
         if search:
             products = repo.search_products(
-                search, category, is_active=filtered_active, skip=skip, limit=limit
+                search,
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                skip=skip,
+                limit=limit,
             )
             total_count = repo.count_search_products(
-                search, category, is_active=filtered_active
+                search, category, is_active=filtered_active, created_by=created_by
             )
         elif brand:
             products = repo.find_by_brand(
-                brand, category, is_active=filtered_active, skip=skip, limit=limit
+                brand,
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                skip=skip,
+                limit=limit,
             )
             total_count = repo.count_by_brand(
-                brand, category, is_active=filtered_active
+                brand, category, is_active=filtered_active, created_by=created_by
             )
         elif category:
             products = repo.find_by_category(
-                category, is_active=filtered_active, skip=skip, limit=limit
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                skip=skip,
+                limit=limit,
             )
-            total_count = repo.count_by_category(category, is_active=filtered_active)
+            total_count = repo.count_by_category(
+                category, is_active=filtered_active, created_by=created_by
+            )
         else:
             _default_filter = (
                 {} if default_active is None else {"is_active": default_active}
             )
+            if created_by:
+                _default_filter["created_by"] = created_by
             products = repo.find_many(_default_filter, skip=skip, limit=limit)
             total_count = repo.count(_default_filter)
 
@@ -1989,6 +2028,88 @@ async def list_tags(
 
 
 # ============================================================================
+# CATALOGUER ATTRIBUTION — who catalogued what
+# ============================================================================
+# Roles that may see the cataloguer roster + per-user counts (performance
+# tracking is a manager concern; regular staff don't need the roster).
+# SUPERADMIN auto-passes via require_roles.
+_CATALOGUER_VIEW_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "CATALOG_MANAGER",
+)
+
+
+@router.get("/cataloguers")
+async def list_cataloguers(
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Distinct product cataloguers with per-user counts (attribution feature).
+
+    One row per distinct `created_by` on the products collection:
+      {user_id, name, created_count, last_created_at}
+    `name` prefers the stamped created_by_name; legacy docs created before the
+    name stamp existed fall back to a batched users lookup, then to the raw id.
+    Drives the Inventory "Catalogued by" filter dropdown + performance counts.
+
+    NOTE (route order): registered BEFORE the dynamic GET /products/{product_id}
+    in this file, so the literal path is matched first and never shadowed.
+    Fail-soft: no repo / aggregation trouble -> empty list, never a 500.
+    """
+    repo = get_product_repository()
+    if repo is None:
+        return {"cataloguers": []}
+
+    try:
+        rows = repo.cataloguer_stats()
+    except Exception:  # noqa: BLE001 - roster must never 500 the page
+        rows = []
+
+    # Legacy-name backfill: docs created before created_by_name existed carry
+    # only the user_id. Resolve those names in ONE batched users query
+    # (fail-soft: unknown ids just render as the raw id).
+    missing = [r["_id"] for r in rows if r.get("_id") and not r.get("name")]
+    resolved: Dict[str, str] = {}
+    if missing:
+        try:
+            from ..dependencies import get_db as _get_db_dep
+
+            _db = _get_db_dep()
+            if _db is not None:
+                users = _db.get_collection("users")
+                if users is not None:
+                    for u in users.find(
+                        {"user_id": {"$in": missing}},
+                        {"_id": 0, "user_id": 1, "username": 1, "full_name": 1},
+                    ):
+                        uid = u.get("user_id")
+                        nm = u.get("username") or u.get("full_name")
+                        if uid and nm:
+                            resolved[uid] = nm
+        except Exception:  # noqa: BLE001 - name enrichment is best-effort
+            resolved = {}
+
+    cataloguers = []
+    for r in rows:
+        uid = r.get("_id")
+        if not uid:
+            continue
+        last = r.get("last_created_at")
+        cataloguers.append(
+            {
+                "user_id": uid,
+                "name": r.get("name") or resolved.get(uid) or uid,
+                "created_count": int(r.get("created_count") or 0),
+                "last_created_at": (
+                    last.isoformat() if isinstance(last, datetime) else last
+                ),
+            }
+        )
+    return {"cataloguers": cataloguers}
+
+
+# ============================================================================
 # PRODUCT IMAGES — durable upload + serve (GridFS-backed file store)
 # ============================================================================
 # The Add Product screen (Quick Add + Guided) uploads product photos here. We
@@ -2379,6 +2500,13 @@ async def update_product(
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
         update_data["updated_by"] = current_user.get("user_id")
+        # Cataloguer attribution: the editor's display name rides next to the id
+        # (JWT already carries the username -- no users lookup needed). Creation
+        # attribution is immutable: ProductUpdate has no created_by* fields and
+        # the None-strip above cannot introduce them, so created_by /
+        # created_by_name are never rewritten here.
+        if current_user.get("username"):
+            update_data["updated_by_name"] = current_user.get("username")
 
         if repo.update(product_id, update_data):
             # Hub Phase 0: apply the catalog-done restamp as a GUARDED single-doc

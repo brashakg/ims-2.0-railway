@@ -5271,6 +5271,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/tags/list",
         "allowed": "AUTHENTICATED",
     },
+    # Cataloguer attribution roster: distinct product creators + per-user
+    # created counts (drives the Inventory "Catalogued by" filter and the
+    # owner's cataloguing-performance view). Manager ladder only -- regular
+    # staff don't need the roster; SUPERADMIN auto-passes.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/cataloguers",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
     # --- PM (N5) unified product-master sub-paths (router product_master.py) ---
     {
         "method": "GET",

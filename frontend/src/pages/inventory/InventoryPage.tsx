@@ -45,7 +45,7 @@ import { inventoryApi, catalogApi, storeApi, type OnlineStatus } from '../../ser
 // Product writes go through the SINGLE validated path (productApi -> /products).
 // Imported DIRECTLY from the module (not the api barrel) to dodge the TS2614
 // re-export resolution issue documented in CLAUDE.md.
-import { productApi, type CreateProductPayload } from '../../services/api/products';
+import { productApi, type CreateProductPayload, type Cataloguer } from '../../services/api/products';
 // v2-2b: import the new display API modules DIRECTLY (not via the api barrel)
 // to dodge the TS2614 re-export resolution issue documented in CLAUDE.md.
 import { displayPlacementsApi, type DisplayPlacement } from '../../services/api/displayPlacements';
@@ -116,6 +116,10 @@ interface StockItem {
    *  first image (row thumbnail); images = full array for the lightbox. */
   image_url?: string | null;
   images?: string[];
+  /** Cataloguer attribution (additive from /inventory/stock): who created the
+   *  product master row. Absent on legacy docs created before the stamp. */
+  created_by?: string | null;
+  created_by_name?: string | null;
 }
 
 // Stock movement row = the backend ledger entry: RECEIVED (GRN) / SOLD
@@ -162,6 +166,12 @@ export function InventoryPage() {
   const [availabilityFilter, setAvailabilityFilter] = useState<'all' | 'online' | 'offline'>('all');
   const [storeFilter, setStoreFilter] = useState<string>(user?.activeStoreId || '');
   const [stores, setStores] = useState<{ id: string; name: string }[]>([]);
+
+  // Cataloguer attribution: "which user catalogued what". '' = all users.
+  // The roster comes from GET /products/cataloguers (manager-ladder gated on
+  // the backend); the chosen user_id is passed to the stock fetch as created_by.
+  const [cataloguerFilter, setCataloguerFilter] = useState<string>('');
+  const [cataloguers, setCataloguers] = useState<Cataloguer[]>([]);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -224,11 +234,26 @@ export function InventoryPage() {
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
   const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
+  // Mirrors the backend gate on GET /products/cataloguers (manager ladder).
+  const canSeeCataloguers = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']);
 
-  // Load data on mount + whenever the viewed store changes
+  // Load data on mount + whenever the viewed store or cataloguer filter changes
   useEffect(() => {
     loadInventory();
-  }, [storeFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeFilter, cataloguerFilter]);
+
+  // Cataloguer roster for the "Catalogued by" filter. Fail-soft: a 403 (role
+  // outside the manager ladder) or any error just hides the filter.
+  useEffect(() => {
+    if (!canSeeCataloguers) return;
+    let cancelled = false;
+    productApi.getCataloguers()
+      .then(res => { if (!cancelled) setCataloguers(res.cataloguers || []); })
+      .catch(() => { if (!cancelled) setCataloguers([]); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canSeeCataloguers]);
 
   // F21: refresh the quarantine unlabeled-count badge whenever the store changes
   // or the Quarantine tab is opened. Fail-soft: a non-manager / no-data response
@@ -307,9 +332,12 @@ export function InventoryPage() {
     setError(null);
 
     try {
-      // Fetch inventory and low stock in parallel (for the viewed store)
+      // Fetch inventory and low stock in parallel (for the viewed store).
+      // The cataloguer filter is applied server-side (products.created_by).
       const [stockData, lowStockData] = await Promise.all([
-        inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
+        inventoryApi
+          .getStock(storeId, undefined, cataloguerFilter ? { created_by: cataloguerFilter } : undefined)
+          .catch(() => ({ items: [] })),
         inventoryApi.getLowStock(storeId).catch(() => ({ items: [] })),
       ]);
 
@@ -364,7 +392,7 @@ export function InventoryPage() {
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, selectedCategory, availabilityFilter, storeFilter]);
+  }, [searchQuery, selectedCategory, availabilityFilter, storeFilter, cataloguerFilter]);
 
   // Movements ledger: fetch from GET /inventory/movements. skip=0 replaces the
   // list; skip>0 appends (the Load-more path). Type filter is server-side.
@@ -885,23 +913,45 @@ export function InventoryPage() {
               {f === 'all' ? 'All' : f === 'online' ? 'Online' : 'Offline'}
             </button>
           ))}
-          {stores.length > 1 && (
-            <div className="ml-auto flex items-center gap-2">
-              <label htmlFor="inv-store" className="text-xs font-medium text-gray-500 uppercase">Store</label>
-              <select
-                id="inv-store"
-                value={storeFilter}
-                onChange={e => setStoreFilter(e.target.value)}
-                className="input-field text-sm py-1.5 w-48"
-              >
-                {stores.map(s => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}{s.id === user?.activeStoreId ? ' (current)' : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          <div className="ml-auto flex items-center gap-2 flex-wrap">
+            {/* Cataloguer attribution: which user catalogued what. Only shown
+                when the roster loaded (manager ladder; fail-soft otherwise). */}
+            {canSeeCataloguers && cataloguers.length > 0 && (
+              <>
+                <label htmlFor="inv-cataloguer" className="text-xs font-medium text-gray-500 uppercase">Catalogued by</label>
+                <select
+                  id="inv-cataloguer"
+                  value={cataloguerFilter}
+                  onChange={e => setCataloguerFilter(e.target.value)}
+                  className="input-field text-sm py-1.5 w-48"
+                >
+                  <option value="">All users</option>
+                  {cataloguers.map(c => (
+                    <option key={c.user_id} value={c.user_id}>
+                      {c.name} ({c.created_count})
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            {stores.length > 1 && (
+              <>
+                <label htmlFor="inv-store" className="text-xs font-medium text-gray-500 uppercase">Store</label>
+                <select
+                  id="inv-store"
+                  value={storeFilter}
+                  onChange={e => setStoreFilter(e.target.value)}
+                  className="input-field text-sm py-1.5 w-48"
+                >
+                  {stores.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}{s.id === user?.activeStoreId ? ' (current)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Category Filters */}
@@ -1039,6 +1089,16 @@ export function InventoryPage() {
                             <div>
                               <p className="font-medium text-gray-900">{item.name}</p>
                               <p className="text-sm text-gray-500">{item.brand}</p>
+                              {/* Cataloguer attribution: muted "by <name>" subtitle
+                                  (absent on legacy rows created before the stamp). */}
+                              {item.created_by_name && (
+                                <p
+                                  className="text-xs text-gray-400 mt-0.5"
+                                  title="Catalogued by"
+                                >
+                                  by {item.created_by_name}
+                                </p>
+                              )}
                               {/* Procurement Phase 1: muted source chip — where the
                                   recent inbound stock came from (latest ACCEPTED GRN). */}
                               {item.last_grn?.grn_number && (item.last_grn.qty ?? 0) > 0 && (
@@ -1508,6 +1568,7 @@ export function InventoryPage() {
           ['Available', String(available)],
           ['Online', online?.online ? `Yes (${online.online_stock ?? 0} online)` : 'In-store only'],
           ['Location', detailItem.location || '-'],
+          ['Catalogued by', detailItem.created_by_name || '-'],
         ];
         return (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetailItem(null)}>

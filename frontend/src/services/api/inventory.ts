@@ -5,8 +5,17 @@
 import api from './client';
 
 export const inventoryApi = {
-  getStock: async (storeId: string, productId?: string) => {
-    const response = await api.get('/inventory/stock', { params: { store_id: storeId, product_id: productId } });
+  // `opts.created_by` (cataloguer attribution) filters the per-product ledger
+  // to products created by that user_id. Backward-compatible: existing
+  // two-argument callers are untouched.
+  getStock: async (storeId: string, productId?: string, opts?: { created_by?: string }) => {
+    const response = await api.get('/inventory/stock', {
+      params: {
+        store_id: storeId,
+        product_id: productId,
+        ...(opts?.created_by ? { created_by: opts.created_by } : {}),
+      },
+    });
     return response.data;
   },
 

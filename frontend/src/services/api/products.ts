@@ -156,6 +156,25 @@ export interface SimilarProductsResponse {
   model_colour_count: number;
 }
 
+// ---------------------------------------------------------------------------
+// Cataloguer attribution (GET /products/cataloguers).
+// One row per distinct product creator, with the display name and per-user
+// created count -- drives the Inventory "Catalogued by" filter dropdown and
+// the owner's cataloguing-performance view. Manager-ladder gated on the
+// backend (403 for regular staff); callers should catch and hide the filter.
+// ---------------------------------------------------------------------------
+export interface Cataloguer {
+  user_id: string;
+  /** Display name (username); falls back to the raw user_id server-side. */
+  name: string;
+  created_count: number;
+  last_created_at: string | null;
+}
+
+export interface CataloguersResponse {
+  cataloguers: Cataloguer[];
+}
+
 // Partial update payload for `PUT /products/{id}`. Mirrors the backend
 // `ProductUpdate` schema (snake_case). Every field is optional; the backend
 // merges only what is sent and re-runs the category + MRP>=offer validators.
@@ -262,9 +281,20 @@ export const productApi = {
     skip?: number;
     limit?: number;
     is_active?: 'true' | 'false' | 'all';
+    /** Cataloguer attribution filter: only products created by this user_id. */
+    created_by?: string;
   }) => {
     const response = await api.get('/products', { params });
     return response.data;
+  },
+
+  // Cataloguer roster for the "Catalogued by" filter + performance counts.
+  // Manager-ladder gated on the backend (403 for regular staff) -- import this
+  // DIRECTLY from this module (not the api barrel), the barrel re-export fails
+  // to resolve for new methods (TS2614).
+  getCataloguers: async (): Promise<CataloguersResponse> => {
+    const response = await api.get('/products/cataloguers');
+    return response.data as CataloguersResponse;
   },
 
   getProduct: async (productId: string) => {
