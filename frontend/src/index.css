@@ -3430,3 +3430,74 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   .top-nav { display: none; }
 }
 
+
+/* ============================================================================
+   Motion layer (owner 2026-07 "add some animations") — a small, coherent set
+   that extends the existing restrained transition system. All of it is
+   NEUTRALISED under prefers-reduced-motion (see the guard at the very end).
+   GPU-friendly (transform/opacity only), short + easeful, never gratuitous.
+   ============================================================================ */
+@keyframes ims-fade-up   { from { opacity: 0; transform: translateY(8px);  } to { opacity: 1; transform: none; } }
+@keyframes ims-fade      { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ims-scale-in  { from { opacity: 0; transform: scale(.97);       } to { opacity: 1; transform: none; } }
+@keyframes ims-slide-right { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes ims-shimmer   { 100% { transform: translateX(100%); } }
+
+/* Route/page mount — the page body eases in on every navigation. Keyed on the
+   pathname in AppLayout so it re-triggers per route. */
+.ims-anim-page { animation: ims-fade-up .26s cubic-bezier(.22,.61,.36,1) both; }
+
+/* Section / card entrance (opt-in on any block). */
+.ims-fade-up { animation: ims-fade-up .3s cubic-bezier(.22,.61,.36,1) both; }
+.ims-fade    { animation: ims-fade .24s ease-out both; }
+
+/* Modal + drawer enter (used by BaseModal / slide-overs). */
+.ims-modal-backdrop { animation: ims-fade .18s ease-out both; }
+.ims-modal-panel    { animation: ims-scale-in .2s cubic-bezier(.2,.9,.3,1.15) both; }
+.ims-drawer-panel   { animation: ims-slide-right .26s cubic-bezier(.22,.61,.36,1) both; }
+
+/* List stagger — put .ims-stagger on a container; its direct children fade-up
+   in sequence. Capped so a long list doesn't wait seconds. */
+.ims-stagger > * { animation: ims-fade-up .32s cubic-bezier(.22,.61,.36,1) both; }
+.ims-stagger > *:nth-child(1){animation-delay:.02s}
+.ims-stagger > *:nth-child(2){animation-delay:.05s}
+.ims-stagger > *:nth-child(3){animation-delay:.08s}
+.ims-stagger > *:nth-child(4){animation-delay:.11s}
+.ims-stagger > *:nth-child(5){animation-delay:.14s}
+.ims-stagger > *:nth-child(6){animation-delay:.17s}
+.ims-stagger > *:nth-child(7){animation-delay:.20s}
+.ims-stagger > *:nth-child(8){animation-delay:.23s}
+.ims-stagger > *:nth-child(n+9){animation-delay:.26s}
+
+/* Opt-in hover lift for interactive cards/tiles (NOT applied to the global
+   .card, so POS + dense grids stay still). */
+.ims-lift { transition: transform .15s ease, box-shadow .15s ease; }
+.ims-lift:hover { transform: translateY(-2px); box-shadow: 0 6px 18px -8px rgba(20,20,19,.18); }
+
+/* Skeleton shimmer — a light sweep over a loading placeholder. Put
+   .ims-shimmer on the placeholder box (position becomes relative + clipped). */
+.ims-shimmer { position: relative; overflow: hidden; }
+.ims-shimmer::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.6), transparent);
+  animation: ims-shimmer 1.4s ease-in-out infinite;
+}
+
+/* Tactile button press — the design system already transitions transform;
+   this adds a subtle "give" on active for primary/secondary buttons. */
+.btn:active, .btn-primary:active, .btn-secondary:active { transform: translateY(.5px) scale(.988); }
+
+/* ---------------------------------------------------------------------------
+   Accessibility: honour the OS "reduce motion" setting. This neutralises the
+   whole motion layer AND the pre-existing micro-transitions for users who ask
+   for calm — the responsible default (there was no such guard before).
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .ims-shimmer::after { display: none; }
+}

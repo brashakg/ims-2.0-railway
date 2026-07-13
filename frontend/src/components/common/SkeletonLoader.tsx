@@ -30,7 +30,9 @@ export function Skeleton({
 }: SkeletonProps) {
   const baseClasses = clsx(
     'bg-gray-200',
-    animated && 'animate-pulse',
+    // ims-shimmer sweeps a soft highlight across the placeholder (nicer than a
+    // flat pulse); neutralised under prefers-reduced-motion by the global guard.
+    animated && 'animate-pulse ims-shimmer',
     circle && 'rounded-full',
     !circle && 'rounded'
   );

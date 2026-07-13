@@ -50,7 +50,7 @@ export function ImageLightbox({ images, startIndex = 0, alt, onClose }: ImageLig
 
   return (
     <div
-      className="fixed inset-0 z-[80] bg-black/80 flex items-center justify-center p-6"
+      className="fixed inset-0 z-[80] bg-black/80 flex items-center justify-center p-6 ims-modal-backdrop"
       role="dialog"
       aria-modal="true"
       aria-label={alt ? `Image: ${alt}` : 'Product image'}
