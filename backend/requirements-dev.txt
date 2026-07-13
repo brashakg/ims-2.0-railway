@@ -12,16 +12,24 @@ pytest-mock==3.15.1
 
 # Code Quality
 # 24.3.0 fixes GHSA-fj7x-q9j7-g6q6 / CVE-2024-21503 (ReDoS) while staying on
-# black's 2024 stable style, so no repo-wide reformat. The dev-only cache-name
-# file-write CVE (GHSA-3936-cmfr-pm3m) needs black 26.x, which changes the
-# stable style -> deferred to a deliberate formatter-upgrade change.
+# black's 2024 stable style, so no repo-wide reformat. STILL deferring the
+# 26.x bump here (re-checked): 26.5.1 would reformat 129 files under api/
+# (`black --check api/` --> "129 files would be reformatted, 119 unchanged")
+# for a dev-only cache-filename CVE (GHSA-3936-cmfr-pm3m) that requires
+# attacker control of --python-cell-magics, a flag this repo's CI invocation
+# never sets -- not exploitable here. Needs its own deliberate reformat PR.
 black==24.3.0
-pylint==3.0.3
-mypy==1.8.0
+# CI's pylint step (--disable=all --enable=E,F) is clean at 10.00/10 on 4.0.6.
+pylint==4.0.6
+# CI's mypy step is continue-on-error (gradual adoption); 2.3.0 finds 826
+# errors under api/ vs 838 pre-existing under 1.8.0 -- no new-error blowup.
+mypy==2.3.0
 types-python-dateutil==2.9.0.20260518
 
 # Security
-bandit==1.7.6
+# 1.9.4: same single pre-existing MEDIUM B608 finding (bvi_parity.py:363,
+# hardcoded table names, not attacker-reachable) as 1.7.6 -- no new blocker.
+bandit==1.9.4
 # safety 3.0.1 pinned pydantic <2, which downgraded our pydantic 2.9 install
 # at test time and broke `from pydantic import field_validator` in routers,
 # which in turn killed every `pytest` run in CI (ConftestImportFailure).

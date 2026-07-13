@@ -2,8 +2,8 @@
 # ===============================
 
 # Web Framework
-fastapi==0.136.3
-uvicorn[standard]==0.49.0
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
 
 # Data Validation
 pydantic==2.13.4
@@ -13,7 +13,11 @@ pydantic-settings==2.14.2
 
 # Authentication & Security
 pyjwt==2.13.0
-bcrypt==4.2.0
+# 5.0.0 makes hashpw() raise ValueError (not silently truncate) past its
+# 72-byte input window. api/routers/auth.py::hash_password guards this with
+# password_within_bcrypt_limit (mirrors the existing users.py check) so a
+# too-long password change/reset is a 400, not an unhandled 500.
+bcrypt==5.0.0
 # 0.0.31 fixes GHSA-v9pg-7xvm-68hf / CVE-2026-53540 (negative Content-Length
 # buffers the whole request body in memory -> DoS).
 python-multipart==0.0.32
@@ -21,9 +25,10 @@ python-multipart==0.0.32
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
 # 48.0.0 fixes CVE-2024-12797, PYSEC-2026-35 (X.509 DNS name-constraint
 # bypass) and CVE-2026-26007 (EC public-key subgroup check); 48.0.1 fixes
-# GHSA-537c-gmf6-5ccf (vulnerable OpenSSL bundled in the wheel) -- all
-# without breaking API changes for our RSA-sign-only usage.
-cryptography==48.0.1
+# GHSA-537c-gmf6-5ccf (vulnerable OpenSSL bundled in the wheel); 49.0.0 is a
+# clean bump for our usage (RSA sign/serialize only -- doesn't touch any of
+# its removed type aliases, ChaCha20, or X.509-NULL-parameter changes).
+cryptography==49.0.0
 
 # Database
 pymongo==4.17.0
@@ -37,10 +42,11 @@ httpx==0.28.1
 apscheduler==3.11.3
 
 # Caching
-# redis 8.x is a major rebranding release (no redis 6/7); API-compatible for
-# our usage (basic get/set/pub-sub via event_bus.py). Staying on 5.x until
-# Railway confirms their managed Redis supports the new RESP3 defaults.
-redis==5.3.1
+# 8.0.1: neither call site (api/services/cache.py, agents/event_bus.py) passes
+# protocol=3, so the wire protocol stays RESP2 regardless of client version --
+# the get/set/pub-sub/ping calls we use are unchanged across 5.x-8.x. Still
+# worth a smoke-check against Railway's managed Redis after deploy.
+redis==8.0.1
 
 # Utilities
 email-validator==2.3.0
@@ -49,5 +55,6 @@ python-dateutil==2.9.0.post0
 # paths work without it, the xlsx path 400s cleanly when absent).
 openpyxl==3.1.5
 
-# Production Server (optional, uvicorn is primary)
-gunicorn==23.0.0
+# Production Server (optional, uvicorn is primary; not currently invoked by
+# any Procfile/start script in this repo)
+gunicorn==26.0.0

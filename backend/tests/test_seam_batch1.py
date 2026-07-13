@@ -18,13 +18,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def test_users_list_route_registered_without_trailing_slash():
     from api.main import app
 
-    matches = [
-        r
-        for r in app.routes
-        if getattr(r, "path", None) == "/api/v1/users"
-        and "GET" in (getattr(r, "methods", None) or set())
-    ]
-    assert matches, "GET /api/v1/users (no trailing slash) is not registered"
+    # Introspect via the OpenAPI schema (stable public API) rather than
+    # app.routes directly: FastAPI 0.139's router groups included routers
+    # into lazy _IncludedRouter wrappers, so app.routes no longer flattens
+    # to a plain list of APIRoute objects with a .path attribute.
+    path_item = app.openapi()["paths"].get("/api/v1/users")
+    assert path_item and "get" in path_item, (
+        "GET /api/v1/users (no trailing slash) is not registered"
+    )
 
 
 def test_vendor_portal_status_accepts_vendor_tracking_url_alias():

@@ -248,7 +248,11 @@ class TestHttpGatesAndFailSoft:
         assert resp.json() == {"vouchers": [], "total": 0}
 
     def test_route_is_mounted(self, app):
-        paths = {getattr(r, "path", "") for r in app.routes}
+        # Introspect via the OpenAPI schema (stable public API) rather than
+        # app.routes directly: FastAPI 0.139's router groups included routers
+        # into lazy _IncludedRouter wrappers, so app.routes no longer flattens
+        # to a plain list of APIRoute objects with a .path attribute.
+        paths = app.openapi()["paths"]
         assert "/api/v1/vouchers" in paths
         assert "/api/v1/vouchers/{code}/redeem" in paths
 

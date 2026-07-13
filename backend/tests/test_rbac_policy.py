@@ -49,16 +49,16 @@ def test_no_stale_policy_entries(app):
     """Every POLICY entry should correspond to a live route - a stale row means
     the table drifted from the app and ``check_access`` could authorize a path
     that no longer exists (or mask a renamed one)."""
-    live = set()
-    for route in app.routes:
-        path = getattr(route, "path", None)
-        methods = getattr(route, "methods", None)
-        if not path or not methods or not path.startswith("/api/v1"):
-            continue
-        for method in methods:
-            if method in ("HEAD", "OPTIONS"):
-                continue
-            live.add((method, path))
+    # rbac.live_api_routes walks the real route tree (not app.openapi()):
+    # some routes are deliberately registered twice -- a canonical path plus
+    # an include_in_schema=False trailing-slash alias for FE compat (see
+    # e.g. handoffs.py) -- and the OpenAPI schema only reflects the visible
+    # one, which would make every hidden-alias POLICY row look stale.
+    live = {
+        (m, p)
+        for m, p in rbac.live_api_routes(app)
+        if m in ("GET", "POST", "PUT", "PATCH", "DELETE")
+    }
     stale = [
         (e["method"], e["path"])
         for e in rbac.POLICY

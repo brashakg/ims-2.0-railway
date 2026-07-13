@@ -7434,31 +7434,71 @@ def check_access(method: str, path: str, user_roles) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+
+
+def _iter_route_method_paths(route, prefix=""):
+    """Yield (method, full_path) for ``route``, recursing into FastAPI
+    0.139's lazy ``_IncludedRouter`` wrappers.
+
+    Included routers are no longer flattened into ``app.routes`` as plain
+    ``APIRoute`` objects -- they're grouped behind a wrapper exposing
+    ``original_router`` (the real ``APIRouter``, with un-prefixed sub-routes)
+    and ``include_context.prefix`` (the mount prefix). Detected structurally
+    (duck-typed) rather than by importing the private wrapper class, since
+    private names aren't a stable cross-version contract.
+
+    Deliberately does NOT go through ``app.openapi()``: some routes are
+    registered twice on purpose -- a canonical path plus a second
+    ``include_in_schema=False`` alias for FE trailing-slash compatibility
+    (see e.g. ``handoffs.py``) -- and the OpenAPI schema only reflects the
+    visible one. Walking the real route tree catches both.
+    """
+    sub_router = getattr(route, "original_router", None)
+    if sub_router is not None:
+        include_ctx = getattr(route, "include_context", None)
+        sub_prefix = prefix + (getattr(include_ctx, "prefix", "") or "")
+        for sub_route in getattr(sub_router, "routes", []):
+            yield from _iter_route_method_paths(sub_route, sub_prefix)
+        return
+    path = getattr(route, "path", None)
+    methods = getattr(route, "methods", None)
+    if path is None or not methods:
+        return
+    # path == "" is a real value (route registered at the bare prefix root,
+    # e.g. the list endpoint's @router.get("")) -- not "missing".
+    full_path = (prefix + path) or "/"
+    for method in methods:
+        yield method, full_path
+
+
+def live_api_routes(app) -> set:
+    """Return the set of (method, path) pairs for every real ``/api/v1``
+    route registered on ``app``, HEAD/OPTIONS excluded. Ground truth for both
+    the coverage and stale-entry RBAC policy tests."""
+    live = set()
+    for route in app.routes:
+        for method, path in _iter_route_method_paths(route):
+            if method in ("HEAD", "OPTIONS"):
+                continue
+            if path.startswith("/api/v1"):
+                live.add((method, path))
+    return live
+
+
 def uncatalogued_routes(app) -> List[Dict[str, str]]:
     """Return live ``/api/v1`` routes (method, path) that have NO POLICY entry.
 
     Excludes docs / openapi / static and non-/api/v1 utility routes (``/``,
-    ``/health``, ``/docs`` …). HEAD is ignored (auto-paired with GET). This is
-    the regression lock used by the coverage test: any new endpoint added
-    without a POLICY row shows up here.
+    ``/health``, ``/docs`` …). HEAD/OPTIONS are ignored (auto-paired with GET).
+    This is the regression lock used by the coverage test: any new endpoint
+    added without a POLICY row shows up here.
     """
     missing: List[Dict[str, str]] = []
-    seen = set()
-    for route in getattr(app, "routes", []):
-        path = getattr(route, "path", None)
-        methods = getattr(route, "methods", None)
-        if not path or not methods:
+    for method, path in live_api_routes(app):
+        if method not in _HTTP_METHODS:
             continue
-        if not path.startswith("/api/v1"):
-            continue
-        for method in methods:
-            if method in ("HEAD", "OPTIONS"):
-                continue
-            key = (method, path)
-            if key in seen:
-                continue
-            seen.add(key)
-            if policy_for(method, path) is None:
-                missing.append({"method": method, "path": path})
+        if policy_for(method, path) is None:
+            missing.append({"method": method, "path": path})
     missing.sort(key=lambda r: (r["path"], r["method"]))
     return missing

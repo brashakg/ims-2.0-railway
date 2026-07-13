@@ -284,7 +284,20 @@ class RefreshTokenRequest(BaseModel):
 
 
 def hash_password(password: str) -> str:
-    """Hash password using bcrypt directly"""
+    """Hash password using bcrypt directly.
+
+    bcrypt only consumes the first 72 BYTES of the input. bcrypt>=5 raises
+    ValueError instead of silently truncating, so reject anything over the
+    limit as a 400 (a multibyte UTF-8 char can push the byte count over 72
+    even within a 72-CHAR schema cap -- mirrors users.py::hash_password).
+    """
+    from api.services.user_roles import password_within_bcrypt_limit, BCRYPT_MAX_BYTES
+
+    if not password_within_bcrypt_limit(password):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at most {BCRYPT_MAX_BYTES} bytes",
+        )
     import bcrypt as _bc
 
     return _bc.hashpw(password.encode(), _bc.gensalt(rounds=12)).decode()
