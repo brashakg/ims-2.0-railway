@@ -956,6 +956,32 @@ class PricingInput(BaseModel):
         return norm
 
 
+class PricingPatchInput(BaseModel):
+    """Diff-only pricing patch for PUT /catalog/products/{id}. The create-path
+    PricingInput REQUIRES mrp and defaults discount_category to 'MASS', so
+    reusing it on the update path made a partial pricing patch impossible
+    (422 on the missing mrp) AND silently stamped MASS onto the merged block
+    -- which flowed through the fail-soft spine mirror into the POS discount
+    caps, widening a LUXURY item's 5% cap to MASS's 15%. Everything is
+    Optional here: the exclude_none merge in the handler keeps only the fields
+    the caller actually sent, and the MRP >= offer rule still runs on the
+    EFFECTIVE post-merge values."""
+
+    mrp: Optional[float] = Field(default=None, gt=0)
+    offer_price: Optional[float] = Field(default=None, gt=0)
+    cost_price: Optional[float] = Field(default=None, gt=0)
+    discount_category: Optional[str] = None
+
+    @field_validator("discount_category")
+    @classmethod
+    def _validate_discount_category(cls, v: Optional[str]) -> Optional[str]:
+        """Same canonical-tier gate as the create path, but only when a value
+        is actually provided (None = leave the stored tier alone)."""
+        if v is None:
+            return None
+        return PricingInput._validate_discount_category(v)
+
+
 class InventoryInput(BaseModel):
     initial_quantity: int = 0
     location_id: Optional[str] = None
@@ -1022,13 +1048,25 @@ class ProductUpdateInput(BaseModel):
     # re-derived from the new category (same helper the migration used).
     category: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None
+    # Full-page review editor extensions (diff-only saves):
+    #   name -- explicit operator name; applied AFTER the attributes block so
+    #     it wins over the best-effort title regen for THAT save (sets both
+    #     name and title; per-save only, no persistent flag).
+    #   tags -- replaces the tag list (each trimmed, empties dropped).
+    #   expected_updated_at -- ADDITIVE optimistic concurrency: when present
+    #     and != the stored updated_at, the save 409s instead of clobbering a
+    #     concurrent reviewer's fixes. Absent = today's last-write-wins (the
+    #     existing drawer sends nothing and keeps working unchanged).
+    name: Optional[str] = None
+    tags: Optional[List[str]] = None
     description: Optional[str] = None
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     weight: Optional[float] = None
-    pricing: Optional[PricingInput] = None
+    pricing: Optional[PricingPatchInput] = None
     images: Optional[List[str]] = None
     is_active: Optional[bool] = None
+    expected_updated_at: Optional[str] = None
 
 
 # ============================================================================
@@ -1120,7 +1158,40 @@ def _save_catalog_product(product: Dict) -> None:
         else:
             coll.insert_one(dict(product))
     else:
-        CATALOG_PRODUCTS[product["id"]] = product
+        # Mirror Mongo's $set semantics: merge into the stored doc so keys
+        # ABSENT from the write survive (the PUT strips the promote-owned
+        # flags from its write; a full replace here would drop them).
+        stored = CATALOG_PRODUCTS.get(product["id"])
+        if stored is not None:
+            stored.update(product)
+        else:
+            CATALOG_PRODUCTS[product["id"]] = product
+
+
+def _save_catalog_product_cas(product: Dict, expected_raw_updated_at) -> bool:
+    """Compare-and-swap save for the optimistic-concurrency PUT path: the
+    write only lands when the stored updated_at STILL equals the raw value
+    read at load time (filtered on the raw datetime-or-string value so
+    imported docs match). Returns False when another writer got in between --
+    the caller 409s. The plain check-then-write left a multi-round-trip
+    window where two overlapping saves both passed the timestamp check and
+    the loser silently clobbered the winner's fixes."""
+    coll = _catalog_coll()
+    if coll is not None:
+        res = coll.update_one(
+            {"id": product["id"], "updated_at": expected_raw_updated_at},
+            {"$set": product},
+        )
+        matched = getattr(res, "matched_count", None)
+        if matched is None:
+            # MockCollection's update_one result only carries modified_count.
+            matched = getattr(res, "modified_count", 0)
+        return bool(matched)
+    stored = CATALOG_PRODUCTS.get(product["id"])
+    if stored is None or stored.get("updated_at") != expected_raw_updated_at:
+        return False
+    stored.update(product)
+    return True
 
 
 def _get_catalog_product(product_id: str) -> Optional[Dict]:
@@ -1689,6 +1760,36 @@ async def update_catalog_product(
     existing = _get_catalog_product(product_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
+    # in-memory dict, so mutating it mid-handler would leak partial edits into
+    # the store on a later 4xx AND defeat the compare-and-swap write below
+    # (the stored updated_at must keep its load-time value until the write
+    # lands). Shallow is enough -- every field below is REPLACED, not mutated
+    # in place.
+    existing = dict(existing)
+
+    # Additive optimistic concurrency (full-page review editor): the client
+    # echoes the updated_at it loaded; a mismatch means another reviewer saved
+    # in between, so 409 instead of silently clobbering their fixes. Compared
+    # as ISO strings (imported docs may store a datetime -- isoformat it).
+    # Callers that send nothing (the existing drawer) keep last-write-wins.
+    # This early check is only a fast pre-check: the write itself is a
+    # compare-and-swap on the RAW stored value (see below), so an overlapping
+    # save in the check-to-write window still 409s instead of clobbering.
+    raw_expected_ts = None
+    if product.expected_updated_at is not None:
+        raw_expected_ts = existing.get("updated_at")
+        stored_ts = raw_expected_ts
+        if isinstance(stored_ts, datetime):
+            stored_ts = stored_ts.isoformat()
+        if stored_ts != product.expected_updated_at:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This item was changed by someone else - reload and "
+                    "re-apply your fixes"
+                ),
+            )
 
     # Category change (Catalog Manager review mini-form). Canonicalised via the
     # shared registry resolver; unknown values are rejected loudly. When the
@@ -1737,6 +1838,33 @@ async def update_catalog_product(
             )
         except (ValueError, KeyError):
             pass
+        # Courtesy mirror: the review-queue brand filter (and the promote
+        # duplicate warnings) read the top-level brand/model, so a fixed
+        # attributes.brand_name / model must be visible there immediately.
+        # Keyed off the CALLER'S patch keys (not the merged set), so an
+        # unrelated attribute fix (e.g. the drawer changing only colour) never
+        # rewrites brand/model from stale attribute values it did not touch;
+        # the mirrored VALUE still comes from the canonicalised merged set. An
+        # explicit clear propagates as "" -- the full-doc $set cannot unset a
+        # key, and consumers treat an empty top-level brand/model as absent.
+        if "brand_name" in product.attributes:
+            existing["brand"] = str(merged_attrs.get("brand_name") or "").strip()
+        if "model_no" in product.attributes or "model_name" in product.attributes:
+            existing["model"] = str(
+                merged_attrs.get("model_no") or merged_attrs.get("model_name") or ""
+            ).strip()
+
+    # Explicit operator name wins over the best-effort title regen for THIS
+    # save (hence applied AFTER the attributes block; per-save only -- the
+    # regen above already no-ops for imported long-form categories).
+    if product.name is not None:
+        _name = product.name.strip()
+        if _name:
+            existing["name"] = _name
+            existing["title"] = _name
+
+    if product.tags is not None:
+        existing["tags"] = [t.strip() for t in product.tags if t and t.strip()]
 
     if product.description is not None:
         existing["description"] = product.description
@@ -1757,13 +1885,37 @@ async def update_catalog_product(
         # offer_price) slipped a product into an MRP < offer state, exactly the
         # back-door SYSTEM_INTENT section 3/10 forbids. Mirrors the equivalent
         # fix in products.update_product.
+        pricing_patch = product.pricing.model_dump(exclude_none=True)
         merged_pricing = {
             **(existing.get("pricing") or {}),
-            **product.pricing.model_dump(exclude_none=True),
+            **pricing_patch,
         }
         eff_mrp = merged_pricing.get("mrp")
         eff_offer = merged_pricing.get("offer_price")
-        if eff_mrp is not None and eff_offer is not None:
+        if "offer_price" in pricing_patch:
+            # An offer-touching patch REQUIRES a usable effective MRP: price-
+            # less imports (BVI fold_variant_prices leaves {mrp: 0.0}) made
+            # evaluate_offer_price return INVALID_MRP, which the old
+            # MRP_BELOW_OFFER-only check silently skipped -- persisting an
+            # offer > MRP doc. Fall back to the top-level mrp mirror (the same
+            # value the promote payload uses) before concluding it is absent;
+            # an absent/zero/non-numeric MRP then rejects loudly.
+            if eff_mrp is None:
+                eff_mrp = existing.get("mrp")
+            verdict = evaluate_offer_price(eff_mrp, eff_offer)
+            if verdict["reason"] == "MRP_BELOW_OFFER":
+                raise HTTPException(
+                    status_code=400, detail="Offer price cannot exceed MRP"
+                )
+            if verdict["reason"] == "INVALID_MRP":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Set a valid MRP before or with the offer price",
+                )
+        elif eff_mrp is not None and eff_offer is not None:
+            # Patches NOT touching offer_price stay lenient (metadata/cost
+            # fixes on price-less imports must keep working): only the
+            # non-negotiable MRP >= offer rule is enforced.
             verdict = evaluate_offer_price(eff_mrp, eff_offer)
             if verdict["reason"] == "MRP_BELOW_OFFER":
                 raise HTTPException(
@@ -1784,8 +1936,40 @@ async def update_catalog_product(
         existing["is_active"] = product.is_active
 
     existing["updated_at"] = datetime.now().isoformat()
+    # Per-user attribution (multiple staff catalogue in parallel): WHO made
+    # this edit, for performance tracking and mistake tracing. Same fields
+    # convention as the other routers' created_by_name; created_by is never
+    # overwritten here.
+    existing["updated_by"] = current_user.get("user_id")
+    existing["updated_by_name"] = current_user.get("full_name") or current_user.get(
+        "username"
+    )
 
-    _save_catalog_product(existing)
+    # Promote is the ONLY writer of the review/promote flags (see the stamp in
+    # promote_catalog_product): strip them from the WRITE (a copy -- the
+    # response below still returns them as loaded) so a PUT whose snapshot was
+    # loaded pre-promote can never resurrect needs_review=True over a
+    # concurrent promote's stamp. $set leaves absent keys untouched, and the
+    # in-memory fallback mirrors that merge semantics.
+    to_write = dict(existing)
+    for _flag in ("needs_review", "pos_ready", "promoted_at", "promoted_by"):
+        to_write.pop(_flag, None)
+
+    if product.expected_updated_at is not None:
+        # Compare-and-swap: filter the write on the RAW stored updated_at
+        # (datetime or string) captured at load. matched_count == 0 means
+        # another writer landed inside the check-to-write window (which
+        # includes live DB round-trips) -- 409 instead of clobbering.
+        if not _save_catalog_product_cas(to_write, raw_expected_ts):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This item was changed by someone else - reload and "
+                    "re-apply your fixes"
+                ),
+            )
+    else:
+        _save_catalog_product(to_write)
 
     # Products-convergence: keep the billing SPINE in sync with this catalog edit
     # (the catalog id == the spine product_id). Propagate price / tier / gst /

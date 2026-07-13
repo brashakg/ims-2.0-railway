@@ -15,13 +15,16 @@
 // Shares CATEGORY_FIELDS + the create payload mapping via productAddShared.ts so
 // the create contract + per-category required-field enforcement are unchanged.
 
-import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   Save,
   RotateCcw,
   Loader2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CheckCircle2,
   X,
   Tag,
   IndianRupee,
@@ -46,6 +49,7 @@ import {
   Lock,
   CopyPlus,
   Pencil,
+  User as UserIcon,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -63,6 +67,13 @@ import {
 // Import the templates service DIRECTLY from its module (not the api barrel —
 // the barrel re-export fails to resolve for new services, TS2614).
 import { productTemplatesApi, type ProductTemplate } from '../../services/api/productTemplates';
+// Catalog-products (imported review docs) API — DIRECT module import (TS2614).
+import {
+  catalogProductsApi,
+  CatalogRequestError,
+  type CatalogProductDoc,
+  type PromoteDryRunResult,
+} from '../../services/api/catalog';
 import { getHSNOptions } from '../../constants/gst';
 import {
   CATEGORIES,
@@ -70,9 +81,15 @@ import {
   loadCategoryRegistry,
   categoryName,
   validateProductForm,
+  validateReviewForm,
   buildProductPayload,
   resolveHsnGst,
   productToFormValues,
+  catalogDocToFormValues,
+  formValuesToCatalogUpdate,
+  promoteGapsToFormErrors,
+  overlayChangedFormValues,
+  dictionaryErrorField,
   mapAutopilotCandidate,
   candidateReferences,
   candidateImagesUsable,
@@ -87,13 +104,27 @@ import {
   type ProductFormValues,
   type ProductDoc,
 } from './productAddShared';
+import {
+  readReviewQueue,
+  writeReviewQueue,
+  removeFromReviewQueue,
+} from './reviewQueue';
 import { SimilarProductsHint } from './SimilarProductsHint';
 import clsx from 'clsx';
 
 type SectionId = 'identity' | 'pricing' | 'inventory';
 
+// The page's edit target, discriminated by which collection it edits:
+//   kind='spine'   — /catalog/add?edit=<id>: EDIT-IN-PLACE of a billing
+//                    `products` row (one validated PUT /products/{id}).
+//   kind='catalog' — /catalog/add?review=<id>: FULL-PAGE REVIEW of an
+//                    imported `catalog_products` doc (diff-only PUT
+//                    /catalog/products/{id} + promote to approve).
+//   null           — plain create (also clone / variant seeding).
+type EditMode = { kind: 'spine' | 'catalog'; id: string; sku: string } | null;
+
 export function QuickAddPage() {
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -202,14 +233,42 @@ export function QuickAddPage() {
   // 'mrp'/'offer_price'). Amber ring until the operator touches the field.
   const [flaggedFields, setFlaggedFields] = useState<Set<string>>(new Set());
 
-  // ---- EDIT-IN-PLACE mode (Catalog Manager drawer -> /catalog/add?edit=<id>)
-  // editingId != null -> handleSubmit issues ONE PUT /products/{id} instead of
-  // a create: SKU/barcode/category are identity (read-only), reorder_point
-  // rides inside the same PUT, and the dup-rescue popup can't trigger (only
-  // createProduct throws DuplicateProductError). Success returns the owner to
-  // the Catalog Manager with the drawer re-opened (?focus=<id>).
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingSku, setEditingSku] = useState('');
+  // ---- EDIT modes (Catalog Manager drawer -> ?edit=<id> / ?review=<id>) ----
+  // kind='spine' (was `editingId`): handleSubmit issues ONE PUT /products/{id}
+  // instead of a create: SKU/barcode/category are identity (read-only),
+  // reorder_point rides inside the same PUT, and the dup-rescue popup can't
+  // trigger (only createProduct throws DuplicateProductError). Success returns
+  // the owner to the Catalog Manager with the drawer re-opened (?focus=<id>).
+  // kind='catalog': the full-page review editor over an imported doc — its own
+  // submit fork (handleReviewSave/handleReviewApprove) + the ReviewQueueBar.
+  const [editMode, setEditMode] = useState<EditMode>(null);
+  const isReviewMode = editMode?.kind === 'catalog';
+
+  // ---- Review-mode state (?review=<id>) -------------------------------------
+  // The loaded doc + the form values as loaded/last-saved — the diff base for
+  // the save payload and the dirty check.
+  const [reviewSnapshot, setReviewSnapshot] = useState<{
+    doc: CatalogProductDoc;
+    values: ProductFormValues;
+  } | null>(null);
+  const [reviewDry, setReviewDry] = useState<PromoteDryRunResult | null>(null);
+  const [reviewDryLoading, setReviewDryLoading] = useState(false);
+  const [reviewApproving, setReviewApproving] = useState(false);
+  // Queue position ("Item N of M") from the sessionStorage stash; null when
+  // deep-linked with no stash context.
+  const [queuePos, setQueuePos] = useState<{ n: number; m: number; hasPrev: boolean } | null>(
+    null
+  );
+  // Terminal state: nothing left to review (friendly panel, never an error).
+  const [queueClear, setQueueClear] = useState(false);
+  // The CURRENT ?review id, kept in sync synchronously by the loader effect.
+  // Post-await continuations (save/approve) check it so a slow response for
+  // item A can never stomp item B's form/snapshot after Alt+Arrow navigation.
+  const reviewIdRef = useRef<string | null>(null);
+  // Review-only editable fields: display name (PUT `name` -> name+title) and
+  // governed tags (PUT `tags`).
+  const [displayName, setDisplayName] = useState('');
+  const [reviewTags, setReviewTags] = useState<string[]>([]);
 
   const firstFieldRef = useRef<HTMLSelectElement | HTMLInputElement | null>(null);
   // Bump on registry load so the field list (required markers sourced from the
@@ -243,18 +302,22 @@ export function QuickAddPage() {
   const skipHsnAutofillRef = useRef(false);
 
   // Auto-fill HSN + GST when category (or 4/6-digit toggle) changes — same
-  // behaviour as the wizard's useEffect.
+  // behaviour as the wizard's useEffect. REVIEW MODE applies NO local HSN/GST
+  // overwrite on a category change: the diff-only save omits the untouched
+  // pair, so the SERVER's category-change re-derivation wins (a hint chip by
+  // the picker says so); the re-derived values re-seed from the PUT response.
   useEffect(() => {
     if (skipHsnAutofillRef.current) {
       skipHsnAutofillRef.current = false;
       return;
     }
+    if (isReviewMode) return;
     if (selectedCategory) {
       const { hsnCode: hc, gstRate: gr } = resolveHsnGst(selectedCategory);
       if (hc) setHsnCode(hc);
       setGstRate(gr);
     }
-  }, [selectedCategory]);
+  }, [selectedCategory, isReviewMode]);
 
   // Keyboard-first: when a category is picked, move focus to the first
   // category field so the user can start typing without reaching for the mouse.
@@ -314,11 +377,14 @@ export function QuickAddPage() {
       shopifyTags,
       publishPOS,
       images,
+      // Review-mode extras (ignored by buildProductPayload / create doors).
+      name: displayName,
+      tags: reviewTags,
     }),
     [
       selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp,
       offerPrice, costPrice, discountCategory, syncToShopify, shopifyTags, publishPOS,
-      images,
+      images, displayName, reviewTags,
     ]
   );
 
@@ -341,6 +407,8 @@ export function QuickAddPage() {
       setPublishPOS(true);
       setImages([]);
       setErrors({});
+      setDisplayName('');
+      setReviewTags([]);
       // Clear the v2 Autopilot verify state so a fresh product starts clean.
       setAutoFilled(new Set());
       setApExtras({});
@@ -374,6 +442,10 @@ export function QuickAddPage() {
     setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
     setPublishPOS(v.publishPOS !== false);
     setImages(Array.isArray(v.images) ? v.images : []);
+    // Review extras — blank for every non-review prefill (template/clone/
+    // variant/autopilot all leave them undefined).
+    setDisplayName(v.name || '');
+    setReviewTags(Array.isArray(v.tags) ? v.tags : []);
     setErrors({});
     // Reveal Inventory too when a prefill carries images so they're visible.
     setOpenSections((s) => ({
@@ -794,14 +866,15 @@ export function QuickAddPage() {
 
       setIsSubmitting(true);
       try {
-        if (editingId) {
+        if (editMode?.kind === 'spine') {
           // EDIT-IN-PLACE: one validated PUT. Identity (SKU/barcode/category)
           // is never sent — it is immutable through this door; reorder_point
           // rides inside the same PUT (no follow-up write), and the 409
           // dup-rescue branch can't fire (PUT never throws DuplicateProductError).
+          // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
           const reorderNum = Number(reorderLevel);
-          await productApi.updateProduct(editingId, {
+          await productApi.updateProduct(editMode.id, {
             brand: payload.brand,
             model: payload.model,
             attributes: payload.attributes,
@@ -821,9 +894,9 @@ export function QuickAddPage() {
               : {}),
           });
           toast.success(
-            editingSku ? `Updated ${editingSku} — same SKU, no new product.` : 'Product updated.'
+            editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
           );
-          navigate(`/catalog?focus=${encodeURIComponent(editingId)}`);
+          navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`);
           return;
         }
         const created = await productApi.createProduct(buildProductPayload(values));
@@ -888,17 +961,361 @@ export function QuickAddPage() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
-      editingId, editingSku, reorderLevel,
+      editMode, reorderLevel,
     ]
   );
 
-  // Keyboard-first: Ctrl+Enter = Save, Ctrl+Shift+Enter = Save + New.
-  // While the duplicate-rescue popup is open it OWNS the keyboard (Enter =
-  // add variant, Esc = go back) — the save shortcut is suppressed. In variant
-  // mode, Esc exits to a fresh blank form ("New model").
+  // ==========================================================================
+  // REVIEW MODE (?review=<id>) — save / approve / queue navigation
+  // ==========================================================================
+
+  // Dirty = the diff-only PUT payload is non-empty (vs the loaded snapshot).
+  const reviewDirty = useMemo(() => {
+    if (editMode?.kind !== 'catalog' || !reviewSnapshot) return false;
+    return Object.keys(formValuesToCatalogUpdate(currentValues(), reviewSnapshot.values)).length > 0;
+  }, [editMode, reviewSnapshot, currentValues]);
+
+  const runReviewDryRun = useCallback(async (id: string) => {
+    setReviewDryLoading(true);
+    try {
+      const res = await catalogProductsApi.promoteDryRun(id);
+      setReviewDry(res);
+    } catch (e: unknown) {
+      // A hard 409 (already approved / SKU clash) surfaces here as one row.
+      setReviewDry({
+        ok: false,
+        gaps: [
+          {
+            field: null,
+            message:
+              e instanceof Error && e.message
+                ? e.message
+                : 'Could not check this product — try again.',
+          },
+        ],
+        duplicate_warnings: [],
+      });
+    } finally {
+      setReviewDryLoading(false);
+    }
+  }, []);
+
+  // Advance = swap the ?review param in place (NO navigate/reload — the
+  // loader effect below re-seeds the form for the new id).
+  const openReviewItem = useCallback(
+    (id: string) => {
+      setSearchParams(
+        (prev) => {
+          const sp = new URLSearchParams(prev);
+          sp.set('review', id);
+          return sp;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
+  // Move to the next queue item. 'remove' drops the current id first (it was
+  // approved / no longer reviewable); 'skip' keeps it and steps past it. When
+  // the stash is exhausted/stale, fall back to asking the server for the next
+  // waiting item; nothing left = the friendly "Review queue clear" panel.
+  const advanceReview = useCallback(
+    async (mode: 'remove' | 'skip') => {
+      if (editMode?.kind !== 'catalog') return;
+      const currentId = editMode.id;
+      const stash = readReviewQueue();
+      let nextId: string | undefined;
+      if (stash && stash.ids.includes(currentId)) {
+        const at = stash.ids.indexOf(currentId);
+        if (mode === 'remove') {
+          const after = removeFromReviewQueue(currentId);
+          nextId = after?.ids[at]; // the item that shifted into this slot
+          if (after && nextId) writeReviewQueue({ ...after, index: at });
+        } else {
+          nextId = stash.ids[at + 1];
+          if (nextId) writeReviewQueue({ ...stash, index: at + 1 });
+        }
+      }
+      if (nextId) {
+        openReviewItem(nextId);
+        return;
+      }
+      try {
+        // limit 2: after a Skip the current item is still needs_review, so the
+        // server's FIRST waiting item can be this very one (newest-first sort)
+        // — fetching one row falsely declared "last item" while dozens waited.
+        // Pick the first OTHER id; only call it the last item when no other id
+        // exists AND the server total agrees.
+        const res = await catalogProductsApi.list({
+          needs_review: true,
+          is_active: 'all',
+          limit: 2,
+        });
+        const ids = (res.products || [])
+          .map((p) => String(p.id || ''))
+          .filter(Boolean);
+        if (ids.length === 0) {
+          setQueueClear(true);
+          return;
+        }
+        const nid = ids.find((id) => id !== currentId) || '';
+        if (!nid) {
+          // The server's only item IS this one.
+          toast.info(
+            Number(res.total ?? 0) > 1
+              ? 'Could not find the next review item — go back to the queue.'
+              : 'This is the last item waiting for review.'
+          );
+          return;
+        }
+        writeReviewQueue({ ids: [nid], index: 0, total: Number(res.total ?? 1) });
+        openReviewItem(nid);
+      } catch {
+        toast.error('Could not find the next review item.');
+      }
+    },
+    [editMode, openReviewItem, toast]
+  );
+
+  const confirmLeaveReviewItem = useCallback((): boolean => {
+    if (!reviewDirty) return true;
+    return window.confirm('You have unsaved changes on this item — move on without saving?');
+  }, [reviewDirty]);
+
+  // Skip / Next: advance without saving (dirty-confirm first).
+  const handleReviewSkip = useCallback(() => {
+    if (!confirmLeaveReviewItem()) return;
+    void advanceReview('skip');
+  }, [confirmLeaveReviewItem, advanceReview]);
+
+  const handleReviewPrev = useCallback(() => {
+    if (editMode?.kind !== 'catalog' || !queuePos?.hasPrev) return;
+    if (!confirmLeaveReviewItem()) return;
+    const stash = readReviewQueue();
+    if (!stash) return;
+    const at = stash.ids.indexOf(editMode.id);
+    if (at <= 0) return;
+    writeReviewQueue({ ...stash, index: at - 1 });
+    openReviewItem(stash.ids[at - 1]);
+  }, [editMode, queuePos, confirmLeaveReviewItem, openReviewItem]);
+
+  // "Back to queue" — restore the exact Catalog Manager grid position
+  // (?segment=review&page=N&focus=<id>; the ?focus fallback re-opens the card).
+  const handleBackToQueue = useCallback(() => {
+    if (editMode?.kind !== 'catalog') return;
+    if (!confirmLeaveReviewItem()) return;
+    const pg = readReviewQueue()?.filters?.page;
+    navigate(
+      `/catalog?segment=review${pg && pg > 1 ? `&page=${pg}` : ''}&focus=${encodeURIComponent(editMode.id)}`
+    );
+  }, [editMode, confirmLeaveReviewItem, navigate]);
+
+  // Save fixes: lenient validation -> DIFF-ONLY PUT (with the optimistic-
+  // concurrency stamp) -> re-seed form + snapshot from the response (so the
+  // server-derived HSN/GST/title become visible) -> re-run the dry-run.
+  // Returns {ok, saved} so Save & Approve can chain it silently.
+  const handleReviewSave = useCallback(
+    async (opts?: { silent?: boolean }): Promise<{ ok: boolean; saved: boolean }> => {
+      if (editMode?.kind !== 'catalog' || !reviewSnapshot) return { ok: false, saved: false };
+      const values = currentValues();
+      const newErrors = validateReviewForm(values, reviewSnapshot.values);
+      setErrors(newErrors);
+      if (Object.keys(newErrors).length > 0) {
+        setOpenSections((s) => ({ ...s, identity: true, pricing: true }));
+        toast.error('Please fix the highlighted fields.');
+        return { ok: false, saved: false };
+      }
+      const payload = formValuesToCatalogUpdate(
+        values,
+        reviewSnapshot.values,
+        String(reviewSnapshot.doc.updated_at || '') || undefined
+      );
+      if (Object.keys(payload).filter((k) => k !== 'expected_updated_at').length === 0) {
+        if (!opts?.silent) toast.info('Nothing changed yet.');
+        return { ok: true, saved: false };
+      }
+      // Currency guard (per-invocation closure id): a slow response for item
+      // A must never stomp item B's form/snapshot after queue navigation.
+      const id = editMode.id;
+      setIsSubmitting(true);
+      try {
+        const res = await catalogProductsApi.update(id, payload);
+        if (reviewIdRef.current !== id) return { ok: true, saved: true };
+        const fresh = res.product;
+        const v = catalogDocToFormValues(fresh);
+        applyFormValues(v);
+        setReviewSnapshot({ doc: fresh, values: v });
+        if (!opts?.silent) toast.success('Saved — re-checking readiness…');
+        void runReviewDryRun(id);
+        return { ok: true, saved: true };
+      } catch (e: unknown) {
+        // Stale continuation: the reviewer moved on — drop the error quietly
+        // (the item keeps needs_review; it resurfaces in the queue).
+        if (reviewIdRef.current !== id) return { ok: false, saved: false };
+        if (e instanceof CatalogRequestError && e.status === 409) {
+          // Optimistic-concurrency conflict: reload the latest doc, RE-APPLY
+          // the reviewer's changed fields on top, and let them save again.
+          try {
+            const freshDoc = await catalogProductsApi.get(id);
+            if (reviewIdRef.current !== id) return { ok: false, saved: false };
+            const freshValues = catalogDocToFormValues(freshDoc);
+            applyFormValues(overlayChangedFormValues(freshValues, reviewSnapshot.values, values));
+            setReviewSnapshot({ doc: freshDoc, values: freshValues });
+            void runReviewDryRun(id);
+            toast.warning(
+              'This item was changed by someone else — reloaded the latest version and kept your edits. Please review and save again.',
+              9000
+            );
+          } catch {
+            toast.error(
+              'This item was changed by someone else and could not be reloaded — go back to the queue and reopen it.'
+            );
+          }
+        } else if (e instanceof CatalogRequestError && e.status === 422) {
+          // Dictionary/validation 422: point at the offending field inline
+          // (the message names the allowed values) when we can identify it.
+          const field = dictionaryErrorField(e.message, values.category);
+          if (field) {
+            setErrors((prev) => ({ ...prev, [field]: e.message }));
+            setOpenSections((s) => ({ ...s, identity: true }));
+            toast.error('Please fix the highlighted fields.');
+          } else {
+            toast.error(e.message);
+          }
+        } else {
+          toast.error(
+            e instanceof Error && e.message ? e.message : 'Could not save the fixes.'
+          );
+        }
+        return { ok: false, saved: false };
+      } finally {
+        setIsSubmitting(false);
+      }
+    },
+    [
+      editMode, reviewSnapshot, currentValues, applyFormValues, runReviewDryRun, toast,
+    ]
+  );
+
+  // Save & Approve: sequential await PUT-if-dirty -> promote dry-run -> if ok
+  // promote -> advance. Dry-run gaps render INLINE on failure. Promote 409
+  // "already a billing product" = treat as approved-and-advance; other 409
+  // (SKU clash / race) = toast + advance; anything else stays put.
+  const handleReviewApprove = useCallback(async () => {
+    if (editMode?.kind !== 'catalog' || reviewApproving || isSubmitting) return;
+    // Same per-invocation currency discipline as handleReviewSave: a slow
+    // response must never steer state (or the queue) for a different item.
+    const id = editMode.id;
+    setReviewApproving(true);
+    try {
+      const saveRes = await handleReviewSave({ silent: true });
+      if (!saveRes.ok || reviewIdRef.current !== id) return;
+      let dry: PromoteDryRunResult;
+      try {
+        dry = await catalogProductsApi.promoteDryRun(id);
+      } catch (e: unknown) {
+        if (reviewIdRef.current !== id) return;
+        toast.error(
+          e instanceof Error && e.message ? e.message : 'Could not check readiness — try again.'
+        );
+        return;
+      }
+      if (reviewIdRef.current !== id) return;
+      setReviewDry(dry);
+      if (!dry.ok) {
+        const mapped = promoteGapsToFormErrors(dry.gaps, currentValues().category);
+        setErrors((prev) => ({ ...prev, ...mapped.errors }));
+        setOpenSections((s) => ({ ...s, identity: true, pricing: true }));
+        toast.error('Not ready yet — fix the highlighted gaps first.');
+        return;
+      }
+      try {
+        const res = await catalogProductsApi.promote(id);
+        toast.success(`Approved for POS${res.sku ? ` — SKU ${res.sku}` : ''}.`);
+        if (reviewIdRef.current !== id) {
+          // Approved, but the reviewer already moved on: just drop it from
+          // the stash — do NOT navigate them again.
+          removeFromReviewQueue(id);
+          return;
+        }
+        await advanceReview('remove');
+      } catch (pe: unknown) {
+        if (pe instanceof CatalogRequestError && pe.status === 409) {
+          if (reviewIdRef.current !== id) {
+            removeFromReviewQueue(id);
+            return;
+          }
+          if (/already a billing product/i.test(pe.message)) {
+            toast.success('Already approved — moving on.');
+          } else {
+            toast.warning(pe.message, 9000);
+          }
+          await advanceReview('remove');
+        } else {
+          if (reviewIdRef.current !== id) return;
+          toast.error(
+            pe instanceof Error && pe.message ? pe.message : 'Approval failed — see the checklist.'
+          );
+          void runReviewDryRun(id);
+        }
+      }
+    } finally {
+      setReviewApproving(false);
+    }
+  }, [
+    editMode, reviewApproving, isSubmitting, handleReviewSave, currentValues,
+    advanceReview, runReviewDryRun, toast,
+  ]);
+
+  // Live gap chips for the ReviewQueueBar: dry-run gaps mapped onto the form's
+  // vocabulary (field chips for rendered inputs, full messages for the rest).
+  const reviewGapView = useMemo(() => {
+    if (!reviewDry || reviewDry.ok) return { chips: [] as Array<{ key: string; label: string; title: string }>, other: [] as string[] };
+    const { errors: mapped, other } = promoteGapsToFormErrors(reviewDry.gaps, selectedCategory);
+    const FORM_LEVEL_LABELS: Record<string, string> = {
+      mrp: 'MRP',
+      offer_price: 'Offer price',
+      category: 'Category',
+    };
+    const fieldLabel = (name: string) =>
+      FORM_LEVEL_LABELS[name] ||
+      getCategoryFields(selectedCategory).find((f) => f.name === name)?.label ||
+      name.replace(/_/g, ' ');
+    return {
+      chips: Object.entries(mapped).map(([f, msg]) => ({ key: f, label: fieldLabel(f), title: msg })),
+      other,
+    };
+  }, [reviewDry, selectedCategory]);
+
+  // Keyboard-first, remapped per mode:
+  //   create/spine: Ctrl+Enter = Save, Ctrl+Shift+Enter = Save + New,
+  //                 Esc exits variant mode (unchanged behaviour).
+  //   review:       Ctrl+Enter = Save fixes, Ctrl+Shift+Enter = Save & Approve,
+  //                 Alt+ArrowLeft/Right = Prev/Next (dirty-confirm).
+  // While the duplicate-rescue popup is open it OWNS the keyboard — suppressed.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (dupInfo) return;
+      if (editMode?.kind === 'catalog') {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+          e.preventDefault();
+          if (isSubmitting || reviewApproving) return;
+          if (e.shiftKey) void handleReviewApprove();
+          else void handleReviewSave();
+        } else if (e.altKey && e.key === 'ArrowLeft') {
+          e.preventDefault();
+          // Same busy gate as the ReviewQueueBar buttons (disabled={busy}):
+          // navigating mid-save would let a slow response land on the next item.
+          if (isSubmitting || reviewApproving) return;
+          handleReviewPrev();
+        } else if (e.altKey && e.key === 'ArrowRight') {
+          e.preventDefault();
+          if (isSubmitting || reviewApproving) return;
+          handleReviewSkip();
+        }
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         if (isSubmitting) return;
@@ -910,7 +1327,11 @@ export function QuickAddPage() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleSubmit, isSubmitting, dupInfo, variantCtx, exitVariantMode]);
+  }, [
+    handleSubmit, isSubmitting, dupInfo, variantCtx, exitVariantMode, editMode,
+    reviewApproving, handleReviewSave, handleReviewApprove, handleReviewPrev,
+    handleReviewSkip,
+  ]);
 
   // ---- Templates: list / load / save / delete ------------------------------
   const loadTemplates = useCallback(async () => {
@@ -1032,7 +1453,9 @@ export function QuickAddPage() {
   // once per id; clears the param so a manual reset isn't re-clobbered.
   const cloneId = searchParams.get('clone');
   useEffect(() => {
-    if (!cloneId) return;
+    // ?review wins over a crafted combined URL — clone is a create affordance
+    // and is suppressed in review mode.
+    if (!cloneId || searchParams.get('review')) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1063,7 +1486,8 @@ export function QuickAddPage() {
   // isn't re-clobbered.
   const editId = searchParams.get('edit');
   useEffect(() => {
-    if (!editId) return;
+    // ?review wins over a crafted combined URL.
+    if (!editId || searchParams.get('review')) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1073,8 +1497,7 @@ export function QuickAddPage() {
           setVariantCtx(null);
           setFlaggedFields(new Set());
           applyFormValues(productToFormValues(product));
-          setEditingId(editId);
-          setEditingSku(String(product.sku || ''));
+          setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
           // Prefill the reorder level so the single PUT round-trips it.
           const rp = Number((product as { reorder_point?: unknown }).reorder_point);
           setReorderLevel(Number.isFinite(rp) && rp >= 0 ? String(rp) : '5');
@@ -1095,6 +1518,139 @@ export function QuickAddPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editId]);
 
+  // ---- FULL-PAGE REVIEW loader: /catalog/add?review=<catalogDocId> ----------
+  // Mirrors the ?edit loader above but against the catalog_products PIM doc
+  // (catalogProductsApi.get -> catalogDocToFormValues -> applyFormValues).
+  // Unlike ?edit, the param STAYS in the URL — advancing through the queue is
+  // a same-page param swap that re-runs this effect for the next id. An
+  // already-approved (pos_ready) doc URL-replaces to ?edit=<id>; a vanished id
+  // falls forward to the item now at the same queue index (else the server
+  // fallback / the "queue clear" panel).
+  const reviewId = searchParams.get('review');
+  useEffect(() => {
+    // Synchronous currency stamp: in-flight save/approve continuations for a
+    // PREVIOUS id compare against this and drop themselves.
+    reviewIdRef.current = reviewId;
+    if (!reviewId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const doc = await catalogProductsApi.get(reviewId);
+        if (cancelled) return;
+        if (doc.pos_ready) {
+          removeFromReviewQueue(reviewId);
+          toast.info('This item is already approved — opening the standard editor.');
+          const next = new URLSearchParams(searchParams);
+          next.delete('review');
+          next.set('edit', reviewId);
+          setSearchParams(next, { replace: true });
+          return;
+        }
+        // Review replaces the whole form — leave variant mode if active.
+        setVariantCtx(null);
+        setFlaggedFields(new Set());
+        setDupInfo(null);
+        // Defence in depth: a review doc must never inherit staged Autopilot
+        // candidate attributes via the late-category effect — clear the
+        // staged state the ?prefill flow may have left behind.
+        stagedCandidateRef.current = null;
+        setAutoFilled(new Set());
+        setApExtras({});
+        setApRefUrls([]);
+        const v = catalogDocToFormValues(doc);
+        applyFormValues(v);
+        setEditMode({ kind: 'catalog', id: reviewId, sku: String(doc.sku || '') });
+        setReviewSnapshot({ doc, values: v });
+        setReviewDry(null);
+        setQueueClear(false);
+        // Queue position from the stash (a deep link gets a one-item stash so
+        // Next still works via the server fallback).
+        const stash = readReviewQueue();
+        if (stash && stash.ids.includes(reviewId)) {
+          const at = stash.ids.indexOf(reviewId);
+          if (stash.index !== at) writeReviewQueue({ ...stash, index: at });
+          setQueuePos({
+            n: (stash.offset ?? 0) + at + 1,
+            m: stash.total ?? stash.ids.length,
+            hasPrev: at > 0,
+          });
+        } else {
+          writeReviewQueue({ ids: [reviewId], index: 0 });
+          setQueuePos(null);
+        }
+        void runReviewDryRun(reviewId);
+        window.scrollTo({ top: 0 });
+      } catch (err: unknown) {
+        if (cancelled) return;
+        // Only a REAL 404 means the item vanished (approved elsewhere /
+        // removed). Any other failure — network blip, 5xx, timeout — is
+        // transient: the item is still reviewable, so leave the stash intact
+        // and let the reviewer retry instead of silently ejecting it.
+        if (!(err instanceof CatalogRequestError && err.status === 404)) {
+          toast.error(
+            'Could not load this review item — check your connection and try again.'
+          );
+          return;
+        }
+        // Vanished: fall FORWARD to the item now at the same stash index,
+        // else ask the server for the next one.
+        const stash = readReviewQueue();
+        const at = stash ? stash.ids.indexOf(reviewId) : -1;
+        const after = removeFromReviewQueue(reviewId);
+        const nextId = after && at >= 0 ? after.ids[at] : undefined;
+        if (nextId) {
+          toast.info('That item is no longer in the queue — moved to the next one.');
+          if (after) writeReviewQueue({ ...after, index: at });
+          const next = new URLSearchParams(searchParams);
+          next.set('review', nextId);
+          setSearchParams(next, { replace: true });
+          return;
+        }
+        try {
+          // limit 2: the server's first waiting item can BE this id (stale
+          // list); pick the first OTHER id instead of wrongly declaring the
+          // queue clear.
+          const res = await catalogProductsApi.list({
+            needs_review: true,
+            is_active: 'all',
+            limit: 2,
+          });
+          const ids = (res.products || [])
+            .map((p) => String(p.id || ''))
+            .filter(Boolean);
+          const nid = ids.find((id) => id !== reviewId) || '';
+          if (nid) {
+            writeReviewQueue({ ids: [nid], index: 0, total: Number(res.total ?? 1) });
+            const next = new URLSearchParams(searchParams);
+            next.set('review', nid);
+            setSearchParams(next, { replace: true });
+          } else {
+            setQueueClear(true);
+          }
+        } catch {
+          toast.error('Could not load that review item.');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewId]);
+
+  // Leaving review mode via the URL (e.g. the sidebar's "Add product" while
+  // reviewing removes ?review=): drop back to a fresh create form so review
+  // state never leaks into a create.
+  useEffect(() => {
+    if (reviewId || editMode?.kind !== 'catalog') return;
+    setEditMode(null);
+    setReviewSnapshot(null);
+    setReviewDry(null);
+    setQueuePos(null);
+    setQueueClear(false);
+    resetForm(false);
+  }, [reviewId, editMode, resetForm]);
+
   // Deep-link variant: /catalog/add?variant=<productId> enters VARIANT MODE
   // seeded from that product — the same code path the duplicate-rescue popup's
   // "Add a new colour/size" uses. The "+ Variant" button in the product list
@@ -1102,7 +1658,9 @@ export function QuickAddPage() {
   // reset isn't re-clobbered.
   const variantId = searchParams.get('variant');
   useEffect(() => {
-    if (!variantId) return;
+    // ?review wins over a crafted combined URL — variant is a create
+    // affordance and is suppressed in review mode.
+    if (!variantId || searchParams.get('review')) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1132,7 +1690,10 @@ export function QuickAddPage() {
   // param cleared so a manual edit/reset isn't re-clobbered on re-render.
   const prefillKind = searchParams.get(AUTOPILOT_PREFILL_PARAM);
   useEffect(() => {
-    if (prefillKind !== AUTOPILOT_PREFILL_VALUE) return;
+    // ?review wins over a crafted combined URL — same suppression the clone/
+    // edit/variant loaders have (prefill is a create affordance; the staged
+    // candidate stays unconsumed for a later legitimate create).
+    if (prefillKind !== AUTOPILOT_PREFILL_VALUE || searchParams.get('review')) return;
     const candidate = takeAutopilotPrefill();
     if (candidate) {
       // Same v2 richness as the inline "Use this": full field mapping, auto
@@ -1153,6 +1714,41 @@ export function QuickAddPage() {
         <div className="card text-center py-12">
           <h2 className="text-xl font-semibold text-gray-700">Access Denied</h2>
           <p className="text-gray-500 mt-1">You don't have permission to add products.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Review-queue terminal state: nothing left to review. A friendly panel,
+  // never an error — the reviewer chose to keep going and the queue ran dry.
+  if (queueClear) {
+    return (
+      <div className="inv-body">
+        <div className="card max-w-lg mx-auto text-center py-14">
+          <CheckCircle2 className="w-10 h-10 mx-auto text-green-600" />
+          <h2 className="mt-3 text-xl font-semibold text-gray-900">Review queue clear</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            Every imported product has been reviewed. Nice work.
+          </p>
+          <div className="mt-5 flex items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/catalog?segment=review')}
+              className="btn-primary"
+            >
+              Back to catalog
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setQueueClear(false);
+                setSearchParams(new URLSearchParams(), { replace: true });
+              }}
+              className="btn-secondary"
+            >
+              Add a product
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1181,12 +1777,16 @@ export function QuickAddPage() {
 
   // Similar-products strip anchor: it renders under the category's MODEL
   // field (model_no for eyewear/watches, model_name for the categories keyed
-  // on it). null when the category has neither (e.g. SERVICES-like sets).
-  const similarAnchorField = visibleFields.some((f) => f.name === 'model_no')
-    ? 'model_no'
-    : visibleFields.some((f) => f.name === 'model_name')
-      ? 'model_name'
-      : null;
+  // on it). null when the category has neither (e.g. SERVICES-like sets) —
+  // and in REVIEW mode, where its pick-a-sibling/variant actions would blow
+  // away the imported doc being reviewed (variant is a create affordance).
+  const similarAnchorField = isReviewMode
+    ? null
+    : visibleFields.some((f) => f.name === 'model_no')
+      ? 'model_no'
+      : visibleFields.some((f) => f.name === 'model_name')
+        ? 'model_name'
+        : null;
 
   const setAttr = (name: string, value: string) => {
     setAttributes((prev) => ({ ...prev, [name]: value }));
@@ -1406,11 +2006,27 @@ export function QuickAddPage() {
       <div className="inv-head">
         <div>
           <div className="eyebrow mb-1.5">
-            {editingId ? 'Catalog · Edit product' : 'Catalog · Add product'}
+            {isReviewMode
+              ? 'Catalog · Review import'
+              : editMode?.kind === 'spine'
+                ? 'Catalog · Edit product'
+                : 'Catalog · Add product'}
           </div>
-          <h1>{editingId ? `Editing ${editingSku || 'product'}` : 'One screen. One SKU. Fast.'}</h1>
+          <h1>
+            {isReviewMode
+              ? `Reviewing ${displayName || editMode?.sku || 'imported product'}`
+              : editMode?.kind === 'spine'
+                ? `Editing ${editMode.sku || 'product'}`
+                : 'One screen. One SKU. Fast.'}
+          </h1>
           <div className="hint">
-            {editingId ? (
+            {isReviewMode ? (
+              <>
+                Everything is editable. <kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> saves
+                fixes; <kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> approves
+                for POS and moves to the next item.
+              </>
+            ) : editMode?.kind === 'spine' ? (
               <>Saving updates this product in place — it will NOT create a new SKU.</>
             ) : (
               <>
@@ -1421,9 +2037,23 @@ export function QuickAddPage() {
           </div>
         </div>
 
-        {/* Templates + clone affordance (hidden while editing — a template or
-            clone load would silently overwrite the product being edited) */}
-        {!editingId && (
+        <div className="flex items-center gap-3">
+          {/* Accountability cue: whose account this create/edit is recorded
+              under (several staff catalogue on shared machines). */}
+          {(user?.name || user?.email) && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-3 py-1.5 text-xs text-gray-700 whitespace-nowrap"
+              title="All changes are recorded under this account"
+            >
+              <UserIcon className="w-3.5 h-3.5 text-gray-500" />
+              {editMode ? 'Editing as' : 'Cataloguing as'}{' '}
+              <span className="font-semibold">{user?.name?.trim() || user?.email}</span>
+            </span>
+          )}
+
+        {/* Templates + clone affordance (hidden while editing/reviewing — a
+            template or clone load would silently overwrite the loaded doc) */}
+        {!editMode && (
         <div className="relative">
           <button
             type="button"
@@ -1565,24 +2195,65 @@ export function QuickAddPage() {
           )}
         </div>
         )}
+        </div>
       </div>
 
       {/* EDIT MODE banner: which product is being edited + the escape hatch. */}
-      {editingId && (
+      {editMode?.kind === 'spine' && (
         <div className="mb-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex flex-wrap items-center gap-3">
           <Pencil className="w-4 h-4 text-blue-600 shrink-0" />
           <p className="text-sm text-blue-900 flex-1 min-w-[200px]">
-            You're editing <span className="font-semibold">{editingSku || 'this product'}</span>.
+            You're editing <span className="font-semibold">{editMode.sku || 'this product'}</span>.
             SKU, barcode and category are locked — saving updates the product, it will NOT create
             a new SKU. Wrong category? Use <span className="font-medium">Clone as new SKU</span>{' '}
             from the Catalog drawer instead.
           </p>
           <button
             type="button"
-            onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editingId)}`)}
+            onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`)}
             className="btn-secondary !py-1.5 !px-3 text-xs"
           >
             Cancel
+          </button>
+        </div>
+      )}
+
+      {/* REVIEW MODE banner: what's being reviewed, the auto-SKU note, the
+          read-only online (Shopify) status, and the way back to the queue. */}
+      {isReviewMode && (
+        <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex flex-wrap items-center gap-3">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+          <div className="text-sm text-amber-900 flex-1 min-w-[220px]">
+            <p>
+              Reviewing an <span className="font-semibold">imported product</span> — every field
+              below is editable. Fix the details, then{' '}
+              <span className="font-semibold">Save &amp; Approve</span> to make it sellable.
+            </p>
+            <p className="mt-0.5 text-xs text-amber-800">
+              SKU:{' '}
+              <span className="font-medium">
+                {editMode?.sku || 'auto — assigned on approval'}
+              </span>
+              {' · '}barcode is assigned at goods receipt
+              {reviewSnapshot?.doc.ecom && (
+                <>
+                  {' · '}online:{' '}
+                  <span className="font-medium">
+                    {String(reviewSnapshot.doc.ecom.status || 'linked')}
+                  </span>
+                  {reviewSnapshot.doc.ecom.handle ? (
+                    <span className="text-amber-700"> ({String(reviewSnapshot.doc.ecom.handle)})</span>
+                  ) : null}
+                </>
+              )}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleBackToQueue}
+            className="btn-secondary !py-1.5 !px-3 text-xs"
+          >
+            Back to queue
           </button>
         </div>
       )}
@@ -1593,8 +2264,10 @@ export function QuickAddPage() {
         {/* ---- Form column ---- */}
         <div className="space-y-3">
           {/* AUTO-FILL FROM WEB (inline Catalog Autopilot) — collapsed by default
-              so the normal manual flow is unchanged. Hidden while editing. */}
-          {!editingId && (
+              so the normal manual flow is unchanged. Hidden while editing or
+              reviewing (review edits an existing doc; Autopilot is a create
+              affordance). */}
+          {!editMode && (
           <div className="card !p-0 overflow-hidden">
             <button
               type="button"
@@ -1840,10 +2513,12 @@ export function QuickAddPage() {
             onToggle={toggleSection}
           >
             {/* Category picker (locked in variant mode — a sibling variant is
-                by definition the same category as its model — AND in edit mode:
-                category is identity; changing it on an ACTIVE row would skip
-                the forward-only restamp, so v1 locks it. Clone-as-new-SKU is
-                the wrong-category workaround.) */}
+                by definition the same category as its model — AND in SPINE edit
+                mode: category is identity; changing it on an ACTIVE row would
+                skip the forward-only restamp, so v1 locks it. Clone-as-new-SKU
+                is the wrong-category workaround. REVIEW mode keeps the picker
+                ENABLED — re-categorising imports is the whole point; the
+                server re-derives HSN & GST on save.) */}
             <div className="mb-5">
               <label className="block text-xs font-medium text-gray-700 mb-2">
                 Category <span className="text-red-500">*</span>
@@ -1855,7 +2530,7 @@ export function QuickAddPage() {
                     <Lock className="w-2.5 h-2.5" /> model
                   </span>
                 )}
-                {editingId && (
+                {editMode?.kind === 'spine' && (
                   <span
                     className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-gray-100 text-gray-600 text-[10px] font-medium align-middle"
                     title="Category is locked while editing — use Clone as new SKU to re-categorise"
@@ -1870,7 +2545,8 @@ export function QuickAddPage() {
                     key={c.code}
                     type="button"
                     disabled={
-                      (Boolean(variantCtx) || Boolean(editingId)) && selectedCategory !== c.code
+                      (Boolean(variantCtx) || editMode?.kind === 'spine') &&
+                      selectedCategory !== c.code
                     }
                     onClick={() => setSelectedCategory(c.code)}
                     className={clsx(
@@ -1878,7 +2554,8 @@ export function QuickAddPage() {
                       selectedCategory === c.code
                         ? 'border-bv bg-bv-50 ring-1 ring-bv'
                         : 'border-gray-200 hover:border-gray-300',
-                      (Boolean(variantCtx) || Boolean(editingId)) && selectedCategory !== c.code &&
+                      (Boolean(variantCtx) || editMode?.kind === 'spine') &&
+                        selectedCategory !== c.code &&
                         'opacity-40 cursor-not-allowed hover:border-gray-200'
                     )}
                   >
@@ -1887,10 +2564,87 @@ export function QuickAddPage() {
                   </button>
                 ))}
               </div>
+              {/* Review mode: the category changed — NO local HSN/GST rewrite
+                  happens; the server re-derives both on save and the response
+                  re-seeds the fields below. */}
+              {isReviewMode &&
+                reviewSnapshot &&
+                selectedCategory &&
+                selectedCategory !== reviewSnapshot.values.category && (
+                  <p className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-1 text-xs text-blue-700">
+                    <Info className="w-3.5 h-3.5" />
+                    HSN &amp; GST update automatically for the new category.
+                  </p>
+                )}
               {errors.category && (
                 <p className="text-red-500 text-xs mt-2">{errors.category}</p>
               )}
             </div>
+
+            {/* Review-only: display name (PUT `name` -> name + title) and the
+                governed tags editor. Rendered even before a category is picked
+                so an unmapped import can still be named/tagged. */}
+            {isReviewMode && (
+              <div className="mb-5 grid grid-cols-1 tablet:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Display name
+                  </label>
+                  <input
+                    type="text"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    className="input-field w-full"
+                    placeholder="Shown on catalog cards & online listings"
+                    title="Display name"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    Saving updates the product's name and title.
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Tags</label>
+                  <input
+                    type="text"
+                    className="input-field w-full"
+                    placeholder="Type a tag, press Enter or comma"
+                    title="Add tag"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ',') {
+                        e.preventDefault();
+                        const input = e.currentTarget;
+                        const value = input.value.trim();
+                        if (value && !reviewTags.includes(value)) {
+                          setReviewTags([...reviewTags, value]);
+                          input.value = '';
+                        }
+                      }
+                    }}
+                  />
+                  {reviewTags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {reviewTags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="inline-flex items-center px-2 py-0.5 text-xs bg-gray-100 rounded-full"
+                        >
+                          {tag}
+                          <button
+                            type="button"
+                            onClick={() => setReviewTags(reviewTags.filter((t) => t !== tag))}
+                            className="ml-1 text-gray-500 hover:text-gray-700"
+                            aria-label={`Remove tag ${tag}`}
+                            title={`Remove tag ${tag}`}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {selectedCategory && (
               <>
@@ -2021,7 +2775,11 @@ export function QuickAddPage() {
                               <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                           </select>
-                          <p className="text-xs text-gray-500 mt-1">Auto-selected based on category</p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {isReviewMode
+                              ? 'Leave untouched to auto-derive from the category on save'
+                              : 'Auto-selected based on category'}
+                          </p>
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-700 mb-1">GST Rate (%)</label>
@@ -2160,28 +2918,46 @@ export function QuickAddPage() {
             id="inventory"
             title="Inventory"
             icon={<Boxes className="w-5 h-5" />}
-            subtitle="Reorder level (stock, SKU & barcode are automatic)"
+            subtitle={
+              isReviewMode
+                ? 'Product images (stock & reorder arrive after approval)'
+                : 'Reorder level (stock, SKU & barcode are automatic)'
+            }
             open={openSections.inventory}
             onToggle={toggleSection}
           >
-            <div className="grid grid-cols-1 tablet:grid-cols-3 desktop:grid-cols-4 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Reorder Level</label>
-                <input
-                  type="number"
-                  title="Reorder Level"
-                  placeholder="5"
-                  value={reorderLevel}
-                  onChange={(e) => setReorderLevel(e.target.value)}
-                  className="input-field w-full"
-                  min="0"
-                />
+            {/* Reorder level is a SPINE setting — an imported doc has none
+                until approval creates the billing row, so it's suppressed in
+                review mode. */}
+            {!isReviewMode && (
+              <div className="grid grid-cols-1 tablet:grid-cols-3 desktop:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Reorder Level</label>
+                  <input
+                    type="number"
+                    title="Reorder Level"
+                    placeholder="5"
+                    value={reorderLevel}
+                    onChange={(e) => setReorderLevel(e.target.value)}
+                    className="input-field w-full"
+                    min="0"
+                  />
+                </div>
               </div>
-            </div>
+            )}
             <p className="text-xs text-gray-500 mt-2">
-              Stock is added via Goods Receipt (GRN), not at product-create time. The SKU is auto-assigned when the
-              product is created and our internal barcode is generated at goods receipt — neither is entered here.
-              Set the reorder level and you&apos;ll be alerted when stock falls below it.
+              {isReviewMode ? (
+                <>
+                  Stock and reorder settings come after approval — approving creates the sellable
+                  billing product; stock then arrives via Goods Receipt (GRN).
+                </>
+              ) : (
+                <>
+                  Stock is added via Goods Receipt (GRN), not at product-create time. The SKU is auto-assigned when the
+                  product is created and our internal barcode is generated at goods receipt — neither is entered here.
+                  Set the reorder level and you&apos;ll be alerted when stock falls below it.
+                </>
+              )}
             </p>
 
             {/* Product images — real upload (durably stored + served by the
@@ -2294,7 +3070,10 @@ export function QuickAddPage() {
 
           {/* ONLINE — compact, always-visible strip (Shopify writes are owned by
               the BVI app; these are dormant future flags, so keep them muted and
-              minimal, no accordion / no extra click). */}
+              minimal, no accordion / no extra click). Hidden in review mode:
+              the imported doc's real online status shows read-only in the
+              banner, and these create-time flags aren't part of the review PUT. */}
+          {!isReviewMode && (
           <div className="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-2.5">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
               <span className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
@@ -2370,6 +3149,7 @@ export function QuickAddPage() {
               </div>
             )}
           </div>
+          )}
 
         </div>
 
@@ -2412,11 +3192,11 @@ export function QuickAddPage() {
                     : 'Auto (Brand Master tier)')
                 }
               />
-              <ReviewRow label="Reorder level" value={reorderLevel || '—'} />
+              {!isReviewMode && <ReviewRow label="Reorder level" value={reorderLevel || '—'} />}
               {images.length > 0 && (
                 <ReviewRow label="Images" value={`${images.length} uploaded`} />
               )}
-              {syncToShopify && <ReviewRow label="Shopify" value="Will sync" />}
+              {syncToShopify && !isReviewMode && <ReviewRow label="Shopify" value="Will sync" />}
             </dl>
           </div>
         </aside>
@@ -2424,7 +3204,27 @@ export function QuickAddPage() {
         {/* ---- Sticky action bar: the single Save point, always reachable.
             Must stay the LAST child of this container so sticky containment
             spans the whole page; -mx-7/-mb-6 cancel .inv-body's padding so the
-            bar runs edge-to-edge, flush with the viewport bottom. ---- */}
+            bar runs edge-to-edge, flush with the viewport bottom. Review mode
+            swaps in the ReviewQueueBar (queue position + Prev/Next + gap chips
+            + Save fixes / Save & Approve / Skip). ---- */}
+        {isReviewMode ? (
+          <ReviewQueueBar
+            positionLabel={queuePos ? `Item ${queuePos.n} of ${queuePos.m}` : 'Review item'}
+            canPrev={Boolean(queuePos?.hasPrev)}
+            dirty={reviewDirty}
+            saving={isSubmitting}
+            approving={reviewApproving}
+            dryLoading={reviewDryLoading}
+            dryOk={reviewDry ? reviewDry.ok : null}
+            gapChips={reviewGapView.chips}
+            otherIssues={reviewGapView.other}
+            dupCount={reviewDry?.duplicate_warnings?.length ?? 0}
+            onPrev={handleReviewPrev}
+            onNext={handleReviewSkip}
+            onSave={() => void handleReviewSave()}
+            onApprove={() => void handleReviewApprove()}
+          />
+        ) : (
         <div className="sticky bottom-0 z-30 -mx-7 -mb-6 px-7 py-2.5 bg-white/95 backdrop-blur border-t border-gray-200 flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -2433,12 +3233,12 @@ export function QuickAddPage() {
             className="btn-primary flex items-center gap-2"
           >
             {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {editingId ? 'Save changes' : variantCtx ? 'Save variant' : 'Save product'}
+            {editMode?.kind === 'spine' ? 'Save changes' : variantCtx ? 'Save variant' : 'Save product'}
           </button>
-          {editingId ? (
+          {editMode?.kind === 'spine' ? (
             <button
               type="button"
-              onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editingId)}`)}
+              onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`)}
               disabled={isSubmitting}
               className="btn-secondary flex items-center gap-2"
             >
@@ -2459,11 +3259,12 @@ export function QuickAddPage() {
           <span className="ml-auto hidden tablet:flex items-center gap-4 text-xs text-gray-500">
             <Keyboard className="w-4 h-4" />
             <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> Save</span>
-            {!editingId && (
+            {!editMode && (
               <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> Save + New</span>
             )}
           </span>
         </div>
+        )}
       </div>
 
       {/* Duplicate-rescue popup (409 DUPLICATE_PRODUCT). The form behind it is
@@ -2517,6 +3318,168 @@ function Section({
         />
       </button>
       {open && <div className="px-4 pb-4 pt-1 border-t border-gray-100">{children}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ReviewQueueBar — the review-mode replacement for the sticky action bar.
+// MODULE-LEVEL on purpose (same lesson as Section: a nested component identity
+// would remount per keystroke). Queue position + Prev/Next (Alt+arrows), the
+// LIVE promote dry-run verdict as compact chips (green "ready" / amber gaps /
+// orange duplicate hint), and the three actions: Save fixes (Ctrl+Enter),
+// Save & Approve (Ctrl+Shift+Enter, the primary), Skip. Muted palette per the
+// house theme — green-600 marks the approve CTA (money-forward action).
+// ---------------------------------------------------------------------------
+function ReviewQueueBar({
+  positionLabel,
+  canPrev,
+  dirty,
+  saving,
+  approving,
+  dryLoading,
+  dryOk,
+  gapChips,
+  otherIssues,
+  dupCount,
+  onPrev,
+  onNext,
+  onSave,
+  onApprove,
+}: {
+  positionLabel: string;
+  canPrev: boolean;
+  dirty: boolean;
+  saving: boolean;
+  approving: boolean;
+  dryLoading: boolean;
+  /** null = dry-run not back yet. */
+  dryOk: boolean | null;
+  gapChips: Array<{ key: string; label: string; title: string }>;
+  otherIssues: string[];
+  dupCount: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onSave: () => void;
+  onApprove: () => void;
+}) {
+  const busy = saving || approving;
+  return (
+    <div className="sticky bottom-0 z-30 -mx-7 -mb-6 px-7 py-2.5 bg-white/95 backdrop-blur border-t border-gray-200 flex flex-wrap items-center gap-3">
+      {/* Queue position + navigation */}
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onPrev}
+          disabled={!canPrev || busy}
+          className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-30"
+          aria-label="Previous review item"
+          title="Previous (Alt+←)"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="text-xs font-medium text-gray-600 whitespace-nowrap min-w-[86px] text-center">
+          {positionLabel}
+        </span>
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={busy}
+          className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-30"
+          aria-label="Next review item"
+          title="Next (Alt+→)"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Live dry-run verdict */}
+      <div className="flex-1 min-w-[160px] flex flex-wrap items-center gap-1.5">
+        {dryLoading ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">
+            <Loader2 className="w-3 h-3 animate-spin" /> Checking readiness…
+          </span>
+        ) : dryOk ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[11px] font-medium text-green-700">
+            <CheckCircle2 className="w-3 h-3" /> Ready to approve
+          </span>
+        ) : dryOk === false ? (
+          <>
+            {gapChips.map((c) => (
+              <span
+                key={c.key}
+                title={c.title}
+                className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+              >
+                <AlertTriangle className="w-3 h-3" /> {c.label}
+              </span>
+            ))}
+            {otherIssues.map((msg, i) => (
+              <span
+                key={`other-${i}`}
+                title={msg}
+                className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 max-w-[260px]"
+              >
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                <span className="truncate">{msg}</span>
+              </span>
+            ))}
+          </>
+        ) : null}
+        {dupCount > 0 && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[11px] text-orange-700"
+            title="A similar billing product already exists — approving creates a second sellable product."
+          >
+            <AlertTriangle className="w-3 h-3" /> possible duplicate
+          </span>
+        )}
+        {dirty && (
+          <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-700">
+            unsaved changes
+          </span>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={busy}
+          className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+          title="Move to the next item without saving (Alt+→)"
+        >
+          Skip
+        </button>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={busy}
+          className="btn-secondary flex items-center gap-1.5"
+          title="Save the fixes and stay on this item (Ctrl+Enter)"
+        >
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          Save fixes
+        </button>
+        <button
+          type="button"
+          onClick={onApprove}
+          disabled={busy}
+          className={clsx(
+            'flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white',
+            busy ? 'bg-gray-300 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'
+          )}
+          title="Save, validate and make this product sellable, then move on (Ctrl+Shift+Enter)"
+        >
+          {approving ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4" />
+          )}
+          Save &amp; Approve
+        </button>
+      </div>
     </div>
   );
 }
