@@ -22,16 +22,16 @@ import {
 
 const TIER_TOKENS: Record<LoyaltyTier, string> = {
   BRONZE: 'bg-amber-50 text-amber-700 ring-amber-200',
-  SILVER: 'bg-slate-100 text-slate-700 ring-slate-200',
+  SILVER: 'bg-gray-100 text-gray-700 ring-gray-200',
   GOLD: 'bg-yellow-50 text-yellow-700 ring-yellow-200',
-  PLATINUM: 'bg-violet-50 text-violet-700 ring-violet-200',
+  PLATINUM: 'bg-blue-50 text-blue-700 ring-blue-200',
 };
 
 const TYPE_TOKENS: Record<LoyaltyTxnType, string> = {
   EARN: 'bg-green-50 text-green-700',
   REDEEM: 'bg-blue-50 text-blue-700',
   EXPIRE: 'bg-amber-50 text-amber-700',
-  ADJUST: 'bg-purple-50 text-purple-700',
+  ADJUST: 'bg-gray-100 text-gray-700',
 };
 
 const PAGE_SIZE = 25;

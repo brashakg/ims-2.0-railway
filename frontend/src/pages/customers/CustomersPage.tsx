@@ -670,10 +670,10 @@ export function CustomersPage() {
   }[] = [];
   const commTypeConfig: Record<string, { icon: typeof MessageCircle; color: string; bg: string }> = {
     SMS: { icon: MessageCircle, color: 'text-green-600', bg: 'bg-green-50' },
-    WhatsApp: { icon: MessageCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    WhatsApp: { icon: MessageCircle, color: 'text-green-600', bg: 'bg-green-50' },
     Call: { icon: PhoneCall, color: 'text-blue-600', bg: 'bg-blue-50' },
-    Visit: { icon: User, color: 'text-orange-600', bg: 'bg-orange-50' },
-    Email: { icon: Mail, color: 'text-purple-600', bg: 'bg-purple-50' },
+    Visit: { icon: User, color: 'text-gray-600', bg: 'bg-gray-100' },
+    Email: { icon: Mail, color: 'text-blue-600', bg: 'bg-blue-50' },
   };
 
   // CRM sub-tab routing — runs AFTER all hooks above so React's hook

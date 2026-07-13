@@ -35,8 +35,8 @@ const LOYALTY_TIERS: LoyaltyTierMeta[] = [
   {
     name: 'Silver',
     key: 'SILVER',
-    color: 'text-slate-700',
-    bgColor: 'bg-slate-50 border-slate-200',
+    color: 'text-gray-700',
+    bgColor: 'bg-gray-50 border-gray-200',
     badge: '🥈',
     benefits: ['Birthday offer', 'Priority support', 'Free shipping'],
   },
@@ -187,7 +187,7 @@ export function LoyaltyProgram() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Points Redeemed</p>
-          <p className="text-2xl font-bold text-orange-600">{fmtCompact(stats?.points_redeemed ?? 0)}</p>
+          <p className="text-2xl font-bold text-amber-600">{fmtCompact(stats?.points_redeemed ?? 0)}</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Redemption Rate</p>
@@ -234,7 +234,7 @@ export function LoyaltyProgram() {
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
                       <div
-                        className="bg-gradient-to-r from-blue-500 to-purple-500 h-full"
+                        className="bg-blue-500 h-full"
                         style={{ width: `${percentage}%` }}
                       />
                     </div>

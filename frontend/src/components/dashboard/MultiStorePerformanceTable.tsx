@@ -85,7 +85,7 @@ export function MultiStorePerformanceTable({ stores, onStoreClick, loading }: Mu
   return (
     <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-purple-50">
+      <div className="p-4 border-b border-gray-200 bg-gray-50">
         <h3 className="text-lg font-semibold text-gray-900">Multi-Store Performance Comparison</h3>
         <p className="text-xs text-gray-600 mt-1">All metrics for {stores.length} stores • Click to drill-down</p>
       </div>
