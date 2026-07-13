@@ -1103,7 +1103,7 @@ export function QuickAddPage() {
     async (opts?: { silent?: boolean }): Promise<{ ok: boolean; saved: boolean }> => {
       if (editMode?.kind !== 'catalog' || !reviewSnapshot) return { ok: false, saved: false };
       const values = currentValues();
-      const newErrors = validateReviewForm(values);
+      const newErrors = validateReviewForm(values, reviewSnapshot.values);
       setErrors(newErrors);
       if (Object.keys(newErrors).length > 0) {
         setOpenSections((s) => ({ ...s, identity: true, pricing: true }));

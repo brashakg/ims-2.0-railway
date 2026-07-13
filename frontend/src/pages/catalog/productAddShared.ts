@@ -923,9 +923,16 @@ export function formValuesToCatalogUpdate(
 /** LENIENT validation for review saves — reviewers are mid-fix by definition,
  *  so the create-strict required-field gate NEVER runs here. Only:
  *  - MRP >= offer price when BOTH are present (server blocks it anyway);
- *  - Catalog Dictionary mirror on FILLED select values (a blank stays blank).
+ *  - Catalog Dictionary mirror on FILLED select values (a blank stays blank),
+ *    and ONLY when the save actually touches attributes: the server validates
+ *    the merged attribute set on attribute patches but lets a pricing-only
+ *    patch through, so a legacy bad value must never block a price fix
+ *    (pass `baseline` = the loaded snapshot to get this diff-awareness).
  *  Approval readiness is the promote dry-run's job, not this gate's. */
-export function validateReviewForm(values: ProductFormValues): Record<string, string> {
+export function validateReviewForm(
+  values: ProductFormValues,
+  baseline?: ProductFormValues
+): Record<string, string> {
   const errors: Record<string, string> = {};
 
   const mrpNum = parseFloat(String(values.mrp ?? ''));
@@ -934,7 +941,22 @@ export function validateReviewForm(values: ProductFormValues): Record<string, st
     errors.offer_price = 'Offer price cannot exceed MRP';
   }
 
-  if (values.category) {
+  // Does this save touch attributes at all? (No baseline = assume yes.)
+  let attrsTouched = !baseline;
+  if (baseline) {
+    const keys = new Set([
+      ...Object.keys(values.attributes || {}),
+      ...Object.keys(baseline.attributes || {}),
+    ]);
+    for (const k of keys) {
+      if (String(values.attributes?.[k] ?? '') !== String(baseline.attributes?.[k] ?? '')) {
+        attrsTouched = true;
+        break;
+      }
+    }
+  }
+
+  if (values.category && attrsTouched) {
     getCategoryFields(values.category).forEach((field) => {
       const val = values.attributes?.[field.name];
       if (
