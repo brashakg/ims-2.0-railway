@@ -1861,6 +1861,14 @@ async def update_catalog_product(
         existing["is_active"] = product.is_active
 
     existing["updated_at"] = datetime.now().isoformat()
+    # Per-user attribution (multiple staff catalogue in parallel): WHO made
+    # this edit, for performance tracking and mistake tracing. Same fields
+    # convention as the other routers' created_by_name; created_by is never
+    # overwritten here.
+    existing["updated_by"] = current_user.get("user_id")
+    existing["updated_by_name"] = current_user.get("full_name") or current_user.get(
+        "username"
+    )
 
     _save_catalog_product(existing)
 

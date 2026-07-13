@@ -371,6 +371,23 @@ def test_absent_expected_updated_at_keeps_last_write_wins(env):
 
 
 # ---------------------------------------------------------------------------
+# Per-user attribution (multiple staff cataloguing in parallel)
+# ---------------------------------------------------------------------------
+
+
+def test_put_stamps_updated_by_and_name_but_never_created_by(env):
+    doc = _bvi_doc(doc_id="clx0rvwho001", created_by="importer-0")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"description": "attributed edit"})
+
+    updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert updated["updated_by"] == "reviewer-1"
+    assert updated["updated_by_name"] == "reviewer"  # full_name absent -> username
+    assert updated["created_by"] == "importer-0"  # never overwritten
+
+
+# ---------------------------------------------------------------------------
 # name/tags survive promote to the spine row
 # ---------------------------------------------------------------------------
 
