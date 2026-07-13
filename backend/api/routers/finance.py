@@ -1865,21 +1865,39 @@ async def itc_register(
             "total_sgst": 0,
             "total_igst": 0,
         }
+    # Scope like the GSTR-3B Table-4 ITC read (reports._itc_from_vendor_bills,
+    # #899): (1) when entity_id is given, count only THAT entity's booked bills
+    # via recipient_entity_id -- the same field a transfer mirror bill records
+    # for its RECEIVING entity, so an inter-entity/same-entity-cross-state
+    # transfer's ITC lands with the receiver and never inflates the sender's
+    # register; (2) always drop ITC-ineligible bills (cancelled / 17(5)-blocked
+    # / not-yet-received) via _itc_eligible_bill -- the register previously
+    # summed EVERY vendor_bills doc, so cancelled + ineligible tax showed as
+    # claimable ITC. The projection widens to carry the eligibility + scoping
+    # fields; the output shape is unchanged.
+    q: dict = {}
+    if entity_id:
+        q["recipient_entity_id"] = entity_id
     try:
-        bills = list(
+        raw_bills = list(
             db.get_collection("vendor_bills").find(
-                {},
+                q,
                 {
                     "_id": 0,
                     "bill_date": 1,
                     "taxable_amount": 1,
                     "tax_amount": 1,
                     "place_of_supply": 1,
+                    "status": 1,
+                    "itc_blocked": 1,
+                    "itc_eligible": 1,
+                    "received": 1,
                 },
             )
         )
     except Exception:
-        bills = []
+        raw_bills = []
+    bills = [b for b in raw_bills if _itc_eligible_bill(b)]
     entity_state = _primary_entity_state(db, entity_id)
     out = itc_reconcile.build_itc_register(bills, entity_state=entity_state)
     if period:
