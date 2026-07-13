@@ -809,6 +809,18 @@ export function catalogDocToFormValues(doc: CatalogProductDoc): ProductFormValue
 const _trimEq = (a: unknown, b: unknown): boolean =>
   String(a ?? '').trim() === String(b ?? '').trim();
 
+/** SHARED trimmed attribute-diff predicate. Both formValuesToCatalogUpdate's
+ *  per-key patch AND validateReviewForm's attrsTouched gate MUST use this —
+ *  when they diverged (untrimmed gate vs trimmed diff), a whitespace-only
+ *  touch armed the full dictionary check while the payload omitted attributes
+ *  entirely, blocking a pricing-only save the server would have accepted.
+ *  Exported for the unit test that pins the two callers together. */
+export const attrChanged = (
+  values: ProductFormValues,
+  baseline: ProductFormValues,
+  key: string
+): boolean => !_trimEq(values.attributes?.[key], baseline.attributes?.[key]);
+
 const _numOrUndef = (v: unknown): number | undefined => {
   const n = parseFloat(String(v ?? '').trim());
   return Number.isFinite(n) ? n : undefined;
@@ -841,9 +853,9 @@ export function formValuesToCatalogUpdate(
     ...Object.keys(snapshot.attributes || {}),
   ]);
   attrKeys.forEach((k) => {
-    const now = String(values.attributes?.[k] ?? '');
-    const before = String(snapshot.attributes?.[k] ?? '');
-    if (now.trim() !== before.trim()) attrPatch[k] = now.trim();
+    if (attrChanged(values, snapshot, k)) {
+      attrPatch[k] = String(values.attributes?.[k] ?? '').trim();
+    }
   });
   if (Object.keys(attrPatch).length > 0) payload.attributes = attrPatch;
 
@@ -949,7 +961,10 @@ export function validateReviewForm(
       ...Object.keys(baseline.attributes || {}),
     ]);
     for (const k of keys) {
-      if (String(values.attributes?.[k] ?? '') !== String(baseline.attributes?.[k] ?? '')) {
+      // Same trimmed predicate as formValuesToCatalogUpdate's payload diff —
+      // a whitespace-only touch must NOT arm the dictionary gate when the
+      // payload would omit attributes entirely.
+      if (attrChanged(values, baseline, k)) {
         attrsTouched = true;
         break;
       }

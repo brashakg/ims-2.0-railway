@@ -261,6 +261,10 @@ export function QuickAddPage() {
   );
   // Terminal state: nothing left to review (friendly panel, never an error).
   const [queueClear, setQueueClear] = useState(false);
+  // The CURRENT ?review id, kept in sync synchronously by the loader effect.
+  // Post-await continuations (save/approve) check it so a slow response for
+  // item A can never stomp item B's form/snapshot after Alt+Arrow navigation.
+  const reviewIdRef = useRef<string | null>(null);
   // Review-only editable fields: display name (PUT `name` -> name+title) and
   // governed tags (PUT `tags`).
   const [displayName, setDisplayName] = useState('');
@@ -1038,19 +1042,31 @@ export function QuickAddPage() {
         return;
       }
       try {
+        // limit 2: after a Skip the current item is still needs_review, so the
+        // server's FIRST waiting item can be this very one (newest-first sort)
+        // — fetching one row falsely declared "last item" while dozens waited.
+        // Pick the first OTHER id; only call it the last item when no other id
+        // exists AND the server total agrees.
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
-          limit: 1,
+          limit: 2,
         });
-        const nid = res.products?.[0] ? String(res.products[0].id || '') : '';
-        if (!nid) {
+        const ids = (res.products || [])
+          .map((p) => String(p.id || ''))
+          .filter(Boolean);
+        if (ids.length === 0) {
           setQueueClear(true);
           return;
         }
-        if (nid === currentId) {
-          // The server's next item IS this one (e.g. skipped the last item).
-          toast.info('This is the last item waiting for review.');
+        const nid = ids.find((id) => id !== currentId) || '';
+        if (!nid) {
+          // The server's only item IS this one.
+          toast.info(
+            Number(res.total ?? 0) > 1
+              ? 'Could not find the next review item — go back to the queue.'
+              : 'This is the last item waiting for review.'
+          );
           return;
         }
         writeReviewQueue({ ids: [nid], index: 0, total: Number(res.total ?? 1) });
@@ -1119,26 +1135,34 @@ export function QuickAddPage() {
         if (!opts?.silent) toast.info('Nothing changed yet.');
         return { ok: true, saved: false };
       }
+      // Currency guard (per-invocation closure id): a slow response for item
+      // A must never stomp item B's form/snapshot after queue navigation.
+      const id = editMode.id;
       setIsSubmitting(true);
       try {
-        const res = await catalogProductsApi.update(editMode.id, payload);
+        const res = await catalogProductsApi.update(id, payload);
+        if (reviewIdRef.current !== id) return { ok: true, saved: true };
         const fresh = res.product;
         const v = catalogDocToFormValues(fresh);
         applyFormValues(v);
         setReviewSnapshot({ doc: fresh, values: v });
         if (!opts?.silent) toast.success('Saved — re-checking readiness…');
-        void runReviewDryRun(editMode.id);
+        void runReviewDryRun(id);
         return { ok: true, saved: true };
       } catch (e: unknown) {
+        // Stale continuation: the reviewer moved on — drop the error quietly
+        // (the item keeps needs_review; it resurfaces in the queue).
+        if (reviewIdRef.current !== id) return { ok: false, saved: false };
         if (e instanceof CatalogRequestError && e.status === 409) {
           // Optimistic-concurrency conflict: reload the latest doc, RE-APPLY
           // the reviewer's changed fields on top, and let them save again.
           try {
-            const freshDoc = await catalogProductsApi.get(editMode.id);
+            const freshDoc = await catalogProductsApi.get(id);
+            if (reviewIdRef.current !== id) return { ok: false, saved: false };
             const freshValues = catalogDocToFormValues(freshDoc);
             applyFormValues(overlayChangedFormValues(freshValues, reviewSnapshot.values, values));
             setReviewSnapshot({ doc: freshDoc, values: freshValues });
-            void runReviewDryRun(editMode.id);
+            void runReviewDryRun(id);
             toast.warning(
               'This item was changed by someone else — reloaded the latest version and kept your edits. Please review and save again.',
               9000
@@ -1180,19 +1204,24 @@ export function QuickAddPage() {
   // (SKU clash / race) = toast + advance; anything else stays put.
   const handleReviewApprove = useCallback(async () => {
     if (editMode?.kind !== 'catalog' || reviewApproving || isSubmitting) return;
+    // Same per-invocation currency discipline as handleReviewSave: a slow
+    // response must never steer state (or the queue) for a different item.
+    const id = editMode.id;
     setReviewApproving(true);
     try {
       const saveRes = await handleReviewSave({ silent: true });
-      if (!saveRes.ok) return;
+      if (!saveRes.ok || reviewIdRef.current !== id) return;
       let dry: PromoteDryRunResult;
       try {
-        dry = await catalogProductsApi.promoteDryRun(editMode.id);
+        dry = await catalogProductsApi.promoteDryRun(id);
       } catch (e: unknown) {
+        if (reviewIdRef.current !== id) return;
         toast.error(
           e instanceof Error && e.message ? e.message : 'Could not check readiness — try again.'
         );
         return;
       }
+      if (reviewIdRef.current !== id) return;
       setReviewDry(dry);
       if (!dry.ok) {
         const mapped = promoteGapsToFormErrors(dry.gaps, currentValues().category);
@@ -1202,11 +1231,21 @@ export function QuickAddPage() {
         return;
       }
       try {
-        const res = await catalogProductsApi.promote(editMode.id);
+        const res = await catalogProductsApi.promote(id);
         toast.success(`Approved for POS${res.sku ? ` — SKU ${res.sku}` : ''}.`);
+        if (reviewIdRef.current !== id) {
+          // Approved, but the reviewer already moved on: just drop it from
+          // the stash — do NOT navigate them again.
+          removeFromReviewQueue(id);
+          return;
+        }
         await advanceReview('remove');
       } catch (pe: unknown) {
         if (pe instanceof CatalogRequestError && pe.status === 409) {
+          if (reviewIdRef.current !== id) {
+            removeFromReviewQueue(id);
+            return;
+          }
           if (/already a billing product/i.test(pe.message)) {
             toast.success('Already approved — moving on.');
           } else {
@@ -1214,10 +1253,11 @@ export function QuickAddPage() {
           }
           await advanceReview('remove');
         } else {
+          if (reviewIdRef.current !== id) return;
           toast.error(
             pe instanceof Error && pe.message ? pe.message : 'Approval failed — see the checklist.'
           );
-          void runReviewDryRun(editMode.id);
+          void runReviewDryRun(id);
         }
       }
     } finally {
@@ -1265,9 +1305,13 @@ export function QuickAddPage() {
           else void handleReviewSave();
         } else if (e.altKey && e.key === 'ArrowLeft') {
           e.preventDefault();
+          // Same busy gate as the ReviewQueueBar buttons (disabled={busy}):
+          // navigating mid-save would let a slow response land on the next item.
+          if (isSubmitting || reviewApproving) return;
           handleReviewPrev();
         } else if (e.altKey && e.key === 'ArrowRight') {
           e.preventDefault();
+          if (isSubmitting || reviewApproving) return;
           handleReviewSkip();
         }
         return;
@@ -1484,6 +1528,9 @@ export function QuickAddPage() {
   // fallback / the "queue clear" panel).
   const reviewId = searchParams.get('review');
   useEffect(() => {
+    // Synchronous currency stamp: in-flight save/approve continuations for a
+    // PREVIOUS id compare against this and drop themselves.
+    reviewIdRef.current = reviewId;
     if (!reviewId) return;
     let cancelled = false;
     (async () => {
@@ -1503,6 +1550,13 @@ export function QuickAddPage() {
         setVariantCtx(null);
         setFlaggedFields(new Set());
         setDupInfo(null);
+        // Defence in depth: a review doc must never inherit staged Autopilot
+        // candidate attributes via the late-category effect — clear the
+        // staged state the ?prefill flow may have left behind.
+        stagedCandidateRef.current = null;
+        setAutoFilled(new Set());
+        setApExtras({});
+        setApRefUrls([]);
         const v = catalogDocToFormValues(doc);
         applyFormValues(v);
         setEditMode({ kind: 'catalog', id: reviewId, sku: String(doc.sku || '') });
@@ -1526,10 +1580,20 @@ export function QuickAddPage() {
         }
         void runReviewDryRun(reviewId);
         window.scrollTo({ top: 0 });
-      } catch {
+      } catch (err: unknown) {
         if (cancelled) return;
-        // Vanished (approved elsewhere / removed): fall FORWARD to the item
-        // now at the same stash index, else ask the server for the next one.
+        // Only a REAL 404 means the item vanished (approved elsewhere /
+        // removed). Any other failure — network blip, 5xx, timeout — is
+        // transient: the item is still reviewable, so leave the stash intact
+        // and let the reviewer retry instead of silently ejecting it.
+        if (!(err instanceof CatalogRequestError && err.status === 404)) {
+          toast.error(
+            'Could not load this review item — check your connection and try again.'
+          );
+          return;
+        }
+        // Vanished: fall FORWARD to the item now at the same stash index,
+        // else ask the server for the next one.
         const stash = readReviewQueue();
         const at = stash ? stash.ids.indexOf(reviewId) : -1;
         const after = removeFromReviewQueue(reviewId);
@@ -1543,13 +1607,19 @@ export function QuickAddPage() {
           return;
         }
         try {
+          // limit 2: the server's first waiting item can BE this id (stale
+          // list); pick the first OTHER id instead of wrongly declaring the
+          // queue clear.
           const res = await catalogProductsApi.list({
             needs_review: true,
             is_active: 'all',
-            limit: 1,
+            limit: 2,
           });
-          const nid = res.products?.[0] ? String(res.products[0].id || '') : '';
-          if (nid && nid !== reviewId) {
+          const ids = (res.products || [])
+            .map((p) => String(p.id || ''))
+            .filter(Boolean);
+          const nid = ids.find((id) => id !== reviewId) || '';
+          if (nid) {
             writeReviewQueue({ ids: [nid], index: 0, total: Number(res.total ?? 1) });
             const next = new URLSearchParams(searchParams);
             next.set('review', nid);
@@ -1620,7 +1690,10 @@ export function QuickAddPage() {
   // param cleared so a manual edit/reset isn't re-clobbered on re-render.
   const prefillKind = searchParams.get(AUTOPILOT_PREFILL_PARAM);
   useEffect(() => {
-    if (prefillKind !== AUTOPILOT_PREFILL_VALUE) return;
+    // ?review wins over a crafted combined URL — same suppression the clone/
+    // edit/variant loaders have (prefill is a create affordance; the staged
+    // candidate stays unconsumed for a later legitimate create).
+    if (prefillKind !== AUTOPILOT_PREFILL_VALUE || searchParams.get('review')) return;
     const candidate = takeAutopilotPrefill();
     if (candidate) {
       // Same v2 richness as the inline "Use this": full field mapping, auto

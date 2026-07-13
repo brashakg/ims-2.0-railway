@@ -172,7 +172,19 @@ export const catalogProductsApi = {
   },
 
   get: async (productId: string): Promise<CatalogProductDoc> => {
-    const response = await api.get(`/catalog/products/${productId}`);
+    // 404 passes validateStatus and re-throws as a typed CatalogRequestError
+    // so the review loader can tell a genuinely VANISHED item apart from a
+    // transient network/5xx failure (which keeps the interceptor's retry path
+    // and must never eject the item from the reviewer's queue).
+    const response = await api.get(`/catalog/products/${productId}`, {
+      validateStatus: (s) => (s >= 200 && s < 300) || s === 404,
+    });
+    if (response.status === 404) {
+      throw new CatalogRequestError(
+        flattenErrorDetail(response.data, 'Product not found.'),
+        404
+      );
+    }
     return (response.data as { product: CatalogProductDoc }).product;
   },
 

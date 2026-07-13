@@ -228,6 +228,67 @@ def test_create_path_pricing_still_requires_mrp():
         catalog_mod.PricingInput(offer_price=100.0)
 
 
+def test_offer_patch_on_priceless_import_rejects_invalid_mrp(env):
+    # Adversarial finding 1: BVI fold_variant_prices can leave a doc with
+    # pricing {mrp: 0.0, offer_price: 0.0}. An offer-only patch merged to
+    # {mrp: 0.0, offer_price: 5000} -> evaluate_offer_price = INVALID_MRP,
+    # which the old MRP_BELOW_OFFER-only check silently skipped, persisting an
+    # offer > MRP doc. Offer-touching patches now reject INVALID_MRP too.
+    doc = _bvi_doc(
+        doc_id="clx0rvzero01",
+        mrp=0.0,
+        offer_price=0.0,
+        pricing={"mrp": 0.0, "offer_price": 0.0, "discount_category": "LUXURY"},
+    )
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    with pytest.raises(HTTPException) as exc:
+        _put(doc["id"], {"pricing": {"offer_price": 5000.0}})
+    assert exc.value.status_code == 400
+    assert "valid MRP" in str(exc.value.detail)
+    # Nothing was persisted.
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["pricing"]["offer_price"] == 0.0
+
+
+def test_offer_patch_falls_back_to_top_level_mrp_mirror(env):
+    # The nested pricing block has NO mrp key but the top-level mirror does
+    # (the value the promote payload uses): the guard must run against that
+    # fallback instead of concluding the MRP is absent.
+    doc = _bvi_doc(
+        doc_id="clx0rvtop001",
+        pricing={"offer_price": 4500.0, "discount_category": "LUXURY"},
+    )  # top-level mrp stays 5000.0 from _bvi_doc
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    with pytest.raises(HTTPException) as exc:
+        _put(doc["id"], {"pricing": {"offer_price": 6000.0}})  # > top-level 5000
+    assert exc.value.status_code == 400
+    assert "cannot exceed MRP" in str(exc.value.detail)
+
+    # A legal offer against the top-level mirror still saves.
+    _put(doc["id"], {"pricing": {"offer_price": 4200.0}})
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["pricing"]["offer_price"] == 4200.0
+
+
+def test_non_offer_saves_stay_lenient_on_priceless_import(env):
+    # Patches NOT touching offer_price keep the lenient path: metadata and
+    # cost-only fixes on a price-less import must never be blocked.
+    doc = _bvi_doc(
+        doc_id="clx0rvzero02",
+        mrp=0.0,
+        offer_price=0.0,
+        pricing={"mrp": 0.0, "offer_price": 0.0},
+    )
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"description": "metadata fix"})
+    _put(doc["id"], {"pricing": {"cost_price": 900.0}})
+
+    updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert updated["description"] == "metadata fix"
+    assert updated["pricing"]["cost_price"] == 900.0
+
+
 # ---------------------------------------------------------------------------
 # name / tags / brand-model mirror
 # ---------------------------------------------------------------------------
@@ -277,6 +338,49 @@ def test_attributes_patch_mirrors_brand_and_model_top_level(env):
     updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
     assert updated["brand"] == "Prada"
     assert updated["model"] == "PR17"
+
+
+def test_untouched_attributes_do_not_rewrite_brand_model(env):
+    # Adversarial finding 8: the mirror must key off the CALLER'S patch keys.
+    # A drawer save fixing ONLY the colour must not flip the top-level brand
+    # (deliberate BVI vendor value) to a stale attributes.brand_name it never
+    # touched, nor rewrite the top-level model.
+    doc = _bvi_doc(doc_id="clx0rvmirr02", brand="Ray-Ban", model="RB2140")
+    doc["attributes"]["brand_name"] = "RAYBAN INC"  # deliberate divergence
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"attributes": {"colour_code": "RED"}})
+
+    updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert updated["brand"] == "Ray-Ban"  # NOT flipped to 'RAYBAN INC'
+    assert updated["model"] == "RB2140"  # untouched
+    assert updated["attributes"]["colour_code"] == "RED"  # the fix landed
+
+
+def test_clearing_brand_model_attrs_clears_top_level_mirror(env):
+    # Adversarial finding 8 (inverse asymmetry): explicitly clearing
+    # attributes.brand_name / model_no must clear the top-level mirror too --
+    # previously the stale mirror kept advertising the deleted value.
+    doc = _bvi_doc(doc_id="clx0rvmirr03", model="VO5051")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"attributes": {"brand_name": "", "model_no": ""}})
+
+    updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert updated["brand"] == ""  # cleared with the attribute
+    assert updated["model"] == ""
+
+
+def test_clearing_model_no_falls_back_to_merged_model_name(env):
+    # Clearing model_no while an untouched model_name still holds a value:
+    # the mirror keeps the merged fallback rather than clearing.
+    doc = _bvi_doc(doc_id="clx0rvmirr04", model="VO5051")
+    doc["attributes"]["model_name"] = "Fifth Avenue"
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"attributes": {"model_no": ""}})
+
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["model"] == "Fifth Avenue"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +472,83 @@ def test_absent_expected_updated_at_keeps_last_write_wins(env):
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
     _put(doc["id"], {"description": "drawer save"})
     assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["description"] == "drawer save"
+
+
+def test_cas_409s_on_concurrent_write_inside_the_window(env, monkeypatch):
+    # Adversarial finding 6: the old check-then-write passed the early
+    # timestamp check, then a concurrent save landed during the handler's live
+    # DB round-trips (dictionary enforcement), and the stale full-doc write
+    # silently clobbered it. The write is now a compare-and-swap on the RAW
+    # stored updated_at -- simulate the concurrent writer inside the window
+    # via the dictionary-enforcement hook the attributes path calls.
+    doc = _bvi_doc(doc_id="clx0rvcas001")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    def _concurrent_writer(category, attrs, db=None):
+        # Another worker's save lands between the check and the write.
+        catalog_mod.CATALOG_PRODUCTS[doc["id"]].update(
+            {
+                "updated_at": "2026-07-10T10:05:00",
+                "description": "the other reviewer's fix",
+            }
+        )
+        return attrs
+
+    monkeypatch.setattr(
+        catalog_mod._pm, "enforce_dictionary_values", _concurrent_writer
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        _put(
+            doc["id"],
+            {
+                "expected_updated_at": "2026-07-10T10:00:00",  # matched at load
+                "attributes": {"colour_code": "RED"},
+            },
+        )
+    assert exc.value.status_code == 409
+    assert "changed by someone else" in str(exc.value.detail)
+    # The concurrent writer's fix SURVIVED; the stale save wrote nothing.
+    updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert updated["description"] == "the other reviewer's fix"
+    assert updated["attributes"]["colour_code"] == "BLK"  # not RED
+
+
+def test_concurrent_promote_stamp_survives_put(env, monkeypatch):
+    # Adversarial finding 6 (promote-only-writer invariant): a PUT whose
+    # snapshot was loaded BEFORE a concurrent promote stamped the doc must not
+    # $set needs_review=True back over the stamp (a billing-live ghost in the
+    # review queue). The PUT strips the promote-owned flags from its write, so
+    # even the drawer's last-write-wins path (no expected_updated_at) can
+    # never resurrect them.
+    doc = _bvi_doc(doc_id="clx0rvghost1", sku="RVGHOST1")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    def _promote_stamp_in_window(category, attrs, db=None):
+        # Exactly what promote_catalog_product stamps (partial $set).
+        catalog_mod.CATALOG_PRODUCTS[doc["id"]].update(
+            {
+                "needs_review": False,
+                "pos_ready": True,
+                "promoted_at": "2026-07-10T10:05:00",
+                "promoted_by": "reviewer-2",
+                "updated_at": "2026-07-10T10:05:00",
+            }
+        )
+        return attrs
+
+    monkeypatch.setattr(
+        catalog_mod._pm, "enforce_dictionary_values", _promote_stamp_in_window
+    )
+
+    _put(doc["id"], {"attributes": {"colour_code": "RED"}})  # drawer-style
+
+    updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
+    assert updated["needs_review"] is False  # the stamp SURVIVED the PUT
+    assert updated["pos_ready"] is True
+    assert updated["promoted_at"] == "2026-07-10T10:05:00"
+    assert updated["promoted_by"] == "reviewer-2"
+    assert updated["attributes"]["colour_code"] == "RED"  # the fix still landed
 
 
 # ---------------------------------------------------------------------------

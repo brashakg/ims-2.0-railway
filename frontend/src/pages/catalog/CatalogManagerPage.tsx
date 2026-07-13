@@ -349,7 +349,13 @@ export function CatalogManagerPage() {
     setPage(1);
     setSelected(new Set());
     setDrawerIdx(null);
-  }, [segment, debouncedSearch, category, brand, includeInactive, setPage]);
+    // setPage is EXCLUDED on purpose: react-router's setSearchParams (and so
+    // setPage) gets a new identity on every URL-search change, so depending on
+    // it made ANY page change snap straight back to page 1 (and broke
+    // Back-to-queue's ?page=N restore). setPage uses the functional-updater
+    // form, so a stale closure is harmless.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segment, debouncedSearch, category, brand, includeInactive]);
 
   // Keep the review-queue stash current: whenever the review segment shows a
   // page of imported docs, that page (+ filters + grid position) IS the
