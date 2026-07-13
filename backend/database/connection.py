@@ -467,7 +467,43 @@ class DatabaseConnection:
         _idx("audit_logs", [("action", 1), ("timestamp", -1)], background=True)
         _idx("audit_logs", [("entity_type", 1), ("entity_id", 1)], background=True)
         _idx("audit_logs", [("severity", 1), ("timestamp", -1)], background=True)
+        # Cataloguing-scorecard corrections scan: {entity_id: {$in: pids},
+        # action: {$in: [...]}, timestamp: {$gte: cutoff}}. The (entity_type,
+        # entity_id) compound above cannot serve it (no entity_type predicate,
+        # prefix rule) and (action, timestamp) matches every middleware UPDATE
+        # row app-wide -- this makes each chunk a pure index seek that stays
+        # flat as the append-only trail grows.
+        _idx("audit_logs", [("entity_id", 1), ("action", 1)], background=True)
         _idx("audit_chain_head", "seq", background=True)
+
+        # QC samples (cataloguing scorecard phase 2). PARTIAL UNIQUE on the
+        # OPEN pair is the concurrency backstop for POST /products/qc-samples/
+        # generate (multi-worker: two overlapping generates both read the
+        # pre-insert exclusion set; the index makes the second insert of the
+        # same open (cataloguer, product) pair lose with a duplicate key,
+        # which the endpoint drops from its reported counts). Partial on
+        # PENDING only: reviewed history rows are excluded by the endpoint's
+        # own any-status exclusion query, not by the index.
+        _idx(
+            "qc_samples",
+            [("cataloguer_id", 1), ("product_id", 1)],
+            unique=True,
+            partialFilterExpression={"status": "PENDING"},
+            name="uniq_qc_open_pair",
+            background=True,
+        )
+        # List endpoint: filter (batch_id/cataloguer_id/status) + sort
+        # sampled_at desc, all server-side.
+        _idx(
+            "qc_samples",
+            [("batch_id", 1), ("status", 1), ("sampled_at", -1)],
+            background=True,
+        )
+        _idx(
+            "qc_samples",
+            [("cataloguer_id", 1), ("sampled_at", -1)],
+            background=True,
+        )
 
         # Catalog variants (BVI Phase 1). UNIQUE sparse Shopify/barcode reverse
         # lookups so a Shopify variant / physical unit resolves to one IMS variant.

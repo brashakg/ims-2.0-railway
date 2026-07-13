@@ -1090,8 +1090,10 @@ export function InventoryPage() {
                               <p className="font-medium text-gray-900">{item.name}</p>
                               <p className="text-sm text-gray-500">{item.brand}</p>
                               {/* Cataloguer attribution: muted "by <name>" subtitle
-                                  (absent on legacy rows created before the stamp). */}
-                              {item.created_by_name && (
+                                  (absent on legacy rows created before the stamp).
+                                  Manager-only — mirrors the backend gate (staff
+                                  responses don't carry the fields anyway). */}
+                              {canSeeCataloguers && item.created_by_name && (
                                 <p
                                   className="text-xs text-gray-400 mt-0.5"
                                   title="Catalogued by"
@@ -1568,7 +1570,10 @@ export function InventoryPage() {
           ['Available', String(available)],
           ['Online', online?.online ? `Yes (${online.online_stock ?? 0} online)` : 'In-store only'],
           ['Location', detailItem.location || '-'],
-          ['Catalogued by', detailItem.created_by_name || '-'],
+          // Attribution is a manager surface (mirrors the backend gate).
+          ...(canSeeCataloguers
+            ? ([['Catalogued by', detailItem.created_by_name || '-']] as Array<[string, string]>)
+            : []),
         ];
         return (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetailItem(null)}>

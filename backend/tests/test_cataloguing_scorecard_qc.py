@@ -75,12 +75,41 @@ def _matches(doc: Dict, flt: Optional[Dict]) -> bool:
     return True
 
 
+class FakeCursor:
+    """Iterable cursor supporting the .sort(field, dir).limit(n) chaining the
+    qc-samples list endpoint now runs server-side."""
+
+    def __init__(self, rows: List[Dict]):
+        self._rows = rows
+
+    def sort(self, field, direction=1):
+        self._rows = sorted(
+            self._rows,
+            key=lambda r: r.get(field) or datetime.min,
+            reverse=(direction == -1),
+        )
+        return self
+
+    def limit(self, n):
+        self._rows = self._rows[: int(n)]
+        return self
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class FakeUpdateResult:
+    def __init__(self, matched: int):
+        self.matched_count = matched
+        self.modified_count = matched
+
+
 class FakeCollection:
     def __init__(self, docs: Optional[List[Dict]] = None):
         self.docs: List[Dict] = [dict(d) for d in (docs or [])]
 
     def find(self, flt=None, projection=None):
-        return [dict(d) for d in self.docs if _matches(d, flt)]
+        return FakeCursor([dict(d) for d in self.docs if _matches(d, flt)])
 
     def find_one(self, flt=None, projection=None):
         for d in self.docs:
@@ -88,7 +117,7 @@ class FakeCollection:
                 return dict(d)
         return None
 
-    def insert_many(self, docs):
+    def insert_many(self, docs, ordered=True):
         self.docs.extend(dict(d) for d in docs)
 
     def insert_one(self, doc):
@@ -98,7 +127,60 @@ class FakeCollection:
         for d in self.docs:
             if _matches(d, flt):
                 d.update(update.get("$set", {}))
-                return
+                return FakeUpdateResult(1)
+        return FakeUpdateResult(0)
+
+    def aggregate(self, pipeline):
+        """Implements exactly the $match/$group/$sort/$limit pipeline the
+        qc-samples batch-progress summary issues (loud on anything else)."""
+        rows = [dict(d) for d in self.docs]
+        for stage in pipeline:
+            if "$match" in stage:
+                rows = [r for r in rows if _matches(r, stage["$match"])]
+            elif "$group" in stage:
+                spec = stage["$group"]
+                gid = spec["_id"]
+                field = (
+                    gid[1:] if isinstance(gid, str) and gid.startswith("$") else None
+                )
+                groups: Dict[Any, Dict] = {}
+                for r in rows:
+                    key = r.get(field) if field else None
+                    g = groups.setdefault(key, {"_id": key})
+                    for out, acc in spec.items():
+                        if out == "_id":
+                            continue
+                        if "$sum" in acc:
+                            arg = acc["$sum"]
+                            if arg == 1:
+                                inc = 1
+                            elif isinstance(arg, dict) and "$cond" in arg:
+                                cond, tval, fval = arg["$cond"]
+                                eq = cond["$eq"]
+                                inc = tval if r.get(eq[0][1:]) == eq[1] else fval
+                            else:
+                                raise AssertionError(f"Fake $sum arg {arg}")
+                            g[out] = g.get(out, 0) + inc
+                        elif "$max" in acc:
+                            v = r.get(acc["$max"][1:])
+                            if v is not None and (g.get(out) is None or v > g[out]):
+                                g[out] = v
+                            else:
+                                g.setdefault(out, None)
+                        else:
+                            raise AssertionError(f"Fake accumulator {acc}")
+                rows = list(groups.values())
+            elif "$sort" in stage:
+                for fld, dr in reversed(list(stage["$sort"].items())):
+                    rows.sort(
+                        key=lambda r, f=fld: r.get(f) or datetime.min,
+                        reverse=(dr == -1),
+                    )
+            elif "$limit" in stage:
+                rows = rows[: int(stage["$limit"])]
+            else:
+                raise AssertionError(f"Fake pipeline stage {stage}")
+        return rows
 
 
 class FakeDB:
@@ -233,6 +315,30 @@ class TestScorecardBasics:
         )
         assert out["rows"] == []
 
+    def test_created_today_uses_ist_day_boundary(self, monkeypatch):
+        # Panel finding 10: created_today is an IST day-boundary metric. The
+        # boundary is IST midnight expressed in the naive-UTC frame created_at
+        # is stored in (api.utils.ist.ist_day_start_utc). A creation 1 minute
+        # after the boundary counts; 1 minute before does not.
+        from api.utils.ist import ist_day_start_utc
+
+        boundary = ist_day_start_utc()
+        # Sanity: the boundary IS IST midnight (naive-UTC + 5h30m -> 00:00).
+        ist_wall = boundary + timedelta(hours=5, minutes=30)
+        assert (ist_wall.hour, ist_wall.minute) == (0, 0)
+
+        db = FakeDB(
+            products=[
+                _product("p-in", "u-a", name="asha",
+                         created_at=boundary + timedelta(minutes=1)),
+                _product("p-out", "u-a", name="asha",
+                         created_at=boundary - timedelta(minutes=1)),
+            ]
+        )
+        row = _rows_by_user(_run_scorecard(monkeypatch, db, days=30))["u-a"]
+        assert row["created_count"] == 2
+        assert row["created_today"] == 1
+
 
 # ============================================================================
 # 2. Scorecard: corrections classification
@@ -326,14 +432,18 @@ class TestScorecardCorrections:
         row = _rows_by_user(_run_scorecard(monkeypatch, db, days=90))["u-a"]
         assert row["corrections_received"] == 1  # only the day-5 edit
 
-    def test_baseline_row_counts_as_approximate(self, monkeypatch):
+    def test_spine_baseline_row_no_longer_counted(self, monkeypatch):
+        # Panel finding 7: the spine PUT now writes a classified
+        # product.updated row itself, so its field-blind baseline middleware
+        # twin must NOT be approximated (a pricing-only spine edit would
+        # otherwise count as a correction).
         db = FakeDB(
             products=[_product("p1", "u-a", name="asha")],
             audit_logs=[_audit_baseline("p1", "u-b", 2)],
         )
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
-        assert row["corrections_received"] == 1
-        assert row["corrections_approximate"] == 1
+        assert row["corrections_received"] == 0
+        assert row["corrections_approximate"] == 0
         assert row["corrections_classified"] == 0
 
     def test_baseline_engine_door_path_excluded(self, monkeypatch):
@@ -370,6 +480,113 @@ class TestScorecardCorrections:
         )
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
         assert row["corrections_approximate"] == 1
+
+
+# ============================================================================
+# 2b. Spine PUT writes a classified audit row (panel finding 7)
+# ============================================================================
+
+
+class _RecorderAuditRepo:
+    def __init__(self):
+        self.rows: List[Dict] = []
+
+    def create(self, doc):
+        self.rows.append(dict(doc))
+        return doc
+
+
+class _SpineRepo:
+    """Single-product repo for the PUT /products/{id} handler."""
+
+    def __init__(self, doc: Dict):
+        self.doc = dict(doc)
+
+    def find_by_id(self, pid):
+        return dict(self.doc) if self.doc.get("product_id") == pid else None
+
+    def update(self, pid, data):
+        if self.doc.get("product_id") != pid:
+            return False
+        self.doc.update(data)
+        return True
+
+
+class TestSpinePutCorrectionsClassification:
+    """The spine PUT (the main FE edit door) now writes a compact
+    product.updated row carrying the patch's changed keys, so its edits are
+    field-classified: a pricing-only edit NEVER counts as a correction; a
+    cataloguing edit does. Its baseline middleware twin is excluded."""
+
+    def _run_put(self, monkeypatch, repo, body_kwargs, editor):
+        from api import dependencies as deps_mod
+
+        monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
+        monkeypatch.setattr(
+            products_mod._pm, "apply_restamp_atomic", lambda *a, **k: {}
+        )
+        monkeypatch.setattr(
+            products_mod, "_refresh_collections_after_product", lambda *a, **k: None
+        )
+        recorder = _RecorderAuditRepo()
+        monkeypatch.setattr(deps_mod, "get_audit_repository", lambda: recorder)
+        monkeypatch.setattr(deps_mod, "get_db", lambda: None)
+        body = products_mod.ProductUpdate(**body_kwargs)
+        asyncio.run(products_mod.update_product("pid-1", body, current_user=editor))
+        return recorder
+
+    def _editor(self):
+        return {"user_id": "u-b", "username": "bala", "roles": ["ADMIN"]}
+
+    def test_pricing_only_spine_edit_not_counted(self, monkeypatch):
+        product = _product("pid-1", "u-a", name="asha", mrp=1000.0,
+                           offer_price=900.0)
+        recorder = self._run_put(
+            monkeypatch, _SpineRepo(product), {"mrp": 1500.0}, self._editor()
+        )
+        rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
+        assert len(rows) == 1
+        # the row carries ONLY the patch's changed keys (attribution stamps
+        # excluded), so the classifier sees a pricing-only edit
+        assert set(rows[0]["after"].keys()) == {"mrp"}
+        assert rows[0]["actor"] == "u-b"
+
+        db = FakeDB(products=[product], audit_logs=rows)
+        row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
+        assert row["corrections_received"] == 0
+        assert row["corrections_classified"] == 0
+        assert row["corrections_approximate"] == 0
+
+    def test_cataloguing_spine_edit_counts_classified(self, monkeypatch):
+        product = _product("pid-1", "u-a", name="asha", mrp=1000.0,
+                           offer_price=900.0)
+        recorder = self._run_put(
+            monkeypatch, _SpineRepo(product), {"brand": "NewBrand"}, self._editor()
+        )
+        rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
+        assert len(rows) == 1
+        assert set(rows[0]["after"].keys()) == {"brand"}
+
+        db = FakeDB(products=[product], audit_logs=rows)
+        row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
+        assert row["corrections_received"] == 1
+        assert row["corrections_classified"] == 1
+
+    def test_heavy_fields_are_elided_not_dumped(self, monkeypatch):
+        product = _product("pid-1", "u-a", name="asha", mrp=1000.0,
+                           offer_price=900.0,
+                           attributes={"brand_name": "Acme"})
+        recorder = self._run_put(
+            monkeypatch,
+            _SpineRepo(product),
+            {"description": "x" * 500},
+            self._editor(),
+        )
+        rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
+        assert len(rows) == 1
+        # key present (classifiable) but the payload is elided
+        assert rows[0]["after"] == {"description": "[changed]"}
+        assert rows[0]["before"] == {"description": "[changed]"}
 
 
 # ============================================================================
@@ -424,18 +641,62 @@ class TestQcGenerate:
         assert out["total_items"] == 2
         assert {i["product_id"] for i in new_items} == {"p1", "p2"}
 
-    def test_reviewed_item_can_be_resampled(self, monkeypatch):
-        # Only OPEN (PENDING) items block re-sampling; a reviewed one doesn't.
+    def test_reviewed_pair_never_resampled(self, monkeypatch):
+        # Panel finding 6: one product = at most ONE QC datapoint per
+        # cataloguer. A pair that was already sampled AND reviewed must not
+        # re-enter the pool (a repeat ERROR verdict on the same unchanged
+        # product would double-count into the scorecard error rate).
         db = FakeDB(
             products=[_product("p0", "u-a", name="asha", created_days_ago=1)],
             qc_samples=[
                 {"item_id": "old-1", "batch_id": "b0", "product_id": "p0",
-                 "cataloguer_id": "u-a", "status": "REVIEWED", "verdict": "OK",
+                 "cataloguer_id": "u-a", "status": "REVIEWED", "verdict": "ERROR",
                  "sampled_at": NOW - timedelta(days=1)},
             ],
         )
         out = _run_generate(monkeypatch, db, per_user=10)
-        assert out["total_items"] == 1
+        assert out["total_items"] == 0
+        assert out["cataloguers"] == []
+        # no new docs were inserted
+        assert len(db.get_collection("qc_samples").docs) == 1
+
+    def test_concurrent_generate_duplicates_dropped_from_counts(self, monkeypatch):
+        # Panel finding 2/9: the partial unique index makes a racing insert
+        # fail per-row with duplicate keys (BulkWriteError, ordered=False);
+        # losers must be dropped from total_items and the per-user summary.
+        class DupColl(FakeCollection):
+            def insert_many(self, docs, ordered=True):
+                assert ordered is False  # race-safe mode required
+                err_cls = type("BulkWriteError", (Exception,), {})
+                exc = err_cls("dup")
+                # First doc loses the race; the rest land.
+                exc.details = {"writeErrors": [{"index": 0, "code": 11000}]}
+                super().insert_many(docs[1:], ordered=ordered)
+                raise exc
+
+        db = FakeDB(
+            products=[_product(f"p{i}", "u-a", name="asha", created_days_ago=1)
+                      for i in range(3)]
+        )
+        db._colls["qc_samples"] = DupColl()
+        out = _run_generate(monkeypatch, db, per_user=10)
+        assert out["total_items"] == 2
+        assert out["cataloguers"] == [
+            {"user_id": "u-a", "name": "asha", "sampled": 2}
+        ]
+
+    def test_bulk_write_duplicate_indices_helper(self):
+        err_cls = type("BulkWriteError", (Exception,), {})
+        dup = err_cls("dup")
+        dup.details = {"writeErrors": [{"index": 2, "code": 11000}]}
+        assert products_mod._bulk_write_duplicate_indices(dup) == {2}
+        # a non-duplicate write error is a REAL failure -> None
+        mixed = err_cls("mixed")
+        mixed.details = {"writeErrors": [{"index": 0, "code": 11000},
+                                         {"index": 1, "code": 121}]}
+        assert products_mod._bulk_write_duplicate_indices(mixed) is None
+        # any other exception type -> None
+        assert products_mod._bulk_write_duplicate_indices(ValueError("x")) is None
 
     def test_multiple_cataloguers_sampled_independently(self, monkeypatch):
         db = FakeDB(
@@ -619,6 +880,60 @@ class TestQcVerdict:
             verdict="OK", error_fields=["category"],
         )
         assert out["error_fields"] == []
+
+    def test_concurrent_first_verdict_races_to_409(self, monkeypatch):
+        # Panel finding 1/8: prod runs multiple uvicorn workers, so two
+        # managers can both read the item as PENDING. Simulated: the read
+        # snapshot shows no verdict, but by write time a verdict exists. The
+        # conditional write (filter re-asserts verdict absent) must 409 via
+        # matched_count==0 -- never a silent overwrite.
+        class RaceyColl(FakeCollection):
+            def find_one(self, flt=None, projection=None):
+                doc = super().find_one(flt, projection)
+                if doc is not None:
+                    doc.pop("verdict", None)  # stale snapshot (race window)
+                    doc["status"] = "PENDING"
+                return doc
+
+        db = _verdict_db(
+            verdict="OK", status="REVIEWED",
+            reviewed_by="mgr-2", reviewed_by_name="meena",
+        )
+        db._colls["qc_samples"] = RaceyColl(db.get_collection("qc_samples").docs)
+        with pytest.raises(HTTPException) as exc:
+            _run_verdict(monkeypatch, db, _manager("mgr-3", "kiran"),
+                         verdict="ERROR", error_fields=["images"])
+        assert exc.value.status_code == 409
+        # the race winner's verdict is untouched
+        stored = db.get_collection("qc_samples").docs[0]
+        assert stored["verdict"] == "OK"
+        assert stored["reviewed_by"] == "mgr-2"
+
+    def test_admin_overwrite_race_pins_reviewed_at(self, monkeypatch):
+        # ADMIN overwrite must pin the previously-read reviewed_at so the
+        # previous_verdict snapshot can never describe a different verdict
+        # than the one actually being overwritten. A concurrent change
+        # (different reviewed_at) -> 409.
+        class StaleColl(FakeCollection):
+            def find_one(self, flt=None, projection=None):
+                doc = super().find_one(flt, projection)
+                if doc is not None and doc.get("reviewed_at") is not None:
+                    # stale snapshot: reviewed_at moved after our read
+                    doc["reviewed_at"] = doc["reviewed_at"] - timedelta(minutes=5)
+                return doc
+
+        db = _verdict_db(
+            verdict="OK", status="REVIEWED",
+            reviewed_by="mgr-2", reviewed_at=NOW - timedelta(hours=1),
+        )
+        db._colls["qc_samples"] = StaleColl(db.get_collection("qc_samples").docs)
+        with pytest.raises(HTTPException) as exc:
+            _run_verdict(
+                monkeypatch, db, _manager("adm-1", "admin", roles=("ADMIN",)),
+                verdict="ERROR", error_fields=["images"],
+            )
+        assert exc.value.status_code == 409
+        assert db.get_collection("qc_samples").docs[0]["verdict"] == "OK"
 
 
 # ============================================================================

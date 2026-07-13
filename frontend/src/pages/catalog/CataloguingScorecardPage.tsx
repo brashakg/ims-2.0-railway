@@ -381,7 +381,7 @@ export default function CataloguingScorecardPage() {
                           <td className="px-4 py-3 text-right text-sm text-gray-700">{r.approvals}</td>
                           <td
                             className="px-4 py-3 text-right text-sm text-gray-700"
-                            title={`${r.corrections_classified} field-classified + ${r.corrections_approximate} approximate (edit doors without field history)`}
+                            title={`${r.corrections_classified} field-classified (pricing/stock edits never count) + ${r.corrections_approximate} approximate (online-store catalog edits, fields unknown until PR #911 adds history there)`}
                           >
                             {r.corrections_received}
                             {r.corrections_approximate > 0 && (
@@ -463,8 +463,9 @@ export default function CataloguingScorecardPage() {
           </div>
           <p className="text-xs text-gray-400">
             Corrections = products edited by a different user within 30 days of creation.
-            Field-classified where audit history exists (pricing/stock changes never count);
-            values marked ~ include edits whose exact fields the audit trail cannot see.
+            Product edits are field-classified — pricing / stock / active-flag changes never
+            count. Values marked ~ additionally include online-store catalog edits, whose
+            exact fields the audit trail cannot see yet (field history there lands with PR #911).
           </p>
         </div>
       )}

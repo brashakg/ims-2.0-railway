@@ -1942,9 +1942,12 @@ def update_product(
     clean.pop("created_by_name", None)
     if actor:
         clean["updated_by"] = actor
-        resolved_name = actor_name or resolve_actor_name(actor, db=db)
-        if resolved_name:
-            clean["updated_by_name"] = resolved_name
+        # ALWAYS written alongside updated_by (raw-id fallback when the name
+        # is unresolvable) so a previous editor's stale name can never survive
+        # next to the new editor's id.
+        clean["updated_by_name"] = (
+            actor_name or resolve_actor_name(actor, db=db) or actor
+        )
 
     before = {k: current.get(k) for k in clean.keys()}
 

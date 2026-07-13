@@ -846,6 +846,21 @@ async def list_products(
     if not isinstance(created_by, str) or not created_by.strip():
         created_by = None
 
+    # Cataloguer-attribution posture (panel finding 4): attribution is a
+    # MANAGER surface. Non-manager roles get neither the created_by filter
+    # nor the attribution fields on the returned docs -- otherwise any staff
+    # account could reconstruct the exact roster + per-user counts that
+    # GET /products/cataloguers deliberately withholds from them.
+    can_see_attribution = bool(
+        set(current_user.get("roles") or [])
+        & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
+    )
+    if created_by and not can_see_attribution:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the cataloguer filter",
+        )
+
     # Category-filter fix: products store CANONICAL categories (SUNGLASS/FRAME),
     # but callers send short codes (SG/FR) or legacy plurals. Normalise the param
     # to canonical when resolvable (fail-open pass-through otherwise) BEFORE the
@@ -858,9 +873,13 @@ async def list_products(
     # any store the user can access), so it is intentionally NOT store-scoped and
     # must not call validate_store_access here.
     active_store = store_id or current_user.get("active_store_id", "")
+    # The caller's attribution tier is part of the key: manager responses
+    # carry created_by/updated_by fields that are STRIPPED for staff, and the
+    # two shapes must never cross-serve from the cache.
+    _tier = "mgr" if can_see_attribution else "staff"
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
-        f":{is_active}:{created_by}"
+        f":{is_active}:{created_by}:{_tier}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -966,6 +985,19 @@ async def list_products(
                 imgs = p.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     p["image_url"] = imgs[0]
+
+        # Attribution stripping for non-manager callers (panel finding 4):
+        # covers the newly stamped names AND the pre-existing raw created_by
+        # user_id, so the roster stays non-derivable from this endpoint.
+        if not can_see_attribution:
+            for p in products:
+                for _f in (
+                    "created_by",
+                    "created_by_name",
+                    "updated_by",
+                    "updated_by_name",
+                ):
+                    p.pop(_f, None)
 
         # LEGACY CONTRACT: `total` stays the PAGE length (pinned by existing
         # consumers/tests). `total_count` is the additive true pre-slice count
@@ -2191,6 +2223,25 @@ def _scorecard_db():
     return db
 
 
+def _bulk_write_duplicate_indices(exc) -> Optional[set]:
+    """For a pymongo BulkWriteError whose failures are ALL duplicate-key
+    (code 11000), return the failing doc indices; None for anything else
+    (caller then treats the exception as a real insert failure). Matched by
+    class name so no hard pymongo import is needed."""
+    if exc.__class__.__name__ != "BulkWriteError":
+        return None
+    details = getattr(exc, "details", None) or {}
+    write_errors = details.get("writeErrors") or []
+    if not write_errors:
+        return None
+    dup: set = set()
+    for we in write_errors:
+        if we.get("code") != 11000:
+            return None
+        dup.add(int(we.get("index", -1)))
+    return dup
+
+
 @router.get("/cataloguing-scorecard")
 async def cataloguing_scorecard(
     days: int = Query(30, ge=1, le=365, description="Rolling window in days"),
@@ -2217,15 +2268,17 @@ async def cataloguing_scorecard(
          attributes[.*]/hsn_code/gst_rate). Pricing (mrp/offer_price/
          cost_price/discount_category), stock and is_active changes NEVER
          count here.
-      2. APPROXIMATE (corrections_approximate): the main FE edit doors --
-         PUT /products/{id} (spine) and PUT /catalog/products/{id} (PIM) --
-         write NO field-level before/after history; only the request-level
-         activity middleware row (action=UPDATE, path, user_id, timestamp)
-         exists. For those, an other-user edit within 30 days of creation is
-         counted WITHOUT field classification, so a pricing-only edit through
-         those doors IS (over-)counted. This is the documented approximation;
-         it disappears for any edit path that starts writing before/after
-         audit rows.
+      2. APPROXIMATE (corrections_approximate): ONLY the catalog-side PIM
+         door (PUT /catalog/products/{id}) still writes no field-level
+         history, so for it an other-user edit within 30 days of creation is
+         counted WITHOUT field classification (a pricing-only edit through
+         that door IS over-counted). The SPINE door (PUT /products/{id}) now
+         writes a compact product.updated row carrying the patch's changed
+         keys, so spine edits are fully CLASSIFIED -- pricing/is_active-only
+         spine edits never count -- and its baseline middleware rows are
+         EXCLUDED from the approximate bucket. The catalog door gains the
+         same classification in a follow-up once PR #911 (which owns
+         routers/catalog.py) lands; the approximate bucket then disappears.
 
     A product flagged by source 1 is excluded from source 2 (no double count).
     corrections_received = classified + approximate (distinct products).
@@ -2258,7 +2311,12 @@ async def cataloguing_scorecard(
 
     # ---- 1. Creations in window (spine products) --------------------------
     creators: Dict[str, tuple] = {}  # product_id -> (creator_id, created_at)
-    today_start = datetime(now.year, now.month, now.day)
+    # created_today is a DAY-BOUNDARY metric for IST stores: the boundary is
+    # IST midnight expressed in the naive-UTC frame created_at is stored in
+    # (BUG-104 helper; Railway runs UTC, business calendar is Asia/Kolkata).
+    from ..utils.ist import ist_day_start_utc
+
+    today_start = ist_day_start_utc()
     try:
         prods = list(
             db.get_collection("products").find(
@@ -2322,6 +2380,12 @@ async def cataloguing_scorecard(
                     {
                         "entity_id": {"$in": chunk},
                         "action": {"$in": ["product.updated", "UPDATE"]},
+                        # Window bound so the (action, timestamp) / (entity_id,
+                        # action) indexes can prune the append-only trail: any
+                        # counted edit satisfies edited_at >= created_at >=
+                        # cutoff (pre-creation edits are skipped below), and
+                        # both row sources always stamp `timestamp`.
+                        "timestamp": {"$gte": cutoff},
                     },
                     {
                         "_id": 0,
@@ -2365,20 +2429,22 @@ async def cataloguing_scorecard(
                         ):
                             corrected_classified.add(pid)
                     else:
-                        # Baseline middleware row (no field detail): count only
-                        # the exact spine / catalog PUT edit paths. Engine-door
-                        # edits (/products/master/{id}) are deliberately NOT
-                        # counted here -- their domain rows above classify them.
+                        # Baseline middleware row (no field detail): count ONLY
+                        # the catalog PIM PUT path -- the one door still without
+                        # field-level history (classification follows once
+                        # PR #911 lands). Spine PUTs (/products/{pid}) and
+                        # engine-door edits (/products/master/{pid}) both write
+                        # classified product.updated rows now, so their
+                        # baseline twins are deliberately NOT counted here.
                         if str(r.get("method") or "") not in ("PUT", "PATCH"):
                             continue
                         path = str(r.get("path") or "")
-                        if path in (
-                            f"/api/v1/products/{pid}",
-                            f"/api/v1/catalog/products/{pid}",
-                        ):
+                        if path == f"/api/v1/catalog/products/{pid}":
                             corrected_approx.add(pid)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Visible (not silent): a cursor timeout here would otherwise
+            # masquerade as "zero corrections".
+            logger.warning("[SCORECARD] corrections scan failed: %s", exc)
     corrected_approx -= corrected_classified
     for pid in corrected_classified:
         _row(creators[pid][0])["corrections_classified"] += 1
@@ -2469,10 +2535,16 @@ async def generate_qc_samples(
     """Draw a random QC sample batch: up to `per_user` random products per
     distinct cataloguer with creations in the last `days` days.
 
-    Products already sitting in an OPEN (PENDING) sample for that cataloguer
-    are excluded, so re-generating never re-queues an unreviewed item. One
-    qc_samples doc per sampled item, sharing a batch_id. Random pick is
-    server-side random.sample over the eligible pool."""
+    A (cataloguer, product) pair that has EVER been sampled -- PENDING or
+    already reviewed -- is excluded, so one product yields at most one QC
+    datapoint per cataloguer (re-generating never re-queues an unreviewed
+    item, and a reviewed defect can never be double-counted into the
+    scorecard error rate). One qc_samples doc per sampled item, sharing a
+    batch_id. Random pick is server-side random.sample over the eligible
+    pool. Concurrent-generate races are backstopped by the partial unique
+    index on (cataloguer_id, product_id, status=PENDING): the insert runs
+    ordered=False and duplicate-key losers are dropped from the reported
+    counts."""
     db = _scorecard_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -2511,14 +2583,15 @@ async def generate_qc_samples(
         if uid and pid:
             pools.setdefault(uid, []).append(p)
 
-    # Items already awaiting review: never re-sample the same product for the
-    # same cataloguer while an OPEN (PENDING) item exists.
+    # Pairs already sampled for these cataloguers -- ANY status. A reviewed
+    # pair must never be re-sampled (one product = at most one QC datapoint
+    # per cataloguer), and a PENDING pair is still awaiting review.
     qc_coll = db.get_collection("qc_samples")
     try:
         already = {
             (r.get("cataloguer_id"), r.get("product_id"))
             for r in qc_coll.find(
-                {"status": "PENDING"},
+                {"cataloguer_id": {"$in": list(pools.keys())}},
                 {"_id": 0, "cataloguer_id": 1, "product_id": 1},
             )
         }
@@ -2580,15 +2653,35 @@ async def generate_qc_samples(
         )
 
     if items:
+        # ordered=False + the partial unique index on (cataloguer_id,
+        # product_id, status=PENDING) make concurrent generates race-safe:
+        # a pair another in-flight generate just inserted fails ITS row only
+        # (duplicate key); every other row still lands. Losers are dropped
+        # from the reported counts so total_items/summary reflect reality.
         try:
             # Copy each doc: insert_many mutates its args (adds _id), and the
             # response below must stay JSON-clean.
-            qc_coll.insert_many([dict(i) for i in items])
+            qc_coll.insert_many([dict(i) for i in items], ordered=False)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[QC] sample batch insert failed: %s", exc)
-            raise HTTPException(
-                status_code=500, detail="Failed to store the QC sample batch"
-            ) from exc
+            dup_indices = _bulk_write_duplicate_indices(exc)
+            if dup_indices is None:
+                logger.warning("[QC] sample batch insert failed: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail="Failed to store the QC sample batch"
+                ) from exc
+            logger.info(
+                "[QC] %d duplicate pair(s) skipped (concurrent generate)",
+                len(dup_indices),
+            )
+            dropped = [items[i] for i in dup_indices if i < len(items)]
+            items = [it for i, it in enumerate(items) if i not in dup_indices]
+            dropped_by_user: Dict[str, int] = {}
+            for it in dropped:
+                uid = it.get("cataloguer_id")
+                dropped_by_user[uid] = dropped_by_user.get(uid, 0) + 1
+            for s in summary:
+                s["sampled"] = max(0, s["sampled"] - dropped_by_user.get(s["user_id"], 0))
+            summary = [s for s in summary if s["sampled"] > 0]
 
     return {
         "batch_id": batch_id,
@@ -2609,46 +2702,67 @@ async def list_qc_samples(
 ):
     """List QC sample items, newest batch first, plus per-batch progress
     summaries (total vs reviewed -- the batch progress is computed over the
-    batch_id/cataloguer scope BEFORE the status filter narrows the items)."""
+    batch_id/cataloguer scope BEFORE the status filter narrows the items).
+
+    Both halves run SERVER-SIDE (qc_samples grows monotonically, so a full
+    client-side materialization would degrade with age): the batch progress
+    is a $group aggregation over the pre-status scope, and the item fetch
+    puts status into the Mongo filter with cursor sort + limit."""
     db = _scorecard_db()
     if db is None:
         return {"items": [], "total": 0, "batches": []}
+    qc_coll = db.get_collection("qc_samples")
 
     flt: Dict[str, Any] = {}
     if batch_id:
         flt["batch_id"] = batch_id
     if cataloguer:
         flt["cataloguer_id"] = cataloguer
+
+    # Per-batch progress: Mongo-side $group over the pre-status scope.
+    batches: List[Dict[str, Any]] = []
     try:
-        base_rows = list(
-            db.get_collection("qc_samples").find(flt, {"_id": 0})
+        pipeline: List[Dict[str, Any]] = []
+        if flt:
+            pipeline.append({"$match": dict(flt)})
+        pipeline += [
+            {
+                "$group": {
+                    "_id": "$batch_id",
+                    "total": {"$sum": 1},
+                    "reviewed": {
+                        "$sum": {
+                            "$cond": [{"$eq": ["$status", "REVIEWED"]}, 1, 0]
+                        }
+                    },
+                    "sampled_at": {"$max": "$sampled_at"},
+                }
+            },
+            {"$sort": {"sampled_at": -1}},
+            {"$limit": 20},
+        ]
+        for b in qc_coll.aggregate(pipeline):
+            batches.append(
+                {
+                    "batch_id": b.get("_id") or "",
+                    "total": int(b.get("total") or 0),
+                    "reviewed": int(b.get("reviewed") or 0),
+                    "sampled_at": b.get("sampled_at"),
+                }
+            )
+    except Exception:  # noqa: BLE001 - progress strip is best-effort
+        batches = []
+
+    # Items: status pushed into the Mongo filter; sort + limit on the cursor.
+    item_flt = dict(flt)
+    if status:
+        item_flt["status"] = status
+    try:
+        rows = list(
+            qc_coll.find(item_flt, {"_id": 0}).sort("sampled_at", -1).limit(limit)
         )
     except Exception:  # noqa: BLE001
-        base_rows = []
-
-    # Per-batch progress over the pre-status scope.
-    batch_map: Dict[str, Dict[str, Any]] = {}
-    for r in base_rows:
-        b = batch_map.setdefault(
-            r.get("batch_id") or "",
-            {"batch_id": r.get("batch_id") or "", "total": 0, "reviewed": 0,
-             "sampled_at": None},
-        )
-        b["total"] += 1
-        if r.get("status") == "REVIEWED":
-            b["reviewed"] += 1
-        s_at = _as_dt(r.get("sampled_at"))
-        if s_at is not None and (b["sampled_at"] is None or s_at > b["sampled_at"]):
-            b["sampled_at"] = s_at
-    batches = sorted(
-        batch_map.values(),
-        key=lambda b: b["sampled_at"] or datetime.min,
-        reverse=True,
-    )[:20]
-
-    rows = [r for r in base_rows if not status or r.get("status") == status]
-    rows.sort(key=lambda r: _as_dt(r.get("sampled_at")) or datetime.min, reverse=True)
-    rows = rows[:limit]
+        rows = []
     return {"items": rows, "total": len(rows), "batches": batches}
 
 
@@ -2684,7 +2798,8 @@ async def qc_sample_verdict(
         )
 
     update: Dict[str, Any] = {}
-    if item.get("verdict"):
+    is_overwrite = bool(item.get("verdict"))
+    if is_overwrite:
         roles = set(current_user.get("roles") or [])
         if not (roles & {"ADMIN", "SUPERADMIN"}):
             raise HTTPException(
@@ -2715,11 +2830,32 @@ async def qc_sample_verdict(
             "status": "REVIEWED",
         }
     )
+    # CONDITIONAL writes: prod runs multiple uvicorn workers, so the
+    # read-then-check above can race a concurrent verdict. The filter
+    # re-asserts the expected prior state and matched_count==0 means someone
+    # else won the race -> 409, never a silent overwrite.
+    if is_overwrite:
+        # Pin the previously-read reviewed_at so the previous_verdict
+        # snapshot built above is guaranteed consistent with what is being
+        # overwritten (a concurrent verdict changes reviewed_at -> no match).
+        write_filter = {"item_id": item_id, "reviewed_at": item.get("reviewed_at")}
+    else:
+        # First verdict: only lands while NO verdict exists. Items are seeded
+        # without the field; $in [None, ""] matches both missing and null.
+        write_filter = {"item_id": item_id, "verdict": {"$in": [None, ""]}}
     try:
-        qc_coll.update_one({"item_id": item_id}, {"$set": update})
+        result = qc_coll.update_one(write_filter, {"$set": update})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[QC] verdict write failed for %s: %s", item_id, exc)
         raise HTTPException(status_code=500, detail="Failed to save verdict") from exc
+    if getattr(result, "matched_count", 0) == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This item was just verdicted by someone else (verdicts are "
+                "immutable). Refresh the list."
+            ),
+        )
     return qc_coll.find_one({"item_id": item_id}, {"_id": 0})
 
 
@@ -3115,14 +3251,67 @@ async def update_product(
 
         update_data["updated_by"] = current_user.get("user_id")
         # Cataloguer attribution: the editor's display name rides next to the id
-        # (JWT already carries the username -- no users lookup needed). Creation
+        # (JWT already carries the username). ALWAYS written when updated_by is
+        # written -- falling back to the raw id -- so a stale previous editor's
+        # name can never survive next to a new editor's id. Creation
         # attribution is immutable: ProductUpdate has no created_by* fields and
         # the None-strip above cannot introduce them, so created_by /
         # created_by_name are never rewritten here.
-        if current_user.get("username"):
-            update_data["updated_by_name"] = current_user.get("username")
+        update_data["updated_by_name"] = current_user.get("username") or current_user.get(
+            "user_id"
+        )
 
         if repo.update(product_id, update_data):
+            # Compact field-classified audit row (scorecard corrections): the
+            # spine PUT is the primary FE edit door, and without this row an
+            # other-user pricing-only edit would be (over-)counted as an
+            # approximate correction. before/after carry the patch's changed
+            # top-level KEYS with light values only (heavy payloads elided) --
+            # the corrections classifier reads keys, not values. Fail-soft:
+            # an audit hiccup never blocks the product save.
+            try:
+                _changed_keys = [
+                    k
+                    for k in update_data.keys()
+                    if k not in ("updated_by", "updated_by_name")
+                ]
+                if _changed_keys:
+                    from ..dependencies import (
+                        get_audit_repository as _get_audit_repo,
+                    )
+
+                    _audit_repo = _get_audit_repo()
+                    if _audit_repo is not None:
+                        _HEAVY = ("attributes", "images", "description")
+                        _before: Dict[str, Any] = {}
+                        _after: Dict[str, Any] = {}
+                        for _k in _changed_keys:
+                            if _k in _HEAVY:
+                                _before[_k] = "[changed]"
+                                _after[_k] = "[changed]"
+                            else:
+                                _before[_k] = existing.get(_k)
+                                _after[_k] = update_data.get(_k)
+                        _audit_repo.create(
+                            {
+                                "action": "product.updated",
+                                "actor": current_user.get("user_id"),
+                                "user_id": current_user.get("user_id"),
+                                "entity_type": "product",
+                                "entity_id": product_id,
+                                "timestamp": datetime.now(),
+                                "ts": datetime.now().isoformat(),
+                                "source": "spine_put",
+                                "before": _before,
+                                "after": _after,
+                            }
+                        )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[PRODUCTS] update audit row skipped for %s",
+                    product_id,
+                    exc_info=True,
+                )
             # Hub Phase 0: apply the catalog-done restamp as a GUARDED single-doc
             # write -- NOT folded into the blind $set above. Auto-promotes a DRAFT
             # the edit just completed (e.g. cost_price / CL power filled in ->

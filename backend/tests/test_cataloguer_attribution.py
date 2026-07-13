@@ -33,9 +33,13 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+
+from fastapi import HTTPException  # noqa: E402
 
 from api.services import product_master as pm  # noqa: E402
 
@@ -478,12 +482,80 @@ class TestListProductsCreatedByFilter:
 
     def test_list_rows_carry_attribution_fields(self, monkeypatch):
         # list_products returns full docs, so created_by / created_by_name ride
-        # along for the FE without a projection change.
+        # along for MANAGER callers without a projection change.
         repo = FakeListRepo(_list_docs())
         out = _run_list(monkeypatch, repo)
         byid = {p["product_id"]: p for p in out["products"]}
         assert byid["p1"]["created_by_name"] == "asha"
         assert "created_by_name" not in byid["p3"]  # legacy row: absent, not fabricated
+
+
+# ============================================================================
+# 3b. Attribution is a MANAGER surface (panel finding 4)
+# ============================================================================
+
+
+class TestAttributionManagerGate:
+    def _staff(self):
+        return {"user_id": "s-1", "username": "staff", "roles": ["SALES_STAFF"]}
+
+    def test_list_products_strips_attribution_for_staff(self, monkeypatch):
+        repo = FakeListRepo(_list_docs())
+        out = _run_list(monkeypatch, repo, current_user=self._staff())
+        assert len(out["products"]) == 3
+        for p in out["products"]:
+            for f in ("created_by", "created_by_name",
+                      "updated_by", "updated_by_name"):
+                assert f not in p, f"{f} leaked to a non-manager caller"
+
+    def test_list_products_created_by_filter_403_for_staff(self, monkeypatch):
+        repo = FakeListRepo(_list_docs())
+        with pytest.raises(HTTPException) as exc:
+            _run_list(monkeypatch, repo, created_by="u-a",
+                      current_user=self._staff())
+        assert exc.value.status_code == 403
+
+    def test_ledger_attribution_withheld_without_flag(self, monkeypatch):
+        from api.routers import inventory as inv_mod
+
+        monkeypatch.setattr(inv_mod, "_last_grn_by_product", lambda sid: {})
+        product_repo = FakeProductRepo([
+            {"product_id": "p1", "sku": "FR-1", "category": "FRAME",
+             "brand": "Acme", "model": "M1", "mrp": 1000, "offer_price": 900,
+             "is_active": True, "created_by": "u-a", "created_by_name": "asha"},
+        ])
+        items = inv_mod._build_store_ledger(
+            _EmptyStockRepo(), product_repo, "S1", include_attribution=False
+        )
+        assert items and items[0]["created_by"] is None
+        assert items[0]["created_by_name"] is None
+
+    def test_stock_endpoint_403_for_staff_created_by(self, client, staff_headers):
+        resp = client.get(
+            "/api/v1/inventory/stock",
+            params={"store_id": "BV-TEST-01", "created_by": "u-x"},
+            headers=staff_headers,
+        )
+        assert resp.status_code == 403
+
+    def test_products_endpoint_403_for_staff_created_by(self, client, staff_headers):
+        resp = client.get(
+            "/api/v1/products",
+            params={"created_by": "u-x"},
+            headers=staff_headers,
+        )
+        assert resp.status_code == 403
+
+
+class _EmptyStockRepo:
+    """stock_units stand-in with no rows (ledger catalog-union path only)."""
+
+    class _Coll:
+        @staticmethod
+        def aggregate(pipeline):
+            return []
+
+    collection = _Coll()
 
 
 # ============================================================================

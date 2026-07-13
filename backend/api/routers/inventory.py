@@ -363,6 +363,21 @@ async def get_stock(
     product_repo = get_product_repository()
     active_store = validate_store_access(store_id, current_user)
 
+    # Cataloguer attribution is a MANAGER surface (panel finding 4): mirrors
+    # the GET /products/cataloguers gate so the roster + per-user activity
+    # cannot be reconstructed from ledger rows by regular staff. Non-managers
+    # get neither the created_by filter (403, loud) nor the attribution
+    # fields on the returned rows.
+    can_see_attribution = bool(
+        set(current_user.get("roles") or [])
+        & {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"}
+    )
+    if created_by and isinstance(created_by, str) and not can_see_attribution:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the cataloguer filter",
+        )
+
     # Category-filter fix: products store CANONICAL categories (SUNGLASS/FRAME),
     # callers send short codes (SG/FR) or plurals -- normalise fail-open.
     if category:
@@ -395,6 +410,7 @@ async def get_stock(
         active_store,
         category=category,
         created_by=created_by,
+        include_attribution=can_see_attribution,
     )
     return {"items": items, "total": len(items)}
 
@@ -464,6 +480,7 @@ def _build_store_ledger(
     store_id: Optional[str],
     category: Optional[str] = None,
     created_by: Optional[str] = None,
+    include_attribution: bool = True,
 ) -> List[Dict]:
     """Per-product Stock Ledger rows for a store.
 
@@ -574,6 +591,7 @@ def _build_store_ledger(
                 sample,
                 store_id,
                 last_grn=last_grn_map.get(pid),
+                include_attribution=include_attribution,
             )
         )
 
@@ -609,6 +627,7 @@ def _build_store_ledger(
                 sample_unit_by_product.get(pid, {}),
                 store_id,
                 last_grn=last_grn_map.get(pid),
+                include_attribution=include_attribution,
             )
         )
 
@@ -622,6 +641,7 @@ def _ledger_row(
     sample_unit: Dict,
     store_id: Optional[str],
     last_grn: Optional[Dict] = None,
+    include_attribution: bool = True,
 ) -> Dict:
     """Build a single Stock Ledger row from a product master doc.
 
@@ -687,8 +707,12 @@ def _ledger_row(
         # Cataloguer attribution (additive; free -- the ledger already joins
         # the full product doc, so this is a passthrough, never an extra
         # lookup). None on legacy docs created before the stamp existed.
-        "created_by": product.get("created_by"),
-        "created_by_name": product.get("created_by_name"),
+        # MANAGER-ONLY (panel finding 4): withheld for regular staff so the
+        # roster the /products/cataloguers gate protects stays non-derivable.
+        "created_by": product.get("created_by") if include_attribution else None,
+        "created_by_name": (
+            product.get("created_by_name") if include_attribution else None
+        ),
         # Owner 2026-07-05: product images on the Inventory screen. The first
         # image as the row thumbnail + the full array for the click-to-zoom
         # lightbox. Spine docs carry images[] (image_url is a serve-time alias).
