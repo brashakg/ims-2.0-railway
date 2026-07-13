@@ -122,9 +122,9 @@ export function StockAgingReport() {
 
   const getClassificationBadge = (classification: AgingProduct['classification']) => {
     const config = {
-      A: { label: 'Fast Mover', color: 'bg-green-100 text-green-800 border-green-200' },
-      B: { label: 'Medium Mover', color: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
-      C: { label: 'Slow Mover', color: 'bg-red-100 text-red-800 border-red-200' },
+      A: { label: 'Fast Mover', color: 'bg-green-50 text-green-700 border-green-200' },
+      B: { label: 'Medium Mover', color: 'bg-amber-50 text-amber-700 border-amber-200' },
+      C: { label: 'Slow Mover', color: 'bg-red-50 text-red-700 border-red-200' },
     };
 
     return (
@@ -139,8 +139,8 @@ export function StockAgingReport() {
   const getAgeBadge = (days: number) => {
     if (days <= 30) return { color: 'text-green-600', icon: '✓' };
     if (days <= 60) return { color: 'text-blue-600', icon: '○' };
-    if (days <= 90) return { color: 'text-yellow-600', icon: '△' };
-    if (days <= 180) return { color: 'text-orange-600', icon: '▲' };
+    if (days <= 90) return { color: 'text-amber-600', icon: '△' };
+    if (days <= 180) return { color: 'text-amber-600', icon: '▲' };
     return { color: 'text-red-600', icon: '⬤' };
   };
 
@@ -178,7 +178,7 @@ export function StockAgingReport() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-            <Clock className="w-6 h-6 text-orange-600" />
+            <Clock className="w-6 h-6 text-gray-500" />
             Stock Aging Report
           </h2>
           <p className="text-sm text-gray-500 mt-1">
@@ -213,8 +213,8 @@ export function StockAgingReport() {
       <div className="grid grid-cols-1 tablet:grid-cols-6 gap-4">
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-              <Package className="w-5 h-5 text-purple-600" />
+            <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
+              <Package className="w-5 h-5 text-gray-500" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Total Items</p>
@@ -235,12 +235,12 @@ export function StockAgingReport() {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-yellow-600" />
+            <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+              <BarChart3 className="w-5 h-5 text-amber-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Medium (B)</p>
-              <p className="text-2xl font-bold text-yellow-600">{classBCount}</p>
+              <p className="text-2xl font-bold text-amber-600">{classBCount}</p>
             </div>
           </div>
         </div>
@@ -257,23 +257,23 @@ export function StockAgingReport() {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
-              <AlertTriangle className="w-5 h-5 text-orange-600" />
+            <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-amber-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Old Stock (90d+)</p>
-              <p className="text-2xl font-bold text-orange-600">{oldStockCount}</p>
+              <p className="text-2xl font-bold text-amber-600">{oldStockCount}</p>
             </div>
           </div>
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-              <Clock className="w-5 h-5 text-blue-600" />
+            <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
+              <Clock className="w-5 h-5 text-gray-500" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Avg Age</p>
-              <p className="text-2xl font-bold text-blue-600">{Math.round(averageAge)}d</p>
+              <p className="text-2xl font-bold text-gray-900">{Math.round(averageAge)}d</p>
             </div>
           </div>
         </div>
@@ -281,7 +281,7 @@ export function StockAgingReport() {
 
       {/* ABC Analysis Summary */}
       <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
-        <div className="card bg-gradient-to-br from-green-50 to-emerald-50 border-green-200">
+        <div className="card bg-green-50 border-green-200">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-green-900">Class A - Fast Movers</h3>
             <TrendingUp className="w-5 h-5 text-green-600" />
@@ -296,22 +296,22 @@ export function StockAgingReport() {
             </span>
           </div>
         </div>
-        <div className="card bg-gradient-to-br from-yellow-50 to-amber-50 border-yellow-200">
+        <div className="card bg-amber-50 border-amber-200">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-semibold text-yellow-900">Class B - Medium Movers</h3>
-            <BarChart3 className="w-5 h-5 text-yellow-600" />
+            <h3 className="font-semibold text-amber-900">Class B - Medium Movers</h3>
+            <BarChart3 className="w-5 h-5 text-amber-600" />
           </div>
-          <p className="text-sm text-yellow-800 mb-2">
+          <p className="text-sm text-amber-800 mb-2">
             Moderate turnover, regular sales. Monitor closely.
           </p>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-yellow-900">{classBCount}</span>
-            <span className="text-sm text-yellow-700">
+            <span className="text-3xl font-bold text-amber-900">{classBCount}</span>
+            <span className="text-sm text-amber-700">
               ({((classBCount / totalProducts) * 100).toFixed(0)}%)
             </span>
           </div>
         </div>
-        <div className="card bg-gradient-to-br from-red-50 to-rose-50 border-red-200">
+        <div className="card bg-red-50 border-red-200">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-red-900">Class C - Slow Movers</h3>
             <TrendingDown className="w-5 h-5 text-red-600" />
@@ -384,7 +384,7 @@ export function StockAgingReport() {
       {/* Products Table */}
       {isLoading ? (
         <div className="card flex items-center justify-center py-12">
-          <Loader2 className="w-8 h-8 animate-spin text-purple-600" />
+          <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
         </div>
       ) : filteredProducts.length === 0 ? (
         <div className="card text-center py-12 text-gray-500">
@@ -499,11 +499,11 @@ export function StockAgingReport() {
             <span className="text-sm text-gray-700">31-60 days (Good)</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xl text-yellow-600">△</span>
+            <span className="text-xl text-amber-600">△</span>
             <span className="text-sm text-gray-700">61-90 days (Monitor)</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xl text-orange-600">▲</span>
+            <span className="text-xl text-amber-600">▲</span>
             <span className="text-sm text-gray-700">91-180 days (Aging)</span>
           </div>
           <div className="flex items-center gap-2">
