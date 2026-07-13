@@ -82,7 +82,7 @@ interface AuditLogEntry {
 }
 
 const AUDIT_ACTION_STYLES: Record<AuditAction, { bg: string; text: string; label: string }> = {
-  LOGIN:  { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Login' },
+  LOGIN:  { bg: 'bg-gray-100',   text: 'text-gray-700',   label: 'Login' },
   LOGOUT: { bg: 'bg-gray-100',   text: 'text-gray-600',   label: 'Logout' },
   CREATE: { bg: 'bg-green-100',  text: 'text-green-700',  label: 'Create' },
   UPDATE: { bg: 'bg-blue-100',   text: 'text-blue-700',   label: 'Update' },
@@ -1114,21 +1114,21 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">System Status</h2>
         <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className={clsx('p-4 rounded-lg', systemStatus?.database === 'connected' ? 'bg-green-50' : 'bg-yellow-50')}>
+          <div className={clsx('p-4 rounded-lg', systemStatus?.database === 'connected' ? 'bg-green-50' : 'bg-amber-50')}>
             <p className="text-sm text-gray-500">Database</p>
-            <p className={clsx('font-medium', systemStatus?.database === 'connected' ? 'text-green-600' : 'text-yellow-600')}>
+            <p className={clsx('font-medium', systemStatus?.database === 'connected' ? 'text-green-700' : 'text-amber-700')}>
               {systemStatus?.database || 'Checking...'}
             </p>
           </div>
-          <div className={clsx('p-4 rounded-lg', systemStatus?.api === 'healthy' ? 'bg-green-50' : 'bg-yellow-50')}>
+          <div className={clsx('p-4 rounded-lg', systemStatus?.api === 'healthy' ? 'bg-green-50' : 'bg-amber-50')}>
             <p className="text-sm text-gray-500">API Status</p>
-            <p className={clsx('font-medium', systemStatus?.api === 'healthy' ? 'text-green-600' : 'text-yellow-600')}>
+            <p className={clsx('font-medium', systemStatus?.api === 'healthy' ? 'text-green-700' : 'text-amber-700')}>
               {systemStatus?.api || 'Checking...'}
             </p>
           </div>
-          <div className="p-4 bg-blue-50 rounded-lg">
+          <div className="p-4 bg-gray-50 rounded-lg">
             <p className="text-sm text-gray-500">Version</p>
-            <p className="font-medium text-blue-600">{systemStatus?.version || '2.0.0'}</p>
+            <p className="font-medium text-gray-900">{systemStatus?.version || '2.0.0'}</p>
           </div>
         </div>
       </div>

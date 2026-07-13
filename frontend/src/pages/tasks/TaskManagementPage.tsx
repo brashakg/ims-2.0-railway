@@ -584,7 +584,7 @@ export function TaskManagementPage() {
       {/* Content */}
       {isLoading ? (
         <div className="flex items-center justify-center h-96">
-          <Loader2 className="w-8 h-8 animate-spin text-green-600" />
+          <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>
       ) : activeTab === 'sop' ? (
         /* SOPs List */
@@ -595,7 +595,7 @@ export function TaskManagementPage() {
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-2">
                     <h3 className="text-lg font-semibold text-gray-900">{sop.title}</h3>
-                    <span className="px-2 py-1 bg-purple-100 text-purple-700 text-xs rounded">
+                    <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded">
                       {sop.category}
                     </span>
                   </div>
@@ -619,7 +619,7 @@ export function TaskManagementPage() {
                 <div className="space-y-1">
                   {sop.steps.slice(0, 3).map((step) => (
                     <div key={step.id} className="flex items-start gap-2 text-sm">
-                      <span className="text-purple-600 font-medium flex-shrink-0">{step.stepNumber}.</span>
+                      <span className="text-gray-500 font-medium flex-shrink-0">{step.stepNumber}.</span>
                       <span className="text-gray-700">{step.instruction}</span>
                     </div>
                   ))}
@@ -707,8 +707,8 @@ export function TaskManagementPage() {
           <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
             <div className="card">
               <div className="flex items-center gap-3 mb-2">
-                <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-                  <Users className="w-5 h-5 text-green-600" />
+                <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
+                  <Users className="w-5 h-5 text-gray-500" />
                 </div>
                 <div>
                   <p className="text-sm text-gray-600">Active Owners</p>
@@ -718,8 +718,8 @@ export function TaskManagementPage() {
             </div>
             <div className="card">
               <div className="flex items-center gap-3 mb-2">
-                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                  <CheckSquare className="w-5 h-5 text-blue-600" />
+                <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
+                  <CheckSquare className="w-5 h-5 text-gray-500" />
                 </div>
                 <div>
                   <p className="text-sm text-gray-600">Tasks Completed</p>
@@ -731,8 +731,8 @@ export function TaskManagementPage() {
             </div>
             <div className="card">
               <div className="flex items-center gap-3 mb-2">
-                <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-                  <TrendingUp className="w-5 h-5 text-purple-600" />
+                <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
+                  <TrendingUp className="w-5 h-5 text-gray-500" />
                 </div>
                 <div>
                   <p className="text-sm text-gray-600">Completion Rate</p>
@@ -744,7 +744,7 @@ export function TaskManagementPage() {
             </div>
             <div className="card">
               <div className="flex items-center gap-3 mb-2">
-                <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
+                <div className="w-10 h-10 bg-red-50 rounded-lg flex items-center justify-center">
                   <AlertTriangle className="w-5 h-5 text-red-600" />
                 </div>
                 <div>
@@ -790,11 +790,9 @@ export function TaskManagementPage() {
                         <div
                           className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${
                             index === 0
-                              ? 'bg-yellow-100 text-yellow-800'
+                              ? 'bg-amber-100 text-amber-800'
                               : index === 1
                               ? 'bg-gray-200 text-gray-700'
-                              : index === 2
-                              ? 'bg-orange-100 text-orange-700'
                               : 'bg-gray-100 text-gray-600'
                           }`}
                         >

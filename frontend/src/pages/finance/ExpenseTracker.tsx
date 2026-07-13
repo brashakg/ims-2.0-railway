@@ -31,14 +31,16 @@ interface ApiError {
   response?: { status?: number; data?: { detail?: string } };
 }
 
+// Expense categories carry NO status meaning, so they all share one neutral
+// chip (was a decorative rainbow — off the muted house theme).
 const CATEGORIES: { value: string; label: string; color: string }[] = [
-  { value: 'utilities', label: 'Utilities', color: 'bg-blue-100 text-blue-700' },
-  { value: 'rent', label: 'Rent / Lease', color: 'bg-indigo-100 text-indigo-700' },
-  { value: 'maintenance', label: 'Maintenance', color: 'bg-orange-100 text-orange-700' },
-  { value: 'supplies', label: 'Supplies', color: 'bg-green-100 text-green-700' },
-  { value: 'travel', label: 'Travel', color: 'bg-purple-100 text-purple-700' },
-  { value: 'food', label: 'Food & Beverage', color: 'bg-red-100 text-red-700' },
-  { value: 'marketing', label: 'Marketing', color: 'bg-pink-100 text-pink-700' },
+  { value: 'utilities', label: 'Utilities', color: 'bg-gray-100 text-gray-700' },
+  { value: 'rent', label: 'Rent / Lease', color: 'bg-gray-100 text-gray-700' },
+  { value: 'maintenance', label: 'Maintenance', color: 'bg-gray-100 text-gray-700' },
+  { value: 'supplies', label: 'Supplies', color: 'bg-gray-100 text-gray-700' },
+  { value: 'travel', label: 'Travel', color: 'bg-gray-100 text-gray-700' },
+  { value: 'food', label: 'Food & Beverage', color: 'bg-gray-100 text-gray-700' },
+  { value: 'marketing', label: 'Marketing', color: 'bg-gray-100 text-gray-700' },
   { value: 'miscellaneous', label: 'Miscellaneous', color: 'bg-gray-100 text-gray-700' },
   // F17: a petty-cash payout draws down the store float on approval. Neutral
   // badge -- the category carries no status meaning (no colour-flag).
@@ -59,11 +61,11 @@ const PAYMENT_MODES: { value: string; label: string }[] = [
 
 const STATUS_META: Record<string, { label: string; badge: string }> = {
   DRAFT: { label: 'Draft', badge: 'bg-gray-100 text-gray-600' },
-  PENDING: { label: 'Pending', badge: 'bg-yellow-100 text-yellow-700' },
-  APPROVED: { label: 'Approved', badge: 'bg-green-100 text-green-700' },
-  REJECTED: { label: 'Rejected', badge: 'bg-red-100 text-red-700' },
-  SENT_TO_ACCOUNTANT: { label: 'With accountant', badge: 'bg-blue-100 text-blue-700' },
-  ENTERED: { label: 'Entered', badge: 'bg-emerald-100 text-emerald-700' },
+  PENDING: { label: 'Pending', badge: 'bg-amber-50 text-amber-700' },
+  APPROVED: { label: 'Approved', badge: 'bg-green-50 text-green-700' },
+  REJECTED: { label: 'Rejected', badge: 'bg-red-50 text-red-700' },
+  SENT_TO_ACCOUNTANT: { label: 'With accountant', badge: 'bg-blue-50 text-blue-700' },
+  ENTERED: { label: 'Entered', badge: 'bg-green-50 text-green-700' },
 };
 
 const catLabel = (v: string) => CATEGORIES.find((c) => c.value === v)?.label || v;
@@ -360,7 +362,7 @@ export default function ExpenseTracker() {
       {/* Summary cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <Card label="My total" value={fc(totalAmt)} />
-        <Card label="Pending" value={String(pendingCount)} color="text-yellow-600" />
+        <Card label="Pending" value={String(pendingCount)} color="text-amber-600" />
         <Card label="Approved+" value={String(approvedCount)} color="text-green-600" />
         <Card label={isAccountant ? 'For my entry' : 'For approval'} value={String(isAccountant ? toEnter.length : approvals.length)} color="text-blue-600" />
       </div>
@@ -459,7 +461,7 @@ export default function ExpenseTracker() {
           <ExpenseTable rows={toEnter} showOwner
             empty="Nothing awaiting ledger entry"
             renderActions={(e) => (
-              <button className="px-3 py-1 rounded-md bg-emerald-600 text-white text-xs inline-flex items-center gap-1 hover:bg-emerald-700"
+              <button className="px-3 py-1 rounded-md bg-green-600 text-white text-xs inline-flex items-center gap-1 hover:bg-green-700"
                 onClick={() => doAction(() => expensesApi.markEntered(e.expense_id), 'Marked as entered')}>
                 <BookCheck className="w-3.5 h-3.5" /> Mark entered
               </button>
@@ -473,7 +475,7 @@ export default function ExpenseTracker() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {(['0-7', '8-15', '15+'] as const).map((b) => {
               const bk = aging?.buckets?.[b];
-              const tone = b === '15+' ? 'text-red-600' : b === '8-15' ? 'text-orange-600' : 'text-green-600';
+              const tone = b === '15+' ? 'text-red-600' : b === '8-15' ? 'text-amber-600' : 'text-green-600';
               const label = b === '0-7' ? '0-7 days' : b === '8-15' ? '8-15 days' : 'Over 15 days';
               return (
                 <div key={b} className="bg-white border border-gray-200 rounded-lg p-5">
@@ -514,7 +516,7 @@ export default function ExpenseTracker() {
                       <td className="px-4 py-3 text-sm text-gray-700 text-right">{r.days_pending}</td>
                       <td className="px-4 py-3">
                         <span className={clsx('inline-block px-2 py-0.5 rounded-full text-xs font-medium',
-                          r.bucket === '15+' ? 'bg-red-100 text-red-700' : r.bucket === '8-15' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700')}>
+                          r.bucket === '15+' ? 'bg-red-50 text-red-700' : r.bucket === '8-15' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700')}>
                           {r.bucket} days
                         </span>
                       </td>
@@ -532,7 +534,7 @@ export default function ExpenseTracker() {
       {activeTab === 'duplicates' && isApprover && (
         <div className="bg-white rounded-lg border border-gray-200">
           <div className="px-4 py-3 border-b border-gray-200 flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-orange-500" />
+            <AlertTriangle className="w-4 h-4 text-amber-500" />
             <h3 className="text-sm font-semibold text-gray-700">Possible duplicate bills</h3>
             <span className="text-xs text-gray-500">
               Same receipt fingerprint as an earlier expense in this store — scrutinise before approving.
@@ -764,7 +766,7 @@ export default function ExpenseTracker() {
             <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2"><Banknote className="w-5 h-5" /> Totals</h3>
             <div className="space-y-4">
               <Row label="My total expenses" value={fc(totalAmt)} />
-              <Row label="Pending approval" value={String(pendingCount)} color="text-yellow-600" />
+              <Row label="Pending approval" value={String(pendingCount)} color="text-amber-600" />
               <Row label="Approved or beyond" value={String(approvedCount)} color="text-green-600" />
             </div>
           </div>
@@ -945,7 +947,7 @@ export default function ExpenseTracker() {
                 <td className="px-4 py-3 text-sm text-gray-600 max-w-xs">
                   <div className="truncate" title={e.description}>{e.description}</div>
                   {e.duplicate_bill && (
-                    <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700"
+                    <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700"
                       title={e.duplicate_of ? `Matches expense ${e.duplicate_of}` : 'Bill matches an earlier receipt'}>
                       <AlertTriangle className="w-3 h-3" /> Duplicate bill
                     </span>
@@ -983,9 +985,9 @@ function Row({ label, value, color }: { label: string; value: string; color?: st
 
 function VarianceBadge({ status }: { status: 'BALANCED' | 'OVER' | 'SHORT' | string }) {
   const map: Record<string, string> = {
-    BALANCED: 'bg-green-100 text-green-700',
-    OVER: 'bg-amber-100 text-amber-700',
-    SHORT: 'bg-red-100 text-red-700',
+    BALANCED: 'bg-green-50 text-green-700',
+    OVER: 'bg-amber-50 text-amber-700',
+    SHORT: 'bg-red-50 text-red-700',
   };
   return (
     <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', map[status] || 'bg-gray-100 text-gray-700')}>

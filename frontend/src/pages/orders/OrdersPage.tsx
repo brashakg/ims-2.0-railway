@@ -41,19 +41,19 @@ import { SuperadminOrderEditModal } from '../../components/orders/SuperadminOrde
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
   DRAFT: { label: 'Draft', color: 'text-gray-600', bgColor: 'bg-gray-100', icon: FileText },
-  CONFIRMED: { label: 'Confirmed', color: 'text-blue-600', bgColor: 'bg-blue-100', icon: CheckCircle },
-  PROCESSING: { label: 'Processing', color: 'text-yellow-600', bgColor: 'bg-yellow-100', icon: Clock },
-  READY: { label: 'Ready', color: 'text-green-600', bgColor: 'bg-green-100', icon: Package },
-  DELIVERED: { label: 'Delivered', color: 'text-emerald-600', bgColor: 'bg-emerald-100', icon: Truck },
-  CANCELLED: { label: 'Cancelled', color: 'text-red-600', bgColor: 'bg-red-100', icon: XCircle },
+  CONFIRMED: { label: 'Confirmed', color: 'text-blue-700', bgColor: 'bg-blue-50', icon: CheckCircle },
+  PROCESSING: { label: 'Processing', color: 'text-amber-700', bgColor: 'bg-amber-50', icon: Clock },
+  READY: { label: 'Ready', color: 'text-green-700', bgColor: 'bg-green-50', icon: Package },
+  DELIVERED: { label: 'Delivered', color: 'text-green-700', bgColor: 'bg-green-50', icon: Truck },
+  CANCELLED: { label: 'Cancelled', color: 'text-red-700', bgColor: 'bg-red-50', icon: XCircle },
 };
 
 const PAYMENT_STATUS_CONFIG: Record<PaymentStatus, { label: string; color: string; bgColor: string }> = {
-  PENDING: { label: 'Pending', color: 'text-red-600', bgColor: 'bg-red-100' },
-  PARTIAL: { label: 'Partial', color: 'text-yellow-600', bgColor: 'bg-yellow-100' },
-  PAID: { label: 'Paid', color: 'text-green-600', bgColor: 'bg-green-100' },
-  UNPAID: { label: 'Unpaid', color: 'text-red-600', bgColor: 'bg-red-100' },
-  CREDIT: { label: 'On Credit', color: 'text-orange-600', bgColor: 'bg-orange-100' },
+  PENDING: { label: 'Pending', color: 'text-red-700', bgColor: 'bg-red-50' },
+  PARTIAL: { label: 'Partial', color: 'text-amber-700', bgColor: 'bg-amber-50' },
+  PAID: { label: 'Paid', color: 'text-green-700', bgColor: 'bg-green-50' },
+  UNPAID: { label: 'Unpaid', color: 'text-red-700', bgColor: 'bg-red-50' },
+  CREDIT: { label: 'On Credit', color: 'text-amber-700', bgColor: 'bg-amber-50' },
   REFUNDED: { label: 'Refunded', color: 'text-gray-600', bgColor: 'bg-gray-100' },
 };
 

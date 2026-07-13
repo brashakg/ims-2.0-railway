@@ -324,7 +324,7 @@ export function EmployeeSelfService() {
                 </div>
                 <div className="bg-amber-50 rounded-lg p-3 text-center">
                   <p className="text-xs text-gray-500 mb-1">Pending</p>
-                  <p className="text-3xl font-bold text-amber-600">
+                  <p className="text-3xl font-bold text-amber-700">
                     {leaves?.summary.pending_days ?? 0}
                   </p>
                   <p className="text-[11px] text-gray-400 mt-0.5">days</p>
@@ -387,7 +387,8 @@ const TONES: Record<string, { bg: string; text: string }> = {
   green: { bg: 'bg-green-50', text: 'text-green-700' },
   red: { bg: 'bg-red-50', text: 'text-red-700' },
   amber: { bg: 'bg-amber-50', text: 'text-amber-700' },
-  yellow: { bg: 'bg-yellow-50', text: 'text-yellow-700' },
+  // yellow consolidated onto amber to keep the status palette muted + consistent.
+  yellow: { bg: 'bg-amber-50', text: 'text-amber-700' },
   blue: { bg: 'bg-blue-50', text: 'text-blue-700' },
   gray: { bg: 'bg-gray-50', text: 'text-gray-700' },
 };
@@ -409,9 +410,9 @@ function codeClasses(code: string): string {
   switch (code) {
     case 'P': return 'bg-green-50 text-green-700';
     case 'A': return 'bg-red-50 text-red-700';
-    case 'HD': return 'bg-yellow-50 text-yellow-700';
+    case 'HD': return 'bg-amber-50 text-amber-700';
     case 'L': return 'bg-blue-50 text-blue-700';
-    case 'LWP': return 'bg-orange-50 text-orange-700';
+    case 'LWP': return 'bg-amber-50 text-amber-700';
     case 'WO': return 'bg-gray-100 text-gray-500';
     default: return 'bg-gray-50 text-gray-300';
   }
