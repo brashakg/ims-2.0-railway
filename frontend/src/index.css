@@ -3501,3 +3501,90 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   }
   .ims-shimmer::after { display: none; }
 }
+
+/* ============================================================================
+   Visual depth & refinement layer (owner 2026-07: "looks a bit basic — use
+   shadows, text, borders, underlines to make it more appealing").
+   Token-level only: every card/button/table/nav across the app upgrades at
+   once; no page files touched. Appended so the cascade wins cleanly.
+   ============================================================================ */
+
+/* 1 — Richer elevation scale. Keeps the hairline ring the system prefers but
+   adds a soft ambient layer so surfaces separate from the canvas. Overrides
+   the :root tokens; everything already using --sh-* deepens together. */
+:root {
+  --sh-sm:  0 1px 2px rgba(17,17,17,.05), 0 2px 8px -2px rgba(17,17,17,.05), 0 0 0 .5px rgba(17,17,17,.04);
+  --sh-md:  0 2px 6px rgba(17,17,17,.05), 0 8px 24px -6px rgba(17,17,17,.09), 0 0 0 .5px rgba(17,17,17,.04);
+  --sh-lg:  0 4px 12px rgba(17,17,17,.06), 0 18px 44px -10px rgba(17,17,17,.13), 0 0 0 .5px rgba(17,17,17,.05);
+  --sh-card: 0 1px 2px rgba(17,17,17,.04), 0 6px 20px -10px rgba(17,17,17,.08), 0 0 0 .5px rgba(17,17,17,.03);
+}
+
+/* 2 — Cards get quiet presence: softened border + the layered card shadow.
+   (Applies to BOTH the legacy .card bridge and .card-new.) */
+.card, .card-new { border-color: var(--line-soft); box-shadow: var(--sh-card); }
+
+/* 3 — Primary actions read tactile: a faint top highlight + grounded shadow,
+   and a whisper of lift on hover (press "give" comes from the motion layer). */
+.btn-primary, .btn-success, .btn.primary {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 1px 2px rgba(17,17,17,.16);
+}
+.btn-primary:hover, .btn-success:hover, .btn.primary:hover {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 2px 6px rgba(17,17,17,.2);
+}
+.btn-secondary:hover, .btn-outline:hover { border-color: var(--ink-4); }
+
+/* 4 — Inputs: hint interactivity on hover; the ink focus ring stays. */
+.input-field:hover:not(:focus):not(:disabled) { border-color: var(--ink-5); }
+
+/* 5 — Brand underline motif. A short BV-red bar that anchors headings —
+   automatic on the shared card/section headers, and available anywhere as
+   .ims-underline. Deliberately small: an accent, not a banner. */
+.ims-underline { position: relative; padding-bottom: 6px; }
+.ims-underline::after {
+  content: ""; position: absolute; left: 0; bottom: 0;
+  width: 26px; height: 2px; border-radius: 1px;
+  background: var(--bv);
+}
+/* NOTE: deliberately NOT auto-applied to every .card-head h3 -- brand red is
+   a RARE accent (design law); eight cards on a dashboard must not mean eight
+   red dashes. Use .ims-underline on the one heading per view that earns it. */
+
+/* 6 — Top-nav active item: a slim brand underline under the active section
+   (in addition to the existing pill), so "where am I" reads at a glance. */
+.top-nav-direct.active::after,
+.top-nav-trigger.active::after {
+  content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px;
+  height: 2px; border-radius: 1px; background: var(--bv);
+}
+.top-nav-li { position: relative; }
+
+/* 7 — Dropdown panels enter with the modal's scale-in and sit on the deeper
+   shadow tier. */
+.top-nav-dropdown { box-shadow: var(--sh-lg); transform-origin: top left; animation: ims-scale-in .16s cubic-bezier(.2,.9,.3,1.1) both; }
+
+/* 8 — Type refinement: tabular numerals wherever figures line up. */
+.tbl tbody td, .ims-tnum { font-variant-numeric: tabular-nums; }
+
+/* 9 — Text selection carries the brand, quietly. */
+::selection { background: rgba(205,32,26,.14); color: var(--ink); }
+
+/* 10 — Focus visibility for keyboard users: one consistent, branded ring on
+   interactive elements that don't already define their own. */
+:where(button, a, [role="button"], [role="tab"]):focus-visible {
+  outline: 2px solid rgba(205,32,26,.5);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* 11 — Slim neutral scrollbars (WebKit/Chromium — the store machines). */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong); border-radius: 6px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--ink-5); }
+
+/* 12 — Section dividers: hairline with a little air, for long settings-style
+   pages (opt-in utility). */
+.ims-divider { border: 0; border-top: 1px solid var(--line-soft); margin: 20px 0; }
