@@ -956,6 +956,32 @@ class PricingInput(BaseModel):
         return norm
 
 
+class PricingPatchInput(BaseModel):
+    """Diff-only pricing patch for PUT /catalog/products/{id}. The create-path
+    PricingInput REQUIRES mrp and defaults discount_category to 'MASS', so
+    reusing it on the update path made a partial pricing patch impossible
+    (422 on the missing mrp) AND silently stamped MASS onto the merged block
+    -- which flowed through the fail-soft spine mirror into the POS discount
+    caps, widening a LUXURY item's 5% cap to MASS's 15%. Everything is
+    Optional here: the exclude_none merge in the handler keeps only the fields
+    the caller actually sent, and the MRP >= offer rule still runs on the
+    EFFECTIVE post-merge values."""
+
+    mrp: Optional[float] = Field(default=None, gt=0)
+    offer_price: Optional[float] = Field(default=None, gt=0)
+    cost_price: Optional[float] = Field(default=None, gt=0)
+    discount_category: Optional[str] = None
+
+    @field_validator("discount_category")
+    @classmethod
+    def _validate_discount_category(cls, v: Optional[str]) -> Optional[str]:
+        """Same canonical-tier gate as the create path, but only when a value
+        is actually provided (None = leave the stored tier alone)."""
+        if v is None:
+            return None
+        return PricingInput._validate_discount_category(v)
+
+
 class InventoryInput(BaseModel):
     initial_quantity: int = 0
     location_id: Optional[str] = None
@@ -1022,13 +1048,25 @@ class ProductUpdateInput(BaseModel):
     # re-derived from the new category (same helper the migration used).
     category: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None
+    # Full-page review editor extensions (diff-only saves):
+    #   name -- explicit operator name; applied AFTER the attributes block so
+    #     it wins over the best-effort title regen for THAT save (sets both
+    #     name and title; per-save only, no persistent flag).
+    #   tags -- replaces the tag list (each trimmed, empties dropped).
+    #   expected_updated_at -- ADDITIVE optimistic concurrency: when present
+    #     and != the stored updated_at, the save 409s instead of clobbering a
+    #     concurrent reviewer's fixes. Absent = today's last-write-wins (the
+    #     existing drawer sends nothing and keeps working unchanged).
+    name: Optional[str] = None
+    tags: Optional[List[str]] = None
     description: Optional[str] = None
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     weight: Optional[float] = None
-    pricing: Optional[PricingInput] = None
+    pricing: Optional[PricingPatchInput] = None
     images: Optional[List[str]] = None
     is_active: Optional[bool] = None
+    expected_updated_at: Optional[str] = None
 
 
 # ============================================================================
@@ -1690,6 +1728,24 @@ async def update_catalog_product(
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # Additive optimistic concurrency (full-page review editor): the client
+    # echoes the updated_at it loaded; a mismatch means another reviewer saved
+    # in between, so 409 instead of silently clobbering their fixes. Compared
+    # as ISO strings (imported docs may store a datetime -- isoformat it).
+    # Callers that send nothing (the existing drawer) keep last-write-wins.
+    if product.expected_updated_at is not None:
+        stored_ts = existing.get("updated_at")
+        if isinstance(stored_ts, datetime):
+            stored_ts = stored_ts.isoformat()
+        if stored_ts != product.expected_updated_at:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This item was changed by someone else - reload and "
+                    "re-apply your fixes"
+                ),
+            )
+
     # Category change (Catalog Manager review mini-form). Canonicalised via the
     # shared registry resolver; unknown values are rejected loudly. When the
     # patch changes the category and does NOT explicitly send hsn_code/gst_rate,
@@ -1737,6 +1793,27 @@ async def update_catalog_product(
             )
         except (ValueError, KeyError):
             pass
+        # Courtesy mirror: the review-queue brand filter (and the promote
+        # duplicate warnings) read the top-level brand/model, so a fixed
+        # attributes.brand_name / model must be visible there immediately.
+        if merged_attrs.get("brand_name"):
+            existing["brand"] = merged_attrs["brand_name"]
+        if merged_attrs.get("model_no") or merged_attrs.get("model_name"):
+            existing["model"] = merged_attrs.get("model_no") or merged_attrs.get(
+                "model_name"
+            )
+
+    # Explicit operator name wins over the best-effort title regen for THIS
+    # save (hence applied AFTER the attributes block; per-save only -- the
+    # regen above already no-ops for imported long-form categories).
+    if product.name is not None:
+        _name = product.name.strip()
+        if _name:
+            existing["name"] = _name
+            existing["title"] = _name
+
+    if product.tags is not None:
+        existing["tags"] = [t.strip() for t in product.tags if t and t.strip()]
 
     if product.description is not None:
         existing["description"] = product.description
@@ -1784,6 +1861,14 @@ async def update_catalog_product(
         existing["is_active"] = product.is_active
 
     existing["updated_at"] = datetime.now().isoformat()
+    # Per-user attribution (multiple staff catalogue in parallel): WHO made
+    # this edit, for performance tracking and mistake tracing. Same fields
+    # convention as the other routers' created_by_name; created_by is never
+    # overwritten here.
+    existing["updated_by"] = current_user.get("user_id")
+    existing["updated_by_name"] = current_user.get("full_name") or current_user.get(
+        "username"
+    )
 
     _save_catalog_product(existing)
 
