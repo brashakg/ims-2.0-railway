@@ -72,7 +72,8 @@ export interface CatalogProductListParams {
   limit?: number;
 }
 
-// Partial update for PUT /catalog/products/{id} (the review mini-form's save).
+// Partial update for PUT /catalog/products/{id} (the review mini-form's save
+// and the full-page ?review editor's diff-only save).
 export interface UpdateCatalogProductPayload {
   /** Canonicalised server-side; a change re-derives HSN/GST when neither is
    *  explicitly sent alongside. */
@@ -82,6 +83,7 @@ export interface UpdateCatalogProductPayload {
   hsn_code?: string;
   gst_rate?: number;
   weight?: number;
+  /** All-optional PATCH model: send only the pricing keys that changed. */
   pricing?: {
     mrp?: number;
     offer_price?: number;
@@ -90,6 +92,45 @@ export interface UpdateCatalogProductPayload {
   };
   images?: string[];
   is_active?: boolean;
+  /** Display name — the server sets both `name` and `title` from it. */
+  name?: string;
+  /** Governed tags; an explicit empty list clears all tags. */
+  tags?: string[];
+  /** Optimistic concurrency: the doc's `updated_at` as it was loaded. The
+   *  server 409s ("changed by someone else") when the doc moved since. */
+  expected_updated_at?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Status-preserving error for the review editor. The shared axios interceptor
+// flattens every failure into a plain string Error (losing the HTTP status),
+// but the full-page review flow must branch on it: 409 = concurrency /
+// already-approved, 422 = dictionary/validation. update() and promote() below
+// let 4xx client errors through validateStatus and re-throw them as this typed
+// error; the message is the same flattened `detail` string the interceptor
+// would have produced, so existing generic `e instanceof Error` handlers
+// (drawer, bulk approve) behave byte-identically.
+// ---------------------------------------------------------------------------
+export class CatalogRequestError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'CatalogRequestError';
+    this.status = status;
+  }
+}
+
+// Mirror of the interceptor's detail flattening for the validateStatus path.
+function flattenErrorDetail(data: unknown, fallback: string): string {
+  const detail = (data as { detail?: unknown } | null | undefined)?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail
+      .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d)))
+      .join('. ');
+  }
+  const message = (data as { message?: unknown } | null | undefined)?.message;
+  return typeof message === 'string' && message ? message : fallback;
 }
 
 // One review-checklist row from the promote dry-run (a door validation gap).
@@ -136,7 +177,19 @@ export const catalogProductsApi = {
   },
 
   update: async (productId: string, data: UpdateCatalogProductPayload) => {
-    const response = await api.put(`/catalog/products/${productId}`, data);
+    // 400/409/422 pass validateStatus so the HTTP status survives as a typed
+    // CatalogRequestError (409 = optimistic-concurrency conflict, 422 =
+    // dictionary/validation). Other statuses keep the normal interceptor path
+    // (retries, 401 refresh, flattened messages).
+    const response = await api.put(`/catalog/products/${productId}`, data, {
+      validateStatus: (s) => (s >= 200 && s < 300) || s === 400 || s === 409 || s === 422,
+    });
+    if (response.status >= 400) {
+      throw new CatalogRequestError(
+        flattenErrorDetail(response.data, 'Could not save the product.'),
+        response.status
+      );
+    }
     return response.data as { product: CatalogProductDoc; message: string };
   },
 
@@ -152,10 +205,20 @@ export const catalogProductsApi = {
   },
 
   /** Approve for POS: inserts the spine row (same id/sku) and clears
-   *  needs_review. Throws on 409/422/5xx with the server's plain-English
-   *  message (the shared interceptor flattens `detail`). */
+   *  needs_review. Throws a status-carrying CatalogRequestError on 400/409/422
+   *  (same plain-English message as before — the review editor branches on
+   *  the status: "already a billing product" 409 = treat as approved) and the
+   *  interceptor's plain Error on everything else (5xx retries intact). */
   promote: async (productId: string): Promise<PromoteResult> => {
-    const response = await api.post(`/catalog/products/${productId}/promote`);
+    const response = await api.post(`/catalog/products/${productId}/promote`, undefined, {
+      validateStatus: (s) => (s >= 200 && s < 300) || s === 400 || s === 409 || s === 422,
+    });
+    if (response.status >= 400) {
+      throw new CatalogRequestError(
+        flattenErrorDetail(response.data, 'Approval failed.'),
+        response.status
+      );
+    }
     return response.data as PromoteResult;
   },
 };

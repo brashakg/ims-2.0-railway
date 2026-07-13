@@ -53,7 +53,13 @@ import {
   canonicalCategory,
   categoryBrowseLabel,
 } from '../../utils/categoryNormalize';
-import { getCategoryFields, loadCategoryRegistry, type CategoryField } from './productAddShared';
+import {
+  CANONICAL_TO_PICKER,
+  getCategoryFields,
+  loadCategoryRegistry,
+  type CategoryField,
+} from './productAddShared';
+import { writeReviewQueue } from './reviewQueue';
 
 // ---------------------------------------------------------------------------
 // Shared item shape with CatalogManagerPage.
@@ -76,23 +82,11 @@ interface CatalogProductDrawerProps {
   /** An imported doc was APPROVED (spine row created) — parent toasts,
    *  refreshes the queue and auto-advances. */
   onApproved?: (productId: string, sku?: string | null) => void;
+  /** "Edit everything" — open the FULL cataloguing page (?review=<id>). The
+   *  parent stashes the whole grid page as the review queue; without it the
+   *  drawer falls back to a single-item stash. */
+  onEditEverything?: (productId: string) => void;
 }
-
-// Canonical category -> the QuickAdd picker code getCategoryFields keys on.
-const CANONICAL_TO_PICKER: Record<string, string> = {
-  FRAME: 'FR',
-  SUNGLASS: 'SG',
-  CONTACT_LENS: 'CL',
-  COLORED_CONTACT_LENS: 'CCL',
-  OPTICAL_LENS: 'LS',
-  READING_GLASSES: 'RG',
-  WATCH: 'WT',
-  WALL_CLOCK: 'CK',
-  HEARING_AID: 'HA',
-  ACCESSORIES: 'ACC',
-  SMARTGLASSES: 'SMTFR',
-  SMARTWATCH: 'SMTWT',
-};
 
 const str = (v: unknown): string => {
   if (v === null || v === undefined) return '';
@@ -186,6 +180,7 @@ export function CatalogProductDrawer({
   onNext,
   onUpdated,
   onApproved,
+  onEditEverything,
 }: CatalogProductDrawerProps) {
   const navigate = useNavigate();
   const toast = useToast();
@@ -397,6 +392,20 @@ export function CatalogProductDrawer({
       setArchiving(false);
     }
   }, [id, archiving, inactive, onUpdated, toast]);
+
+  // ---- "Edit everything" → the FULL cataloguing page (?review=<id>) --------
+  // The parent (Catalog Manager) stashes the whole grid page as the queue;
+  // standalone use falls back to a single-item stash so Prev/Next degrade
+  // gracefully instead of erroring.
+  const handleEditEverything = useCallback(() => {
+    if (!id) return;
+    if (onEditEverything) {
+      onEditEverything(id);
+      return;
+    }
+    writeReviewQueue({ ids: [id], index: 0 });
+    navigate(`/catalog/add?review=${encodeURIComponent(id)}`);
+  }, [id, onEditEverything, navigate]);
 
   // ---- Keyboard: Esc close, arrows prev/next (not while lightbox/input) ----
   useEffect(() => {
@@ -618,10 +627,22 @@ export function CatalogProductDrawer({
           {/* ------------------------ REVIEW PANEL ------------------------ */}
           {isImported && (
             <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/50 p-4">
-              <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
-                Review for POS
-                {dryLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400" />}
-              </h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                  Review for POS
+                  {dryLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400" />}
+                </h3>
+                {/* THE full-page door: every field editable, not just the
+                    quick-fix set below. */}
+                <button
+                  type="button"
+                  onClick={handleEditEverything}
+                  className="btn-primary !py-1.5 !px-3 text-xs flex items-center gap-1.5 shrink-0"
+                  title="Open the full cataloguing page — every field editable"
+                >
+                  <Pencil className="w-3.5 h-3.5" /> Edit everything
+                </button>
+              </div>
 
               {/* Checklist */}
               <div className="mt-2 space-y-1">

@@ -50,6 +50,7 @@ import {
   docOffer,
   type CatalogDrawerItem,
 } from './CatalogProductDrawer';
+import { writeReviewQueue } from './reviewQueue';
 
 const PAGE_SIZE = 48; // divisible by every column tier (2/3/4/6)
 const BULK_CAP = 200;
@@ -182,10 +183,47 @@ export function CatalogManagerPage() {
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [segment, setSegment] = useState<Segment>('catalog');
+  // Segment + page live in the URL (not useState) so the full-page review
+  // editor's "Back to queue" (/catalog?segment=review&page=N&focus=<id>)
+  // restores the exact grid position. Unknown/absent params fall back to the
+  // previous defaults, so plain /catalog behaves exactly as before.
+  const segment: Segment = searchParams.get('segment') === 'review' ? 'review' : 'catalog';
+  const pageRaw = parseInt(searchParams.get('page') || '1', 10);
+  const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+
+  const setSegment = useCallback(
+    (next: Segment) => {
+      setSearchParams(
+        (prev) => {
+          const sp = new URLSearchParams(prev);
+          if (next === 'review') sp.set('segment', 'review');
+          else sp.delete('segment');
+          sp.delete('page'); // a segment switch always starts at page 1
+          return sp;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
+  const setPage = useCallback(
+    (next: number) => {
+      setSearchParams(
+        (prev) => {
+          const sp = new URLSearchParams(prev);
+          if (next > 1) sp.set('page', String(next));
+          else sp.delete('page');
+          return sp;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
   const [items, setItems] = useState<CatalogDrawerItem[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -299,12 +337,65 @@ export function CatalogManagerPage() {
     };
   }, [category]);
 
-  // Reset page + selection when the view meaningfully changes.
+  // Reset page + selection when the view meaningfully changes. Skipped on the
+  // FIRST run so a deep-linked ?segment=review&page=N isn't clobbered back to
+  // page 1 on mount (page now lives in the URL).
+  const viewResetReady = useRef(false);
   useEffect(() => {
+    if (!viewResetReady.current) {
+      viewResetReady.current = true;
+      return;
+    }
     setPage(1);
     setSelected(new Set());
     setDrawerIdx(null);
-  }, [segment, debouncedSearch, category, brand, includeInactive]);
+  }, [segment, debouncedSearch, category, brand, includeInactive, setPage]);
+
+  // Keep the review-queue stash current: whenever the review segment shows a
+  // page of imported docs, that page (+ filters + grid position) IS the
+  // reviewer's working queue — the full-page editor reads it for "Item N of M"
+  // and Prev/Next. The drawer's "Edit everything" pins the index just before
+  // navigating.
+  useEffect(() => {
+    if (segment !== 'review' || loading) return;
+    const ids = items.filter((it) => it.kind === 'imported').map((it) => docId(it.doc));
+    if (ids.length === 0) return;
+    writeReviewQueue({
+      ids,
+      index: 0,
+      offset: (page - 1) * PAGE_SIZE,
+      total,
+      filters: {
+        search: debouncedSearch || undefined,
+        category: category || undefined,
+        brand: brand || undefined,
+        page,
+      },
+    });
+  }, [segment, loading, items, page, total, debouncedSearch, category, brand]);
+
+  // "Edit everything" (drawer) → full cataloguing page with the queue stashed
+  // at this item's position.
+  const handleEditEverything = useCallback(
+    (id: string) => {
+      const ids = items.filter((it) => it.kind === 'imported').map((it) => docId(it.doc));
+      const at = ids.indexOf(id);
+      writeReviewQueue({
+        ids: at >= 0 ? ids : [id],
+        index: Math.max(0, at),
+        offset: at >= 0 ? (page - 1) * PAGE_SIZE : 0,
+        total: at >= 0 ? total : undefined,
+        filters: {
+          search: debouncedSearch || undefined,
+          category: category || undefined,
+          brand: brand || undefined,
+          page,
+        },
+      });
+      navigate(`/catalog/add?review=${encodeURIComponent(id)}`);
+    },
+    [items, page, total, debouncedSearch, category, brand, navigate]
+  );
 
   // ---- ?focus=<id> read-once deep link (drawer reopen after QuickAdd edit) --
   const focusHandled = useRef(false);
@@ -702,6 +793,7 @@ export function CatalogManagerPage() {
           onNext={drawerNext}
           onUpdated={handleDrawerUpdated}
           onApproved={handleApproved}
+          onEditEverything={handleEditEverything}
         />
       )}
 
