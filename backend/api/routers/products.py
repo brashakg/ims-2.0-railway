@@ -9,8 +9,9 @@ from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+import random
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_product_repository
@@ -2070,25 +2071,7 @@ async def list_cataloguers(
     # only the user_id. Resolve those names in ONE batched users query
     # (fail-soft: unknown ids just render as the raw id).
     missing = [r["_id"] for r in rows if r.get("_id") and not r.get("name")]
-    resolved: Dict[str, str] = {}
-    if missing:
-        try:
-            from ..dependencies import get_db as _get_db_dep
-
-            _db = _get_db_dep()
-            if _db is not None:
-                users = _db.get_collection("users")
-                if users is not None:
-                    for u in users.find(
-                        {"user_id": {"$in": missing}},
-                        {"_id": 0, "user_id": 1, "username": 1, "full_name": 1},
-                    ):
-                        uid = u.get("user_id")
-                        nm = u.get("username") or u.get("full_name")
-                        if uid and nm:
-                            resolved[uid] = nm
-        except Exception:  # noqa: BLE001 - name enrichment is best-effort
-            resolved = {}
+    resolved = _resolve_user_names(missing)
 
     cataloguers = []
     for r in rows:
@@ -2107,6 +2090,637 @@ async def list_cataloguers(
             }
         )
     return {"cataloguers": cataloguers}
+
+
+# ============================================================================
+# CATALOGUING SCORECARD + QC SAMPLING (attribution phase 2)
+# ============================================================================
+# Owner requirement: per-user cataloguing performance (volume, approvals,
+# corrections received, QC error rate) + a random-sample QC review workflow.
+# Manager-ladder gated (same posture as /products/cataloguers).
+
+# Creator ids that are never a human cataloguer.
+_NON_CATALOGUER_IDS = (None, "", "system", "SYSTEM")
+
+# Patch keys that count as CATALOGUING fields when classifying a correction
+# from a `product.updated` audit row's before/after. Pricing (mrp/offer_price/
+# cost_price/discount_category), stock and is_active changes NEVER count.
+# Any `attributes.*` dotted key also counts (checked by prefix).
+_CATALOGUING_AUDIT_KEYS = frozenset(
+    {
+        "category",
+        "brand",
+        "model",
+        "name",
+        "title",
+        "description",
+        "images",
+        "hsn_code",
+        "gst_rate",
+        "attributes",
+    }
+)
+
+# QC verdict error-field vocabulary (mirrored by the FE checkboxes).
+_QC_ERROR_FIELDS = (
+    "category",
+    "brand_model",
+    "attributes",
+    "pricing",
+    "hsn_gst",
+    "images",
+    "description",
+    "name",
+)
+
+
+def _resolve_user_names(user_ids: List[str]) -> Dict[str, str]:
+    """Batched user_id -> display-name lookup on the users collection.
+    Fail-soft: no db / unknown ids simply resolve to nothing (callers fall
+    back to the raw id)."""
+    resolved: Dict[str, str] = {}
+    ids = [u for u in (user_ids or []) if u]
+    if not ids:
+        return resolved
+    try:
+        from ..dependencies import get_db as _get_db_dep
+
+        _db = _get_db_dep()
+        if _db is not None:
+            users = _db.get_collection("users")
+            if users is not None:
+                for u in users.find(
+                    {"user_id": {"$in": ids}},
+                    {"_id": 0, "user_id": 1, "username": 1, "full_name": 1},
+                ):
+                    uid = u.get("user_id")
+                    nm = u.get("username") or u.get("full_name")
+                    if uid and nm:
+                        resolved[uid] = nm
+    except Exception:  # noqa: BLE001 - name enrichment is best-effort
+        return {}
+    return resolved
+
+
+def _as_dt(value) -> Optional[datetime]:
+    """Coerce a stored timestamp (datetime or ISO string) to a NAIVE datetime
+    for windowing comparisons. None when unparseable. Mixed tz sources (audit
+    domain rows are local now(), the activity middleware stamps utcnow()) skew
+    by a few hours at most, which is immaterial for day-granularity windows."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _scorecard_db():
+    """The shared db connection, or None (fail-soft) when unavailable."""
+    try:
+        from ..dependencies import get_db as _get_db_dep
+
+        db = _get_db_dep()
+    except Exception:  # noqa: BLE001
+        return None
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    return db
+
+
+@router.get("/cataloguing-scorecard")
+async def cataloguing_scorecard(
+    days: int = Query(30, ge=1, le=365, description="Rolling window in days"),
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Per-user cataloguing performance over a rolling window (default 30d).
+
+    One row per user who created products (or approved promotions) in the
+    window: created_count + per-day rate + created_today, approvals (catalog
+    promotes), corrections_received, category_coverage, and QC stats from the
+    qc_samples verdicts.
+
+    CORRECTIONS METRIC - what it can and cannot see
+    -----------------------------------------------
+    corrections_received counts DISTINCT products this user created in the
+    window that a DIFFERENT user edited within 30 days of creation. Two
+    signal sources, best available first:
+
+      1. CLASSIFIED (corrections_classified): `product.updated` rows in the
+         hash-chained audit_logs (written ONLY by the product_master engine
+         door, PUT /products/master/{id}) carry before/after patch keys, so
+         these are field-classified: they count ONLY when a cataloguing field
+         changed (category/brand/model/name/title/description/images/
+         attributes[.*]/hsn_code/gst_rate). Pricing (mrp/offer_price/
+         cost_price/discount_category), stock and is_active changes NEVER
+         count here.
+      2. APPROXIMATE (corrections_approximate): the main FE edit doors --
+         PUT /products/{id} (spine) and PUT /catalog/products/{id} (PIM) --
+         write NO field-level before/after history; only the request-level
+         activity middleware row (action=UPDATE, path, user_id, timestamp)
+         exists. For those, an other-user edit within 30 days of creation is
+         counted WITHOUT field classification, so a pricing-only edit through
+         those doors IS (over-)counted. This is the documented approximation;
+         it disappears for any edit path that starts writing before/after
+         audit rows.
+
+    A product flagged by source 1 is excluded from source 2 (no double count).
+    corrections_received = classified + approximate (distinct products).
+    """
+    now = datetime.now()
+    cutoff = now - timedelta(days=days)
+    db = _scorecard_db()
+    if db is None:
+        return {"days": days, "generated_at": now.isoformat(), "rows": []}
+
+    per_user: Dict[str, Dict[str, Any]] = {}
+
+    def _row(uid: str) -> Dict[str, Any]:
+        return per_user.setdefault(
+            uid,
+            {
+                "user_id": uid,
+                "name": None,
+                "created_count": 0,
+                "created_today": 0,
+                "per_day_rate": 0.0,
+                "approvals": 0,
+                "corrections_received": 0,
+                "corrections_classified": 0,
+                "corrections_approximate": 0,
+                "category_coverage": {},
+                "qc": {"sampled": 0, "errors": 0, "error_rate": 0.0},
+            },
+        )
+
+    # ---- 1. Creations in window (spine products) --------------------------
+    creators: Dict[str, tuple] = {}  # product_id -> (creator_id, created_at)
+    today_start = datetime(now.year, now.month, now.day)
+    try:
+        prods = list(
+            db.get_collection("products").find(
+                {
+                    "created_at": {"$gte": cutoff},
+                    "created_by": {"$nin": list(_NON_CATALOGUER_IDS)},
+                },
+                {
+                    "_id": 0,
+                    "product_id": 1,
+                    "created_by": 1,
+                    "created_by_name": 1,
+                    "category": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 - scorecard must never 500
+        prods = []
+    for p in prods:
+        uid = p.get("created_by")
+        if not uid:
+            continue
+        row = _row(uid)
+        row["created_count"] += 1
+        if not row["name"] and p.get("created_by_name"):
+            row["name"] = p.get("created_by_name")
+        cat = p.get("category") or "UNKNOWN"
+        row["category_coverage"][cat] = row["category_coverage"].get(cat, 0) + 1
+        created_at = _as_dt(p.get("created_at"))
+        if created_at is not None and created_at >= today_start:
+            row["created_today"] += 1
+        pid = p.get("product_id")
+        if pid:
+            creators[pid] = (uid, created_at)
+
+    # ---- 2. Approvals (catalog_products promote stamps; promoted_at is an
+    # ISO string, so the window bound is a string compare -- same format). ----
+    try:
+        promos = db.get_collection("catalog_products").find(
+            {"promoted_at": {"$gte": cutoff.isoformat()}},
+            {"_id": 0, "promoted_by": 1},
+        )
+        for c in promos:
+            uid = c.get("promoted_by")
+            if uid and uid not in _NON_CATALOGUER_IDS:
+                _row(uid)["approvals"] += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ---- 3. Corrections (see docstring for the two-source design) ---------
+    corrected_classified: set = set()
+    corrected_approx: set = set()
+    pids = list(creators.keys())
+    if pids:
+        try:
+            audit = db.get_collection("audit_logs")
+            for i in range(0, len(pids), 500):
+                chunk = pids[i : i + 500]
+                audit_rows = audit.find(
+                    {
+                        "entity_id": {"$in": chunk},
+                        "action": {"$in": ["product.updated", "UPDATE"]},
+                    },
+                    {
+                        "_id": 0,
+                        "entity_id": 1,
+                        "action": 1,
+                        "actor": 1,
+                        "user_id": 1,
+                        "timestamp": 1,
+                        "ts": 1,
+                        "before": 1,
+                        "after": 1,
+                        "path": 1,
+                        "method": 1,
+                    },
+                )
+                for r in audit_rows:
+                    pid = r.get("entity_id")
+                    info = creators.get(pid)
+                    if not info:
+                        continue
+                    creator_id, created_at = info
+                    actor = r.get("actor") or r.get("user_id")
+                    if not actor or actor == creator_id:
+                        continue  # self-edits are never corrections
+                    edited_at = _as_dt(r.get("timestamp")) or _as_dt(r.get("ts"))
+                    if edited_at is None or created_at is None:
+                        continue
+                    # Recency rule: only edits within 30 days of creation count.
+                    if edited_at < created_at or edited_at > created_at + timedelta(
+                        days=30
+                    ):
+                        continue
+                    if r.get("action") == "product.updated":
+                        keys = set((r.get("before") or {}).keys()) | set(
+                            (r.get("after") or {}).keys()
+                        )
+                        if any(
+                            k in _CATALOGUING_AUDIT_KEYS
+                            or str(k).startswith("attributes.")
+                            for k in keys
+                        ):
+                            corrected_classified.add(pid)
+                    else:
+                        # Baseline middleware row (no field detail): count only
+                        # the exact spine / catalog PUT edit paths. Engine-door
+                        # edits (/products/master/{id}) are deliberately NOT
+                        # counted here -- their domain rows above classify them.
+                        if str(r.get("method") or "") not in ("PUT", "PATCH"):
+                            continue
+                        path = str(r.get("path") or "")
+                        if path in (
+                            f"/api/v1/products/{pid}",
+                            f"/api/v1/catalog/products/{pid}",
+                        ):
+                            corrected_approx.add(pid)
+        except Exception:  # noqa: BLE001
+            pass
+    corrected_approx -= corrected_classified
+    for pid in corrected_classified:
+        _row(creators[pid][0])["corrections_classified"] += 1
+    for pid in corrected_approx:
+        _row(creators[pid][0])["corrections_approximate"] += 1
+    for row in per_user.values():
+        row["corrections_received"] = (
+            row["corrections_classified"] + row["corrections_approximate"]
+        )
+
+    # ---- 4. QC stats (verdicts on samples drawn in the window) ------------
+    try:
+        samples = db.get_collection("qc_samples").find(
+            {"sampled_at": {"$gte": cutoff}},
+            {"_id": 0, "cataloguer_id": 1, "cataloguer_name": 1, "verdict": 1},
+        )
+        for s in samples:
+            uid = s.get("cataloguer_id")
+            if not uid or uid in _NON_CATALOGUER_IDS:
+                continue
+            if not s.get("verdict"):
+                continue  # pending items don't count until reviewed
+            row = _row(uid)
+            if not row["name"] and s.get("cataloguer_name"):
+                row["name"] = s.get("cataloguer_name")
+            row["qc"]["sampled"] += 1
+            if s.get("verdict") == "ERROR":
+                row["qc"]["errors"] += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ---- 5. Finalise rows --------------------------------------------------
+    missing_names = [u for u, r in per_user.items() if not r["name"]]
+    resolved = _resolve_user_names(missing_names)
+    rows = []
+    for uid, row in per_user.items():
+        row["name"] = row["name"] or resolved.get(uid) or uid
+        row["per_day_rate"] = round(row["created_count"] / float(days), 2)
+        qc = row["qc"]
+        qc["error_rate"] = (
+            round(qc["errors"] * 100.0 / qc["sampled"], 1) if qc["sampled"] else 0.0
+        )
+        rows.append(row)
+    rows.sort(key=lambda r: (-r["created_count"], r["user_id"]))
+    return {"days": days, "generated_at": now.isoformat(), "rows": rows}
+
+
+class QcGenerateRequest(BaseModel):
+    """POST /products/qc-samples/generate body."""
+
+    days: int = Field(default=7, ge=1, le=90)
+    per_user: int = Field(default=10, ge=1, le=50)
+
+
+class QcVerdictRequest(BaseModel):
+    """POST /products/qc-samples/{item_id}/verdict body."""
+
+    verdict: str
+    error_fields: Optional[List[str]] = None
+    note: Optional[str] = None
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _validate_verdict(cls, v):
+        normed = str(v or "").strip().upper()
+        if normed not in ("OK", "ERROR"):
+            raise ValueError("verdict must be OK or ERROR")
+        return normed
+
+    @field_validator("error_fields")
+    @classmethod
+    def _validate_error_fields(cls, v):
+        if v is None:
+            return None
+        bad = [f for f in v if f not in _QC_ERROR_FIELDS]
+        if bad:
+            raise ValueError(
+                f"Invalid error_fields {bad}. Allowed: {list(_QC_ERROR_FIELDS)}"
+            )
+        return v
+
+
+@router.post("/qc-samples/generate", status_code=201)
+async def generate_qc_samples(
+    body: QcGenerateRequest,
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Draw a random QC sample batch: up to `per_user` random products per
+    distinct cataloguer with creations in the last `days` days.
+
+    Products already sitting in an OPEN (PENDING) sample for that cataloguer
+    are excluded, so re-generating never re-queues an unreviewed item. One
+    qc_samples doc per sampled item, sharing a batch_id. Random pick is
+    server-side random.sample over the eligible pool."""
+    db = _scorecard_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    now = datetime.now()
+    cutoff = now - timedelta(days=body.days)
+    try:
+        pool_docs = list(
+            db.get_collection("products").find(
+                {
+                    "created_at": {"$gte": cutoff},
+                    "created_by": {"$nin": list(_NON_CATALOGUER_IDS)},
+                },
+                {
+                    "_id": 0,
+                    "product_id": 1,
+                    "created_by": 1,
+                    "created_by_name": 1,
+                    "category": 1,
+                    "brand": 1,
+                    "model": 1,
+                    "name": 1,
+                    "sku": 1,
+                    "images": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pool_docs = []
+
+    pools: Dict[str, List[Dict]] = {}
+    for p in pool_docs:
+        uid = p.get("created_by")
+        pid = p.get("product_id")
+        if uid and pid:
+            pools.setdefault(uid, []).append(p)
+
+    # Items already awaiting review: never re-sample the same product for the
+    # same cataloguer while an OPEN (PENDING) item exists.
+    qc_coll = db.get_collection("qc_samples")
+    try:
+        already = {
+            (r.get("cataloguer_id"), r.get("product_id"))
+            for r in qc_coll.find(
+                {"status": "PENDING"},
+                {"_id": 0, "cataloguer_id": 1, "product_id": 1},
+            )
+        }
+    except Exception:  # noqa: BLE001
+        already = set()
+
+    names = _resolve_user_names(
+        [u for u, docs in pools.items() if not any(d.get("created_by_name") for d in docs)]
+    )
+
+    batch_id = str(uuid.uuid4())
+    items: List[Dict[str, Any]] = []
+    summary: List[Dict[str, Any]] = []
+    for uid in sorted(pools.keys()):
+        pool = pools[uid]
+        eligible = [p for p in pool if (uid, p.get("product_id")) not in already]
+        if not eligible:
+            continue
+        picked = random.sample(eligible, min(body.per_user, len(eligible)))
+        cataloguer_name = (
+            next((p.get("created_by_name") for p in pool if p.get("created_by_name")), None)
+            or names.get(uid)
+            or uid
+        )
+        for p in picked:
+            brand = p.get("brand") or ""
+            model = p.get("model") or ""
+            pname = (
+                p.get("name") or f"{brand} {model}".strip() or p.get("sku") or ""
+            )
+            imgs = p.get("images")
+            image_url = (
+                imgs[0]
+                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str)
+                else None
+            )
+            items.append(
+                {
+                    "item_id": str(uuid.uuid4()),
+                    "batch_id": batch_id,
+                    "product_id": p.get("product_id"),
+                    "product_name": pname,
+                    "sku": p.get("sku"),
+                    "category": p.get("category"),
+                    "image_url": image_url,
+                    "cataloguer_id": uid,
+                    "cataloguer_name": cataloguer_name,
+                    "product_created_at": p.get("created_at"),
+                    "status": "PENDING",
+                    "sampled_at": now,
+                    "sampled_by": current_user.get("user_id"),
+                    "sampled_by_name": current_user.get("username"),
+                    "window_days": body.days,
+                    "per_user_cap": body.per_user,
+                }
+            )
+        summary.append(
+            {"user_id": uid, "name": cataloguer_name, "sampled": len(picked)}
+        )
+
+    if items:
+        try:
+            # Copy each doc: insert_many mutates its args (adds _id), and the
+            # response below must stay JSON-clean.
+            qc_coll.insert_many([dict(i) for i in items])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[QC] sample batch insert failed: %s", exc)
+            raise HTTPException(
+                status_code=500, detail="Failed to store the QC sample batch"
+            ) from exc
+
+    return {
+        "batch_id": batch_id,
+        "days": body.days,
+        "per_user": body.per_user,
+        "total_items": len(items),
+        "cataloguers": summary,
+    }
+
+
+@router.get("/qc-samples")
+async def list_qc_samples(
+    status: Optional[str] = Query(None, pattern="^(PENDING|REVIEWED)$"),
+    batch_id: Optional[str] = Query(None),
+    cataloguer: Optional[str] = Query(None, description="Filter by cataloguer user_id"),
+    limit: int = Query(500, ge=1, le=2000),
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """List QC sample items, newest batch first, plus per-batch progress
+    summaries (total vs reviewed -- the batch progress is computed over the
+    batch_id/cataloguer scope BEFORE the status filter narrows the items)."""
+    db = _scorecard_db()
+    if db is None:
+        return {"items": [], "total": 0, "batches": []}
+
+    flt: Dict[str, Any] = {}
+    if batch_id:
+        flt["batch_id"] = batch_id
+    if cataloguer:
+        flt["cataloguer_id"] = cataloguer
+    try:
+        base_rows = list(
+            db.get_collection("qc_samples").find(flt, {"_id": 0})
+        )
+    except Exception:  # noqa: BLE001
+        base_rows = []
+
+    # Per-batch progress over the pre-status scope.
+    batch_map: Dict[str, Dict[str, Any]] = {}
+    for r in base_rows:
+        b = batch_map.setdefault(
+            r.get("batch_id") or "",
+            {"batch_id": r.get("batch_id") or "", "total": 0, "reviewed": 0,
+             "sampled_at": None},
+        )
+        b["total"] += 1
+        if r.get("status") == "REVIEWED":
+            b["reviewed"] += 1
+        s_at = _as_dt(r.get("sampled_at"))
+        if s_at is not None and (b["sampled_at"] is None or s_at > b["sampled_at"]):
+            b["sampled_at"] = s_at
+    batches = sorted(
+        batch_map.values(),
+        key=lambda b: b["sampled_at"] or datetime.min,
+        reverse=True,
+    )[:20]
+
+    rows = [r for r in base_rows if not status or r.get("status") == status]
+    rows.sort(key=lambda r: _as_dt(r.get("sampled_at")) or datetime.min, reverse=True)
+    rows = rows[:limit]
+    return {"items": rows, "total": len(rows), "batches": batches}
+
+
+@router.post("/qc-samples/{item_id}/verdict")
+async def qc_sample_verdict(
+    item_id: str,
+    body: QcVerdictRequest,
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Record a QC verdict (OK / ERROR + error_fields + note) on a sample item.
+
+    HARD RULES:
+      * NO SELF-QC: the item's cataloguer may never verdict their own item
+        (403), regardless of role -- another manager must review it.
+      * IMMUTABLE: a set verdict returns 409 on re-verdict. Only ADMIN /
+        SUPERADMIN may overwrite, and the overwrite stamps overwritten_by
+        (+ keeps the previous verdict in previous_verdict)."""
+    db = _scorecard_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    qc_coll = db.get_collection("qc_samples")
+    item = qc_coll.find_one({"item_id": item_id}, {"_id": 0})
+    if item is None:
+        raise HTTPException(status_code=404, detail="QC sample item not found")
+
+    if item.get("cataloguer_id") == current_user.get("user_id"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "You catalogued this product -- another manager must review it "
+                "(no self-QC)."
+            ),
+        )
+
+    update: Dict[str, Any] = {}
+    if item.get("verdict"):
+        roles = set(current_user.get("roles") or [])
+        if not (roles & {"ADMIN", "SUPERADMIN"}):
+            raise HTTPException(
+                status_code=409,
+                detail="This item already has a verdict (verdicts are immutable).",
+            )
+        update["previous_verdict"] = {
+            "verdict": item.get("verdict"),
+            "error_fields": item.get("error_fields"),
+            "note": item.get("note"),
+            "reviewed_by": item.get("reviewed_by"),
+            "reviewed_by_name": item.get("reviewed_by_name"),
+            "reviewed_at": item.get("reviewed_at"),
+        }
+        update["overwritten_by"] = current_user.get("user_id")
+        update["overwritten_by_name"] = current_user.get("username")
+        update["overwritten_at"] = datetime.now()
+
+    update.update(
+        {
+            "verdict": body.verdict,
+            # error_fields only mean something on an ERROR verdict.
+            "error_fields": (body.error_fields or []) if body.verdict == "ERROR" else [],
+            "note": body.note,
+            "reviewed_by": current_user.get("user_id"),
+            "reviewed_by_name": current_user.get("username"),
+            "reviewed_at": datetime.now(),
+            "status": "REVIEWED",
+        }
+    )
+    try:
+        qc_coll.update_one({"item_id": item_id}, {"$set": update})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[QC] verdict write failed for %s: %s", item_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to save verdict") from exc
+    return qc_coll.find_one({"item_id": item_id}, {"_id": 0})
 
 
 # ============================================================================
