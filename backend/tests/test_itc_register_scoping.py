@@ -59,10 +59,22 @@ SUPER = {"user_id": "u1", "roles": ["SUPERADMIN"]}
 
 
 def _run(db, entity_id=None, period=None):
+    """Call the endpoint with a fake db, RESTORING finance._get_db afterwards.
+
+    A bare `finance._get_db = ...` assignment leaks the fake into every later
+    test in the same process (broke test_period_lock's expense-create in CI:
+    the fake _Coll has no insert_one). Save/restore in a finally so this file
+    can never pollute another."""
     import api.routers.finance as finance
 
+    original = finance._get_db
     finance._get_db = lambda: db  # type: ignore[attr-defined]
-    return asyncio.run(finance.itc_register(period=period, entity_id=entity_id, current_user=SUPER))
+    try:
+        return asyncio.run(
+            finance.itc_register(period=period, entity_id=entity_id, current_user=SUPER)
+        )
+    finally:
+        finance._get_db = original  # type: ignore[attr-defined]
 
 
 def test_ineligible_bills_excluded():
