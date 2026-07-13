@@ -88,6 +88,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // Catalog Manager: the browse/review landing at /catalog ("+ Add product"
       // inside it links on to /catalog/add — no second sidebar entry).
       { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      // Cataloguing Scorecard + QC review (attribution phase 2). requireRoles
+      // mirrors the /catalog/scorecard ProtectedRoute gate + backend rbac rows.
+      { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
       // Catalog Autopilot is now merged INLINE into the Add Product screen (the
       // "Auto-fill from web" panel), so its standalone nav item was removed. The
       // /catalog/autopilot route still resolves (it redirects to /catalog/add)

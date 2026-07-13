@@ -175,6 +175,40 @@ export interface CataloguersResponse {
   cataloguers: Cataloguer[];
 }
 
+// ---------------------------------------------------------------------------
+// Cataloguing scorecard (GET /products/cataloguing-scorecard) — attribution
+// phase 2. One row per user with creations (or promote approvals) in the
+// rolling window. corrections_received = corrections_classified (field-level
+// audit rows; pricing never counts) + corrections_approximate (edit doors
+// with no field history — documented server-side). Manager-ladder gated.
+// ---------------------------------------------------------------------------
+export interface ScorecardQcStats {
+  sampled: number;
+  errors: number;
+  /** 0..100 percentage over reviewed samples; 0 when none reviewed. */
+  error_rate: number;
+}
+
+export interface ScorecardRow {
+  user_id: string;
+  name: string;
+  created_count: number;
+  created_today: number;
+  per_day_rate: number;
+  approvals: number;
+  corrections_received: number;
+  corrections_classified: number;
+  corrections_approximate: number;
+  category_coverage: Record<string, number>;
+  qc: ScorecardQcStats;
+}
+
+export interface ScorecardResponse {
+  days: number;
+  generated_at: string;
+  rows: ScorecardRow[];
+}
+
 // Partial update payload for `PUT /products/{id}`. Mirrors the backend
 // `ProductUpdate` schema (snake_case). Every field is optional; the backend
 // merges only what is sent and re-runs the category + MRP>=offer validators.
@@ -295,6 +329,15 @@ export const productApi = {
   getCataloguers: async (): Promise<CataloguersResponse> => {
     const response = await api.get('/products/cataloguers');
     return response.data as CataloguersResponse;
+  },
+
+  // Cataloguing performance scorecard (attribution phase 2). Manager-ladder
+  // gated. Import DIRECTLY from this module (not the api barrel) -- TS2614.
+  getCataloguingScorecard: async (days: number = 30): Promise<ScorecardResponse> => {
+    const response = await api.get('/products/cataloguing-scorecard', {
+      params: { days },
+    });
+    return response.data as ScorecardResponse;
   },
 
   getProduct: async (productId: string) => {
