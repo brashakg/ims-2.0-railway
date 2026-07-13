@@ -147,8 +147,8 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-orange-100 rounded-lg">
-              <TrendingDown className="w-6 h-6 text-orange-600" />
+            <div className="p-2 bg-gray-100 rounded-lg">
+              <TrendingDown className="w-6 h-6 text-gray-500" />
             </div>
             <div>
               <h2 className="text-xl font-bold text-gray-900">Configure Reorder Point</h2>
@@ -182,12 +182,12 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                 <div className="flex items-center gap-2">
                   <p className="font-medium text-gray-900">{product.currentStock} units</p>
                   {stockStatus === 'critical' && (
-                    <span className="px-2 py-1 bg-red-100 text-red-800 text-xs font-medium rounded-full">
+                    <span className="px-2 py-1 bg-red-50 text-red-700 text-xs font-medium rounded-full">
                       Critical
                     </span>
                   )}
                   {stockStatus === 'warning' && (
-                    <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs font-medium rounded-full">
+                    <span className="px-2 py-1 bg-amber-50 text-amber-700 text-xs font-medium rounded-full">
                       Low
                     </span>
                   )}
@@ -207,7 +207,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                 type="checkbox"
                 checked={autoCalculate}
                 onChange={(e) => setAutoCalculate(e.target.checked)}
-                className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
               />
               <div className="flex items-center gap-2">
                 <Calculator className="w-5 h-5 text-blue-600" />
@@ -275,7 +275,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                   checked={autoReorderOff}
                   onChange={(e) => setAutoReorderOff(e.target.checked)}
                   disabled={isSaving}
-                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
                 <span className="text-sm text-gray-700">Auto-reorder disabled</span>
               </label>
@@ -325,9 +325,9 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
           </div>
 
           {/* Visual Indicator */}
-          <div className="mt-6 p-4 bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 rounded-lg">
+          <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
             <div className="flex items-center gap-3 mb-3">
-              <BarChart3 className="w-5 h-5 text-purple-600" />
+              <BarChart3 className="w-5 h-5 text-gray-500" />
               <p className="font-medium text-gray-900">Stock Level Visualization</p>
             </div>
             <div className="space-y-2">
@@ -341,7 +341,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
                     product.currentStock <= reorderPoint
                       ? 'bg-red-500'
                       : product.currentStock <= reorderPoint * 1.5
-                      ? 'bg-yellow-500'
+                      ? 'bg-amber-500'
                       : 'bg-green-500'
                   }`}
                   style={{ width: `${Math.min((product.currentStock / maxStock) * 100, 100)}%` }}
@@ -349,7 +349,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderP
               </div>
               <div className="flex items-center justify-between text-xs text-gray-500">
                 <span>0</span>
-                <span className="text-orange-600 font-medium">
+                <span className="text-amber-600 font-medium">
                   Reorder: {reorderPoint}
                 </span>
                 <span>Max: {maxStock}</span>

@@ -61,11 +61,14 @@ const RETURN_REASONS = [
   { value: 'other', label: 'Other' },
 ];
 
+// Muted semantic palette: in-progress states (created/approved/shipped) read as
+// info blue, "received by vendor" as amber (awaiting credit), settled as green,
+// cancelled as red. Decorative cyan/purple/orange are consolidated away.
 const STATUS_COLORS: Record<string, string> = {
   created: 'bg-blue-50 text-blue-700',
-  approved: 'bg-cyan-50 text-cyan-700',
-  shipped: 'bg-purple-50 text-purple-700',
-  received_by_vendor: 'bg-orange-50 text-orange-700',
+  approved: 'bg-blue-50 text-blue-700',
+  shipped: 'bg-blue-50 text-blue-700',
+  received_by_vendor: 'bg-amber-50 text-amber-700',
   credit_issued: 'bg-green-50 text-green-700',
   replaced: 'bg-green-50 text-green-700',
   cancelled: 'bg-red-50 text-red-700',
@@ -282,7 +285,7 @@ export function VendorReturns() {
         </div>
         <button
           onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition"
+          className="flex items-center gap-2 bg-bv-red-600 hover:bg-bv-red-700 text-white px-4 py-2 rounded-lg transition"
         >
           <Plus className="w-5 h-5" />
           Create Return
@@ -301,9 +304,9 @@ export function VendorReturns() {
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">Pending Credits</p>
-            <Clock className="w-5 h-5 text-yellow-500" />
+            <Clock className="w-5 h-5 text-amber-500" />
           </div>
-          <p className="text-2xl font-bold text-yellow-600">
+          <p className="text-2xl font-bold text-amber-600">
             {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
           </p>
         </div>
@@ -376,7 +379,7 @@ export function VendorReturns() {
                       </span>
                       <span className={clsx(
                         'px-2 py-1 rounded text-xs font-semibold',
-                        ret.return_type === 'credit_note' ? 'bg-blue-50 text-blue-700' : 'bg-purple-50 text-purple-700'
+                        ret.return_type === 'credit_note' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'
                       )}>
                         {ret.return_type === 'credit_note' ? 'Credit Note' : 'Replacement'}
                       </span>
@@ -512,7 +515,7 @@ export function VendorReturns() {
                       {ret.status === 'shipped' && (
                         <button
                           onClick={() => handleUpdateStatus(ret.return_id, 'received_by_vendor')}
-                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                          className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
                         >
                           Received by Vendor
                         </button>
@@ -709,7 +712,7 @@ export function VendorReturns() {
               </button>
               <button
                 onClick={handleCreateReturn}
-                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition"
+                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-medium transition"
               >
                 Create Return
               </button>

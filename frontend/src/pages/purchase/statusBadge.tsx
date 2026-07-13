@@ -17,16 +17,19 @@ type POStatusBadge = { label: string; color: string; icon: LucideIcon };
 
 export function getStatusBadge(status: POStatus) {
   const config: Record<string, POStatusBadge> = {
-    DRAFT: { label: 'Draft', color: 'bg-gray-100 text-gray-800', icon: FileText },
-    PENDING: { label: 'Pending Approval', color: 'bg-yellow-100 text-yellow-800', icon: Clock },
-    APPROVED: { label: 'Approved', color: 'bg-blue-100 text-blue-800', icon: CheckCircle },
-    SENT: { label: 'Sent', color: 'bg-indigo-100 text-indigo-800', icon: Send },
-    ACKNOWLEDGED: { label: 'Acknowledged', color: 'bg-teal-100 text-teal-800', icon: CheckCircle },
-    ORDERED: { label: 'Ordered', color: 'bg-purple-100 text-purple-800', icon: Truck },
-    PARTIAL: { label: 'Partially Received', color: 'bg-amber-100 text-amber-800', icon: Truck },
-    PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'bg-amber-100 text-amber-800', icon: Truck },
-    RECEIVED: { label: 'Received', color: 'bg-green-100 text-green-800', icon: CheckCircle },
-    CANCELLED: { label: 'Cancelled', color: 'bg-red-100 text-red-800', icon: XIcon },
+    // Single muted semantic palette: neutral (draft), amber (pending/partial),
+    // blue (in-progress: approved/sent/acknowledged/ordered), green (received),
+    // red (cancelled). Decorative indigo/teal/purple collapse into the info blue.
+    DRAFT: { label: 'Draft', color: 'bg-gray-100 text-gray-700', icon: FileText },
+    PENDING: { label: 'Pending Approval', color: 'bg-amber-50 text-amber-700', icon: Clock },
+    APPROVED: { label: 'Approved', color: 'bg-blue-50 text-blue-700', icon: CheckCircle },
+    SENT: { label: 'Sent', color: 'bg-blue-50 text-blue-700', icon: Send },
+    ACKNOWLEDGED: { label: 'Acknowledged', color: 'bg-blue-50 text-blue-700', icon: CheckCircle },
+    ORDERED: { label: 'Ordered', color: 'bg-blue-50 text-blue-700', icon: Truck },
+    PARTIAL: { label: 'Partially Received', color: 'bg-amber-50 text-amber-700', icon: Truck },
+    PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'bg-amber-50 text-amber-700', icon: Truck },
+    RECEIVED: { label: 'Received', color: 'bg-green-50 text-green-700', icon: CheckCircle },
+    CANCELLED: { label: 'Cancelled', color: 'bg-red-50 text-red-700', icon: XIcon },
   };
 
   // Fallback so any unmapped/legacy status renders instead of crashing the whole
@@ -35,7 +38,7 @@ export function getStatusBadge(status: POStatus) {
   // app-level ErrorBoundary unmounted everything once a PO was sent.
   const { label, color, icon: Icon } = config[status] ?? {
     label: String(status || 'Unknown'),
-    color: 'bg-gray-100 text-gray-800',
+    color: 'bg-gray-100 text-gray-700',
     icon: FileText,
   };
 

@@ -152,8 +152,8 @@ export default function CatalogAutopilotPage() {
             {sources.map((s) => (
               <span key={s.name} title={s.reason}
                 className={clsx('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs',
-                  s.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500')}>
-                <span className={clsx('w-1.5 h-1.5 rounded-full', s.enabled ? 'bg-emerald-500' : 'bg-gray-400')} />
+                  s.enabled ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500')}>
+                <span className={clsx('w-1.5 h-1.5 rounded-full', s.enabled ? 'bg-green-500' : 'bg-gray-400')} />
                 {s.priority}. {s.label}
                 {s.source_class === 'UNVERIFIED' && <AlertTriangle className="w-3 h-3 text-amber-500" />}
               </span>
@@ -201,9 +201,9 @@ export default function CatalogAutopilotPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     {/* Source badge — AI-suggested rows get a distinct violet pill. */}
                     <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium',
-                      badge.ai ? 'bg-violet-100 text-violet-700'
-                        : authorized ? 'bg-emerald-100 text-emerald-700'
-                        : 'bg-amber-100 text-amber-700')}>
+                      badge.ai ? 'bg-blue-50 text-blue-700'
+                        : authorized ? 'bg-green-50 text-green-700'
+                        : 'bg-amber-50 text-amber-700')}>
                       {badge.ai ? <Sparkles className="w-3 h-3" />
                         : authorized ? <ShieldCheck className="w-3 h-3" />
                         : <AlertTriangle className="w-3 h-3" />}
@@ -212,7 +212,7 @@ export default function CatalogAutopilotPage() {
                     <span className="text-xs text-gray-500">{c.source}</span>
                     {pct !== null && (
                       <span className={clsx('inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full',
-                        pct >= 90 ? 'bg-green-100 text-green-700' : pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600')}>
+                        pct >= 90 ? 'bg-green-50 text-green-700' : pct >= 70 ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600')}>
                         <Gauge className="w-3 h-3" />
                         {pct}% {c.confidence != null ? 'confidence' : 'match'}
                       </span>

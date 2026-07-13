@@ -1227,7 +1227,7 @@ export function QuickAddPage() {
     const isFlagged = !isLocked && flaggedFields.has(field.name);
     const fieldClass = clsx(
       'input-field w-full',
-      isAuto && 'ring-1 ring-violet-300 bg-violet-50/40',
+      isAuto && 'ring-1 ring-blue-300 bg-blue-50/40',
       isFlagged && 'ring-1 ring-amber-400 bg-amber-50/60',
       isLocked && 'bg-gray-50 text-gray-500 cursor-not-allowed'
     );
@@ -1239,7 +1239,7 @@ export function QuickAddPage() {
         {field.required && <span className="text-red-500 ml-1">*</span>}
         {isAuto && (
           <span
-            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-violet-100 text-violet-700 text-[10px] font-medium align-middle"
+            className="ml-2 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-blue-50 text-blue-700 text-[10px] font-medium align-middle"
             title="Auto-filled by Autopilot — please verify"
           >
             <SparklesIcon className="w-2.5 h-2.5" /> auto
@@ -1719,7 +1719,7 @@ export function QuickAddPage() {
                 {/* Fill confirmation right where the button was clicked: what
                     just landed in the MAIN form below. */}
                 {autoFilled.size > 0 && (
-                  <p className="text-sm text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2 flex items-center gap-2">
+                  <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 flex items-center gap-2">
                     <SparklesIcon className="w-4 h-4 shrink-0" />
                     Filled {autoFilled.size} field{autoFilled.size === 1 ? '' : 's'}
                     {images.length > 0 && <> + {images.length} image{images.length === 1 ? '' : 's'}</>}
@@ -1736,9 +1736,9 @@ export function QuickAddPage() {
               fields/images were auto-filled, where the data came from, and the
               extra (unmapped) specs found so nothing scraped is invisible. */}
           {(autoFilled.size > 0 || Object.keys(apExtras).length > 0 || apRefUrls.length > 0) && (
-            <div className="rounded-xl border border-violet-200 bg-violet-50/60 px-4 py-3 text-sm">
+            <div className="rounded-xl border border-blue-200 bg-blue-50/60 px-4 py-3 text-sm">
               <div className="flex items-start gap-2.5">
-                <SparklesIcon className="w-4 h-4 text-violet-600 mt-0.5 shrink-0" />
+                <SparklesIcon className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" />
                 <div className="min-w-0 flex-1 space-y-1.5">
                   <p className="text-gray-800">
                     Auto-filled <span className="font-semibold">{autoFilled.size}</span> field{autoFilled.size === 1 ? '' : 's'}
@@ -1752,7 +1752,7 @@ export function QuickAddPage() {
                             href={u}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-0.5 text-violet-700 underline decoration-violet-300 hover:decoration-violet-600"
+                            className="inline-flex items-center gap-0.5 text-blue-700 underline decoration-blue-300 hover:decoration-blue-600"
                           >
                             {apDomain(u)}
                             <ExternalLink className="w-3 h-3" />
@@ -1765,7 +1765,7 @@ export function QuickAddPage() {
                   </p>
                   {apImageCopy && imageRehostSummary(apImageCopy.copied, apImageCopy.kept) && (
                     <p className="text-xs text-gray-600 flex items-center gap-1.5">
-                      <ImageIcon className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+                      <ImageIcon className="w-3.5 h-3.5 text-blue-500 shrink-0" />
                       {imageRehostSummary(apImageCopy.copied, apImageCopy.kept)}
                     </p>
                   )}
@@ -1963,7 +1963,7 @@ export function QuickAddPage() {
                           ? 'Fill Brand and Model first'
                           : 'Draft a description from the filled fields'
                       }
-                      className="inline-flex items-center gap-1 rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {generatingDesc ? (
                         <Loader2 className="w-3 h-3 animate-spin" />
@@ -2592,9 +2592,9 @@ function AutopilotCandidateRow({ c, onUse }: { c: AutopilotCandidate; onUse: () 
       </div>
       <div className="flex items-center gap-1.5 flex-wrap">
         <span className={clsx('inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium',
-          badge.ai ? 'bg-violet-100 text-violet-700'
-            : badge.authorized ? 'bg-emerald-100 text-emerald-700'
-            : 'bg-amber-100 text-amber-700')}>
+          badge.ai ? 'bg-blue-50 text-blue-700'
+            : badge.authorized ? 'bg-green-50 text-green-700'
+            : 'bg-amber-50 text-amber-700')}>
           {badge.ai ? <SparklesIcon className="w-3 h-3" />
             : badge.authorized ? <ShieldCheck className="w-3 h-3" />
             : <AlertTriangle className="w-3 h-3" />}
@@ -2602,7 +2602,7 @@ function AutopilotCandidateRow({ c, onUse }: { c: AutopilotCandidate; onUse: () 
         </span>
         {pct !== null && (
           <span className={clsx('inline-flex items-center gap-1 text-[11px] font-semibold px-1.5 py-0.5 rounded-full',
-            pct >= 90 ? 'bg-green-100 text-green-700' : pct >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600')}>
+            pct >= 90 ? 'bg-green-50 text-green-700' : pct >= 70 ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600')}>
             <Gauge className="w-3 h-3" />
             {pct}%
           </span>

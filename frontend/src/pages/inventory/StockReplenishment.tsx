@@ -51,7 +51,7 @@ const getStockStatusColor = (status: string) => {
     case 'critical':
       return 'bg-red-50 text-red-700';
     case 'low':
-      return 'bg-orange-50 text-orange-700';
+      return 'bg-amber-50 text-amber-700';
     case 'normal':
       return 'bg-green-50 text-green-700';
     case 'excess':
@@ -203,11 +203,11 @@ export function StockReplenishment() {
         </div>
         <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Low Stock Items</p>
-          <p className="text-2xl font-bold text-orange-600">{lowItems.length}</p>
+          <p className="text-2xl font-bold text-amber-600">{lowItems.length}</p>
         </div>
         <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Dead Stock Items</p>
-          <p className="text-2xl font-bold text-purple-600">{deadStock.length}</p>
+          <p className="text-2xl font-bold text-gray-900">{deadStock.length}</p>
         </div>
         <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Est. Replenish Cost</p>
@@ -242,7 +242,7 @@ export function StockReplenishment() {
             </p>
           )}
           {criticalItems.length > 0 && (
-            <div className="bg-red-50 border border-red-700 rounded-lg p-4 flex items-start gap-3">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-red-700 font-semibold">{criticalItems.length} Critical Items</p>
@@ -355,7 +355,7 @@ export function StockReplenishment() {
               <h3 className="text-lg font-semibold text-gray-900 mb-4">ABC Classification</h3>
               {[
                 { category: 'A', color: 'text-red-600', desc: 'High-value items (~80% value, ~20% of items)' },
-                { category: 'B', color: 'text-yellow-600', desc: 'Medium-value items (~15% value, ~30% of items)' },
+                { category: 'B', color: 'text-amber-600', desc: 'Medium-value items (~15% value, ~30% of items)' },
                 { category: 'C', color: 'text-green-600', desc: 'Low-value items (~5% value, ~50% of items)' },
               ].map((cat) => (
                 <div key={cat.category} className="rounded-lg p-4 border border-gray-200 bg-white">
@@ -385,17 +385,17 @@ export function StockReplenishment() {
 
       {activeTab === 'dead-stock' && (
         <div className="space-y-4">
-          <div className="bg-purple-50/30 border border-purple-700 rounded-lg p-4 flex items-start gap-3">
-            <TrendingDown className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" />
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-start gap-3">
+            <TrendingDown className="w-5 h-5 text-gray-500 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-purple-700 font-semibold">Dead Stock Identification</p>
-              <p className="text-purple-700 text-sm">Items with no sales activity in the last 180 days</p>
+              <p className="text-gray-700 font-semibold">Dead Stock Identification</p>
+              <p className="text-gray-500 text-sm">Items with no sales activity in the last 180 days</p>
             </div>
           </div>
 
           {deadStockLoading ? (
             <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-8 h-8 animate-spin text-purple-600" />
+              <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
             </div>
           ) : deadStock.length === 0 ? (
             <div className="bg-white rounded-lg border border-gray-200 p-10 text-center text-gray-500">
@@ -431,7 +431,7 @@ export function StockReplenishment() {
                         <td className="px-4 py-3 text-gray-600">
                           {item.last_sold_at ? new Date(item.last_sold_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Never'}
                         </td>
-                        <td className="px-4 py-3 text-right font-semibold text-purple-600">
+                        <td className="px-4 py-3 text-right font-semibold text-gray-900">
                           {item.days_since_sold != null ? item.days_since_sold : '—'}
                         </td>
                         <td className="px-4 py-3 text-right text-gray-900">
@@ -591,7 +591,7 @@ function CreatePOModal({
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading vendors…
               </div>
             ) : vendors.length === 0 ? (
-              <p className="text-sm text-orange-600">
+              <p className="text-sm text-amber-600">
                 No vendors found. Add a vendor under Supply Chain &rarr; Suppliers first.
               </p>
             ) : (

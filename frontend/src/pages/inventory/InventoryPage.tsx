@@ -1085,7 +1085,7 @@ export function InventoryPage() {
                         <td className="px-4 py-3 text-center">
                           <span className="font-medium">{item.stock - (item.reserved || 0)}</span>
                           {item.reserved > 0 && (
-                            <span className="text-xs text-orange-500 ml-1">+{item.reserved} reserved</span>
+                            <span className="text-xs text-amber-600 ml-1">+{item.reserved} reserved</span>
                           )}
                         </td>
                         {/* v2-2b: Zone column — primary placement (fixture code + zone). Cell
@@ -1121,7 +1121,7 @@ export function InventoryPage() {
                             }
                             return (
                               <div className="flex flex-col items-center gap-0.5">
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700">
                                   <Globe className="w-3 h-3" strokeWidth={2} />
                                   Online
                                 </span>
@@ -1205,11 +1205,11 @@ export function InventoryPage() {
               {lowStockItems.map(item => (
                 <div
                   key={item.id}
-                  className="flex items-center justify-between p-4 bg-yellow-50 border border-yellow-200 rounded-lg"
+                  className="flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-lg"
                 >
                   <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
-                      <AlertTriangle className="w-5 h-5 text-yellow-600" />
+                    <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+                      <AlertTriangle className="w-5 h-5 text-amber-600" />
                     </div>
                     <div>
                       <p className="font-medium text-gray-900">{item.name}</p>
@@ -1217,7 +1217,7 @@ export function InventoryPage() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-yellow-600">{item.stock} left</p>
+                    <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
                     <p className="text-xs text-gray-500">Min: {item.lowStockThreshold || item.minStock || 5}</p>
                   </div>
                 </div>
@@ -1278,7 +1278,7 @@ export function InventoryPage() {
           SOLD: { label: 'Sold', color: 'text-red-700', bg: 'bg-red-100', prefix: '-' },
           TRANSFER_IN: { label: 'Transfer In', color: 'text-blue-700', bg: 'bg-blue-100', prefix: '+' },
           TRANSFER_OUT: { label: 'Transfer Out', color: 'text-amber-700', bg: 'bg-amber-100', prefix: '-' },
-          OPENING_STOCK: { label: 'Opening stock', color: 'text-purple-700', bg: 'bg-purple-100', prefix: '+' },
+          OPENING_STOCK: { label: 'Opening stock', color: 'text-gray-700', bg: 'bg-gray-100', prefix: '+' },
         };
         return (
           <div className="space-y-4">
