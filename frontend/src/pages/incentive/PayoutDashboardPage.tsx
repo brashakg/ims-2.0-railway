@@ -165,7 +165,7 @@ export function PayoutDashboardPage() {
             Pool sizing • per-staff allocation • manager bonus
             {snapshot && (
               <span className={`text-xs px-2 py-0.5 rounded-full border ${
-                snapshot.status === 'PAID' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                snapshot.status === 'PAID' ? 'bg-green-50 text-green-700 border-green-200' :
                 snapshot.status === 'LOCKED' ? 'bg-blue-50 text-blue-700 border-blue-200' :
                 'bg-gray-50 text-gray-600 border-gray-200'
               }`}>
@@ -273,7 +273,7 @@ export function PayoutDashboardPage() {
                 <div
                   key={lvl}
                   className={`p-3 rounded border ${
-                    isBest ? 'bg-emerald-50 border-emerald-300' :
+                    isBest ? 'bg-green-50 border-green-300' :
                     achieved ? 'bg-blue-50 border-blue-200' :
                     'bg-gray-50 border-gray-200'
                   }`}
@@ -282,7 +282,7 @@ export function PayoutDashboardPage() {
                     {lvl} • {pct(t.growth, 0)} growth
                   </div>
                   <div className="text-xl font-bold text-gray-900 mt-1">{inr(t.target)}</div>
-                  <div className={`text-xs mt-1 ${achieved ? 'text-emerald-700' : 'text-gray-500'}`}>
+                  <div className={`text-xs mt-1 ${achieved ? 'text-green-700' : 'text-gray-500'}`}>
                     {achieved ? '✓ Achieved' : '— Not achieved'}
                     {isBest && ' (best)'}
                   </div>
@@ -391,7 +391,7 @@ export function PayoutDashboardPage() {
 
       {/* Grand total banner */}
       {view && (
-        <section className="card p-5 bg-gradient-to-r from-bv-red-50 to-amber-50 border-2 border-bv-red-200">
+        <section className="card p-5 bg-bv-red-50 border-2 border-bv-red-200">
           <div className="flex items-center justify-between">
             <div>
               <div className="text-xs uppercase tracking-wider text-gray-600 mb-1">Grand total</div>
@@ -405,7 +405,7 @@ export function PayoutDashboardPage() {
             </div>
             <div className="text-right text-xs text-gray-500">
               {view.discount_kill_active && (
-                <div className="text-rose-700 font-medium inline-flex items-center gap-1 mb-1">
+                <div className="text-red-700 font-medium inline-flex items-center gap-1 mb-1">
                   <AlertTriangle className="w-3 h-3" /> Discount kill active — pool zeroed
                 </div>
               )}
@@ -462,14 +462,14 @@ function PoolSizingCard({ env }: { env: PayoutEnvelope | null }) {
     );
   }
   return (
-    <section className="card p-4 bg-gradient-to-br from-blue-50/60 to-emerald-50/60 border-blue-200">
+    <section className="card p-4 bg-gray-50 border-gray-200">
       <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 inline-flex items-center gap-1">
         <TrendingUp className="w-3 h-3" /> Pool sizing
       </h2>
       <div className="space-y-2">
         <Stat label="Best level achieved" value={
           <span className={`font-semibold ${
-            env.best_level_achieved === 'L3' ? 'text-emerald-700' :
+            env.best_level_achieved === 'L3' ? 'text-green-700' :
             env.best_level_achieved === 'L2' ? 'text-blue-700' :
             env.best_level_achieved === 'L1' ? 'text-amber-700' :
             'text-gray-500'
@@ -479,7 +479,7 @@ function PoolSizingCard({ env }: { env: PayoutEnvelope | null }) {
         } />
         <Stat label="Multiplier tier" value={env.multiplier_tier} />
         <Stat label="Multiplier" value={`${env.multiplier}×`} />
-        <div className="pt-2 mt-2 border-t border-blue-200">
+        <div className="pt-2 mt-2 border-t border-gray-200">
           <div className="text-xs uppercase tracking-wider text-gray-600">Total team pool</div>
           <div className="text-2xl font-bold text-bv-red-700 inline-flex items-center">
             <IndianRupee className="w-5 h-5" />

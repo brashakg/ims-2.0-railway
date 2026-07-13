@@ -695,13 +695,13 @@ export default function EnterpriseAnalyticsDashboard() {
       {metrics && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Low Stock Alerts */}
-          <div className="bg-white rounded-xl border border-amber-200 bg-amber-50 shadow-sm p-6">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-amber-900">Low Stock Alerts</h3>
+              <h3 className="text-lg font-semibold text-gray-900">Low Stock Alerts</h3>
               <AlertTriangle className="w-5 h-5 text-amber-600" />
             </div>
-            <p className="text-3xl font-bold text-amber-600 mb-2">{metrics.lowStockItems}</p>
-            <p className="text-sm text-amber-700">Items below reorder point</p>
+            <p className="text-3xl font-bold text-amber-700 mb-2">{metrics.lowStockItems}</p>
+            <p className="text-sm text-gray-500">Items below reorder point</p>
             <button
               onClick={() => navigate('/inventory?tab=low-stock')}
               className="mt-4 w-full px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors text-sm font-medium"
@@ -711,24 +711,24 @@ export default function EnterpriseAnalyticsDashboard() {
           </div>
 
           {/* Dead Stock */}
-          <div className="bg-white rounded-xl border border-red-200 bg-red-50 shadow-sm p-6">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-red-900">Dead Stock</h3>
+              <h3 className="text-lg font-semibold text-gray-900">Dead Stock</h3>
               <Package className="w-5 h-5 text-red-600" />
             </div>
             {metrics.deadStockValue !== null ? (
               <>
-                <p className="text-3xl font-bold text-red-600 mb-2">
+                <p className="text-3xl font-bold text-red-700 mb-2">
                   {formatChartValue(metrics.deadStockValue)}
                 </p>
-                <p className="text-sm text-red-700">
+                <p className="text-sm text-gray-500">
                   {metrics.deadStockItems !== null ? `${metrics.deadStockItems} items` : 'Items'} not sold in 90+ days
                 </p>
               </>
             ) : (
               <>
-                <p className="text-3xl font-bold text-red-600 mb-2">N/A</p>
-                <p className="text-sm text-red-600">No data available</p>
+                <p className="text-3xl font-bold text-red-700 mb-2">N/A</p>
+                <p className="text-sm text-gray-500">No data available</p>
               </>
             )}
             <button
@@ -740,20 +740,20 @@ export default function EnterpriseAnalyticsDashboard() {
           </div>
 
           {/* Fast Moving Items */}
-          <div className="bg-white rounded-xl border border-green-200 bg-green-50 shadow-sm p-6">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-green-900">Fast Moving Items</h3>
+              <h3 className="text-lg font-semibold text-gray-900">Fast Moving Items</h3>
               <TrendingUp className="w-5 h-5 text-green-600" />
             </div>
             {metrics.fastMovingItems !== null ? (
               <>
-                <p className="text-3xl font-bold text-green-600 mb-2">{metrics.fastMovingItems}</p>
-                <p className="text-sm text-green-700">Top performers this period</p>
+                <p className="text-3xl font-bold text-green-700 mb-2">{metrics.fastMovingItems}</p>
+                <p className="text-sm text-gray-500">Top performers this period</p>
               </>
             ) : (
               <>
-                <p className="text-3xl font-bold text-green-600 mb-2">N/A</p>
-                <p className="text-sm text-green-600">No data available</p>
+                <p className="text-3xl font-bold text-green-700 mb-2">N/A</p>
+                <p className="text-sm text-gray-500">No data available</p>
               </>
             )}
             <button
@@ -838,7 +838,7 @@ export default function EnterpriseAnalyticsDashboard() {
                     className="flex items-center justify-between p-2 hover:bg-gray-50 rounded-lg transition-colors"
                   >
                     <div className="flex items-center gap-3 flex-1">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-gray-900 text-sm font-bold">
+                      <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-700 text-sm font-bold">
                         {idx + 1}
                       </div>
                       <div>
@@ -858,18 +858,18 @@ export default function EnterpriseAnalyticsDashboard() {
       )}
 
       {/* SECTION 6: Quick Actions Panel */}
-      <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border border-blue-200 p-6">
+      <div className="bg-gray-50 rounded-xl border border-gray-200 p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <Zap className="w-5 h-5 text-blue-600" />
+          <Zap className="w-5 h-5 text-gray-500" />
           Quick Actions
         </h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           {[
-            { icon: Plus, label: 'Create New Order', action: 'new-order', color: 'bg-blue-600 hover:bg-blue-700' },
-            { icon: Users, label: 'Add New Customer', action: 'new-customer', color: 'bg-green-600 hover:bg-green-700' },
-            { icon: ArrowRight, label: 'Stock Transfer', action: 'stock-transfer', color: 'bg-purple-600 hover:bg-purple-700' },
-            { icon: BarChart3, label: 'Generate Report', action: 'report', color: 'bg-orange-600 hover:bg-orange-700' },
-            { icon: Zap, label: 'Workshop Jobs', action: 'workshop', color: 'bg-red-600 hover:bg-red-700' },
+            { icon: Plus, label: 'Create New Order', action: 'new-order', color: 'bg-white border border-gray-200 hover:bg-gray-100' },
+            { icon: Users, label: 'Add New Customer', action: 'new-customer', color: 'bg-white border border-gray-200 hover:bg-gray-100' },
+            { icon: ArrowRight, label: 'Stock Transfer', action: 'stock-transfer', color: 'bg-white border border-gray-200 hover:bg-gray-100' },
+            { icon: BarChart3, label: 'Generate Report', action: 'report', color: 'bg-white border border-gray-200 hover:bg-gray-100' },
+            { icon: Zap, label: 'Workshop Jobs', action: 'workshop', color: 'bg-white border border-gray-200 hover:bg-gray-100' },
           ].map((item) => {
             const Icon = item.icon;
             return (
@@ -877,7 +877,7 @@ export default function EnterpriseAnalyticsDashboard() {
                 key={item.action}
                 onClick={() => handleQuickAction(item.action)}
                 className={clsx(
-                  'flex flex-col items-center gap-2 px-4 py-3 rounded-lg text-gray-900 font-medium transition-colors',
+                  'flex flex-col items-center gap-2 px-4 py-3 rounded-lg text-gray-700 font-medium transition-colors',
                   item.color
                 )}
               >

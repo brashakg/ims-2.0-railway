@@ -494,7 +494,7 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
   const getTierColor = (tier: LoyaltyTier): string => {
     const colors = {
       Bronze: 'bg-amber-50 text-amber-700',
-      Silver: 'bg-gray-100 text-slate-700',
+      Silver: 'bg-gray-100 text-gray-700',
       Gold: 'bg-yellow-50 text-yellow-700',
       Platinum: 'bg-blue-50 text-blue-700',
     };
@@ -506,8 +506,8 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
       <div className="flex items-start justify-between">
         <div className="flex items-start gap-4">
           {/* Avatar */}
-          <div className="w-20 h-20 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center">
-            <User className="w-10 h-10 text-gray-900" />
+          <div className="w-20 h-20 rounded-full bg-gray-100 flex items-center justify-center">
+            <User className="w-10 h-10 text-gray-500" />
           </div>
 
           {/* Customer Info */}
@@ -594,7 +594,7 @@ function npsLabel(score: number): string {
 function npsColor(score: number): string {
   if (score >= 9) return 'text-green-600';
   if (score >= 7) return 'text-blue-600';
-  return 'text-orange-600';
+  return 'text-amber-600';
 }
 
 function OverviewTab({ stats, lastNpsScore, vipChurnRisk, canIntervene, onIntervene }: OverviewTabProps) {
@@ -781,7 +781,7 @@ function PrescriptionsTab({ prescriptions, customerId, customerName }: Prescript
                   rx.renewalStatus === 'current'
                     ? 'bg-green-50 text-green-700'
                     : rx.renewalStatus === 'upcoming'
-                      ? 'bg-yellow-50 text-yellow-700'
+                      ? 'bg-amber-50 text-amber-700'
                       : 'bg-red-50 text-red-700'
                 )}
               >
@@ -794,7 +794,7 @@ function PrescriptionsTab({ prescriptions, customerId, customerName }: Prescript
                 <button
                   type="button"
                   onClick={() => setVersionsRxId(rx.id)}
-                  className="px-2 py-1 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded flex items-center gap-1"
+                  className="px-2 py-1 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-200 rounded flex items-center gap-1"
                   title="Manage 4-version Rx"
                 >
                   <Layers className="w-3.5 h-3.5" />
@@ -940,9 +940,9 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
       <div className="bg-gray-50 rounded-lg p-6 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold text-gray-900">Current Tier</h3>
-          <Award className="w-6 h-6 text-yellow-600" />
+          <Award className="w-6 h-6 text-amber-600" />
         </div>
-        <p className="text-4xl font-bold text-yellow-600">{loyaltyData.tier}</p>
+        <p className="text-4xl font-bold text-amber-600">{loyaltyData.tier}</p>
         <p className="text-gray-500">Member since {new Date(loyaltyData.memberSince).toLocaleDateString()}</p>
       </div>
 
@@ -955,7 +955,7 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
             <span className="text-gray-900 font-semibold">{loyaltyData.points.toLocaleString('en-IN')} pts</span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
-            <div className="bg-gradient-to-r from-blue-500 to-purple-500 h-full" style={{ width: `${Math.min(progress, 100)}%` }} />
+            <div className="bg-blue-500 h-full" style={{ width: `${Math.min(progress, 100)}%` }} />
           </div>
           <div className="flex items-center justify-between text-xs">
             <span className="text-gray-500">

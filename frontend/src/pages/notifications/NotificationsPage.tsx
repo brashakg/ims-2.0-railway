@@ -21,8 +21,8 @@ const isSnoozed = (n: AppNotification) => {
 };
 
 const PRIORITY_DOT: Record<string, string> = {
-  P0: 'bg-red-500', P1: 'bg-orange-500', URGENT: 'bg-red-500', HIGH: 'bg-orange-500',
-  P2: 'bg-yellow-500', NORMAL: 'bg-blue-500', P3: 'bg-gray-400', LOW: 'bg-gray-400',
+  P0: 'bg-red-500', P1: 'bg-amber-500', URGENT: 'bg-red-500', HIGH: 'bg-amber-500',
+  P2: 'bg-amber-500', NORMAL: 'bg-blue-500', P3: 'bg-gray-400', LOW: 'bg-gray-400',
 };
 
 // Quick snooze presets -> absolute Date.
