@@ -1243,7 +1243,7 @@ export function mapAutopilotCandidate(
 
   // THE core v2 step: map free-form scraped specs (+ the size string in the
   // query/title/description) onto the category's declared form fields.
-  let extras: Record<string, string> = {};
+  let extras: Record<string, string>;
   if (category) {
     const specMap = mapSpecsToCategoryFields(
       category,

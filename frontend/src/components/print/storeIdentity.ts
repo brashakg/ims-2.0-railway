@@ -164,7 +164,7 @@ export function toEntityLike(
  * Returns nulls/empty on failure (fail-soft) -- callers gate statutory prints.
  */
 export async function resolveStoreIdentity(storeId: string): Promise<StoreIdentity> {
-  let raw: RawStoreDoc | null = null;
+  let raw: RawStoreDoc | null;
   try {
     raw = (await storeApi.getStore(storeId)) as RawStoreDoc;
   } catch {

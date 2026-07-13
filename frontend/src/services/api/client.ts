@@ -159,8 +159,8 @@ export function refreshAccessToken(): Promise<string | null> {
 }
 
 async function performRefresh(): Promise<string | null> {
-  let access: string | null = null;
-  let refresh: string | null = null;
+  let access: string | null;
+  let refresh: string | null;
   try {
     access = localStorage.getItem(TOKEN_STORAGE_KEY);
     refresh = localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
@@ -195,7 +195,7 @@ async function performRefresh(): Promise<string | null> {
 
 /** Fire-and-forget proactive check; cheap enough to run per-request + on a timer. */
 function maybeProactiveRefresh(): void {
-  let token: string | null = null;
+  let token: string | null;
   try {
     token = localStorage.getItem(TOKEN_STORAGE_KEY);
   } catch {

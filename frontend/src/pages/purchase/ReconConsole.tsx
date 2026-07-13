@@ -249,7 +249,6 @@ function NoteControl({
             onChange={(e) => setText(e.target.value)}
             placeholder='e.g. "Paid via NEFT ref 5401"'
             className="input-field text-xs py-1.5 px-2 w-full"
-            // eslint-disable-next-line jsx-a11y/no-autofocus
             autoFocus
           />
           <div className="flex justify-end gap-1.5 mt-2">

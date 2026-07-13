@@ -86,11 +86,19 @@ export default defineConfig({
     },
     rollupOptions: {
       output: {
-        manualChunks: {
-          // Split vendor libraries into separate chunks
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-ui': ['lucide-react', 'clsx'],
-          'vendor-utils': ['date-fns', 'axios', 'zustand'],
+        // Vite 8's Rolldown-powered bundler only accepts a function here
+        // (the old Rollup object-map form throws "manualChunks is not a
+        // function"); same vendor split, expressed by matching the id.
+        manualChunks(id) {
+          if (/node_modules\/(react|react-dom|react-router-dom)\//.test(id)) {
+            return 'vendor-react'
+          }
+          if (/node_modules\/(lucide-react|clsx)\//.test(id)) {
+            return 'vendor-ui'
+          }
+          if (/node_modules\/(date-fns|axios|zustand)\//.test(id)) {
+            return 'vendor-utils'
+          }
         },
       },
     },

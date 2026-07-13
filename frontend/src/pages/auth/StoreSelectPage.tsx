@@ -54,7 +54,7 @@ export function StoreSelectPage() {
 
     let cancelled = false;
     (async () => {
-      let accessible: AccessibleStore[] = [];
+      let accessible: AccessibleStore[];
       try {
         const res: any = await storeApi.getStores();
         const raw = res?.stores ?? res ?? [];

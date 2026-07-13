@@ -332,7 +332,7 @@ export function NumericBadge({
   trailingIcon: TrailingIcon,
 }: NumericBadgeProps) {
   // Determine status based on value
-  let status = 'default';
+  let status: string;
   if (getStatus) {
     status = getStatus(value);
   } else {
