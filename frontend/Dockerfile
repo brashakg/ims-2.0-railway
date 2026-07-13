@@ -5,7 +5,7 @@
 # ============================================================================
 
 # Stage 1: Build the React application
-FROM node:20-alpine as build
+FROM node:22-alpine as build
 
 # Set working directory
 WORKDIR /app
@@ -27,7 +27,7 @@ ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 # Stage 2: Production server with Nginx
-FROM nginx:1.27-alpine as production
+FROM nginx:1.31-alpine as production
 
 # Copy custom nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf

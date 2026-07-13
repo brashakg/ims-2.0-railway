@@ -13,7 +13,7 @@ jobs:
     # Mirror backend-ci.yml's Mongo service exactly.
     services:
       mongodb:
-        image: mongo:7.0
+        image: mongo:8.0
         env:
           MONGO_INITDB_DATABASE: ims_test
         options: >-
