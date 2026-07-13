@@ -47,19 +47,10 @@ const emptyForm: PromoRuleCreate = {
   active: true,
 };
 
-function typeChip(t: string): string {
-  switch (t) {
-    case 'THRESHOLD':
-      return 'bg-blue-100 text-blue-700';
-    case 'BOGO':
-      return 'bg-purple-100 text-purple-700';
-    case 'COMBO':
-      return 'bg-amber-100 text-amber-700';
-    case 'SECOND_PAIR':
-      return 'bg-teal-100 text-teal-700';
-    default:
-      return 'bg-gray-100 text-gray-700';
-  }
+// Promo type is a category label, not a status — one neutral chip for all
+// (was a blue/purple/amber/teal rainbow, off the muted house theme).
+function typeChip(_t: string): string {
+  return 'bg-gray-100 text-gray-700';
 }
 
 export default function PromotionsPage() {

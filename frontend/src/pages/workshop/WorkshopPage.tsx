@@ -77,7 +77,7 @@ type LensStatus = 'NOT_ORDERED' | 'ORDERED' | 'RECEIVED' | 'MOUNTED';
 const LENS_STATUS_CONFIG: Record<LensStatus, { label: string; class: string; next?: LensStatus; nextLabel?: string }> = {
   NOT_ORDERED: { label: 'Lens: Not ordered', class: 'bg-gray-100 text-gray-600', next: 'ORDERED', nextLabel: 'Mark lens ordered' },
   ORDERED: { label: 'Lens: Ordered', class: 'bg-blue-50 text-blue-700', next: 'RECEIVED', nextLabel: 'Mark lens received' },
-  RECEIVED: { label: 'Lens: Received', class: 'bg-indigo-50 text-indigo-700', next: 'MOUNTED', nextLabel: 'Mark lens mounted' },
+  RECEIVED: { label: 'Lens: Received', class: 'bg-blue-50 text-blue-700', next: 'MOUNTED', nextLabel: 'Mark lens mounted' },
   MOUNTED: { label: 'Lens: Mounted', class: 'bg-green-50 text-green-700' },
 };
 function resolveLensConfig(status: unknown) {
@@ -92,25 +92,25 @@ function resolveLensConfig(status: unknown) {
 const UNKNOWN_STATUS = { label: 'Unknown', class: 'bg-gray-100 text-gray-700', step: 0 };
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
   PENDING: { label: 'Pending', class: 'bg-gray-100 text-gray-700', step: 1 },
-  IN_PROGRESS: { label: 'In Progress', class: 'bg-yellow-50 text-yellow-700', step: 2 },
-  PROCESSING: { label: 'Fitting', class: 'bg-yellow-50 text-yellow-700', step: 2 },
+  IN_PROGRESS: { label: 'In Progress', class: 'bg-amber-50 text-amber-700', step: 2 },
+  PROCESSING: { label: 'Fitting', class: 'bg-amber-50 text-amber-700', step: 2 },
   COMPLETED: { label: 'Completed', class: 'bg-blue-50 text-blue-700', step: 3 },
   QC_FAILED: { label: 'QC Failed', class: 'bg-red-50 text-red-700', step: 2 },
   READY: { label: 'Ready for Pickup', class: 'bg-green-50 text-green-700', step: 4 },
-  DELIVERED: { label: 'Delivered', class: 'bg-emerald-50 text-emerald-700', step: 5 },
+  DELIVERED: { label: 'Delivered', class: 'bg-green-50 text-green-700', step: 5 },
   // Fallback for legacy statuses
   CREATED: { label: 'Created', class: 'bg-gray-100 text-gray-500', step: 1 },
   LENS_ORDERED: { label: 'Lens Ordered', class: 'bg-blue-50 text-blue-700', step: 2 },
-  LENS_RECEIVED: { label: 'Lens Received', class: 'bg-indigo-50 text-indigo-700', step: 3 },
-  QC_PENDING: { label: 'QC Pending', class: 'bg-orange-50 text-orange-700', step: 3 },
-  QC_PASSED: { label: 'QC Passed', class: 'bg-teal-50 text-teal-700', step: 4 },
+  LENS_RECEIVED: { label: 'Lens Received', class: 'bg-blue-50 text-blue-700', step: 3 },
+  QC_PENDING: { label: 'QC Pending', class: 'bg-amber-50 text-amber-700', step: 3 },
+  QC_PASSED: { label: 'QC Passed', class: 'bg-green-50 text-green-700', step: 4 },
   CANCELLED: { label: 'Cancelled', class: 'bg-red-50 text-red-700', step: 0 },
 };
 
 const UNKNOWN_PRIORITY = { label: '—', class: 'text-gray-500', icon: Clock };
 const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon: React.ComponentType<{ className?: string }> }> = {
   NORMAL: { label: 'Normal', class: 'text-gray-500', icon: Clock },
-  EXPRESS: { label: 'Express', class: 'text-orange-500', icon: Timer },
+  EXPRESS: { label: 'Express', class: 'text-amber-600', icon: Timer },
   URGENT: { label: 'Urgent', class: 'text-red-500', icon: Zap },
 };
 
@@ -614,12 +614,12 @@ const loadJobs = async () => {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-orange-50 rounded-lg flex items-center justify-center">
-              <AlertTriangle className="w-5 h-5 text-orange-600" />
+            <div className="w-10 h-10 bg-amber-50 rounded-lg flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-amber-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Overdue</p>
-              <p className="text-2xl font-bold text-orange-600">{kpis?.overdue ?? overdueJobs.length}</p>
+              <p className="text-2xl font-bold text-amber-600">{kpis?.overdue ?? overdueJobs.length}</p>
             </div>
           </div>
         </div>
@@ -738,7 +738,7 @@ const loadJobs = async () => {
                 className={clsx(
                   'card',
                   job.priority === 'URGENT' && 'border-red-300 bg-red-50',
-                  overdue && job.priority !== 'URGENT' && 'border-orange-300 bg-orange-50'
+                  overdue && job.priority !== 'URGENT' && 'border-amber-300 bg-amber-50'
                 )}
               >
                 <div className="flex items-start justify-between gap-4">
@@ -784,7 +784,7 @@ const loadJobs = async () => {
                     </div>
 
                     {job.notes && (
-                      <p className="mt-2 text-sm text-yellow-800 bg-yellow-50 px-2 py-1 rounded">
+                      <p className="mt-2 text-sm text-amber-800 bg-amber-50 px-2 py-1 rounded">
                         Note: {job.notes}
                       </p>
                     )}
@@ -930,9 +930,9 @@ const loadJobs = async () => {
 
                 {/* Notes */}
                 {selectedJob.notes && (
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                    <p className="text-sm font-medium text-yellow-800">Notes</p>
-                    <p className="text-sm text-yellow-800 mt-1">{selectedJob.notes}</p>
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-amber-800">Notes</p>
+                    <p className="text-sm text-amber-800 mt-1">{selectedJob.notes}</p>
                   </div>
                 )}
 
@@ -1548,7 +1548,7 @@ function QcChecklistModal({
             </p>
           )}
           {allAnswered && !allChecked && (
-            <p className="text-xs text-orange-600">
+            <p className="text-xs text-amber-600">
               One or more items failed. Add overall notes describing what needs rework, then click &quot;Fail QC&quot;.
             </p>
           )}
@@ -1694,11 +1694,11 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
   const VENDOR_STATUS_OPTIONS = ['ACKNOWLEDGED', 'IN_PROGRESS', 'DISPATCHED', 'DELIVERED', 'DELAYED', 'CANCELLED'];
 
   return (
-    <div className="rounded-lg border border-indigo-200 bg-indigo-50/30 p-3">
+    <div className="rounded-lg border border-gray-200 bg-gray-50/60 p-3">
       <div className="flex items-center justify-between mb-2">
-        <p className="text-sm font-medium text-indigo-900">Vendor / lens lab</p>
+        <p className="text-sm font-medium text-gray-900">Vendor / lens lab</p>
         {j.vendor_status && (
-          <span className="px-2 py-0.5 rounded text-xs font-semibold bg-white border border-indigo-300 text-indigo-700">
+          <span className="px-2 py-0.5 rounded text-xs font-semibold bg-white border border-gray-300 text-gray-700">
             {j.vendor_status}
           </span>
         )}
@@ -1751,7 +1751,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
           type="button"
           onClick={handleSave}
           disabled={!dirty || saving}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded disabled:opacity-50"
+          className="px-3 py-1.5 bg-bv-red-600 hover:bg-bv-red-700 text-white text-xs font-semibold rounded disabled:opacity-50"
         >
           {saving ? 'Saving…' : 'Save vendor details'}
         </button>
@@ -1759,7 +1759,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
           <button
             type="button"
             onClick={() => setShowStatusForm((s) => !s)}
-            className="px-3 py-1.5 bg-white hover:bg-gray-50 text-indigo-700 text-xs font-semibold rounded border border-indigo-300"
+            className="px-3 py-1.5 bg-white hover:bg-gray-50 text-gray-700 text-xs font-semibold rounded border border-gray-300"
           >
             {showStatusForm ? 'Cancel status update' : 'Log vendor status'}
           </button>
@@ -1767,7 +1767,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
       </div>
 
       {showStatusForm && (
-        <div className="mt-2 p-2 bg-white border border-indigo-200 rounded space-y-2">
+        <div className="mt-2 p-2 bg-white border border-gray-200 rounded space-y-2">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             <select
               value={statusValue}
@@ -1794,7 +1794,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
             type="button"
             onClick={handlePostStatus}
             disabled={!statusValue.trim() || saving}
-            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded disabled:opacity-50"
+            className="px-3 py-1.5 bg-bv-red-600 hover:bg-bv-red-700 text-white text-xs font-semibold rounded disabled:opacity-50"
           >
             {saving ? 'Posting…' : 'Post status'}
           </button>
@@ -1815,7 +1815,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
                   <span className="font-mono text-gray-400">
                     {h.at ? new Date(h.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
                   </span>
-                  <span className="font-semibold text-indigo-700">{h.status}</span>
+                  <span className="font-semibold text-gray-800">{h.status}</span>
                   {h.note && <span className="text-gray-600">· {h.note}</span>}
                   <span className="text-gray-400 ml-auto">[{h.source}]</span>
                 </li>

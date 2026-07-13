@@ -67,11 +67,11 @@ interface LeaveRequest {
 }
 
 const ATTENDANCE_STATUS_CONFIG: Record<AttendanceStatus, { label: string; class: string }> = {
-  PRESENT: { label: 'Present', class: 'bg-green-100 text-green-600' },
-  ABSENT: { label: 'Absent', class: 'bg-red-100 text-red-600' },
-  HALF_DAY: { label: 'Half Day', class: 'bg-yellow-100 text-yellow-600' },
-  LEAVE: { label: 'On Leave', class: 'bg-blue-100 text-blue-600' },
-  LATE: { label: 'Late', class: 'bg-orange-100 text-orange-600' },
+  PRESENT: { label: 'Present', class: 'bg-green-50 text-green-700' },
+  ABSENT: { label: 'Absent', class: 'bg-red-50 text-red-700' },
+  HALF_DAY: { label: 'Half Day', class: 'bg-amber-50 text-amber-700' },
+  LEAVE: { label: 'On Leave', class: 'bg-blue-50 text-blue-700' },
+  LATE: { label: 'Late', class: 'bg-amber-50 text-amber-700' },
 };
 
 const LEAVE_STATUS_CONFIG: Record<LeaveStatus, { label: string; class: string }> = {
@@ -287,45 +287,45 @@ export function HRPage() {
       <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
+            <div className="w-10 h-10 bg-green-50 rounded-lg flex items-center justify-center">
               <CheckCircle className="w-5 h-5 text-green-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Present Today</p>
-              <p className="text-2xl font-bold text-green-600">{presentCount}</p>
+              <p className="text-2xl font-bold text-green-700">{presentCount}</p>
             </div>
           </div>
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
+            <div className="w-10 h-10 bg-red-50 rounded-lg flex items-center justify-center">
               <XCircle className="w-5 h-5 text-red-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Absent</p>
-              <p className="text-2xl font-bold text-red-600">{absentCount}</p>
+              <p className="text-2xl font-bold text-red-700">{absentCount}</p>
             </div>
           </div>
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Calendar className="w-5 h-5 text-blue-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">On Leave</p>
-              <p className="text-2xl font-bold text-blue-600">{onLeaveCount}</p>
+              <p className="text-2xl font-bold text-blue-700">{onLeaveCount}</p>
             </div>
           </div>
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
-              <FileText className="w-5 h-5 text-yellow-600" />
+            <div className="w-10 h-10 bg-amber-50 rounded-lg flex items-center justify-center">
+              <FileText className="w-5 h-5 text-amber-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Pending Leaves</p>
-              <p className="text-2xl font-bold text-yellow-600">{pendingLeaves}</p>
+              <p className="text-2xl font-bold text-amber-700">{pendingLeaves}</p>
             </div>
           </div>
         </div>
@@ -357,7 +357,7 @@ export function HRPage() {
           <Calendar className="w-4 h-4" />
           Leave Requests
           {pendingLeaves > 0 && (
-            <span className="ml-1 px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-600 text-xs">
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-xs">
               {pendingLeaves}
             </span>
           )}
@@ -496,7 +496,7 @@ export function HRPage() {
                           ) : record.status === 'LEAVE' ? (
                             <span className="text-gray-500">-</span>
                           ) : (
-                            <AlertTriangle className="w-4 h-4 text-yellow-500 mx-auto" />
+                            <AlertTriangle className="w-4 h-4 text-amber-500 mx-auto" />
                           )}
                         </td>
                       </tr>

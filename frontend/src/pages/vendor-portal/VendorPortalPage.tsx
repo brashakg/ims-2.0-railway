@@ -36,9 +36,9 @@ const STATUSES: Array<{
 }> = [
   { id: 'RECEIVED',      label: 'Acknowledge receipt of job',  shortLabel: 'Received',      badge: 'bg-blue-50 text-blue-700 border-blue-200',     cta: 'Mark received' },
   { id: 'IN_PRODUCTION', label: 'In production / cutting',      shortLabel: 'In production', badge: 'bg-amber-50 text-amber-700 border-amber-200',  cta: 'Mark in production' },
-  { id: 'DISPATCHED',    label: 'Dispatched back to store',     shortLabel: 'Dispatched',    badge: 'bg-indigo-50 text-indigo-700 border-indigo-200', cta: 'Mark dispatched' },
+  { id: 'DISPATCHED',    label: 'Dispatched back to store',     shortLabel: 'Dispatched',    badge: 'bg-blue-50 text-blue-700 border-blue-200',    cta: 'Mark dispatched' },
   { id: 'DELIVERED',     label: 'Confirmed delivered',          shortLabel: 'Delivered',     badge: 'bg-green-50 text-green-700 border-green-200',  cta: 'Mark delivered' },
-  { id: 'ON_HOLD',       label: 'On hold (need clarification)', shortLabel: 'On hold',       badge: 'bg-orange-50 text-orange-700 border-orange-200', cta: 'Mark on hold' },
+  { id: 'ON_HOLD',       label: 'On hold (need clarification)', shortLabel: 'On hold',       badge: 'bg-amber-50 text-amber-700 border-amber-200', cta: 'Mark on hold' },
   { id: 'CANCELLED',     label: 'Won\'t fulfil',                shortLabel: 'Cancelled',     badge: 'bg-red-50 text-red-700 border-red-200',         cta: 'Mark cancelled' },
 ];
 

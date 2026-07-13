@@ -56,18 +56,21 @@ interface TimelineEntry {
 // Hero identity mapping
 // ============================================================================
 
-const HERO_META: Record<string, { color: string; gradient: string; emoji: string }> = {
-  cortex:     { color: 'purple', gradient: 'from-purple-500 to-indigo-600', emoji: '🧠' },
-  sentinel:   { color: 'red',    gradient: 'from-red-500 to-orange-600',    emoji: '🛡️' },
-  oracle:     { color: 'blue',   gradient: 'from-blue-500 to-cyan-600',     emoji: '🔮' },
-  taskmaster: { color: 'amber',  gradient: 'from-amber-500 to-yellow-600',  emoji: '📋' },
-  megaphone:  { color: 'green',  gradient: 'from-green-500 to-emerald-600', emoji: '📢' },
-  nexus:      { color: 'slate',  gradient: 'from-slate-500 to-gray-600',    emoji: '🔗' },
-  pixel:      { color: 'sky',    gradient: 'from-sky-500 to-blue-600',      emoji: '🖥️' },
+// Per-agent identity is carried by the emoji only. The former per-agent
+// gradient/colour chrome was a vivid rainbow (off the muted house theme) and
+// is no longer rendered.
+const HERO_META: Record<string, { emoji: string }> = {
+  cortex:     { emoji: '🧠' },
+  sentinel:   { emoji: '🛡️' },
+  oracle:     { emoji: '🔮' },
+  taskmaster: { emoji: '📋' },
+  megaphone:  { emoji: '📢' },
+  nexus:      { emoji: '🔗' },
+  pixel:      { emoji: '🖥️' },
 };
 
 const getHeroMeta = (agentId: string) =>
-  HERO_META[agentId] || { color: 'gray', gradient: 'from-gray-500 to-gray-600', emoji: '🤖' };
+  HERO_META[agentId] || { emoji: '🤖' };
 
 // ============================================================================
 // Helpers
@@ -158,8 +161,9 @@ function AgentCard({
       'border rounded-xl overflow-hidden transition-all',
       agent.enabled ? 'border-gray-200 bg-white shadow-sm' : 'border-gray-100 bg-gray-50 opacity-75',
     )}>
-      {/* Header bar */}
-      <div className={clsx('h-1 bg-gradient-to-r', meta.gradient)} />
+      {/* Accent bar — consistent neutral chrome; each agent's identity is
+          carried by its emoji (kept), not a rainbow of gradient stripes. */}
+      <div className="h-1 bg-gray-100" />
 
       <div className="p-4">
         {/* Top row: name + controls */}
@@ -208,7 +212,7 @@ function AgentCard({
                 agent.enabled ? 'translate-x-5' : 'translate-x-0.5',
               )} />
               {!agent.toggleable && (
-                <Shield className="absolute -top-1 -right-1 w-3 h-3 text-purple-500" />
+                <Shield className="absolute -top-1 -right-1 w-3 h-3 text-gray-500" />
               )}
             </button>
           </div>
@@ -418,8 +422,8 @@ export function AgentControlPanel() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-xl shadow-sm">
-            <Bot className="w-5 h-5 text-gray-900" />
+          <div className="p-2 bg-bv-red-50 rounded-xl">
+            <Bot className="w-5 h-5 text-bv-red-600" />
           </div>
           <div>
             <h2 className="text-lg font-semibold text-gray-900">JARVIS Agent Control</h2>
