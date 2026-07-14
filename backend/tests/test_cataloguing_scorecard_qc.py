@@ -990,3 +990,67 @@ class TestScorecardQcRbac:
         assert resp.status_code == 200
         body = resp.json()
         assert "items" in body and "batches" in body
+
+
+# ============================================================================
+# 7. Capability isolation: QC routes must not broaden products:write grants
+# ============================================================================
+# The grant guard (user_roles.grantable_capabilities_for) reasons from each
+# capability's role union. The manager-ladder QC POST routes therefore live on
+# a curated products:qc key -- mapping them to the generic products:write would
+# have let a STORE_MANAGER grant full product create/edit (real escalation,
+# caught by tests/test_permissions_router.py on CI).
+
+
+class TestQcCapabilityIsolation:
+    def test_qc_routes_map_to_curated_products_qc(self):
+        from api.services import capabilities as C
+
+        assert (
+            C.capability_for("POST", "/api/v1/products/qc-samples/generate")
+            == "products:qc"
+        )
+        assert C.capability_for("GET", "/api/v1/products/qc-samples") == "products:qc"
+        # concrete id path resolves through the {item_id} template identically
+        assert (
+            C.capability_for("POST", "/api/v1/products/qc-samples/abc-123/verdict")
+            == "products:qc"
+        )
+        assert "products:qc" in C.VALID_CAPABILITY_KEYS
+        assert not C.is_ungrantable("products:qc")
+
+    def test_products_write_union_not_broadened_by_qc_routes(self):
+        # The escalation this guards against: AREA/STORE managers joining the
+        # products:write role union via the QC rows. products:write must stay
+        # the catalog-mutation ladder only.
+        from api.services.capabilities import capability_roles
+
+        write_union = set(capability_roles("products:write"))
+        assert {"AREA_MANAGER", "STORE_MANAGER"}.isdisjoint(write_union), write_union
+        # products:qc carries the manager ladder instead.
+        qc_union = set(capability_roles("products:qc"))
+        assert {"ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"} <= qc_union
+
+    def test_store_manager_grants_qc_not_products_write(self):
+        from api.services.user_roles import grantable_capabilities_for
+
+        for role in ("STORE_MANAGER", "AREA_MANAGER"):
+            grantable = grantable_capabilities_for([role])
+            assert "products:write" not in grantable, role
+            assert "products:qc" in grantable, role
+        # the catalog-mutation ladder still grants products:write
+        assert "products:write" in grantable_capabilities_for(["CATALOG_MANAGER"])
+        assert "products:write" in grantable_capabilities_for(["ADMIN"])
+
+    def test_scorecard_and_roster_gets_do_not_broaden_grants(self):
+        # /products/cataloguers + /products/cataloguing-scorecard stay
+        # products:read, whose union is already AUTHENTICATED-broad (GET
+        # /products is AUTHENTICATED) -- so those rows broaden nothing.
+        from api.services import capabilities as C
+
+        assert (
+            C.capability_for("GET", "/api/v1/products/cataloguing-scorecard")
+            == "products:read"
+        )
+        assert C.capability_for("GET", "/api/v1/products/cataloguers") == "products:read"
+        assert "AUTHENTICATED" in C.capability_roles("products:read")
