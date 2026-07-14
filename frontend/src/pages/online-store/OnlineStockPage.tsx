@@ -180,27 +180,15 @@ export default function OnlineStockPage() {
           {(['ALL', 'AT_RISK'] as RiskFilter[]).map((f) => {
             const active = filter === f;
             const label = f === 'ALL' ? 'All' : 'Oversell-risk';
-            const activeClass =
-              f === 'AT_RISK'
-                ? 'bg-red-100 text-red-700 border-red-200'
-                : 'bg-gray-900 text-white border-gray-900';
             return (
               <button
                 key={f}
                 type="button"
                 onClick={() => setFilter(f)}
-                className={
-                  'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ' +
-                  (active ? activeClass : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300')
-                }
+                className={active ? 'ims-chip ims-chip--on' : 'ims-chip'}
               >
                 {label}
-                <span
-                  className={
-                    'inline-flex items-center justify-center min-w-[1.25rem] rounded-full px-1 text-[11px] ' +
-                    (active ? 'bg-white/20' : 'bg-gray-100 text-gray-600')
-                  }
-                >
+                <span className="inline-flex items-center justify-center min-w-[1.25rem] rounded-full px-1 text-[11px] bg-gray-100 text-gray-600">
                   {counts[f]}
                 </span>
               </button>

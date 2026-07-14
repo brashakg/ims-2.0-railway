@@ -902,12 +902,7 @@ export function InventoryPage() {
             <button
               key={f}
               onClick={() => setAvailabilityFilter(f)}
-              className={clsx(
-                'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors inline-flex items-center gap-1.5 border',
-                availabilityFilter === f
-                  ? 'bg-bv-red-50 text-gray-900 border-bv-red-500'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-transparent',
-              )}
+              className={clsx('ims-chip', availabilityFilter === f && 'ims-chip--on')}
             >
               {f === 'online' && <Globe className="w-3.5 h-3.5" strokeWidth={1.6} />}
               {f === 'all' ? 'All' : f === 'online' ? 'Online' : 'Offline'}
@@ -958,12 +953,7 @@ export function InventoryPage() {
         <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
           <button
             onClick={() => setSelectedCategory(null)}
-            className={clsx(
-              'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors',
-              !selectedCategory
-                ? 'bg-bv-red-600 text-white'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            )}
+            className={clsx('ims-chip', !selectedCategory && 'ims-chip--on')}
           >
             All
           </button>
@@ -974,16 +964,9 @@ export function InventoryPage() {
               <button
                 key={cat.code}
                 onClick={() => setSelectedCategory(cat.code)}
-                className={clsx(
-                  'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors inline-flex items-center gap-1.5 border',
-                  /* DELTAS Critical #4: canonical selected state is
-                     bv-50 fill + bv-500 border + ink text (mirrors
-                     the Returns Exchange card). Solid red was
-                     reserved for one hero CTA per screen. */
-                  selected
-                    ? 'bg-bv-red-50 text-gray-900 border-bv-red-500'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-transparent',
-                )}
+                /* Canonical filter-chip pattern (index.css .ims-chip):
+                   selected = BV red text on a faint red tint. */
+                className={clsx('ims-chip', selected && 'ims-chip--on')}
               >
                 <IconCmp className="w-3.5 h-3.5" strokeWidth={1.6} />
                 <span>{cat.label}</span>

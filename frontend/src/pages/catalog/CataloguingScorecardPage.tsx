@@ -310,12 +310,7 @@ export default function CataloguingScorecardPage() {
               <button
                 key={w}
                 onClick={() => setDays(w)}
-                className={clsx(
-                  'px-3 py-1.5 rounded-full text-sm font-medium border transition-colors',
-                  days === w
-                    ? 'bg-gray-900 text-white border-gray-900'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-transparent',
-                )}
+                className={clsx('ims-chip', days === w && 'ims-chip--on')}
               >
                 {w} days
               </button>
@@ -510,12 +505,7 @@ export default function CataloguingScorecardPage() {
                 <button
                   key={s}
                   onClick={() => setQcStatusFilter(s)}
-                  className={clsx(
-                    'px-3 py-1.5 rounded-full text-xs font-medium border transition-colors',
-                    qcStatusFilter === s
-                      ? 'bg-gray-900 text-white border-gray-900'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-transparent',
-                  )}
+                  className={clsx('ims-chip', qcStatusFilter === s && 'ims-chip--on')}
                 >
                   {s === 'ALL' ? 'All' : s === 'PENDING' ? 'Pending' : 'Reviewed'}
                 </button>

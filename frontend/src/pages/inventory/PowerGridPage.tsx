@@ -699,11 +699,7 @@ function MatrixView({ line, storeId, onBack, onCellClick, refreshKey, onErrorToa
                 key={String(a)}
                 type="button"
                 onClick={() => setActiveAdd(a)}
-                className={
-                  `px-3 py-1 text-xs font-medium rounded-full border transition ${active
-                    ? 'bg-bv text-white border-bv'
-                    : 'bg-white text-ink-3 border-line hover:bg-bv-50 hover:text-bv'}`
-                }
+                className={active ? 'ims-chip ims-chip--on' : 'ims-chip'}
               >
                 {label}
               </button>

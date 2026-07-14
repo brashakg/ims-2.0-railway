@@ -73,11 +73,7 @@ function Chip({
       type="button"
       onClick={onClick}
       aria-pressed={selected}
-      className={
-        selected
-          ? 'px-3 py-1.5 rounded-full text-sm border border-gray-900 bg-gray-900 text-white'
-          : 'px-3 py-1.5 rounded-full text-sm border border-gray-200 bg-white text-gray-700 hover:border-gray-400'
-      }
+      className={selected ? 'ims-chip ims-chip--on' : 'ims-chip'}
     >
       {label}
     </button>

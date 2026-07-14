@@ -358,7 +358,7 @@ export default function DesignQueuePage() {
           onClick={() => setFilter('ALL')}
           label="All"
           count={counts.ALL}
-          activeClass="bg-gray-900 text-white border-gray-900"
+          activeClass="ims-chip--on"
         />
         {IMAGE_DESIGN_STATUSES.map((s) => (
           <FilterChip
@@ -367,7 +367,7 @@ export default function DesignQueuePage() {
             onClick={() => setFilter(s)}
             label={STATUS_META[s].label}
             count={counts[s]}
-            activeClass={STATUS_META[s].chip}
+            activeClass="ims-chip--on"
           />
         ))}
       </div>
@@ -470,18 +470,10 @@ function FilterChip({
       type="button"
       onClick={onClick}
       aria-pressed={active ? "true" : "false"}
-      className={
-        'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ' +
-        (active ? activeClass : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50')
-      }
+      className={'ims-chip' + (active ? ' ' + activeClass : '')}
     >
       {label}
-      <span
-        className={
-          'inline-flex items-center justify-center min-w-[1.25rem] rounded-full px-1 text-[11px] ' +
-          (active ? 'bg-white/25' : 'bg-gray-100 text-gray-600')
-        }
-      >
+      <span className="inline-flex items-center justify-center min-w-[1.25rem] rounded-full px-1 text-[11px] bg-gray-100 text-gray-600">
         {count}
       </span>
     </button>

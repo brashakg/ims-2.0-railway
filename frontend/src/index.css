@@ -3143,8 +3143,13 @@ main .text-gray-400, .fixed.inset-0 .text-gray-400 { color: #6b7280; }
 main .bg-gray-700:not(button):not(.btn-primary):not(.btn-secondary),
 .fixed.inset-0 .bg-gray-700:not(button) { background-color: #f3f4f6; }
 
-main .bg-gray-800:not(aside *), .fixed.inset-0 .bg-gray-800 { background-color: #ffffff; }
-main .bg-gray-900:not(aside *), .fixed.inset-0 .bg-gray-900 { background-color: #f9fafb; }
+/* 2026-07-14 root-cause fix: these bleach rules MUST exclude <button>.
+   The text-white rules above deliberately skip buttons, so a button authored
+   `bg-gray-900 text-white` kept its white TEXT while its dark FILL was bleached
+   to near-white here — white-on-white (invisible selected filter pills, CTAs).
+   Mirrors the :not(button) guard the bg-gray-700 rule already had. */
+main .bg-gray-800:not(aside *):not(button), .fixed.inset-0 .bg-gray-800:not(button) { background-color: #ffffff; }
+main .bg-gray-900:not(aside *):not(button), .fixed.inset-0 .bg-gray-900:not(button) { background-color: #f9fafb; }
 
 /* --- Dark borders → light --- */
 main .border-gray-600, .fixed.inset-0 .border-gray-600 { border-color: #d1d5db; }
@@ -3158,8 +3163,8 @@ main .divide-gray-800 > :not(:last-child), .fixed.inset-0 .divide-gray-800 > :no
 
 /* --- Hover states → light --- */
 main .hover\:bg-gray-700:hover, .fixed.inset-0 .hover\:bg-gray-700:hover { background-color: #e5e7eb !important; }
-main .hover\:bg-gray-800:hover, .fixed.inset-0 .hover\:bg-gray-800:hover { background-color: #f3f4f6 !important; }
-main .hover\:bg-gray-900:hover { background-color: #f3f4f6 !important; }
+main .hover\:bg-gray-800:hover:not(button), .fixed.inset-0 .hover\:bg-gray-800:hover:not(button) { background-color: #f3f4f6 !important; }
+main .hover\:bg-gray-900:hover:not(button) { background-color: #f3f4f6 !important; }
 
 /* --- Ring/focus --- */
 main .ring-gray-700, main .ring-gray-600 { --tw-ring-color: #d1d5db; }
@@ -3273,9 +3278,16 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 .crumbs { min-width: 0; }
 .crumbs .cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---- Store pill: responsive truncation ---- */
+/* ---- Store pill: responsive truncation ----
+   Owner 2026-07-14: the old hard 200px cap truncated the store NAME
+   ("GANGADHAM…") while the header had plenty of empty space. Let the pill
+   grow with the viewport — content-sized up to a viewport-relative cap — and
+   only ellipsize when genuinely tight. (This rule intentionally overrides the
+   earlier min-width: 240/360/480px block: min-width 0 keeps the pill able to
+   yield so the crumbs / search / bell are never pushed off-screen.)
+   Cap curve: ~200px at 768w, ~300px at 1024w, ~415px at 1280w, 480px max. */
 .store-pill {
-  max-width: 200px;       /* desktop cap */
+  max-width: clamp(200px, 45vw - 160px, 480px);
   min-width: 0;
 }
 .store-pill .name {
@@ -3283,7 +3295,12 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  flex-shrink: 1;         /* the NAME absorbs free space and yields first */
 }
+/* dot / code / chevron keep their size; only the name flexes */
+.store-pill .dot,
+.store-pill .code,
+.store-pill svg { flex-shrink: 0; }
 /* Mobile: hide the long name, show the code (e.g. BV-BOK-01) */
 .store-pill .code { display: none; }
 
@@ -3588,3 +3605,46 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 /* 12 — Section dividers: hairline with a little air, for long settings-style
    pages (opt-in utility). */
 .ims-divider { border: 0; border-top: 1px solid var(--line-soft); margin: 20px 0; }
+
+/* ============================================================================
+   13 — Canonical FILTER-CHIP pattern (owner 2026-07-14: "make text our red
+   colour when selected, and make sure the same pattern is followed throughout
+   the app").
+   Use on interactive select-one / select-many FILTER pills ONLY — never on
+   status badges, count pills, the store-pill, or real CTAs.
+   Usage: <button className="ims-chip">…  selected → add "ims-chip--on".
+   Components must carry ONLY these classes plus layout utilities (margins,
+   flex-position) — no competing bg-*/text-*/border-* Tailwind utilities.
+   NO dark fills here on purpose: the light-theme bridge bleaches dark
+   backgrounds, which is exactly how the old white-on-white pills happened.
+   ============================================================================ */
+.ims-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;                   /* px-3 py-1 */
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 9999px;
+  background: #ffffff;
+  color: #374151;                      /* gray-700 */
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+.ims-chip:hover {
+  background: #f9fafb;                 /* gray-50 */
+  border-color: #d1d5db;               /* gray-300 */
+}
+/* Selected: BV red text on a faint red tint. Hover state pinned so a selected
+   chip doesn't grey out on mouse-over. focus-visible comes from the global
+   ring (rule 10 above). */
+.ims-chip--on,
+.ims-chip--on:hover {
+  color: var(--bv, #CD201A);
+  background: rgba(205, 32, 26, .06);
+  border-color: rgba(205, 32, 26, .35);
+  font-weight: 600;
+}
