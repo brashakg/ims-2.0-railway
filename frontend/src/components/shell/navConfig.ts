@@ -100,6 +100,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // system — governed chip builder + per-collection stock/sales KPIs.
       // requireRoles mirrors the /collections ProtectedRoute gate in App.tsx.
       { id: 'collections', label: 'Collections', to: '/collections', icon: 'layers', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      // Share Catalogue: pick products -> share as PDF / save a temporary set.
+      // Broad staff surface (anyone helping a customer); mirrors the
+      // /catalog/quick-share ProtectedRoute gate + AUTHENTICATED backend routes.
+      { id: 'quick-share', label: 'Share Catalogue', to: '/catalog/quick-share', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'OPTOMETRIST', 'CASHIER'] },
     ],
   },
   {
