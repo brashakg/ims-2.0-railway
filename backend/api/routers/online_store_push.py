@@ -166,6 +166,16 @@ async def push_collection(
     doc = repo.get_by_id(collection_id) if repo else None
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
+    # Temporary "share as PDF" collections are internal, auto-expiring sharing
+    # sets -- NEVER a storefront collection. Refuse to push one even if targeted
+    # by hand (structural exclusion: they also carry sync_to_shopify=False /
+    # published=False). This is the one isolated sync-selection guard; the push
+    # engine (services/shopify_push.py) is intentionally not touched.
+    if doc.get("is_temporary") or doc.get("sync_to_shopify") is False:
+        raise HTTPException(
+            status_code=400,
+            detail="Temporary collections are internal sharing sets and are never pushed to Shopify",
+        )
     result = await shopify_push.push_collection(db, doc)
     data = result.to_dict()
     _write_audit(data, current_user)

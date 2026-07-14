@@ -11,12 +11,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Layers, Plus, Search, Loader2, Sparkles, ListChecks } from 'lucide-react';
+import { Layers, Plus, Search, Loader2, Sparkles, ListChecks, FileDown } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
   collectionsInsightsApi,
   type CollectionSummaryRow,
 } from '../../services/api/collectionsInsights';
+import CataloguePdfModal from '../../components/catalogue/CataloguePdfModal';
 import { rupee, fmtInt, basisLabel } from './collectionsShared';
 
 // Roles that may CREATE from this surface (a pure STORE_MANAGER is view-only;
@@ -36,6 +37,8 @@ export default function CollectionsListPage() {
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
   const [search, setSearch] = useState('');
+  // "Share as PDF" target (collection id + title) for the reusable modal.
+  const [shareTarget, setShareTarget] = useState<{ id: string; title: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -194,6 +197,21 @@ export default function CollectionsListPage() {
                     >
                       {c.published ? 'Online' : 'Internal'}
                     </span>
+                    {/* Share as PDF — opens the reusable modal (preventDefault so
+                        the card link does not navigate). */}
+                    <button
+                      type="button"
+                      title="Share as PDF"
+                      aria-label="Share as PDF"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setShareTarget({ id: c.collection_id, title: c.title || 'Collection' });
+                      }}
+                      className="text-gray-400 hover:text-bv-red-600"
+                    >
+                      <FileDown size={14} />
+                    </button>
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
@@ -226,6 +244,13 @@ export default function CollectionsListPage() {
           })}
         </div>
       )}
+
+      <CataloguePdfModal
+        open={!!shareTarget}
+        onClose={() => setShareTarget(null)}
+        collectionId={shareTarget?.id}
+        title={shareTarget?.title}
+      />
     </div>
   );
 }

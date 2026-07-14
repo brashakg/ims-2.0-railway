@@ -135,6 +135,7 @@ from .routers import (
     online_store_discount_rules_router,
     online_store_orders_router,
     online_store_refund_reviews_router,
+    catalogue_pdf_router,
     ondc_router,
     approvals_router,
 )
@@ -1664,6 +1665,18 @@ app.include_router(
     online_store_images_router,
     prefix="/api/v1/online-store/images",
     tags=["Online Store - Images"],
+)
+# Catalogue PDF + Temporary Collections (Share collection as PDF). Build a
+# branded A4 catalogue PDF from a collection OR a hand-picked product_ids list
+# (toggles: product details / MRP), plus save a hand-picked selection as a
+# TEMPORARY, auto-expiring (<=7d TTL) internal sharing set that is NEVER pushed
+# to Shopify. Every route is AUTHENTICATED (broad staff activity -- anyone
+# helping a customer) + catalogued in rbac_policy.POLICY. Mounted at
+# /api/v1/catalogue. See routers/catalogue_pdf.py + services/catalogue_pdf.py.
+app.include_router(
+    catalogue_pdf_router,
+    prefix="/api/v1/catalogue",
+    tags=["Catalogue PDF"],
 )
 # Shopify PUSH sub-module (BVI Phase 5). The IMS -> Shopify GraphQL push for
 # product / collection / menu / image + a status surface -- BUILT DARK: every

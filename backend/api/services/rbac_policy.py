@@ -4753,6 +4753,30 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/all-pending",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # --- /api/v1/catalogue ---  (Share collection as PDF + temp collections)
+    # Catalogue sharing is a broad staff activity (anyone helping a customer),
+    # so these are AUTHENTICATED -- the same posture as the internal catalogue
+    # browse (GET /products, GET /collections). Build a branded PDF from a
+    # collection OR a hand-picked product_ids list, and save a hand-picked
+    # selection as a TEMPORARY, auto-expiring internal sharing set (never pushed
+    # to Shopify). The literal /temp-collections out-ranks the {collection_id}
+    # param route in the matcher. See routers/catalogue_pdf.py.
+    {"method": "POST", "path": "/api/v1/catalogue/pdf", "allowed": AUTHENTICATED},
+    {
+        "method": "POST",
+        "path": "/api/v1/catalogue/temp-collections",
+        "allowed": AUTHENTICATED,
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/catalogue/temp-collections",
+        "allowed": AUTHENTICATED,
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/catalogue/temp-collections/{collection_id}",
+        "allowed": AUTHENTICATED,
+    },
     # --- /api/v1/online-store/orders ---  (BVI Phase 3b: online sales into IMS books)
     # The read + recovery surface over the canonical IMS orders that
     # online_order_mapper creates from Shopify orders (channel='ONLINE', GST invoice

@@ -49,5 +49,13 @@ python-dateutil==2.9.0.post0
 # paths work without it, the xlsx path 400s cleanly when absent).
 openpyxl==3.1.5
 
+# Catalogue PDF (Share collection as PDF). reportlab is PURE-PYTHON with no
+# native system libraries (unlike weasyprint's pango/cairo) -> Railway-safe;
+# Pillow (manylinux wheels, no runtime system deps) normalises fetched product
+# images (any format -> RGB JPEG, downscaled) before embedding. Both lazy-imported
+# inside services/catalogue_pdf.py so a missing wheel can't crash app startup.
+reportlab==4.2.5
+Pillow==11.3.0
+
 # Production Server (optional, uvicorn is primary)
 gunicorn==23.0.0
