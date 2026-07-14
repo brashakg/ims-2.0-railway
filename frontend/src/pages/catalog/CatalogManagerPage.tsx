@@ -671,12 +671,7 @@ export function CatalogManagerPage() {
           <button
             type="button"
             onClick={() => setCategory('')}
-            className={clsx(
-              'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
-              category === ''
-                ? 'bg-gray-900 text-white border-gray-900'
-                : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
-            )}
+            className={clsx('ims-chip', category === '' && 'ims-chip--on')}
           >
             All
           </button>
@@ -685,12 +680,7 @@ export function CatalogManagerPage() {
               key={o.value}
               type="button"
               onClick={() => setCategory((c) => (c === o.value ? '' : o.value))}
-              className={clsx(
-                'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
-                category === o.value
-                  ? 'bg-gray-900 text-white border-gray-900'
-                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
-              )}
+              className={clsx('ims-chip', category === o.value && 'ims-chip--on')}
             >
               {o.label}
             </button>

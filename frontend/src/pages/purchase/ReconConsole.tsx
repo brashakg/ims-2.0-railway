@@ -1313,18 +1313,10 @@ export default function ReconConsole() {
               role="tab"
               aria-selected={activeChip === id}
               onClick={() => setActiveChip(id)}
-              className={[
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors border',
-                activeChip === id
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50',
-              ].join(' ')}
+              className={activeChip === id ? 'ims-chip ims-chip--on' : 'ims-chip'}
             >
               {label}
-              <span className={[
-                'text-[10px] px-1.5 py-0.5 rounded-full',
-                activeChip === id ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500',
-              ].join(' ')}>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">
                 {chipCounts[id] ?? 0}
               </span>
             </button>

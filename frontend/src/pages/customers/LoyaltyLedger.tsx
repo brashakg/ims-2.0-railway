@@ -291,11 +291,7 @@ function FilterChip({ label, active, onClick }: FilterChipProps) {
   return (
     <button
       onClick={onClick}
-      className={`px-3 py-1 rounded-full text-xs font-medium border ${
-        active
-          ? 'bg-bv-red-600 text-white border-bv-red-600'
-          : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
-      }`}
+      className={active ? 'ims-chip ims-chip--on' : 'ims-chip'}
     >
       {label}
     </button>
