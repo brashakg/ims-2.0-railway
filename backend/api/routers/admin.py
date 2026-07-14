@@ -1000,6 +1000,18 @@ async def online_store_rehost_images(
     return rehost_uploads_images(_sync_health_db(), dry_run=dry_run, limit=limit)
 
 
+def _default_cutover_topics() -> List[str]:
+    """The full BVI-retirement cutover topic set (single source of truth lives on
+    shopify_push.CUTOVER_WEBHOOK_TOPICS). Imported lazily so admin.py load never
+    pulls in the push engine."""
+    try:
+        from ..services.shopify_push import CUTOVER_WEBHOOK_TOPICS
+
+        return list(CUTOVER_WEBHOOK_TOPICS)
+    except Exception:  # noqa: BLE001 -- never let a default break request parsing
+        return ["orders/create"]
+
+
 class RegisterWebhooksRequest(BaseModel):
     """Body for POST /online-store/register-webhooks."""
 
@@ -1010,8 +1022,15 @@ class RegisterWebhooksRequest(BaseModel):
             "domain). The receiver path /api/v1/webhooks/shopify is appended."
         ),
     )
-    topics: List[str] = Field(default_factory=lambda: ["orders/create"])
+    # DEFAULTS to the full cutover set (order lifecycle + refunds/create +
+    # fulfillments/create,update + customers/create,update) -- everything the
+    # IMS receiver now handles once BVI is retired.
+    topics: List[str] = Field(default_factory=_default_cutover_topics)
     apply: bool = False
+    # When True (with apply=True + gates LIVE), also DELETE any surfaced conflict
+    # (same topic still pointing at BVI) so each topic delivers exactly once after
+    # the baton hand-off. Off by default: conflicts are only surfaced.
+    delete_conflicts: bool = False
 
 
 @router.post("/online-store/register-webhooks")
@@ -1048,6 +1067,7 @@ async def online_store_register_webhooks(
         body.callback_base_url,
         topics=body.topics,
         apply=body.apply,
+        delete_conflicts=body.delete_conflicts,
     )
     # Chained audit row for every registration ATTEMPT (dry-run or applied).
     # Fail-soft: an audit error never undoes/blocks the registration result.
@@ -1069,6 +1089,8 @@ async def online_store_register_webhooks(
                         "ok": result.get("ok"),
                         "topics": result.get("topics"),
                         "created": result.get("created"),
+                        "deleted_conflicts": result.get("deleted_conflicts"),
+                        "conflicts": result.get("conflicts"),
                         "errors": result.get("errors"),
                         "reason": result.get("reason"),
                     },
