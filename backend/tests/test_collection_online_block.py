@@ -268,7 +268,12 @@ def test_block_endpoint_sets_flag_and_plans_delist(
     body = r.json()
     assert body["blocked"] is True
     assert body["member_count"] == 1
-    assert body["delisted"] == 1
+    # HONEST DARK REPORTING (finding #14): the gates are DARK, so the delist was
+    # only SIMULATED -- report it as PLANNED, not done. delisted (real LIVE
+    # writes) MUST be 0; planned MUST be 1.
+    assert body["delisted"] == 0
+    assert body["planned"] == 1
+    assert body["truncated"] is False
     assert body["delist_results"][0]["action"] == "delist"
     assert body["delist_results"][0]["mode"] == "SIMULATED"
 
@@ -383,3 +388,258 @@ def test_block_route_resolves_not_shadowed_by_bare_collection_id():
     assert hit is not None and hit["path"].endswith("/block")
     hit2 = rbac.policy_for("POST", "/api/v1/online-store/collections/C1/unblock")
     assert hit2 is not None and hit2["path"].endswith("/unblock")
+
+
+# ===========================================================================
+# 7. ADVERSARIAL-REVIEW FIXES (#14-#20)
+# ===========================================================================
+
+from api.routers import online_store_collections as osc  # noqa: E402
+from api.routers import online_store_push as osp  # noqa: E402
+
+
+def _force_live(monkeypatch, graphql_fn):
+    """Open all three push gates on shopify_push's namespace + install a fake
+    _graphql (no real network). Restored by monkeypatch."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
+    monkeypatch.setattr(
+        shopify_push,
+        "resolve_shopify_credentials",
+        lambda db: {"shop_url": "t.myshopify.com", "access_token": "shpat_x"},
+    )
+    monkeypatch.setattr(shopify_push, "_graphql", graphql_fn)
+
+
+def _dispatch_graphql(handlers):
+    """Build an async _graphql replacement: dispatch on a query substring to a
+    handler(variables)->response. Records every call on `.calls`."""
+    calls = []
+
+    async def _fake(db, query, variables):
+        calls.append({"query": query, "variables": variables})
+        for marker, fn in handlers:
+            if marker in query:
+                return fn(variables)
+        return {"data": {}}
+
+    _fake.calls = calls
+    return _fake
+
+
+# --- #14: honest dark reporting -- LIVE counts delisted, dark counts planned ---
+
+def test_block_live_counts_delisted_not_planned(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """When the gates are LIVE a real productUpdate fires -> delisted increments,
+    planned stays 0 (the mirror of the dark test above which asserts the opposite)."""
+    conn = patched_db
+    _force_live(
+        monkeypatch,
+        _dispatch_graphql(
+            [(
+                "productUpdate",
+                lambda v: {"data": {"productUpdate": {"product": {"id": "gid://shopify/Product/1"}, "userErrors": []}}},
+            )]
+        ),
+    )
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "CL", "title": "Gucci", "handle": "gucci-live",
+         "collection_type": "CUSTOM", "online_sync_blocked": False,
+         "products": [{"sku": "SKU-A", "position": 0}]}
+    )
+    conn.db["catalog_products"].insert_one(
+        {"id": "P-A", "sku": "SKU-A",
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}}
+    )
+    r = client.post("/api/v1/online-store/collections/CL/block", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["delisted"] == 1  # a REAL LIVE write happened
+    assert body["planned"] == 0
+    assert body["delist_results"][0]["mode"] == "LIVE"
+
+
+# --- #15: SMART >1000-member resolution is not silently truncated ---
+
+def test_block_members_smart_over_1000_not_truncated_at_preview_cap(monkeypatch):
+    """A SMART block resolves the FULL banned set, not the 1000 preview cap: 1200
+    matching products all come back and truncated stays False (finding #15)."""
+    products = [{"sku": f"S{i}", "brand": "Gucci"} for i in range(1200)]
+    monkeypatch.setattr(osc, "_catalog_products", lambda: products)
+    doc = {"collection_id": "C-SMART", "collection_type": "SMART",
+           "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
+    skus, truncated = osc._resolve_block_members(doc)
+    assert len(skus) == 1200  # NOT capped at the old _RESOLVE_MAX (1000)
+    assert truncated is False
+
+
+def test_block_members_truncation_is_surfaced_not_silent(monkeypatch):
+    """When even the higher block cap is hit, `truncated` is True (surfaced, so a
+    partial delist/requeue is never silent)."""
+    monkeypatch.setattr(osc, "_BLOCK_RESOLVE_MAX", 3)
+    products = [{"sku": f"S{i}", "brand": "Gucci"} for i in range(10)]
+    monkeypatch.setattr(osc, "_catalog_products", lambda: products)
+    doc = {"collection_id": "C-SMART", "collection_type": "SMART",
+           "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
+    skus, truncated = osc._resolve_block_members(doc)
+    assert len(skus) == 3
+    assert truncated is True
+
+
+# --- #16: delete_conflicts never deletes on a FAILED replacement create ---
+
+def test_register_webhooks_conflict_delete_only_after_successful_create(monkeypatch):
+    """Two conflicting topics: one create SUCCEEDS (its BVI conflict may be
+    deleted), one create FAILS (its BVI conflict is KEPT -- deleting it would
+    leave the topic delivering nowhere). Finding #16."""
+    cb = "https://api.example.com/api/v1/webhooks/shopify"
+
+    def _query(_v):
+        return {"data": {"webhookSubscriptions": {"edges": [
+            {"node": {"id": "gid://bvi/1", "topic": "ORDERS_CREATE",
+                      "endpoint": {"__typename": "WebhookHttpEndpoint",
+                                   "callbackUrl": "https://old-bvi.app/hook"}}},
+            {"node": {"id": "gid://bvi/2", "topic": "ORDERS_UPDATED",
+                      "endpoint": {"__typename": "WebhookHttpEndpoint",
+                                   "callbackUrl": "https://old-bvi.app/hook"}}},
+        ], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+
+    def _create(v):
+        if v.get("topic") == "ORDERS_CREATE":
+            return {"data": {"webhookSubscriptionCreate": {
+                "webhookSubscription": {"id": "gid://ims/9", "topic": "ORDERS_CREATE"},
+                "userErrors": []}}}
+        # ORDERS_UPDATED create FAILS (e.g. missing scope)
+        return {"data": {"webhookSubscriptionCreate": {
+            "webhookSubscription": None,
+            "userErrors": [{"field": ["topic"], "message": "scope missing"}]}}}
+
+    _force_live(monkeypatch, _dispatch_graphql([
+        ("webhookSubscriptions(first", _query),
+        ("webhookSubscriptionCreate(", _create),
+    ]))
+
+    async def _del_spy(db, sub_id):
+        _del_spy.calls.append(sub_id)
+        return {"ok": True, "deleted": "gid://deleted", "errors": []}
+
+    _del_spy.calls = []
+    monkeypatch.setattr(shopify_push, "delete_webhook_subscription", _del_spy)
+
+    res = _run(shopify_push.register_webhooks(
+        _EngineDB(), "https://api.example.com",
+        topics=["orders/create", "orders/updated"], apply=True, delete_conflicts=True,
+    ))
+    # ORDERS_CREATE created -> its conflict deleted. ORDERS_UPDATED create failed
+    # -> its conflict KEPT (delete never called for it).
+    assert _del_spy.calls == ["gid://bvi/1"]
+    assert res["deleted_conflicts"] == [{"topic": "ORDERS_CREATE", "id": "gid://bvi/1"}]
+    assert any("skipped delete for ORDERS_UPDATED" in e for e in res["errors"])
+    assert res["ok"] is False  # a create failed
+
+
+# --- #17: a blocked product is excluded from the /all-pending sweep selection ---
+
+def test_all_pending_sweep_excludes_blocked_products(monkeypatch):
+    """A blocked dirty product is skipped BEFORE it consumes a limit slot or
+    writes a junk audit row; the clean dirty product is pushed (finding #17)."""
+    _force_dark(monkeypatch)
+    from api import dependencies as deps
+
+    conn = _FakeConn()
+    monkeypatch.setattr(deps, "get_db", lambda: conn)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
+
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C-BAN", "collection_type": "CUSTOM", "online_sync_blocked": True,
+         "products": [{"sku": "SKU-BAD", "position": 0}]}
+    )
+    conn.db["catalog_products"].insert_one(
+        {"id": "P-BAD", "sku": "SKU-BAD", "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+    )
+    conn.db["catalog_products"].insert_one(
+        {"id": "P-OK", "sku": "SKU-OK", "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+    )
+
+    out = _run(osp.push_all_pending(entities="products", limit=500,
+                                    current_user={"user_id": "u"}))
+    assert out["summary"]["products"]["blocked_skipped"] == 1
+    assert out["summary"]["products"]["pushed"] == 1
+    target_ids = [r.get("target_id") for r in out["results"]]
+    assert "P-OK" in target_ids
+    assert "P-BAD" not in target_ids  # never pushed, never audited
+
+
+# --- #18: the push path FAILS CLOSED when the block config can't be read ---
+
+class _RaisingColl:
+    def find(self, *a, **k):
+        raise RuntimeError("primary stepdown")
+
+    def find_one(self, *a, **k):
+        raise RuntimeError("primary stepdown")
+
+
+class _RaisingDB:
+    """db whose ecom_collections read raises (a transient Mongo error)."""
+
+    def __getitem__(self, name):
+        if name == "ecom_collections":
+            return _RaisingColl()
+        return MockCollection(name)
+
+
+def test_strict_classifier_returns_unknown_on_db_error():
+    db = _RaisingDB()
+    # STRICT (push path): a config read error is UNKNOWN (None), NOT a false clean.
+    assert online_block.is_blocked_from_online_strict({"sku": "X"}, db) is None
+    # FAIL-OPEN (availability): the same error still degrades to False (unchanged).
+    assert online_block.is_blocked_from_online({"sku": "X"}, db) is False
+
+
+def test_push_product_fails_closed_on_block_config_error(monkeypatch):
+    """A block-config read error must SKIP the push (fail closed), never fall
+    through to a SIMULATED/LIVE create that could ship a banned product (#18)."""
+    _force_dark(monkeypatch)  # boom-spy: also proves no network is reached
+    product = {"id": "P1", "sku": "X", "title": "T", "ecom": {"status": "PUBLISHED"}}
+    res = _run(shopify_push.push_product(_RaisingDB(), product, []))
+    assert res.mode == shopify_push.MODE_BLOCKED
+    assert res.action == "skip"
+    assert res.ok is False
+    assert res.reason == "block_status_unverifiable"
+
+
+# --- #19: the webhook registrar paginates past the first 100 subscriptions ---
+
+def test_register_webhooks_paginates_past_first_page(monkeypatch):
+    """A subscription already at IMS's URL on PAGE 2 is detected (already
+    registered), so it is not treated as missing / re-created (finding #19)."""
+    cb = "https://api.example.com/api/v1/webhooks/shopify"
+
+    def _query(v):
+        if v.get("after") is None:
+            # Page 1: 100 unrelated subs (elided) + hasNextPage -> page 2 exists.
+            return {"data": {"webhookSubscriptions": {"edges": [
+                {"node": {"id": "gid://x/1", "topic": "PRODUCTS_CREATE",
+                          "endpoint": {"__typename": "WebhookHttpEndpoint",
+                                       "callbackUrl": "https://other.app/h"}}},
+            ], "pageInfo": {"hasNextPage": True, "endCursor": "cursor1"}}}}
+        # Page 2: the ORDERS_CREATE sub already at OUR url.
+        return {"data": {"webhookSubscriptions": {"edges": [
+            {"node": {"id": "gid://x/2", "topic": "ORDERS_CREATE",
+                      "endpoint": {"__typename": "WebhookHttpEndpoint",
+                                   "callbackUrl": cb}}},
+        ], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+
+    fake = _dispatch_graphql([("webhookSubscriptions(first", _query)])
+    _force_live(monkeypatch, fake)
+
+    res = _run(shopify_push.register_webhooks(
+        _EngineDB(), "https://api.example.com", topics=["orders/create"], apply=False,
+    ))
+    # Page 2 was read -> ORDERS_CREATE is seen as already registered, not missing.
+    assert res["already_registered"] == ["ORDERS_CREATE"]
+    assert res["missing"] == []
+    assert len(fake.calls) == 2  # two query pages fetched

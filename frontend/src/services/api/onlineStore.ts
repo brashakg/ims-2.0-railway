@@ -567,16 +567,32 @@ export const collectionsApi = {
   // can toast it.
 
   /** Block a collection from online sale. Returns the block summary
-   *  {blocked, member_count, delisted, mode, ...}. */
+   *  {blocked, member_count, delisted, planned, isLive, truncated}.
+   *
+   *  HONEST DARK REPORTING: `delisted` counts only REAL (LIVE) Shopify writes;
+   *  `planned` counts delists that were merely SIMULATED because the push gates
+   *  are DARK (nothing actually changed on the storefront yet). `isLive` says
+   *  whether pushes are live so the caller can toast the truth. */
   block: async (
     id: string,
-  ): Promise<{ blocked: boolean; member_count: number; delisted: number }> => {
+  ): Promise<{
+    blocked: boolean;
+    member_count: number;
+    delisted: number;
+    planned: number;
+    isLive: boolean;
+    truncated: boolean;
+  }> => {
     const res = await api.post(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/block`);
     const d = (res?.data ?? {}) as Record<string, any>;
+    const modeObj = d.mode && typeof d.mode === 'object' ? (d.mode as Record<string, any>) : null;
     return {
       blocked: !!d.blocked,
       member_count: typeof d.member_count === 'number' ? d.member_count : 0,
       delisted: typeof d.delisted === 'number' ? d.delisted : 0,
+      planned: typeof d.planned === 'number' ? d.planned : 0,
+      isLive: modeObj ? !!modeObj.is_live : false,
+      truncated: !!d.truncated,
     };
   },
 
