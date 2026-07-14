@@ -178,9 +178,10 @@ export interface CataloguersResponse {
 // ---------------------------------------------------------------------------
 // Cataloguing scorecard (GET /products/cataloguing-scorecard) — attribution
 // phase 2. One row per user with creations (or promote approvals) in the
-// rolling window. corrections_received = corrections_classified (field-level
-// audit rows; pricing never counts) + corrections_approximate (edit doors
-// with no field history — documented server-side). Manager-ladder gated.
+// rolling window. corrections_received is fully field-classified (every edit
+// door writes field-level audit rows; pricing/stock/active-flag edits never
+// count); corrections_classified carries the same number. Manager-ladder
+// gated.
 // ---------------------------------------------------------------------------
 export interface ScorecardQcStats {
   sampled: number;
@@ -198,7 +199,6 @@ export interface ScorecardRow {
   approvals: number;
   corrections_received: number;
   corrections_classified: number;
-  corrections_approximate: number;
   category_coverage: Record<string, number>;
   qc: ScorecardQcStats;
 }

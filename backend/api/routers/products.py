@@ -2254,34 +2254,26 @@ async def cataloguing_scorecard(
     promotes), corrections_received, category_coverage, and QC stats from the
     qc_samples verdicts.
 
-    CORRECTIONS METRIC - what it can and cannot see
-    -----------------------------------------------
+    CORRECTIONS METRIC - fully field-classified
+    -------------------------------------------
     corrections_received counts DISTINCT products this user created in the
-    window that a DIFFERENT user edited within 30 days of creation. Two
-    signal sources, best available first:
+    window that a DIFFERENT user edited within 30 days of creation, where the
+    edit changed a CATALOGUING field. EVERY edit door now writes a
+    `product.updated` audit row carrying the patch's before/after keys -- the
+    product_master engine door (PUT /products/master/{id}), the spine PUT
+    (PUT /products/{id}), and the catalog-side PIM door
+    (PUT /catalog/products/{id}) -- so classification is complete: an edit
+    counts ONLY when a cataloguing field changed (category/brand/model/name/
+    title/description/images/attributes[.*]/hsn_code/gst_rate). Pricing
+    (mrp/offer_price/cost_price/discount_category), stock and is_active
+    changes NEVER count. corrections_classified carries the same number
+    (kept alongside the headline for continuity); the field-blind
+    "approximate" bucket (baseline middleware rows for catalog-door edits)
+    is RETIRED.
 
-      1. CLASSIFIED (corrections_classified): `product.updated` rows in the
-         hash-chained audit_logs (written ONLY by the product_master engine
-         door, PUT /products/master/{id}) carry before/after patch keys, so
-         these are field-classified: they count ONLY when a cataloguing field
-         changed (category/brand/model/name/title/description/images/
-         attributes[.*]/hsn_code/gst_rate). Pricing (mrp/offer_price/
-         cost_price/discount_category), stock and is_active changes NEVER
-         count here.
-      2. APPROXIMATE (corrections_approximate): ONLY the catalog-side PIM
-         door (PUT /catalog/products/{id}) still writes no field-level
-         history, so for it an other-user edit within 30 days of creation is
-         counted WITHOUT field classification (a pricing-only edit through
-         that door IS over-counted). The SPINE door (PUT /products/{id}) now
-         writes a compact product.updated row carrying the patch's changed
-         keys, so spine edits are fully CLASSIFIED -- pricing/is_active-only
-         spine edits never count -- and its baseline middleware rows are
-         EXCLUDED from the approximate bucket. The catalog door gains the
-         same classification in a follow-up once PR #911 (which owns
-         routers/catalog.py) lands; the approximate bucket then disappears.
-
-    A product flagged by source 1 is excluded from source 2 (no double count).
-    corrections_received = classified + approximate (distinct products).
+    NOTE: catalog-door edits made BEFORE its classified row shipped left only
+    field-blind baseline rows, which are no longer read -- those early edits
+    are invisible to this metric (acceptable: the door was hours old).
     """
     now = datetime.now()
     cutoff = now - timedelta(days=days)
@@ -2303,7 +2295,6 @@ async def cataloguing_scorecard(
                 "approvals": 0,
                 "corrections_received": 0,
                 "corrections_classified": 0,
-                "corrections_approximate": 0,
                 "category_coverage": {},
                 "qc": {"sampled": 0, "errors": 0, "error_rate": 0.0},
             },
@@ -2367,9 +2358,10 @@ async def cataloguing_scorecard(
     except Exception:  # noqa: BLE001
         pass
 
-    # ---- 3. Corrections (see docstring for the two-source design) ---------
+    # ---- 3. Corrections (field-classified; see docstring) ------------------
+    # Baseline middleware rows (action "UPDATE", no field detail) are ignored
+    # entirely: every edit door writes its own classified product.updated row.
     corrected_classified: set = set()
-    corrected_approx: set = set()
     pids = list(creators.keys())
     if pids:
         try:
@@ -2379,26 +2371,23 @@ async def cataloguing_scorecard(
                 audit_rows = audit.find(
                     {
                         "entity_id": {"$in": chunk},
-                        "action": {"$in": ["product.updated", "UPDATE"]},
+                        "action": "product.updated",
                         # Window bound so the (action, timestamp) / (entity_id,
                         # action) indexes can prune the append-only trail: any
                         # counted edit satisfies edited_at >= created_at >=
                         # cutoff (pre-creation edits are skipped below), and
-                        # both row sources always stamp `timestamp`.
+                        # every row source stamps `timestamp`.
                         "timestamp": {"$gte": cutoff},
                     },
                     {
                         "_id": 0,
                         "entity_id": 1,
-                        "action": 1,
                         "actor": 1,
                         "user_id": 1,
                         "timestamp": 1,
                         "ts": 1,
                         "before": 1,
                         "after": 1,
-                        "path": 1,
-                        "method": 1,
                     },
                 )
                 for r in audit_rows:
@@ -2418,42 +2407,23 @@ async def cataloguing_scorecard(
                         days=30
                     ):
                         continue
-                    if r.get("action") == "product.updated":
-                        keys = set((r.get("before") or {}).keys()) | set(
-                            (r.get("after") or {}).keys()
-                        )
-                        if any(
-                            k in _CATALOGUING_AUDIT_KEYS
-                            or str(k).startswith("attributes.")
-                            for k in keys
-                        ):
-                            corrected_classified.add(pid)
-                    else:
-                        # Baseline middleware row (no field detail): count ONLY
-                        # the catalog PIM PUT path -- the one door still without
-                        # field-level history (classification follows once
-                        # PR #911 lands). Spine PUTs (/products/{pid}) and
-                        # engine-door edits (/products/master/{pid}) both write
-                        # classified product.updated rows now, so their
-                        # baseline twins are deliberately NOT counted here.
-                        if str(r.get("method") or "") not in ("PUT", "PATCH"):
-                            continue
-                        path = str(r.get("path") or "")
-                        if path == f"/api/v1/catalog/products/{pid}":
-                            corrected_approx.add(pid)
+                    keys = set((r.get("before") or {}).keys()) | set(
+                        (r.get("after") or {}).keys()
+                    )
+                    if any(
+                        k in _CATALOGUING_AUDIT_KEYS
+                        or str(k).startswith("attributes.")
+                        for k in keys
+                    ):
+                        corrected_classified.add(pid)
         except Exception as exc:  # noqa: BLE001
             # Visible (not silent): a cursor timeout here would otherwise
             # masquerade as "zero corrections".
             logger.warning("[SCORECARD] corrections scan failed: %s", exc)
-    corrected_approx -= corrected_classified
     for pid in corrected_classified:
-        _row(creators[pid][0])["corrections_classified"] += 1
-    for pid in corrected_approx:
-        _row(creators[pid][0])["corrections_approximate"] += 1
-    for row in per_user.values():
-        row["corrections_received"] = (
-            row["corrections_classified"] + row["corrections_approximate"]
-        )
+        row = _row(creators[pid][0])
+        row["corrections_classified"] += 1
+        row["corrections_received"] += 1
 
     # ---- 4. QC stats (verdicts on samples drawn in the window) ------------
     try:
@@ -3264,11 +3234,13 @@ async def update_product(
         if repo.update(product_id, update_data):
             # Compact field-classified audit row (scorecard corrections): the
             # spine PUT is the primary FE edit door, and without this row an
-            # other-user pricing-only edit would be (over-)counted as an
-            # approximate correction. before/after carry the patch's changed
-            # top-level KEYS with light values only (heavy payloads elided) --
-            # the corrections classifier reads keys, not values. Fail-soft:
-            # an audit hiccup never blocks the product save.
+            # other-user pricing-only edit would be (over-)counted as a
+            # correction. before/after carry the patch's changed top-level
+            # KEYS with light values only (heavy payloads elided) -- the
+            # corrections classifier reads keys, not values. Twin: the catalog
+            # PIM door (catalog.update_catalog_product) writes the same row
+            # shape -- keep the two in sync. Fail-soft: an audit hiccup never
+            # blocks the product save.
             try:
                 _changed_keys = [
                     k

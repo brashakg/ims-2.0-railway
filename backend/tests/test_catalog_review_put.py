@@ -569,6 +569,107 @@ def test_put_stamps_updated_by_and_name_but_never_created_by(env):
 
 
 # ---------------------------------------------------------------------------
+# Compact classified audit row (cataloguing scorecard corrections) -- the
+# catalog twin of the spine PUT's row in products.update_product. The
+# scorecard classifier reads before/after KEYS, so the row must carry ONLY
+# the top-level keys the CALLER's patch touched (heavy payloads elided).
+# ---------------------------------------------------------------------------
+
+
+def test_put_writes_compact_classified_audit_row(env):
+    doc = _bvi_doc(doc_id="clx0rvaud001")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(doc["id"], {"pricing": {"offer_price": 4200.0}, "hsn_code": "900410"})
+
+    rows = [r for r in env["audit"].rows if r.get("action") == "product.updated"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["entity_id"] == doc["id"]  # catalog id == spine product_id
+    assert row["actor"] == "reviewer-1"
+    assert row["user_id"] == "reviewer-1"
+    assert row["actor_name"] == "reviewer"  # full_name absent -> username
+    assert row["source"] == "catalog_put"
+    # ONLY the caller's touched top-level keys, with light values carried.
+    assert set(row["after"].keys()) == {"pricing", "hsn_code"}
+    assert row["before"]["hsn_code"] == "900311"
+    assert row["after"]["hsn_code"] == "900410"
+    assert row["before"]["pricing"]["offer_price"] == 4500.0
+    assert row["after"]["pricing"]["offer_price"] == 4200.0
+
+
+def test_put_audit_row_elides_heavy_fields(env):
+    doc = _bvi_doc(doc_id="clx0rvaud002")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(
+        doc["id"],
+        {
+            "attributes": {"colour_code": "RED"},
+            "images": ["https://cdn.example/img.jpg"],
+            "description": "x" * 500,
+        },
+    )
+
+    rows = [r for r in env["audit"].rows if r.get("action") == "product.updated"]
+    assert len(rows) == 1
+    assert rows[0]["after"] == {
+        "attributes": "[changed]",
+        "images": "[changed]",
+        "description": "[changed]",
+    }
+    assert rows[0]["before"] == rows[0]["after"]
+
+
+def test_put_audit_excludes_expected_updated_at(env):
+    # The concurrency token is never a field change -- recording it would
+    # make every full-page-editor save classify as a correction.
+    doc = _bvi_doc(doc_id="clx0rvaud003")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    _put(
+        doc["id"],
+        {"expected_updated_at": "2026-07-10T10:00:00", "gst_rate": 12.0},
+    )
+
+    rows = [r for r in env["audit"].rows if r.get("action") == "product.updated"]
+    assert len(rows) == 1
+    assert set(rows[0]["after"].keys()) == {"gst_rate"}
+
+
+def test_put_audit_failure_is_fail_soft(env, monkeypatch):
+    # An audit-write failure must NEVER fail the save (same posture as the
+    # spine PUT's twin).
+    class _Boom:
+        def create(self, row):
+            raise RuntimeError("audit down")
+
+    monkeypatch.setattr(deps_mod, "get_audit_repository", lambda: _Boom())
+    doc = _bvi_doc(doc_id="clx0rvaud004")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    res = _put(doc["id"], {"description": "still saves"})
+
+    assert res["message"] == "Product updated successfully"
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["description"] == "still saves"
+
+
+def test_409_put_writes_no_audit_row(env):
+    # The audit row is written only AFTER a successful save: a stale
+    # expected_updated_at 409s before anything lands.
+    doc = _bvi_doc(doc_id="clx0rvaud005")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+
+    with pytest.raises(HTTPException):
+        _put(
+            doc["id"],
+            {"expected_updated_at": "2026-07-09T09:00:00", "description": "x"},
+        )
+
+    assert not [r for r in env["audit"].rows if r.get("action") == "product.updated"]
+
+
+# ---------------------------------------------------------------------------
 # name/tags survive promote to the spine row
 # ---------------------------------------------------------------------------
 

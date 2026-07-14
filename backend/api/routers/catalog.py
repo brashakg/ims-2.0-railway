@@ -1767,6 +1767,10 @@ async def update_catalog_product(
     # lands). Shallow is enough -- every field below is REPLACED, not mutated
     # in place.
     existing = dict(existing)
+    # Pre-edit snapshot for the scorecard audit row written after the save:
+    # top-level values are REPLACED below (never mutated in place), so a
+    # second shallow copy preserves the original values.
+    pre_edit = dict(existing)
 
     # Additive optimistic concurrency (full-page review editor): the client
     # echoes the updated_at it loaded; a mismatch means another reviewer saved
@@ -1970,6 +1974,80 @@ async def update_catalog_product(
             )
     else:
         _save_catalog_product(to_write)
+
+    # Compact field-classified audit row (cataloguing scorecard corrections):
+    # local mirror of the spine PUT's twin in products.update_product -- keep
+    # the two in sync (no shared helper: routers deliberately don't import each
+    # other). before/after carry ONLY the top-level keys the CALLER's patch
+    # touched, with light values (heavy payloads elided to "[changed]") -- the
+    # scorecard classifier reads keys, not values, so a pricing-only edit
+    # through this door is now correctly NOT counted as a correction (this
+    # retires the field-blind "approximate" bucket). expected_updated_at is a
+    # concurrency token, never a field change. Fail-soft: an audit hiccup must
+    # never block the catalog save.
+    try:
+        _changed_keys = []
+        if product.category is not None:
+            _changed_keys.append("category")
+        if product.attributes:
+            _changed_keys.append("attributes")
+        if product.name is not None and product.name.strip():
+            _changed_keys.append("name")
+        if product.tags is not None:
+            _changed_keys.append("tags")
+        if product.description is not None:
+            _changed_keys.append("description")
+        if product.hsn_code is not None:
+            _changed_keys.append("hsn_code")
+        if product.gst_rate is not None:
+            _changed_keys.append("gst_rate")
+        if product.weight is not None:
+            _changed_keys.append("weight")
+        if product.pricing is not None:
+            _changed_keys.append("pricing")
+        if product.images is not None:
+            _changed_keys.append("images")
+        if product.is_active is not None:
+            _changed_keys.append("is_active")
+        if _changed_keys:
+            from ..dependencies import get_audit_repository as _get_audit_repo
+
+            _audit_repo = _get_audit_repo()
+            if _audit_repo is not None:
+                _HEAVY = ("attributes", "images", "description")
+                _before: Dict[str, Any] = {}
+                _after: Dict[str, Any] = {}
+                for _k in _changed_keys:
+                    if _k in _HEAVY:
+                        _before[_k] = "[changed]"
+                        _after[_k] = "[changed]"
+                    else:
+                        _before[_k] = pre_edit.get(_k)
+                        _after[_k] = existing.get(_k)
+                _audit_repo.create(
+                    {
+                        "action": "product.updated",
+                        "actor": current_user.get("user_id"),
+                        "user_id": current_user.get("user_id"),
+                        # Same display-name convention as the updated_by_name
+                        # stamp above.
+                        "actor_name": current_user.get("full_name")
+                        or current_user.get("username"),
+                        "entity_type": "product",
+                        # The catalog doc id == the spine product_id (the
+                        # scorecard's creators map matches on it).
+                        "entity_id": product_id,
+                        "timestamp": datetime.now(),
+                        "ts": datetime.now().isoformat(),
+                        "source": "catalog_put",
+                        "before": _before,
+                        "after": _after,
+                    }
+                )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG] update audit row skipped for %s", product_id, exc_info=True
+        )
 
     # Products-convergence: keep the billing SPINE in sync with this catalog edit
     # (the catalog id == the spine product_id). Propagate price / tier / gst /

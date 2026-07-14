@@ -9,8 +9,8 @@ Covers:
         CATALOGUING fields count; pricing-only edits NEVER count
       - self-edits never count
       - the 30-days-of-creation recency rule
-      - APPROXIMATE via baseline activity-middleware rows (exact spine /
-        catalog PUT paths only; engine-door paths excluded)
+      - baseline activity-middleware rows are IGNORED entirely (every edit
+        door writes its own classified row; the approximate bucket is retired)
   * POST /products/qc-samples/generate -- per_user cap, exclusion of items
     already PENDING for that cataloguer, batch summary shape
   * GET /products/qc-samples -- status filter + per-batch progress
@@ -42,6 +42,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 
 from fastapi import HTTPException  # noqa: E402
 
+from api.routers import catalog as catalog_mod  # noqa: E402
 from api.routers import products as products_mod  # noqa: E402
 
 
@@ -386,7 +387,7 @@ class TestScorecardCorrections:
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
         assert row["corrections_received"] == 1
         assert row["corrections_classified"] == 1
-        assert row["corrections_approximate"] == 0
+        assert "corrections_approximate" not in row  # bucket retired
 
     def test_pricing_only_edit_never_counts(self, monkeypatch):
         db = FakeDB(
@@ -443,7 +444,6 @@ class TestScorecardCorrections:
         )
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
         assert row["corrections_received"] == 0
-        assert row["corrections_approximate"] == 0
         assert row["corrections_classified"] == 0
 
     def test_baseline_engine_door_path_excluded(self, monkeypatch):
@@ -469,9 +469,12 @@ class TestScorecardCorrections:
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
         assert row["corrections_received"] == 1
         assert row["corrections_classified"] == 1
-        assert row["corrections_approximate"] == 0
 
-    def test_catalog_put_path_counts_as_approximate(self, monkeypatch):
+    def test_catalog_put_baseline_row_no_longer_counted(self, monkeypatch):
+        # The catalog PIM door now writes its own classified product.updated
+        # row (TestCatalogPutCorrectionsClassification below), so its field-
+        # blind baseline middleware twin is ignored -- the approximate bucket
+        # is retired and a pricing-only catalog edit no longer over-counts.
         db = FakeDB(
             products=[_product("p1", "u-a", name="asha")],
             audit_logs=[
@@ -479,7 +482,8 @@ class TestScorecardCorrections:
             ],
         )
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
-        assert row["corrections_approximate"] == 1
+        assert row["corrections_received"] == 0
+        assert row["corrections_classified"] == 0
 
 
 # ============================================================================
@@ -555,7 +559,6 @@ class TestSpinePutCorrectionsClassification:
         row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
         assert row["corrections_received"] == 0
         assert row["corrections_classified"] == 0
-        assert row["corrections_approximate"] == 0
 
     def test_cataloguing_spine_edit_counts_classified(self, monkeypatch):
         product = _product("pid-1", "u-a", name="asha", mrp=1000.0,
@@ -587,6 +590,121 @@ class TestSpinePutCorrectionsClassification:
         # key present (classifiable) but the payload is elided
         assert rows[0]["after"] == {"description": "[changed]"}
         assert rows[0]["before"] == {"description": "[changed]"}
+
+
+# ============================================================================
+# 2c. Catalog PIM PUT writes a classified audit row (#911 fast-follow)
+# ============================================================================
+
+
+class TestCatalogPutCorrectionsClassification:
+    """PUT /catalog/products/{id} (the imported-item review door) now writes
+    the same compact product.updated row as the spine PUT, so its edits are
+    field-classified too: a pricing-only fix through this door is NO LONGER
+    counted as a correction (the retired approximate bucket over-counted it);
+    a category/attributes fix by a different user within 30 days of creation
+    counts CLASSIFIED. The audit write is fail-soft (never fails the save)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_catalog_store(self):
+        catalog_mod.CATALOG_PRODUCTS.clear()
+        yield
+        catalog_mod.CATALOG_PRODUCTS.clear()
+
+    def _catalog_doc(self, pid="p1"):
+        """Minimal BVI-import-shaped catalog_products doc (long-form category,
+        top-level AND nested pricing) -- the shape the review PUT edits."""
+        return {
+            "id": pid,
+            "title": "Vogue VO5051",
+            "name": "Vogue VO5051",
+            "brand": "Vogue",
+            "category": "FRAME",
+            "hsn_code": "900311",
+            "gst_rate": 5.0,
+            "mrp": 5000.0,
+            "offer_price": 4500.0,
+            "pricing": {"mrp": 5000.0, "offer_price": 4500.0},
+            "attributes": {"brand_name": "Vogue"},
+            "is_active": True,
+            "updated_at": "2026-07-10T10:00:00",
+        }
+
+    def _editor(self):
+        return {"user_id": "u-b", "username": "bala", "roles": ["ADMIN"]}
+
+    def _run_put(self, monkeypatch, doc, body_kwargs, editor, audit_repo=None):
+        """No-DB catalog (in-memory CATALOG_PRODUCTS) + recorder audit repo +
+        no spine repo -- same rig family as tests/test_catalog_review_put.py;
+        monkeypatch restores every patched module global on teardown."""
+        from api import dependencies as deps_mod
+
+        catalog_mod.CATALOG_PRODUCTS[doc["id"]] = dict(doc)
+        recorder = audit_repo if audit_repo is not None else _RecorderAuditRepo()
+        monkeypatch.setattr(catalog_mod, "_get_db", lambda: None)
+        monkeypatch.setattr(deps_mod, "get_audit_repository", lambda: recorder)
+        monkeypatch.setattr(deps_mod, "get_product_repository", lambda: None)
+        body = catalog_mod.ProductUpdateInput(**body_kwargs)
+        out = asyncio.run(
+            catalog_mod.update_catalog_product(doc["id"], body, current_user=editor)
+        )
+        return out, recorder
+
+    def test_pricing_only_catalog_edit_not_counted(self, monkeypatch):
+        doc = self._catalog_doc()
+        _, recorder = self._run_put(
+            monkeypatch, doc, {"pricing": {"offer_price": 4200.0}}, self._editor()
+        )
+        rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
+        assert len(rows) == 1
+        # the row carries ONLY the caller's touched top-level key, so the
+        # classifier sees a pricing-only edit (pricing is NOT a cataloguing
+        # key) and does not count it
+        assert set(rows[0]["after"].keys()) == {"pricing"}
+        assert rows[0]["actor"] == "u-b"
+        assert rows[0]["entity_id"] == "p1"
+
+        db = FakeDB(products=[_product("p1", "u-a", name="asha")], audit_logs=rows)
+        row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
+        assert row["corrections_received"] == 0
+        assert row["corrections_classified"] == 0
+
+    def test_category_attribute_catalog_edit_counts_classified(self, monkeypatch):
+        doc = self._catalog_doc()
+        _, recorder = self._run_put(
+            monkeypatch,
+            doc,
+            {"category": "Sunglasses", "attributes": {"colour_code": "BLK"}},
+            self._editor(),
+        )
+        rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
+        assert len(rows) == 1
+        assert set(rows[0]["after"].keys()) == {"category", "attributes"}
+        # heavy field elided, light value carried (canonicalised category)
+        assert rows[0]["after"]["attributes"] == "[changed]"
+        assert rows[0]["after"]["category"] == "SUNGLASS"
+        assert rows[0]["before"]["category"] == "FRAME"
+
+        db = FakeDB(products=[_product("p1", "u-a", name="asha")], audit_logs=rows)
+        row = _rows_by_user(_run_scorecard(monkeypatch, db))["u-a"]
+        assert row["corrections_received"] == 1
+        assert row["corrections_classified"] == 1
+
+    def test_audit_write_failure_never_fails_the_save(self, monkeypatch):
+        class _BoomAuditRepo:
+            def create(self, doc):
+                raise RuntimeError("audit down")
+
+        doc = self._catalog_doc()
+        out, _ = self._run_put(
+            monkeypatch,
+            doc,
+            {"description": "fixed copy"},
+            self._editor(),
+            audit_repo=_BoomAuditRepo(),
+        )
+        assert out["message"] == "Product updated successfully"
+        assert catalog_mod.CATALOG_PRODUCTS["p1"]["description"] == "fixed copy"
 
 
 # ============================================================================
