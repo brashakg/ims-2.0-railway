@@ -143,11 +143,16 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     safe to re-process.
 
     Atomicity: find_one_and_update with the filter
-    {shopify_refund_id, credit_note_issued != True, reprocessing_at == null} flips
-    reprocessing_at for the FIRST caller only; a second concurrent retry then no
-    longer matches (reprocessing_at is set, or credit_note_issued has since become
-    True) and gets None -> it CANNOT also re-issue. Single-winner => no double
-    credit note on concurrent redeliveries. The marker is cleared on finalize.
+    {shopify_refund_id, credit_note_issued != True, reprocessing_at == null,
+    status != PENDING} flips reprocessing_at for the FIRST caller only; a second
+    concurrent retry then no longer matches (reprocessing_at is set, or
+    credit_note_issued has since become True) and gets None -> it CANNOT also
+    re-issue. Single-winner => no double credit note on concurrent redeliveries.
+    The `status != PENDING` leg is what closes the concurrent FIRST-EVER race: a
+    brand-new claim is inserted as PENDING and only leaves PENDING once finalized,
+    so a racing first-delivery loser can never re-claim the winner's still-in-flight
+    PENDING doc (it would only ever match a FINALIZED, never-credited row). The
+    marker is cleared on finalize.
 
     Returns the existing doc when THIS caller won the right to re-process a
     never-credited row (the caller falls through to the credit-issue + finalize
@@ -161,6 +166,9 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
                     "shopify_refund_id": refund_id,
                     "credit_note_issued": {"$ne": True},
                     "reprocessing_at": None,
+                    # Only re-claim a FINALIZED row -- never an in-flight brand-new
+                    # PENDING claim (closes the concurrent first-ever double-issue).
+                    "status": {"$ne": "PENDING"},
                 },
                 {"$set": {"reprocessing_at": now}},
             )
@@ -173,7 +181,11 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
         existing = returns_coll.find_one({"shopify_refund_id": refund_id})
     except Exception:  # noqa: BLE001
         existing = None
-    if existing and existing.get("credit_note_issued") is not True:
+    if (
+        existing
+        and existing.get("credit_note_issued") is not True
+        and existing.get("status") != "PENDING"
+    ):
         return existing
     return None
 
