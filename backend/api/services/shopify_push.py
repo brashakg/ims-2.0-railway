@@ -18,13 +18,15 @@ UNLESS ALL THREE hold:
   2. shopify_dispatch_mode() == "live" -- SHOPIFY_DISPATCH_MODE when set (owner
      2026-07-05: lets Shopify go live WITHOUT arming the global DISPATCH_MODE,
      which would also arm WhatsApp/SMS), else the global DISPATCH_MODE.
-  3. Shopify creds present         -- shop_url + access_token in the `integrations`
-     Mongo collection (NOT env): _load_integration_config(db, "shopify").
+  3. Shopify creds present         -- resolvable shop_url + access_token via
+     shopify_auth.resolve_shopify_credentials(db): OAuth client-credentials
+     (minted from SHOPIFY_CLIENT_ID/SECRET) preferred, else the Mongo vault or
+     env static token.
 Default / missing-creds / gate-off  ->  mode="SIMULATED", no Shopify call.
 
 We REUSE the existing, code-verified safety primitives rather than reinvent them:
   - nexus_providers.ims_shopify_writes_enabled()  (the single-writer kill-switch)
-  - nexus_providers._load_integration_config(db, "shopify")  (creds from Mongo)
+  - shopify_auth.resolve_shopify_credentials(db)  (OAuth-preferred creds resolver)
   - nexus_providers.shopify_dispatch_mode() / _as_shopify_gid()  (live gate + GID helper)
 
 IDEMPOTENT: on a LIVE push the Shopify gid returned by the mutation is written
@@ -58,12 +60,17 @@ import httpx
 
 # Reuse the existing Shopify safety primitives -- do NOT fork the writer.
 from agents.nexus_providers import (
-    _load_integration_config,
     ims_shopify_writes_enabled,
     shopify_dispatch_mode,
     _as_shopify_gid,
     SHOPIFY_API_VERSION,
 )
+
+# Credential resolution is centralised in shopify_auth: it prefers OAuth
+# client-credentials (mint-and-cache) over the stale static Mongo token that
+# 401s on the Admin API. Both _has_shopify_creds (the gate) and _graphql (the
+# network boundary) source shop_url + access_token from here.
+from api.services.shopify_auth import resolve_shopify_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +156,19 @@ def push_mode_status(db) -> Dict[str, Any]:
 
 
 def _has_shopify_creds(db) -> bool:
-    """True iff the `integrations` Shopify config carries shop_url + access_token.
-    Fail-soft -> False (treated as DARK)."""
+    """True iff usable Shopify Admin API credentials resolve (shop_url +
+    access_token), via OAuth client-credentials OR the vault/env fallback --
+    NOT a raw read of the (possibly stale) stored token. So the gate now reports
+    creds-present whenever OAuth env creds are configured, even if the Mongo
+    vault token is a known-bad placeholder. Fail-soft -> False (treated as DARK).
+
+    NOTE: this is only ever reached (in _live_or_reason) AFTER the writes +
+    dispatch gates pass, so in the DARK default posture no OAuth token is minted.
+    push_mode_status calls it directly; with the in-process token cache that
+    mints at most ~once per TTL."""
     try:
-        cfg = _load_integration_config(db, "shopify") or {}
-        return bool(cfg.get("shop_url") and cfg.get("access_token"))
+        creds = resolve_shopify_credentials(db)
+        return bool(creds and creds.get("shop_url") and creds.get("access_token"))
     except Exception:  # noqa: BLE001 -- a config read must never raise into a push
         return False
 
@@ -291,9 +306,9 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     Raises httpx/ValueError on a transport-level failure; the caller catches and
     converts to a fail-soft PushResult.
     """
-    cfg = _load_integration_config(db, "shopify") or {}
-    shop_url = cfg.get("shop_url")
-    access_token = cfg.get("access_token")
+    creds = resolve_shopify_credentials(db)
+    shop_url = (creds or {}).get("shop_url")
+    access_token = (creds or {}).get("access_token")
     if not shop_url or not access_token:
         # Should never happen (gate checked creds) but guard anyway.
         raise ValueError("shopify creds missing at GraphQL call time")
