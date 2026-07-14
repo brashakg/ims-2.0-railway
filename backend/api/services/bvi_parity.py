@@ -383,9 +383,9 @@ def _pg_count(conn, table: str) -> int:
         return -1
     try:
         with conn.cursor() as cur:
-            # nosec B608: `table` is validated against the closed allowlist
-            # above (never caller/user input), and the session is server-side
-            # read-only; identifiers can't be parameterized in Postgres.
+            # B608 justification: `table` is validated against the closed
+            # allowlist above (never caller/user input), and the session is
+            # server-side read-only; identifiers can't be parameterized.
             cur.execute(f'SELECT COUNT(*) FROM "{table}"')  # nosec B608
             row = cur.fetchone()
             return int(row[0]) if row else 0
