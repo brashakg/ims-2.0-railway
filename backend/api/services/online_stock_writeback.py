@@ -220,9 +220,26 @@ async def writeback_skus(
     # 2. Compute on-hand once for the targeted SKUs (the only ones worth pushing).
     on_hand = _on_hand_for_skus(db, list(targets.keys()), store_id)
 
+    # SUPERADMIN "block a collection from online sale": a product that belongs to
+    # an online_sync_blocked collection must NEVER be sellable online even if it
+    # is physically in stock, so we push available=0 for it (a delist-by-
+    # availability). Fail-soft -> no SKUs treated as blocked on any error.
+    try:
+        from . import online_block
+
+        blocked = online_block.blocked_skus(db, list(targets.keys()))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] block lookup skipped: %s", exc)
+        blocked = set()
+    summary["blocked_online"] = 0
+
     for sku, tgt in targets.items():
         try:
-            qty = stock_allocation.recommend_allocation(on_hand.get(sku, 0), buf)
+            if sku in blocked:
+                qty = 0
+                summary["blocked_online"] += 1
+            else:
+                qty = stock_allocation.recommend_allocation(on_hand.get(sku, 0), buf)
             res = await shopify_set_inventory_available(
                 db, tgt.get("inventory_item_id"), tgt.get("location_id"), qty
             )
