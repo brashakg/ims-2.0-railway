@@ -75,8 +75,10 @@ def _force_dark(monkeypatch):
     network call would fail the test."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
+    # Creds resolve via shopify_auth.resolve_shopify_credentials since #916
+    # (the old _load_integration_config seam no longer exists on shopify_push).
     monkeypatch.setattr(
-        shopify_push, "_load_integration_config", lambda db, t: {}
+        shopify_push, "resolve_shopify_credentials", lambda db: None
     )
 
     async def _boom(db, query, variables):  # pragma: no cover

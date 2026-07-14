@@ -634,9 +634,11 @@ def test_webhook_subscription_delete_builds_right_mutation(monkeypatch):
 
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
+    # Creds resolve via shopify_auth.resolve_shopify_credentials since #916.
     monkeypatch.setattr(
-        shopify_push, "_load_integration_config",
-        lambda db, t: {"shop_url": "x.myshopify.com", "access_token": "shpat_x"},
+        shopify_push, "resolve_shopify_credentials",
+        lambda db: {"shop_url": "x.myshopify.com", "access_token": "shpat_x",
+                    "source": "vault"},
     )
 
     captured: Dict[str, Any] = {}
