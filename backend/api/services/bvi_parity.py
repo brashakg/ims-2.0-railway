@@ -66,6 +66,7 @@ DEFAULT_COUNT_TOLERANCE = 5
 # Pure helpers (no I/O)
 # ===========================================================================
 
+
 def _norm_sku(v: Any) -> str:
     """Normalise a SKU for comparison: strip + upper-case. Empty stays empty."""
     if v is None:
@@ -103,6 +104,7 @@ def is_durable_image_url(url: Any) -> bool:
 # Snapshot dataclasses -- the in-memory shapes the pure comparator consumes
 # ===========================================================================
 
+
 @dataclass
 class BviSnapshot:
     """A read-only snapshot of the BVI Postgres catalog (counts + index lists).
@@ -111,6 +113,7 @@ class BviSnapshot:
     SKU and barcode diffs. The image-url list drives the storage audit.
     Everything here is derived from SELECTs only.
     """
+
     products: int = 0
     variants: int = 0
     collections: int = 0
@@ -128,6 +131,7 @@ class BviSnapshot:
 @dataclass
 class ImsSnapshot:
     """A read-only snapshot of the IMS Mongo catalog (counts + index maps)."""
+
     catalog_products: int = 0
     catalog_variants: int = 0
     ecom_collections: int = 0
@@ -145,6 +149,7 @@ class ImsSnapshot:
 # ===========================================================================
 # PURE comparator -- unit-tested without a DB
 # ===========================================================================
+
 
 def build_parity_report(
     bvi: BviSnapshot,
@@ -177,6 +182,7 @@ def build_parity_report(
         "gate_pass": bool,   (counts match AND no missing SKU AND no barcode mismatch)
       }
     """
+
     # --- counts, per entity ---
     def _count_row(b: int, i: int) -> Dict[str, Any]:
         return {"bvi": b, "ims": i, "delta": i - b, "match": b == i}
@@ -237,7 +243,9 @@ def build_parity_report(
         "total": total_imgs,
         "durable": durable,
         "local_disk": local_disk,
-        "local_disk_pct": round((local_disk / total_imgs * 100.0), 2) if total_imgs else 0.0,
+        "local_disk_pct": (
+            round((local_disk / total_imgs * 100.0), 2) if total_imgs else 0.0
+        ),
         "phase4_rehost_needed": local_disk > 0,
     }
 
@@ -304,7 +312,9 @@ def render_text_report(report: Dict[str, Any]) -> str:
     lines.append("-" * 64)
     lines.append(f"  total images        : {img['total']}")
     lines.append(f"  durable (http/https): {img['durable']}")
-    lines.append(f"  LOCAL DISK /uploads : {img['local_disk']}  ({img['local_disk_pct']}%)")
+    lines.append(
+        f"  LOCAL DISK /uploads : {img['local_disk']}  ({img['local_disk_pct']}%)"
+    )
     lines.append(
         f"  Phase-4 re-host     : "
         f"{'NEEDED (local-disk images present)' if img['phase4_rehost_needed'] else 'not needed (all durable)'}"
@@ -312,7 +322,9 @@ def render_text_report(report: Dict[str, Any]) -> str:
 
     lines.append("")
     lines.append("=" * 64)
-    lines.append(f"GATE: {'PASS' if report['gate_pass'] else 'FAIL -- parity not yet met'}")
+    lines.append(
+        f"GATE: {'PASS' if report['gate_pass'] else 'FAIL -- parity not yet met'}"
+    )
     lines.append("=" * 64)
     return "\n".join(lines)
 
@@ -320,6 +332,7 @@ def render_text_report(report: Dict[str, Any]) -> str:
 # ===========================================================================
 # Postgres (read-only) snapshot collection -- I/O
 # ===========================================================================
+
 
 def _resolve_pg_url() -> Optional[str]:
     """The BVI Postgres URL from env. Prefer BVI_DATABASE_URL (the Phase-0 spec
@@ -355,12 +368,25 @@ def _pg_connect(pg_url: str):
         return None
 
 
+# The only BVI tables _pg_count may touch. Identifiers cannot be bound as SQL
+# parameters, so the interpolation below is gated on this closed set instead.
+_COUNTABLE_TABLES = frozenset(
+    {"Product", "ProductVariant", "Collection", "Menu", "Customer", "Order"}
+)
+
+
 def _pg_count(conn, table: str) -> int:
     """SELECT COUNT(*) for a BVI table (quoted -- Prisma uses PascalCase).
     Returns -1 on error so a failure is visible (never silently 0)."""
+    if table not in _COUNTABLE_TABLES:
+        logger.warning("[BVI_PARITY] count(%s) refused: not an allowed table", table)
+        return -1
     try:
         with conn.cursor() as cur:
-            cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+            # nosec B608: `table` is validated against the closed allowlist
+            # above (never caller/user input), and the session is server-side
+            # read-only; identifiers can't be parameterized in Postgres.
+            cur.execute(f'SELECT COUNT(*) FROM "{table}"')  # nosec B608
             row = cur.fetchone()
             return int(row[0]) if row else 0
     except Exception as e:  # noqa: BLE001
@@ -372,6 +398,7 @@ def _pg_fetchall(conn, sql: str) -> List[Dict]:
     """Run a SELECT, return list-of-dicts. [] on error (logged)."""
     try:
         import psycopg2.extras  # noqa: PLC0415
+
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]
@@ -420,6 +447,7 @@ def collect_bvi_snapshot(conn) -> BviSnapshot:
 # ===========================================================================
 # Mongo (read-only) snapshot collection -- I/O
 # ===========================================================================
+
 
 def collect_ims_snapshot(db) -> ImsSnapshot:
     """Read the IMS Mongo catalog into an in-memory snapshot. find/count only.
@@ -472,9 +500,7 @@ def collect_ims_snapshot(db) -> ImsSnapshot:
     # Fold in spine `products.barcode` for any sku not already mapped (the billing
     # spine is the source of truth for the physical store barcode in IMS).
     try:
-        cur = db.get_collection("products").find(
-            {}, {"sku": 1, "barcode": 1, "_id": 0}
-        )
+        cur = db.get_collection("products").find({}, {"sku": 1, "barcode": 1, "_id": 0})
         for d in cur:
             sku = _norm_sku(d.get("sku"))
             bc = _norm_barcode(d.get("barcode"))
@@ -492,6 +518,7 @@ def collect_ims_snapshot(db) -> ImsSnapshot:
 # Nightly monitor: snapshot -> store -> drift check (all fail-soft)
 # ===========================================================================
 
+
 def monitor_enabled() -> bool:
     """BVI_PARITY_MONITOR env gate. Default ON."""
     val = os.getenv("BVI_PARITY_MONITOR", "on").strip().lower()
@@ -501,7 +528,10 @@ def monitor_enabled() -> bool:
 def count_tolerance() -> int:
     """Product/variant count delta tolerated before drift is flagged."""
     try:
-        return max(0, int(os.getenv("BVI_PARITY_COUNT_TOLERANCE", str(DEFAULT_COUNT_TOLERANCE))))
+        return max(
+            0,
+            int(os.getenv("BVI_PARITY_COUNT_TOLERANCE", str(DEFAULT_COUNT_TOLERANCE))),
+        )
     except (TypeError, ValueError):
         return DEFAULT_COUNT_TOLERANCE
 
@@ -510,6 +540,7 @@ def _ist_now() -> datetime:
     """tz-aware IST now (fail-soft fallback to a fixed +05:30 offset)."""
     try:
         from api.utils.ist import now_ist  # noqa: PLC0415
+
         return now_ist()
     except Exception:  # noqa: BLE001
         return datetime.now(timezone(timedelta(hours=5, minutes=30)))
@@ -529,19 +560,25 @@ def _compact_report(report: Dict[str, Any], sample_limit: int) -> Dict[str, Any]
             "missing_count": sd.get("missing_count", 0),
             "sample_missing": list(sd.get("sample_missing", []) or [])[:sample_limit],
             "extra_in_ims_count": sd.get("extra_in_ims_count", 0),
-            "sample_extra_in_ims": list(sd.get("extra_in_ims", []) or [])[:sample_limit],
+            "sample_extra_in_ims": list(sd.get("extra_in_ims", []) or [])[
+                :sample_limit
+            ],
         },
         "barcode_diff": {
             "checked": bd.get("checked", 0),
             "mismatched_count": bd.get("mismatched_count", 0),
-            "sample_mismatched": list(bd.get("sample_mismatched", []) or [])[:sample_limit],
+            "sample_mismatched": list(bd.get("sample_mismatched", []) or [])[
+                :sample_limit
+            ],
         },
         "image_storage": report.get("image_storage", {}),
         "gate_pass": bool(report.get("gate_pass", False)),
     }
 
 
-def run_parity_snapshot(db, sample_limit: int = SNAPSHOT_SAMPLE_LIMIT) -> Dict[str, Any]:
+def run_parity_snapshot(
+    db, sample_limit: int = SNAPSHOT_SAMPLE_LIMIT
+) -> Dict[str, Any]:
     """Run a full BVI-Postgres vs IMS-Mongo parity comparison. FAIL-SOFT:
     NEVER raises. Returns:
 
@@ -721,12 +758,16 @@ def latest_parity_snapshot(db) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _create_drift_task(db, snapshot: Dict[str, Any], drift: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _create_drift_task(
+    db, snapshot: Dict[str, Any], drift: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """File a deduped SYSTEM task (one per IST day) so drift is visible on the
     SUPERADMIN task board. Fail-soft: returns the created task or None."""
     try:
         from api.services.task_triggers import create_system_task  # noqa: PLC0415
-        from database.repositories.task_repository import TaskRepository  # noqa: PLC0415
+        from database.repositories.task_repository import (
+            TaskRepository,
+        )  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
         logger.debug("[BVI_PARITY] drift-task imports failed (soft): %s", e)
         return None
