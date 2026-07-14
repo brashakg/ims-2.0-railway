@@ -29,9 +29,15 @@ Fail-soft contract:
 - Replayed delivery (same vendor event id already ingested) → 200 with
   `{"status":"duplicate"}` and NO re-dispatch. Webhooks must 2xx or the
   vendor retries forever; the original inbox row is the durable record.
-- Mongo down → log + 200 (we don't want vendor retries to overwhelm us).
-- Event dispatch failure → still 200 (the inbox row is the durable record;
-  NEXUS can sweep it on next tick).
+- Persist failure (inbox collection/DB unavailable, or a non-duplicate insert
+  error) → 503. We must NEVER ack-without-persist: a 2xx tells the vendor the
+  delivery is permanently handled, so Shopify/Razorpay/Shiprocket never resend
+  it and a real inbound order would be lost forever. 503 makes the vendor
+  RETRY (Shopify backs off for ~48h). We only ACK 200 AFTER the row is durably
+  written (or it's a verified duplicate whose original row is the record).
+- Event dispatch failure → still 200 (the inbox row is ALREADY durable; NEXUS
+  re-discovers unprocessed rows on its next tick, and re-acking would make the
+  vendor resend a delivery we already persisted).
 
 The inbox doc shape:
 
@@ -242,16 +248,47 @@ def _is_duplicate_key_error(exc: Exception) -> bool:
 # DB access — direct, no repository layer (one collection, three writes)
 # ============================================================================
 
+# Sentinel so we can distinguish "conn has no `.db` attribute" (a bare db-like
+# object / test fake) from "conn.db is None" (Mongo genuinely unreachable)
+# WITHOUT ever truth-testing a pymongo object (see _get_db for why that matters).
+_NO_DB_ATTR = object()
+
 
 def _get_db():
-    """Same pattern as the rest of the routers."""
+    """Return the live pymongo Database, or None when Mongo is unreachable.
+
+    ROOT-CAUSE (P0, silent webhook data-loss): the previous body was
+    `return getattr(d, "db", None) or d`. `d` is the DatabaseConnection
+    singleton and `d.db` is the *connected pymongo Database*. PyMongo makes
+    `bool(Database)` raise `NotImplementedError` (a deliberate guard against
+    the `if db:` mistake), so the `or` evaluated `bool(<Database>)`, which
+    raised, was swallowed by the `except Exception` below, and `_get_db()`
+    returned None. Every caller then read None and SILENTLY skipped its write
+    — the `webhook_inbox` insert among them — while the receiver still returned
+    200 "received". A real inbound order was acknowledged-and-dropped. This is
+    the same pymongo-truthiness trap that broke GRN/expense/HR uploads
+    (file_store) and DB-backed product categories (see products.py:63-66).
+
+    Fix: never `or`/`and` a pymongo Database or Collection. Read the `.db`
+    property directly and compare with `is None`. `.db` returns the connected
+    Database, or None if the connect() inside the property failed — in which
+    case we propagate None so the caller treats storage as unavailable.
+    """
     try:
         from database.connection import get_db as _gd
 
-        d = _gd()
-        if d is None:
+        conn = _gd()
+        if conn is None:
             return None
-        return getattr(d, "db", None) or d
+        # conn is the DatabaseConnection singleton in prod; `.db` is the
+        # connected pymongo Database (or None if Mongo is down). Some test
+        # fakes ARE the db-like object and expose no `.db` — return those
+        # as-is. Use a sentinel + `is` checks so we NEVER call bool() on a
+        # pymongo object.
+        database = getattr(conn, "db", _NO_DB_ATTR)
+        if database is _NO_DB_ATTR:
+            return conn
+        return database  # real pymongo Database, or None if unreachable
     except Exception as e:
         logger.debug(f"[WEBHOOKS] _get_db failed: {e}")
         return None
@@ -427,7 +464,24 @@ async def _ingest(
 
     coll = _get_inbox_collection()
 
-    if coll is not None and event_id:
+    # DATA-LOSS SAFETY (never ack-and-drop): if we cannot reach the inbox
+    # collection we must NOT return 200. A 2xx tells the vendor the delivery is
+    # permanently handled, so Shopify/Razorpay/Shiprocket will NEVER resend it —
+    # a real inbound order would be lost forever. Return 503 so the vendor
+    # RETRIES (Shopify backs off for ~48h; the others similarly). We only ever
+    # ACK 200 AFTER the row is durably persisted, or when it's a verified
+    # duplicate (its original row is already the durable record). The "no secret
+    # configured -> 200 skipped" and "replay window -> 200 skipped" paths above
+    # are deliberate, safe skips and are unaffected.
+    if coll is None:
+        logger.error(
+            "[WEBHOOKS] %s: inbox collection unavailable — returning 503 so the "
+            "vendor retries (refusing to ack-and-drop an unpersisted delivery)",
+            vendor,
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
+    if event_id:
         try:
             existing = coll.find_one({"vendor": vendor, "event_id": event_id})
         except Exception:  # noqa: BLE001
@@ -459,30 +513,32 @@ async def _ingest(
         "event_id": event_id,
     }
 
-    if coll is not None:
-        try:
-            coll.insert_one(dict(inbox_doc))
-        except Exception as e:
-            if event_id and _is_duplicate_key_error(e):
-                # Race backstop: a concurrent worker ingested the same
-                # delivery between our pre-check and this insert. ACK it and
-                # do NOT re-dispatch — the winner's row is the record.
-                logger.warning(
-                    "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
-                    "(unique index race backstop)",
-                    vendor,
-                    event_id,
-                )
-                return {
-                    "status": "duplicate",
-                    "vendor": vendor,
-                    "event_id": event_id,
-                }
-            # Mongo down — the receiver MUST stay green so vendors don't
-            # back up their retry queue. Log loud, swallow.
-            logger.error(f"[WEBHOOKS] inbox insert failed for {vendor}: {e}")
+    try:
+        coll.insert_one(dict(inbox_doc))
+    except Exception as e:
+        if event_id and _is_duplicate_key_error(e):
+            # Race backstop: a concurrent worker ingested the same
+            # delivery between our pre-check and this insert. ACK it and
+            # do NOT re-dispatch — the winner's row is the record.
+            logger.warning(
+                "[WEBHOOKS] %s: duplicate delivery event_id=%s ignored "
+                "(unique index race backstop)",
+                vendor,
+                event_id,
+            )
+            return {
+                "status": "duplicate",
+                "vendor": vendor,
+                "event_id": event_id,
+            }
+        # Genuine persist failure (Mongo write error that isn't a dup). The row
+        # is NOT durable, so we must NOT ack — a 200 here would drop the event.
+        # Return 503 so the vendor retries; the failure is logged loud.
+        logger.error(f"[WEBHOOKS] inbox insert failed for {vendor}: {e}")
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
 
-    # Dispatch the event so NEXUS picks it up on its next tick / immediately.
+    # The row is now durably persisted. ONLY now do we dispatch + ACK 200.
+    # Dispatch the event so NEXUS picks it up immediately / on its next tick.
     try:
         from agents.registry import dispatch_event
 
@@ -492,8 +548,9 @@ async def _ingest(
             source="webhooks_router",
         )
     except Exception as e:
-        # Already in inbox — NEXUS's hourly tick can re-discover unprocessed
-        # rows. Don't fail the request.
+        # The inbox row is already durable — NEXUS's hourly tick re-discovers
+        # unprocessed rows — so a dispatch hiccup must NOT fail the request
+        # (that would make the vendor resend a delivery we already persisted).
         logger.warning(f"[WEBHOOKS] dispatch_event failed for {vendor}: {e}")
 
     return {
