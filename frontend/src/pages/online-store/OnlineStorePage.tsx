@@ -27,6 +27,7 @@ import {
   CheckCircle2,
   ArrowRight,
   Tag,
+  ReceiptText,
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
@@ -139,6 +140,16 @@ const SECTIONS: Section[] = [
     countLabel: 'online orders',
     // Phase 3b shipped: the Online orders view is live in-app.
     href: '/online-store/orders',
+  },
+  {
+    key: 'refund-reviews',
+    title: 'Refund reviews',
+    blurb:
+      'Online refunds land here as proposed GST credit notes — confirm to post the credit note and restock, or reject. Nothing hits the books until an accountant confirms.',
+    icon: ReceiptText,
+    phase: 'Finance',
+    // Live: the accountant consumer for the Shopify refund review queue.
+    href: '/online-store/refund-reviews',
   },
   {
     key: 'stock-tally',

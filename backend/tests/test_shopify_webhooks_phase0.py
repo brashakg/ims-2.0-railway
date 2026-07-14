@@ -165,6 +165,19 @@ class FakeCollection:
             return type("R", (), {"modified_count": 0, "upserted_id": 1})()
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
+    def delete_many(self, filter_=None):
+        keep = [d for d in self.docs if not _match(d, filter_)]
+        removed = len(self.docs) - len(keep)
+        self.docs = keep
+        return type("R", (), {"deleted_count": removed})()
+
+    def delete_one(self, filter_=None):
+        for i, d in enumerate(self.docs):
+            if _match(d, filter_):
+                del self.docs[i]
+                return type("R", (), {"deleted_count": 1})()
+        return type("R", (), {"deleted_count": 0})()
+
 
 class FakeDB:
     is_connected = True
@@ -437,6 +450,263 @@ def test_refund_no_db_simulates():
 
     res = handle_shopify_refund(None, _refund_payload(), topic="refunds/create")
     assert res["status"] == "simulated"
+
+
+# ===========================================================================
+# refunds/create -- adversarial-review hardening (findings #1-#7)
+# ===========================================================================
+
+
+def _refund_payload_with_txn(refund_id=700001, shopify_order_id=5001, *, amount,
+                             gateway=None, kind="refund", status="success"):
+    """A refund payload carrying a `transactions` block (the amount Shopify
+    actually refunded) so the handler can reconcile / detect a card refund."""
+    p = _refund_payload(refund_id=refund_id, shopify_order_id=shopify_order_id)
+    txn = {"kind": kind, "status": status, "amount": f"{amount}"}
+    if gateway is not None:
+        txn["gateway"] = gateway
+    p["transactions"] = [txn]
+    return p
+
+
+def test_refund_amount_reconciliation_forces_discrepancy(wired, monkeypatch):
+    """#2: a Rs 200 goodwill refund whose lines still claim the full Rs 1000 unit
+    must NOT auto-post the Rs 1000 credit note -- it is routed to DISCREPANCY."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")  # even with AUTO on
+    _seed_online_order(wired)
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    from api.services.shopify_refund import handle_shopify_refund
+
+    # transactions say Rs 200 refunded; the computed credit note is Rs 1000.
+    payload = _refund_payload_with_txn(amount=200, gateway="razorpay")
+    res = handle_shopify_refund(wired["db"], payload, topic="refunds/create")
+
+    assert res["status"] == "queued"
+    assert res["queue_status"] == "DISCREPANCY"
+    row = wired["review"].find_one({"shopify_refund_id": "700001"})
+    assert row is not None and row["status"] == "DISCREPANCY"
+    assert row["shopify_refunded_amount"] == 200.0
+    # NOTHING posted on a mismatched amount.
+    assert wired["ledger"].count_documents({}) == 0
+    assert wired["returns"].count_documents({}) == 0
+
+
+def test_refund_auto_claim_first_blocks_double_post(wired, monkeypatch):
+    """#3: the claim-first returns-doc insert (unique index on shopify_refund_id)
+    blocks a second post for the same refund id -> no double credit / restock."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    order = _seed_online_order(wired)
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    from api.services import shopify_refund as sr
+
+    first = sr.handle_shopify_refund(wired["db"], _refund_payload(), topic="refunds/create")
+    assert first["status"] == "credited"
+    assert wired["returns"].count_documents({"shopify_refund_id": "700001"}) == 1
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
+
+    # Call the poster DIRECTLY (bypassing the pre-check) to prove the claim-first
+    # unique index is what stops the double -- it returns 'duplicate', no 2nd row.
+    credit_note = {
+        "gross_refund": 1000.0,
+        "net_refund": 1000.0,
+        "gst_breakup": {"gross": 1000.0, "taxable": 952.38, "tax": 47.62, "gst_rate": 5.0},
+        "lines": [],
+    }
+    dup = sr._post_credit_and_restock(
+        wired["db"], refund_id="700001", order=order, return_lines=[],
+        credit_note=credit_note, restock_store="BV-GANGA-01",
+    )
+    assert dup["status"] == "duplicate"
+    assert wired["returns"].count_documents({"shopify_refund_id": "700001"}) == 1
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
+
+
+def test_refund_card_refund_does_not_bump_store_credit(wired, monkeypatch):
+    """#5: a card/gateway refund books the CDNR ledger row (GST reversal) but must
+    NOT also mint redeemable store credit (double benefit)."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _seed_online_order(wired)
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    from api.services.shopify_refund import handle_shopify_refund
+
+    # A gateway refund whose amount matches the computed gross (no discrepancy).
+    payload = _refund_payload_with_txn(amount="1000.00", gateway="razorpay")
+    res = handle_shopify_refund(wired["db"], payload, topic="refunds/create")
+
+    assert res["status"] == "credited"
+    assert res["settled_externally"] is True
+    # The CDNR ledger row EXISTS (GST reversal still flows into GSTR-1)...
+    rows = list(wired["ledger"].find({"customer_id": "CUST-1"}))
+    assert len(rows) == 1
+    assert rows[0]["type"] == "ISSUED"
+    assert rows[0].get("settlement") == "EXTERNAL"
+    assert rows[0].get("delta") == 0.0  # no balance movement
+    # ...but the customer's redeemable store credit was NOT bumped.
+    cust = wired["customers"].find_one({"customer_id": "CUST-1"})
+    assert float(cust.get("store_credit") or 0.0) == 0.0
+
+
+def test_refund_auto_cdnr_tax_and_billing_store(wired, monkeypatch):
+    """#4: the AUTO credit-note ledger row carries the REAL tax (not 0) and lands
+    under the ORIGINAL order's billing store (GSTIN), not the physical restock
+    store."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _seed_online_order(wired)  # store_id=BV-ONLINE-01, fulfils at BV-GANGA-01
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    from api.services.shopify_refund import handle_shopify_refund
+
+    res = handle_shopify_refund(wired["db"], _refund_payload(), topic="refunds/create")
+    assert res["status"] == "credited"
+    row = wired["ledger"].find_one({"customer_id": "CUST-1"})
+    assert row is not None
+    assert row["tax"] == 47.62          # real output-tax reversal, not 0
+    assert row["taxable"] == 952.38
+    assert row["store_id"] == "BV-ONLINE-01"   # billing store, NOT BV-GANGA-01
+
+
+def test_refund_unmatched_row_is_reprocessable(wired, monkeypatch):
+    """#1: a refund that arrived before its order (UNMATCHED) must be reprocessable
+    once the order is ingested -- the stale UNMATCHED row is superseded."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    from api.services.shopify_refund import handle_shopify_refund
+
+    # 1) Refund arrives first -> UNMATCHED (no order yet).
+    first = handle_shopify_refund(wired["db"], _refund_payload(), topic="refunds/create")
+    assert first["status"] == "order_not_found"
+    assert wired["review"].find_one({"shopify_refund_id": "700001"})["status"] == "UNMATCHED"
+
+    # 2) The order is ingested; a redelivery now reprocesses (not 'duplicate').
+    _seed_online_order(wired)
+    second = handle_shopify_refund(wired["db"], _refund_payload(), topic="refunds/create")
+    assert second["status"] == "queued"
+    assert second["queue_status"] == "PENDING"
+    # The stale UNMATCHED row was superseded -> exactly one row, now PENDING.
+    rows = list(wired["review"].find({"shopify_refund_id": "700001"}))
+    assert len(rows) == 1 and rows[0]["status"] == "PENDING"
+
+
+def test_refund_mixed_gst_rate_splits_per_line(wired, monkeypatch):
+    """#7: a refund mixing an 18% frame + a 5% lens backs the tax out PER LINE
+    (tax 900 + 300 = 1200), not one dominant rate over the whole gross."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    frame = {
+        "item_id": "it-frame", "product_id": "7001", "ims_product_id": "IMS-FRAME",
+        "shopify_line_item_id": 9001, "sku": "FR-18", "product_name": "Frame",
+        "quantity": 1, "gst_rate": 18.0, "taxable_value": 5000.0, "tax_amount": 900.0,
+    }
+    lens = {
+        "item_id": "it-lens", "product_id": "7002", "ims_product_id": "IMS-LENS",
+        "shopify_line_item_id": 9002, "sku": "LN-5", "product_name": "Lens",
+        "quantity": 1, "gst_rate": 5.0, "taxable_value": 6000.0, "tax_amount": 300.0,
+    }
+    order = {
+        "order_id": "ord-mix", "_id": "ord-mix", "shopify_order_id": "5002",
+        "order_number": "ONL-5002", "channel": "ONLINE", "source": "shopify",
+        "customer_id": "CUST-1", "customer_name": "Ravi", "store_id": "BV-ONLINE-01",
+        "fulfillment_stores": ["BV-GANGA-01"], "items": [frame, lens],
+        "grand_total": 12200.0, "status": "CONFIRMED",
+    }
+    wired["orders"].insert_one(order)
+
+    payload = {
+        "id": 700002, "order_id": 5002, "restock": True,
+        "refund_line_items": [
+            {"id": 1, "quantity": 1, "line_item_id": 9001, "restock_type": "return",
+             "subtotal": 5000.0, "total_tax": 900.0, "line_item": {"id": 9001, "sku": "FR-18"}},
+            {"id": 2, "quantity": 1, "line_item_id": 9002, "restock_type": "return",
+             "subtotal": 6000.0, "total_tax": 300.0, "line_item": {"id": 9002, "sku": "LN-5"}},
+        ],
+    }
+    from api.services.shopify_refund import handle_shopify_refund
+
+    res = handle_shopify_refund(wired["db"], payload, topic="refunds/create")
+    assert res["status"] == "queued"
+    assert res["gross_refund"] == 12200.0
+    gb = res["gst_breakup"]
+    assert gb["tax"] == 1200.0          # 900 + 300, NOT a dominant-rate figure
+    assert gb["taxable"] == 11000.0
+    # The exact by-rate split is kept for the accountant.
+    assert set(gb["by_rate"].keys()) == {"18.0", "5.0"}
+    assert gb["by_rate"]["18.0"]["tax"] == 900.0
+    assert gb["by_rate"]["5.0"]["tax"] == 300.0
+
+
+def test_gst_breakup_lines_engine_mixed_rate():
+    """#7 (pure engine): gst_breakup_lines backs tax out per line at each rate."""
+    from api.services import returns_engine as engine
+
+    lines = [
+        {"return_qty": 1, "unit_price": 5900.0, "gst_rate": 18.0},  # taxable 5000, tax 900
+        {"return_qty": 1, "unit_price": 6300.0, "gst_rate": 5.0},   # taxable 6000, tax 300
+    ]
+    view = engine.gst_breakup_lines(lines)
+    assert view["gross"] == 12200.0
+    assert view["taxable"] == 11000.0
+    assert view["tax"] == 1200.0
+
+
+def test_refund_auto_guest_order_diverts_to_queue_not_completed(wired, monkeypatch):
+    """#6: an AUTO refund on a guest / customer-less order must NOT be silently
+    marked COMPLETED with no credit note -- it diverts to the queue (NO_CUSTOMER)
+    so an accountant can issue the credit note, and the returns doc is CREDIT_FAILED
+    (keeps the refund id consumed for idempotency)."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _seed_online_order(wired, customer_id="")  # guest: no customer on the order
+    from api.services.shopify_refund import handle_shopify_refund
+
+    res = handle_shopify_refund(wired["db"], _refund_payload(), topic="refunds/create")
+    assert res["status"] == "credit_failed"
+    assert res["queue_status"] == "NO_CUSTOMER"
+    # No credit note was issued (no customer) ...
+    assert wired["ledger"].count_documents({}) == 0
+    # ... the returns doc is CREDIT_FAILED (NOT COMPLETED), id stays consumed ...
+    ret = wired["returns"].find_one({"shopify_refund_id": "700001"})
+    assert ret is not None and ret["status"] == "CREDIT_FAILED"
+    # ... and the accountant has a surface.
+    row = wired["review"].find_one({"shopify_refund_id": "700001"})
+    assert row is not None and row["status"] == "NO_CUSTOMER"
+
+
+def test_refund_confirm_posts_from_stored_review_doc(wired, monkeypatch):
+    """#1: the accountant CONFIRM path posts the credit note + restock from the
+    STORED review row (post_from_review), rebuilding ReturnLine from the queued
+    proposed_restock."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    _seed_online_order(wired)
+    wired["stock_repo"].units.append(
+        {"stock_id": "stk-1", "product_id": "IMS-P-1", "store_id": "BV-GANGA-01",
+         "order_id": "ord-abc", "status": "SOLD"}
+    )
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    from api.services.shopify_refund import handle_shopify_refund, post_from_review
+
+    # Default queue -> a PENDING review row, nothing posted.
+    queued = handle_shopify_refund(wired["db"], _refund_payload(), topic="refunds/create")
+    assert queued["status"] == "queued" and queued["queue_status"] == "PENDING"
+    assert wired["ledger"].count_documents({}) == 0
+    assert wired["returns"].count_documents({}) == 0
+
+    # The accountant confirms -> post from the STORED doc.
+    review = wired["review"].find_one({"shopify_refund_id": "700001"})
+    res = post_from_review(wired["db"], review)
+    assert res["status"] == "credited"
+    assert res["credit_note_issued"] is True
+    assert res["restock_applied"] is True
+    # Now a ledger row + a returns doc exist, and the SOLD unit was reactivated.
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
+    ret = wired["returns"].find_one({"shopify_refund_id": "700001"})
+    assert ret is not None and ret["status"] == "COMPLETED"
+    assert wired["stock_repo"].units[0]["status"] == "AVAILABLE"
 
 
 # ===========================================================================

@@ -4776,6 +4776,34 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/orders/remap/{shopify_order_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # --- /api/v1/online-store/refund-reviews ---  (Shopify refund -> GST consumer)
+    # The ACCOUNTANT-facing consumer for shopify_refund_review -- the queue the
+    # refunds/create handler writes to by DEFAULT (SHOPIFY_REFUND_AUTO off). The
+    # books are the accountant's, so ACCOUNTANT is first-class (GET list + POST
+    # confirm/reject); ADMIN is HQ; SUPERADMIN auto. Confirm posts the credit note
+    # + restock from the stored row (reuses _issue_store_credit + _restock_good_items).
+    # Non-HQ callers are FORCED to their own store scope. See
+    # routers/online_store_refund_reviews.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/refund-reviews",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/refund-reviews/",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/refund-reviews/{review_id}/confirm",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/refund-reviews/{review_id}/reject",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
     # --- /api/v1/ondc ---  (BVI-20: ONDC Seller Node scaffolding -- DARK default)
     # Callback endpoints are PUBLIC (Beckn protocol; SNP signature-gated when
     # config.ukp is set). Admin routes require SUPERADMIN / ADMIN.
