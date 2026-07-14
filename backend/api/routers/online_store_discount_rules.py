@@ -77,6 +77,24 @@ def _coll(db):
     return db[RULES_COLLECTION]
 
 
+def _ensure_indexes(db) -> None:
+    """Idempotently ensure a UNIQUE compound index on the natural key
+    (category, brand, sub_brand) so a duplicate rule can never race past the
+    application-level pre-check (two workers, or a re-run of the migration). Blank
+    brand/sub_brand are stored as '' (never None) so the index treats them as one
+    value -- matching the migration's natural_key shape. Fail-soft: a missing
+    create_index (MockCollection) or a pre-existing duplicate just no-ops here; the
+    DuplicateKeyError branch on insert is the runtime backstop."""
+    try:
+        _coll(db).create_index(
+            [("category", 1), ("brand", 1), ("sub_brand", 1)],
+            unique=True,
+            name="uq_rule_natural_key",
+        )
+    except Exception:  # noqa: BLE001 -- best-effort; never break a rule write
+        pass
+
+
 def _clean(doc: Optional[Dict]) -> Optional[Dict]:
     if isinstance(doc, dict):
         doc.pop("_id", None)
@@ -199,12 +217,16 @@ async def create_rule(
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Discount-rule store unavailable")
+    _ensure_indexes(db)
 
     category = _validate_category(payload.category)
-    brand = (payload.brand or "").strip() or None
-    sub_brand = (payload.sub_brand or "").strip() or None
 
-    key = _norm_key(category, brand, sub_brand)
+    # Normalise the natural key. Blank brand/sub_brand are stored as '' (NOT None):
+    # the dup pre-check filter (_norm_key) and the migration both use '' for a blank
+    # leg, so storing None here made the pre-check ({'brand': ''}) miss an existing
+    # None-brand doc -> duplicate rules coexisted and the deeper discount silently
+    # won (BUG-10). '' everywhere keeps filter == storage.
+    key = _norm_key(category, payload.brand, payload.sub_brand)
     try:
         if _coll(db).find_one(key) is not None:
             raise HTTPException(
@@ -220,11 +242,11 @@ async def create_rule(
     doc: Dict[str, Any] = {
         "rule_id": rule_id,
         "id": rule_id,
-        # Store category UPPER-canonical + brand/sub_brand normalised for the
-        # natural key; the engine matches case-insensitively regardless.
+        # Store category UPPER-canonical + brand/sub_brand normalised ('' for blank)
+        # for the natural key; the engine matches case-insensitively regardless.
         "category": key["category"],
-        "brand": key["brand"] or None,
-        "sub_brand": key["sub_brand"] or None,
+        "brand": key["brand"],
+        "sub_brand": key["sub_brand"],
         "discount_percentage": float(payload.discount_percentage),
         "active": bool(payload.active),
         "priority": int(payload.priority),
@@ -303,10 +325,12 @@ async def update_rule(
     if "category" in data:
         new_category = _validate_category(data["category"])
         updates["category"] = new_category
+    # Store '' (not None) for a blank leg so the natural key matches the pre-check
+    # filter + the migration shape + the unique index (BUG-10).
     if "brand" in data:
-        updates["brand"] = (data["brand"] or "").strip().lower() or None
+        updates["brand"] = (data["brand"] or "").strip().lower()
     if "sub_brand" in data:
-        updates["sub_brand"] = (data["sub_brand"] or "").strip().lower() or None
+        updates["sub_brand"] = (data["sub_brand"] or "").strip().lower()
     if "discount_percentage" in data:
         updates["discount_percentage"] = float(data["discount_percentage"])
     if "active" in data:

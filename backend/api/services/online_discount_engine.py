@@ -22,10 +22,15 @@ storefront price:
 CLAMPS (money invariants -- REUSED, never re-invented)
 ------------------------------------------------------
   * offer <= MRP always (the same invariant pricing_caps enforces at the DB door).
-  * NEVER below cost: if a rule/manual price would sell below cost_price, it is
-    capped AT cost and FLAGGED (``COST_CLAMPED``) -- we never silently sell at a
-    loss. If cost itself exceeds MRP (bad data) we cap at MRP and flag
-    ``COST_ABOVE_MRP`` (cannot protect margin without breaching the MRP ceiling).
+  * NEVER below cost, NEVER reveal cost: if a rule/manual price would sell below
+    cost_price we do NOT clamp to cost exactly (cost_price is a cost-MASKED field;
+    publishing it as the online price defeats the mask store-wide). Instead we hold
+    at MRP and flag ``COST_CONFLICT`` for owner review -- never a loss, never a cost
+    leak. If cost itself exceeds MRP (bad data) we hold at MRP + ``COST_ABOVE_MRP``.
+  * NEVER a 0.00 price: a rule/manual price that rounds to <= 0 with no cost floor
+    (e.g. a 100%-off rule, no cost data) is refused -- held at MRP + flagged
+    ``ZERO_PRICE_REFUSED`` -- so we never persist 0 (which would ship free / make the
+    push fall back to the in-store price).
   * ADVISORY only: after computing, the result is run through
     ``pricing_caps.evaluate_offer_price`` and, if the online discount would exceed
     the IN-STORE discount cap (category / luxury-brand), the flag
@@ -268,8 +273,9 @@ def compute_online_price(
           "pct": float,            # EFFECTIVE discount % after clamps
           "requested_pct": float,  # the % the rule/manual price implied pre-clamp
           "source": "manual"|"rule"|"none",
-          "flags": [str, ...],     # COST_CLAMPED / COST_ABOVE_MRP / OFFER_ABOVE_MRP
-                                   #   / EXCEEDS_INSTORE_CAP / INVALID_MRP
+          "flags": [str, ...],     # COST_CONFLICT / COST_ABOVE_MRP / OFFER_ABOVE_MRP
+                                   #   / ZERO_PRICE_REFUSED / EXCEEDS_INSTORE_CAP
+                                   #   / INVALID_MRP
           "clamped": bool,
         }
     Never raises.
@@ -307,23 +313,37 @@ def compute_online_price(
     offer = raw
     clamped = False
 
+    # Guard (ZERO_PRICE_REFUSED): a rule/manual price that rounds to <= 0 (e.g. a
+    # 100%-off clearance rule on a product whose cost was never entered) must NEVER
+    # be persisted -- a 0.00 online price ships free AND makes the Shopify push fall
+    # back to the in-store offer_price (leaking the POS price online). Refuse it:
+    # hold at MRP (a public value) and flag for owner review. When cost IS known the
+    # below-cost invariant already lifts the price off 0.
+    if offer <= 0:
+        offer = mrp_f
+        clamped = True
+        flags.append("ZERO_PRICE_REFUSED")
+
     # Invariant 1: offer <= MRP (the DB-level MRP >= offer rule; pricing_caps).
     if offer > mrp_f:
         offer = mrp_f
         clamped = True
         flags.append("OFFER_ABOVE_MRP")
 
-    # Invariant 2: never below cost. Cap at cost and FLAG (don't sell at a loss).
+    # Invariant 2: never below cost -- AND never reveal cost. cost_price is a
+    # cost-MASKED field, so we do NOT clamp the online price to cost EXACTLY (that
+    # would publish the exact cost through every cost-masked storefront read and the
+    # Shopify push -- COST_CLAMPED literally announced "this number IS the cost").
+    # Instead hold at MRP (a public value) and flag COST_CONFLICT for owner review:
+    # we still never sell at a loss, and we never leak the cost number online.
     if cost_f is not None and offer < cost_f:
-        if cost_f <= mrp_f:
-            offer = cost_f
-            flags.append("COST_CLAMPED")
-        else:
-            # cost > MRP: bad data. offer<=MRP is the hard invariant, so cap at
-            # MRP and flag that margin CANNOT be protected here (do not invent).
-            offer = mrp_f
-            flags.append("COST_ABOVE_MRP")
+        offer = mrp_f
         clamped = True
+        if cost_f <= mrp_f:
+            flags.append("COST_CONFLICT")
+        else:
+            # cost > MRP: bad data. offer<=MRP is the hard invariant anyway.
+            flags.append("COST_ABOVE_MRP")
 
     offer = _round2(offer)
     compare_at = _round2(mrp_f)
@@ -521,7 +541,24 @@ def recompute_online_price(
             pct = _rule_pct(rule)
 
         # ---- Product level (record + no-variant fallback the push reads) ----
+        ecom_existing = product.get("ecom") or {}
+        # The engine ALWAYS stamps online_price_source when it writes a price, so a
+        # positive online_offer_price with NO such stamp is a price the engine never
+        # wrote -- a BVI-migrated / hand-set storefront price.
+        prior_stamp = ecom_existing.get("online_price_source")
+        existing_online = _pos_or_none(ecom_existing.get(ECOM_OFFER_FIELD))
+
         product_manual = _product_manual_offer(product)
+        seeded_manual = None
+        # PRESERVE-ON-FIRST-TOUCH (BUG-8): adopt an unstamped hand-set/BVI online
+        # price as the manual override so neither the empty-rules window nor a later
+        # rule-CRUD recompute_all sweep can clobber it (owner ruling: a hand-set
+        # online price WINS over a rule). We persist it so the next recompute sees a
+        # stamp + manual field and this branch never fires twice.
+        if product_manual is None and existing_online is not None and not prior_stamp:
+            product_manual = existing_online
+            seeded_manual = existing_online
+
         prod_res = compute_online_price(
             mrp,
             discount_pct=pct,
@@ -531,22 +568,34 @@ def recompute_online_price(
             brand=brand,
         )
         computed_at = _now_iso()
-        ecom_updates = {
-            ECOM_OFFER_FIELD: prod_res["offer"],
-            ECOM_COMPARE_FIELD: prod_res["compare_at"],
-            "online_discount_pct": prod_res["pct"],
-            "online_discount_rule_id": rule_id,
-            "online_price_source": prod_res["source"],
-            "online_price_flags": prod_res["flags"],
-            "online_price_computed_at": computed_at,
-        }
-        # Mutate in place so a DB-less caller (unit test / pre-persist door) sees it.
-        ecom = dict(product.get("ecom") or {})
-        ecom.update(ecom_updates)
-        product["ecom"] = ecom
 
-        if persist and db is not None and pid:
-            _persist_product_ecom(db, pid, ecom_updates)
+        # Only rule-owned or hand-set (manual) prices are (re)written. When there is
+        # NO rule and NO manual (source == "none") and the engine never previously
+        # priced this product (no prior stamp), we DO NOT stamp an MRP "online price"
+        # onto it: that would (a) reset a hand-set BVI price during the empty-rules
+        # window and (b) flip a no-variant product from its in-store offer up to MRP
+        # at the Phase-B cutover. A prior engine stamp means the engine owns the
+        # field and may legitimately revert it (e.g. after a rule is deleted).
+        write_offer = not (prod_res["source"] == "none" and not prior_stamp)
+        if write_offer:
+            ecom_updates = {
+                ECOM_OFFER_FIELD: prod_res["offer"],
+                ECOM_COMPARE_FIELD: prod_res["compare_at"],
+                "online_discount_pct": prod_res["pct"],
+                "online_discount_rule_id": rule_id,
+                "online_price_source": prod_res["source"],
+                "online_price_flags": prod_res["flags"],
+                "online_price_computed_at": computed_at,
+            }
+            if seeded_manual is not None:
+                ecom_updates[MANUAL_OFFER_FIELD] = seeded_manual
+            # Mutate in place so a DB-less caller (unit test / pre-persist door) sees it.
+            ecom = dict(ecom_existing)
+            ecom.update(ecom_updates)
+            product["ecom"] = ecom
+
+            if persist and db is not None and pid:
+                _persist_product_ecom(db, pid, ecom_updates)
 
         # ---- Variant level (the primary lever: the push reads these FIRST) ----
         if variants is None:
@@ -555,7 +604,21 @@ def recompute_online_price(
         all_flags = set(prod_res["flags"])
         for v in variants or []:
             v_mrp = _first_pos(v.get("mrp")) or mrp  # variant MRP, else product MRP
+            # Same PRESERVE-ON-FIRST-TOUCH contract as the product level: the engine
+            # stamps online_price_meta whenever it writes discounted_price, so a
+            # positive discounted_price with no meta is a hand-set / BVI-migrated
+            # variant price -> adopt it as the manual override so a recompute can
+            # never clobber it, and persist it so this only fires once.
+            v_meta = v.get("online_price_meta")
+            v_prior_stamp = (
+                v_meta.get("source") if isinstance(v_meta, dict) else None
+            )
+            v_existing_online = _pos_or_none(v.get(VARIANT_OFFER_FIELD))
             v_manual = _variant_manual_offer(v)
+            v_seeded_manual = None
+            if v_manual is None and v_existing_online is not None and not v_prior_stamp:
+                v_manual = v_existing_online
+                v_seeded_manual = v_existing_online
             v_res = compute_online_price(
                 v_mrp,
                 discount_pct=pct,
@@ -564,34 +627,38 @@ def recompute_online_price(
                 discount_category=discount_category,
                 brand=brand,
             )
-            v[VARIANT_OFFER_FIELD] = v_res["offer"]
-            v[VARIANT_COMPARE_FIELD] = v_res["compare_at"]
-            v["online_price_meta"] = {
-                "source": v_res["source"],
-                "rule_id": rule_id,
-                "pct": v_res["pct"],
-                "flags": v_res["flags"],
-                "computed_at": computed_at,
-            }
             all_flags.update(v_res["flags"])
             sku = v.get("sku")
-            if persist and db is not None and sku:
-                _persist_variant(
-                    db,
-                    sku,
-                    {
-                        VARIANT_OFFER_FIELD: v_res["offer"],
-                        VARIANT_COMPARE_FIELD: v_res["compare_at"],
-                        "online_price_meta": v["online_price_meta"],
-                    },
-                )
+            # Don't reset a never-priced variant to MRP when no rule / manual owns it.
+            v_write = not (v_res["source"] == "none" and not v_prior_stamp)
+            if v_write:
+                v[VARIANT_OFFER_FIELD] = v_res["offer"]
+                v[VARIANT_COMPARE_FIELD] = v_res["compare_at"]
+                v["online_price_meta"] = {
+                    "source": v_res["source"],
+                    "rule_id": rule_id,
+                    "pct": v_res["pct"],
+                    "flags": v_res["flags"],
+                    "computed_at": computed_at,
+                }
+                v_updates = {
+                    VARIANT_OFFER_FIELD: v_res["offer"],
+                    VARIANT_COMPARE_FIELD: v_res["compare_at"],
+                    "online_price_meta": v["online_price_meta"],
+                }
+                if v_seeded_manual is not None:
+                    v[MANUAL_OFFER_FIELD] = v_seeded_manual
+                    v_updates[MANUAL_OFFER_FIELD] = v_seeded_manual
+                if persist and db is not None and sku:
+                    _persist_variant(db, sku, v_updates)
             variant_summaries.append(
                 {
                     "sku": sku,
-                    "offer": v_res["offer"],
-                    "compare_at": v_res["compare_at"],
+                    "offer": v.get(VARIANT_OFFER_FIELD),
+                    "compare_at": v.get(VARIANT_COMPARE_FIELD),
                     "source": v_res["source"],
                     "flags": v_res["flags"],
+                    "written": v_write,
                 }
             )
 

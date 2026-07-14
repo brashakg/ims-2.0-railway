@@ -51,6 +51,7 @@ import argparse
 import logging
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -232,15 +233,36 @@ def _mongo_connect(mongo_url: str, db_name: str):
         return None, None
 
 
+def _new_rule_id() -> str:
+    """A stable CRUD id for a migrated rule (same shape the router mints:
+    online_store_discount_rules.create_rule uses ``rule_{uuid4().hex[:12]}``)."""
+    return f"rule_{uuid.uuid4().hex[:12]}"
+
+
 def _upsert_one(collection, filter_doc: Dict, doc: Dict) -> bool:
-    """Idempotent upsert. ``bvi_rule_id`` (the natural creation lineage) and
-    created_at live in $setOnInsert so a re-run never shifts them; everything else
-    refreshes each run."""
+    """Idempotent upsert. ``bvi_rule_id`` (the natural creation lineage), the CRUD
+    id (``rule_id`` + its ``id`` mirror) and created_at live in $setOnInsert so a
+    re-run never shifts them; everything else refreshes each run.
+
+    Minting rule_id/id at INSERT is the fix for BUG-9: without them the router's
+    get/update/delete (keyed on rule_id) and the FE list (React key = rule_id) see
+    ``undefined`` -> every migrated rule was uneditable/undeletable, so a live
+    storefront discount could not be turned off. $setOnInsert keeps them stable
+    across re-runs."""
     try:
         now = _now_utc()
-        set_on_insert = {"created_at": doc.pop("created_at", now)}
+        rid = _new_rule_id()
+        set_on_insert = {
+            "created_at": doc.pop("created_at", now),
+            "rule_id": rid,
+            "id": rid,
+        }
         if doc.get("bvi_rule_id"):
             set_on_insert["bvi_rule_id"] = doc.pop("bvi_rule_id")
+        # Never let $set fight $setOnInsert over the same key (a re-run must keep the
+        # original id, not rotate it).
+        doc.pop("rule_id", None)
+        doc.pop("id", None)
         doc["updated_at"] = now
         collection.update_one(
             filter_doc,
@@ -251,6 +273,32 @@ def _upsert_one(collection, filter_doc: Dict, doc: Dict) -> bool:
     except Exception as e:  # noqa: BLE001
         logger.warning("[UPSERT] failed on filter %s: %s", filter_doc, e)
         return False
+
+
+def _backfill_rule_ids(collection) -> int:
+    """Give any pre-existing ecom_discount_rules doc that is missing a CRUD id one
+    (covers rows written before the BUG-9 fix so they too become editable/deletable
+    via the router + UI). Idempotent + fail-soft; returns the count backfilled."""
+    backfilled = 0
+    try:
+        cursor = collection.find(
+            {"$or": [{"rule_id": {"$exists": False}}, {"rule_id": None}, {"rule_id": ""}]}
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[BACKFILL] scan failed: %s", e)
+        return 0
+    for d in cursor:
+        rid = _new_rule_id()
+        try:
+            collection.update_one(
+                {"_id": d.get("_id")}, {"$set": {"rule_id": rid, "id": rid}}
+            )
+            backfilled += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[BACKFILL] update failed for %s: %s", d.get("_id"), e)
+    if backfilled:
+        logger.info("[BACKFILL] minted rule_id for %d pre-existing doc(s)", backfilled)
+    return backfilled
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +340,14 @@ def run_discount_rules(pg_conn, mongo_db, *, dry_run: bool, sample_n: int = 5) -
         if _upsert_one(coll, natural_key(d), d):
             upserted += 1
     logger.info("[RULES] upserted %d / %d", upserted, len(docs))
+    # Backfill CRUD ids for any doc written before the rule_id fix (idempotent).
+    backfilled = _backfill_rule_ids(coll)
     return {
         "entity": "discount_rules",
         "pg_rows": total,
         "upserted": upserted,
         "unmapped": unmapped,
+        "backfilled": backfilled,
         "dry_run": False,
     }
 

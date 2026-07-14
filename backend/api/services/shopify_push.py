@@ -713,17 +713,28 @@ def _resolve_variant_pricing(
     usable exists.
 
     NOTE (online discount engine): ecom.online_offer_price is preferred ABOVE the
-    in-store offer_price so a no-variant product shows its RULE-derived online
-    price online, never the in-store price -- and the engine NEVER writes
-    offer_price, so in-store POS pricing is untouched. Variant-carrying products
-    are unaffected: the variant's own discounted_price (which the engine writes)
-    still wins first."""
+    in-store offer_price ONLY when the online discount engine actually computed it
+    (ecom.online_price_source in {"rule","manual"}). An unstamped / "none" online
+    price is a hand-set BVI value or a stale save -- preferring it would silently
+    FLIP a no-variant product's shipped price (e.g. from its in-store offer up to
+    MRP) at the Phase-B cutover. When it is not engine-stamped we fall back to the
+    existing in-store offer (pre-batch behaviour) so nothing flips unexpectedly. The
+    engine NEVER writes offer_price, so in-store POS pricing is untouched. Variant-
+    carrying products are unaffected: the variant's own discounted_price (which the
+    engine writes) still wins first."""
     pricing = product.get("pricing") or {}
     ecom = product.get("ecom") or {}
+    # Only trust the product-level online offer/compare-at when the engine stamped
+    # it (a real rule- or manual-derived price); ignore unstamped / "none" values.
+    _ecom_stamped = ecom.get("online_price_source") in ("rule", "manual")
+    ecom_online_offer = _price_float(ecom.get("online_offer_price")) if _ecom_stamped else 0.0
+    ecom_online_compare = (
+        _price_float(ecom.get("online_compare_at_price")) if _ecom_stamped else 0.0
+    )
     price = (
         _price_float(variant.get("discounted_price"))
         or _price_float(variant.get("mrp"))
-        or _price_float(ecom.get("online_offer_price"))
+        or ecom_online_offer
         or _price_float(product.get("offer_price"))
         or _price_float(pricing.get("offer_price"))
         or _price_float(product.get("mrp"))
@@ -732,7 +743,7 @@ def _resolve_variant_pricing(
     mrp = (
         _price_float(variant.get("compare_at_price"))
         or _price_float(variant.get("mrp"))
-        or _price_float(ecom.get("online_compare_at_price"))
+        or ecom_online_compare
         or _price_float(product.get("mrp"))
         or _price_float(pricing.get("mrp"))
     )

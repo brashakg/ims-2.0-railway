@@ -125,11 +125,15 @@ def test_compute_basic_math_and_rounding():
     assert r["source"] == "rule"
 
 
-def test_compute_never_below_cost_clamps_and_flags():
-    # 40% off 1000 = 600, but cost is 750 -> clamp UP to cost, flag COST_CLAMPED.
+def test_compute_below_cost_holds_at_mrp_and_does_not_expose_cost():
+    # 40% off 1000 = 600, but cost is 750. cost_price is a MASKED field: we must
+    # NEVER publish the exact cost as the online price (that defeats cost-masking).
+    # Hold at MRP, flag COST_CONFLICT, and the online price must NOT equal cost.
     r = engine.compute_online_price(1000, discount_pct=40, cost_price=750)
-    assert r["offer"] == 750.0
-    assert "COST_CLAMPED" in r["flags"]
+    assert r["offer"] == 1000.0
+    assert r["offer"] != 750.0  # the cost number is NOT surfaced as the price
+    assert "COST_CONFLICT" in r["flags"]
+    assert "COST_CLAMPED" not in r["flags"]  # old leaky flag is gone
     assert r["clamped"] is True
 
 
@@ -146,11 +150,13 @@ def test_compute_manual_offer_overrides_rule():
     assert r["source"] == "manual"
 
 
-def test_compute_manual_offer_still_clamped_below_cost():
-    # A manual price below cost is still lifted to cost (never sell at a loss).
+def test_compute_manual_offer_below_cost_holds_at_mrp_not_cost():
+    # A manual price below cost is refused too: held at MRP (never a loss, never a
+    # cost leak) and flagged COST_CONFLICT -- the cost number is never the price.
     r = engine.compute_online_price(1000, discount_pct=0, manual_offer=500, cost_price=650)
-    assert r["offer"] == 650.0
-    assert "COST_CLAMPED" in r["flags"]
+    assert r["offer"] == 1000.0
+    assert r["offer"] != 650.0
+    assert "COST_CONFLICT" in r["flags"]
 
 
 def test_compute_offer_never_exceeds_mrp():
@@ -345,3 +351,213 @@ def test_rule_crud_rbac_allows_manager_roles():
 def test_rule_crud_rbac_denies_sales_staff_and_others():
     for role in ("SALES_STAFF", "DESIGN_MANAGER", "ACCOUNTANT", "CASHIER", "OPTOMETRIST"):
         assert rbac.check_access("POST", "/api/v1/online-store/discount-rules", [role]) is False, role
+
+
+# ===========================================================================
+# G. Adversarial-panel fixes (#8-#13): preserve non-rule prices, cost-leak +
+#    zero-price guards, stable migrated rule_id, dup guard, no cutover flip.
+# ===========================================================================
+
+
+# --- #8 preserve-on-first-touch: no-rule / empty-rules window ---------------
+
+
+def test_recompute_preserves_unstamped_bvi_online_price_in_empty_rules_window():
+    # BVI-migrated product: ecom.online_offer_price=4499 (the live storefront price)
+    # was written by the migration, NOT the engine (no online_price_source stamp).
+    # An edit before rules are migrated recomputes with EMPTY rules -> the engine
+    # must PRESERVE 4499 (adopt as manual), never reset it to MRP 8999.
+    db = _EngineDB()  # no discount rules loaded
+    product = {
+        "id": "BV1", "category": "SUNGLASS", "mrp": 8999,
+        "ecom": {"online_offer_price": 4499},
+    }
+    db["catalog_products"].insert_one(dict(product))
+    db["catalog_variants"].insert_one(
+        {"sku": "V-BV1", "parent_product_id": "BV1", "mrp": 8999, "discounted_price": 4499}
+    )
+    res = engine.recompute_online_price(product, db=db)
+    assert res["ok"] is True
+    saved = db["catalog_products"].find_one({"id": "BV1"})
+    assert saved["ecom"]["online_offer_price"] == 4499.0  # NOT reset to MRP
+    assert saved["ecom"].get("manual_online_offer_price") == 4499.0  # seeded
+    assert saved["ecom"]["online_price_source"] == "manual"
+    # In-store price never invented/touched.
+    assert "offer_price" not in saved or saved.get("offer_price") in (None, 0)
+    v = db["catalog_variants"].find_one({"sku": "V-BV1"})
+    assert v["discounted_price"] == 4499.0  # variant BVI price preserved too
+    assert v.get("manual_online_offer_price") == 4499.0
+
+
+def test_recompute_no_rule_does_not_price_fresh_product_to_mrp():
+    # A product with NO existing online price and no matching rule must NOT get an
+    # MRP "online price" stamped (that is the cutover-flip / MRP-reset bug).
+    db = _EngineDB()
+    product = {"id": "F1", "category": "SUNGLASS", "mrp": 5000, "offer_price": 4200}
+    db["catalog_products"].insert_one(dict(product))
+    res = engine.recompute_online_price(product, db=db)
+    assert res["ok"] is True and res["source"] == "none"
+    saved = db["catalog_products"].find_one({"id": "F1"})
+    assert "online_offer_price" not in (saved.get("ecom") or {})
+
+
+def test_recompute_manual_survives_a_later_rule_recompute():
+    # An explicit manual online price wins over a rule and survives recompute_all.
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r", "category": "SUNGLASS", "discount_percentage": 30, "active": True}
+    )
+    product = {
+        "id": "M1", "category": "SUNGLASS", "mrp": 1000, "cost_price": 400,
+        "ecom": {"manual_online_offer_price": 880},
+    }
+    db["catalog_products"].insert_one(dict(product))
+    res = engine.recompute_online_price(product, db=db)
+    assert res["source"] == "manual"
+    saved = db["catalog_products"].find_one({"id": "M1"})
+    assert saved["ecom"]["online_offer_price"] == 880.0  # rule 30% (=700) did NOT win
+
+
+def test_recompute_rule_owned_price_still_reverts_when_no_rule():
+    # A price the ENGINE previously wrote (has a stamp) is engine-owned and DOES
+    # revert to MRP when its rule is later removed -- preserve-on-first-touch only
+    # protects UNstamped (hand-set) prices, not engine-written ones.
+    db = _EngineDB()
+    product = {
+        "id": "E1", "category": "SUNGLASS", "mrp": 2000,
+        "ecom": {"online_offer_price": 1500, "online_price_source": "rule"},
+    }
+    db["catalog_products"].insert_one(dict(product))
+    res = engine.recompute_online_price(product, db=db)  # no rules now
+    saved = db["catalog_products"].find_one({"id": "E1"})
+    assert res["source"] == "none"
+    assert saved["ecom"]["online_offer_price"] == 2000.0  # reverted to MRP
+
+
+# --- #11 cost-leak guard through recompute ----------------------------------
+
+
+def test_recompute_below_cost_never_writes_cost_to_online_field():
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r", "category": "ACCESSORIES", "discount_percentage": 60, "active": True}
+    )
+    product = {"id": "C1", "category": "ACCESSORIES", "mrp": 1000, "cost_price": 700}
+    db["catalog_products"].insert_one(dict(product))
+    engine.recompute_online_price(product, db=db)
+    saved = db["catalog_products"].find_one({"id": "C1"})
+    # 60% off = 400 < cost 700 -> held at MRP, NEVER the cost number.
+    assert saved["ecom"]["online_offer_price"] == 1000.0
+    assert saved["ecom"]["online_offer_price"] != 700.0
+    assert "COST_CONFLICT" in saved["ecom"]["online_price_flags"]
+
+
+# --- #13 zero-price guard ---------------------------------------------------
+
+
+def test_compute_100pct_no_cost_refuses_zero_price():
+    r = engine.compute_online_price(1000, discount_pct=100)
+    assert r["offer"] == 1000.0  # held at MRP, never 0.0
+    assert r["offer"] != 0.0
+    assert "ZERO_PRICE_REFUSED" in r["flags"]
+
+
+def test_recompute_100pct_rule_never_persists_zero():
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r", "category": "ACCESSORIES", "discount_percentage": 100, "active": True}
+    )
+    product = {"id": "Z1", "category": "ACCESSORIES", "mrp": 500}  # no cost data
+    db["catalog_products"].insert_one(dict(product))
+    db["catalog_variants"].insert_one(
+        {"sku": "V-Z1", "parent_product_id": "Z1", "mrp": 500}
+    )
+    engine.recompute_online_price(product, db=db)
+    saved = db["catalog_products"].find_one({"id": "Z1"})
+    assert saved["ecom"]["online_offer_price"] == 500.0
+    assert saved["ecom"]["online_offer_price"] != 0.0
+    v = db["catalog_variants"].find_one({"sku": "V-Z1"})
+    assert v["discounted_price"] == 500.0 and v["discounted_price"] != 0.0
+
+
+# --- #9 migration mints a STABLE rule_id ------------------------------------
+
+
+def test_migration_mints_stable_rule_id_across_reruns():
+    import migrate_bvi_discount_rules as mig
+
+    coll = _FakeUpsertColl()
+    row = {"id": "d1", "category": "SUNGLASSES", "brand": "Ray-Ban",
+           "subBrand": None, "discountPercentage": 20}
+    ids = []
+    for _ in range(3):
+        doc = mig.map_discount_rule(row)
+        mig._upsert_one(coll, mig.natural_key(doc), doc)
+        ids.append(coll.docs[0]["rule_id"])
+    assert len(coll.docs) == 1
+    assert coll.docs[0]["rule_id"], "migrated rule must carry a CRUD rule_id"
+    assert coll.docs[0]["id"] == coll.docs[0]["rule_id"]  # id mirrors rule_id
+    assert coll.docs[0]["rule_id"].startswith("rule_")
+    assert ids[0] == ids[1] == ids[2]  # stable across re-runs ($setOnInsert)
+
+
+# --- #10 duplicate natural-key rejected via the router ----------------------
+
+
+def test_router_rejects_duplicate_category_only_rule():
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api.routers import online_store_discount_rules as rules_router
+
+    db = _EngineDB()
+    _orig = rules_router._get_db
+    rules_router._get_db = lambda: db
+    try:
+        user = {"user_id": "u1"}
+        first = asyncio.run(
+            rules_router.create_rule(
+                rules_router.RuleCreate(category="SUNGLASS", discount_percentage=10),
+                user,
+            )
+        )
+        assert first["rule"]["category"] == "SUNGLASS"
+        # Blank brand/sub_brand stored as '' (not None) so the pre-check matches.
+        assert first["rule"]["brand"] == ""
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(
+                rules_router.create_rule(
+                    rules_router.RuleCreate(category="SUNGLASS", discount_percentage=25),
+                    user,
+                )
+            )
+        assert ei.value.status_code == 409
+    finally:
+        rules_router._get_db = _orig
+
+
+# --- #12 _resolve_variant_pricing: no cutover flip for unstamped ecom price --
+
+
+def test_resolve_variant_pricing_ignores_unstamped_ecom_online_price():
+    from api.services import shopify_push
+
+    # No-variant product on Shopify at its in-store offer (450); a post-merge save
+    # stored ecom.online_offer_price=600 (MRP) WITHOUT an engine stamp. The push must
+    # NOT prefer it (that flips the live price to MRP) -> falls back to in-store 450.
+    product = {"mrp": 600, "offer_price": 450, "ecom": {"online_offer_price": 600}}
+    price, mrp = shopify_push._resolve_variant_pricing(product, {})
+    assert price == 450.0  # in-store offer, NOT raised to MRP 600
+    assert mrp == 600.0
+
+
+def test_resolve_variant_pricing_uses_stamped_engine_online_price():
+    from api.services import shopify_push
+
+    product = {
+        "mrp": 600, "offer_price": 450,
+        "ecom": {"online_offer_price": 540, "online_price_source": "rule"},
+    }
+    price, _mrp = shopify_push._resolve_variant_pricing(product, {})
+    assert price == 540.0  # engine-stamped rule price IS preferred
