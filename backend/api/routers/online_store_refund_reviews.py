@@ -44,6 +44,7 @@ router = APIRouter()
 _REVIEW_ROLES = ("ADMIN", "ACCOUNTANT")
 
 _REVIEW_COLLECTION = "shopify_refund_review"
+_RETURNS_COLLECTION = "returns"
 
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
@@ -78,6 +79,25 @@ def _clean(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _duplicate_has_credit_note(db, row: Dict[str, Any]) -> bool:
+    """Defense-in-depth for the CONFIRM path: a post that returns 'duplicate' may
+    only be treated as truly POSTED when a REAL credit note exists behind the
+    refund id (the `returns` doc shows credit_note_issued == True). A stale claim
+    that never issued (e.g. a no-customer refund whose row still reads
+    credit_note_issued=False) must NOT falsely close the review as POSTED -- the
+    GST reversal was never written. Fail CLOSED (return False) on any doubt so the
+    row stays open for retry rather than silently swallowing the reversal."""
+    refund_id = str(row.get("shopify_refund_id") or "").strip()
+    if not refund_id:
+        return False
+    try:
+        coll = db.get_collection(_RETURNS_COLLECTION)
+        doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
+    except Exception:  # noqa: BLE001
+        doc = None
+    return bool(doc and doc.get("credit_note_issued") is True)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +223,14 @@ async def confirm_refund_review(
         result = {"status": "error", "error": str(exc)}
 
     post_status = str(result.get("status") or "")
-    posted = post_status in ("credited", "duplicate")
+    if post_status == "duplicate":
+        # A 'duplicate' only counts as POSTED when a real credit note actually
+        # exists behind it. Re-read the returns doc: a duplicate whose row was
+        # never credited (credit_note_issued != True) is a stale claim, NOT a
+        # posted refund -> keep the review open instead of falsely closing it.
+        posted = _duplicate_has_credit_note(db, row)
+    else:
+        posted = post_status == "credited"
     new_status = "POSTED" if posted else "CREDIT_FAILED"
     update = {
         "status": new_status,

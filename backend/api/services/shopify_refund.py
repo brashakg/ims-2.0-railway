@@ -134,6 +134,50 @@ def _ensure_unique_refund_index(db, collection: str) -> None:
         logger.debug("[SHOPIFY_REFUND] index build skipped for %s", collection, exc_info=True)
 
 
+def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
+    """The claim-first insert hit the unique index -- a `returns` doc ALREADY
+    carries this refund id. Decide ATOMICALLY whether that is a genuine duplicate
+    (a credit note was already issued -> the caller must NOT re-issue) or a STALE
+    claim from an earlier attempt that never managed to issue the credit note (e.g.
+    a guest / no-customer online order finalized CREDIT_FAILED) and is therefore
+    safe to re-process.
+
+    Atomicity: find_one_and_update with the filter
+    {shopify_refund_id, credit_note_issued != True, reprocessing_at == null} flips
+    reprocessing_at for the FIRST caller only; a second concurrent retry then no
+    longer matches (reprocessing_at is set, or credit_note_issued has since become
+    True) and gets None -> it CANNOT also re-issue. Single-winner => no double
+    credit note on concurrent redeliveries. The marker is cleared on finalize.
+
+    Returns the existing doc when THIS caller won the right to re-process a
+    never-credited row (the caller falls through to the credit-issue + finalize
+    path, which update_one's this same doc); returns None for a TRUE duplicate -- a
+    credit note really exists, OR another worker is mid-reprocess. Never raises."""
+    fou = getattr(returns_coll, "find_one_and_update", None)
+    if callable(fou):
+        try:
+            return fou(
+                {
+                    "shopify_refund_id": refund_id,
+                    "credit_note_issued": {"$ne": True},
+                    "reprocessing_at": None,
+                },
+                {"$set": {"reprocessing_at": now}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_REFUND] retry-claim find_one_and_update failed: %s", exc)
+            return None
+    # No find_one_and_update (mock / no-DB path): best-effort NON-atomic decision.
+    # Still honest -- only re-process when the row was demonstrably never credited.
+    try:
+        existing = returns_coll.find_one({"shopify_refund_id": refund_id})
+    except Exception:  # noqa: BLE001
+        existing = None
+    if existing and existing.get("credit_note_issued") is not True:
+        return existing
+    return None
+
+
 def _refund_auto_enabled(db) -> bool:
     """Full auto-credit-note + auto-restock posture. DEFAULT OFF (safe for a live
     business -- do NOT auto-post financial entries). Turned ON only by an explicit
@@ -777,15 +821,31 @@ def _post_credit_and_restock(
             claimed = True
         except Exception as exc:  # noqa: BLE001
             if _is_dup_key(exc):
+                # A returns doc already carries this refund id. Do NOT blindly call
+                # it a duplicate: it may be a STALE claim from an earlier attempt
+                # that never issued the credit note (e.g. a no-customer online
+                # order that finalized CREDIT_FAILED). Atomically claim the retry --
+                # only when the existing row was never credited AND no other worker
+                # is mid-reprocess -- so a genuinely-posted refund is still a true
+                # duplicate but an unposted one gets re-driven (not silently
+                # swallowed while the GST reversal is lost).
+                existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
+                if existing is None:
+                    logger.info(
+                        "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
+                    )
+                    return {
+                        "status": "duplicate",
+                        "refund_id": refund_id,
+                        "order_id": order_id,
+                    }
                 logger.info(
-                    "[SHOPIFY_REFUND] refund=%s already claimed -- duplicate", refund_id
+                    "[SHOPIFY_REFUND] refund=%s re-attempting previously-unposted refund",
+                    refund_id,
                 )
-                return {
-                    "status": "duplicate",
-                    "refund_id": refund_id,
-                    "order_id": order_id,
-                }
-            logger.warning("[SHOPIFY_REFUND] claim insert failed: %s", exc)
+                claimed = True
+            else:
+                logger.warning("[SHOPIFY_REFUND] claim insert failed: %s", exc)
 
     # (a) GST credit note -> credit_note_ledger (the CDNR source). Booked under the
     #     BILLING store with the real GST split; card refunds skip the balance bump.
@@ -850,6 +910,10 @@ def _post_credit_and_restock(
         "restocked": restock_result.get("restocked", []),
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_result.get("restock_stock_ids", []),
+        # Release the retry claim so a legitimate later retry of a still-uncredited
+        # row can re-claim it; a genuinely credited row is already guarded by
+        # credit_note_issued=True, so clearing this here is safe either way.
+        "reprocessing_at": None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if returns_coll is not None and claimed:

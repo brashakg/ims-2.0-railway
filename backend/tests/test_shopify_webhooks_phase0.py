@@ -80,6 +80,9 @@ def _match(doc, filter_) -> bool:
                 elif op == "$lte":
                     if actual is None or actual > op_val:
                         return False
+                elif op == "$ne":
+                    if actual == op_val:
+                        return False
                 else:
                     return False
         else:
@@ -150,6 +153,14 @@ class FakeCollection:
 
     def count_documents(self, filter_=None):
         return len([d for d in self.docs if _match(d, filter_)])
+
+    def find_one_and_update(self, filter_, update, **kwargs):
+        for d in self.docs:
+            if _match(d, filter_):
+                for k, v in (update.get("$set") or {}).items():
+                    d[k] = v
+                return dict(d)
+        return None
 
     def update_one(self, filter_, update, upsert=False):
         for d in self.docs:
