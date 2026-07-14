@@ -4415,6 +4415,43 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/store-health",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # --- /api/v1/online-store/discount-rules ---  (rebuild of BVI DiscountRule).
+    # Owner-editable CRUD for the automatic ONLINE storefront discount rules the
+    # online discount engine reads. PUSH-DARK + ONLINE-only (never in-store POS).
+    # Role-gated to SUPERADMIN/ADMIN/CATALOG_MANAGER (pricing, not a design-queue
+    # concern -> DESIGN_MANAGER excluded). The literal /recompute row precedes the
+    # /{rule_id} rows (policy_for prefers the exact-literal / fewest-params match).
+    # See routers/online_store_discount_rules.py + services/online_discount_engine.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/discount-rules",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/discount-rules",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/discount-rules/recompute",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/discount-rules/{rule_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/online-store/discount-rules/{rule_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/online-store/discount-rules/{rule_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
     # --- /api/v1/collections ---  (unification step-13: materialised collection
     # BROWSE). Read-only, fast-path over the collection_products materialised
     # view. AUTHENTICATED -- same posture as GET /products + GET /catalog/products

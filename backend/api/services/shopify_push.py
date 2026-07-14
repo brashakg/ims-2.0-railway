@@ -651,13 +651,25 @@ def _resolve_variant_pricing(
     """Resolve (selling_price, mrp) for ONE variant.
 
     Selling price: the variant's own discounted_price, else its mrp, else the
-    parent product's offer_price / pricing.offer_price, else the product mrp.
-    MRP (the compare-at side): the variant's compare_at_price, else its mrp,
-    else the product mrp. Returns 0.0 legs when nothing usable exists."""
+    ONLINE rule price on the ecom sub-doc (ecom.online_offer_price -- what the
+    online discount engine writes for a no-variant product), else the parent
+    product's offer_price / pricing.offer_price, else the product mrp.
+    MRP (the compare-at side): the variant's compare_at_price, else its mrp, else
+    the ecom online compare-at, else the product mrp. Returns 0.0 legs when nothing
+    usable exists.
+
+    NOTE (online discount engine): ecom.online_offer_price is preferred ABOVE the
+    in-store offer_price so a no-variant product shows its RULE-derived online
+    price online, never the in-store price -- and the engine NEVER writes
+    offer_price, so in-store POS pricing is untouched. Variant-carrying products
+    are unaffected: the variant's own discounted_price (which the engine writes)
+    still wins first."""
     pricing = product.get("pricing") or {}
+    ecom = product.get("ecom") or {}
     price = (
         _price_float(variant.get("discounted_price"))
         or _price_float(variant.get("mrp"))
+        or _price_float(ecom.get("online_offer_price"))
         or _price_float(product.get("offer_price"))
         or _price_float(pricing.get("offer_price"))
         or _price_float(product.get("mrp"))
@@ -666,6 +678,7 @@ def _resolve_variant_pricing(
     mrp = (
         _price_float(variant.get("compare_at_price"))
         or _price_float(variant.get("mrp"))
+        or _price_float(ecom.get("online_compare_at_price"))
         or _price_float(product.get("mrp"))
         or _price_float(pricing.get("mrp"))
     )

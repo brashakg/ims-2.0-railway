@@ -99,6 +99,7 @@ from .collections_insights import router as collections_insights_router
 from .online_store_menus import router as online_store_menus_router
 from .online_store_images import router as online_store_images_router
 from .online_store_push import router as online_store_push_router
+from .online_store_discount_rules import router as online_store_discount_rules_router
 from .online_store_orders import router as online_store_orders_router
 from .ondc import router as ondc_router
 from .approvals import router as approvals_router
@@ -200,6 +201,7 @@ __all__ = [
     "online_store_menus_router",
     "online_store_images_router",
     "online_store_push_router",
+    "online_store_discount_rules_router",
     "online_store_orders_router",
     "ondc_router",
     "approvals_router",
