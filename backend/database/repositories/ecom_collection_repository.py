@@ -116,6 +116,10 @@ class EcomCollectionRepository(BaseRepository):
         doc.setdefault("products", [])
         doc.setdefault("rules", [])
         doc.setdefault("products_count", len(doc.get("products") or []))
+        # SUPERADMIN "block from online sale": when True, every product in this
+        # collection is excluded from Shopify (never pushed; delisted if synced).
+        # See api/services/online_block.py + routers/online_store_collections.py.
+        doc.setdefault("online_sync_blocked", False)
         # Dirty from birth -- not yet synced to Shopify.
         doc.setdefault("locally_modified", True)
         # base_repository.create assigns _id + created_at/updated_at and inserts.
@@ -147,6 +151,38 @@ class EcomCollectionRepository(BaseRepository):
         if not collection_id:
             return False
         return super().delete(collection_id)
+
+    def set_block(
+        self, collection_id: str, blocked: bool, user_id: Optional[str] = None
+    ) -> Optional[Dict]:
+        """SUPERADMIN "block from online sale" toggle: set online_sync_blocked +
+        audit stamps directly.
+
+        Deliberately does NOT flip `locally_modified` (the collection metadata
+        itself did not change -- only IMS's internal online-block flag), so a
+        block/unblock never queues a pointless collection re-push. Returns the
+        updated doc, or None on failure / unknown collection. Fail-soft."""
+        if not collection_id:
+            return None
+        coll = self.find_one({self.id_field: collection_id})
+        if coll is None:
+            return None
+        now = datetime.now()
+        patch: Dict = {"online_sync_blocked": bool(blocked)}
+        if blocked:
+            patch["online_sync_blocked_by"] = user_id
+            patch["online_sync_blocked_at"] = now
+        else:
+            patch["online_sync_unblocked_by"] = user_id
+            patch["online_sync_unblocked_at"] = now
+        try:
+            self.collection.update_one(
+                {self.id_field: collection_id}, {"$set": patch}
+            )
+        except Exception as e:  # noqa: BLE001 -- fail-soft
+            print(f"Error setting block on {self.entity_name} {collection_id}: {e}")
+            return None
+        return self.find_one({self.id_field: collection_id})
 
     # ------------------------------------------------------------------
     # Manual membership (embedded ordered `products` array)

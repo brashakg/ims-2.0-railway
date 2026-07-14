@@ -4539,6 +4539,25 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/collections/{collection_id}/resolved-products",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # SUPERADMIN "block a collection from online sale" (BVI-retirement). Some
+    # brands contractually forbid online sale; the owner (SUPERADMIN) flags a
+    # collection so every product in it is excluded from Shopify (never pushed;
+    # delisted if already synced). NARROWED to SUPERADMIN ONLY (the owner asked
+    # for the SUPERADMIN right) -- the broader ecom set that runs the rest of the
+    # collections router is NOT admitted here. The literal .../block + .../unblock
+    # suffixes each carry one param + a literal segment, so policy_for resolves
+    # them ahead of the bare .../{collection_id} (different segment count anyway).
+    # See routers/online_store_collections.py + services/online_block.py.
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/collections/{collection_id}/block",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/collections/{collection_id}/unblock",
+        "allowed": ["SUPERADMIN"],
+    },
     # --- /api/v1/online-store/menus ---  (BVI Phase 3: Menus / Mega-menu, FLAGSHIP #2)
     # PUSH-DARK ecom_menus CRUD + an embedded recursive item-tree editor
     # (add/move/remove/reorder/patch nodes). All gated to the ecom role set

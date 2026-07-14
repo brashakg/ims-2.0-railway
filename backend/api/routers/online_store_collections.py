@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import require_roles
 from ..services import ecom_smart_rules
+from ..services import shopify_push
 
 router = APIRouter()
 
@@ -616,4 +617,174 @@ async def resolved_products(
         "count": len(skus),
         "scanned": len(products),
         "source": "smart_rules",
+    }
+
+
+# ---------------------------------------------------------------------------
+# SUPERADMIN: block a collection from online sale (BVI-retirement)
+# ---------------------------------------------------------------------------
+# Some brands contractually forbid ONLINE sale. The owner (SUPERADMIN) flags a
+# collection so ALL its products are excluded from Shopify -- never pushed
+# (api/services/online_block.is_blocked_from_online gates shopify_push.push_product)
+# and, if already synced, delisted here (status -> DRAFT, REVERSIBLE, never a
+# hard delete). These two routes are SUPERADMIN-ONLY (require_roles() with no
+# roles => only SUPERADMIN passes; the ecom set that runs the rest of this router
+# is deliberately NOT admitted). Catalogued in rbac_policy.POLICY as SUPERADMIN.
+
+
+def _resolve_member_skus(doc: Dict) -> List[str]:
+    """The effective member SKUs of a collection: CUSTOM -> its manual list (in
+    position order); SMART -> the rule set resolved over the catalog. Mirrors
+    /resolved-products. Fail-soft -> []."""
+    ctype = (doc.get("collection_type") or "CUSTOM").upper()
+    if ctype == "CUSTOM":
+        members = sorted(
+            (doc.get("products") or []),
+            key=lambda p: int((p or {}).get("position", 0) or 0),
+        )
+        return [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
+    rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
+    products = _catalog_products()
+    return ecom_smart_rules.resolve_skus(
+        products, rules, disjunctive=bool(doc.get("disjunctive", False)), limit=_RESOLVE_MAX
+    )
+
+
+def _synced_member_products(db, skus: List[str]) -> List[Dict]:
+    """catalog_products docs for `skus` that are ALREADY on Shopify (carry an
+    ecom.shopify_product_id) -- the ones a block must delist / an unblock must
+    re-queue. Fail-soft -> []."""
+    if db is None or not skus:
+        return []
+    out: List[Dict] = []
+    try:
+        for d in db["catalog_products"].find({"sku": {"$in": list(skus)}}):
+            if (d.get("ecom") or {}).get("shopify_product_id"):
+                d.pop("_id", None)
+                out.append(d)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
+def _write_block_audit(
+    current_user: dict, collection_id: str, blocked: bool, member_count: int, acted: int
+) -> None:
+    """Chained audit row for a block/unblock action (Audit Everything). Fail-soft:
+    an audit error never undoes/blocks the action."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is None:
+            return
+        audit.create(
+            {
+                "action": "COLLECTION_ONLINE_BLOCK" if blocked else "COLLECTION_ONLINE_UNBLOCK",
+                "entity_type": "ecom_collection",
+                "entity_id": collection_id,
+                "user_id": current_user.get("user_id"),
+                "severity": "WARNING" if blocked else "INFO",
+                "details": {
+                    "online_sync_blocked": blocked,
+                    "member_count": member_count,
+                    "affected": acted,
+                },
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.post("/{collection_id}/block")
+async def block_collection(
+    collection_id: str,
+    current_user: dict = Depends(require_roles()),  # SUPERADMIN ONLY
+) -> Dict:
+    """Flag a collection as blocked from online sale (SUPERADMIN). Sets
+    online_sync_blocked=True + audit stamps, then DELISTS every already-synced
+    member product on Shopify (status -> DRAFT via shopify_push.push_product_delist).
+
+    The delist obeys the existing dark write-gates: when DARK each delist is a
+    SIMULATED plan (no network); when the gates are LIVE it fires a real
+    productUpdate. Reversible (never hard-deletes) -- see /unblock. Unknown
+    collection -> 404."""
+    repo = _require_repo()
+    doc = repo.get_by_id(collection_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    updated = repo.set_block(collection_id, True, current_user.get("user_id"))
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to block collection")
+    # Keep the materialised membership current so is_blocked_from_online resolves
+    # this collection's members correctly right away (fail-soft).
+    _materialize(collection_id)
+
+    db = _get_db()
+    skus = _resolve_member_skus(updated)
+    delist_results: List[Dict] = []
+    delisted = 0
+    if db is not None and skus:
+        for member in _synced_member_products(db, skus):
+            res = await shopify_push.push_product_delist(db, member)
+            data = res.to_dict()
+            delist_results.append(data)
+            if res.ok and data.get("action") == "delist":
+                delisted += 1
+    mode = shopify_push.push_mode_status(db) if db is not None else None
+    _write_block_audit(current_user, collection_id, True, len(skus), delisted)
+    return {
+        "blocked": True,
+        "collection_id": collection_id,
+        "collection": _with_id(updated),
+        "member_count": len(skus),
+        "delisted": delisted,
+        "mode": mode,
+        "delist_results": delist_results,
+    }
+
+
+@router.post("/{collection_id}/unblock")
+async def unblock_collection(
+    collection_id: str,
+    current_user: dict = Depends(require_roles()),  # SUPERADMIN ONLY
+) -> Dict:
+    """Reverse the online-block flag (SUPERADMIN). Sets online_sync_blocked=False
+    and re-queues every already-synced member (marks ecom.locally_modified=True)
+    so a subsequent push re-publishes it (the block guard is now off, so
+    push_product rebuilds the ProductInput from the unchanged ecom.status ->
+    ACTIVE). Unknown collection -> 404."""
+    repo = _require_repo()
+    doc = repo.get_by_id(collection_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    updated = repo.set_block(collection_id, False, current_user.get("user_id"))
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to unblock collection")
+    _materialize(collection_id)
+
+    db = _get_db()
+    skus = _resolve_member_skus(updated)
+    requeued = 0
+    if db is not None and skus:
+        for member in _synced_member_products(db, skus):
+            try:
+                pid = member.get("id") or member.get("product_id")
+                if not pid:
+                    continue
+                ecom = dict(member.get("ecom") or {})
+                ecom["locally_modified"] = True
+                db["catalog_products"].update_one({"id": pid}, {"$set": {"ecom": ecom}})
+                requeued += 1
+            except Exception:  # noqa: BLE001 -- one bad doc never aborts the rest
+                continue
+    _write_block_audit(current_user, collection_id, False, len(skus), requeued)
+    return {
+        "blocked": False,
+        "collection_id": collection_id,
+        "collection": _with_id(updated),
+        "member_count": len(skus),
+        "requeued": requeued,
     }

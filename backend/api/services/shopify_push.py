@@ -108,6 +108,12 @@ class PushResult:
     # planned ProductVariantsBulkInput rows; LIVE -> a summary dict. None
     # elsewhere (and None when the product has no variants).
     variant_prices: Optional[Any] = None
+    # Collection pushes only (CUSTOM): the manual-membership side channel (the
+    # collectionAddProducts step -- IMS's stored manual member list reproduced on
+    # Shopify). SIMULATED -> the planned {product_ids, skipped_not_on_shopify};
+    # LIVE -> an {added, skipped_not_on_shopify, errors} summary. None for SMART
+    # (Shopify derives SMART membership from the ruleSet) and non-collection pushes.
+    membership: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -429,6 +435,23 @@ mutation imsCollectionUpdate($input: CollectionInput!) {
 }
 """
 
+# CUSTOM-collection MANUAL membership push (parity with BVI's
+# ecommerce/src/lib/shopify.ts addProductsToCollection). CollectionInput does
+# NOT carry a manual product list, so a CUSTOM collection's members are attached
+# in a SEPARATE step after the collection upsert. Idempotent: re-adding an
+# existing member is a no-op on Shopify. SMART collections never use this (their
+# membership is derived by Shopify from the ruleSet).
+_COLLECTION_ADD_PRODUCTS = """
+mutation imsCollectionAddProducts($id: ID!, $productIds: [ID!]!) {
+  collectionAddProducts(id: $id, productIds: $productIds) {
+    collection { id }
+    userErrors { field message }
+  }
+}
+"""
+# Shopify accepts many ids per call; chunk to stay well within limits.
+_COLLECTION_PRODUCTS_PER_CALL = 250
+
 _MENU_CREATE = """
 mutation imsMenuCreate($title: String!, $handle: String!, $items: [MenuItemCreateInput!]!) {
   menuCreate(title: $title, handle: $handle, items: $items) {
@@ -735,6 +758,16 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
         }
     if collection.get("sort_order"):
         inp["sortOrder"] = collection["sort_order"]
+    # Collection hero image (parity with BVI's updateCollection, which pushed
+    # image:{src,altText}). `image_url` is the stored collection image; the
+    # `banner_image` metafield is a separate storefront concern, not the
+    # Shopify CollectionInput.image.
+    image_src = collection.get("image_url")
+    if image_src:
+        inp["image"] = {
+            "src": image_src,
+            "altText": collection.get("image_alt") or collection.get("title") or "",
+        }
     if (collection.get("collection_type") or "").upper() == "SMART":
         rules = _build_rule_set(collection.get("rules") or [])
         if rules:
@@ -775,6 +808,63 @@ def _build_rule_set(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             {"column": col, "relation": rel, "condition": str(r.get("value") or "")}
         )
     return out
+
+
+def _member_product_gids(db, collection: Dict[str, Any]) -> Tuple[List[str], int]:
+    """Resolve a CUSTOM collection's manual member SKUs -> their parent products'
+    Shopify gids (catalog_products.ecom.shopify_product_id), in position order.
+
+    SMART collections have NO manual membership (Shopify derives their set from
+    the ruleSet) -> ([], 0). A member whose product isn't on Shopify yet is
+    SKIPPED (counted): it joins the collection when that product first syncs; we
+    never create a product from here. Fail-soft -> ([], 0)."""
+    if str(collection.get("collection_type") or "CUSTOM").upper() != "CUSTOM":
+        return [], 0
+    members = sorted(
+        (collection.get("products") or []),
+        key=lambda p: int((p or {}).get("position", 0) or 0),
+    )
+    skus = [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
+    gids: List[str] = []
+    skipped = 0
+    for sku in skus:
+        gid = None
+        try:
+            doc = db["catalog_products"].find_one({"sku": sku}) if db is not None else None
+            if doc is not None:
+                gid = (doc.get("ecom") or {}).get("shopify_product_id")
+        except Exception:  # noqa: BLE001 -- one bad lookup never blocks the rest
+            gid = None
+        if gid:
+            gids.append(_as_shopify_gid(gid, "Product"))
+        else:
+            skipped += 1
+    return gids, skipped
+
+
+async def _push_collection_membership(
+    db, collection_gid: str, product_gids: List[str]
+) -> Dict[str, Any]:
+    """LIVE-only: attach a CUSTOM collection's manual members via
+    collectionAddProducts, chunked at the per-call cap. Fail-SOFT side channel --
+    a membership error is reported but NEVER flips the collection push's ok
+    (mirrors the metafields / variant-prices contract). Returns a summary dict."""
+    added = 0
+    errors: List[str] = []
+    for i in range(0, len(product_gids), _COLLECTION_PRODUCTS_PER_CALL):
+        chunk = product_gids[i : i + _COLLECTION_PRODUCTS_PER_CALL]
+        try:
+            body = await _graphql(
+                db, _COLLECTION_ADD_PRODUCTS, {"id": collection_gid, "productIds": chunk}
+            )
+            err = _user_errors(body, "collectionAddProducts")
+            if err:
+                errors.append(err)
+            else:
+                added += len(chunk)
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            errors.append(str(e))
+    return {"added": added, "errors": errors}
 
 
 def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -894,6 +984,30 @@ async def push_product(
     _lock = push_lock_reason(db, "product", product)
     if _lock:
         return _blocked_result("product", pid, _lock)
+    # SUPERADMIN "block collection from online" (BVI-retirement): a product that
+    # belongs to AT LEAST ONE online_sync_blocked collection is a HARD block --
+    # it must NEVER be created/updated on Shopify regardless of its other
+    # (unblocked) collection memberships (a brand ban wins). This single guard is
+    # the ONE chokepoint, so BOTH the per-product push route AND the /all-pending
+    # product sweep are covered. Fail-soft (is_blocked_from_online -> False on any
+    # error, so a lookup blip never wrongly hides a product). Delisting an
+    # already-synced blocked product is done separately by push_product_delist,
+    # which is NOT gated here (it IS the block action).
+    try:
+        from .online_block import is_blocked_from_online
+
+        if is_blocked_from_online(product, db):
+            return PushResult(
+                mode=MODE_BLOCKED,
+                entity="product",
+                action="skip",
+                target_id=pid,
+                ok=False,
+                error="blocked from online (member of an online_sync_blocked collection)",
+                reason="online_sync_blocked",
+            )
+    except Exception:  # noqa: BLE001 -- classifier must never break a push
+        pass
     variants = variants or []
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
@@ -985,6 +1099,87 @@ async def push_product(
             action=action,
             target_id=pid,
             ok=False,
+            payload=payload,
+            error=str(e),
+        )
+
+
+async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
+    """DELIST a product from the Shopify storefront: set its Shopify status to
+    DRAFT (unpublished / not sellable). Used by the SUPERADMIN "block collection
+    from online" cutover to take an already-synced, now-blocked product OFF the
+    storefront.
+
+    REVERSIBLE by design: the Shopify product is NEVER deleted, and this does NOT
+    touch the IMS ecom.status -- so after an unblock a normal push_product rebuilds
+    the ProductInput from the unchanged ecom.status (PUBLISHED -> ACTIVE) and the
+    product re-publishes. Unlike push_product this is NOT gated by
+    is_blocked_from_online (it IS the block action). Obeys the same three dark
+    gates: SIMULATED plan when dark, LIVE productUpdate only behind the gates.
+    Only acts when the product already carries a Shopify gid (else a clean noop --
+    nothing to delist). Never raises."""
+    pid = product.get("id") or product.get("product_id")
+    ecom = product.get("ecom") or {}
+    existing_gid = ecom.get("shopify_product_id")
+    if not existing_gid:
+        # Not on Shopify -> nothing to take down (a clean no-op, not an error).
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="product",
+            action="noop",
+            target_id=pid,
+            ok=True,
+            reason="not on Shopify -- nothing to delist",
+        )
+    payload: Dict[str, Any] = {
+        "id": _as_shopify_gid(existing_gid, "Product"),
+        "status": "DRAFT",
+    }
+
+    live, reason = _live_or_reason(db)
+    if not live:
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="product",
+            action="delist",
+            target_id=pid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+            reason=reason,
+        )
+
+    try:
+        body = await _graphql(db, _PRODUCT_UPDATE, {"input": payload})
+        err = _user_errors(body, "productUpdate")
+        if err:
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action="delist",
+                target_id=pid,
+                ok=False,
+                shopify_id=existing_gid,
+                payload=payload,
+                error=err,
+            )
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="product",
+            action="delist",
+            target_id=pid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="product",
+            action="delist",
+            target_id=pid,
+            ok=False,
+            shopify_id=existing_gid,
             payload=payload,
             error=str(e),
         )
@@ -1099,8 +1294,16 @@ async def push_variant_prices(
 
 async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     """Push an ecom_collections doc to Shopify (collectionCreate / collectionUpdate,
-    + smart ruleSet when SMART). DARK by default; LIVE behind the gates with gid
-    write-back. Never raises."""
+    + smart ruleSet when SMART, + manual membership when CUSTOM). DARK by default;
+    LIVE behind the gates with gid write-back. Never raises.
+
+    MEMBERSHIP (parity fix): a CUSTOM collection's manual member list is NOT part
+    of CollectionInput, so after the collection upsert its members are attached
+    via collectionAddProducts (mirrors BVI's addProductsToCollection). SMART
+    membership is derived by Shopify from the ruleSet -- no add step. Members
+    whose product isn't on Shopify yet are skipped (they join on the product's
+    first sync). The membership push is a fail-soft side channel: an error is
+    reported in `membership` but never flips the collection push's ok."""
     cid = collection.get("collection_id")
     # Hub Phase 5: push-lock first -- a locked collection handle is NEVER pushed.
     _lock = push_lock_reason(db, "collection", collection)
@@ -1109,6 +1312,9 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     existing_gid = collection.get("shopify_collection_id")
     payload = build_collection_input(collection)
     action = "update" if existing_gid else "create"
+    # CUSTOM manual membership plan (empty for SMART).
+    member_gids, member_skipped = _member_product_gids(db, collection)
+    is_custom = str(collection.get("collection_type") or "CUSTOM").upper() == "CUSTOM"
 
     live, reason = _live_or_reason(db)
     if not live:
@@ -1121,6 +1327,11 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             shopify_id=existing_gid,
             payload=payload,
             reason=reason,
+            membership=(
+                {"product_ids": member_gids, "skipped_not_on_shopify": member_skipped}
+                if is_custom
+                else None
+            ),
         )
 
     query = _COLLECTION_UPDATE if existing_gid else _COLLECTION_CREATE
@@ -1151,6 +1362,19 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 "shopify_collection_id",
                 new_gid,
             )
+        # CUSTOM manual membership rides AFTER the collection upsert (the gid must
+        # exist to attach products to). Fail-soft side channel: reported in
+        # `membership`, never flips the collection push's ok. push never raises.
+        membership_summary = None
+        if is_custom and new_gid and member_gids:
+            mres = await _push_collection_membership(db, new_gid, member_gids)
+            membership_summary = {**mres, "skipped_not_on_shopify": member_skipped}
+        elif is_custom:
+            membership_summary = {
+                "added": 0,
+                "errors": [],
+                "skipped_not_on_shopify": member_skipped,
+            }
         return PushResult(
             mode=MODE_LIVE,
             entity="collection",
@@ -1159,6 +1383,7 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             ok=True,
             shopify_id=new_gid,
             payload=payload,
+            membership=membership_summary,
         )
     except Exception as e:  # noqa: BLE001
         return PushResult(

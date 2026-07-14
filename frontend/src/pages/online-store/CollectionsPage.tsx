@@ -43,6 +43,7 @@ import {
   Info,
   RefreshCw,
   UploadCloud,
+  Ban,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -154,12 +155,18 @@ export default function CollectionsPage() {
   // ADMIN only (matches the backend push router gate). The backend is the real
   // enforcement; this just hides the control from everyone else.
   const canPublish = hasRole(['SUPERADMIN', 'ADMIN']);
+  // "Block from online sale" is contractual (some brands forbid online sale) and
+  // takes products OFF the storefront -> SUPERADMIN ONLY (matches the backend
+  // gate). Non-SUPERADMIN users never see the control.
+  const canBlock = hasRole(['SUPERADMIN']);
 
   const [collections, setCollections] = useState<EcomCollection[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   // Which collection id is mid-publish (disables its button + spins).
   const [publishingId, setPublishingId] = useState<string | null>(null);
+  // Which collection id is mid-block/unblock (disables its button + spins).
+  const [blockingId, setBlockingId] = useState<string | null>(null);
   const bannerRef = useRef<OnlineStoreSyncBannerHandle>(null);
 
   // Drawer state
@@ -276,6 +283,61 @@ export default function CollectionsPage() {
       );
     } finally {
       setPublishingId(null);
+    }
+  };
+
+  // SUPERADMIN: block / unblock a collection from online sale. Blocking excludes
+  // ALL its products from Shopify (never synced; already-synced ones delisted to
+  // Draft); unblocking re-enables sync (a later push re-publishes). A clear
+  // warning + affected-product count precede a block. Reversible either way.
+  const toggleBlock = async (c: EcomCollection) => {
+    const currentlyBlocked = !!c.online_sync_blocked;
+    if (currentlyBlocked) {
+      if (
+        !window.confirm(
+          `Unblock "${c.title || c.handle}" for online sale?\n\n` +
+            `Its products become eligible to sync to Shopify again — a later Publish re-lists them.`,
+        )
+      )
+        return;
+    } else {
+      const n = fmtCount(c.products_count);
+      if (
+        !window.confirm(
+          `Block "${c.title || c.handle}" from online sale?\n\n` +
+            `All ${n} product(s) in this collection will be EXCLUDED from the online store — ` +
+            `not synced to Shopify, and any already on the storefront will be DELISTED (set to Draft).\n\n` +
+            `Use this for brands that contractually forbid online sale. This is reversible.`,
+        )
+      )
+        return;
+    }
+    setBlockingId(c.id);
+    try {
+      if (currentlyBlocked) {
+        const res = await collectionsApi.unblock(c.id);
+        setCollections((prev) =>
+          prev.map((x) => (x.id === c.id ? { ...x, online_sync_blocked: false } : x)),
+        );
+        toast.success(
+          `Unblocked — ${fmtCount(res.requeued)} synced product(s) re-queued for the storefront`,
+        );
+      } else {
+        const res = await collectionsApi.block(c.id);
+        setCollections((prev) =>
+          prev.map((x) => (x.id === c.id ? { ...x, online_sync_blocked: true } : x)),
+        );
+        toast.success(
+          `Blocked from online — ${fmtCount(res.delisted)} already-synced product(s) delisted`,
+        );
+      }
+      await load();
+    } catch (e: any) {
+      toast.error(
+        e?.response?.data?.detail || e?.message || 'Could not update the online-block',
+      );
+    } finally {
+      setBlockingId(null);
     }
   };
 
@@ -469,6 +531,14 @@ export default function CollectionsPage() {
                         synced={!!c.shopify_collection_id}
                         pending={!!c.locally_modified}
                       />
+                      {c.online_sync_blocked ? (
+                        <span
+                          className="inline-flex items-center gap-1 rounded bg-red-50 text-red-700 border border-red-200 px-1.5 py-0.5"
+                          title="Blocked from online sale — every product in this collection is excluded from Shopify"
+                        >
+                          <Ban className="w-3 h-3" /> Blocked online
+                        </span>
+                      ) : null}
                     </div>
                   </td>
                   <td className="px-4 py-2.5">
@@ -508,6 +578,31 @@ export default function CollectionsPage() {
                   </td>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center justify-end gap-1">
+                      {canBlock && (
+                        <button
+                          type="button"
+                          onClick={() => toggleBlock(c)}
+                          disabled={blockingId === c.id}
+                          className={
+                            'inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-medium disabled:opacity-50 ' +
+                            (c.online_sync_blocked
+                              ? 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
+                              : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50')
+                          }
+                          title={
+                            c.online_sync_blocked
+                              ? 'Unblock: allow this collection to sync to the online store again'
+                              : 'Block from online sale: exclude every product in this collection from Shopify (delist if already synced)'
+                          }
+                        >
+                          {blockingId === c.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Ban className="w-3.5 h-3.5" />
+                          )}
+                          {c.online_sync_blocked ? 'Unblock' : 'Block'}
+                        </button>
+                      )}
                       {canPublish && (
                         <button
                           type="button"

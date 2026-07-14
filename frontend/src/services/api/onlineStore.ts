@@ -383,6 +383,11 @@ export interface EcomCollection {
   // dirty flag -> Phase-5 push queue. Informational in Phase 2.
   locally_modified?: boolean | null;
   shopify_collection_id?: string | null;
+  // SUPERADMIN "block from online sale": when true, every product in this
+  // collection is excluded from Shopify (never pushed; delisted if synced).
+  online_sync_blocked?: boolean | null;
+  online_sync_blocked_by?: string | null;
+  online_sync_blocked_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -551,6 +556,42 @@ export const collectionsApi = {
   /** Delete a collection. Throws on failure. */
   remove: async (id: string): Promise<void> => {
     await api.delete(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}`);
+  },
+
+  // --- SUPERADMIN: block / unblock from online sale ------------------------
+  // Flag a collection so ALL its products are excluded from Shopify (never
+  // pushed; delisted if already synced). SUPERADMIN-only at the backend (a
+  // non-SUPERADMIN call 403s). The delist obeys the dark write-gates: when DARK
+  // it returns a SIMULATED plan; when the gates are live it fires a real
+  // productUpdate (status -> DRAFT, reversible). Throws on failure so the screen
+  // can toast it.
+
+  /** Block a collection from online sale. Returns the block summary
+   *  {blocked, member_count, delisted, mode, ...}. */
+  block: async (
+    id: string,
+  ): Promise<{ blocked: boolean; member_count: number; delisted: number }> => {
+    const res = await api.post(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/block`);
+    const d = (res?.data ?? {}) as Record<string, any>;
+    return {
+      blocked: !!d.blocked,
+      member_count: typeof d.member_count === 'number' ? d.member_count : 0,
+      delisted: typeof d.delisted === 'number' ? d.delisted : 0,
+    };
+  },
+
+  /** Reverse the online-block flag (re-enables sync; a later push re-publishes).
+   *  Returns {blocked:false, member_count, requeued}. */
+  unblock: async (
+    id: string,
+  ): Promise<{ blocked: boolean; member_count: number; requeued: number }> => {
+    const res = await api.post(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/unblock`);
+    const d = (res?.data ?? {}) as Record<string, any>;
+    return {
+      blocked: !!d.blocked,
+      member_count: typeof d.member_count === 'number' ? d.member_count : 0,
+      requeued: typeof d.requeued === 'number' ? d.requeued : 0,
+    };
   },
 
   // --- Manual (CUSTOM) membership ------------------------------------------

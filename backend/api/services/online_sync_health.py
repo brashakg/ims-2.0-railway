@@ -336,6 +336,18 @@ def stock_tally_summary(
     skus = [p.get("sku") for p in products if p.get("sku")]
     online = online_status_for_skus(skus)  # {} when Postgres unconfigured
 
+    # SUPERADMIN "block a collection from online sale": a product in an
+    # online_sync_blocked collection is NOT sellable online (sellable forced to 0
+    # below) even if physically in stock. Resolve the blocked subset once.
+    # Fail-soft -> empty set.
+    try:
+        from .online_block import blocked_skus as _blocked_skus
+
+        blocked = _blocked_skus(db, [s for s in skus if s])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_TALLY] block lookup skipped: %s", exc)
+        blocked = set()
+
     items: List[Dict[str, Any]] = []
     at_risk = 0
     tot_listed = tot_on_hand = tot_reserved = tot_sellable = 0
@@ -351,7 +363,10 @@ def stock_tally_summary(
             continue
         oh = int(on_hand.get(pid, 0) or 0)
         rv = int(reserved.get(pid, 0) or 0)
-        sellable = max(0, oh - rv)
+        # A blocked-collection product is never sellable online regardless of
+        # physical stock (a brand ban); force its sellable to 0 so it can never
+        # show as available online.
+        sellable = 0 if sku in blocked else max(0, oh - rv)
         listed = int(o.get("online_stock") or 0)
         risk = listed > sellable
         if risk:
