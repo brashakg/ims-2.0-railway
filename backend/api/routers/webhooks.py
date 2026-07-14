@@ -299,29 +299,39 @@ def _load_secret(vendor: str) -> Optional[str]:
     Pull the per-vendor `webhook_secret` from the `integrations` doc.
     Mirrors `nexus_providers._load_integration_config` shape.
     """
+    secret: Optional[str] = None
     db = _get_db()
-    if db is None:
-        return None
-    try:
-        coll = db.get_collection("integrations")
-        doc = coll.find_one({"type": vendor.lower()})
-        if not doc:
-            return None
-        cfg = doc.get("config") or {}
-        # BUG-155 parity: the Settings hub Fernet-encrypts webhook_secret at
-        # rest (cred_crypto.SENSITIVE_FIELDS), so compare HMACs against the
-        # DECRYPTED value. decrypt_config is a passthrough on legacy plaintext
-        # rows; on any decrypt error fall back to the raw value (fail-soft).
+    if db is not None:
         try:
-            from ..services.cred_crypto import decrypt_config
+            coll = db.get_collection("integrations")
+            doc = coll.find_one({"type": vendor.lower()})
+            cfg = (doc or {}).get("config") or {}
+            # BUG-155 parity: the Settings hub Fernet-encrypts webhook_secret at
+            # rest (cred_crypto.SENSITIVE_FIELDS), so compare HMACs against the
+            # DECRYPTED value. decrypt_config is a passthrough on legacy plaintext
+            # rows; on any decrypt error fall back to the raw value (fail-soft).
+            try:
+                from ..services.cred_crypto import decrypt_config
 
-            cfg = decrypt_config(cfg)
-        except Exception:  # noqa: BLE001
-            pass
-        return cfg.get("webhook_secret") or None
-    except Exception as e:
-        logger.debug(f"[WEBHOOKS] secret lookup failed for {vendor}: {e}")
-        return None
+                cfg = decrypt_config(cfg)
+            except Exception:  # noqa: BLE001
+                pass
+            secret = cfg.get("webhook_secret") or None
+        except Exception as e:
+            logger.debug(f"[WEBHOOKS] secret lookup failed for {vendor}: {e}")
+            secret = None
+    # Shopify env fallback: a custom app's webhook HMAC signing key IS its API
+    # secret key (== the OAuth client secret used by shopify_auth). When the
+    # integrations doc carries no explicit webhook_secret, use the app secret
+    # already on the server so inbound HMAC verification works without anyone
+    # pasting a key. Mirrors the #916 auth-fix philosophy (env-first creds).
+    if not secret and vendor.lower() == "shopify":
+        secret = (
+            os.getenv("SHOPIFY_CLIENT_SECRET")
+            or os.getenv("SHOPIFY_API_SECRET")
+            or None
+        )
+    return secret
 
 
 # ============================================================================
