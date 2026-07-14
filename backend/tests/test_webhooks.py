@@ -554,3 +554,173 @@ def test_nexus_dispatches_per_vendor_handler():
     # And the row is flagged processed
     row = inbox.find_one({"webhook_id": "wh-2"})
     assert row["processed"] is True
+
+
+# ============================================================================
+# Persist reliability + ack-safety (P0 — never ack-without-persist)
+# ============================================================================
+# The prod bug: _get_db did `getattr(conn, "db", None) or conn`. `conn.db` is a
+# live pymongo Database, and pymongo makes bool(Database) raise
+# NotImplementedError. The `or` tripped that, the except swallowed it, _get_db
+# returned None, and every inbox insert was SILENTLY skipped while the receiver
+# still returned 200 "received" — an acknowledged-and-dropped delivery. These
+# fakes reproduce pymongo's truthiness trap so the tests exercise the REAL
+# _get_db / _get_inbox_collection accessors (not just a wholesale-patched stub).
+
+
+class _BoolRaisesCollection(FakeCollection):
+    """Mimics a pymongo Collection: bool() raises NotImplementedError."""
+
+    def __bool__(self):
+        raise NotImplementedError(
+            "Collection objects do not implement truth value testing or bool(). "
+            "Please compare with None instead"
+        )
+
+
+class _BoolRaisesDatabase:
+    """Mimics a pymongo Database: bool() raises; get_collection returns a coll."""
+
+    is_connected = True
+
+    def __init__(self):
+        self._collections: Dict[str, _BoolRaisesCollection] = {}
+
+    def __bool__(self):
+        raise NotImplementedError(
+            "Database objects do not implement truth value testing or bool(). "
+            "Please compare with None instead"
+        )
+
+    def get_collection(self, name):
+        if name not in self._collections:
+            self._collections[name] = _BoolRaisesCollection()
+        return self._collections[name]
+
+
+class _FakeConn:
+    """Mimics DatabaseConnection: exposes a `.db` property (the pymongo-like
+    Database). _get_db reads `.db` and MUST NOT truth-test it."""
+
+    def __init__(self, database):
+        self._database = database
+
+    @property
+    def db(self):
+        return self._database
+
+
+def test_get_db_returns_real_database_without_bool_testing(monkeypatch):
+    """Regression for the P0 silent webhook-drop. _get_db must read the
+    DatabaseConnection's `.db` and compare with `is None`, NEVER `or`/`and`
+    (pymongo Database.__bool__ raises NotImplementedError)."""
+    from api.routers import webhooks as wh_module
+
+    database = _BoolRaisesDatabase()
+    conn = _FakeConn(database)
+    monkeypatch.setattr("database.connection.get_db", lambda: conn)
+
+    got = wh_module._get_db()
+    assert got is database, "must return the real pymongo Database, not None/conn"
+
+    coll = wh_module._get_inbox_collection()
+    assert coll is not None, "inbox collection must resolve off the real database"
+    assert coll is database.get_collection("webhook_inbox")
+
+
+def test_signed_webhook_persists_via_real_accessor_and_is_findable(client, monkeypatch):
+    """End-to-end through the REAL _get_db / _get_inbox_collection (only the
+    underlying connection is faked, with a pymongo-style bool-raising db). A
+    correctly-signed Shopify webhook must persist the inbox row — findable by
+    webhook_id exactly as NEXUS looks it up — and return 200. This is the exact
+    prod path that was silently dropping deliveries."""
+    from api.routers import webhooks as wh_module
+
+    database = _BoolRaisesDatabase()
+    # Seed the per-vendor secret on the SAME db the receiver reads.
+    integ = database.get_collection("integrations")
+    integ.insert_one({"type": "shopify",
+                      "config": {"webhook_secret": "shpfy_42"},
+                      "enabled": True})
+    conn = _FakeConn(database)
+    monkeypatch.setattr("database.connection.get_db", lambda: conn)
+
+    dispatched: List[Dict[str, Any]] = []
+
+    async def fake_dispatch(event, payload, source=""):
+        dispatched.append(payload)
+
+    import agents.registry as reg
+    monkeypatch.setattr(reg, "dispatch_event", fake_dispatch)
+
+    body = b'{"id":90210,"line_items":[{"id":1,"price":"100"}]}'
+    sig = _b64_sig(body, "shpfy_42")
+    r = client.post("/api/v1/webhooks/shopify", content=body,
+                    headers={"X-Shopify-Hmac-Sha256": sig,
+                             "X-Shopify-Topic": "orders/create",
+                             "content-type": "application/json"})
+    assert r.status_code == 200, r.text
+    webhook_id = r.json()["webhook_id"]
+    assert webhook_id
+
+    inbox = database.get_collection("webhook_inbox")
+    assert len(inbox.docs) == 1, "inbox row must be persisted via the real accessor"
+    # Findable by webhook_id exactly as NEXUS._handle_inbox_webhook looks it up.
+    row = inbox.find_one({"webhook_id": webhook_id})
+    assert row is not None
+    assert row["vendor"] == "shopify"
+    assert row["processed"] is False
+    assert len(dispatched) == 1
+    assert dispatched[0]["webhook_id"] == webhook_id
+
+
+def test_persist_unavailable_returns_503_not_200(client, monkeypatch):
+    """When the inbox collection is unavailable (DB up enough to load the
+    secret, storage down) the receiver must return 503 so the vendor RETRIES,
+    and must dispatch NOTHING — never a silent 200 ack-and-drop."""
+    fake_db = FakeDB()
+    integ = fake_db.get_collection("integrations")
+    integ.insert_one({"type": "shopify",
+                      "config": {"webhook_secret": "shpfy_42"},
+                      "enabled": True})
+
+    from api.routers import webhooks as wh_module
+    monkeypatch.setattr(wh_module, "_get_db", lambda: fake_db)
+    monkeypatch.setattr(wh_module, "_get_inbox_collection", lambda: None)
+
+    dispatched: List[Dict[str, Any]] = []
+
+    async def fake_dispatch(event, payload, source=""):
+        dispatched.append(payload)
+
+    import agents.registry as reg
+    monkeypatch.setattr(reg, "dispatch_event", fake_dispatch)
+
+    body = b'{"id":555,"line_items":[]}'
+    sig = _b64_sig(body, "shpfy_42")
+    r = client.post("/api/v1/webhooks/shopify", content=body,
+                    headers={"X-Shopify-Hmac-Sha256": sig,
+                             "content-type": "application/json"})
+    assert r.status_code == 503, r.text
+    assert dispatched == [], "must not dispatch when the row was never persisted"
+
+
+def test_persist_insert_error_returns_503_not_200(client, patched_webhooks, monkeypatch):
+    """A non-duplicate insert failure (e.g. a Mongo write error) must surface as
+    503 — the row is not durable, so acking 200 would drop the delivery. No
+    inbox row and no dispatch result."""
+    inbox = patched_webhooks["db"].get_collection("webhook_inbox")
+
+    def _boom(doc):
+        raise RuntimeError("mongo write concern failed")
+
+    monkeypatch.setattr(inbox, "insert_one", _boom)
+
+    body = b'{"id":4242,"line_items":[]}'
+    sig = _b64_sig(body, "shpfy_42")
+    r = client.post("/api/v1/webhooks/shopify", content=body,
+                    headers={"X-Shopify-Hmac-Sha256": sig,
+                             "content-type": "application/json"})
+    assert r.status_code == 503, r.text
+    assert len(inbox.docs) == 0
+    assert len(patched_webhooks["dispatched"]) == 0
