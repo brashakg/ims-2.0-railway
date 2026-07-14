@@ -1014,14 +1014,27 @@ def _writeback_simple(
 
 
 async def push_product(
-    db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+    db,
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]] = None,
+    blocked: Optional[bool] = None,
 ) -> PushResult:
     """Push a catalog product (+ its ecom sub-doc + variants) to Shopify.
 
     DARK by default -> returns a SIMULATED dry-run plan with the full ProductInput
     and NO network call. LIVE only when all three gates pass: then productCreate
     (no stored gid) or productUpdate (gid present), with the new gid written back
-    for idempotency. Never raises."""
+    for idempotency. Never raises.
+
+    ``blocked`` is an OPTIONAL precomputed block classification:
+      * ``None`` (default, single-push route): classify HERE via the STRICT
+        variant. An UNKNOWN (block config unreadable) FAILS CLOSED -- the push is
+        skipped so a DB blip can never let a contractually-banned product reach
+        Shopify (finding #18).
+      * ``True`` / ``False``: supplied by the /all-pending sweep, which resolves
+        the blocked set ONCE for the whole batch (finding #20 -- no per-product
+        re-scan). The sweep passes ``None`` (not ``False``) when it could not
+        verify the config, so this fail-closed skip still applies."""
     pid = product.get("id") or product.get("product_id")
     # Hub Phase 5: push-lock is the FIRST gate -- a locked brand is NEVER pushed,
     # before the dark/live gate (fail-closed).
@@ -1033,25 +1046,39 @@ async def push_product(
     # it must NEVER be created/updated on Shopify regardless of its other
     # (unblocked) collection memberships (a brand ban wins). This single guard is
     # the ONE chokepoint, so BOTH the per-product push route AND the /all-pending
-    # product sweep are covered. Fail-soft (is_blocked_from_online -> False on any
-    # error, so a lookup blip never wrongly hides a product). Delisting an
+    # product sweep are covered. FAIL-CLOSED: the strict classifier returns None
+    # (UNKNOWN) on a block-config read error and we SKIP the push (never a false
+    # 'clean' that ships a banned product -- finding #18). Delisting an
     # already-synced blocked product is done separately by push_product_delist,
     # which is NOT gated here (it IS the block action).
-    try:
-        from .online_block import is_blocked_from_online
+    if blocked is None:
+        try:
+            from .online_block import is_blocked_from_online_strict
 
-        if is_blocked_from_online(product, db):
-            return PushResult(
-                mode=MODE_BLOCKED,
-                entity="product",
-                action="skip",
-                target_id=pid,
-                ok=False,
-                error="blocked from online (member of an online_sync_blocked collection)",
-                reason="online_sync_blocked",
-            )
-    except Exception:  # noqa: BLE001 -- classifier must never break a push
-        pass
+            blocked = is_blocked_from_online_strict(product, db)
+        except Exception:  # noqa: BLE001 -- classifier must never break a push
+            blocked = None
+    if blocked is None:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error="block status unverifiable (block-config read error) -- "
+            "push skipped (fail-closed)",
+            reason="block_status_unverifiable",
+        )
+    if blocked:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error="blocked from online (member of an online_sync_blocked collection)",
+            reason="online_sync_blocked",
+        )
     variants = variants or []
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
@@ -1701,8 +1728,8 @@ def _writeback_image(db, image_id: str, shopify_id: str) -> None:
 # the shopify `integrations` config or every delivery will 401.
 
 _WEBHOOK_SUBSCRIPTIONS_QUERY = """
-query imsWebhookSubscriptions($first: Int!) {
-  webhookSubscriptions(first: $first) {
+query imsWebhookSubscriptions($first: Int!, $after: String) {
+  webhookSubscriptions(first: $first, after: $after) {
     edges {
       node {
         id
@@ -1713,9 +1740,18 @@ query imsWebhookSubscriptions($first: Int!) {
         }
       }
     }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
+
+# The webhook subscription list is paginated: the custom app can accumulate >100
+# subscriptions (BVI history + retries), so a single first:100 read would miss
+# subs on later pages -> a sub already at IMS's URL would look 'missing' and a
+# BVI-pointing conflict would go unsurfaced (finding #19). Walk every page (up to
+# this fail-soft cap) before deciding create/skip/delete.
+_WEBHOOK_PAGE_SIZE = 100
+_WEBHOOK_MAX_PAGES = 10
 
 _WEBHOOK_SUBSCRIPTION_CREATE = """
 mutation imsWebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
@@ -1880,16 +1916,32 @@ async def register_webhooks(
         return result
 
     try:
-        body = await _graphql(db, _WEBHOOK_SUBSCRIPTIONS_QUERY, {"first": 100})
-        if not isinstance(body, dict) or body.get("errors"):
-            result["ok"] = False
-            result["errors"].append(
-                f"webhookSubscriptions query failed: {str((body or {}).get('errors'))[:300]}"
+        # PAGINATE the subscription list: walk every page (until hasNextPage is
+        # false, capped fail-soft at _WEBHOOK_MAX_PAGES) so a sub beyond page 1 is
+        # never missed (finding #19). A missed sub would either force a duplicate
+        # create (userError) or leave a BVI conflict unsurfaced/undeleted.
+        edges: List[Dict[str, Any]] = []
+        after: Optional[str] = None
+        for _page in range(_WEBHOOK_MAX_PAGES):
+            body = await _graphql(
+                db,
+                _WEBHOOK_SUBSCRIPTIONS_QUERY,
+                {"first": _WEBHOOK_PAGE_SIZE, "after": after},
             )
-            return result
-        edges = (
-            ((body.get("data") or {}).get("webhookSubscriptions") or {}).get("edges")
-        ) or []
+            if not isinstance(body, dict) or body.get("errors"):
+                result["ok"] = False
+                result["errors"].append(
+                    f"webhookSubscriptions query failed: {str((body or {}).get('errors'))[:300]}"
+                )
+                return result
+            conn = ((body.get("data") or {}).get("webhookSubscriptions") or {})
+            edges.extend(conn.get("edges") or [])
+            page_info = conn.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if not after:
+                break
         existing: List[Dict[str, Any]] = []
         for e in edges:
             node = (e or {}).get("node") or {}
@@ -1951,17 +2003,39 @@ async def register_webhooks(
         # still pointing at a different URL, e.g. BVI) so each topic delivers
         # exactly once after the baton hand-off. Off by default (conflicts are
         # only surfaced). Each delete is fail-soft + recorded.
+        #
+        # SAFETY (finding #16): a conflict's old (BVI) subscription is deleted
+        # ONLY once a WORKING subscription at the IMS callback URL provably exists
+        # for that topic -- either just created this run (in result['created']) or
+        # already registered (result['already_registered']). Deleting on a FAILED
+        # create would leave that topic delivering NOWHERE (a zero-receiver gap:
+        # refunds/orders webhooks silently stop reaching BOTH BVI and IMS). Order
+        # is therefore create/verify IMS sub -> THEN delete the conflict.
         if delete_conflicts:
+            safe_topics = {
+                c.get("topic") for c in result["created"]
+            } | set(result["already_registered"])
             for c in result["conflicts"]:
+                topic = c.get("topic")
+                if topic not in safe_topics:
+                    # No confirmed IMS replacement for this topic -> keep the old
+                    # subscription (do NOT create a zero-receiver gap).
+                    result["ok"] = False
+                    result["errors"].append(
+                        f"skipped delete for {topic}: replacement create at IMS URL "
+                        "did not succeed -- old subscription kept to avoid a "
+                        "zero-receiver gap"
+                    )
+                    continue
                 del_res = await delete_webhook_subscription(db, c.get("id"))
                 if del_res.get("ok") and del_res.get("deleted"):
                     result["deleted_conflicts"].append(
-                        {"topic": c.get("topic"), "id": c.get("id")}
+                        {"topic": topic, "id": c.get("id")}
                     )
                 else:
                     result["ok"] = False
                     result["errors"].append(
-                        f"delete conflict {c.get('topic')}: {del_res.get('errors')}"
+                        f"delete conflict {topic}: {del_res.get('errors')}"
                     )
         return result
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate

@@ -29,23 +29,31 @@ availability paths call. No emoji (Windows cp1252).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import ecom_smart_rules
 
 logger = logging.getLogger(__name__)
 
 
-def _blocked_collections(db) -> List[Dict[str, Any]]:
+def _blocked_collections(db, strict: bool = False) -> List[Dict[str, Any]]:
     """All ``ecom_collections`` docs flagged ``online_sync_blocked=True``.
 
     Usually a SMALL set (a handful of contract-banned brands), so iterating them
-    per product is cheap. Fail-soft -> []."""
+    per product is cheap. Fail-soft -> [] by default.
+
+    ``strict=True`` RE-RAISES a read error instead of swallowing it -- the push
+    chokepoint uses this so a transient DB blip becomes an UNKNOWN classification
+    (fail CLOSED / skip the push) rather than a false 'not blocked' that could let
+    a contractually-banned product reach Shopify (finding #18)."""
     if db is None:
         return []
     try:
         return list(db["ecom_collections"].find({"online_sync_blocked": True}))
-    except Exception:  # noqa: BLE001 -- a config read must never raise into a push
+    except Exception as exc:  # noqa: BLE001 -- a config read must never raise into a push
+        logger.warning("online-block: reading blocked collections failed: %s", exc)
+        if strict:
+            raise
         return []
 
 
@@ -69,12 +77,53 @@ def _product_in_smart(collection: Dict[str, Any], product: Dict[str, Any]) -> bo
     )
 
 
+def _membership_hit(
+    product: Dict[str, Any], db, blocked: List[Dict[str, Any]]
+) -> bool:
+    """True iff `product` is a member of ANY collection in `blocked` (assumed
+    already loaded + non-empty). Uses the materialised membership view fast path,
+    then the direct manual / rule fallback so a stale-or-unmaterialised view never
+    mis-classifies. The view read is fail-soft (falls through to the direct check);
+    the direct check is pure in-memory."""
+    sku = product.get("sku")
+    blocked_cids = [c.get("collection_id") for c in blocked if c.get("collection_id")]
+
+    # Fast path: the materialised membership view already holds CUSTOM +
+    # SMART membership for every collection.
+    if sku and db is not None and blocked_cids:
+        try:
+            hit = db["collection_products"].find_one(
+                {"collection_id": {"$in": blocked_cids}, "sku": sku}
+            )
+            if hit is not None:
+                return True
+        except Exception as exc:  # noqa: BLE001 -- view is a cache; fall through
+            logger.warning(
+                "online-block: membership view lookup failed, using fallback: %s", exc
+            )
+
+    # Fallback (view stale / never materialised): check membership directly.
+    for c in blocked:
+        ctype = str(c.get("collection_type") or "CUSTOM").upper()
+        if ctype == "SMART":
+            if _product_in_smart(c, product):
+                return True
+        else:
+            if _product_in_custom(c, sku):
+                return True
+    return False
+
+
 def is_blocked_from_online(product: Dict[str, Any], db) -> bool:
     """Is this product blocked from Shopify / online sale?
 
     True iff it belongs to AT LEAST ONE ``online_sync_blocked`` collection (the
     HARD multi-collection rule documented at module top -- one banned membership
     is enough, other clean memberships do NOT rescue it). Fail-soft -> False.
+
+    This is the FAIL-OPEN variant (availability/display callers): a lookup blip
+    never wrongly HIDES a product. The push chokepoint must instead use
+    ``is_blocked_from_online_strict`` so a blip fails CLOSED (finding #18).
     """
     if not isinstance(product, dict):
         return False
@@ -82,33 +131,72 @@ def is_blocked_from_online(product: Dict[str, Any], db) -> bool:
         blocked = _blocked_collections(db)
         if not blocked:
             return False
-        sku = product.get("sku")
-        blocked_cids = [c.get("collection_id") for c in blocked if c.get("collection_id")]
-
-        # Fast path: the materialised membership view already holds CUSTOM +
-        # SMART membership for every collection.
-        if sku and db is not None and blocked_cids:
-            try:
-                hit = db["collection_products"].find_one(
-                    {"collection_id": {"$in": blocked_cids}, "sku": sku}
-                )
-                if hit is not None:
-                    return True
-            except Exception:  # noqa: BLE001 -- view is a cache; fall through
-                pass
-
-        # Fallback (view stale / never materialised): check membership directly.
-        for c in blocked:
-            ctype = str(c.get("collection_type") or "CUSTOM").upper()
-            if ctype == "SMART":
-                if _product_in_smart(c, product):
-                    return True
-            else:
-                if _product_in_custom(c, sku):
-                    return True
+        return _membership_hit(product, db, blocked)
+    except Exception as exc:  # noqa: BLE001 -- classifier must never raise
+        logger.warning("online-block: is_blocked_from_online failed open (False): %s", exc)
         return False
-    except Exception:  # noqa: BLE001 -- classifier must never raise
+
+
+def is_blocked_from_online_strict(product: Dict[str, Any], db) -> Optional[bool]:
+    """Push-path classifier that FAILS CLOSED (finding #18).
+
+    Returns True/False normally, but ``None`` (UNKNOWN) when the block
+    CONFIGURATION cannot be read (a transient DB error). The push path must treat
+    UNKNOWN as 'skip this push and retry later' -- better to defer a push than to
+    risk shipping a contractually-banned product because a read blip made a hard
+    block look clean.
+
+    ``db is None`` -> False: no connection means nothing is configured AND the
+    push is DARK anyway, so there is no compliance risk to guard against.
+    Membership resolution within a readable config is best-effort; a resolution
+    error also collapses to UNKNOWN (fail closed) rather than a false clean.
+    """
+    if not isinstance(product, dict):
         return False
+    if db is None:
+        return False
+    try:
+        blocked = _blocked_collections(db, strict=True)
+    except Exception:  # noqa: BLE001 -- config unreadable -> UNKNOWN (fail closed)
+        logger.warning(
+            "online-block: block config unreadable in push path -> UNKNOWN (fail closed)"
+        )
+        return None
+    if not blocked:
+        return False
+    try:
+        return _membership_hit(product, db, blocked)
+    except Exception as exc:  # noqa: BLE001 -- resolution error -> UNKNOWN (fail closed)
+        logger.warning(
+            "online-block: strict membership resolution failed -> UNKNOWN "
+            "(fail closed): %s",
+            exc,
+        )
+        return None
+
+
+def classify_blocked_skus(db, skus: List[str]) -> Tuple[Set[str], bool]:
+    """Batch classifier for the /all-pending push sweep (findings #17 + #20).
+
+    Returns ``(blocked_set, verifiable)``:
+      * ``verifiable=False`` -- the block CONFIG could not be read, so the caller
+        MUST fail CLOSED (treat every product as unverifiable and skip the push)
+        rather than push possibly-banned products (finding #18).
+      * ``verifiable=True`` -- ``blocked_set`` is the subset of ``skus`` that is
+        blocked, resolved ONCE for the whole sweep so ``push_product`` never has
+        to re-scan the block config per product (kills the N+1, finding #20).
+
+    ``db is None`` -> ``(empty, True)``: the push is DARK; nothing is configured.
+    """
+    clean = [s for s in (skus or []) if s]
+    if db is None:
+        return set(), True
+    try:
+        _blocked_collections(db, strict=True)
+    except Exception:  # noqa: BLE001 -- config unreadable -> not verifiable
+        logger.warning("online-block: sweep block config unreadable -> fail closed")
+        return set(), False
+    return blocked_skus(db, clean), True
 
 
 def blocked_skus(db, skus: List[str]) -> Set[str]:

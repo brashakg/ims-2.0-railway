@@ -298,16 +298,48 @@ async def push_all_pending(
     # The sweep order mirrors a dependency-safe cutover: products (+ variants)
     # first, then the collections/menus that reference them, then images last.
     if "products" in selected:
+        from ..services import online_block
+
+        # Collect the dirty products ONCE, then hoist the block classification for
+        # the whole batch (findings #17 + #20):
+        #  * A BLOCKED product is EXCLUDED here -- it never consumes a limit slot
+        #    or writes a junk MODE_BLOCKED audit row on every sweep (which would
+        #    otherwise starve the cutover queue-drain -- finding #17).
+        #  * Non-blocked products are pushed with a PRECOMPUTED blocked=False, so
+        #    push_product does not re-scan the block config per product (kills the
+        #    ~2-Mongo-queries-per-product N+1 over 4.4k products -- finding #20).
+        #  * If the block CONFIG is unreadable (verifiable=False) we cannot verify
+        #    anything -> FAIL CLOSED: pass blocked=None so push_product skips each
+        #    (never ship a possibly-banned product on a DB blip -- finding #18).
+        dirty_products: List[Dict] = []
         for doc in _all_docs(db, "catalog_products"):
+            ecom = doc.get("ecom")
+            if ecom and ecom.get("locally_modified"):
+                dirty_products.append(doc)
+        dirty_skus = [d.get("sku") for d in dirty_products if d.get("sku")]
+        blocked_set, block_verifiable = online_block.classify_blocked_skus(
+            db, dirty_skus
+        )
+        blocked_skipped = 0
+        for doc in dirty_products:
             if len(results) >= limit:
                 break
-            ecom = doc.get("ecom")
-            if not ecom or not ecom.get("locally_modified"):
+            if block_verifiable and doc.get("sku") in blocked_set:
+                blocked_skipped += 1
                 continue
             variants = _get_variants_for_product(db, doc)
-            data = (await shopify_push.push_product(db, doc, variants)).to_dict()
+            precomputed = False if block_verifiable else None
+            data = (
+                await shopify_push.push_product(
+                    db, doc, variants, blocked=precomputed
+                )
+            ).to_dict()
             _write_audit(data, current_user)
             _tally("products", data)
+        if blocked_skipped:
+            summary.setdefault("products", {"pushed": 0, "failed": 0})[
+                "blocked_skipped"
+            ] = blocked_skipped
 
     # OPT-IN price/barcode resync (never in the default set -- the product
     # sweep above already pushes prices as part of each product push). Targets

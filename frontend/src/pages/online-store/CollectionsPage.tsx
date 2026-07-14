@@ -327,9 +327,20 @@ export default function CollectionsPage() {
         setCollections((prev) =>
           prev.map((x) => (x.id === c.id ? { ...x, online_sync_blocked: true } : x)),
         );
-        toast.success(
-          `Blocked from online — ${fmtCount(res.delisted)} already-synced product(s) delisted`,
-        );
+        // HONEST DARK REPORTING: when Shopify writes are DARK nothing was actually
+        // removed from the storefront — report the delists as PLANNED (a warning),
+        // not as done, so the owner is never told a contractual brand ban is
+        // enforced while the products remain live on bettervision.in.
+        if (res.isLive) {
+          toast.success(
+            `Blocked from online — ${fmtCount(res.delisted)} already-synced product(s) delisted`,
+          );
+        } else {
+          toast.warning(
+            `Blocked — but Shopify writes are DARK, so ${fmtCount(res.planned)} delist(s) are PLANNED, ` +
+              `not done. The product(s) stay live on the storefront until go-live.`,
+          );
+        }
       }
       await load();
     } catch (e: any) {
