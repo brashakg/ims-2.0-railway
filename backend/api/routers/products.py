@@ -9,8 +9,9 @@ from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+import random
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_product_repository
@@ -470,6 +471,9 @@ def _create_via_canonical_door(
             _canonical_door_payload(product, as_draft=as_draft),
             source=source,
             actor=current_user.get("user_id"),
+            # Cataloguer attribution: the JWT already carries the username, so
+            # the display name is stamped without a users lookup.
+            actor_name=current_user.get("username"),
             extra_fields=extra,
             product_repo=get_product_repository(),
             variant_repo=variant_repo,
@@ -482,7 +486,7 @@ def _create_via_canonical_door(
         ) from err
 
 
-def _build_product_data(product: "ProductCreate", created_by) -> dict:
+def _build_product_data(product: "ProductCreate", created_by, created_by_name=None) -> dict:
     """Map a validated ProductCreate into the persisted product doc.
 
     Single source of truth for the create payload shape, shared by the single
@@ -516,6 +520,10 @@ def _build_product_data(product: "ProductCreate", created_by) -> dict:
         "is_active": True,
         "created_by": created_by,
     }
+    # Cataloguer attribution (additive): display name alongside the id, matching
+    # the canonical door's normalise_payload stamp.
+    if created_by_name:
+        product_data["created_by_name"] = created_by_name
 
     # Persist optional identity fields top-level only when provided (additive).
     for _f in _OPTIONAL_PRODUCT_FIELDS:
@@ -800,6 +808,13 @@ async def list_products(
     tag: Optional[str] = Query(
         None, description="Filter to products carrying this normalised tag"
     ),
+    created_by: Optional[str] = Query(
+        None,
+        description=(
+            "Cataloguer attribution filter: only products created by this "
+            "user_id (the value stamped in each product's created_by)."
+        ),
+    ),
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
@@ -824,6 +839,28 @@ async def list_products(
     from ..services.cache import cache
     from ..services.product_master import resolve_category
 
+    # Direct-call safety: several unit suites invoke this handler as a plain
+    # function WITHOUT the newer kwargs, so `created_by` arrives as its
+    # truthy FastAPI Query default object. Treat anything that is not a
+    # non-blank string as "absent" (HTTP callers always deliver a str/None).
+    if not isinstance(created_by, str) or not created_by.strip():
+        created_by = None
+
+    # Cataloguer-attribution posture (panel finding 4): attribution is a
+    # MANAGER surface. Non-manager roles get neither the created_by filter
+    # nor the attribution fields on the returned docs -- otherwise any staff
+    # account could reconstruct the exact roster + per-user counts that
+    # GET /products/cataloguers deliberately withholds from them.
+    can_see_attribution = bool(
+        set(current_user.get("roles") or [])
+        & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
+    )
+    if created_by and not can_see_attribution:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the cataloguer filter",
+        )
+
     # Category-filter fix: products store CANONICAL categories (SUNGLASS/FRAME),
     # but callers send short codes (SG/FR) or legacy plurals. Normalise the param
     # to canonical when resolvable (fail-open pass-through otherwise) BEFORE the
@@ -836,9 +873,13 @@ async def list_products(
     # any store the user can access), so it is intentionally NOT store-scoped and
     # must not call validate_store_access here.
     active_store = store_id or current_user.get("active_store_id", "")
+    # The caller's attribution tier is part of the key: manager responses
+    # carry created_by/updated_by fields that are STRIPPED for staff, and the
+    # two shapes must never cross-serve from the cache.
+    _tier = "mgr" if can_see_attribution else "staff"
     cache_key = (
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
-        f":{is_active}"
+        f":{is_active}:{created_by}:{_tier}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -865,27 +906,45 @@ async def list_products(
 
         if search:
             products = repo.search_products(
-                search, category, is_active=filtered_active, skip=skip, limit=limit
+                search,
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                skip=skip,
+                limit=limit,
             )
             total_count = repo.count_search_products(
-                search, category, is_active=filtered_active
+                search, category, is_active=filtered_active, created_by=created_by
             )
         elif brand:
             products = repo.find_by_brand(
-                brand, category, is_active=filtered_active, skip=skip, limit=limit
+                brand,
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                skip=skip,
+                limit=limit,
             )
             total_count = repo.count_by_brand(
-                brand, category, is_active=filtered_active
+                brand, category, is_active=filtered_active, created_by=created_by
             )
         elif category:
             products = repo.find_by_category(
-                category, is_active=filtered_active, skip=skip, limit=limit
+                category,
+                is_active=filtered_active,
+                created_by=created_by,
+                skip=skip,
+                limit=limit,
             )
-            total_count = repo.count_by_category(category, is_active=filtered_active)
+            total_count = repo.count_by_category(
+                category, is_active=filtered_active, created_by=created_by
+            )
         else:
             _default_filter = (
                 {} if default_active is None else {"is_active": default_active}
             )
+            if created_by:
+                _default_filter["created_by"] = created_by
             products = repo.find_many(_default_filter, skip=skip, limit=limit)
             total_count = repo.count(_default_filter)
 
@@ -926,6 +985,19 @@ async def list_products(
                 imgs = p.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     p["image_url"] = imgs[0]
+
+        # Attribution stripping for non-manager callers (panel finding 4):
+        # covers the newly stamped names AND the pre-existing raw created_by
+        # user_id, so the roster stays non-derivable from this endpoint.
+        if not can_see_attribution:
+            for p in products:
+                for _f in (
+                    "created_by",
+                    "created_by_name",
+                    "updated_by",
+                    "updated_by_name",
+                ):
+                    p.pop(_f, None)
 
         # LEGACY CONTRACT: `total` stays the PAGE length (pinned by existing
         # consumers/tests). `total_count` is the additive true pre-slice count
@@ -1989,6 +2061,805 @@ async def list_tags(
 
 
 # ============================================================================
+# CATALOGUER ATTRIBUTION — who catalogued what
+# ============================================================================
+# Roles that may see the cataloguer roster + per-user counts (performance
+# tracking is a manager concern; regular staff don't need the roster).
+# SUPERADMIN auto-passes via require_roles.
+_CATALOGUER_VIEW_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "CATALOG_MANAGER",
+)
+
+
+@router.get("/cataloguers")
+async def list_cataloguers(
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Distinct product cataloguers with per-user counts (attribution feature).
+
+    One row per distinct `created_by` on the products collection:
+      {user_id, name, created_count, last_created_at}
+    `name` prefers the stamped created_by_name; legacy docs created before the
+    name stamp existed fall back to a batched users lookup, then to the raw id.
+    Drives the Inventory "Catalogued by" filter dropdown + performance counts.
+
+    NOTE (route order): registered BEFORE the dynamic GET /products/{product_id}
+    in this file, so the literal path is matched first and never shadowed.
+    Fail-soft: no repo / aggregation trouble -> empty list, never a 500.
+    """
+    repo = get_product_repository()
+    if repo is None:
+        return {"cataloguers": []}
+
+    try:
+        rows = repo.cataloguer_stats()
+    except Exception:  # noqa: BLE001 - roster must never 500 the page
+        rows = []
+
+    # Legacy-name backfill: docs created before created_by_name existed carry
+    # only the user_id. Resolve those names in ONE batched users query
+    # (fail-soft: unknown ids just render as the raw id).
+    missing = [r["_id"] for r in rows if r.get("_id") and not r.get("name")]
+    resolved = _resolve_user_names(missing)
+
+    cataloguers = []
+    for r in rows:
+        uid = r.get("_id")
+        if not uid:
+            continue
+        last = r.get("last_created_at")
+        cataloguers.append(
+            {
+                "user_id": uid,
+                "name": r.get("name") or resolved.get(uid) or uid,
+                "created_count": int(r.get("created_count") or 0),
+                "last_created_at": (
+                    last.isoformat() if isinstance(last, datetime) else last
+                ),
+            }
+        )
+    return {"cataloguers": cataloguers}
+
+
+# ============================================================================
+# CATALOGUING SCORECARD + QC SAMPLING (attribution phase 2)
+# ============================================================================
+# Owner requirement: per-user cataloguing performance (volume, approvals,
+# corrections received, QC error rate) + a random-sample QC review workflow.
+# Manager-ladder gated (same posture as /products/cataloguers).
+
+# Creator ids that are never a human cataloguer.
+_NON_CATALOGUER_IDS = (None, "", "system", "SYSTEM")
+
+# Patch keys that count as CATALOGUING fields when classifying a correction
+# from a `product.updated` audit row's before/after. Pricing (mrp/offer_price/
+# cost_price/discount_category), stock and is_active changes NEVER count.
+# Any `attributes.*` dotted key also counts (checked by prefix).
+_CATALOGUING_AUDIT_KEYS = frozenset(
+    {
+        "category",
+        "brand",
+        "model",
+        "name",
+        "title",
+        "description",
+        "images",
+        "hsn_code",
+        "gst_rate",
+        "attributes",
+    }
+)
+
+# QC verdict error-field vocabulary (mirrored by the FE checkboxes).
+_QC_ERROR_FIELDS = (
+    "category",
+    "brand_model",
+    "attributes",
+    "pricing",
+    "hsn_gst",
+    "images",
+    "description",
+    "name",
+)
+
+
+def _resolve_user_names(user_ids: List[str]) -> Dict[str, str]:
+    """Batched user_id -> display-name lookup on the users collection.
+    Fail-soft: no db / unknown ids simply resolve to nothing (callers fall
+    back to the raw id)."""
+    resolved: Dict[str, str] = {}
+    ids = [u for u in (user_ids or []) if u]
+    if not ids:
+        return resolved
+    try:
+        from ..dependencies import get_db as _get_db_dep
+
+        _db = _get_db_dep()
+        if _db is not None:
+            users = _db.get_collection("users")
+            if users is not None:
+                for u in users.find(
+                    {"user_id": {"$in": ids}},
+                    {"_id": 0, "user_id": 1, "username": 1, "full_name": 1},
+                ):
+                    uid = u.get("user_id")
+                    nm = u.get("username") or u.get("full_name")
+                    if uid and nm:
+                        resolved[uid] = nm
+    except Exception:  # noqa: BLE001 - name enrichment is best-effort
+        return {}
+    return resolved
+
+
+def _as_dt(value) -> Optional[datetime]:
+    """Coerce a stored timestamp (datetime or ISO string) to a NAIVE datetime
+    for windowing comparisons. None when unparseable. Mixed tz sources (audit
+    domain rows are local now(), the activity middleware stamps utcnow()) skew
+    by a few hours at most, which is immaterial for day-granularity windows."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _scorecard_db():
+    """The shared db connection, or None (fail-soft) when unavailable."""
+    try:
+        from ..dependencies import get_db as _get_db_dep
+
+        db = _get_db_dep()
+    except Exception:  # noqa: BLE001
+        return None
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    return db
+
+
+def _bulk_write_duplicate_indices(exc) -> Optional[set]:
+    """For a pymongo BulkWriteError whose failures are ALL duplicate-key
+    (code 11000), return the failing doc indices; None for anything else
+    (caller then treats the exception as a real insert failure). Matched by
+    class name so no hard pymongo import is needed."""
+    if exc.__class__.__name__ != "BulkWriteError":
+        return None
+    details = getattr(exc, "details", None) or {}
+    write_errors = details.get("writeErrors") or []
+    if not write_errors:
+        return None
+    dup: set = set()
+    for we in write_errors:
+        if we.get("code") != 11000:
+            return None
+        dup.add(int(we.get("index", -1)))
+    return dup
+
+
+@router.get("/cataloguing-scorecard")
+async def cataloguing_scorecard(
+    days: int = Query(30, ge=1, le=365, description="Rolling window in days"),
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Per-user cataloguing performance over a rolling window (default 30d).
+
+    One row per user who created products (or approved promotions) in the
+    window: created_count + per-day rate + created_today, approvals (catalog
+    promotes), corrections_received, category_coverage, and QC stats from the
+    qc_samples verdicts.
+
+    CORRECTIONS METRIC - what it can and cannot see
+    -----------------------------------------------
+    corrections_received counts DISTINCT products this user created in the
+    window that a DIFFERENT user edited within 30 days of creation. Two
+    signal sources, best available first:
+
+      1. CLASSIFIED (corrections_classified): `product.updated` rows in the
+         hash-chained audit_logs (written ONLY by the product_master engine
+         door, PUT /products/master/{id}) carry before/after patch keys, so
+         these are field-classified: they count ONLY when a cataloguing field
+         changed (category/brand/model/name/title/description/images/
+         attributes[.*]/hsn_code/gst_rate). Pricing (mrp/offer_price/
+         cost_price/discount_category), stock and is_active changes NEVER
+         count here.
+      2. APPROXIMATE (corrections_approximate): ONLY the catalog-side PIM
+         door (PUT /catalog/products/{id}) still writes no field-level
+         history, so for it an other-user edit within 30 days of creation is
+         counted WITHOUT field classification (a pricing-only edit through
+         that door IS over-counted). The SPINE door (PUT /products/{id}) now
+         writes a compact product.updated row carrying the patch's changed
+         keys, so spine edits are fully CLASSIFIED -- pricing/is_active-only
+         spine edits never count -- and its baseline middleware rows are
+         EXCLUDED from the approximate bucket. The catalog door gains the
+         same classification in a follow-up once PR #911 (which owns
+         routers/catalog.py) lands; the approximate bucket then disappears.
+
+    A product flagged by source 1 is excluded from source 2 (no double count).
+    corrections_received = classified + approximate (distinct products).
+    """
+    now = datetime.now()
+    cutoff = now - timedelta(days=days)
+    db = _scorecard_db()
+    if db is None:
+        return {"days": days, "generated_at": now.isoformat(), "rows": []}
+
+    per_user: Dict[str, Dict[str, Any]] = {}
+
+    def _row(uid: str) -> Dict[str, Any]:
+        return per_user.setdefault(
+            uid,
+            {
+                "user_id": uid,
+                "name": None,
+                "created_count": 0,
+                "created_today": 0,
+                "per_day_rate": 0.0,
+                "approvals": 0,
+                "corrections_received": 0,
+                "corrections_classified": 0,
+                "corrections_approximate": 0,
+                "category_coverage": {},
+                "qc": {"sampled": 0, "errors": 0, "error_rate": 0.0},
+            },
+        )
+
+    # ---- 1. Creations in window (spine products) --------------------------
+    creators: Dict[str, tuple] = {}  # product_id -> (creator_id, created_at)
+    # created_today is a DAY-BOUNDARY metric for IST stores: the boundary is
+    # IST midnight expressed in the naive-UTC frame created_at is stored in
+    # (BUG-104 helper; Railway runs UTC, business calendar is Asia/Kolkata).
+    from ..utils.ist import ist_day_start_utc
+
+    today_start = ist_day_start_utc()
+    try:
+        prods = list(
+            db.get_collection("products").find(
+                {
+                    "created_at": {"$gte": cutoff},
+                    "created_by": {"$nin": list(_NON_CATALOGUER_IDS)},
+                },
+                {
+                    "_id": 0,
+                    "product_id": 1,
+                    "created_by": 1,
+                    "created_by_name": 1,
+                    "category": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 - scorecard must never 500
+        prods = []
+    for p in prods:
+        uid = p.get("created_by")
+        if not uid:
+            continue
+        row = _row(uid)
+        row["created_count"] += 1
+        if not row["name"] and p.get("created_by_name"):
+            row["name"] = p.get("created_by_name")
+        cat = p.get("category") or "UNKNOWN"
+        row["category_coverage"][cat] = row["category_coverage"].get(cat, 0) + 1
+        created_at = _as_dt(p.get("created_at"))
+        if created_at is not None and created_at >= today_start:
+            row["created_today"] += 1
+        pid = p.get("product_id")
+        if pid:
+            creators[pid] = (uid, created_at)
+
+    # ---- 2. Approvals (catalog_products promote stamps; promoted_at is an
+    # ISO string, so the window bound is a string compare -- same format). ----
+    try:
+        promos = db.get_collection("catalog_products").find(
+            {"promoted_at": {"$gte": cutoff.isoformat()}},
+            {"_id": 0, "promoted_by": 1},
+        )
+        for c in promos:
+            uid = c.get("promoted_by")
+            if uid and uid not in _NON_CATALOGUER_IDS:
+                _row(uid)["approvals"] += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ---- 3. Corrections (see docstring for the two-source design) ---------
+    corrected_classified: set = set()
+    corrected_approx: set = set()
+    pids = list(creators.keys())
+    if pids:
+        try:
+            audit = db.get_collection("audit_logs")
+            for i in range(0, len(pids), 500):
+                chunk = pids[i : i + 500]
+                audit_rows = audit.find(
+                    {
+                        "entity_id": {"$in": chunk},
+                        "action": {"$in": ["product.updated", "UPDATE"]},
+                        # Window bound so the (action, timestamp) / (entity_id,
+                        # action) indexes can prune the append-only trail: any
+                        # counted edit satisfies edited_at >= created_at >=
+                        # cutoff (pre-creation edits are skipped below), and
+                        # both row sources always stamp `timestamp`.
+                        "timestamp": {"$gte": cutoff},
+                    },
+                    {
+                        "_id": 0,
+                        "entity_id": 1,
+                        "action": 1,
+                        "actor": 1,
+                        "user_id": 1,
+                        "timestamp": 1,
+                        "ts": 1,
+                        "before": 1,
+                        "after": 1,
+                        "path": 1,
+                        "method": 1,
+                    },
+                )
+                for r in audit_rows:
+                    pid = r.get("entity_id")
+                    info = creators.get(pid)
+                    if not info:
+                        continue
+                    creator_id, created_at = info
+                    actor = r.get("actor") or r.get("user_id")
+                    if not actor or actor == creator_id:
+                        continue  # self-edits are never corrections
+                    edited_at = _as_dt(r.get("timestamp")) or _as_dt(r.get("ts"))
+                    if edited_at is None or created_at is None:
+                        continue
+                    # Recency rule: only edits within 30 days of creation count.
+                    if edited_at < created_at or edited_at > created_at + timedelta(
+                        days=30
+                    ):
+                        continue
+                    if r.get("action") == "product.updated":
+                        keys = set((r.get("before") or {}).keys()) | set(
+                            (r.get("after") or {}).keys()
+                        )
+                        if any(
+                            k in _CATALOGUING_AUDIT_KEYS
+                            or str(k).startswith("attributes.")
+                            for k in keys
+                        ):
+                            corrected_classified.add(pid)
+                    else:
+                        # Baseline middleware row (no field detail): count ONLY
+                        # the catalog PIM PUT path -- the one door still without
+                        # field-level history (classification follows once
+                        # PR #911 lands). Spine PUTs (/products/{pid}) and
+                        # engine-door edits (/products/master/{pid}) both write
+                        # classified product.updated rows now, so their
+                        # baseline twins are deliberately NOT counted here.
+                        if str(r.get("method") or "") not in ("PUT", "PATCH"):
+                            continue
+                        path = str(r.get("path") or "")
+                        if path == f"/api/v1/catalog/products/{pid}":
+                            corrected_approx.add(pid)
+        except Exception as exc:  # noqa: BLE001
+            # Visible (not silent): a cursor timeout here would otherwise
+            # masquerade as "zero corrections".
+            logger.warning("[SCORECARD] corrections scan failed: %s", exc)
+    corrected_approx -= corrected_classified
+    for pid in corrected_classified:
+        _row(creators[pid][0])["corrections_classified"] += 1
+    for pid in corrected_approx:
+        _row(creators[pid][0])["corrections_approximate"] += 1
+    for row in per_user.values():
+        row["corrections_received"] = (
+            row["corrections_classified"] + row["corrections_approximate"]
+        )
+
+    # ---- 4. QC stats (verdicts on samples drawn in the window) ------------
+    try:
+        samples = db.get_collection("qc_samples").find(
+            {"sampled_at": {"$gte": cutoff}},
+            {"_id": 0, "cataloguer_id": 1, "cataloguer_name": 1, "verdict": 1},
+        )
+        for s in samples:
+            uid = s.get("cataloguer_id")
+            if not uid or uid in _NON_CATALOGUER_IDS:
+                continue
+            if not s.get("verdict"):
+                continue  # pending items don't count until reviewed
+            row = _row(uid)
+            if not row["name"] and s.get("cataloguer_name"):
+                row["name"] = s.get("cataloguer_name")
+            row["qc"]["sampled"] += 1
+            if s.get("verdict") == "ERROR":
+                row["qc"]["errors"] += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ---- 5. Finalise rows --------------------------------------------------
+    missing_names = [u for u, r in per_user.items() if not r["name"]]
+    resolved = _resolve_user_names(missing_names)
+    rows = []
+    for uid, row in per_user.items():
+        row["name"] = row["name"] or resolved.get(uid) or uid
+        row["per_day_rate"] = round(row["created_count"] / float(days), 2)
+        qc = row["qc"]
+        qc["error_rate"] = (
+            round(qc["errors"] * 100.0 / qc["sampled"], 1) if qc["sampled"] else 0.0
+        )
+        rows.append(row)
+    rows.sort(key=lambda r: (-r["created_count"], r["user_id"]))
+    return {"days": days, "generated_at": now.isoformat(), "rows": rows}
+
+
+class QcGenerateRequest(BaseModel):
+    """POST /products/qc-samples/generate body."""
+
+    days: int = Field(default=7, ge=1, le=90)
+    per_user: int = Field(default=10, ge=1, le=50)
+
+
+class QcVerdictRequest(BaseModel):
+    """POST /products/qc-samples/{item_id}/verdict body."""
+
+    verdict: str
+    error_fields: Optional[List[str]] = None
+    note: Optional[str] = None
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _validate_verdict(cls, v):
+        normed = str(v or "").strip().upper()
+        if normed not in ("OK", "ERROR"):
+            raise ValueError("verdict must be OK or ERROR")
+        return normed
+
+    @field_validator("error_fields")
+    @classmethod
+    def _validate_error_fields(cls, v):
+        if v is None:
+            return None
+        bad = [f for f in v if f not in _QC_ERROR_FIELDS]
+        if bad:
+            raise ValueError(
+                f"Invalid error_fields {bad}. Allowed: {list(_QC_ERROR_FIELDS)}"
+            )
+        return v
+
+
+@router.post("/qc-samples/generate", status_code=201)
+async def generate_qc_samples(
+    body: QcGenerateRequest,
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Draw a random QC sample batch: up to `per_user` random products per
+    distinct cataloguer with creations in the last `days` days.
+
+    A (cataloguer, product) pair that has EVER been sampled -- PENDING or
+    already reviewed -- is excluded, so one product yields at most one QC
+    datapoint per cataloguer (re-generating never re-queues an unreviewed
+    item, and a reviewed defect can never be double-counted into the
+    scorecard error rate). One qc_samples doc per sampled item, sharing a
+    batch_id. Random pick is server-side random.sample over the eligible
+    pool. Concurrent-generate races are backstopped by the partial unique
+    index on (cataloguer_id, product_id, status=PENDING): the insert runs
+    ordered=False and duplicate-key losers are dropped from the reported
+    counts."""
+    db = _scorecard_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    now = datetime.now()
+    cutoff = now - timedelta(days=body.days)
+    try:
+        pool_docs = list(
+            db.get_collection("products").find(
+                {
+                    "created_at": {"$gte": cutoff},
+                    "created_by": {"$nin": list(_NON_CATALOGUER_IDS)},
+                },
+                {
+                    "_id": 0,
+                    "product_id": 1,
+                    "created_by": 1,
+                    "created_by_name": 1,
+                    "category": 1,
+                    "brand": 1,
+                    "model": 1,
+                    "name": 1,
+                    "sku": 1,
+                    "images": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pool_docs = []
+
+    pools: Dict[str, List[Dict]] = {}
+    for p in pool_docs:
+        uid = p.get("created_by")
+        pid = p.get("product_id")
+        if uid and pid:
+            pools.setdefault(uid, []).append(p)
+
+    # Pairs already sampled for these cataloguers -- ANY status. A reviewed
+    # pair must never be re-sampled (one product = at most one QC datapoint
+    # per cataloguer), and a PENDING pair is still awaiting review.
+    qc_coll = db.get_collection("qc_samples")
+    try:
+        already = {
+            (r.get("cataloguer_id"), r.get("product_id"))
+            for r in qc_coll.find(
+                {"cataloguer_id": {"$in": list(pools.keys())}},
+                {"_id": 0, "cataloguer_id": 1, "product_id": 1},
+            )
+        }
+    except Exception:  # noqa: BLE001
+        already = set()
+
+    names = _resolve_user_names(
+        [u for u, docs in pools.items() if not any(d.get("created_by_name") for d in docs)]
+    )
+
+    batch_id = str(uuid.uuid4())
+    items: List[Dict[str, Any]] = []
+    summary: List[Dict[str, Any]] = []
+    for uid in sorted(pools.keys()):
+        pool = pools[uid]
+        eligible = [p for p in pool if (uid, p.get("product_id")) not in already]
+        if not eligible:
+            continue
+        picked = random.sample(eligible, min(body.per_user, len(eligible)))
+        cataloguer_name = (
+            next((p.get("created_by_name") for p in pool if p.get("created_by_name")), None)
+            or names.get(uid)
+            or uid
+        )
+        for p in picked:
+            brand = p.get("brand") or ""
+            model = p.get("model") or ""
+            pname = (
+                p.get("name") or f"{brand} {model}".strip() or p.get("sku") or ""
+            )
+            imgs = p.get("images")
+            image_url = (
+                imgs[0]
+                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str)
+                else None
+            )
+            items.append(
+                {
+                    "item_id": str(uuid.uuid4()),
+                    "batch_id": batch_id,
+                    "product_id": p.get("product_id"),
+                    "product_name": pname,
+                    "sku": p.get("sku"),
+                    "category": p.get("category"),
+                    "image_url": image_url,
+                    "cataloguer_id": uid,
+                    "cataloguer_name": cataloguer_name,
+                    "product_created_at": p.get("created_at"),
+                    "status": "PENDING",
+                    "sampled_at": now,
+                    "sampled_by": current_user.get("user_id"),
+                    "sampled_by_name": current_user.get("username"),
+                    "window_days": body.days,
+                    "per_user_cap": body.per_user,
+                }
+            )
+        summary.append(
+            {"user_id": uid, "name": cataloguer_name, "sampled": len(picked)}
+        )
+
+    if items:
+        # ordered=False + the partial unique index on (cataloguer_id,
+        # product_id, status=PENDING) make concurrent generates race-safe:
+        # a pair another in-flight generate just inserted fails ITS row only
+        # (duplicate key); every other row still lands. Losers are dropped
+        # from the reported counts so total_items/summary reflect reality.
+        try:
+            # Copy each doc: insert_many mutates its args (adds _id), and the
+            # response below must stay JSON-clean.
+            qc_coll.insert_many([dict(i) for i in items], ordered=False)
+        except Exception as exc:  # noqa: BLE001
+            dup_indices = _bulk_write_duplicate_indices(exc)
+            if dup_indices is None:
+                logger.warning("[QC] sample batch insert failed: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail="Failed to store the QC sample batch"
+                ) from exc
+            logger.info(
+                "[QC] %d duplicate pair(s) skipped (concurrent generate)",
+                len(dup_indices),
+            )
+            dropped = [items[i] for i in dup_indices if i < len(items)]
+            items = [it for i, it in enumerate(items) if i not in dup_indices]
+            dropped_by_user: Dict[str, int] = {}
+            for it in dropped:
+                uid = it.get("cataloguer_id")
+                dropped_by_user[uid] = dropped_by_user.get(uid, 0) + 1
+            for s in summary:
+                s["sampled"] = max(0, s["sampled"] - dropped_by_user.get(s["user_id"], 0))
+            summary = [s for s in summary if s["sampled"] > 0]
+
+    return {
+        "batch_id": batch_id,
+        "days": body.days,
+        "per_user": body.per_user,
+        "total_items": len(items),
+        "cataloguers": summary,
+    }
+
+
+@router.get("/qc-samples")
+async def list_qc_samples(
+    status: Optional[str] = Query(None, pattern="^(PENDING|REVIEWED)$"),
+    batch_id: Optional[str] = Query(None),
+    cataloguer: Optional[str] = Query(None, description="Filter by cataloguer user_id"),
+    limit: int = Query(500, ge=1, le=2000),
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """List QC sample items, newest batch first, plus per-batch progress
+    summaries (total vs reviewed -- the batch progress is computed over the
+    batch_id/cataloguer scope BEFORE the status filter narrows the items).
+
+    Both halves run SERVER-SIDE (qc_samples grows monotonically, so a full
+    client-side materialization would degrade with age): the batch progress
+    is a $group aggregation over the pre-status scope, and the item fetch
+    puts status into the Mongo filter with cursor sort + limit."""
+    db = _scorecard_db()
+    if db is None:
+        return {"items": [], "total": 0, "batches": []}
+    qc_coll = db.get_collection("qc_samples")
+
+    flt: Dict[str, Any] = {}
+    if batch_id:
+        flt["batch_id"] = batch_id
+    if cataloguer:
+        flt["cataloguer_id"] = cataloguer
+
+    # Per-batch progress: Mongo-side $group over the pre-status scope.
+    batches: List[Dict[str, Any]] = []
+    try:
+        pipeline: List[Dict[str, Any]] = []
+        if flt:
+            pipeline.append({"$match": dict(flt)})
+        pipeline += [
+            {
+                "$group": {
+                    "_id": "$batch_id",
+                    "total": {"$sum": 1},
+                    "reviewed": {
+                        "$sum": {
+                            "$cond": [{"$eq": ["$status", "REVIEWED"]}, 1, 0]
+                        }
+                    },
+                    "sampled_at": {"$max": "$sampled_at"},
+                }
+            },
+            {"$sort": {"sampled_at": -1}},
+            {"$limit": 20},
+        ]
+        for b in qc_coll.aggregate(pipeline):
+            batches.append(
+                {
+                    "batch_id": b.get("_id") or "",
+                    "total": int(b.get("total") or 0),
+                    "reviewed": int(b.get("reviewed") or 0),
+                    "sampled_at": b.get("sampled_at"),
+                }
+            )
+    except Exception:  # noqa: BLE001 - progress strip is best-effort
+        batches = []
+
+    # Items: status pushed into the Mongo filter; sort + limit on the cursor.
+    item_flt = dict(flt)
+    if status:
+        item_flt["status"] = status
+    try:
+        rows = list(
+            qc_coll.find(item_flt, {"_id": 0}).sort("sampled_at", -1).limit(limit)
+        )
+    except Exception:  # noqa: BLE001
+        rows = []
+    return {"items": rows, "total": len(rows), "batches": batches}
+
+
+@router.post("/qc-samples/{item_id}/verdict")
+async def qc_sample_verdict(
+    item_id: str,
+    body: QcVerdictRequest,
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """Record a QC verdict (OK / ERROR + error_fields + note) on a sample item.
+
+    HARD RULES:
+      * NO SELF-QC: the item's cataloguer may never verdict their own item
+        (403), regardless of role -- another manager must review it.
+      * IMMUTABLE: a set verdict returns 409 on re-verdict. Only ADMIN /
+        SUPERADMIN may overwrite, and the overwrite stamps overwritten_by
+        (+ keeps the previous verdict in previous_verdict)."""
+    db = _scorecard_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    qc_coll = db.get_collection("qc_samples")
+    item = qc_coll.find_one({"item_id": item_id}, {"_id": 0})
+    if item is None:
+        raise HTTPException(status_code=404, detail="QC sample item not found")
+
+    if item.get("cataloguer_id") == current_user.get("user_id"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "You catalogued this product -- another manager must review it "
+                "(no self-QC)."
+            ),
+        )
+
+    update: Dict[str, Any] = {}
+    is_overwrite = bool(item.get("verdict"))
+    if is_overwrite:
+        roles = set(current_user.get("roles") or [])
+        if not (roles & {"ADMIN", "SUPERADMIN"}):
+            raise HTTPException(
+                status_code=409,
+                detail="This item already has a verdict (verdicts are immutable).",
+            )
+        update["previous_verdict"] = {
+            "verdict": item.get("verdict"),
+            "error_fields": item.get("error_fields"),
+            "note": item.get("note"),
+            "reviewed_by": item.get("reviewed_by"),
+            "reviewed_by_name": item.get("reviewed_by_name"),
+            "reviewed_at": item.get("reviewed_at"),
+        }
+        update["overwritten_by"] = current_user.get("user_id")
+        update["overwritten_by_name"] = current_user.get("username")
+        update["overwritten_at"] = datetime.now()
+
+    update.update(
+        {
+            "verdict": body.verdict,
+            # error_fields only mean something on an ERROR verdict.
+            "error_fields": (body.error_fields or []) if body.verdict == "ERROR" else [],
+            "note": body.note,
+            "reviewed_by": current_user.get("user_id"),
+            "reviewed_by_name": current_user.get("username"),
+            "reviewed_at": datetime.now(),
+            "status": "REVIEWED",
+        }
+    )
+    # CONDITIONAL writes: prod runs multiple uvicorn workers, so the
+    # read-then-check above can race a concurrent verdict. The filter
+    # re-asserts the expected prior state and matched_count==0 means someone
+    # else won the race -> 409, never a silent overwrite.
+    if is_overwrite:
+        # Pin the previously-read reviewed_at so the previous_verdict
+        # snapshot built above is guaranteed consistent with what is being
+        # overwritten (a concurrent verdict changes reviewed_at -> no match).
+        write_filter = {"item_id": item_id, "reviewed_at": item.get("reviewed_at")}
+    else:
+        # First verdict: only lands while NO verdict exists. Items are seeded
+        # without the field; $in [None, ""] matches both missing and null.
+        write_filter = {"item_id": item_id, "verdict": {"$in": [None, ""]}}
+    try:
+        result = qc_coll.update_one(write_filter, {"$set": update})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[QC] verdict write failed for %s: %s", item_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to save verdict") from exc
+    if getattr(result, "matched_count", 0) == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This item was just verdicted by someone else (verdicts are "
+                "immutable). Refresh the list."
+            ),
+        )
+    return qc_coll.find_one({"item_id": item_id}, {"_id": 0})
+
+
+# ============================================================================
 # PRODUCT IMAGES — durable upload + serve (GridFS-backed file store)
 # ============================================================================
 # The Add Product screen (Quick Add + Guided) uploads product photos here. We
@@ -2379,8 +3250,68 @@ async def update_product(
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
         update_data["updated_by"] = current_user.get("user_id")
+        # Cataloguer attribution: the editor's display name rides next to the id
+        # (JWT already carries the username). ALWAYS written when updated_by is
+        # written -- falling back to the raw id -- so a stale previous editor's
+        # name can never survive next to a new editor's id. Creation
+        # attribution is immutable: ProductUpdate has no created_by* fields and
+        # the None-strip above cannot introduce them, so created_by /
+        # created_by_name are never rewritten here.
+        update_data["updated_by_name"] = current_user.get("username") or current_user.get(
+            "user_id"
+        )
 
         if repo.update(product_id, update_data):
+            # Compact field-classified audit row (scorecard corrections): the
+            # spine PUT is the primary FE edit door, and without this row an
+            # other-user pricing-only edit would be (over-)counted as an
+            # approximate correction. before/after carry the patch's changed
+            # top-level KEYS with light values only (heavy payloads elided) --
+            # the corrections classifier reads keys, not values. Fail-soft:
+            # an audit hiccup never blocks the product save.
+            try:
+                _changed_keys = [
+                    k
+                    for k in update_data.keys()
+                    if k not in ("updated_by", "updated_by_name")
+                ]
+                if _changed_keys:
+                    from ..dependencies import (
+                        get_audit_repository as _get_audit_repo,
+                    )
+
+                    _audit_repo = _get_audit_repo()
+                    if _audit_repo is not None:
+                        _HEAVY = ("attributes", "images", "description")
+                        _before: Dict[str, Any] = {}
+                        _after: Dict[str, Any] = {}
+                        for _k in _changed_keys:
+                            if _k in _HEAVY:
+                                _before[_k] = "[changed]"
+                                _after[_k] = "[changed]"
+                            else:
+                                _before[_k] = existing.get(_k)
+                                _after[_k] = update_data.get(_k)
+                        _audit_repo.create(
+                            {
+                                "action": "product.updated",
+                                "actor": current_user.get("user_id"),
+                                "user_id": current_user.get("user_id"),
+                                "entity_type": "product",
+                                "entity_id": product_id,
+                                "timestamp": datetime.now(),
+                                "ts": datetime.now().isoformat(),
+                                "source": "spine_put",
+                                "before": _before,
+                                "after": _after,
+                            }
+                        )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[PRODUCTS] update audit row skipped for %s",
+                    product_id,
+                    exc_info=True,
+                )
             # Hub Phase 0: apply the catalog-done restamp as a GUARDED single-doc
             # write -- NOT folded into the blind $set above. Auto-promotes a DRAFT
             # the edit just completed (e.g. cost_price / CL power filled in ->

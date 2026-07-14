@@ -49,10 +49,17 @@ class ProductRepository(BaseRepository):
             return None
         return self.find_one({"barcode": barcode})
 
-    def _category_filter(self, category: str, is_active: Optional[bool]) -> Dict:
+    def _category_filter(
+        self,
+        category: str,
+        is_active: Optional[bool],
+        created_by: Optional[str] = None,
+    ) -> Dict:
         filter = {"category": category}
         if is_active is not None:
             filter["is_active"] = is_active
+        if created_by:
+            filter["created_by"] = created_by
         return filter
 
     def find_by_category(
@@ -61,32 +68,47 @@ class ProductRepository(BaseRepository):
         active_only: bool = True,
         *,
         is_active=_LEGACY,
+        created_by: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[Dict]:
         # Legacy contract preserved: active_only=True -> is_active True filter,
         # active_only=False -> no filter. The keyword-only `is_active` tri-state
         # (True/False/None) wins when passed explicitly (Catalog Manager).
+        # `created_by` (cataloguer attribution) is an additive equality filter;
+        # None (the default) preserves the pre-existing query byte-for-byte.
         if is_active is _LEGACY:
             is_active = True if active_only else None
         return self.find_many(
-            self._category_filter(category, is_active),
+            self._category_filter(category, is_active, created_by),
             sort=[("brand", 1), ("model", 1)],
             skip=skip,
             limit=limit,
         )
 
-    def count_by_category(self, category: str, *, is_active: Optional[bool] = True) -> int:
-        return self.count(self._category_filter(category, is_active))
+    def count_by_category(
+        self,
+        category: str,
+        *,
+        is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
+    ) -> int:
+        return self.count(self._category_filter(category, is_active, created_by))
 
     def _brand_filter(
-        self, brand: str, category: Optional[str], is_active: Optional[bool]
+        self,
+        brand: str,
+        category: Optional[str],
+        is_active: Optional[bool],
+        created_by: Optional[str] = None,
     ) -> Dict:
         filter: Dict = {"brand": brand}
         if is_active is not None:
             filter["is_active"] = is_active
         if category:
             filter["category"] = category
+        if created_by:
+            filter["created_by"] = created_by
         return filter
 
     def find_by_brand(
@@ -95,29 +117,40 @@ class ProductRepository(BaseRepository):
         category: str = None,
         *,
         is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[Dict]:
         return self.find_many(
-            self._brand_filter(brand, category, is_active),
+            self._brand_filter(brand, category, is_active, created_by),
             sort=[("model", 1)],
             skip=skip,
             limit=limit,
         )
 
     def count_by_brand(
-        self, brand: str, category: str = None, *, is_active: Optional[bool] = True
+        self,
+        brand: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
     ) -> int:
-        return self.count(self._brand_filter(brand, category, is_active))
+        return self.count(self._brand_filter(brand, category, is_active, created_by))
 
     def _search_extra_filter(
-        self, category: Optional[str], is_active: Optional[bool]
+        self,
+        category: Optional[str],
+        is_active: Optional[bool],
+        created_by: Optional[str] = None,
     ) -> Dict:
         filter: Dict = {}
         if is_active is not None:
             filter["is_active"] = is_active
         if category:
             filter["category"] = category
+        if created_by:
+            filter["created_by"] = created_by
         return filter
 
     def search_products(
@@ -126,23 +159,55 @@ class ProductRepository(BaseRepository):
         category: str = None,
         *,
         is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[Dict]:
         return self.search(
             query,
             list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active),
+            self._search_extra_filter(category, is_active, created_by),
             skip=skip,
             limit=limit,
         )
 
     def count_search_products(
-        self, query: str, category: str = None, *, is_active: Optional[bool] = True
+        self,
+        query: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
     ) -> int:
         return self.search_count(
-            query, list(self.SEARCH_FIELDS), self._search_extra_filter(category, is_active)
+            query,
+            list(self.SEARCH_FIELDS),
+            self._search_extra_filter(category, is_active, created_by),
         )
+
+    def cataloguer_stats(self) -> List[Dict]:
+        """Per-creator cataloguing rollup (attribution feature).
+
+        Groups the products collection by `created_by`, excluding rows with no
+        creator (legacy/system-seeded docs). Returns one row per cataloguer:
+          {_id: user_id, name: best created_by_name seen (or None),
+           created_count, last_created_at}
+        sorted by created_count desc. Fail-soft [] via aggregate()."""
+        pipeline = [
+            {"$match": {"created_by": {"$nin": [None, "", "system", "SYSTEM"]}}},
+            {
+                "$group": {
+                    "_id": "$created_by",
+                    # $max ignores missing values, so any doc that carries the
+                    # display name wins over older docs that lack it.
+                    "name": {"$max": "$created_by_name"},
+                    "created_count": {"$sum": 1},
+                    "last_created_at": {"$max": "$created_at"},
+                }
+            },
+            {"$sort": {"created_count": -1, "_id": 1}},
+        ]
+        return self.aggregate(pipeline)
 
     def update_price(
         self, product_id: str, mrp: float, offer_price: float, updated_by: str

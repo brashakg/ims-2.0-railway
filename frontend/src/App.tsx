@@ -137,6 +137,9 @@ const QuickAddPage = lazy(() => import('./pages/catalog/QuickAddPage'));
 // QuickAddPage); /catalog/autopilot now redirects to /catalog/add. The page file
 // is kept in the tree but no longer imported here.
 const BuyDeskPage = lazy(() => import('./pages/catalog/BuyDeskPage'));
+// /catalog/scorecard — per-user cataloguing performance (volume, approvals,
+// corrections, QC error rate) + the random-sample QC review workflow.
+const CataloguingScorecardPage = lazy(() => import('./pages/catalog/CataloguingScorecardPage'));
 const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
@@ -1380,6 +1383,26 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
                         <QuickAddPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Cataloguing Scorecard + QC review — manager ladder; gate
+                      mirrors the backend rbac rows for /products/cataloguing-
+                      scorecard + /products/qc-samples*. */}
+                  <Route
+                    path="catalog/scorecard"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={[
+                          'SUPERADMIN',
+                          'ADMIN',
+                          'AREA_MANAGER',
+                          'STORE_MANAGER',
+                          'CATALOG_MANAGER',
+                        ]}
+                      >
+                        <CataloguingScorecardPage />
                       </ProtectedRoute>
                     }
                   />

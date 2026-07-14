@@ -53,12 +53,13 @@ def test_every_non_public_route_maps_to_exactly_one_capability():
 
 
 def test_capability_universe_nonempty_and_verb_shaped():
-    """Every key is ``<module>:read|write`` or the curated approvals:approve."""
+    """Every key is ``<module>:read|write`` or a curated key
+    (approvals:approve, products:qc)."""
     assert C.VALID_CAPABILITY_KEYS
     for key in C.VALID_CAPABILITY_KEYS:
         assert ":" in key, key
         verb = key.rsplit(":", 1)[1]
-        assert verb in ("read", "write", "approve"), key
+        assert verb in ("read", "write", "approve", "qc"), key
 
 
 def test_capability_resolution_matches_role_layer_path_params():

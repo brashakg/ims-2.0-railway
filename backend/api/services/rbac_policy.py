@@ -5271,6 +5271,40 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/products/tags/list",
         "allowed": "AUTHENTICATED",
     },
+    # Cataloguer attribution roster: distinct product creators + per-user
+    # created counts (drives the Inventory "Catalogued by" filter and the
+    # owner's cataloguing-performance view). Manager ladder only -- regular
+    # staff don't need the roster; SUPERADMIN auto-passes.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/cataloguers",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
+    # Cataloguing performance scorecard (attribution phase 2): per-user volume,
+    # approvals, corrections received, QC error rate. Same manager ladder.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/cataloguing-scorecard",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
+    # QC sampling workflow (attribution phase 2): draw a random per-cataloguer
+    # sample batch, list items, and record OK/ERROR verdicts (no self-QC;
+    # verdicts immutable except an ADMIN/SUPERADMIN overwrite). Manager ladder.
+    {
+        "method": "POST",
+        "path": "/api/v1/products/qc-samples/generate",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/products/qc-samples",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/products/qc-samples/{item_id}/verdict",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
     # --- PM (N5) unified product-master sub-paths (router product_master.py) ---
     {
         "method": "GET",

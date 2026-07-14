@@ -156,6 +156,59 @@ export interface SimilarProductsResponse {
   model_colour_count: number;
 }
 
+// ---------------------------------------------------------------------------
+// Cataloguer attribution (GET /products/cataloguers).
+// One row per distinct product creator, with the display name and per-user
+// created count -- drives the Inventory "Catalogued by" filter dropdown and
+// the owner's cataloguing-performance view. Manager-ladder gated on the
+// backend (403 for regular staff); callers should catch and hide the filter.
+// ---------------------------------------------------------------------------
+export interface Cataloguer {
+  user_id: string;
+  /** Display name (username); falls back to the raw user_id server-side. */
+  name: string;
+  created_count: number;
+  last_created_at: string | null;
+}
+
+export interface CataloguersResponse {
+  cataloguers: Cataloguer[];
+}
+
+// ---------------------------------------------------------------------------
+// Cataloguing scorecard (GET /products/cataloguing-scorecard) — attribution
+// phase 2. One row per user with creations (or promote approvals) in the
+// rolling window. corrections_received = corrections_classified (field-level
+// audit rows; pricing never counts) + corrections_approximate (edit doors
+// with no field history — documented server-side). Manager-ladder gated.
+// ---------------------------------------------------------------------------
+export interface ScorecardQcStats {
+  sampled: number;
+  errors: number;
+  /** 0..100 percentage over reviewed samples; 0 when none reviewed. */
+  error_rate: number;
+}
+
+export interface ScorecardRow {
+  user_id: string;
+  name: string;
+  created_count: number;
+  created_today: number;
+  per_day_rate: number;
+  approvals: number;
+  corrections_received: number;
+  corrections_classified: number;
+  corrections_approximate: number;
+  category_coverage: Record<string, number>;
+  qc: ScorecardQcStats;
+}
+
+export interface ScorecardResponse {
+  days: number;
+  generated_at: string;
+  rows: ScorecardRow[];
+}
+
 // Partial update payload for `PUT /products/{id}`. Mirrors the backend
 // `ProductUpdate` schema (snake_case). Every field is optional; the backend
 // merges only what is sent and re-runs the category + MRP>=offer validators.
@@ -262,9 +315,29 @@ export const productApi = {
     skip?: number;
     limit?: number;
     is_active?: 'true' | 'false' | 'all';
+    /** Cataloguer attribution filter: only products created by this user_id. */
+    created_by?: string;
   }) => {
     const response = await api.get('/products', { params });
     return response.data;
+  },
+
+  // Cataloguer roster for the "Catalogued by" filter + performance counts.
+  // Manager-ladder gated on the backend (403 for regular staff) -- import this
+  // DIRECTLY from this module (not the api barrel), the barrel re-export fails
+  // to resolve for new methods (TS2614).
+  getCataloguers: async (): Promise<CataloguersResponse> => {
+    const response = await api.get('/products/cataloguers');
+    return response.data as CataloguersResponse;
+  },
+
+  // Cataloguing performance scorecard (attribution phase 2). Manager-ladder
+  // gated. Import DIRECTLY from this module (not the api barrel) -- TS2614.
+  getCataloguingScorecard: async (days: number = 30): Promise<ScorecardResponse> => {
+    const response = await api.get('/products/cataloguing-scorecard', {
+      params: { days },
+    });
+    return response.data as ScorecardResponse;
   },
 
   getProduct: async (productId: string) => {

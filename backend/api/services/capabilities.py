@@ -10,6 +10,11 @@ registry by collapsing every catalogued ``(method, path)`` to a single key:
     POST/PUT/PATCH/DELETE           -> "<module>:write"
     /approvals/*/approve|reject     -> "approvals:approve"  (curated, the
                                        dedicated maker-checker surface only)
+    /products/qc-samples*           -> "products:qc"        (curated: the QC
+                                       sampling workflow is manager-ladder
+                                       gated and must NOT broaden the
+                                       products:write role union -- see
+                                       capability_for)
 
 WHY CAPABILITIES (not raw routes, not modules)
 ----------------------------------------------
@@ -96,6 +101,19 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # to their module's :write -- that is the natural verb and keeps totality.
     if mod == "approvals" and (tmpl.endswith("/approve") or tmpl.endswith("/reject")):
         return "approvals:approve"
+    # Curated finer capability: the cataloguing-QC sampling workflow. Its
+    # routes are gated to the MANAGER LADDER (AREA_MANAGER/STORE_MANAGER
+    # included); collapsing them to the generic products:write would add
+    # those roles to that capability's role union, and the grant guard
+    # (user_roles.grantable_capabilities_for) reasons FROM that union -- a
+    # STORE_MANAGER would suddenly be able to grant full product create/edit
+    # to anyone. One key for BOTH verbs (precedent: approvals:approve already
+    # breaks the read/write shape); the sibling manager-gated GETs
+    # (/products/cataloguers, /products/cataloguing-scorecard) stay
+    # products:read, whose union is already AUTHENTICATED-broad, so they
+    # broaden nothing.
+    if tmpl.startswith("/api/v1/products/qc-samples"):
+        return "products:qc"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -111,9 +129,17 @@ def _build_universe() -> (
                                     (incl. every jarvis:* key), so the layer must
                                     never grant them to a lesser actor.
       * _CAP_ROLE_HINT           -- for each capability, the UNION of roles that
-                                    can reach ANY of its routes (used by the FE
-                                    delta-defaults + the totality/annotation test
-                                    only; NOT an enforcement input).
+                                    can reach ANY of its routes. This IS an
+                                    enforcement input: user_roles.
+                                    grantable_capabilities_for uses it to decide
+                                    which capabilities a non-SUPERADMIN actor may
+                                    GRANT ("you can grant what your roles can
+                                    reach"). Consequence: adding a new route row
+                                    with a broader role list BROADENS who may
+                                    grant that module's capability -- which is
+                                    exactly why the manager-ladder QC routes get
+                                    their own curated products:qc key instead of
+                                    joining products:write.
     """
     keys: Set[str] = set()
     # For ungrantable detection: a capability is ungrantable iff EVERY route it
@@ -161,8 +187,15 @@ def is_ungrantable(key: str) -> bool:
 
 def capability_roles(key: str) -> List[str]:
     """The union of roles that can reach any route of this capability (or the
-    AUTHENTICATED sentinel). Advisory only -- used by the FE delta-default and
-    the totality test, NEVER an enforcement input (enforcement is the resolver)."""
+    AUTHENTICATED sentinel).
+
+    ENFORCEMENT INPUT for the grant guard: user_roles.grantable_capabilities_for
+    derives what a non-SUPERADMIN actor may GRANT from this union (an actor can
+    only grant capabilities their own roles reach). Broadening a capability's
+    role union therefore broadens who can grant it -- keep manager-ladder route
+    families on curated keys (approvals:approve, products:qc) rather than
+    letting them widen a module's generic :write union. Request-time route
+    ACCESS enforcement remains the resolver + role layer, not this hint."""
     return sorted(_CAP_ROLE_HINT.get(key, set()))
 
 
