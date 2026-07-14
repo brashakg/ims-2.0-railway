@@ -573,6 +573,19 @@ class DatabaseConnection:
         )
         _idx("ecom_collections", "auto_source", sparse=True, background=True)
         _idx("ecom_collections", "category_anchor", sparse=True, background=True)
+        # Temporary "share as PDF" collections (Share collection as PDF feature)
+        # auto-expire: Mongo removes the doc once expires_at passes. PARTIAL to
+        # is_temporary=true ONLY so it can NEVER touch a real storefront
+        # collection (which has no expires_at). expireAfterSeconds=0 means "expire
+        # exactly at the stored date". Fail-soft via _idx.
+        _idx(
+            "ecom_collections",
+            "expires_at",
+            expireAfterSeconds=0,
+            partialFilterExpression={"is_temporary": True},
+            name="ttl_temp_collection_expires_at",
+            background=True,
+        )
         _idx("ecom_menus", "handle", unique=True, sparse=True, background=True)
         _idx(
             "ecom_menus",

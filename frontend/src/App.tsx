@@ -140,6 +140,9 @@ const BuyDeskPage = lazy(() => import('./pages/catalog/BuyDeskPage'));
 // /catalog/scorecard — per-user cataloguing performance (volume, approvals,
 // corrections, QC error rate) + the random-sample QC review workflow.
 const CataloguingScorecardPage = lazy(() => import('./pages/catalog/CataloguingScorecardPage'));
+// /catalog/quick-share — pick products -> share as a branded PDF / save a
+// temporary (auto-expiring) set. Broad staff surface (anyone helping a customer).
+const QuickSharePage = lazy(() => import('./pages/catalogue/QuickSharePage'));
 const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
@@ -1403,6 +1406,30 @@ function App() {
                         ]}
                       >
                         <CataloguingScorecardPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Quick Share — pick products -> share as PDF / temp set.
+                      Broad staff gate (anyone helping a customer); backend
+                      /catalogue routes are AUTHENTICATED. */}
+                  <Route
+                    path="catalog/quick-share"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={[
+                          'SUPERADMIN',
+                          'ADMIN',
+                          'AREA_MANAGER',
+                          'STORE_MANAGER',
+                          'CATALOG_MANAGER',
+                          'SALES_STAFF',
+                          'SALES_CASHIER',
+                          'OPTOMETRIST',
+                          'CASHIER',
+                        ]}
+                      >
+                        <QuickSharePage />
                       </ProtectedRoute>
                     }
                   />
