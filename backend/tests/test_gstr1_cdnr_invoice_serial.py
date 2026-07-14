@@ -104,6 +104,33 @@ def test_gstr1_cdnr_empty_when_no_credit_notes(monkeypatch):
     assert report["cdnr"] == []
 
 
+def test_gstr1_cdnr_prefers_explicit_tax_when_fee_less(monkeypatch):
+    """Finding #4: a FEE-LESS credit note has gross == net, so the legacy
+    gross-minus-net derivation would report tax 0. When the ledger row carries the
+    explicit GST split (Shopify refund + in-store CREDIT_NOTE now stamp it), the
+    CDNR must report the REAL taxable/tax, not 0."""
+    fee_less = {
+        "entry_id": "entry-cn", "customer_id": "cust-001", "type": "ISSUED",
+        "ref": "RET-SHOPIFY-1", "store_id": "store-001",
+        "created_at": datetime(2026, 4, 20, 9, 0, 0),
+        # fee-less: gross == net -> the old derivation would give tax 0...
+        "gross_refund": 5900.0, "net_refund": 5900.0,
+        # ...but the explicit stamp carries the true reversal.
+        "taxable": 5000.0, "tax": 900.0, "gst_rate": 18.0,
+    }
+    _patch(monkeypatch, _db([fee_less]))
+    report = _compute_gstr1("2026-04", "store-001")
+    assert len(report["cdnr"]) == 1
+    cn = report["cdnr"][0]
+    assert cn["grossValue"] == 5900.0
+    assert cn["taxableValue"] == 5000.0
+    assert cn["taxValue"] == 900.0          # NOT 0
+    assert cn["gstRate"] == 18
+    # Intra-state (store + customer both Delhi) -> CGST/SGST split, no IGST.
+    assert round(cn["cgst"] + cn["sgst"], 2) == 900.0
+    assert cn["igst"] == 0.0
+
+
 def test_gstr1_has_hsn_summary(monkeypatch):
     _patch(monkeypatch, _db([]))
     report = _compute_gstr1("2026-04", "store-001")

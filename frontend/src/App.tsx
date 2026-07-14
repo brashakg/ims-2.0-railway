@@ -72,6 +72,7 @@ const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
 const DiscountRulesPage = lazy(() => import('./pages/online-store/DiscountRulesPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
+const RefundReviewsPage = lazy(() => import('./pages/online-store/RefundReviewsPage'));
 const OnlineStockTallyPage = lazy(() => import('./pages/online-store/OnlineStockPage'));
 const OnlineStoreHealthPage = lazy(() => import('./pages/online-store/OnlineStoreHealthPage'));
 const OndcSellerPage = lazy(() => import('./pages/online-store/OndcSellerPage'));
@@ -649,6 +650,22 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <OnlineOrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Refund reviews (Shopify refund -> GST credit
+                      note). The ACCOUNTANT-facing consumer for the refund review
+                      queue: confirm posts the credit note + restock, reject
+                      declines. Gated SUPERADMIN / ADMIN / ACCOUNTANT to match the
+                      backend router (the books are the accountant's). */}
+                  <Route
+                    path="online-store/refund-reviews"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}
+                      >
+                        <RefundReviewsPage />
                       </ProtectedRoute>
                     }
                   />

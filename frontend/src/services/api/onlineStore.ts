@@ -1735,3 +1735,101 @@ export const ordersApi = {
     return _onlineOrderFrom((row ?? {}) as Record<string, any>);
   },
 };
+
+// ============================================================================
+// REFUND REVIEWS  (Shopify refund -> GST credit note; accountant queue consumer)
+// ============================================================================
+// A Shopify `refunds/create` webhook is turned into a proposed GST credit note +
+// restock and, by DEFAULT (SHOPIFY_REFUND_AUTO off), parked in the
+// `shopify_refund_review` queue for an ACCOUNTANT to confirm. This sub-api is the
+// consumer for that queue, served by the backend router:
+//   - GET  /api/v1/online-store/refund-reviews            (list, filter ?status=)
+//   - POST /api/v1/online-store/refund-reviews/{id}/confirm  (post the credit note)
+//   - POST /api/v1/online-store/refund-reviews/{id}/reject   (decline; no posting)
+//
+// GRACEFUL DEGRADATION: the list read resolves to a safe empty/unavailable value
+// rather than throwing so the screen always renders. confirm / reject DO throw on
+// failure so the screen can toast it. Import DIRECTLY from this module (NOT the
+// api barrel — TS2614 per past sessions).
+// ============================================================================
+
+/** One Shopify refund review row as surfaced to the Refund reviews screen.
+ *  Every field optional/nullable so a partial backend payload never breaks. */
+export interface RefundReview {
+  review_id: string;
+  shopify_refund_id?: string | null;
+  shopify_order_id?: string | null;
+  order_id?: string | null;
+  order_number?: string | null;
+  customer_id?: string | null;
+  customer_name?: string | null;
+  store_id?: string | null;
+  restock_store_id?: string | null;
+  /** PENDING | DISCREPANCY | UNMATCHED | CREDIT_FAILED | NO_CUSTOMER | POSTED | REJECTED */
+  status?: string | null;
+  note?: string | null;
+  resolved?: boolean | null;
+  /** GST-inclusive gross of the computed credit note. */
+  gross_refund?: number | null;
+  /** What Shopify actually refunded (drives the DISCREPANCY flag). */
+  shopify_refunded_amount?: number | null;
+  /** The computed credit note (gross/taxable/tax split), as stored. */
+  credit_note?: Record<string, any> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface RefundReviewsResult {
+  reviews: RefundReview[];
+  total: number;
+  available: boolean;
+}
+
+export interface RefundReviewFilters {
+  status?: string;
+  resolved?: boolean;
+  limit?: number;
+}
+
+const REFUND_REVIEWS_BASE = '/online-store/refund-reviews';
+
+export const refundReviewsApi = {
+  /** List refund review rows (optionally filtered by status). NEVER throws: any
+   *  error (404 stale deploy / 403 outside the gate) resolves to an empty,
+   *  unavailable result so the screen always renders. */
+  list: async (filters: RefundReviewFilters = {}): Promise<RefundReviewsResult> => {
+    try {
+      const params: Record<string, string | number | boolean> = {};
+      if (filters.status) params.status = filters.status;
+      if (typeof filters.resolved === 'boolean') params.resolved = filters.resolved;
+      params.limit = typeof filters.limit === 'number' ? filters.limit : 500;
+      const res = await api.get(REFUND_REVIEWS_BASE, { params });
+      const data = res?.data;
+      const arr = Array.isArray(data) ? data : (data?.reviews ?? data?.items ?? []);
+      const reviews = (Array.isArray(arr) ? arr : []) as RefundReview[];
+      const total = typeof data?.total === 'number' ? data.total : reviews.length;
+      return { reviews, total, available: true };
+    } catch {
+      return { reviews: [], total: 0, available: false };
+    }
+  },
+
+  /** Confirm a review: post the credit note + restock from the stored row. Throws
+   *  on failure so the caller can toast it. */
+  confirm: async (reviewId: string): Promise<Record<string, any>> => {
+    const res = await api.post(
+      `${REFUND_REVIEWS_BASE}/${encodeURIComponent(reviewId)}/confirm`,
+    );
+    return (res?.data ?? {}) as Record<string, any>;
+  },
+
+  /** Reject a review: mark it resolved without posting anything. Throws on failure. */
+  reject: async (reviewId: string): Promise<Record<string, any>> => {
+    const res = await api.post(
+      `${REFUND_REVIEWS_BASE}/${encodeURIComponent(reviewId)}/reject`,
+    );
+    return (res?.data ?? {}) as Record<string, any>;
+  },
+};

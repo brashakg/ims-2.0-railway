@@ -14,30 +14,44 @@ WHAT A SHOPIFY REFUND PRODUCES IN IMS (mirrors an in-store return exactly):
       refunded unit is recovered from the ORIGINAL IMS order line via
       returns.py `_priced_return_lines` (the same (taxable_value+tax_amount)/qty
       resolution the till uses), and the tax is backed OUT of that gross with
-      returns_engine.gst_breakup -- the identical credit-note reversal an
-      in-store CREDIT_NOTE runs. When a customer is resolved, the credit note is
-      recorded to `credit_note_ledger` via returns.py `_issue_store_credit` (the
-      SAME ledger the GSTR-1 CDNR report reads), so the reversal flows into GST
-      reporting exactly like a counter credit note.
+      returns_engine.gst_breakup_lines PER LINE (exact for mixed GST rates) --
+      the identical credit-note reversal an in-store CREDIT_NOTE runs. When a
+      customer is resolved, the credit note is recorded to `credit_note_ledger`
+      via returns.py `_issue_store_credit` (the SAME ledger the GSTR-1 CDNR
+      report reads) UNDER THE ORIGINAL ORDER'S STORE, stamped with the real
+      taxable/tax split, so the reversal flows into GST reporting under the right
+      GSTIN exactly like a counter credit note.
   (b) a STOCK RESTOCK of the refunded serialized units back to the FULFILLING
       store, reusing returns.py `_restock_good_items` (re-activate the original
       SOLD unit, else mint a fresh AVAILABLE one) -- the same restock path a
       counter return runs. Shopify's per-line restock_type is honoured.
 
-IDEMPOTENT on the Shopify refund id: a re-delivered `refunds/create` webhook
-must never double-credit or double-restock. We guard on the refund id before any
-write (a prior `returns` doc OR a prior review-queue row for this refund id ->
-"duplicate", no-op).
+AMOUNT RECONCILIATION: the credit note is computed from the ORIGINAL billed
+gross, but Shopify may have refunded a DIFFERENT amount (a partial / goodwill
+refund). We read the amount Shopify actually refunded from the payload and, when
+it differs from the computed gross beyond a small epsilon, force the review-queue
+row to DISCREPANCY and NEVER auto-post -- an accountant reconciles.
+
+NO DOUBLE BENEFIT ON CARD REFUNDS: when the payload shows the money already went
+back via a payment gateway, the credit note is booked WITHOUT bumping the
+customer's redeemable store credit (the CDNR ledger row is still written for the
+GST reversal). Only a genuine store-credit settlement bumps the balance.
+
+IDEMPOTENT on the Shopify refund id (CLAIM-FIRST): the AUTO path INSERTS the
+`returns` doc stamped with the refund id (backed by a unique partial index)
+BEFORE issuing credit / restock, so a redelivery mid-flight hits the unique index
+(-> duplicate) rather than double-crediting. A prior review-queue row also blocks
+a replay -- EXCEPT an UNMATCHED row (order arrived after the refund), which stays
+reprocessable once the order is ingested.
 
 REFUND POLICY (safe for a LIVE business):
   * DEFAULT = ACCOUNTANT REVIEW QUEUE. We do NOT auto-post financial entries. The
     computed credit note + proposed restock are written to `shopify_refund_review`
-    as a PENDING item for an accountant to confirm. Nothing hits the ledger or
-    stock.
+    as a PENDING item for an accountant to CONFIRM (see the consumer router
+    routers/online_store_refund_reviews.py). Nothing hits the ledger or stock.
   * AUTO (opt-in, DARK by default) = auto-credit-note + auto-restock. Gated behind
     `SHOPIFY_REFUND_AUTO` (env) OR the shopify integration config flag
-    `refund_auto`. Only when explicitly turned ON does IMS post the credit note +
-    restock automatically.
+    `refund_auto`.
   BOTH code paths are built; the default is the queue. See `_refund_auto_enabled`.
 
 FAIL-SOFT, end to end: a bad/partial payload, an unresolved order, or a DB error
@@ -46,6 +60,7 @@ loop must keep ticking).
 
 PUBLIC API:
     handle_shopify_refund(db, payload, *, webhook_id=None, topic=None) -> dict
+    post_from_review(db, review) -> dict   (used by the accountant consumer route)
 """
 
 from __future__ import annotations
@@ -59,11 +74,22 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _REVIEW_COLLECTION = "shopify_refund_review"
+_RETURNS_COLLECTION = "returns"
+
+# Rupee tolerance when reconciling the computed credit-note gross against what
+# Shopify actually refunded. Absorbs GST rounding dust (a paisa or two on a
+# multi-line refund) while still catching a real mismatch (a Rs 200 goodwill
+# refund vs a Rs 7,000 computed credit note).
+_AMOUNT_EPS = 1.0
 
 # Shopify per-line restock intent -> should this returned unit go back on the
 # shelf. "no_restock" is an explicit hold; everything else (return / cancel /
 # legacy_restock) restocks. Absent -> defer to the refund-level `restock` flag.
 _RESTOCK_TYPES_ON = {"return", "cancel", "legacy_restock"}
+
+# Gateways that mean the money did NOT go back to an external card/UPI/wallet
+# (so a store-credit bump is legitimate). Anything else = money already returned.
+_NON_EXTERNAL_GATEWAYS = {"manual", "store_credit", "store-credit", "gift_card", "gift-card"}
 
 
 def _norm(value: Any) -> str:
@@ -75,6 +101,37 @@ def _f(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _is_dup_key(exc: Exception) -> bool:
+    """True when an insert failed on a unique index (pymongo DuplicateKeyError or
+    the in-memory test emulator's equivalent). Portable across both."""
+    name = type(exc).__name__
+    if name == "DuplicateKeyError":
+        return True
+    msg = str(exc).lower()
+    return "e11000" in msg or "duplicate key" in msg
+
+
+def _ensure_unique_refund_index(db, collection: str) -> None:
+    """Lazily create a UNIQUE PARTIAL index on `<collection>.shopify_refund_id`
+    (only over docs that carry a string refund id -- legacy / in-store rows with
+    no refund id are unaffected). Built the same idempotent way webhooks.py builds
+    uniq_webhook_event_id. Fail-soft: never raises."""
+    if db is None:
+        return
+    try:
+        coll = db.get_collection(collection)
+        if coll is None:
+            return
+        coll.create_index(
+            "shopify_refund_id",
+            unique=True,
+            partialFilterExpression={"shopify_refund_id": {"$type": "string"}},
+            name="uniq_shopify_refund_id",
+        )
+    except Exception:  # noqa: BLE001 -- index build must never break the drain
+        logger.debug("[SHOPIFY_REFUND] index build skipped for %s", collection, exc_info=True)
 
 
 def _refund_auto_enabled(db) -> bool:
@@ -123,13 +180,18 @@ def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
 def _refund_already_processed(db, refund_id: str) -> bool:
     """Idempotency guard on the Shopify refund id -- a re-delivered webhook must
     not double-credit or double-restock. True when a prior `returns` credit-note
-    doc OR a prior review-queue row already carries this refund id. Fail-soft ->
-    False (the caller then proceeds; a stray double is preferable to dropping a
-    real refund, and the single NEXUS drain makes a race unlikely)."""
+    doc OR a prior review-queue row (ANY status EXCEPT UNMATCHED) already carries
+    this refund id.
+
+    An UNMATCHED review row is DELIBERATELY not treated as processed: it means
+    the refund arrived before its order was ingested, so once the order exists a
+    redelivery (or a re-drive) must be able to reprocess it. Fail-soft -> False
+    (the caller then proceeds; a stray double is preferable to dropping a real
+    refund)."""
     if db is None or not refund_id:
         return False
     try:
-        returns_coll = db.get_collection("returns")
+        returns_coll = db.get_collection(_RETURNS_COLLECTION)
         if returns_coll is not None and returns_coll.find_one(
             {"shopify_refund_id": refund_id}
         ):
@@ -138,13 +200,31 @@ def _refund_already_processed(db, refund_id: str) -> bool:
         pass
     try:
         review_coll = db.get_collection(_REVIEW_COLLECTION)
-        if review_coll is not None and review_coll.find_one(
-            {"shopify_refund_id": refund_id}
-        ):
-            return True
+        if review_coll is not None:
+            row = review_coll.find_one({"shopify_refund_id": refund_id})
+            if row is not None and _norm(row.get("status")).upper() != "UNMATCHED":
+                return True
     except Exception:  # noqa: BLE001
         pass
     return False
+
+
+def _supersede_unmatched(db, refund_id: str) -> None:
+    """Delete any stale UNMATCHED review row for this refund id once its order is
+    ingested and we are about to (re)process it, so a resolved refund never leaves
+    a dangling UNMATCHED row alongside the new PENDING / posted one. Fail-soft."""
+    if db is None or not refund_id:
+        return
+    try:
+        coll = db.get_collection(_REVIEW_COLLECTION)
+        if coll is None:
+            return
+        if hasattr(coll, "delete_many"):
+            coll.delete_many({"shopify_refund_id": refund_id, "status": "UNMATCHED"})
+        elif hasattr(coll, "delete_one"):
+            coll.delete_one({"shopify_refund_id": refund_id, "status": "UNMATCHED"})
+    except Exception:  # noqa: BLE001
+        logger.debug("[SHOPIFY_REFUND] supersede UNMATCHED failed", exc_info=True)
 
 
 def _restock_store_for_order(order: Dict[str, Any]) -> Optional[str]:
@@ -255,6 +335,86 @@ def _build_return_lines(
     return lines
 
 
+def _return_lines_from_proposed(proposed: List[Dict[str, Any]]) -> List[Any]:
+    """Rebuild ReturnLine objects from a review row's stored `proposed_restock`
+    (a list of ReturnLine model_dumps), so the accountant CONFIRM path posts the
+    exact restock the webhook proposed. Never raises -- a bad row is skipped."""
+    from ..routers.returns import ReturnLine
+
+    out: List[Any] = []
+    fields = set(getattr(ReturnLine, "model_fields", {}).keys())
+    for d in proposed or []:
+        if not isinstance(d, dict):
+            continue
+        try:
+            out.append(ReturnLine(**{k: v for k, v in d.items() if k in fields}))
+        except Exception:  # noqa: BLE001
+            logger.debug("[SHOPIFY_REFUND] could not rebuild ReturnLine", exc_info=True)
+    return out
+
+
+def _shopify_refunded_amount(payload: Dict[str, Any]) -> Optional[float]:
+    """The amount Shopify ACTUALLY refunded, read from the payload:
+      1. sum of `transactions` with kind=='refund' and status=='success';
+      2. fallback: sum of `refund_line_items` (subtotal + total_tax).
+    Returns None when neither is derivable (the caller then cannot reconcile and
+    does not force a discrepancy on missing data)."""
+    if not isinstance(payload, dict):
+        return None
+    txns = payload.get("transactions")
+    if isinstance(txns, list) and txns:
+        total = 0.0
+        found = False
+        for t in txns:
+            if not isinstance(t, dict):
+                continue
+            if _norm(t.get("kind")).lower() != "refund":
+                continue
+            status = _norm(t.get("status")).lower()
+            if status and status != "success":
+                continue
+            total += _f(t.get("amount"))
+            found = True
+        if found:
+            return round(total, 2)
+    rlis = payload.get("refund_line_items")
+    if isinstance(rlis, list) and rlis:
+        total = 0.0
+        found = False
+        for rli in rlis:
+            if not isinstance(rli, dict):
+                continue
+            total += _f(rli.get("subtotal")) + _f(rli.get("total_tax"))
+            found = True
+        if found:
+            return round(total, 2)
+    return None
+
+
+def _is_gateway_refund(payload: Dict[str, Any]) -> bool:
+    """True when the payload shows the money already went back via a payment
+    GATEWAY (card / UPI / wallet), so IMS must NOT also mint redeemable store
+    credit (double benefit). A `manual` / `store_credit` / `gift_card` gateway is
+    an internal settlement, not external money -> False."""
+    if not isinstance(payload, dict):
+        return False
+    txns = payload.get("transactions")
+    if not isinstance(txns, list):
+        return False
+    for t in txns:
+        if not isinstance(t, dict):
+            continue
+        if _norm(t.get("kind")).lower() != "refund":
+            continue
+        status = _norm(t.get("status")).lower()
+        if status and status != "success":
+            continue
+        gateway = _norm(t.get("gateway")).lower()
+        if gateway and gateway not in _NON_EXTERNAL_GATEWAYS:
+            return True
+    return False
+
+
 def _system_user(store_id: Optional[str]) -> Dict[str, Any]:
     """A synthetic actor for the reused return helpers (they read user_id +
     active_store_id off a current_user dict)."""
@@ -278,9 +438,8 @@ def handle_shopify_refund(
 
     Idempotent on the Shopify refund id. NEVER raises (the NEXUS drain loop
     relies on this). Returns a structured result dict:
-      {"status": "queued"|"credited"|"duplicate"|"simulated"|"skipped"|
-                 "order_not_found",
-       "refund_id": <str>, "shopify_order_id": <str>, ...}
+      {"status": "queued"|"credited"|"credit_failed"|"duplicate"|"simulated"|
+                 "skipped"|"order_not_found", "refund_id": <str>, ...}
     """
     try:
         payload = payload if isinstance(payload, dict) else {}
@@ -295,7 +454,7 @@ def handle_shopify_refund(
             return {"status": "simulated", "refund_id": refund_id}
 
         # Idempotency: a re-delivered refund webhook must not double-credit /
-        # double-restock.
+        # double-restock (UNMATCHED rows stay reprocessable -- see the guard).
         if _refund_already_processed(db, refund_id):
             return {
                 "status": "duplicate",
@@ -307,7 +466,8 @@ def handle_shopify_refund(
         if not order:
             # Fail-soft: never crash on an unmatched refund. Record it in the
             # review queue as UNMATCHED so a live business never silently loses a
-            # refund (an accountant investigates), then return.
+            # refund (an accountant investigates), then return. The row stays
+            # reprocessable once the order is ingested.
             _queue_review(
                 db,
                 refund_id=refund_id,
@@ -357,24 +517,55 @@ def handle_shopify_refund(
         # --- GST credit note math: REUSE the in-store return machinery ----------
         # _priced_return_lines recovers the GST-INCLUSIVE gross the customer paid
         # for each refunded unit from the ORIGINAL IMS order line; returned_value
-        # sums it; gst_breakup backs the tax OUT of that gross (the reversal). No
-        # new GST math is introduced here.
+        # sums it; gst_breakup_lines backs the tax OUT of EACH line at ITS OWN
+        # rate (exact for mixed GST rates -- the dominant-rate shortcut mis-taxed a
+        # mixed refund by hundreds of rupees). No new GST math is introduced here.
         from ..routers.returns import _priced_return_lines
         from . import returns_engine as engine
 
         priced = _priced_return_lines(return_lines, order)
         gross_refund = engine.returned_value(priced)
-        gst_view = engine.gst_breakup(
-            gross_refund, engine.dominant_gst_rate(priced)
-        )
+        gst_view = engine.gst_breakup_lines(priced)
         restock_store = _restock_store_for_order(order)
+
+        # AMOUNT RECONCILIATION: what Shopify actually refunded may differ from the
+        # billed gross (a partial / goodwill refund). Never auto-post a mismatch.
+        shopify_refunded = _shopify_refunded_amount(payload)
+        discrepancy = (
+            shopify_refunded is not None
+            and gross_refund > 0
+            and abs(shopify_refunded - gross_refund) > _AMOUNT_EPS
+        )
 
         credit_note = {
             "gross_refund": gross_refund,
             "net_refund": gross_refund,  # no online restocking fee
             "gst_breakup": gst_view,
+            "shopify_refunded_amount": shopify_refunded,
             "lines": priced,
         }
+
+        # We are about to (re)process this refund now that its order exists ->
+        # supersede any stale UNMATCHED review row for it.
+        _supersede_unmatched(db, refund_id)
+
+        if discrepancy:
+            # Never auto-post a mismatched amount; route to the accountant to
+            # reconcile (applies in BOTH queue and auto postures).
+            return _queue_review(
+                db,
+                refund_id=refund_id,
+                shopify_order_id=shopify_order_id,
+                order=order,
+                credit_note=credit_note,
+                restock_lines=return_lines,
+                restock_store=restock_store,
+                status="DISCREPANCY",
+                note=(
+                    f"Shopify refunded Rs {shopify_refunded} but the computed "
+                    f"credit note is Rs {gross_refund} -- accountant must reconcile."
+                ),
+            )
 
         if not _refund_auto_enabled(db):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
@@ -391,15 +582,40 @@ def handle_shopify_refund(
             )
 
         # AUTO: post the credit note + restock automatically (opt-in only).
-        return _auto_post(
+        settled_externally = _is_gateway_refund(payload)
+        result = _post_credit_and_restock(
             db,
             refund_id=refund_id,
-            payload=payload,
             order=order,
             return_lines=return_lines,
             credit_note=credit_note,
             restock_store=restock_store,
+            settled_externally=settled_externally,
         )
+
+        if result.get("status") == "credit_failed":
+            # A credit note SHOULD have issued but didn't (guest / no customer /
+            # ledger failure). Do NOT leave it silently COMPLETED -- give the
+            # accountant a surface (the returns doc already keeps the refund id).
+            queue_status = "NO_CUSTOMER" if not result.get("customer_id") else "CREDIT_FAILED"
+            _queue_review(
+                db,
+                refund_id=refund_id,
+                shopify_order_id=shopify_order_id,
+                order=order,
+                credit_note=credit_note,
+                restock_lines=return_lines,
+                restock_store=restock_store,
+                status=queue_status,
+                note=(
+                    "AUTO restock done but the store credit could not be issued "
+                    "(no customer on the order or a ledger error) -- an accountant "
+                    "must issue the credit note manually."
+                ),
+            )
+            result["queue_status"] = queue_status
+        result.setdefault("shopify_order_id", _norm(order.get("shopify_order_id")))
+        return result
     except Exception as exc:  # noqa: BLE001 -- the drain loop must never die here
         logger.warning("[SHOPIFY_REFUND] handle_shopify_refund failed soft: %s", exc)
         return {"status": "skipped", "reason": f"exception:{type(exc).__name__}"}
@@ -418,8 +634,10 @@ def _queue_review(
     note: str,
 ) -> Dict[str, Any]:
     """Persist the proposed credit note + restock to `shopify_refund_review` for
-    an accountant to confirm. NO financial entry, NO stock movement. Idempotent
-    on the refund id. Fail-soft."""
+    an accountant to confirm (routers/online_store_refund_reviews.py). NO
+    financial entry, NO stock movement. Unique on the refund id (a duplicate
+    insert is a no-op). Fail-soft."""
+    _ensure_unique_refund_index(db, _REVIEW_COLLECTION)
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "review_id": str(uuid.uuid4()),
@@ -429,13 +647,17 @@ def _queue_review(
         "order_number": (order or {}).get("order_number"),
         "invoice_number": (order or {}).get("invoice_number"),
         "customer_id": (order or {}).get("customer_id"),
+        "customer_name": (order or {}).get("customer_name"),
         "store_id": (order or {}).get("store_id"),
         "restock_store_id": restock_store,
         "credit_note": credit_note,
+        "gross_refund": (credit_note or {}).get("gross_refund"),
+        "shopify_refunded_amount": (credit_note or {}).get("shopify_refunded_amount"),
         "proposed_restock": [
             r.model_dump() if hasattr(r, "model_dump") else r for r in restock_lines
         ],
         "status": status,
+        "note": note,
         "resolved": False,
         "created_at": now,
         "updated_at": now,
@@ -445,7 +667,13 @@ def _queue_review(
         if coll is not None:
             coll.insert_one(dict(doc))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_REFUND] review-queue write failed: %s", exc)
+        if _is_dup_key(exc):
+            logger.info(
+                "[SHOPIFY_REFUND] review row for refund=%s already exists -- no-op",
+                refund_id,
+            )
+        else:
+            logger.warning("[SHOPIFY_REFUND] review-queue write failed: %s", exc)
     logger.info(
         "[SHOPIFY_REFUND] refund=%s order=%s queued for accountant review "
         "(status=%s, gross=%s)",
@@ -462,54 +690,122 @@ def _queue_review(
         "order_id": (order or {}).get("order_id"),
         "gross_refund": (credit_note or {}).get("gross_refund"),
         "gst_breakup": (credit_note or {}).get("gst_breakup"),
+        "shopify_refunded_amount": (credit_note or {}).get("shopify_refunded_amount"),
         "restock_store_id": restock_store,
     }
 
 
-def _auto_post(
+def _post_credit_and_restock(
     db,
     *,
     refund_id: str,
-    payload: Dict[str, Any],
     order: Dict[str, Any],
     return_lines: List[Any],
     credit_note: Dict[str, Any],
     restock_store: Optional[str],
+    settled_externally: bool = False,
 ) -> Dict[str, Any]:
-    """AUTO path (opt-in): post the GST credit note to `credit_note_ledger` (via
-    the SAME returns.py `_issue_store_credit` an in-store CREDIT_NOTE uses, so the
-    output-tax reversal flows into the GSTR-1 CDNR report) + restock the refunded
-    units (via the SAME returns.py `_restock_good_items`). Persist a `returns`
-    credit-note doc stamped with the Shopify refund id for idempotency + audit.
-    Fully fail-soft.
+    """Post the GST credit note to `credit_note_ledger` (via the SAME returns.py
+    `_issue_store_credit` an in-store CREDIT_NOTE uses, so the output-tax reversal
+    flows into the GSTR-1 CDNR report) + restock the refunded units (via the SAME
+    returns.py `_restock_good_items`).
 
-    NOTE (owner/accountant): issuing store credit here mirrors how IMS records an
-    in-store credit note. For an online card refund the money already went back to
-    the card via Shopify, so store credit on top would over-credit the buyer --
-    which is exactly why the DEFAULT is the accountant review queue and this AUTO
-    path is DARK/opt-in.
-    """
+    CLAIM-FIRST idempotency: the `returns` doc (stamped with the refund id) is
+    INSERTED as PENDING -- backed by a unique partial index -- BEFORE any credit /
+    restock. A redelivery mid-flight then hits the unique index (DuplicateKeyError
+    -> "duplicate") instead of double-posting. The doc is updated to COMPLETED (or
+    CREDIT_FAILED) once the credit + restock finish.
+
+    GST: the credit note is booked UNDER THE ORIGINAL ORDER'S STORE (the online
+    billing store / GSTIN, not the physical restock store) and stamped with the
+    real taxable/tax split. CARD refunds (settled_externally=True) write the CDNR
+    ledger row WITHOUT bumping the customer's redeemable store credit.
+
+    Shared by the AUTO webhook path and the accountant CONFIRM route. Fully
+    fail-soft. Returns {"status": "credited"|"credit_failed"|"duplicate", ...}."""
     order_id = _norm(order.get("order_id"))
     customer_id = _norm(order.get("customer_id")) or None
+    billing_store = _norm(order.get("store_id")) or None
     gross_refund = _f(credit_note.get("gross_refund"))
     gst_view = credit_note.get("gst_breakup") or {}
 
-    return_id = None
-    credit_entry = None
     try:
-        from ..routers.returns import generate_return_id, _issue_store_credit
+        from ..routers.returns import generate_return_id
 
         return_id = generate_return_id()
-        # (a) GST credit note -> credit_note_ledger (the CDNR source).
+    except Exception:  # noqa: BLE001
+        return_id = f"RET-{refund_id}"
+
+    # (0) CLAIM-FIRST: insert the PENDING returns doc stamped with the refund id
+    #     BEFORE any side effect, so a concurrent / replayed delivery is blocked.
+    _ensure_unique_refund_index(db, _RETURNS_COLLECTION)
+    now = datetime.now(timezone.utc).isoformat()
+    claim_doc = {
+        "return_id": return_id,
+        "shopify_refund_id": refund_id,
+        "order_id": order_id,
+        "order_number": order.get("order_number"),
+        "customer_id": customer_id,
+        "customer_name": order.get("customer_name"),
+        "store_id": billing_store,
+        "restock_store_id": restock_store,
+        "return_type": "CREDIT_NOTE",
+        "source": "shopify",
+        "channel": "ONLINE",
+        "items": credit_note.get("lines", []),
+        "returned_value": gross_refund,
+        "gross_refund": gross_refund,
+        "restocking_fee": 0.0,
+        "net_refund": gross_refund,
+        "gst_breakup": gst_view,
+        "shopify_refunded_amount": credit_note.get("shopify_refunded_amount"),
+        "settled_externally": bool(settled_externally),
+        "status": "PENDING",
+        "reason_summary": "Shopify refund",
+        "created_by": "SYSTEM_SHOPIFY_REFUND",
+        "created_at": now,
+    }
+    returns_coll = None
+    claimed = False
+    try:
+        returns_coll = db.get_collection(_RETURNS_COLLECTION)
+    except Exception:  # noqa: BLE001
+        returns_coll = None
+    if returns_coll is not None:
+        try:
+            returns_coll.insert_one(dict(claim_doc))
+            claimed = True
+        except Exception as exc:  # noqa: BLE001
+            if _is_dup_key(exc):
+                logger.info(
+                    "[SHOPIFY_REFUND] refund=%s already claimed -- duplicate", refund_id
+                )
+                return {
+                    "status": "duplicate",
+                    "refund_id": refund_id,
+                    "order_id": order_id,
+                }
+            logger.warning("[SHOPIFY_REFUND] claim insert failed: %s", exc)
+
+    # (a) GST credit note -> credit_note_ledger (the CDNR source). Booked under the
+    #     BILLING store with the real GST split; card refunds skip the balance bump.
+    credit_entry = None
+    try:
+        from ..routers.returns import _issue_store_credit
+
         if customer_id and gross_refund > 0:
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
                 reason=f"Shopify refund {refund_id} for order {order_id}",
                 ref=return_id,
-                current_user=_system_user(restock_store),
+                current_user=_system_user(billing_store),
                 gross=gross_refund,
                 restocking_fee=0.0,
+                taxable=gst_view.get("taxable"),
+                tax=gst_view.get("tax"),
+                gst_rate=gst_view.get("gst_rate"),
+                bump_balance=not settled_externally,
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
@@ -534,62 +830,101 @@ def _auto_post(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc)
 
-    # Persist the credit-note return doc (stamped with the Shopify refund id so a
-    # replay is caught by _refund_already_processed).
-    now = datetime.now(timezone.utc).isoformat()
-    doc = {
-        "return_id": return_id,
-        "shopify_refund_id": refund_id,
-        "order_id": order_id,
-        "order_number": order.get("order_number"),
-        "customer_id": customer_id,
-        "customer_name": order.get("customer_name"),
-        "store_id": order.get("store_id"),
-        "restock_store_id": restock_store,
-        "return_type": "CREDIT_NOTE",
-        "source": "shopify",
-        "channel": "ONLINE",
-        "items": credit_note.get("lines", []),
-        "returned_value": gross_refund,
-        "gross_refund": gross_refund,
-        "restocking_fee": 0.0,
-        "net_refund": gross_refund,
-        "gst_breakup": gst_view,
-        "credit_amount": gross_refund if credit_entry else None,
+    # Finalize: a credit note that SHOULD have issued (gross>0) but didn't must NOT
+    # be marked COMPLETED (finding #6) -> CREDIT_FAILED, so the accountant gets a
+    # surface while the refund id stays consumed (idempotency preserved).
+    credit_ok = bool(credit_entry)
+    result_status = "credited"
+    final_status = "COMPLETED"
+    if gross_refund > 0 and not credit_ok:
+        result_status = "credit_failed"
+        final_status = "CREDIT_FAILED"
+
+    restock_applied = bool(restock_result.get("applied"))
+    update_fields = {
+        "status": final_status,
+        "credit_amount": gross_refund if credit_ok else None,
         "credit_entry": credit_entry,
+        "credit_note_issued": credit_ok,
+        "settled_externally": bool(settled_externally),
         "restocked": restock_result.get("restocked", []),
-        "restock_applied": bool(restock_result.get("applied")),
+        "restock_applied": restock_applied,
         "restock_stock_ids": restock_result.get("restock_stock_ids", []),
-        "status": "COMPLETED",
-        "reason_summary": "Shopify refund",
-        "created_by": "SYSTEM_SHOPIFY_REFUND",
-        "created_at": now,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    try:
-        coll = db.get_collection("returns")
-        if coll is not None:
-            coll.insert_one(dict(doc))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_REFUND] returns doc persist failed: %s", exc)
+    if returns_coll is not None and claimed:
+        try:
+            returns_coll.update_one(
+                {"shopify_refund_id": refund_id}, {"$set": update_fields}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_REFUND] returns doc finalize failed: %s", exc)
+    elif returns_coll is not None:
+        # The claim insert did not land (a non-dup DB error) -> best-effort persist
+        # so the credit/restock is still auditable (no idempotency protection).
+        try:
+            returns_coll.insert_one({**claim_doc, **update_fields})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_REFUND] returns doc persist failed: %s", exc)
 
     logger.info(
         "[SHOPIFY_REFUND] AUTO-posted refund=%s order=%s credit=%s tax=%s "
-        "restock_applied=%s",
+        "credit_issued=%s settled_externally=%s restock_applied=%s",
         refund_id,
         order_id,
         gross_refund,
         gst_view.get("tax"),
-        doc["restock_applied"],
+        credit_ok,
+        settled_externally,
+        restock_applied,
     )
     return {
-        "status": "credited",
+        "status": result_status,
         "refund_id": refund_id,
         "shopify_order_id": _norm(order.get("shopify_order_id")),
         "order_id": order_id,
         "return_id": return_id,
+        "customer_id": customer_id,
         "gross_refund": gross_refund,
         "gst_breakup": gst_view,
-        "credit_note_issued": bool(credit_entry),
-        "restock_applied": doc["restock_applied"],
+        "credit_note_issued": credit_ok,
+        "settled_externally": bool(settled_externally),
+        "restock_applied": restock_applied,
         "restock_store_id": restock_store,
     }
+
+
+def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
+    """Post the credit note + restock from a STORED `shopify_refund_review` row
+    (the accountant CONFIRM action). Rebuilds the order context + ReturnLine list
+    from the row and calls the SAME `_post_credit_and_restock` the AUTO path uses,
+    so a confirmed refund books identically. NEVER raises; returns the post
+    result. The caller (the consumer router) stamps the review row status."""
+    if not isinstance(review, dict):
+        return {"status": "skipped", "reason": "bad_review"}
+    refund_id = _norm(review.get("shopify_refund_id"))
+    credit_note = review.get("credit_note") or {}
+    if not refund_id or not credit_note:
+        return {"status": "skipped", "reason": "no_credit_note", "refund_id": refund_id}
+
+    order = {
+        "order_id": review.get("order_id"),
+        "order_number": review.get("order_number"),
+        "customer_id": review.get("customer_id"),
+        "customer_name": review.get("customer_name"),
+        "store_id": review.get("store_id"),
+        "shopify_order_id": review.get("shopify_order_id"),
+    }
+    return_lines = _return_lines_from_proposed(review.get("proposed_restock") or [])
+    settled_externally = bool(
+        review.get("settled_externally") or credit_note.get("settled_externally")
+    )
+    return _post_credit_and_restock(
+        db,
+        refund_id=refund_id,
+        order=order,
+        return_lines=return_lines,
+        credit_note=credit_note,
+        restock_store=review.get("restock_store_id"),
+        settled_externally=settled_externally,
+    )

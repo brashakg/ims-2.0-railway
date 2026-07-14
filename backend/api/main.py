@@ -134,6 +134,7 @@ from .routers import (
     online_store_push_router,
     online_store_discount_rules_router,
     online_store_orders_router,
+    online_store_refund_reviews_router,
     ondc_router,
     approvals_router,
 )
@@ -1702,6 +1703,19 @@ app.include_router(
     online_store_orders_router,
     prefix="/api/v1/online-store/orders",
     tags=["Online Store - Orders"],
+)
+# Refund review QUEUE consumer (Shopify refund -> GST credit note). The
+# ACCOUNTANT-facing surface over shopify_refund_review -- the queue that the
+# refunds/create handler writes to by DEFAULT (SHOPIFY_REFUND_AUTO off). GET list
+# + POST confirm (posts the credit note + restock from the stored row, reusing
+# the SAME _issue_store_credit + _restock_good_items the AUTO path uses) + POST
+# reject. Mounted at /api/v1/online-store/refund-reviews. Role-gated INSIDE the
+# router (require_roles -> SUPERADMIN / ADMIN / ACCOUNTANT) + catalogued in
+# rbac_policy.POLICY. Confirm/reject write a chained audit_logs row.
+app.include_router(
+    online_store_refund_reviews_router,
+    prefix="/api/v1/online-store/refund-reviews",
+    tags=["Online Store - Refund Reviews"],
 )
 
 # ── ONDC Seller Node (BVI-20) ─────────────────────────────────────────────
