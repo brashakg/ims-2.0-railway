@@ -1488,8 +1488,38 @@ mutation imsWebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhoo
 }
 """
 
+# Phase-6 cutover: delete a conflicting subscription (e.g. one still pointing at
+# BVI) so Shopify stops double-delivering the same topic once IMS is registered.
+_WEBHOOK_SUBSCRIPTION_DELETE = """
+mutation imsWebhookSubscriptionDelete($id: ID!) {
+  webhookSubscriptionDelete(id: $id) {
+    deletedWebhookSubscriptionId
+    userErrors { field message }
+  }
+}
+"""
+
 # The receiver route the subscriptions point at (mounted under /api/v1).
 _WEBHOOK_RECEIVER_PATH = "/api/v1/webhooks/shopify"
+
+# BVI-retirement cutover topic set: every Shopify webhook IMS must receive once
+# BVI is retired -- the order lifecycle (count-once invoice + status sync),
+# refunds (GST credit note + restock), fulfilments (shipped/tracking), and
+# customers (CRM upsert). register_webhooks defaults to THIS set so a single
+# apply=true registers everything the receiver now handles.
+CUTOVER_WEBHOOK_TOPICS = [
+    "orders/create",
+    "orders/paid",
+    "orders/updated",
+    "orders/cancelled",
+    "orders/fulfilled",
+    "orders/partially_fulfilled",
+    "refunds/create",
+    "fulfillments/create",
+    "fulfillments/update",
+    "customers/create",
+    "customers/update",
+]
 
 
 def _topic_enum(topic: str) -> str:
@@ -1498,22 +1528,79 @@ def _topic_enum(topic: str) -> str:
     return str(topic or "").strip().replace("/", "_").replace(".", "_").upper()
 
 
+async def delete_webhook_subscription(db, subscription_id: str) -> Dict[str, Any]:
+    """Delete ONE Shopify webhookSubscription by gid (Phase-6 cutover: drop a
+    conflicting subscription still pointing at BVI so a topic stops
+    double-delivering). DARK by default -> SIMULATED, no network call; LIVE only
+    behind the same three push gates. Fail-soft: returns a structured dict, never
+    raises."""
+    result: Dict[str, Any] = {
+        "ok": True,
+        "mode": MODE_SIMULATED,
+        "id": subscription_id,
+        "deleted": None,
+        "errors": [],
+        "reason": None,
+    }
+    if not subscription_id:
+        result["ok"] = False
+        result["errors"].append("no subscription id")
+        return result
+
+    live, reason = _live_or_reason(db)
+    result["reason"] = reason
+    result["mode"] = MODE_LIVE if live else MODE_SIMULATED
+    if not live:
+        result["note"] = "SIMULATED: push gates closed -- no Shopify call made"
+        return result
+
+    try:
+        body = await _graphql(db, _WEBHOOK_SUBSCRIPTION_DELETE, {"id": subscription_id})
+        err = _user_errors(body, "webhookSubscriptionDelete")
+        if err:
+            result["ok"] = False
+            result["errors"].append(err)
+            return result
+        deleted = (
+            (body.get("data") or {}).get("webhookSubscriptionDelete") or {}
+        ).get("deletedWebhookSubscriptionId")
+        result["deleted"] = deleted
+        return result
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        result["ok"] = False
+        result["errors"].append(str(e))
+        return result
+
+
 async def register_webhooks(
     db,
     callback_base_url: str,
     topics: Optional[List[str]] = None,
     apply: bool = False,
+    delete_conflicts: bool = False,
 ) -> Dict[str, Any]:
     """Ensure Shopify webhookSubscriptions exist for `topics`, pointing at
     {callback_base_url}/api/v1/webhooks/shopify. Fail-soft: returns a structured
     dict, never raises.
 
+    `topics` DEFAULTS to the full BVI-retirement cutover set
+    (CUTOVER_WEBHOOK_TOPICS: order lifecycle + refunds/create +
+    fulfillments/create,update + customers/create,update) so a single apply=true
+    registers everything the receiver now handles.
+
     DRY-RUN by default (apply=False): reports what WOULD be registered. When
     the three push gates are LIVE the dry-run also QUERIES the existing
     subscriptions (a read); when DARK it makes NO network call at all.
     Mutations happen ONLY when apply=True AND the gates are LIVE, and only for
-    topics not already subscribed at this exact callback URL (idempotent)."""
-    topic_enums = [_topic_enum(t) for t in (topics or ["orders/create"]) if _topic_enum(t)]
+    topics not already subscribed at this exact callback URL (idempotent).
+
+    `delete_conflicts` (default False): when True AND apply=True AND LIVE, also
+    DELETE every surfaced conflict (a requested topic subscribed at a DIFFERENT
+    callback URL -- e.g. still pointing at BVI) so the cutover leaves exactly one
+    delivery per topic. Left False, conflicts are only SURFACED, never removed."""
+    topic_enums = [
+        _topic_enum(t) for t in (topics or CUTOVER_WEBHOOK_TOPICS) if _topic_enum(t)
+    ]
     base = str(callback_base_url or "").strip().rstrip("/")
     callback_url = base + _WEBHOOK_RECEIVER_PATH
 
@@ -1529,6 +1616,7 @@ async def register_webhooks(
         "missing": list(topic_enums),
         "conflicts": [],
         "created": [],
+        "deleted_conflicts": [],
         "errors": [],
         "reason": reason,
     }
@@ -1620,6 +1708,23 @@ async def register_webhooks(
                 (body.get("data") or {}).get("webhookSubscriptionCreate") or {}
             ).get("webhookSubscription") or {}
             result["created"].append({"topic": t, "id": sub.get("id")})
+
+        # Cutover cleanup: optionally DELETE the surfaced conflicts (same topic
+        # still pointing at a different URL, e.g. BVI) so each topic delivers
+        # exactly once after the baton hand-off. Off by default (conflicts are
+        # only surfaced). Each delete is fail-soft + recorded.
+        if delete_conflicts:
+            for c in result["conflicts"]:
+                del_res = await delete_webhook_subscription(db, c.get("id"))
+                if del_res.get("ok") and del_res.get("deleted"):
+                    result["deleted_conflicts"].append(
+                        {"topic": c.get("topic"), "id": c.get("id")}
+                    )
+                else:
+                    result["ok"] = False
+                    result["errors"].append(
+                        f"delete conflict {c.get('topic')}: {del_res.get('errors')}"
+                    )
         return result
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         result["ok"] = False
