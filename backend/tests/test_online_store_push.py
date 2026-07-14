@@ -70,12 +70,16 @@ class _SpyGraphQL:
 def _force_live(monkeypatch, graphql_response):
     """Open all three gates ON shopify_push's OWN namespace (it imported the
     symbols by value) and replace the network boundary with a spy. Returns the
-    spy so a test can assert calls + inspect variables."""
+    spy so a test can assert calls + inspect variables.
+
+    Creds now come from resolve_shopify_credentials (OAuth-preferred resolver),
+    so we stub THAT symbol in shopify_push's namespace -- no real mint."""
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
     monkeypatch.setattr(
-        shopify_push, "_load_integration_config",
-        lambda db, t: {"shop_url": "test.myshopify.com", "access_token": "shpat_test"},
+        shopify_push, "resolve_shopify_credentials",
+        lambda db: {"shop_url": "test.myshopify.com",
+                    "access_token": "shpat_test", "source": "vault"},
     )
     spy = _SpyGraphQL(graphql_response)
     monkeypatch.setattr(shopify_push, "_graphql", spy)
@@ -85,20 +89,21 @@ def _force_live(monkeypatch, graphql_response):
 def _force_dark(monkeypatch, reason="writes_off"):
     """Close a gate so the engine is SIMULATED, and install a spy that EXPLODES if
     called (the dark branch must never reach the network)."""
+    _creds = {"shop_url": "x", "access_token": "y", "source": "vault"}
     if reason == "writes_off":
         monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
         monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
-        monkeypatch.setattr(shopify_push, "_load_integration_config",
-                            lambda db, t: {"shop_url": "x", "access_token": "y"})
+        monkeypatch.setattr(shopify_push, "resolve_shopify_credentials",
+                            lambda db: _creds)
     elif reason == "dispatch_off":
         monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
         monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "off")
-        monkeypatch.setattr(shopify_push, "_load_integration_config",
-                            lambda db, t: {"shop_url": "x", "access_token": "y"})
+        monkeypatch.setattr(shopify_push, "resolve_shopify_credentials",
+                            lambda db: _creds)
     elif reason == "no_creds":
         monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
         monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
-        monkeypatch.setattr(shopify_push, "_load_integration_config", lambda db, t: {})
+        monkeypatch.setattr(shopify_push, "resolve_shopify_credentials", lambda db: None)
 
     async def _boom(db, query, variables):  # pragma: no cover - must never run
         raise AssertionError("DARK push must not hit the Shopify network")
@@ -168,7 +173,7 @@ def test_mode_is_live_only_when_all_three_align(monkeypatch):
 def test_mode_dark_when_creds_missing_even_if_gates_on(monkeypatch):
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
-    monkeypatch.setattr(shopify_push, "_load_integration_config", lambda db, t: {})
+    monkeypatch.setattr(shopify_push, "resolve_shopify_credentials", lambda db: None)
     status = shopify_push.push_mode_status(object())
     assert status["mode"] == "SIMULATED" and status["creds_present"] is False
 
@@ -750,8 +755,9 @@ def test_push_mode_live_via_shopify_override_only(monkeypatch):
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     monkeypatch.setattr(
         shopify_push,
-        "_load_integration_config",
-        lambda db, t: {"shop_url": "x.myshopify.com", "access_token": "tok"},
+        "resolve_shopify_credentials",
+        lambda db: {"shop_url": "x.myshopify.com", "access_token": "tok",
+                    "source": "oauth"},
     )
     st = shopify_push.push_mode_status(None)
     assert st["is_live"] is True
@@ -996,8 +1002,9 @@ def _wire_graphql(monkeypatch, responses):
     monkeypatch.setattr(shopify_push, "_post_once", fake_post_once)
     monkeypatch.setattr(shopify_push.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(
-        shopify_push, "_load_integration_config",
-        lambda db, t: {"shop_url": "x.myshopify.com", "access_token": "t"},
+        shopify_push, "resolve_shopify_credentials",
+        lambda db: {"shop_url": "x.myshopify.com", "access_token": "t",
+                    "source": "vault"},
     )
     return calls
 

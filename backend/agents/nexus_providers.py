@@ -120,9 +120,14 @@ def ims_shopify_writes_enabled() -> bool:
 
 async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
     """Pull Shopify orders created in the last N hours for fulfillment routing."""
-    cfg = _load_integration_config(db, "shopify")
-    shop_url = cfg.get("shop_url")
-    access_token = cfg.get("access_token")
+    # Resolve creds via the shared resolver (OAuth client-credentials preferred;
+    # the stored Mongo token is stale/401s). Lazy import avoids an import cycle
+    # (shopify_auth imports this module for its vault fallback).
+    from api.services.shopify_auth import resolve_shopify_credentials
+
+    creds = resolve_shopify_credentials(db)
+    shop_url = (creds or {}).get("shop_url")
+    access_token = (creds or {}).get("access_token")
     if not shop_url or not access_token:
         return SyncResult(
             ok=False,
@@ -132,7 +137,7 @@ async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
         )
 
     since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
-    url = f"https://{shop_url}/admin/api/2024-01/orders.json"
+    url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
     params = {"status": "any", "updated_at_min": since, "limit": 100}
     headers = {"X-Shopify-Access-Token": access_token}
 
