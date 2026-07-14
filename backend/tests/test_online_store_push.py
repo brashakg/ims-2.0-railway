@@ -417,7 +417,9 @@ def test_build_product_input_maps_status_and_options():
     assert inp["vendor"] == "Ray-Ban"
     assert inp["productType"] == "SUNGLASS"
     assert inp["seo"]["title"] == "RB SEO"
-    assert inp["tags"] == ["new", "summer"]
+    # Tags = manual seo.tags UNION the BVI attribute->tag tokens (here a SUNGLASS
+    # with top-level brand Ray-Ban -> brand_ray-ban), lower-cased + de-duped.
+    assert inp["tags"] == ["new", "summer", "brand_ray-ban"]
     # Options derived + de-duped (Color: Black, Gold ; Size: M).
     opts = {o["name"]: [v["name"] for v in o["values"]] for o in inp["productOptions"]}
     assert opts["Color"] == ["Black", "Gold"]

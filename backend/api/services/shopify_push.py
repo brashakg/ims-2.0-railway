@@ -72,6 +72,9 @@ from agents.nexus_providers import (
 # network boundary) source shop_url + access_token from here.
 from api.services.shopify_auth import resolve_shopify_credentials
 
+# Attribute -> Shopify filter-tag generator (BVI parity). Pure, network-free.
+from .shopify_tag_gen import generate_attribute_tags, merge_tag_lists
+
 logger = logging.getLogger(__name__)
 
 PROVIDER_TIMEOUT = float(os.getenv("NEXUS_PROVIDER_TIMEOUT", "30.0"))
@@ -534,8 +537,21 @@ def build_product_input(
             "title": seo.get("title") or title,
             "description": seo.get("description") or "",
         }
-    if seo.get("tags"):
-        inp["tags"] = list(seo["tags"])
+    # Tags = union of the product's manual/browse tags (ecom.seo.tags) + the
+    # attribute-derived `<prefix>_<value>` filter tags the BVI admin app
+    # auto-generates (shopify_tag_gen). Reproducing BVI's tokens is what keeps a
+    # LIVE productUpdate (which REPLACES the whole tags array) from wiping the
+    # storefront's filter tags. Pure + deterministic; no new network.
+    attrs = product.get("attributes") or {}
+    extras: Dict[str, Any] = {}
+    if product.get("brand"):
+        # Brand lives top-level on the product doc; feed it so the brand_ tag is
+        # emitted even when `attributes` has no brand_name.
+        extras["brand_name"] = product["brand"]
+    generated_tags = generate_attribute_tags(product.get("category"), attrs, extras)
+    merged_tags = merge_tag_lists(seo.get("tags") or [], generated_tags)
+    if merged_tags:
+        inp["tags"] = merged_tags
     # Variant identity is carried as options/skus only (price/qty stay BVI/stock
     # owned -- online qty is the derived allocation, not pushed from here).
     if variants:
