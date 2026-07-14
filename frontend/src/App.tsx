@@ -69,6 +69,7 @@ const CollectionsListPage = lazy(() => import('./pages/collections/CollectionsLi
 const CollectionNewPage = lazy(() => import('./pages/collections/CollectionNewPage'));
 const CollectionDetailPage = lazy(() => import('./pages/collections/CollectionDetailPage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
+const DiscountRulesPage = lazy(() => import('./pages/online-store/DiscountRulesPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
 const OnlineStockTallyPage = lazy(() => import('./pages/online-store/OnlineStockPage'));
@@ -591,6 +592,21 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <CollectionBrowsePage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Discount Rules (rebuild of BVI DiscountRule).
+                      Owner-editable automatic ONLINE storefront discount rules.
+                      Pricing surface -> SUPERADMIN/ADMIN/CATALOG_MANAGER only
+                      (DESIGN_MANAGER excluded), matching the backend gate. */}
+                  <Route
+                    path="online-store/discount-rules"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}
+                      >
+                        <DiscountRulesPage />
                       </ProtectedRoute>
                     }
                   />

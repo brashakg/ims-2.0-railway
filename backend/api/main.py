@@ -132,6 +132,7 @@ from .routers import (
     online_store_menus_router,
     online_store_images_router,
     online_store_push_router,
+    online_store_discount_rules_router,
     online_store_orders_router,
     ondc_router,
     approvals_router,
@@ -1675,6 +1676,19 @@ app.include_router(
     online_store_push_router,
     prefix="/api/v1/online-store/push",
     tags=["Online Store - Push"],
+)
+# Discount-Rule sub-module (rebuild of BVI's Postgres DiscountRule). Owner-editable
+# CRUD for ecom_discount_rules -- the automatic ONLINE storefront discount rules the
+# online discount engine reads (services/online_discount_engine.py). PUSH-DARK:
+# computes + stores online prices on catalog docs only; those reach Shopify solely
+# behind the Phase-5 push gates. ONLINE-only -- never touches in-store POS pricing.
+# Mounted at /api/v1/online-store/discount-rules. Role-gated INSIDE the router
+# (require_roles -> SUPERADMIN / ADMIN / CATALOG_MANAGER) + catalogued in
+# rbac_policy.POLICY. A rule change fires a fail-soft category-scoped recompute.
+app.include_router(
+    online_store_discount_rules_router,
+    prefix="/api/v1/online-store/discount-rules",
+    tags=["Online Store - Discount Rules"],
 )
 # Online ORDERS sub-module (BVI Phase 3b). The read + recovery surface over the
 # canonical IMS orders that online_order_mapper creates from Shopify orders (one

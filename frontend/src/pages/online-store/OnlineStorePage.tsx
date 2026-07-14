@@ -26,6 +26,7 @@ import {
   Loader2,
   CheckCircle2,
   ArrowRight,
+  Tag,
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
@@ -80,6 +81,16 @@ const SECTIONS: Section[] = [
     countLabel: 'collections',
     // Phase 2 shipped: the Collections editor is live in-app.
     href: '/online-store/collections',
+  },
+  {
+    key: 'discount-rules',
+    title: 'Discount rules',
+    blurb:
+      'Automatic online pricing by category, brand and sub-brand — e.g. "Ray-Ban frames → 20% off". Sets the website price only; in-store POS pricing is untouched.',
+    icon: Tag,
+    phase: 'Pricing',
+    // Live: the online discount-rule engine + editor is in-app (rebuild of BVI).
+    href: '/online-store/discount-rules',
   },
   {
     key: 'menus',
