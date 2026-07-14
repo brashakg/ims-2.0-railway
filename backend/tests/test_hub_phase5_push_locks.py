@@ -16,12 +16,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
+from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push as sp  # noqa: E402
 from api.services import policy_engine  # noqa: E402
 
 
 def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
+
+
+class _EmptyDB:
+    """Minimal readable in-memory db: db[name].find(...) -> [] cleanly. Used where
+    a push must proceed past the block classifier (which now FAILS CLOSED on an
+    unreadable db -- finding #18 -- so a bare object() would be skipped)."""
+
+    def __init__(self):
+        self._colls = {}
+
+    def __getitem__(self, name):
+        return self._colls.setdefault(name, MockCollection(name))
 
 
 def _locks(monkeypatch, cfg):
@@ -92,7 +105,7 @@ def test_push_product_unlocked_proceeds(monkeypatch):
     _locks(monkeypatch, {"brands": ["cartier"]})
     res = _run(
         sp.push_product(
-            object(),
+            _EmptyDB(),
             {"product_id": "P2", "brand": "Ray-Ban", "name": "RB Frame", "sku": "RB1"},
         )
     )

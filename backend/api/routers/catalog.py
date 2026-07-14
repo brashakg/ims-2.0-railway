@@ -1731,6 +1731,20 @@ async def create_catalog_product(
 
     _save_catalog_product(product_data)
 
+    # Online discount engine (rebuild of BVI DiscountRule): compute + store the
+    # ONLINE storefront price from the active rules onto product_data.ecom.*
+    # (and any variants). ADDITIVE + FAIL-SOFT -- it must NEVER block a save, and
+    # it writes ONLY online-lineage fields (never the in-store offer_price). Still
+    # DARK: the stored price reaches Shopify only behind the Phase-5 push gates.
+    try:
+        from ..services import online_discount_engine as _ode
+
+        _ode.recompute_online_price(product_data, db=_get_db())
+    except Exception:  # noqa: BLE001 -- online pricing must never break the create
+        logger.warning(
+            "[CATALOG] online price recompute skipped for %s", product_id, exc_info=True
+        )
+
     # Sync to Shopify if requested
     shopify_result = None
     if product.shopify and product.shopify.sync_to_shopify:
@@ -2075,6 +2089,18 @@ async def update_catalog_product(
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
+        )
+
+    # Online discount engine: re-derive the ONLINE storefront price after an edit
+    # (MRP / brand / category changes can move the winning rule). ADDITIVE +
+    # FAIL-SOFT; ONLINE-only (never touches the in-store offer_price). DARK.
+    try:
+        from ..services import online_discount_engine as _ode
+
+        _ode.recompute_online_price(existing, db=_get_db())
+    except Exception:  # noqa: BLE001 -- online pricing must never break the update
+        logger.warning(
+            "[CATALOG] online price recompute skipped for %s", product_id, exc_info=True
         )
 
     return {

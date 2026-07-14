@@ -118,6 +118,12 @@ class PushResult:
     # planned ProductVariantsBulkInput rows; LIVE -> a summary dict. None
     # elsewhere (and None when the product has no variants).
     variant_prices: Optional[Any] = None
+    # Collection pushes only (CUSTOM): the manual-membership side channel (the
+    # collectionAddProducts step -- IMS's stored manual member list reproduced on
+    # Shopify). SIMULATED -> the planned {product_ids, skipped_not_on_shopify};
+    # LIVE -> an {added, skipped_not_on_shopify, errors} summary. None for SMART
+    # (Shopify derives SMART membership from the ruleSet) and non-collection pushes.
+    membership: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -447,6 +453,23 @@ mutation imsCollectionUpdate($input: CollectionInput!) {
 }
 """
 
+# CUSTOM-collection MANUAL membership push (parity with BVI's
+# ecommerce/src/lib/shopify.ts addProductsToCollection). CollectionInput does
+# NOT carry a manual product list, so a CUSTOM collection's members are attached
+# in a SEPARATE step after the collection upsert. Idempotent: re-adding an
+# existing member is a no-op on Shopify. SMART collections never use this (their
+# membership is derived by Shopify from the ruleSet).
+_COLLECTION_ADD_PRODUCTS = """
+mutation imsCollectionAddProducts($id: ID!, $productIds: [ID!]!) {
+  collectionAddProducts(id: $id, productIds: $productIds) {
+    collection { id }
+    userErrors { field message }
+  }
+}
+"""
+# Shopify accepts many ids per call; chunk to stay well within limits.
+_COLLECTION_PRODUCTS_PER_CALL = 250
+
 _MENU_CREATE = """
 mutation imsMenuCreate($title: String!, $handle: String!, $items: [MenuItemCreateInput!]!) {
   menuCreate(title: $title, handle: $handle, items: $items) {
@@ -682,13 +705,36 @@ def _resolve_variant_pricing(
     """Resolve (selling_price, mrp) for ONE variant.
 
     Selling price: the variant's own discounted_price, else its mrp, else the
-    parent product's offer_price / pricing.offer_price, else the product mrp.
-    MRP (the compare-at side): the variant's compare_at_price, else its mrp,
-    else the product mrp. Returns 0.0 legs when nothing usable exists."""
+    ONLINE rule price on the ecom sub-doc (ecom.online_offer_price -- what the
+    online discount engine writes for a no-variant product), else the parent
+    product's offer_price / pricing.offer_price, else the product mrp.
+    MRP (the compare-at side): the variant's compare_at_price, else its mrp, else
+    the ecom online compare-at, else the product mrp. Returns 0.0 legs when nothing
+    usable exists.
+
+    NOTE (online discount engine): ecom.online_offer_price is preferred ABOVE the
+    in-store offer_price ONLY when the online discount engine actually computed it
+    (ecom.online_price_source in {"rule","manual"}). An unstamped / "none" online
+    price is a hand-set BVI value or a stale save -- preferring it would silently
+    FLIP a no-variant product's shipped price (e.g. from its in-store offer up to
+    MRP) at the Phase-B cutover. When it is not engine-stamped we fall back to the
+    existing in-store offer (pre-batch behaviour) so nothing flips unexpectedly. The
+    engine NEVER writes offer_price, so in-store POS pricing is untouched. Variant-
+    carrying products are unaffected: the variant's own discounted_price (which the
+    engine writes) still wins first."""
     pricing = product.get("pricing") or {}
+    ecom = product.get("ecom") or {}
+    # Only trust the product-level online offer/compare-at when the engine stamped
+    # it (a real rule- or manual-derived price); ignore unstamped / "none" values.
+    _ecom_stamped = ecom.get("online_price_source") in ("rule", "manual")
+    ecom_online_offer = _price_float(ecom.get("online_offer_price")) if _ecom_stamped else 0.0
+    ecom_online_compare = (
+        _price_float(ecom.get("online_compare_at_price")) if _ecom_stamped else 0.0
+    )
     price = (
         _price_float(variant.get("discounted_price"))
         or _price_float(variant.get("mrp"))
+        or ecom_online_offer
         or _price_float(product.get("offer_price"))
         or _price_float(pricing.get("offer_price"))
         or _price_float(product.get("mrp"))
@@ -697,6 +743,7 @@ def _resolve_variant_pricing(
     mrp = (
         _price_float(variant.get("compare_at_price"))
         or _price_float(variant.get("mrp"))
+        or ecom_online_compare
         or _price_float(product.get("mrp"))
         or _price_float(pricing.get("mrp"))
     )
@@ -766,6 +813,16 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
         }
     if collection.get("sort_order"):
         inp["sortOrder"] = collection["sort_order"]
+    # Collection hero image (parity with BVI's updateCollection, which pushed
+    # image:{src,altText}). `image_url` is the stored collection image; the
+    # `banner_image` metafield is a separate storefront concern, not the
+    # Shopify CollectionInput.image.
+    image_src = collection.get("image_url")
+    if image_src:
+        inp["image"] = {
+            "src": image_src,
+            "altText": collection.get("image_alt") or collection.get("title") or "",
+        }
     if (collection.get("collection_type") or "").upper() == "SMART":
         rules = _build_rule_set(collection.get("rules") or [])
         if rules:
@@ -806,6 +863,63 @@ def _build_rule_set(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             {"column": col, "relation": rel, "condition": str(r.get("value") or "")}
         )
     return out
+
+
+def _member_product_gids(db, collection: Dict[str, Any]) -> Tuple[List[str], int]:
+    """Resolve a CUSTOM collection's manual member SKUs -> their parent products'
+    Shopify gids (catalog_products.ecom.shopify_product_id), in position order.
+
+    SMART collections have NO manual membership (Shopify derives their set from
+    the ruleSet) -> ([], 0). A member whose product isn't on Shopify yet is
+    SKIPPED (counted): it joins the collection when that product first syncs; we
+    never create a product from here. Fail-soft -> ([], 0)."""
+    if str(collection.get("collection_type") or "CUSTOM").upper() != "CUSTOM":
+        return [], 0
+    members = sorted(
+        (collection.get("products") or []),
+        key=lambda p: int((p or {}).get("position", 0) or 0),
+    )
+    skus = [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
+    gids: List[str] = []
+    skipped = 0
+    for sku in skus:
+        gid = None
+        try:
+            doc = db["catalog_products"].find_one({"sku": sku}) if db is not None else None
+            if doc is not None:
+                gid = (doc.get("ecom") or {}).get("shopify_product_id")
+        except Exception:  # noqa: BLE001 -- one bad lookup never blocks the rest
+            gid = None
+        if gid:
+            gids.append(_as_shopify_gid(gid, "Product"))
+        else:
+            skipped += 1
+    return gids, skipped
+
+
+async def _push_collection_membership(
+    db, collection_gid: str, product_gids: List[str]
+) -> Dict[str, Any]:
+    """LIVE-only: attach a CUSTOM collection's manual members via
+    collectionAddProducts, chunked at the per-call cap. Fail-SOFT side channel --
+    a membership error is reported but NEVER flips the collection push's ok
+    (mirrors the metafields / variant-prices contract). Returns a summary dict."""
+    added = 0
+    errors: List[str] = []
+    for i in range(0, len(product_gids), _COLLECTION_PRODUCTS_PER_CALL):
+        chunk = product_gids[i : i + _COLLECTION_PRODUCTS_PER_CALL]
+        try:
+            body = await _graphql(
+                db, _COLLECTION_ADD_PRODUCTS, {"id": collection_gid, "productIds": chunk}
+            )
+            err = _user_errors(body, "collectionAddProducts")
+            if err:
+                errors.append(err)
+            else:
+                added += len(chunk)
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            errors.append(str(e))
+    return {"added": added, "errors": errors}
 
 
 def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -911,20 +1025,71 @@ def _writeback_simple(
 
 
 async def push_product(
-    db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+    db,
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]] = None,
+    blocked: Optional[bool] = None,
 ) -> PushResult:
     """Push a catalog product (+ its ecom sub-doc + variants) to Shopify.
 
     DARK by default -> returns a SIMULATED dry-run plan with the full ProductInput
     and NO network call. LIVE only when all three gates pass: then productCreate
     (no stored gid) or productUpdate (gid present), with the new gid written back
-    for idempotency. Never raises."""
+    for idempotency. Never raises.
+
+    ``blocked`` is an OPTIONAL precomputed block classification:
+      * ``None`` (default, single-push route): classify HERE via the STRICT
+        variant. An UNKNOWN (block config unreadable) FAILS CLOSED -- the push is
+        skipped so a DB blip can never let a contractually-banned product reach
+        Shopify (finding #18).
+      * ``True`` / ``False``: supplied by the /all-pending sweep, which resolves
+        the blocked set ONCE for the whole batch (finding #20 -- no per-product
+        re-scan). The sweep passes ``None`` (not ``False``) when it could not
+        verify the config, so this fail-closed skip still applies."""
     pid = product.get("id") or product.get("product_id")
     # Hub Phase 5: push-lock is the FIRST gate -- a locked brand is NEVER pushed,
     # before the dark/live gate (fail-closed).
     _lock = push_lock_reason(db, "product", product)
     if _lock:
         return _blocked_result("product", pid, _lock)
+    # SUPERADMIN "block collection from online" (BVI-retirement): a product that
+    # belongs to AT LEAST ONE online_sync_blocked collection is a HARD block --
+    # it must NEVER be created/updated on Shopify regardless of its other
+    # (unblocked) collection memberships (a brand ban wins). This single guard is
+    # the ONE chokepoint, so BOTH the per-product push route AND the /all-pending
+    # product sweep are covered. FAIL-CLOSED: the strict classifier returns None
+    # (UNKNOWN) on a block-config read error and we SKIP the push (never a false
+    # 'clean' that ships a banned product -- finding #18). Delisting an
+    # already-synced blocked product is done separately by push_product_delist,
+    # which is NOT gated here (it IS the block action).
+    if blocked is None:
+        try:
+            from .online_block import is_blocked_from_online_strict
+
+            blocked = is_blocked_from_online_strict(product, db)
+        except Exception:  # noqa: BLE001 -- classifier must never break a push
+            blocked = None
+    if blocked is None:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error="block status unverifiable (block-config read error) -- "
+            "push skipped (fail-closed)",
+            reason="block_status_unverifiable",
+        )
+    if blocked:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error="blocked from online (member of an online_sync_blocked collection)",
+            reason="online_sync_blocked",
+        )
     variants = variants or []
     ecom = product.get("ecom") or {}
     existing_gid = ecom.get("shopify_product_id")
@@ -1016,6 +1181,87 @@ async def push_product(
             action=action,
             target_id=pid,
             ok=False,
+            payload=payload,
+            error=str(e),
+        )
+
+
+async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
+    """DELIST a product from the Shopify storefront: set its Shopify status to
+    DRAFT (unpublished / not sellable). Used by the SUPERADMIN "block collection
+    from online" cutover to take an already-synced, now-blocked product OFF the
+    storefront.
+
+    REVERSIBLE by design: the Shopify product is NEVER deleted, and this does NOT
+    touch the IMS ecom.status -- so after an unblock a normal push_product rebuilds
+    the ProductInput from the unchanged ecom.status (PUBLISHED -> ACTIVE) and the
+    product re-publishes. Unlike push_product this is NOT gated by
+    is_blocked_from_online (it IS the block action). Obeys the same three dark
+    gates: SIMULATED plan when dark, LIVE productUpdate only behind the gates.
+    Only acts when the product already carries a Shopify gid (else a clean noop --
+    nothing to delist). Never raises."""
+    pid = product.get("id") or product.get("product_id")
+    ecom = product.get("ecom") or {}
+    existing_gid = ecom.get("shopify_product_id")
+    if not existing_gid:
+        # Not on Shopify -> nothing to take down (a clean no-op, not an error).
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="product",
+            action="noop",
+            target_id=pid,
+            ok=True,
+            reason="not on Shopify -- nothing to delist",
+        )
+    payload: Dict[str, Any] = {
+        "id": _as_shopify_gid(existing_gid, "Product"),
+        "status": "DRAFT",
+    }
+
+    live, reason = _live_or_reason(db)
+    if not live:
+        return PushResult(
+            mode=MODE_SIMULATED,
+            entity="product",
+            action="delist",
+            target_id=pid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+            reason=reason,
+        )
+
+    try:
+        body = await _graphql(db, _PRODUCT_UPDATE, {"input": payload})
+        err = _user_errors(body, "productUpdate")
+        if err:
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action="delist",
+                target_id=pid,
+                ok=False,
+                shopify_id=existing_gid,
+                payload=payload,
+                error=err,
+            )
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="product",
+            action="delist",
+            target_id=pid,
+            ok=True,
+            shopify_id=existing_gid,
+            payload=payload,
+        )
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="product",
+            action="delist",
+            target_id=pid,
+            ok=False,
+            shopify_id=existing_gid,
             payload=payload,
             error=str(e),
         )
@@ -1130,8 +1376,16 @@ async def push_variant_prices(
 
 async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     """Push an ecom_collections doc to Shopify (collectionCreate / collectionUpdate,
-    + smart ruleSet when SMART). DARK by default; LIVE behind the gates with gid
-    write-back. Never raises."""
+    + smart ruleSet when SMART, + manual membership when CUSTOM). DARK by default;
+    LIVE behind the gates with gid write-back. Never raises.
+
+    MEMBERSHIP (parity fix): a CUSTOM collection's manual member list is NOT part
+    of CollectionInput, so after the collection upsert its members are attached
+    via collectionAddProducts (mirrors BVI's addProductsToCollection). SMART
+    membership is derived by Shopify from the ruleSet -- no add step. Members
+    whose product isn't on Shopify yet are skipped (they join on the product's
+    first sync). The membership push is a fail-soft side channel: an error is
+    reported in `membership` but never flips the collection push's ok."""
     cid = collection.get("collection_id")
     # Hub Phase 5: push-lock first -- a locked collection handle is NEVER pushed.
     _lock = push_lock_reason(db, "collection", collection)
@@ -1140,6 +1394,9 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     existing_gid = collection.get("shopify_collection_id")
     payload = build_collection_input(collection)
     action = "update" if existing_gid else "create"
+    # CUSTOM manual membership plan (empty for SMART).
+    member_gids, member_skipped = _member_product_gids(db, collection)
+    is_custom = str(collection.get("collection_type") or "CUSTOM").upper() == "CUSTOM"
 
     live, reason = _live_or_reason(db)
     if not live:
@@ -1152,6 +1409,11 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             shopify_id=existing_gid,
             payload=payload,
             reason=reason,
+            membership=(
+                {"product_ids": member_gids, "skipped_not_on_shopify": member_skipped}
+                if is_custom
+                else None
+            ),
         )
 
     query = _COLLECTION_UPDATE if existing_gid else _COLLECTION_CREATE
@@ -1182,6 +1444,19 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 "shopify_collection_id",
                 new_gid,
             )
+        # CUSTOM manual membership rides AFTER the collection upsert (the gid must
+        # exist to attach products to). Fail-soft side channel: reported in
+        # `membership`, never flips the collection push's ok. push never raises.
+        membership_summary = None
+        if is_custom and new_gid and member_gids:
+            mres = await _push_collection_membership(db, new_gid, member_gids)
+            membership_summary = {**mres, "skipped_not_on_shopify": member_skipped}
+        elif is_custom:
+            membership_summary = {
+                "added": 0,
+                "errors": [],
+                "skipped_not_on_shopify": member_skipped,
+            }
         return PushResult(
             mode=MODE_LIVE,
             entity="collection",
@@ -1190,6 +1465,7 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             ok=True,
             shopify_id=new_gid,
             payload=payload,
+            membership=membership_summary,
         )
     except Exception as e:  # noqa: BLE001
         return PushResult(
@@ -1463,8 +1739,8 @@ def _writeback_image(db, image_id: str, shopify_id: str) -> None:
 # the shopify `integrations` config or every delivery will 401.
 
 _WEBHOOK_SUBSCRIPTIONS_QUERY = """
-query imsWebhookSubscriptions($first: Int!) {
-  webhookSubscriptions(first: $first) {
+query imsWebhookSubscriptions($first: Int!, $after: String) {
+  webhookSubscriptions(first: $first, after: $after) {
     edges {
       node {
         id
@@ -1475,9 +1751,18 @@ query imsWebhookSubscriptions($first: Int!) {
         }
       }
     }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
+
+# The webhook subscription list is paginated: the custom app can accumulate >100
+# subscriptions (BVI history + retries), so a single first:100 read would miss
+# subs on later pages -> a sub already at IMS's URL would look 'missing' and a
+# BVI-pointing conflict would go unsurfaced (finding #19). Walk every page (up to
+# this fail-soft cap) before deciding create/skip/delete.
+_WEBHOOK_PAGE_SIZE = 100
+_WEBHOOK_MAX_PAGES = 10
 
 _WEBHOOK_SUBSCRIPTION_CREATE = """
 mutation imsWebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
@@ -1488,8 +1773,38 @@ mutation imsWebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhoo
 }
 """
 
+# Phase-6 cutover: delete a conflicting subscription (e.g. one still pointing at
+# BVI) so Shopify stops double-delivering the same topic once IMS is registered.
+_WEBHOOK_SUBSCRIPTION_DELETE = """
+mutation imsWebhookSubscriptionDelete($id: ID!) {
+  webhookSubscriptionDelete(id: $id) {
+    deletedWebhookSubscriptionId
+    userErrors { field message }
+  }
+}
+"""
+
 # The receiver route the subscriptions point at (mounted under /api/v1).
 _WEBHOOK_RECEIVER_PATH = "/api/v1/webhooks/shopify"
+
+# BVI-retirement cutover topic set: every Shopify webhook IMS must receive once
+# BVI is retired -- the order lifecycle (count-once invoice + status sync),
+# refunds (GST credit note + restock), fulfilments (shipped/tracking), and
+# customers (CRM upsert). register_webhooks defaults to THIS set so a single
+# apply=true registers everything the receiver now handles.
+CUTOVER_WEBHOOK_TOPICS = [
+    "orders/create",
+    "orders/paid",
+    "orders/updated",
+    "orders/cancelled",
+    "orders/fulfilled",
+    "orders/partially_fulfilled",
+    "refunds/create",
+    "fulfillments/create",
+    "fulfillments/update",
+    "customers/create",
+    "customers/update",
+]
 
 
 def _topic_enum(topic: str) -> str:
@@ -1498,22 +1813,79 @@ def _topic_enum(topic: str) -> str:
     return str(topic or "").strip().replace("/", "_").replace(".", "_").upper()
 
 
+async def delete_webhook_subscription(db, subscription_id: str) -> Dict[str, Any]:
+    """Delete ONE Shopify webhookSubscription by gid (Phase-6 cutover: drop a
+    conflicting subscription still pointing at BVI so a topic stops
+    double-delivering). DARK by default -> SIMULATED, no network call; LIVE only
+    behind the same three push gates. Fail-soft: returns a structured dict, never
+    raises."""
+    result: Dict[str, Any] = {
+        "ok": True,
+        "mode": MODE_SIMULATED,
+        "id": subscription_id,
+        "deleted": None,
+        "errors": [],
+        "reason": None,
+    }
+    if not subscription_id:
+        result["ok"] = False
+        result["errors"].append("no subscription id")
+        return result
+
+    live, reason = _live_or_reason(db)
+    result["reason"] = reason
+    result["mode"] = MODE_LIVE if live else MODE_SIMULATED
+    if not live:
+        result["note"] = "SIMULATED: push gates closed -- no Shopify call made"
+        return result
+
+    try:
+        body = await _graphql(db, _WEBHOOK_SUBSCRIPTION_DELETE, {"id": subscription_id})
+        err = _user_errors(body, "webhookSubscriptionDelete")
+        if err:
+            result["ok"] = False
+            result["errors"].append(err)
+            return result
+        deleted = (
+            (body.get("data") or {}).get("webhookSubscriptionDelete") or {}
+        ).get("deletedWebhookSubscriptionId")
+        result["deleted"] = deleted
+        return result
+    except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
+        result["ok"] = False
+        result["errors"].append(str(e))
+        return result
+
+
 async def register_webhooks(
     db,
     callback_base_url: str,
     topics: Optional[List[str]] = None,
     apply: bool = False,
+    delete_conflicts: bool = False,
 ) -> Dict[str, Any]:
     """Ensure Shopify webhookSubscriptions exist for `topics`, pointing at
     {callback_base_url}/api/v1/webhooks/shopify. Fail-soft: returns a structured
     dict, never raises.
 
+    `topics` DEFAULTS to the full BVI-retirement cutover set
+    (CUTOVER_WEBHOOK_TOPICS: order lifecycle + refunds/create +
+    fulfillments/create,update + customers/create,update) so a single apply=true
+    registers everything the receiver now handles.
+
     DRY-RUN by default (apply=False): reports what WOULD be registered. When
     the three push gates are LIVE the dry-run also QUERIES the existing
     subscriptions (a read); when DARK it makes NO network call at all.
     Mutations happen ONLY when apply=True AND the gates are LIVE, and only for
-    topics not already subscribed at this exact callback URL (idempotent)."""
-    topic_enums = [_topic_enum(t) for t in (topics or ["orders/create"]) if _topic_enum(t)]
+    topics not already subscribed at this exact callback URL (idempotent).
+
+    `delete_conflicts` (default False): when True AND apply=True AND LIVE, also
+    DELETE every surfaced conflict (a requested topic subscribed at a DIFFERENT
+    callback URL -- e.g. still pointing at BVI) so the cutover leaves exactly one
+    delivery per topic. Left False, conflicts are only SURFACED, never removed."""
+    topic_enums = [
+        _topic_enum(t) for t in (topics or CUTOVER_WEBHOOK_TOPICS) if _topic_enum(t)
+    ]
     base = str(callback_base_url or "").strip().rstrip("/")
     callback_url = base + _WEBHOOK_RECEIVER_PATH
 
@@ -1529,6 +1901,7 @@ async def register_webhooks(
         "missing": list(topic_enums),
         "conflicts": [],
         "created": [],
+        "deleted_conflicts": [],
         "errors": [],
         "reason": reason,
     }
@@ -1554,16 +1927,32 @@ async def register_webhooks(
         return result
 
     try:
-        body = await _graphql(db, _WEBHOOK_SUBSCRIPTIONS_QUERY, {"first": 100})
-        if not isinstance(body, dict) or body.get("errors"):
-            result["ok"] = False
-            result["errors"].append(
-                f"webhookSubscriptions query failed: {str((body or {}).get('errors'))[:300]}"
+        # PAGINATE the subscription list: walk every page (until hasNextPage is
+        # false, capped fail-soft at _WEBHOOK_MAX_PAGES) so a sub beyond page 1 is
+        # never missed (finding #19). A missed sub would either force a duplicate
+        # create (userError) or leave a BVI conflict unsurfaced/undeleted.
+        edges: List[Dict[str, Any]] = []
+        after: Optional[str] = None
+        for _page in range(_WEBHOOK_MAX_PAGES):
+            body = await _graphql(
+                db,
+                _WEBHOOK_SUBSCRIPTIONS_QUERY,
+                {"first": _WEBHOOK_PAGE_SIZE, "after": after},
             )
-            return result
-        edges = (
-            ((body.get("data") or {}).get("webhookSubscriptions") or {}).get("edges")
-        ) or []
+            if not isinstance(body, dict) or body.get("errors"):
+                result["ok"] = False
+                result["errors"].append(
+                    f"webhookSubscriptions query failed: {str((body or {}).get('errors'))[:300]}"
+                )
+                return result
+            conn = ((body.get("data") or {}).get("webhookSubscriptions") or {})
+            edges.extend(conn.get("edges") or [])
+            page_info = conn.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if not after:
+                break
         existing: List[Dict[str, Any]] = []
         for e in edges:
             node = (e or {}).get("node") or {}
@@ -1620,6 +2009,45 @@ async def register_webhooks(
                 (body.get("data") or {}).get("webhookSubscriptionCreate") or {}
             ).get("webhookSubscription") or {}
             result["created"].append({"topic": t, "id": sub.get("id")})
+
+        # Cutover cleanup: optionally DELETE the surfaced conflicts (same topic
+        # still pointing at a different URL, e.g. BVI) so each topic delivers
+        # exactly once after the baton hand-off. Off by default (conflicts are
+        # only surfaced). Each delete is fail-soft + recorded.
+        #
+        # SAFETY (finding #16): a conflict's old (BVI) subscription is deleted
+        # ONLY once a WORKING subscription at the IMS callback URL provably exists
+        # for that topic -- either just created this run (in result['created']) or
+        # already registered (result['already_registered']). Deleting on a FAILED
+        # create would leave that topic delivering NOWHERE (a zero-receiver gap:
+        # refunds/orders webhooks silently stop reaching BOTH BVI and IMS). Order
+        # is therefore create/verify IMS sub -> THEN delete the conflict.
+        if delete_conflicts:
+            safe_topics = {
+                c.get("topic") for c in result["created"]
+            } | set(result["already_registered"])
+            for c in result["conflicts"]:
+                topic = c.get("topic")
+                if topic not in safe_topics:
+                    # No confirmed IMS replacement for this topic -> keep the old
+                    # subscription (do NOT create a zero-receiver gap).
+                    result["ok"] = False
+                    result["errors"].append(
+                        f"skipped delete for {topic}: replacement create at IMS URL "
+                        "did not succeed -- old subscription kept to avoid a "
+                        "zero-receiver gap"
+                    )
+                    continue
+                del_res = await delete_webhook_subscription(db, c.get("id"))
+                if del_res.get("ok") and del_res.get("deleted"):
+                    result["deleted_conflicts"].append(
+                        {"topic": topic, "id": c.get("id")}
+                    )
+                else:
+                    result["ok"] = False
+                    result["errors"].append(
+                        f"delete conflict {topic}: {del_res.get('errors')}"
+                    )
         return result
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         result["ok"] = False

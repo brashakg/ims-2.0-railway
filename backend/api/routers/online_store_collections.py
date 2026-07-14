@@ -32,23 +32,36 @@ returns an empty set rather than 500.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union
+import logging
+from typing import Dict, List, Optional, Tuple, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from .auth import require_roles
 from ..services import ecom_smart_rules
+from ..services import shopify_push
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 # Roles allowed into the Collections surface. SUPERADMIN is auto-granted by
 # require_roles, so it is not repeated in the tuple but IS listed in the POLICY
 # rows. Keep this in lock-step with rbac_policy.POLICY for every route below.
 _ECOM_ROLES = ("ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER")
 
-# A SMART collection can resolve against a large catalog; cap the scan + result.
+# A SMART collection can resolve against a large catalog; cap the scan + result
+# for the PREVIEW endpoint (/resolved-products).
 _RESOLVE_MAX = 1000
+
+# Block / unblock are rare SUPERADMIN actions where COMPLETE coverage of the
+# banned set beats latency: resolve up to the same 5000 cap the materialised
+# `collection_products` view uses (collection_materializer._MEMBER_MAX), NOT the
+# 1000 preview cap -- otherwise a broad SMART collection (>1000 members) would
+# silently leave ~800 banned products still ACTIVE on the storefront (finding
+# #15). Hitting even this cap is surfaced (never a silent truncation).
+_BLOCK_RESOLVE_MAX = 5000
 
 
 # ---------------------------------------------------------------------------
@@ -616,4 +629,257 @@ async def resolved_products(
         "count": len(skus),
         "scanned": len(products),
         "source": "smart_rules",
+    }
+
+
+# ---------------------------------------------------------------------------
+# SUPERADMIN: block a collection from online sale (BVI-retirement)
+# ---------------------------------------------------------------------------
+# Some brands contractually forbid ONLINE sale. The owner (SUPERADMIN) flags a
+# collection so ALL its products are excluded from Shopify -- never pushed
+# (api/services/online_block.is_blocked_from_online gates shopify_push.push_product)
+# and, if already synced, delisted here (status -> DRAFT, REVERSIBLE, never a
+# hard delete). These two routes are SUPERADMIN-ONLY (require_roles() with no
+# roles => only SUPERADMIN passes; the ecom set that runs the rest of this router
+# is deliberately NOT admitted). Catalogued in rbac_policy.POLICY as SUPERADMIN.
+
+
+def _resolve_member_skus(doc: Dict) -> List[str]:
+    """The effective member SKUs of a collection: CUSTOM -> its manual list (in
+    position order); SMART -> the rule set resolved over the catalog. Mirrors
+    /resolved-products. Fail-soft -> []."""
+    ctype = (doc.get("collection_type") or "CUSTOM").upper()
+    if ctype == "CUSTOM":
+        members = sorted(
+            (doc.get("products") or []),
+            key=lambda p: int((p or {}).get("position", 0) or 0),
+        )
+        return [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
+    rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
+    products = _catalog_products()
+    return ecom_smart_rules.resolve_skus(
+        products, rules, disjunctive=bool(doc.get("disjunctive", False)), limit=_RESOLVE_MAX
+    )
+
+
+def _resolve_block_members(doc: Dict) -> Tuple[List[str], bool]:
+    """Member SKUs for a block / unblock sweep, plus a `truncated` flag.
+
+    CUSTOM membership is stored in full (the embedded manual list), so it is never
+    truncated. SMART membership is resolved over the catalog up to
+    _BLOCK_RESOLVE_MAX (the view cap, NOT the 1000 preview cap -- finding #15). We
+    request one MORE than the cap so hitting it is DETECTABLE, then trim + log so a
+    partial delist / requeue is never silent. Fail-soft -> ([], False)."""
+    ctype = (doc.get("collection_type") or "CUSTOM").upper()
+    if ctype == "CUSTOM":
+        return _resolve_member_skus(doc), False
+    rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
+    products = _catalog_products()
+    skus = ecom_smart_rules.resolve_skus(
+        products,
+        rules,
+        disjunctive=bool(doc.get("disjunctive", False)),
+        limit=_BLOCK_RESOLVE_MAX + 1,
+    )
+    truncated = len(skus) > _BLOCK_RESOLVE_MAX
+    if truncated:
+        skus = skus[:_BLOCK_RESOLVE_MAX]
+        logger.warning(
+            "block/unblock: SMART membership hit the %s cap for collection %s "
+            "(>%s members) -- delist/requeue is PARTIAL",
+            _BLOCK_RESOLVE_MAX,
+            doc.get("collection_id"),
+            _BLOCK_RESOLVE_MAX,
+        )
+    return skus, truncated
+
+
+def _synced_member_products(db, skus: List[str]) -> List[Dict]:
+    """catalog_products docs for `skus` that are ALREADY on Shopify (carry an
+    ecom.shopify_product_id) -- the ones a block must delist / an unblock must
+    re-queue. Fail-soft -> []."""
+    if db is None or not skus:
+        return []
+    out: List[Dict] = []
+    try:
+        for d in db["catalog_products"].find({"sku": {"$in": list(skus)}}):
+            if (d.get("ecom") or {}).get("shopify_product_id"):
+                d.pop("_id", None)
+                out.append(d)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
+def _write_block_audit(
+    current_user: dict,
+    collection_id: str,
+    blocked: bool,
+    member_count: int,
+    acted: int,
+    *,
+    planned: int = 0,
+    mode: Optional[Dict] = None,
+    truncated: bool = False,
+) -> None:
+    """Chained audit row for a block/unblock action (Audit Everything). Fail-soft:
+    an audit error never undoes/blocks the action.
+
+    `acted` = the number of REAL writes (LIVE delists / DB requeues). `planned` =
+    ok delists that were only SIMULATED because the push gates are DARK (nothing
+    changed on Shopify yet -- finding #14). `mode` is the push-posture snapshot;
+    `truncated` flags a partial member sweep (finding #15). The audit records the
+    honest {mode, planned, executed} so the immutable log is never a false
+    'delisted N' while the storefront is untouched."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is None:
+            return
+        audit.create(
+            {
+                "action": "COLLECTION_ONLINE_BLOCK" if blocked else "COLLECTION_ONLINE_UNBLOCK",
+                "entity_type": "ecom_collection",
+                "entity_id": collection_id,
+                "user_id": current_user.get("user_id"),
+                "severity": "WARNING" if blocked else "INFO",
+                "details": {
+                    "online_sync_blocked": blocked,
+                    "member_count": member_count,
+                    "affected": acted,
+                    "executed": acted,
+                    "planned": planned,
+                    "truncated": truncated,
+                    "mode": (mode or {}).get("mode") if isinstance(mode, dict) else mode,
+                },
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.post("/{collection_id}/block")
+async def block_collection(
+    collection_id: str,
+    current_user: dict = Depends(require_roles()),  # SUPERADMIN ONLY
+) -> Dict:
+    """Flag a collection as blocked from online sale (SUPERADMIN). Sets
+    online_sync_blocked=True + audit stamps, then DELISTS every already-synced
+    member product on Shopify (status -> DRAFT via shopify_push.push_product_delist).
+
+    The delist obeys the existing dark write-gates: when DARK each delist is a
+    SIMULATED plan (no network); when the gates are LIVE it fires a real
+    productUpdate. Reversible (never hard-deletes) -- see /unblock. Unknown
+    collection -> 404."""
+    repo = _require_repo()
+    doc = repo.get_by_id(collection_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    updated = repo.set_block(collection_id, True, current_user.get("user_id"))
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to block collection")
+    # Keep the materialised membership current so is_blocked_from_online resolves
+    # this collection's members correctly right away (fail-soft).
+    _materialize(collection_id)
+
+    db = _get_db()
+    skus, truncated = _resolve_block_members(updated)
+    delist_results: List[Dict] = []
+    # HONEST DARK REPORTING (finding #14): only a LIVE productUpdate actually
+    # takes a product off the storefront. When the push gates are DARK (prod's
+    # current posture) each delist is a SIMULATED plan -- NOTHING changed on
+    # Shopify. Count real writes as `delisted` and simulated ones as `planned` so
+    # the owner is never told "N delisted" for a contractual brand ban that has
+    # not actually been enforced yet.
+    delisted = 0
+    planned = 0
+    if db is not None and skus:
+        for member in _synced_member_products(db, skus):
+            res = await shopify_push.push_product_delist(db, member)
+            data = res.to_dict()
+            delist_results.append(data)
+            if res.ok and data.get("action") == "delist":
+                if res.mode == shopify_push.MODE_LIVE:
+                    delisted += 1
+                else:
+                    planned += 1
+    mode = shopify_push.push_mode_status(db) if db is not None else None
+    _write_block_audit(
+        current_user,
+        collection_id,
+        True,
+        len(skus),
+        delisted,
+        planned=planned,
+        mode=mode,
+        truncated=truncated,
+    )
+    return {
+        "blocked": True,
+        "collection_id": collection_id,
+        "collection": _with_id(updated),
+        "member_count": len(skus),
+        "delisted": delisted,
+        "planned": planned,
+        "truncated": truncated,
+        "mode": mode,
+        "delist_results": delist_results,
+    }
+
+
+@router.post("/{collection_id}/unblock")
+async def unblock_collection(
+    collection_id: str,
+    current_user: dict = Depends(require_roles()),  # SUPERADMIN ONLY
+) -> Dict:
+    """Reverse the online-block flag (SUPERADMIN). Sets online_sync_blocked=False
+    and re-queues every already-synced member (marks ecom.locally_modified=True)
+    so a subsequent push re-publishes it (the block guard is now off, so
+    push_product rebuilds the ProductInput from the unchanged ecom.status ->
+    ACTIVE). Unknown collection -> 404."""
+    repo = _require_repo()
+    doc = repo.get_by_id(collection_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    updated = repo.set_block(collection_id, False, current_user.get("user_id"))
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to unblock collection")
+    _materialize(collection_id)
+
+    db = _get_db()
+    # Full member coverage (finding #15): a broad SMART collection's requeue must
+    # not silently stop at the 1000 preview cap, else ~800 members would stay
+    # un-requeued (stranded off the storefront).
+    skus, truncated = _resolve_block_members(updated)
+    requeued = 0
+    if db is not None and skus:
+        for member in _synced_member_products(db, skus):
+            try:
+                pid = member.get("id") or member.get("product_id")
+                if not pid:
+                    continue
+                ecom = dict(member.get("ecom") or {})
+                ecom["locally_modified"] = True
+                db["catalog_products"].update_one({"id": pid}, {"$set": {"ecom": ecom}})
+                requeued += 1
+            except Exception:  # noqa: BLE001 -- one bad doc never aborts the rest
+                continue
+    _write_block_audit(
+        current_user,
+        collection_id,
+        False,
+        len(skus),
+        requeued,
+        truncated=truncated,
+    )
+    return {
+        "blocked": False,
+        "collection_id": collection_id,
+        "collection": _with_id(updated),
+        "member_count": len(skus),
+        "requeued": requeued,
+        "truncated": truncated,
     }

@@ -644,16 +644,35 @@ def _issue_store_credit(
     current_user: dict,
     gross: Optional[float] = None,
     restocking_fee: Optional[float] = None,
+    taxable: Optional[float] = None,
+    tax: Optional[float] = None,
+    gst_rate: Optional[float] = None,
+    bump_balance: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Append an ISSUED ledger entry + bump the customer's running balance.
+    """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
+    by default, bump the customer's running store-credit balance.
 
     Reuses services.store_credit_ledger.make_entry and the same persistence
     shape as customers.py. `amount` is the NET credit issued; when a credit
     note carries a restocking fee, `gross` + `restocking_fee` are stamped on
     the persisted ledger row so the GST-inclusive gross, the fee, and the net
-    are all auditable from the ledger alone. Fully fail-soft: returns None (and
-    never raises) when the DB is absent or anything goes wrong, so a return is
-    still recorded even if the credit ledger write fails.
+    are all auditable from the ledger alone.
+
+    GST stamp (`taxable` / `tax` / `gst_rate`): the REAL output-tax reversal
+    backed out of the gross. A fee-less credit note has gross == net, so the
+    legacy reports.py gross-minus-net derivation would report tax 0; stamping
+    the explicit split lets the GSTR-1 CDNR report the true reversal.
+
+    Settlement mode (`bump_balance`): a Shopify CARD/gateway refund already put
+    the money back on the customer's card, so IMS must NOT also mint POS-
+    redeemable store credit (a double benefit). `bump_balance=False` writes the
+    CDNR ledger row (type ISSUED, so the GST reversal still flows into GSTR-1)
+    but with a ZERO delta and leaves customer.store_credit untouched.
+
+    Fail-LOUD on persistence: returns None (never raises) when the DB is absent
+    OR the ledger insert fails, so `credit_note_issued` can never read True
+    without a real credit_note_ledger row behind it (BUG: a swallowed insert
+    used to leave the return marked COMPLETED with no ledger entry).
     """
     if not customer_id or amount <= 0:
         return None
@@ -688,16 +707,37 @@ def _issue_store_credit(
     if restocking_fee is not None:
         entry["restocking_fee"] = round(float(restocking_fee), 2)
     entry["net_refund"] = round(float(amount), 2)
+    # Explicit GST split (real output-tax reversal) so GSTR-1 CDNR reports the
+    # true tax instead of deriving 0 from a fee-less gross==net row.
+    if taxable is not None:
+        entry["taxable"] = round(float(taxable), 2)
+    if tax is not None:
+        entry["tax"] = round(float(tax), 2)
+    if gst_rate is not None:
+        entry["gst_rate"] = round(float(gst_rate), 2)
+
+    # Externally-settled (card/gateway refund): record the CDNR row but do NOT
+    # add redeemable balance -> zero the delta, hold the balance, mark it.
+    if not bump_balance:
+        entry["delta"] = 0.0
+        entry["balance_after"] = round(float(balance), 2)
+        entry["settlement"] = "EXTERNAL"
 
     coll = _ledger_coll()
-    if coll is not None:
-        try:
-            coll.insert_one(dict(entry))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[RETURNS] credit ledger insert failed: %s", exc)
+    if coll is None:
+        # No ledger to persist to -> we cannot honestly claim a credit note was
+        # issued. Fail loud (return None) rather than hand back a phantom entry.
+        logger.warning("[RETURNS] credit ledger unavailable; credit note not issued")
+        return None
+    try:
+        coll.insert_one(dict(entry))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] credit ledger insert failed: %s", exc)
+        return None
     # Keep the legacy customer.store_credit number in sync so the rest of the
-    # app (POS redeem, customer card) sees the new balance.
-    if repo is not None:
+    # app (POS redeem, customer card) sees the new balance -- unless this credit
+    # was settled externally (card refund), where the balance must stay put.
+    if bump_balance and repo is not None:
         try:
             repo.update(customer_id, {"store_credit": entry["balance_after"]})
         except Exception:  # noqa: BLE001
@@ -1692,6 +1732,11 @@ async def create_return(
             current_user=current_user,
             gross=gross_refund,
             restocking_fee=restocking_fee,
+            # Stamp the real GST split so the GSTR-1 CDNR reports the true
+            # output-tax reversal (not 0, the fee-less gross==net derivation).
+            taxable=gst_view.get("taxable"),
+            tax=gst_view.get("tax"),
+            gst_rate=gst_view.get("gst_rate"),
         )
 
     else:  # EXCHANGE (settlement already computed + validated above)

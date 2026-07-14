@@ -2815,10 +2815,25 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         cust_gstin = cust_info.get("gstin", "")
                         cust_state = cust_info.get("state", "") or store_state
 
-                        # Derive tax from gross/net refund (net = gross - tax)
+                        # Tax + taxable base for the credit note. PREFER the
+                        # explicit GST split stamped on the ledger row (Shopify
+                        # refund + in-store CREDIT_NOTE now stamp taxable/tax --
+                        # the REAL output-tax reversal). Only FALL BACK to the
+                        # gross-minus-net derivation for legacy rows that predate
+                        # the stamp (where net = gross - tax). Without this a
+                        # fee-less credit note (gross == net) reported tax 0.
                         gross_refund = float(entry.get("gross_refund") or 0.0)
                         net_refund = float(entry.get("net_refund", entry.get("amount", 0)) or 0.0)
-                        cn_tax = round(gross_refund - net_refund, 2) if gross_refund > 0 else 0.0
+                        explicit_tax = entry.get("tax")
+                        explicit_taxable = entry.get("taxable")
+                        if explicit_tax is not None:
+                            cn_tax = round(float(explicit_tax or 0.0), 2)
+                        else:
+                            cn_tax = round(gross_refund - net_refund, 2) if gross_refund > 0 else 0.0
+                        if explicit_taxable is not None:
+                            cn_taxable = round(float(explicit_taxable or 0.0), 2)
+                        else:
+                            cn_taxable = round(net_refund, 2)
 
                         # Split CGST/SGST vs IGST by comparing states
                         is_inter = bool(
@@ -2839,9 +2854,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         ref = str(entry.get("ref", entry.get("entry_id", "")) or "")
                         cn_date = str(entry.get("created_at", ""))[:10] if entry.get("created_at") else month + "-01"
 
-                        # Assume credit notes use the same HSN/rate as the items returned
+                        # Credit notes carry the items' HSN/rate. Prefer the rate
+                        # stamped on the ledger row (Shopify refund + in-store
+                        # credit note stamp gst_rate); else the 18% default.
                         cn_hsn = "9004"
-                        cn_rate = 18
+                        try:
+                            cn_rate = int(round(float(entry.get("gst_rate")))) if entry.get("gst_rate") else 18
+                        except (TypeError, ValueError):
+                            cn_rate = 18
                         cn_place = cust_state or store_state or "Unknown"
 
                         cn_entry = {
@@ -2853,7 +2873,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             "customerState": cn_place,
                             "placeOfSupply": cn_place,
                             "grossValue": round(gross_refund, 2),
-                            "taxableValue": round(net_refund, 2),
+                            "taxableValue": cn_taxable,
                             "cgst": cn_cgst,
                             "sgst": cn_sgst,
                             "igst": cn_igst,

@@ -4415,6 +4415,43 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/store-health",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # --- /api/v1/online-store/discount-rules ---  (rebuild of BVI DiscountRule).
+    # Owner-editable CRUD for the automatic ONLINE storefront discount rules the
+    # online discount engine reads. PUSH-DARK + ONLINE-only (never in-store POS).
+    # Role-gated to SUPERADMIN/ADMIN/CATALOG_MANAGER (pricing, not a design-queue
+    # concern -> DESIGN_MANAGER excluded). The literal /recompute row precedes the
+    # /{rule_id} rows (policy_for prefers the exact-literal / fewest-params match).
+    # See routers/online_store_discount_rules.py + services/online_discount_engine.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/discount-rules",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/discount-rules",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/discount-rules/recompute",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/discount-rules/{rule_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/online-store/discount-rules/{rule_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "DELETE",
+        "path": "/api/v1/online-store/discount-rules/{rule_id}",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
     # --- /api/v1/collections ---  (unification step-13: materialised collection
     # BROWSE). Read-only, fast-path over the collection_products materialised
     # view. AUTHENTICATED -- same posture as GET /products + GET /catalog/products
@@ -4538,6 +4575,25 @@ POLICY: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/online-store/collections/{collection_id}/resolved-products",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
+    },
+    # SUPERADMIN "block a collection from online sale" (BVI-retirement). Some
+    # brands contractually forbid online sale; the owner (SUPERADMIN) flags a
+    # collection so every product in it is excluded from Shopify (never pushed;
+    # delisted if already synced). NARROWED to SUPERADMIN ONLY (the owner asked
+    # for the SUPERADMIN right) -- the broader ecom set that runs the rest of the
+    # collections router is NOT admitted here. The literal .../block + .../unblock
+    # suffixes each carry one param + a literal segment, so policy_for resolves
+    # them ahead of the bare .../{collection_id} (different segment count anyway).
+    # See routers/online_store_collections.py + services/online_block.py.
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/collections/{collection_id}/block",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/collections/{collection_id}/unblock",
+        "allowed": ["SUPERADMIN"],
     },
     # --- /api/v1/online-store/menus ---  (BVI Phase 3: Menus / Mega-menu, FLAGSHIP #2)
     # PUSH-DARK ecom_menus CRUD + an embedded recursive item-tree editor
@@ -4743,6 +4799,34 @@ POLICY: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/online-store/orders/remap/{shopify_order_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    # --- /api/v1/online-store/refund-reviews ---  (Shopify refund -> GST consumer)
+    # The ACCOUNTANT-facing consumer for shopify_refund_review -- the queue the
+    # refunds/create handler writes to by DEFAULT (SHOPIFY_REFUND_AUTO off). The
+    # books are the accountant's, so ACCOUNTANT is first-class (GET list + POST
+    # confirm/reject); ADMIN is HQ; SUPERADMIN auto. Confirm posts the credit note
+    # + restock from the stored row (reuses _issue_store_credit + _restock_good_items).
+    # Non-HQ callers are FORCED to their own store scope. See
+    # routers/online_store_refund_reviews.py.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/refund-reviews",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/refund-reviews/",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/refund-reviews/{review_id}/confirm",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/refund-reviews/{review_id}/reject",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
     },
     # --- /api/v1/ondc ---  (BVI-20: ONDC Seller Node scaffolding -- DARK default)
     # Callback endpoints are PUBLIC (Beckn protocol; SNP signature-gated when

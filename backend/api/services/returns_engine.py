@@ -217,3 +217,51 @@ def dominant_gst_rate(items: List[Dict[str, Any]]) -> float:
     if not by_rate:
         return 0.0
     return max(by_rate, key=lambda r: by_rate[r])
+
+
+def gst_breakup_lines(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """EXACT per-line GST back-out for a credit note that spans MIXED GST rates.
+
+    ``dominant_gst_rate`` + ``gst_breakup`` back one single rate out of the whole
+    gross -- wrong when a return mixes rates (e.g. an 18% frame + a 5% lens),
+    where it under/over-states the tax by hundreds of rupees. This backs the tax
+    out of EACH line at ITS OWN rate and aggregates, so the credit-note tax equals
+    the sum of the original line taxes (a true reversal).
+
+    For each line: line_gross = return_qty * unit_price (the GST-INCLUSIVE gross
+    billed), then ``gst_breakup(line_gross, line_rate)`` splits it. Returns
+    ``{gross, taxable, tax, gst_rate, by_rate:{"<rate>":{gross,taxable,tax}}}``
+    where ``gst_rate`` is the DOMINANT rate (kept for single-rate display /
+    back-compat) and ``by_rate`` carries the exact split the accountant sees.
+    Defensive: a bad line is skipped, never raises.
+    """
+    by_rate: Dict[float, Dict[str, float]] = {}
+    total_gross = 0.0
+    total_taxable = 0.0
+    total_tax = 0.0
+    for it in items or []:
+        try:
+            qty = _coerce_qty(it.get("return_qty", it.get("quantity")), "return_qty")
+            price = _coerce_price(it.get("unit_price"), "unit_price")
+            rate = _coerce_rate(it.get("gst_rate"))
+        except ValueError:
+            continue
+        line_gross = round(qty * price, 2)
+        bd = gst_breakup(line_gross, rate)
+        total_gross += line_gross
+        total_taxable += bd["taxable"]
+        total_tax += bd["tax"]
+        slot = by_rate.setdefault(rate, {"gross": 0.0, "taxable": 0.0, "tax": 0.0})
+        slot["gross"] = round(slot["gross"] + line_gross, 2)
+        slot["taxable"] = round(slot["taxable"] + bd["taxable"], 2)
+        slot["tax"] = round(slot["tax"] + bd["tax"], 2)
+    dominant = (
+        max(by_rate, key=lambda r: by_rate[r]["gross"]) if by_rate else 0.0
+    )
+    return {
+        "gross": round(total_gross, 2),
+        "taxable": round(total_taxable, 2),
+        "tax": round(total_tax, 2),
+        "gst_rate": dominant,
+        "by_rate": {str(r): v for r, v in by_rate.items()},
+    }

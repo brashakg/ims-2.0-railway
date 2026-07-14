@@ -383,6 +383,11 @@ export interface EcomCollection {
   // dirty flag -> Phase-5 push queue. Informational in Phase 2.
   locally_modified?: boolean | null;
   shopify_collection_id?: string | null;
+  // SUPERADMIN "block from online sale": when true, every product in this
+  // collection is excluded from Shopify (never pushed; delisted if synced).
+  online_sync_blocked?: boolean | null;
+  online_sync_blocked_by?: string | null;
+  online_sync_blocked_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -551,6 +556,58 @@ export const collectionsApi = {
   /** Delete a collection. Throws on failure. */
   remove: async (id: string): Promise<void> => {
     await api.delete(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}`);
+  },
+
+  // --- SUPERADMIN: block / unblock from online sale ------------------------
+  // Flag a collection so ALL its products are excluded from Shopify (never
+  // pushed; delisted if already synced). SUPERADMIN-only at the backend (a
+  // non-SUPERADMIN call 403s). The delist obeys the dark write-gates: when DARK
+  // it returns a SIMULATED plan; when the gates are live it fires a real
+  // productUpdate (status -> DRAFT, reversible). Throws on failure so the screen
+  // can toast it.
+
+  /** Block a collection from online sale. Returns the block summary
+   *  {blocked, member_count, delisted, planned, isLive, truncated}.
+   *
+   *  HONEST DARK REPORTING: `delisted` counts only REAL (LIVE) Shopify writes;
+   *  `planned` counts delists that were merely SIMULATED because the push gates
+   *  are DARK (nothing actually changed on the storefront yet). `isLive` says
+   *  whether pushes are live so the caller can toast the truth. */
+  block: async (
+    id: string,
+  ): Promise<{
+    blocked: boolean;
+    member_count: number;
+    delisted: number;
+    planned: number;
+    isLive: boolean;
+    truncated: boolean;
+  }> => {
+    const res = await api.post(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/block`);
+    const d = (res?.data ?? {}) as Record<string, any>;
+    const modeObj = d.mode && typeof d.mode === 'object' ? (d.mode as Record<string, any>) : null;
+    return {
+      blocked: !!d.blocked,
+      member_count: typeof d.member_count === 'number' ? d.member_count : 0,
+      delisted: typeof d.delisted === 'number' ? d.delisted : 0,
+      planned: typeof d.planned === 'number' ? d.planned : 0,
+      isLive: modeObj ? !!modeObj.is_live : false,
+      truncated: !!d.truncated,
+    };
+  },
+
+  /** Reverse the online-block flag (re-enables sync; a later push re-publishes).
+   *  Returns {blocked:false, member_count, requeued}. */
+  unblock: async (
+    id: string,
+  ): Promise<{ blocked: boolean; member_count: number; requeued: number }> => {
+    const res = await api.post(`${COLLECTIONS_BASE}/${encodeURIComponent(id)}/unblock`);
+    const d = (res?.data ?? {}) as Record<string, any>;
+    return {
+      blocked: !!d.blocked,
+      member_count: typeof d.member_count === 'number' ? d.member_count : 0,
+      requeued: typeof d.requeued === 'number' ? d.requeued : 0,
+    };
   },
 
   // --- Manual (CUSTOM) membership ------------------------------------------
@@ -1676,5 +1733,103 @@ export const ordersApi = {
       ? (data.order ?? data.result)
       : data;
     return _onlineOrderFrom((row ?? {}) as Record<string, any>);
+  },
+};
+
+// ============================================================================
+// REFUND REVIEWS  (Shopify refund -> GST credit note; accountant queue consumer)
+// ============================================================================
+// A Shopify `refunds/create` webhook is turned into a proposed GST credit note +
+// restock and, by DEFAULT (SHOPIFY_REFUND_AUTO off), parked in the
+// `shopify_refund_review` queue for an ACCOUNTANT to confirm. This sub-api is the
+// consumer for that queue, served by the backend router:
+//   - GET  /api/v1/online-store/refund-reviews            (list, filter ?status=)
+//   - POST /api/v1/online-store/refund-reviews/{id}/confirm  (post the credit note)
+//   - POST /api/v1/online-store/refund-reviews/{id}/reject   (decline; no posting)
+//
+// GRACEFUL DEGRADATION: the list read resolves to a safe empty/unavailable value
+// rather than throwing so the screen always renders. confirm / reject DO throw on
+// failure so the screen can toast it. Import DIRECTLY from this module (NOT the
+// api barrel — TS2614 per past sessions).
+// ============================================================================
+
+/** One Shopify refund review row as surfaced to the Refund reviews screen.
+ *  Every field optional/nullable so a partial backend payload never breaks. */
+export interface RefundReview {
+  review_id: string;
+  shopify_refund_id?: string | null;
+  shopify_order_id?: string | null;
+  order_id?: string | null;
+  order_number?: string | null;
+  customer_id?: string | null;
+  customer_name?: string | null;
+  store_id?: string | null;
+  restock_store_id?: string | null;
+  /** PENDING | DISCREPANCY | UNMATCHED | CREDIT_FAILED | NO_CUSTOMER | POSTED | REJECTED */
+  status?: string | null;
+  note?: string | null;
+  resolved?: boolean | null;
+  /** GST-inclusive gross of the computed credit note. */
+  gross_refund?: number | null;
+  /** What Shopify actually refunded (drives the DISCREPANCY flag). */
+  shopify_refunded_amount?: number | null;
+  /** The computed credit note (gross/taxable/tax split), as stored. */
+  credit_note?: Record<string, any> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface RefundReviewsResult {
+  reviews: RefundReview[];
+  total: number;
+  available: boolean;
+}
+
+export interface RefundReviewFilters {
+  status?: string;
+  resolved?: boolean;
+  limit?: number;
+}
+
+const REFUND_REVIEWS_BASE = '/online-store/refund-reviews';
+
+export const refundReviewsApi = {
+  /** List refund review rows (optionally filtered by status). NEVER throws: any
+   *  error (404 stale deploy / 403 outside the gate) resolves to an empty,
+   *  unavailable result so the screen always renders. */
+  list: async (filters: RefundReviewFilters = {}): Promise<RefundReviewsResult> => {
+    try {
+      const params: Record<string, string | number | boolean> = {};
+      if (filters.status) params.status = filters.status;
+      if (typeof filters.resolved === 'boolean') params.resolved = filters.resolved;
+      params.limit = typeof filters.limit === 'number' ? filters.limit : 500;
+      const res = await api.get(REFUND_REVIEWS_BASE, { params });
+      const data = res?.data;
+      const arr = Array.isArray(data) ? data : (data?.reviews ?? data?.items ?? []);
+      const reviews = (Array.isArray(arr) ? arr : []) as RefundReview[];
+      const total = typeof data?.total === 'number' ? data.total : reviews.length;
+      return { reviews, total, available: true };
+    } catch {
+      return { reviews: [], total: 0, available: false };
+    }
+  },
+
+  /** Confirm a review: post the credit note + restock from the stored row. Throws
+   *  on failure so the caller can toast it. */
+  confirm: async (reviewId: string): Promise<Record<string, any>> => {
+    const res = await api.post(
+      `${REFUND_REVIEWS_BASE}/${encodeURIComponent(reviewId)}/confirm`,
+    );
+    return (res?.data ?? {}) as Record<string, any>;
+  },
+
+  /** Reject a review: mark it resolved without posting anything. Throws on failure. */
+  reject: async (reviewId: string): Promise<Record<string, any>> => {
+    const res = await api.post(
+      `${REFUND_REVIEWS_BASE}/${encodeURIComponent(reviewId)}/reject`,
+    );
+    return (res?.data ?? {}) as Record<string, any>;
   },
 };

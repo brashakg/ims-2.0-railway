@@ -69,8 +69,10 @@ const CollectionsListPage = lazy(() => import('./pages/collections/CollectionsLi
 const CollectionNewPage = lazy(() => import('./pages/collections/CollectionNewPage'));
 const CollectionDetailPage = lazy(() => import('./pages/collections/CollectionDetailPage'));
 const MenusPage = lazy(() => import('./pages/online-store/MenusPage'));
+const DiscountRulesPage = lazy(() => import('./pages/online-store/DiscountRulesPage'));
 const DesignQueuePage = lazy(() => import('./pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('./pages/online-store/OnlineOrdersPage'));
+const RefundReviewsPage = lazy(() => import('./pages/online-store/RefundReviewsPage'));
 const OnlineStockTallyPage = lazy(() => import('./pages/online-store/OnlineStockPage'));
 const OnlineStoreHealthPage = lazy(() => import('./pages/online-store/OnlineStoreHealthPage'));
 const OndcSellerPage = lazy(() => import('./pages/online-store/OndcSellerPage'));
@@ -598,6 +600,21 @@ function App() {
                     }
                   />
 
+                  {/* Online Store — Discount Rules (rebuild of BVI DiscountRule).
+                      Owner-editable automatic ONLINE storefront discount rules.
+                      Pricing surface -> SUPERADMIN/ADMIN/CATALOG_MANAGER only
+                      (DESIGN_MANAGER excluded), matching the backend gate. */}
+                  <Route
+                    path="online-store/discount-rules"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}
+                      >
+                        <DiscountRulesPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
                   {/* Online Store — Menus / Mega-menu editor (BVI Phase 3). Same
                       catalog/design role gate as the module shell. */}
                   <Route
@@ -636,6 +653,22 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
                       >
                         <OnlineOrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Online Store — Refund reviews (Shopify refund -> GST credit
+                      note). The ACCOUNTANT-facing consumer for the refund review
+                      queue: confirm posts the credit note + restock, reject
+                      declines. Gated SUPERADMIN / ADMIN / ACCOUNTANT to match the
+                      backend router (the books are the accountant's). */}
+                  <Route
+                    path="online-store/refund-reviews"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}
+                      >
+                        <RefundReviewsPage />
                       </ProtectedRoute>
                     }
                   />

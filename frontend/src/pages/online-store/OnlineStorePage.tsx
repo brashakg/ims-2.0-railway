@@ -26,6 +26,8 @@ import {
   Loader2,
   CheckCircle2,
   ArrowRight,
+  Tag,
+  ReceiptText,
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
@@ -82,6 +84,16 @@ const SECTIONS: Section[] = [
     href: '/online-store/collections',
   },
   {
+    key: 'discount-rules',
+    title: 'Discount rules',
+    blurb:
+      'Automatic online pricing by category, brand and sub-brand — e.g. "Ray-Ban frames → 20% off". Sets the website price only; in-store POS pricing is untouched.',
+    icon: Tag,
+    phase: 'Pricing',
+    // Live: the online discount-rule engine + editor is in-app (rebuild of BVI).
+    href: '/online-store/discount-rules',
+  },
+  {
     key: 'menus',
     title: 'Mega-menu editor',
     blurb:
@@ -128,6 +140,16 @@ const SECTIONS: Section[] = [
     countLabel: 'online orders',
     // Phase 3b shipped: the Online orders view is live in-app.
     href: '/online-store/orders',
+  },
+  {
+    key: 'refund-reviews',
+    title: 'Refund reviews',
+    blurb:
+      'Online refunds land here as proposed GST credit notes — confirm to post the credit note and restock, or reject. Nothing hits the books until an accountant confirms.',
+    icon: ReceiptText,
+    phase: 'Finance',
+    // Live: the accountant consumer for the Shopify refund review queue.
+    href: '/online-store/refund-reviews',
   },
   {
     key: 'stock-tally',

@@ -540,30 +540,52 @@ class NexusAgent(JarvisAgent):
         "orders/partially_fulfilled",
     )
 
+    # BVI-retirement phase 0: the non-order Shopify topics IMS must handle once BVI
+    # is retired. A dispatch table (topic -> handler-method name) replaces the old
+    # blanket "non-order topics just log" early-return. Each handler is fail-soft.
+    #   refunds/create      -> GST credit note (output-tax reversal) + stock restock
+    #   fulfillments/*      -> reconcile shipped/tracking onto the IMS online order
+    #   customers/*         -> upsert into IMS CRM (dedupe on mobile/email, merge)
+    _SHOPIFY_TOPIC_HANDLERS = {
+        "refunds/create": "_handle_shopify_refund_topic",
+        "fulfillments/create": "_handle_shopify_fulfillment_topic",
+        "fulfillments/update": "_handle_shopify_fulfillment_topic",
+        "customers/create": "_handle_shopify_customer_topic",
+        "customers/update": "_handle_shopify_customer_topic",
+    }
+
+    # Catalog / collection / inventory reverse-sync is CONSCIOUSLY UNBUILT (owner
+    # policy = edit-only-in-IMS: products, collections and stock levels are edited
+    # in IMS and pushed OUT to Shopify, never pulled back). We match these topic
+    # families so they log a clear, greppable "intentionally ignored" line rather
+    # than falling through as an anonymous no-op.
+    _SHOPIFY_EDIT_ONLY_PREFIXES = (
+        "products/",
+        "collections/",
+        "inventory_levels/",
+        "inventory_items/",
+        "product_listings/",
+    )
+
     async def _handle_shopify_webhook(self, payload: Dict[str, Any]):
-        """Translate a verified Shopify ORDER webhook into a canonical IMS order.
+        """Route a verified Shopify webhook to the right IMS handler via the
+        topic dispatch table.
 
         For the seller's own bettervision.in storefront, IMS is the GST invoice
-        system-of-record. This routes through api.services.online_order_mapper
-        (Phase 3b), the SINGLE authoritative Shopify-order -> IMS-order mapper:
-          * orders/create + orders/paid -> idempotently create an IMS order tagged
-            channel='ONLINE' with a consecutive GST tax invoice (per-line HSN +
-            taxable + tax, IGST vs CGST+SGST by place of supply), AFTER resolving
-            each Shopify variant -> catalog_variants -> the IMS sku and matching /
-            creating the IMS customer.
-          * orders/updated + orders/cancelled -> SYNC the existing order's
-            payment / fulfillment / lifecycle status (NEVER a 2nd order).
-        A replayed delivery (same Shopify order id or same X-Shopify-Webhook-Id)
-        creates NOTHING further -- revenue is never double-counted. Non-order
-        topics just log (the catalog is owned by BVI).
+        system-of-record. ORDER topics route through api.services.online_order_
+        mapper (the SINGLE authoritative Shopify-order -> IMS-order mapper); the
+        non-order topics IMS took over from BVI (refunds / fulfillments /
+        customers) route through their dedicated services. Catalog / collection /
+        inventory topics are intentionally ignored (edit-only-in-IMS) but LOGGED so
+        the choice is greppable, not silent.
 
         The Shopify topic + X-Shopify-Webhook-Id are read from the inbox headers
         stashed on `self._current_webhook_headers` by `_handle_inbox_webhook`
         (kept off the call signature so the existing 1-arg handler contract is
         preserved). They also fall back to fields on the payload body.
 
-        Fail-soft: the mapper never raises on its normal paths and SIMULATES when
-        the DB is unavailable; any residual error is swallowed by the caller.
+        Fail-soft: every handler swallows its own errors and SIMULATES when the DB
+        is unavailable; any residual error is swallowed by the caller.
         """
         headers = getattr(self, "_current_webhook_headers", None)
         headers = headers if isinstance(headers, dict) else {}
@@ -574,10 +596,46 @@ class NexusAgent(JarvisAgent):
             or "unknown"
         )
         logger.info(f"[NEXUS] shopify webhook topic={topic}")
+        t = str(topic).strip().lower()
 
-        if str(topic).strip().lower() not in self._SHOPIFY_ORDER_TOPICS:
+        # Order topics keep their existing mapper path (count-once + status sync).
+        if t in self._SHOPIFY_ORDER_TOPICS:
+            await self._dispatch_shopify_order(payload, str(topic), headers)
             return
 
+        # Non-order topics IMS now owns (BVI-retirement phase 0).
+        handler_name = self._SHOPIFY_TOPIC_HANDLERS.get(t)
+        if handler_name is not None:
+            handler = getattr(self, handler_name, None)
+            if handler is not None:
+                await handler(payload, str(topic))
+                return
+
+        # Catalog / collection / inventory reverse-sync: consciously unbuilt.
+        if t.startswith(self._SHOPIFY_EDIT_ONLY_PREFIXES):
+            logger.info(
+                "[NEXUS] shopify topic=%s intentionally ignored under "
+                "edit-only-in-IMS policy (catalog/inventory reverse-sync "
+                "consciously unbuilt)",
+                topic,
+            )
+            return
+
+        # Anything else: an unmapped topic. Log so it is greppable, do nothing.
+        logger.info("[NEXUS] shopify topic=%s has no IMS handler -- ignored", topic)
+
+    async def _dispatch_shopify_order(self, payload, topic: str, headers: Dict[str, Any]):
+        """Translate a verified Shopify ORDER webhook into a canonical IMS order
+        via api.services.online_order_mapper (Phase 3b):
+          * orders/create + orders/paid -> idempotently create an IMS order tagged
+            channel='ONLINE' with a consecutive GST tax invoice (per-line HSN +
+            taxable + tax, IGST vs CGST+SGST by place of supply), AFTER resolving
+            each Shopify variant -> catalog_variants -> the IMS sku and matching /
+            creating the IMS customer.
+          * orders/updated + orders/cancelled -> SYNC the existing order's
+            payment / fulfillment / lifecycle status (NEVER a 2nd order).
+        A replayed delivery (same Shopify order id or same X-Shopify-Webhook-Id)
+        creates NOTHING further -- revenue is never double-counted. Fail-soft."""
         try:
             from api.services.online_order_mapper import map_shopify_order
 
@@ -598,6 +656,68 @@ class NexusAgent(JarvisAgent):
             )
         except Exception as e:  # noqa: BLE001 - never let mapping crash the loop
             logger.warning(f"[NEXUS] shopify order mapping failed: {e}")
+
+    async def _handle_shopify_refund_topic(self, payload: Dict[str, Any], topic: str):
+        """refunds/create -> GST credit note (output-tax reversal) + stock restock,
+        via api.services.shopify_refund. DEFAULT routes to an accountant review
+        queue; full auto-credit-note+restock is DARK behind SHOPIFY_REFUND_AUTO.
+        Idempotent on the Shopify refund id. Fail-soft."""
+        try:
+            from api.services.shopify_refund import handle_shopify_refund
+
+            headers = getattr(self, "_current_webhook_headers", None)
+            headers = headers if isinstance(headers, dict) else {}
+            result = handle_shopify_refund(
+                self.db,
+                payload,
+                webhook_id=headers.get("x-shopify-webhook-id"),
+                topic=str(topic),
+            )
+            logger.info(
+                "[NEXUS] shopify refund -> status=%s refund=%s order=%s gross=%s",
+                result.get("status"),
+                result.get("refund_id"),
+                result.get("order_id"),
+                result.get("gross_refund"),
+            )
+        except Exception as e:  # noqa: BLE001 - never let a refund crash the loop
+            logger.warning(f"[NEXUS] shopify refund handling failed: {e}")
+
+    async def _handle_shopify_fulfillment_topic(self, payload: Dict[str, Any], topic: str):
+        """fulfillments/create + fulfillments/update -> reconcile shipped status +
+        tracking onto the matching IMS online order, via
+        api.services.shopify_fulfillment. Fail-soft if the order isn't found."""
+        try:
+            from api.services.shopify_fulfillment import reconcile_fulfillment
+
+            result = reconcile_fulfillment(self.db, payload, topic=str(topic))
+            logger.info(
+                "[NEXUS] shopify fulfilment -> status=%s order=%s fulfilment=%s "
+                "order_status=%s",
+                result.get("status"),
+                result.get("order_id"),
+                result.get("fulfillment_id"),
+                result.get("order_status"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] shopify fulfilment handling failed: {e}")
+
+    async def _handle_shopify_customer_topic(self, payload: Dict[str, Any], topic: str):
+        """customers/create + customers/update -> upsert into the IMS CRM (dedupe
+        on mobile/email, merge don't clobber), via api.services.shopify_customer_
+        sync. Fail-soft."""
+        try:
+            from api.services.shopify_customer_sync import upsert_shopify_customer
+
+            result = upsert_shopify_customer(self.db, payload, topic=str(topic))
+            logger.info(
+                "[NEXUS] shopify customer -> status=%s customer=%s shopify_id=%s",
+                result.get("status"),
+                result.get("customer_id"),
+                result.get("shopify_customer_id"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] shopify customer handling failed: {e}")
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
         evt = payload.get("current_status") or payload.get("event") or "unknown"
