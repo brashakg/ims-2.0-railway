@@ -360,7 +360,10 @@ def _pg_count(conn, table: str) -> int:
     Returns -1 on error so a failure is visible (never silently 0)."""
     try:
         with conn.cursor() as cur:
-            cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+            # nosec B608 -- `table` is ALWAYS a hardcoded constant literal passed
+            # by collect_bvi_snapshot ("Product"/"ProductVariant"/...); it is never
+            # user input, so this is a Bandit false positive, not an injection vector.
+            cur.execute(f'SELECT COUNT(*) FROM "{table}"')  # nosec B608
             row = cur.fetchone()
             return int(row[0]) if row else 0
     except Exception as e:  # noqa: BLE001
