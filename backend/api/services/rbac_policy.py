@@ -4367,6 +4367,18 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/marketing/ad-performance",
         "allowed": ["SUPERADMIN", "ADMIN"],
     },
+    # Marketing Funnel Phase 0: consent-gated ad-audience export (DARK). Discloses
+    # hashed customer PII to a Google/Meta match audience -> SUPERADMIN/ADMIN only.
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/ad-audience/summary",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/marketing/ad-audience/export",
+        "allowed": ["SUPERADMIN", "ADMIN"],
+    },
     # --- /api/v1/notifications ---
     {"method": "GET", "path": "/api/v1/notifications", "allowed": "AUTHENTICATED"},
     {"method": "GET", "path": "/api/v1/notifications/", "allowed": "AUTHENTICATED"},

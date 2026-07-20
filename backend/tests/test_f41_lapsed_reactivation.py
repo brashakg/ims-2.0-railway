@@ -270,6 +270,37 @@ def _crm_client(db, monkeypatch):
     return TestClient(app)
 
 
+# ---------------------------------------------------------------------------
+# Deterministic IST clock -- close the IST-midnight-rollover flake.
+# ---------------------------------------------------------------------------
+# TODAY is captured ONCE at module import (pytest collection time), but the code
+# under test recomputes the IST calendar day FRESH at request time -- crm's
+# get_reactivation_worklist / log_reactivation_outcome and MegaphoneAgent.
+# _build_reactivation_cohorts all call react._today_ist() -> api.utils.ist.
+# now_ist(). In a long CI run whose wall-clock straddles IST midnight (18:30 UTC)
+# the two diverge: docs are PERSISTED under the collection-time day but LOOKED UP
+# under the (later) request-time day, so every persisted-doc read misses --
+# KeyError 'lapse_months' (T3b), 404 not_on_todays_list (T4/T4b/T4c), and the
+# megaphone cohort find_one -> None. Pinning now_ist to a fixed IST instant on
+# TODAY makes build-time and read-time always agree. This changes NO assertion --
+# it only removes the wall-clock nondeterminism -- and mirrors the clock pinning
+# the sibling TZ-sensitive suites already do (test_f43_vip_triggers,
+# test_tz_p3_sweep, test_walkouts). The tz-aware-`now` injection path used by T7b
+# (react._today_ist(early)) is unaffected: it consults the passed instant, never
+# now_ist().
+from api.utils.ist import IST as _IST  # noqa: E402
+
+_FIXED_NOW_IST = datetime.fromisoformat(TODAY + "T10:00:00").replace(tzinfo=_IST)
+
+
+@pytest.fixture(autouse=True)
+def _pin_ist_today(monkeypatch):
+    """Freeze the IST 'now' to TODAY so no F41 test straddles an IST-midnight
+    boundary between the persisted cohort doc's day and the request-time day."""
+    monkeypatch.setattr("api.utils.ist.now_ist", lambda: _FIXED_NOW_IST)
+    yield
+
+
 # ===========================================================================
 # T1 -- dual-gap lapsed-cohort math (the PRIMARY code path).
 # ===========================================================================

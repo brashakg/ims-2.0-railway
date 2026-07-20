@@ -1370,6 +1370,116 @@ async def get_ad_performance(
 
 
 # ============================================================================
+# Marketing Funnel Phase 0 — Ad-audience export (DARK, consent-gated)
+# ============================================================================
+# Foundation for Google Customer Match + Meta Custom Audiences. Everything here
+# is EXPORT-FILE ONLY: no call ever leaves IMS to Google/Meta, no credentials
+# are read. It builds hashed, consent-gated audience (ADD) and suppression
+# (REMOVE) payloads; a later phase owns the actual upload once creds +
+# DISPATCH_MODE go live. Gated to SUPERADMIN/ADMIN -- this discloses (hashed)
+# personal data, so it sits at the same trust level as ad-spend + agency data.
+# ============================================================================
+
+_AD_AUDIENCE_ROLES = ("ADMIN",)
+
+
+@router.get(
+    "/ad-audience/summary",
+    summary="Ad-audience export summary (counts only, no PII)",
+    description=(
+        "How many customers would export to a Google/Meta match audience vs the "
+        "suppression (delete) list, gated on explicit AD_AUDIENCE DPDP consent + "
+        "the unified opt-out gate. Returns COUNTS ONLY (no hashes). Optional "
+        "store_id scopes to one store. SUPERADMIN/ADMIN only. DARK -- no external "
+        "calls."
+    ),
+)
+async def get_ad_audience_summary(
+    store_id: Optional[str] = Query(None, description="Scope to one store; omit for all"),
+    current_user: dict = Depends(require_roles("SUPERADMIN", *_AD_AUDIENCE_ROLES)),
+):
+    db = _get_db()
+    from ..services.audience_export import summarize_ad_audience
+
+    result = summarize_ad_audience(db, store_id=store_id)
+    return {
+        "store_id": result.store_id,
+        "scanned": result.scanned,
+        "audience_count": result.audience_count,
+        "suppression_count": result.suppression_count,
+        "email_only_count": result.email_only_count,
+        "phone_count": result.phone_count,
+        "skipped_no_contact": result.skipped_no_contact,
+        "skipped_no_ad_consent": result.skipped_no_ad_consent,
+        "generated_at": result.generated_at,
+        "note": result.note,
+    }
+
+
+@router.get(
+    "/ad-audience/export",
+    summary="Ad-audience hashed export (DARK; JSON or CSV)",
+    description=(
+        "Build the hashed Customer-Match / Custom-Audience payload: an `audience` "
+        "list (ADD -- opted-in, not suppressed) and a `suppression` list (REMOVE -- "
+        "opted-out / withdrawn) in the chosen provider's field naming. No raw PII "
+        "ever leaves IMS (SHA-256 only) and NO call is made to Google/Meta. "
+        "provider = generic | google | meta; format = json | csv. SUPERADMIN/ADMIN."
+    ),
+)
+async def get_ad_audience_export(
+    provider: str = Query("generic", description="generic | google | meta"),
+    store_id: Optional[str] = Query(None, description="Scope to one store; omit for all"),
+    format: str = Query("json", description="json | csv"),
+    current_user: dict = Depends(require_roles("SUPERADMIN", *_AD_AUDIENCE_ROLES)),
+):
+    if provider not in ("generic", "google", "meta"):
+        raise HTTPException(status_code=422, detail="provider must be generic, google or meta")
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=422, detail="format must be json or csv")
+
+    db = _get_db()
+    from ..services.audience_export import (
+        build_ad_audience_export,
+        format_row,
+        to_csv,
+    )
+
+    result = build_ad_audience_export(db, store_id=store_id, provider=provider)
+
+    if format == "csv":
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(
+            to_csv(result),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=ad_audience_{provider}.csv"
+                )
+            },
+        )
+
+    return {
+        "provider": result.provider,
+        "store_id": result.store_id,
+        "generated_at": result.generated_at,
+        "counts": {
+            "scanned": result.scanned,
+            "audience_count": result.audience_count,
+            "suppression_count": result.suppression_count,
+            "email_only_count": result.email_only_count,
+            "phone_count": result.phone_count,
+            "skipped_no_contact": result.skipped_no_contact,
+            "skipped_no_ad_consent": result.skipped_no_ad_consent,
+        },
+        "audience": [format_row(r, provider) for r in result.audience],
+        "suppression": [format_row(r, provider) for r in result.suppression],
+        "note": result.note,
+    }
+
+
+# ============================================================================
 # CRM-15: WHATSAPP OPT-IN / OPT-OUT (STOP LEDGER)
 # ============================================================================
 # TRAI/DLT and the WhatsApp Business Policy require that operators maintain a
