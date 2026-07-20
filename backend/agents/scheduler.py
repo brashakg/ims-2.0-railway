@@ -61,6 +61,15 @@ SCHEDULER_LEADER_KEY = os.getenv(
 SCHEDULER_LEADER_TTL = int(os.getenv("AGENT_SCHEDULER_LEADER_TTL", "90"))
 # How often the holder refreshes the TTL. Must be comfortably < TTL.
 SCHEDULER_LEADER_REFRESH = int(os.getenv("AGENT_SCHEDULER_LEADER_REFRESH", "30"))
+# How often a worker that LOST the startup race re-attempts to acquire the lock.
+# Without this retry a worker that came up during a zero-downtime deploy (while
+# the previous deploy's leader still held the lock) would give up forever ->
+# once the old leader exits, NOBODY schedules and the whole fleet goes dark.
+# This was the live "scheduler not running in prod" root cause. A live leader
+# refreshes its TTL well within the window, so SET NX here only ever succeeds
+# once the previous leader has genuinely gone -> a short interval steals from
+# nobody and just makes takeover prompt after a deploy.
+SCHEDULER_LEADER_RETRY = int(os.getenv("AGENT_SCHEDULER_LEADER_RETRY", "30"))
 
 
 def _scheduler_enabled() -> bool:
@@ -122,12 +131,18 @@ class AgentScheduler:
         self._scheduler = None
         self._fallback_tasks: Dict[str, asyncio.Task] = {}
         self._running = False
+        # Agents captured at start() so a delayed leadership takeover (via the
+        # wait loop below) can schedule them without start() being re-called.
+        self._agents: Dict[str, JarvisAgent] = {}
 
         # Leader-election state (multi-worker singleton guard).
         self._instance_id = str(uuid.uuid4())      # unique per process
         self._redis = None                          # set if we hold the lock
         self._is_leader = False                     # did this process win?
         self._leader_refresh_task: Optional[asyncio.Task] = None
+        # Background retry loop for a worker that lost the startup race but must
+        # take over if the current leader later exits (deploy rollover fix).
+        self._leader_wait_task: Optional[asyncio.Task] = None
 
         if APSCHEDULER_AVAILABLE:
             self._scheduler = AsyncIOScheduler(
@@ -149,28 +164,53 @@ class AgentScheduler:
         a Redis leader lock when Redis is configured). This stops every worker
         in a multi-worker deploy from ticking every agent.
         """
+        # Remember the roster so a delayed takeover can schedule it later.
+        self._agents = agents or {}
+
         # --- Multi-worker singleton guard --------------------------------
         if not _scheduler_enabled():
-            logger.info(
-                "[SCHEDULER] RUN_AGENT_SCHEDULER is false -> not starting "
-                "agent jobs in this process."
-            )
-            return
-        if not await self._acquire_leadership():
-            logger.info(
-                "[SCHEDULER] Another process holds the scheduler leader lock "
-                "-> not starting agent jobs here (worker %s).",
+            # FAIL LOUD: an operator who set this off (or a stray env value)
+            # must see in the logs that the ENTIRE agent fleet is dark here.
+            logger.warning(
+                "[SCHEDULER] RUN_AGENT_SCHEDULER is OFF -> NO agent jobs will "
+                "run in this process. The Jarvis fleet is DARK until this is "
+                "unset or set truthy. (worker %s)",
                 self._instance_id[:8],
             )
             return
+        if not await self._acquire_leadership():
+            # Do NOT give up permanently: keep retrying in the background so
+            # this worker takes over once the current leader exits. Without
+            # this, a worker that booted during a zero-downtime deploy loses
+            # the race, gives up forever, and after the old leader stops NOBODY
+            # schedules -> the live dead-scheduler bug.
+            logger.warning(
+                "[SCHEDULER] Another process holds the scheduler leader lock "
+                "-> not scheduling here yet (worker %s). Will retry every %ss to "
+                "take over if that leader exits.",
+                self._instance_id[:8], SCHEDULER_LEADER_RETRY,
+            )
+            self._start_leader_wait_loop()
+            return
         # -----------------------------------------------------------------
 
+        self._schedule_jobs()
+
+    def _schedule_jobs(self):
+        """Attach every agent's job to the running scheduler.
+
+        Split out of start() so the leader-wait loop can call it on a delayed
+        takeover. Safe to call more than once (APScheduler jobs are added with
+        replace_existing=True and the scheduler is only .start()-ed if not
+        already running) — this is what makes the /agents/reseed rehydrate and
+        the takeover path idempotent.
+        """
         self._running = True
         configs = self._config_manager.get_all_configs()
 
         for config in configs:
             agent_id = config["agent_id"]
-            agent = agents.get(agent_id)
+            agent = self._agents.get(agent_id)
             if not agent:
                 continue
 
@@ -190,14 +230,72 @@ class AgentScheduler:
                     self._add_fallback_task(agent, schedule_type, schedule_value)
 
         if APSCHEDULER_AVAILABLE and self._scheduler:
-            self._scheduler.start()
+            if not getattr(self._scheduler, "running", False):
+                self._scheduler.start()
             logger.info(f"[SCHEDULER] APScheduler started with {len(self._scheduler.get_jobs())} jobs")
         else:
             logger.info(f"[SCHEDULER] Fallback scheduler started with {len(self._fallback_tasks)} tasks")
 
+    def _start_leader_wait_loop(self):
+        """Spawn the background leadership-retry task (idempotent)."""
+        if self._leader_wait_task is not None:
+            return
+        try:
+            self._leader_wait_task = asyncio.create_task(
+                self._leader_wait_loop(), name="agent_scheduler.leader_wait"
+            )
+        except RuntimeError:
+            # No running loop (e.g. called from a sync test context) -- the
+            # takeover retry simply won't run; startup behavior is unchanged.
+            self._leader_wait_task = None
+
+    async def _leader_wait_loop(self):
+        """Re-attempt leadership until we win it, then schedule the jobs.
+
+        Sleeps FIRST so a worker that just lost the startup race leaves start()
+        in the clean 'not scheduling here yet' state before any retry fires. A
+        live leader keeps its lock refreshed, so acquire only succeeds once that
+        leader has genuinely gone -> we never steal from an alive one.
+        """
+        while not self._is_leader and _scheduler_enabled():
+            try:
+                await asyncio.sleep(SCHEDULER_LEADER_RETRY)
+            except asyncio.CancelledError:
+                break
+            if self._is_leader or not _scheduler_enabled():
+                break
+            try:
+                won = await self._acquire_leadership()
+            except Exception as e:
+                logger.warning(f"[SCHEDULER] leader retry acquire failed ({e})")
+                won = False
+            if won:
+                logger.warning(
+                    "[SCHEDULER] Took over scheduler leadership (worker %s) "
+                    "-> scheduling agent jobs now.", self._instance_id[:8],
+                )
+                try:
+                    self._schedule_jobs()
+                except Exception as e:
+                    logger.error(
+                        f"[SCHEDULER] scheduling after takeover failed: {e}",
+                        exc_info=True,
+                    )
+                break
+
     async def shutdown(self):
         """Gracefully shutdown the scheduler."""
         self._running = False
+
+        # Stop the leadership-retry loop (if this worker was waiting to take
+        # over) so it doesn't outlive shutdown or clobber a new leader.
+        if self._leader_wait_task is not None:
+            self._leader_wait_task.cancel()
+            try:
+                await self._leader_wait_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._leader_wait_task = None
 
         if APSCHEDULER_AVAILABLE and self._scheduler:
             # Only a leader actually started the APScheduler; guard the call so
@@ -229,6 +327,13 @@ class AgentScheduler:
             - not acquired       -> False (someone else is the leader)
             - Redis error         -> True  (fail-soft + warning)
         """
+        # Idempotent re-entry: if we already hold the lock (or are the fail-soft
+        # no-Redis leader), don't SET NX again -- our own key would deny us and
+        # we'd wrongly conclude someone else leads. Lets /agents/reseed re-run
+        # start() on the live leader without spawning a spurious wait loop.
+        if self._is_leader:
+            return True
+
         client = _make_redis_client()
         if client is None:
             # Either Redis isn't set up at all, or we couldn't reach it. Both

@@ -20,6 +20,7 @@ DEFAULT_AGENT_CONFIGS.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -240,3 +241,72 @@ async def test_release_does_not_delete_another_workers_lock(monkeypatch):
     await sched._release_leadership()
     # New owner's lock survives.
     assert store.kv[scheduler_mod.SCHEDULER_LEADER_KEY] == "new-owner-worker"
+
+
+# ---------------------------------------------------------------------------
+# Deploy-rollover takeover: a loser must RETRY and take over when the lock frees
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loser_spawns_wait_loop_not_permanent_giveup(monkeypatch):
+    """Losing the startup race must NOT be permanent. start() spawns a
+    background leadership-retry task instead of giving up forever (the live
+    dead-scheduler root cause)."""
+    monkeypatch.setenv("RUN_AGENT_SCHEDULER", "true")
+    monkeypatch.setattr(scheduler_mod, "SCHEDULER_LEADER_RETRY", 0)
+    store = FakeRedisStore()
+    store.kv[scheduler_mod.SCHEDULER_LEADER_KEY] = "old-leader"
+    monkeypatch.setattr(scheduler_mod, "_make_redis_client",
+                        lambda: FakeRedis(store))
+
+    sched = AgentScheduler(db=None)
+    await sched.start(agents={})
+
+    assert sched._is_leader is False
+    assert sched._running is False  # loser schedules nothing yet
+    assert sched._leader_wait_task is not None  # but keeps trying
+    await sched.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_loser_takes_over_when_lock_frees(monkeypatch):
+    """Once the previous leader releases the lock, the waiting worker acquires
+    leadership on a retry and starts scheduling -- so a zero-downtime deploy
+    never leaves the fleet permanently dark."""
+    monkeypatch.setenv("RUN_AGENT_SCHEDULER", "true")
+    monkeypatch.setattr(scheduler_mod, "SCHEDULER_LEADER_RETRY", 0)
+    store = FakeRedisStore()
+    store.kv[scheduler_mod.SCHEDULER_LEADER_KEY] = "old-leader"
+    monkeypatch.setattr(scheduler_mod, "_make_redis_client",
+                        lambda: FakeRedis(store))
+
+    sched = AgentScheduler(db=None)
+    await sched.start(agents={})
+    assert sched._is_leader is False
+
+    # The previous leader exits -> its lock is gone.
+    store.kv.pop(scheduler_mod.SCHEDULER_LEADER_KEY, None)
+
+    # Let the retry loop run a few event-loop turns and take over.
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if sched._is_leader:
+            break
+
+    assert sched._is_leader is True
+    assert store.kv[scheduler_mod.SCHEDULER_LEADER_KEY] == sched._instance_id
+    assert sched._running is True  # scheduling happened on takeover
+    await sched.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_env_gate_off_does_not_spawn_wait_loop(monkeypatch):
+    """RUN_AGENT_SCHEDULER off -> hard stop, no retry loop (nothing to wait
+    for) -- and it must be logged, not silent."""
+    monkeypatch.setenv("RUN_AGENT_SCHEDULER", "false")
+    sched = AgentScheduler(db=None)
+    await sched.start(agents={})
+    assert sched._is_leader is False
+    assert sched._leader_wait_task is None
+    await sched.shutdown()
