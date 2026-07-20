@@ -83,25 +83,34 @@ def _normalize_shop(raw: Any) -> str:
     return s.rstrip("/")
 
 
-def _vault_config(db) -> Dict[str, Any]:
-    """The decrypted Mongo integrations config for shopify. Fail-soft -> {}.
-    Imported lazily to avoid an import cycle (nexus_providers imports this
-    module for its own credential resolution)."""
+def _vault_config(db, storefront_id: str = "BV") -> Dict[str, Any]:
+    """The decrypted Mongo integrations config for shopify, keyed to one
+    storefront. Fail-soft -> {}. Imported lazily to avoid an import cycle
+    (nexus_providers imports this module for its own credential resolution).
+
+    The keyed lookup is BACKWARD-COMPATIBLE: the live BV integrations doc has
+    NO storefront_id field, so _load_integration_config matches it via an
+    $or:[{storefront_id}, {storefront_id:$exists:false}] filter (see there).
+    For storefront_id=="BV" this resolves the exact same doc as before."""
     try:
         from agents.nexus_providers import _load_integration_config
 
-        return _load_integration_config(db, "shopify") or {}
+        return (
+            _load_integration_config(db, "shopify", storefront_id=storefront_id) or {}
+        )
     except Exception:  # noqa: BLE001 -- a config read must never raise here
         return {}
 
 
-def _resolve_shop(db, vault: Optional[Dict[str, Any]] = None) -> str:
+def _resolve_shop(
+    db, vault: Optional[Dict[str, Any]] = None, storefront_id: str = "BV"
+) -> str:
     """The shop host to mint/auth against: SHOPIFY_STORE_URL env wins, else the
     Mongo integrations config.shop_url. Both normalised to a bare host."""
     shop = _normalize_shop(_env("SHOPIFY_STORE_URL"))
     if shop:
         return shop
-    cfg = vault if vault is not None else _vault_config(db)
+    cfg = vault if vault is not None else _vault_config(db, storefront_id)
     return _normalize_shop(cfg.get("shop_url"))
 
 
@@ -174,8 +183,10 @@ def _mint_oauth_token(
     return body or None
 
 
-def resolve_shopify_credentials(db) -> Optional[Dict[str, str]]:
-    """Resolve usable Shopify Admin API credentials.
+def resolve_shopify_credentials(
+    db, storefront_id: str = "BV"
+) -> Optional[Dict[str, str]]:
+    """Resolve usable Shopify Admin API credentials for ONE storefront.
 
     Returns {"shop_url": <bare host>, "access_token": <token>, "source":
     "oauth"|"vault"|"env"} or None when nothing usable is configured.
@@ -183,14 +194,22 @@ def resolve_shopify_credentials(db) -> Optional[Dict[str, str]]:
     Preference: OAuth client-credentials (minted + cached) > Mongo vault token >
     env static token. Never raises; never logs the token value. See the module
     docstring for the full rationale (the stored vault token is stale/401s;
-    OAuth mint-and-cache is the correct model)."""
+    OAuth mint-and-cache is the correct model).
+
+    `storefront_id` (default "BV") keys the Mongo vault lookup so a second
+    storefront (WizOpt) can resolve its OWN credential doc later. It is
+    BACKWARD-COMPATIBLE: the live BV integrations doc carries no storefront_id,
+    and the keyed lookup still matches it (see _vault_config), so the default
+    "BV" call is byte-identical to the previous single-arg behaviour. OAuth /
+    env resolution stays global (the default storefront's creds) in Phase 0."""
+    storefront_id = (storefront_id or "BV").strip() or "BV"
     client_id = _env("SHOPIFY_CLIENT_ID")
     client_secret = _env("SHOPIFY_CLIENT_SECRET")
-    vault = _vault_config(db)
+    vault = _vault_config(db, storefront_id)
 
     # 1) OAuth client-credentials -- the working path. Mint-and-cache.
     if client_id and client_secret:
-        shop = _resolve_shop(db, vault)
+        shop = _resolve_shop(db, vault, storefront_id)
         if shop:
             cached = _cached_token(shop)
             if cached:
@@ -222,7 +241,7 @@ def resolve_shopify_credentials(db) -> Optional[Dict[str, str]]:
     # 3) Env static token (BVI-style SHOPIFY_ACCESS_TOKEN / SHOPIFY_ADMIN_TOKEN).
     e_token = _env("SHOPIFY_ACCESS_TOKEN") or _env("SHOPIFY_ADMIN_TOKEN")
     if e_token:
-        e_shop = _resolve_shop(db, vault)
+        e_shop = _resolve_shop(db, vault, storefront_id)
         if e_shop:
             logger.info(
                 "[SHOPIFY_AUTH] resolved credentials via source=env shop=%s", e_shop

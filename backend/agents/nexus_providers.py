@@ -53,13 +53,29 @@ class SyncResult:
 # ============================================================================
 
 
-def _load_integration_config(db, integration_type: str) -> Dict[str, Any]:
-    """Look up {type, enabled, config:{...}} for one integration. Returns {} if missing."""
+def _load_integration_config(
+    db, integration_type: str, storefront_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Look up {type, enabled, config:{...}} for one integration. Returns {} if missing.
+
+    `storefront_id` (optional) keys the lookup to ONE storefront (WizOpt
+    multi-storefront Phase 0). It is BACKWARD-COMPATIBLE: the live Shopify
+    integrations doc carries NO storefront_id field, so the query matches it via
+    an $or of [{storefront_id: <sid>}, {storefront_id: {$exists: False}}]. For
+    the default "BV" this resolves the SAME doc as the un-keyed query did, so BV
+    behaves byte-identically. Callers that pass no storefront_id (razorpay,
+    shiprocket, ...) keep the exact previous query."""
     if db is None:
         return {}
     try:
         coll = db.get_collection("integrations")
-        doc = coll.find_one({"type": integration_type.lower(), "enabled": True})
+        query: Dict[str, Any] = {"type": integration_type.lower(), "enabled": True}
+        if storefront_id:
+            query["$or"] = [
+                {"storefront_id": storefront_id},
+                {"storefront_id": {"$exists": False}},
+            ]
+        doc = coll.find_one(query)
         if not doc:
             return {}
         # BUG-155: secrets are Fernet-encrypted at rest; decrypt for provider use.
@@ -184,7 +200,9 @@ async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
             notes=f"SIMULATED — shopify_dispatch_mode={shopify_dispatch_mode()}",
         )
 
-    cfg = _load_integration_config(db, "shopify")
+    # Keyed to the default BV storefront (Phase 0). Backward-compatible: the
+    # untagged live Shopify doc still matches, so BV behaves byte-identically.
+    cfg = _load_integration_config(db, "shopify", storefront_id="BV")
     shop_url = cfg.get("shop_url")
     access_token = cfg.get("access_token")
     if not shop_url or not access_token:
@@ -308,7 +326,9 @@ async def shopify_set_inventory_available(
             },
         )
 
-    cfg = _load_integration_config(db, "shopify")
+    # Keyed to the default BV storefront (Phase 0). Backward-compatible: the
+    # untagged live Shopify doc still matches, so BV behaves byte-identically.
+    cfg = _load_integration_config(db, "shopify", storefront_id="BV")
     shop_url = cfg.get("shop_url")
     access_token = cfg.get("access_token")
     if not shop_url or not access_token:
