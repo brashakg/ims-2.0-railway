@@ -47,8 +47,13 @@ export interface CrossCheckSignoff {
   checked_by_name?: string;
   checked_at?: string;
   note?: string;
+  // Server-recomputed authoritative snapshot.
   mismatch_count?: number;
   gst_payable?: number;
+  mismatch_metrics?: string[];
+  // What the client claimed (drift forensics only).
+  client_mismatch_count?: number;
+  client_gst_payable?: number;
 }
 
 export interface GstCrossCheck {
@@ -58,6 +63,9 @@ export interface GstCrossCheck {
   entity_id: string | null;
   entity_name: string | null;
   store_count: number;
+  stores_computed: number;
+  failed_store_ids: string[];
+  partial: boolean;
   tolerance: number;
   comparisons: CrossCheckRow[];
   rate_breakup: RateBreakupRow[];

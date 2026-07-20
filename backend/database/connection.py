@@ -651,6 +651,20 @@ class DatabaseConnection:
         _idx("vendor_bills", "status", background=True)
         _idx("vendor_bills", [("bill_date", -1)], background=True)
 
+        # GST cross-check sign-offs are keyed (year, month, entity_id) and
+        # written via update_one(..., upsert=True). Without a UNIQUE index two
+        # concurrent sign-offs (double-click / two admins) both take the insert
+        # path and leave duplicate docs, after which find_one returns an
+        # arbitrary one and later upserts touch only one duplicate. Entity-less
+        # sign-offs store entity_id == "_all", so the field is always present.
+        _idx(
+            "gst_crosscheck_signoffs",
+            [("year", 1), ("month", 1), ("entity_id", 1)],
+            unique=True,
+            name="uniq_gst_crosscheck_signoff",
+            background=True,
+        )
+
         # health_checks (SENTINEL telemetry) grows unbounded; TTL auto-expires
         # rows >14d. Building a TTL index needs free disk -- already isolated by
         # _idx so an OutOfDiskSpace here can't abort the others (SENTINEL's in-tick

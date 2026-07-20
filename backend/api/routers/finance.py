@@ -2253,13 +2253,17 @@ async def get_gst_reconciliation(
         )
     )
 
-    # purchase_orders.date is a CALENDAR-date string -- keep calendar-frame
-    # month bounds for it (do NOT reuse the IST-shifted created_at instants).
-    p_lo = datetime(y, m, 1).isoformat()
-    p_hi = (datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)).isoformat()
-    p_match = {"date": {"$gte": p_lo, "$lt": p_hi}}
+    # purchase_orders persist created_at as a BSON datetime (BaseRepository
+    # _add_timestamps). No writer ever set a top-level `date` field, so the old
+    # {"date": <string>} filter matched NOTHING and input_credit read a permanent
+    # 0. Use the SAME IST created_at window as the orders side, and map a PO to an
+    # entity via delivery_store_id OR store_id (gst_reconciliation's own mapping).
+    p_match = {"created_at": {"$gte": start, "$lt": end}}
     if store_ids is not None:
-        p_match["delivery_store_id"] = {"$in": store_ids}
+        p_match["$or"] = [
+            {"delivery_store_id": {"$in": store_ids}},
+            {"store_id": {"$in": store_ids}},
+        ]
     purchases = list(
         db.get_collection("purchase_orders").find(
             p_match, {"_id": 0, "delivery_store_id": 1, "store_id": 1, "tax_amount": 1}
@@ -2302,12 +2306,14 @@ _GST_CROSSCHECK_SIGNOFFS = "gst_crosscheck_signoffs"
 
 
 class GstCrossCheckSignoff(BaseModel):
-    month: int
-    year: int
+    month: int = Field(..., ge=1, le=12)
+    year: int = Field(..., ge=2000, le=2100)
     entity_id: Optional[str] = None
     note: Optional[str] = None
-    # Snapshot of what the accountant saw at sign-off time (mismatch count +
-    # net payable) so the audit record is self-describing after later edits.
+    # What the CLIENT claims it saw. The server RECOMPUTES the cross-check at
+    # sign-off and records its OWN mismatch_count / gst_payable as the
+    # authoritative audit snapshot; these client values are kept only for drift
+    # forensics and must never be trusted as the record of what was signed off.
     mismatch_count: Optional[int] = None
     gst_payable: Optional[float] = None
 
@@ -2391,49 +2397,58 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
     return books, tally
 
 
-@router.get("/gst/cross-check")
-async def get_gst_cross_check(
-    month: Optional[int] = None,
-    year: Optional[int] = None,
-    entity_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
-):
-    """Accountant GST cross-check for a (month, entity): GSTR-1 / GSTR-3B vs the
-    books (orders / payments / Tally / purchase-side ITC), side by side, with
-    per-rate breakup, CDNR + deemed-supply detail, and mismatch flags. A review
-    aid only -- it changes no figure and locks no period."""
-    _require_finance_admin(current_user)
-    db = _get_db()
-    from ..services import gst_crosscheck as _xc
+def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
+    """Compute the full GST cross-check payload for (month, year, entity).
 
-    now = now_ist()
-    m = month or now.month
-    y = year or now.year
+    Shared by the GET (display) and the POST sign-off, which RECOMPUTES
+    server-side so the durable audit snapshot is the SERVER's figure, never the
+    client's claim. Raises 503 when the DB is unreachable and 404 when a named
+    entity resolves to no stores (which would otherwise render every source as
+    0.00 -- a false 'all sources reconcile' green screen). Returns the result
+    WITHOUT the sign-off marker (the GET attaches that separately)."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    from ..services import gst_crosscheck as _xc
+    from .reports import _compute_gstr1, _compute_gstr3b
+
     period = f"{y:04d}-{m:02d}"
 
     s2e, enames = _store_maps(db)
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        if not store_ids:
+            raise HTTPException(
+                status_code=404, detail="No stores found for this entity"
+            )
     else:
         store_ids = list(s2e.keys())
 
     # Reuse the per-store GST-return computations (single source of truth for
-    # the tax math), then aggregate to the entity level in the pure service.
-    from .reports import _compute_gstr1, _compute_gstr3b
-
-    g1_reports, g3_reports = [], []
+    # the tax math), then aggregate to the entity level in the pure service. A
+    # per-store compute failure is tracked (not silently dropped) so the screen
+    # can flag partial data instead of presenting understated GSTR totals as a
+    # tax break, and so sign-off can be blocked.
+    g1_reports, g3_reports, g3_entities = [], [], []
+    failed: set = set()
     for sid in store_ids:
         try:
             g1_reports.append(_compute_gstr1(period, sid))
         except Exception:  # noqa: BLE001 -- one bad store must not sink the view
             logger.exception("cross-check: GSTR-1 compute failed for %s", sid)
+            failed.add(sid)
         try:
             g3_reports.append(_compute_gstr3b(period, sid))
+            g3_entities.append(s2e.get(sid))
         except Exception:  # noqa: BLE001
             logger.exception("cross-check: GSTR-3B compute failed for %s", sid)
+            failed.add(sid)
 
     gstr1 = _xc.aggregate_gstr1(g1_reports)
-    gstr3b = _xc.aggregate_gstr3b(g3_reports)
+    # ITC / RCM are entity-scoped (identical for every sibling store), so pass
+    # the entity per store report -- aggregate_gstr3b counts them ONCE per
+    # entity instead of multiplying by the entity's store count.
+    gstr3b = _xc.aggregate_gstr3b(g3_reports, g3_entities)
 
     start, end = _gst_month_window(y, m)
     books, tally = _books_and_tally_for_stores(db, store_ids, start, end)
@@ -2441,13 +2456,17 @@ async def get_gst_cross_check(
     # Purchase-side ITC (from purchase_orders) as an INDEPENDENT cross-check
     # against GSTR-3B's vendor-bills ITC. Reuse gst_reconciliation()'s math.
     try:
-        p_lo = datetime(y, m, 1).isoformat()
-        p_hi = (
-            datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
-        ).isoformat()
-        p_match = {"date": {"$gte": p_lo, "$lt": p_hi}}
+        # purchase_orders.created_at is a BSON datetime (BaseRepository
+        # _add_timestamps); no writer ever set a `date` field, so the old
+        # `date` string filter matched NOTHING and ITC read a permanent 0. Use
+        # the SAME IST created_at window as the orders side, and map a PO to an
+        # entity via delivery_store_id OR store_id (gst_reconciliation's mapping).
+        p_match: dict = {"created_at": {"$gte": start, "$lt": end}}
         if entity_id:
-            p_match["delivery_store_id"] = {"$in": store_ids}
+            p_match["$or"] = [
+                {"delivery_store_id": {"$in": store_ids}},
+                {"store_id": {"$in": store_ids}},
+            ]
         purchases = list(
             db.get_collection("purchase_orders").find(
                 p_match,
@@ -2471,16 +2490,6 @@ async def get_gst_cross_check(
         books["input_credit"] = None
 
     result = _xc.build_crosscheck(gstr1, gstr3b, books, tally)
-
-    # Attach the latest sign-off (if any) so the screen shows CHECKED status.
-    signoff = None
-    try:
-        signoff = db.get_collection(_GST_CROSSCHECK_SIGNOFFS).find_one(
-            {"year": y, "month": m, "entity_id": entity_id or "_all"}, {"_id": 0}
-        )
-    except Exception:  # noqa: BLE001
-        signoff = None
-
     result.update(
         {
             "month": m,
@@ -2489,6 +2498,9 @@ async def get_gst_cross_check(
             "entity_id": entity_id,
             "entity_name": enames.get(entity_id) if entity_id else "All entities",
             "store_count": len(store_ids),
+            "stores_computed": len(store_ids) - len(failed),
+            "failed_store_ids": sorted(failed),
+            "partial": bool(failed),
             "gstr1": {
                 "totalTaxableValue": gstr1["totalTaxableValue"],
                 "totalTax": gstr1["totalTax"],
@@ -2505,9 +2517,40 @@ async def get_gst_cross_check(
             },
             "books": books,
             "tally": tally,
-            "signoff": signoff,
         }
     )
+    return result
+
+
+@router.get("/gst/cross-check")
+async def get_gst_cross_check(
+    month: Optional[int] = Query(None, ge=1, le=12),
+    year: Optional[int] = Query(None, ge=2000, le=2100),
+    entity_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Accountant GST cross-check for a (month, entity): GSTR-1 / GSTR-3B vs the
+    books (orders / payments / Tally / purchase-side ITC), side by side, with
+    per-rate breakup, CDNR + deemed-supply detail, and mismatch flags. A review
+    aid only -- it changes no figure and locks no period."""
+    _require_finance_admin(current_user)
+    db = _get_db()
+
+    now = now_ist()
+    m = month or now.month
+    y = year or now.year
+
+    result = _run_gst_cross_check(db, m, y, entity_id)
+
+    # Attach the latest sign-off (if any) so the screen shows CHECKED status.
+    signoff = None
+    try:
+        signoff = db.get_collection(_GST_CROSSCHECK_SIGNOFFS).find_one(
+            {"year": y, "month": m, "entity_id": entity_id or "_all"}, {"_id": 0}
+        )
+    except Exception:  # noqa: BLE001
+        signoff = None
+    result["signoff"] = signoff
     return result
 
 
@@ -2526,9 +2569,28 @@ async def gst_cross_check_signoff(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+    m = int(body.month)
+    y = int(body.year)
+
+    # Recompute the cross-check SERVER-SIDE so the durable audit snapshot is the
+    # server's figure, never a (forgeable) client-supplied mismatch_count=0.
+    server = _run_gst_cross_check(db, m, y, body.entity_id)
+    if server.get("partial"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot sign off: %d store(s) failed to compute, so the figures "
+                "are understated. Resolve and retry."
+                % len(server.get("failed_store_ids") or [])
+            ),
+        )
+    server_summary = server.get("summary", {})
+    server_mismatch = int(server_summary.get("mismatch_count", 0) or 0)
+    server_payable = float(server_summary.get("gst_payable", 0.0) or 0.0)
+
     key = {
-        "year": int(body.year),
-        "month": int(body.month),
+        "year": y,
+        "month": m,
         "entity_id": body.entity_id or "_all",
     }
     reviewer = current_user.get("name") or current_user.get("full_name")
@@ -2539,12 +2601,36 @@ async def gst_cross_check_signoff(
         "checked_by_name": reviewer,
         "checked_at": _iso_now(),
         "note": body.note,
-        "mismatch_count": body.mismatch_count,
-        "gst_payable": body.gst_payable,
+        # Server-recomputed authoritative snapshot.
+        "mismatch_count": server_mismatch,
+        "gst_payable": server_payable,
+        "mismatch_metrics": server_summary.get("mismatch_metrics", []),
+        # What the client claimed it saw (drift forensics only, never trusted).
+        "client_mismatch_count": body.mismatch_count,
+        "client_gst_payable": body.gst_payable,
     }
+
+    # Preserve any prior sign-off in a history array instead of silently
+    # overwriting another reviewer's record.
+    prior = None
+    try:
+        prior = db.get_collection(_GST_CROSSCHECK_SIGNOFFS).find_one(key, {"_id": 0})
+    except Exception:  # noqa: BLE001
+        prior = None
+    update: dict = {"$set": record}
+    if prior:
+        update["$push"] = {
+            "history": {
+                k: prior.get(k)
+                for k in (
+                    "checked_by", "checked_by_name", "checked_at", "note",
+                    "mismatch_count", "gst_payable", "client_mismatch_count",
+                )
+            }
+        }
     try:
         db.get_collection(_GST_CROSSCHECK_SIGNOFFS).update_one(
-            key, {"$set": record}, upsert=True
+            key, update, upsert=True
         )
     except Exception:  # noqa: BLE001
         logger.exception("GST cross-check sign-off failed")
@@ -2571,7 +2657,9 @@ async def gst_cross_check_signoff(
                     "after_state": {
                         "checked": True,
                         "note": body.note,
-                        "mismatch_count": body.mismatch_count,
+                        "mismatch_count": server_mismatch,
+                        "gst_payable": server_payable,
+                        "client_mismatch_count": body.mismatch_count,
                     },
                 }
             )

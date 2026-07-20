@@ -29,6 +29,14 @@ import { useToast } from '../../context/ToastContext';
 const inr = (n?: number) =>
   `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
+// Variance is shown to 2dp: at a ₹1 tolerance, a ₹0.99 MATCH and a ₹1.40
+// MISMATCH must not both render as "₹1".
+const inr2 = (n?: number) =>
+  `₹${(Number(n) || 0).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
 function currentMonth(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -221,6 +229,23 @@ export default function GstCrossCheckPage() {
             </div>
           </div>
 
+          {/* Partial-data warning: some stores failed to compute, so the GSTR
+              columns are understated. Sign-off is blocked until it clears. */}
+          {data.partial && (
+            <div className="mb-5 flex items-start gap-2 px-4 py-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800">
+              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <div>
+                Partial data: {data.stores_computed} of {data.store_count} store
+                {data.store_count === 1 ? '' : 's'} computed
+                {data.failed_store_ids.length > 0
+                  ? ` (failed: ${data.failed_store_ids.join(', ')})`
+                  : ''}
+                . The GSTR figures are understated — do not sign off until this
+                is resolved.
+              </div>
+            </div>
+          )}
+
           {/* Existing sign-off note */}
           {data.signoff?.checked && (
             <div className="mb-5 flex items-start gap-2 px-4 py-2.5 rounded-lg border border-green-200 bg-green-50 text-sm text-green-800">
@@ -283,7 +308,9 @@ export default function GstCrossCheckPage() {
                           : 'text-gray-500'
                       }`}
                     >
-                      {row.status === 'INFO' ? '--' : inr(row.variance)}
+                      {Object.keys(row.sources).length >= 2
+                        ? inr2(row.variance)
+                        : '--'}
                     </td>
                     <td className="px-4 py-2 text-right">
                       <StatusBadge status={row.status} />
@@ -392,7 +419,7 @@ export default function GstCrossCheckPage() {
               <button
                 type="button"
                 onClick={doSignoff}
-                disabled={signingOff}
+                disabled={signingOff || data.partial}
                 className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60"
               >
                 {signingOff ? (
@@ -402,7 +429,12 @@ export default function GstCrossCheckPage() {
                 )}
                 {data.signoff?.checked ? 'Re-check month' : 'Mark month CHECKED'}
               </button>
-              {!data.summary.all_matched && (
+              {data.partial && (
+                <span className="text-xs text-red-700">
+                  Sign-off blocked: some stores failed to compute.
+                </span>
+              )}
+              {!data.partial && !data.summary.all_matched && (
                 <span className="text-xs text-amber-700">
                   {data.summary.mismatch_count} unreconciled mismatch
                   {data.summary.mismatch_count === 1 ? '' : 'es'} -- add a note

@@ -117,6 +117,12 @@ def aggregate_gstr1(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     deemed = [r for r in b2b if r.get("deemedSupply")]
     deemed_taxable = sum(_f(r.get("taxableValue")) for r in deemed)
     deemed_tax = sum(_f(r.get("totalTax")) for r in deemed)
+    # Per-head split of the deemed supply so the cross-check can add it to the
+    # orders-only Books/Tally sources (which never see inter-GSTIN transfers)
+    # and line them up with GSTR-1/3B (which already include it).
+    deemed_cgst = sum(_f(r.get("cgst")) for r in deemed)
+    deemed_sgst = sum(_f(r.get("sgst")) for r in deemed)
+    deemed_igst = sum(_f(r.get("igst")) for r in deemed)
 
     cdnr_taxable = sum(_f(c.get("taxableValue")) for c in cdnr)
     cdnr_tax = sum(
@@ -156,6 +162,9 @@ def aggregate_gstr1(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
             "count": len(deemed),
             "taxableValue": _r(deemed_taxable),
             "tax": _r(deemed_tax),
+            "cgst": _r(deemed_cgst),
+            "sgst": _r(deemed_sgst),
+            "igst": _r(deemed_igst),
             "rows": deemed,
         },
         "rate_breakup": rate_breakup,
@@ -167,38 +176,93 @@ def aggregate_gstr1(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def aggregate_gstr3b(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate_gstr3b(
+    store_reports: List[Dict[str, Any]],
+    entity_ids: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
     """Merge N per-store GSTR-3B dicts (reports.py::_compute_gstr3b) into one
     entity-level dict: outward taxable + tax, ITC available, net cash payable,
-    and reverse-charge (RCM). Pure."""
-    out_taxable = 0.0
-    out_c = out_s = out_i = 0.0
-    itc_c = itc_s = itc_i = 0.0
-    cash_c = cash_s = cash_i = 0.0
-    rcm_taxable = 0.0
-    rcm_c = rcm_s = rcm_i = 0.0
+    and reverse-charge (RCM). Pure.
 
-    for rep in store_reports or []:
-        if not isinstance(rep, dict):
-            continue
-        out_taxable += _f(rep.get("outwardTaxableValue"))
+    OUTWARD supply is STORE-scoped (reports.py reads it from that store's own
+    orders + sender-side transfer bills), so it is SUMMED across every store.
+
+    ITC and RCM are ENTITY-scoped: reports.py::_itc_from_vendor_bills /
+    _rcm_from_vendor_bills filter on recipient_entity_id, so EVERY store of an
+    entity returns the SAME Table-4 ITC/RCM ("one GSTIN, one filing"). Summing
+    them across sibling stores multiplies ITC / RCM / net cash by the store
+    count -- the P1 defect this closes. Pass ``entity_ids`` (a parallel list,
+    one entity_id per store report) so ITC/RCM are counted ONCE per entity; a
+    store whose entity_id is falsy contributes ZERO ITC/RCM (its per-store
+    figure is org-wide, not entity-scoped, so it must not be trusted).
+
+    Net cash is derived ENTITY-LEVEL after aggregation as per-head
+    max(0, out - itc) + rcm and summed across entities -- one entity's ITC
+    surplus can never offset another entity's output tax (distinct GSTINs file
+    separately), and RCM is always discharged in cash on top.
+
+    ``entity_ids=None`` keeps the legacy per-report summation, for callers that
+    already know every report is a distinct entity."""
+    reports = [r for r in (store_reports or []) if isinstance(r, dict)]
+    if entity_ids is None:
+        keys: List[Any] = list(range(len(reports)))
+    else:
+        keys = [
+            entity_ids[i] if i < len(entity_ids) else None
+            for i in range(len(reports))
+        ]
+
+    def _blank() -> Dict[str, float]:
+        return {
+            "out_c": 0.0, "out_s": 0.0, "out_i": 0.0, "out_taxable": 0.0,
+            "itc_c": 0.0, "itc_s": 0.0, "itc_i": 0.0,
+            "rcm_c": 0.0, "rcm_s": 0.0, "rcm_i": 0.0, "rcm_taxable": 0.0,
+        }
+
+    # Accumulate PER ENTITY so ITC/RCM (entity-scoped) is not multiplied and net
+    # cash is clamped per entity, not on the cross-entity grand total.
+    buckets: Dict[Any, Dict[str, float]] = {}
+    itc_taken: set = set()
+    for rep, key in zip(reports, keys):
+        # Storeless stores (falsy entity_id) share one bucket: their outward is
+        # real and counted, but they never contribute ITC/RCM.
+        bkey = key if (entity_ids is None or key) else "__no_entity__"
+        b = buckets.setdefault(bkey, _blank())
+        b["out_taxable"] += _f(rep.get("outwardTaxableValue"))
         osup = rep.get("outwardTaxableSupplies") or {}
-        out_c += _f(osup.get("centralTax"))
-        out_s += _f(osup.get("stateTax"))
-        out_i += _f(osup.get("integratedTax"))
-        itc = rep.get("itcAvailable") or {}
-        itc_c += _f(itc.get("centralTax"))
-        itc_s += _f(itc.get("stateTax"))
-        itc_i += _f(itc.get("integratedTax"))
-        cash = rep.get("taxPaidCash") or {}
-        cash_c += _f(cash.get("centralTax"))
-        cash_s += _f(cash.get("stateTax"))
-        cash_i += _f(cash.get("integratedTax"))
-        rcm_taxable += _f(rep.get("inwardSuppliesReverseChargeValue"))
-        rcm = rep.get("inwardSuppliesReverseCharge") or {}
-        rcm_c += _f(rcm.get("centralTax"))
-        rcm_s += _f(rcm.get("stateTax"))
-        rcm_i += _f(rcm.get("integratedTax"))
+        b["out_c"] += _f(osup.get("centralTax"))
+        b["out_s"] += _f(osup.get("stateTax"))
+        b["out_i"] += _f(osup.get("integratedTax"))
+        take_itc = (entity_ids is None or bool(key)) and key not in itc_taken
+        if take_itc:
+            itc_taken.add(key)
+            itc = rep.get("itcAvailable") or {}
+            b["itc_c"] += _f(itc.get("centralTax"))
+            b["itc_s"] += _f(itc.get("stateTax"))
+            b["itc_i"] += _f(itc.get("integratedTax"))
+            rcm = rep.get("inwardSuppliesReverseCharge") or {}
+            b["rcm_c"] += _f(rcm.get("centralTax"))
+            b["rcm_s"] += _f(rcm.get("stateTax"))
+            b["rcm_i"] += _f(rcm.get("integratedTax"))
+            b["rcm_taxable"] += _f(rep.get("inwardSuppliesReverseChargeValue"))
+
+    vals = list(buckets.values())
+    out_taxable = sum(b["out_taxable"] for b in vals)
+    out_c = sum(b["out_c"] for b in vals)
+    out_s = sum(b["out_s"] for b in vals)
+    out_i = sum(b["out_i"] for b in vals)
+    itc_c = sum(b["itc_c"] for b in vals)
+    itc_s = sum(b["itc_s"] for b in vals)
+    itc_i = sum(b["itc_i"] for b in vals)
+    rcm_c = sum(b["rcm_c"] for b in vals)
+    rcm_s = sum(b["rcm_s"] for b in vals)
+    rcm_i = sum(b["rcm_i"] for b in vals)
+    rcm_taxable = sum(b["rcm_taxable"] for b in vals)
+    # Net cash: per entity, per head, output minus ITC clamped at 0, plus RCM;
+    # then summed across entities.
+    cash_c = sum(max(0.0, b["out_c"] - b["itc_c"]) + b["rcm_c"] for b in vals)
+    cash_s = sum(max(0.0, b["out_s"] - b["itc_s"]) + b["rcm_s"] for b in vals)
+    cash_i = sum(max(0.0, b["out_i"] - b["itc_i"]) + b["rcm_i"] for b in vals)
 
     return {
         "outwardTaxableValue": _r(out_taxable),
@@ -238,17 +302,27 @@ def _cmp_row(
     sources: Dict[str, Optional[float]],
     tolerance: float,
     note: str = "",
+    advisory: bool = False,
 ) -> Dict[str, Any]:
     """Build one comparison row. ``sources`` maps a source label -> value (or
     None when that source does not report the metric). Variance is the spread
     across the reported (non-None) values; status is MATCH within tolerance,
     else MISMATCH. A row with fewer than two reported sources is INFO (nothing
-    to reconcile against)."""
+    to reconcile against).
+
+    ``advisory=True`` still computes the variance (so the gap is visible) but
+    reports status INFO so the row is EXCLUDED from mismatch_count / all_matched
+    -- used for rows whose gap is expected by design (e.g. invoiced-vs-collected
+    on the credit/advance-payment retail model), so genuine GST breaks are not
+    buried under a recurring, benign amber flag."""
     reported = {k: _r(v) for k, v in sources.items() if v is not None}
     values = list(reported.values())
     if len(values) >= 2:
         variance = round(max(values) - min(values), 2)
-        status = "MATCH" if variance <= tolerance else "MISMATCH"
+        if advisory:
+            status = "INFO"
+        else:
+            status = "MATCH" if variance <= tolerance else "MISMATCH"
     else:
         variance = 0.0
         status = "INFO"
@@ -296,6 +370,50 @@ def build_crosscheck(
     itc_total = _f((gstr3b.get("itc") or {}).get("total"))
     net_cash = _f((gstr3b.get("netCash") or {}).get("total"))
 
+    # Inter-GSTIN transfer deemed supply (Schedule I). GSTR-1 / GSTR-3B INCLUDE
+    # it; the orders-only Books/Tally sources do NOT (a stock transfer is not an
+    # order). Add it to Books/Tally on the outward rows so a routine transfer
+    # month does not flag a phantom MISMATCH on the headline totals.
+    deemed = gstr1.get("deemed_supply") or {}
+    d_taxable = _f(deemed.get("taxableValue"))
+    d_tax = _f(deemed.get("tax"))
+    d_cgst = _f(deemed.get("cgst"))
+    d_sgst = _f(deemed.get("sgst"))
+    d_igst = _f(deemed.get("igst"))
+    deemed_note = (
+        (
+            "Books / Tally include Rs %s inter-GSTIN transfer deemed supply "
+            "(Rs %s tax) so they line up with GSTR-1 / GSTR-3B, which already "
+            "carry it. See the deemed-supply card below."
+            % (f"{d_taxable:,.2f}", f"{d_tax:,.2f}")
+        )
+        if (d_taxable or d_tax)
+        else ""
+    )
+    # A CGST/SGST-vs-IGST swap whose totals still agree is state-format drift
+    # (store vs customer state stored as name vs code), not a real break.
+    state_note = (
+        "If this splits differently across sources but 'Total output GST' still "
+        "matches, it is store/customer state-format drift (e.g. 'Jharkhand' vs "
+        "'JH'), not a GST break."
+    )
+    head_note = (deemed_note + " " + state_note).strip() if deemed_note else state_note
+
+    # Per-head net cash the SAME way GSTR-3B derives it (output minus ITC clamped
+    # at 0, plus RCM), so this row is like-for-like and only breaks on a real
+    # 3B math error. In a single-entity view it equals gstr3b.netCash exactly.
+    out_c = _f(gstr3b.get("cgst"))
+    out_s = _f(gstr3b.get("sgst"))
+    out_i = _f(gstr3b.get("igst"))
+    itc = gstr3b.get("itc") or {}
+    rcm = gstr3b.get("rcm") or {}
+    net_expected = round(
+        max(0.0, out_c - _f(itc.get("cgst"))) + _f(rcm.get("cgst"))
+        + max(0.0, out_s - _f(itc.get("sgst"))) + _f(rcm.get("sgst"))
+        + max(0.0, out_i - _f(itc.get("igst"))) + _f(rcm.get("igst")),
+        2,
+    )
+
     b_taxable = _f(books.get("sales_taxable"))
     b_tax = _f(books.get("sales_tax"))
     b_grand = _f(books.get("sales_grand_total"))
@@ -308,47 +426,52 @@ def build_crosscheck(
             {
                 "GSTR-1": g1_taxable,
                 "GSTR-3B": _f(gstr3b.get("outwardTaxableValue")),
-                "Books (orders)": b_taxable,
-                "Tally Sales JV": _f(tally.get("taxable")),
+                "Books (orders)": b_taxable + d_taxable,
+                "Tally Sales JV": _f(tally.get("taxable")) + d_taxable,
             },
             tolerance,
+            note=deemed_note,
         ),
         _cmp_row(
             "Total output GST",
             {
                 "GSTR-1": g1_tax,
                 "GSTR-3B": g3_out_tax,
-                "Books (orders)": b_tax,
-                "Tally Sales JV": _f(tally.get("tax")),
+                "Books (orders)": b_tax + d_tax,
+                "Tally Sales JV": _f(tally.get("tax")) + d_tax,
             },
             tolerance,
+            note=deemed_note,
         ),
         _cmp_row(
             "CGST (output)",
             {
                 "GSTR-1": _f(gstr1.get("cgst")),
                 "GSTR-3B": _f(gstr3b.get("cgst")),
-                "Tally Sales JV": _f(tally.get("cgst")),
+                "Tally Sales JV": _f(tally.get("cgst")) + d_cgst,
             },
             tolerance,
+            note=head_note,
         ),
         _cmp_row(
             "SGST (output)",
             {
                 "GSTR-1": _f(gstr1.get("sgst")),
                 "GSTR-3B": _f(gstr3b.get("sgst")),
-                "Tally Sales JV": _f(tally.get("sgst")),
+                "Tally Sales JV": _f(tally.get("sgst")) + d_sgst,
             },
             tolerance,
+            note=head_note,
         ),
         _cmp_row(
             "IGST (output)",
             {
                 "GSTR-1": _f(gstr1.get("igst")),
                 "GSTR-3B": _f(gstr3b.get("igst")),
-                "Tally Sales JV": _f(tally.get("igst")),
+                "Tally Sales JV": _f(tally.get("igst")) + d_igst,
             },
             tolerance,
+            note=head_note,
         ),
         _cmp_row(
             "Input tax credit (ITC)",
@@ -369,9 +492,15 @@ def build_crosscheck(
             "Net GST payable (cash)",
             {
                 "GSTR-3B": net_cash,
-                "Output - ITC": round(g3_out_tax - itc_total, 2),
+                "Output - ITC + RCM": net_expected,
             },
             tolerance,
+            note=(
+                "Output tax minus ITC (floored at zero per head) plus reverse-"
+                "charge tax, which is paid in cash. In the combined all-entities "
+                "view a small gap can appear because each entity's cash is "
+                "clamped separately (one entity's ITC cannot offset another's)."
+            ),
         ),
         _cmp_row(
             "Sales: invoiced vs collected",
@@ -382,8 +511,10 @@ def build_crosscheck(
             tolerance,
             note=(
                 "A gap here is normal when sales are on credit / partly paid -- "
-                "it is a collections check, not a GST break."
+                "it is a collections check, not a GST break, so it does not count "
+                "toward the mismatch total."
             ),
+            advisory=True,
         ),
     ]
 

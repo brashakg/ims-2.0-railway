@@ -108,7 +108,13 @@ def _store_gstr1(deemed=False):
     return rep
 
 
-def _store_gstr3b():
+def _store_gstr3b(rcm_c=0.0, rcm_s=0.0, rcm_taxable=0.0):
+    """One store's GSTR-3B (reports.py::_compute_gstr3b shape).
+
+    IMPORTANT: itcAvailable and inwardSuppliesReverseCharge are ENTITY-scoped in
+    reports.py -- every sibling store of the same GSTIN returns the SAME values.
+    Tests that aggregate sibling stores MUST pass entity_ids so they are counted
+    once, not multiplied (the P1 defect the fixtures previously masked)."""
     return {
         "period": "2026-04",
         "outwardTaxableValue": 20000.0,
@@ -130,9 +136,12 @@ def _store_gstr3b():
             "stateTax": 750.0,
             "cess": 0.0,
         },
-        "inwardSuppliesReverseChargeValue": 0.0,
+        "inwardSuppliesReverseChargeValue": rcm_taxable,
         "inwardSuppliesReverseCharge": {
-            "integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0,
+            "integratedTax": 0.0,
+            "centralTax": rcm_c,
+            "stateTax": rcm_s,
+            "cess": 0.0,
         },
     }
 
@@ -207,13 +216,59 @@ def test_aggregate_gstr1_collects_validation_issues():
 # ---------------------------------------------------------------------------
 
 
-def test_aggregate_gstr3b_sums_stores():
+def test_aggregate_gstr3b_untagged_sums_per_report():
+    # Legacy fallback (entity_ids=None): each report treated as its own entity.
     agg = aggregate_gstr3b([_store_gstr3b(), _store_gstr3b()])
     assert agg["outwardTaxableValue"] == 40000.0
     assert agg["cgst"] == 2300.0
     assert agg["outwardTax"] == 4600.0
     assert agg["itc"]["total"] == 1600.0
+    # Net cash per report: max(0, 1150-400) x2 heads x2 reports = 3000.
     assert agg["netCash"]["total"] == 3000.0
+
+
+def test_aggregate_gstr3b_dedups_entity_itc_rcm():
+    # P1-1: two stores of the SAME entity. Outward is store-scoped -> summed;
+    # ITC/RCM are entity-scoped -> counted ONCE (not doubled).
+    agg = aggregate_gstr3b([_store_gstr3b(), _store_gstr3b()], ["E1", "E1"])
+    assert agg["outwardTaxableValue"] == 40000.0  # summed
+    assert agg["cgst"] == 2300.0                  # summed
+    assert agg["outwardTax"] == 4600.0
+    assert agg["itc"]["total"] == 800.0           # counted once, not 1600
+    # Net cash entity-level: max(0, 2300-400) per head x2 = 3800 (not the old
+    # 3000, which double-subtracted the entity ITC on each store).
+    assert agg["netCash"]["total"] == 3800.0
+
+
+def test_aggregate_gstr3b_multi_entity_itc_summed_across_entities():
+    # Two DISTINCT entities -> each entity's ITC counted once, then summed;
+    # net cash clamped PER entity (no cross-entity ITC offset).
+    agg = aggregate_gstr3b([_store_gstr3b(), _store_gstr3b()], ["E1", "E2"])
+    assert agg["itc"]["total"] == 1600.0
+    assert agg["netCash"]["total"] == 3000.0
+
+
+def test_aggregate_gstr3b_storeless_contributes_no_itc():
+    # A store with a falsy entity_id: its outward is real and counted, but its
+    # per-store ITC is org-wide garbage and must be dropped to zero.
+    agg = aggregate_gstr3b([_store_gstr3b()], [None])
+    assert agg["outwardTax"] == 2300.0
+    assert agg["itc"]["total"] == 0.0
+    assert agg["netCash"]["total"] == 2300.0  # max(0, 1150-0) x2 heads
+
+
+def test_aggregate_gstr3b_rcm_counted_once_and_added_to_cash():
+    # RCM is entity-scoped like ITC: two siblings must not double it, and it is
+    # always added to net cash (it cannot be set off against ITC).
+    agg = aggregate_gstr3b(
+        [_store_gstr3b(rcm_c=100.0, rcm_s=100.0, rcm_taxable=2000.0),
+         _store_gstr3b(rcm_c=100.0, rcm_s=100.0, rcm_taxable=2000.0)],
+        ["E1", "E1"],
+    )
+    assert agg["rcm"]["total"] == 200.0           # once, not 400
+    assert agg["rcm"]["taxableValue"] == 2000.0
+    # Net cash: max(0, 2300-400) per head x2 + RCM 200 = 3800 + 200 = 4000.
+    assert agg["netCash"]["total"] == 4000.0
 
 
 def test_aggregate_gstr3b_empty_is_safe():
@@ -317,15 +372,90 @@ def test_build_crosscheck_carries_rate_and_cdnr_detail():
     assert res["summary"]["gst_payable"] == 3000.0
 
 
-def test_build_crosscheck_collections_gap_is_flagged():
+def test_build_crosscheck_collections_gap_is_advisory():
+    # P3-1: a collections gap is normal on the credit/advance-payment model, so
+    # the row is INFO (variance still shown) and is EXCLUDED from the mismatch
+    # rollup -- otherwise alarm fatigue buries real GST breaks.
     gstr1, gstr3b, books, tally = _matched_inputs()
     books["payments_collected"] = 40000.0  # 4600 uncollected (credit sales)
     res = build_crosscheck(gstr1, gstr3b, books, tally)
     row = next(
         c for c in res["comparisons"] if c["metric"] == "Sales: invoiced vs collected"
     )
-    assert row["status"] == "MISMATCH"
+    assert row["status"] == "INFO"
     assert row["variance"] == 4600.0
+    assert "Sales: invoiced vs collected" not in res["summary"]["mismatch_metrics"]
+    assert res["summary"]["all_matched"] is True
+
+
+def _aggregated_gstr3b(out_c, out_s, out_i, itc_total=0.0, rcm_total=0.0):
+    """Hand-built aggregate_gstr3b-shaped dict for build_crosscheck tests."""
+    return {
+        "outwardTaxableValue": round((out_c + out_s + out_i) * 100.0, 2),
+        "cgst": out_c,
+        "sgst": out_s,
+        "igst": out_i,
+        "outwardTax": round(out_c + out_s + out_i, 2),
+        "itc": {"cgst": itc_total, "sgst": 0.0, "igst": 0.0, "total": itc_total},
+        "netCash": {
+            "cgst": max(0.0, out_c - itc_total),
+            "sgst": out_s,
+            "igst": out_i,
+            "total": round(max(0.0, out_c - itc_total) + out_s + out_i + rcm_total, 2),
+        },
+        "rcm": {"taxableValue": 0.0, "cgst": rcm_total, "sgst": 0.0, "igst": 0.0,
+                "total": rcm_total},
+    }
+
+
+def test_build_crosscheck_deemed_supply_aligns_outward_rows():
+    # P2-2: GSTR-1/3B include inter-GSTIN transfer deemed supply; the orders-only
+    # Books/Tally do not. build_crosscheck must ADD deemed to Books/Tally so the
+    # outward rows do not flag a phantom MISMATCH on a routine transfer month.
+    gstr1 = aggregate_gstr1([_store_gstr1(deemed=True)])
+    # gstr1: taxable 25000, tax 3200, cgst 1150, sgst 1150, igst 900 (deemed).
+    gstr3b = {
+        "outwardTaxableValue": 25000.0,
+        "cgst": 1150.0, "sgst": 1150.0, "igst": 900.0,
+        "outwardTax": 3200.0,
+        "itc": {"cgst": 0.0, "sgst": 0.0, "igst": 0.0, "total": 0.0},
+        "netCash": {"cgst": 1150.0, "sgst": 1150.0, "igst": 900.0, "total": 3200.0},
+        "rcm": {"taxableValue": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0, "total": 0.0},
+    }
+    # Books/Tally exclude the 5000 / 900 transfer.
+    books = {
+        "sales_taxable": 20000.0, "sales_tax": 2300.0,
+        "sales_grand_total": 22300.0, "payments_collected": 22300.0,
+        "input_credit": 0.0,
+    }
+    tally = {"taxable": 20000.0, "tax": 2300.0, "cgst": 1150.0, "sgst": 1150.0, "igst": 0.0}
+    res = build_crosscheck(gstr1, gstr3b, books, tally)
+    by_metric = {c["metric"]: c for c in res["comparisons"]}
+    for metric in (
+        "Taxable value (outward)", "Total output GST",
+        "CGST (output)", "SGST (output)", "IGST (output)",
+    ):
+        assert by_metric[metric]["status"] == "MATCH", metric
+    # The IGST row is the one that would go red without alignment (Tally 0 vs 900).
+    assert by_metric["IGST (output)"]["sources"]["Tally Sales JV"] == 900.0
+    assert res["deemed_supply"]["taxableValue"] == 5000.0
+    assert res["summary"]["all_matched"] is True
+
+
+def test_build_crosscheck_net_cash_row_like_for_like():
+    # P2-1: the 'Net GST payable (cash)' comparator must recompute per head with
+    # clamp + RCM so it matches gstr3b.netCash instead of raw output-minus-ITC.
+    gstr1 = aggregate_gstr1([_store_gstr1()])
+    gstr3b = _aggregated_gstr3b(1150.0, 1150.0, 0.0, itc_total=400.0, rcm_total=100.0)
+    books = {"sales_taxable": 20000.0, "sales_tax": 2300.0,
+             "sales_grand_total": 22300.0, "payments_collected": 22300.0,
+             "input_credit": 400.0}
+    tally = {"taxable": 20000.0, "tax": 2300.0, "cgst": 1150.0, "sgst": 1150.0, "igst": 0.0}
+    res = build_crosscheck(gstr1, gstr3b, books, tally)
+    row = next(c for c in res["comparisons"] if c["metric"] == "Net GST payable (cash)")
+    # netCash = max(0,1150-400)+1150+100 = 2000 ; comparator recomputes the same.
+    assert row["sources"]["Output - ITC + RCM"] == 2000.0
+    assert row["status"] == "MATCH"
 
 
 def test_build_crosscheck_empty_inputs_safe():
