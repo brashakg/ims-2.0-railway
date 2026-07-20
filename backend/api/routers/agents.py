@@ -80,6 +80,19 @@ class AgentStatusResponse(BaseModel):
     last_run: Optional[str] = Field(
         None, description="ISO8601 timestamp of most recent tick or null"
     )
+    last_tick_at: Optional[str] = Field(
+        None,
+        description=(
+            "ISO8601 timestamp of the most recent scheduler heartbeat for this "
+            "agent (from agent_heartbeats). Updated on EVERY tick — including a "
+            "tick skipped because the agent is toggled OFF — so a live value "
+            "here proves the scheduler is actually reaching the agent. Null "
+            "means no tick has landed (scheduler dead or agent never scheduled)."
+        ),
+    )
+    heartbeat_status: Optional[str] = Field(
+        None, description="Last heartbeat outcome — ok | error | skipped"
+    )
     last_status: Optional[str] = Field(
         None, description="success | error from the last tick"
     )
@@ -169,6 +182,42 @@ def _get_scheduler():
         return None
 
 
+def _iso_or_none(ts) -> Optional[str]:
+    """Coerce a datetime/string timestamp to an ISO string, or None."""
+    if ts is None:
+        return None
+    if hasattr(ts, "isoformat"):
+        return ts.isoformat()
+    return str(ts)
+
+
+def _get_heartbeat_map() -> Dict[str, Dict[str, Any]]:
+    """Return {agent_id: heartbeat_doc} from agent_heartbeats. Fail-soft: any
+    error yields an empty map so the roster still renders."""
+    try:
+        import sys, os
+
+        sys.path.insert(
+            0,
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ),
+        )
+        from database.connection import get_seeded_db
+
+        db = get_seeded_db()
+        if db is None:
+            return {}
+        col = db.get_collection("agent_heartbeats")
+        return {
+            h.get("agent_id"): h
+            for h in col.find({}, {"_id": 0})
+            if h.get("agent_id")
+        }
+    except Exception:
+        return {}
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -212,11 +261,13 @@ async def list_agents(user: dict = Depends(require_superadmin)):
     except Exception:
         configs = []
     config_map = {c.get("agent_id", ""): c for c in configs if c}
+    heartbeat_map = _get_heartbeat_map()
 
     agents_list = []
     for agent_id, agent in registry.items():
         try:
             config = config_map.get(agent_id, {})
+            heartbeat = heartbeat_map.get(agent_id, {})
             try:
                 health = await agent.health_check()
             except Exception:
@@ -244,6 +295,8 @@ async def list_agents(user: dict = Depends(require_superadmin)):
                         if config.get("last_run")
                         else None
                     ),
+                    "last_tick_at": _iso_or_none(heartbeat.get("last_tick_at")),
+                    "heartbeat_status": heartbeat.get("last_tick_status"),
                     "last_status": config.get("last_status"),
                     "last_error": config.get("last_error"),
                     "run_count": int(config.get("run_count", 0) or 0),
@@ -321,12 +374,55 @@ async def agents_diagnostic(user: dict = Depends(require_superadmin)):
             "nexus",
         ]
 
+    # --- Scheduler liveness -------------------------------------------------
+    # The most common "the fleet looks dead" cause is the scheduler simply not
+    # running on this worker (RUN_AGENT_SCHEDULER off, or this worker lost the
+    # leader lock during a rolling deploy). Surface the real runtime state so an
+    # operator can tell a dead scheduler apart from merely-idle agents.
+    scheduler = _get_scheduler()
+    scheduler_state: Dict[str, Any] = {
+        "instance_present": scheduler is not None,
+        "run_env_gate": os.getenv("RUN_AGENT_SCHEDULER", "true"),
+    }
+    if scheduler is not None:
+        try:
+            aps = getattr(scheduler, "_scheduler", None)
+            scheduler_state.update(
+                {
+                    "running": bool(getattr(scheduler, "_running", False)),
+                    "is_leader": bool(getattr(scheduler, "_is_leader", False)),
+                    "waiting_to_take_over": getattr(
+                        scheduler, "_leader_wait_task", None
+                    )
+                    is not None,
+                    "apscheduler_running": bool(getattr(aps, "running", False))
+                    if aps is not None
+                    else False,
+                    "job_count": len(aps.get_jobs()) if aps is not None else 0,
+                }
+            )
+        except Exception as e:
+            scheduler_state["error"] = str(e)
+
+    # --- Heartbeats (real last-tick liveness per agent) ---------------------
+    heartbeats = {
+        aid: {
+            "last_tick_at": _iso_or_none(h.get("last_tick_at")),
+            "status": h.get("last_tick_status"),
+            "tick_count": h.get("tick_count", 0),
+            "last_error": h.get("last_tick_error"),
+        }
+        for aid, h in _get_heartbeat_map().items()
+    }
+
     return {
         "canonical": canonical,
         "registered": registered,
         "configured": configured,
         "missing_from_registry": [a for a in canonical if a not in registered],
         "missing_from_config": [a for a in canonical if a not in configured],
+        "scheduler": scheduler_state,
+        "heartbeats": heartbeats,
         "worker_id": os.getenv("HOSTNAME")
         or os.getenv("RAILWAY_REPLICA_ID")
         or "unknown",

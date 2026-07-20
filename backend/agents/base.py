@@ -185,6 +185,10 @@ class JarvisAgent(ABC):
         config = await self.get_config()
         if config and not config.get("enabled", True):
             self._status = AgentStatus.STOPPED
+            # Heartbeat even on a skipped tick — proves the scheduler is alive
+            # and reached this agent (it's just toggled OFF), vs a dead
+            # scheduler where NO heartbeat lands at all.
+            await self._write_heartbeat("skipped", (time.time() - start) * 1000, None)
             return  # Agent is toggled OFF — skip
 
         self._status = AgentStatus.RUNNING
@@ -203,6 +207,7 @@ class JarvisAgent(ABC):
 
             # Update config with run stats
             await self._update_run_stats("success", elapsed)
+            await self._write_heartbeat("ok", elapsed, None)
 
         except Exception as e:
             elapsed = (_time.time() - start) * 1000
@@ -213,6 +218,7 @@ class JarvisAgent(ABC):
 
             await self._capture_agent_error(e, elapsed)
             await self._update_run_stats("error", elapsed, error=str(e))
+            await self._write_heartbeat("error", elapsed, str(e))
 
     async def _capture_agent_error(self, exc: BaseException, elapsed_ms: float):
         """Capture a failed tick IN-HOUSE — persist to the `agent_errors`
@@ -329,7 +335,13 @@ class JarvisAgent(ABC):
         try:
             col = self.get_collection("agent_config")
             if col is not None:
-                config = col.find_one({"agent_id": self.agent_id})
+                # Deterministic under residual duplicate docs: prefer the
+                # enabled=True twin so a stray enabled=None/False duplicate can
+                # never silently skip this agent's tick (see config._STABLE_SORT).
+                config = col.find_one(
+                    {"agent_id": self.agent_id},
+                    sort=[("enabled", -1), ("_id", 1)],
+                )
                 return config
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Failed to read config: {e}")
@@ -355,6 +367,39 @@ class JarvisAgent(ABC):
                 col.update_one({"agent_id": self.agent_id}, update, upsert=True)
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Failed to update run stats: {e}")
+
+    async def _write_heartbeat(self, status: str, elapsed_ms: float, error: Optional[str]):
+        """Upsert this agent's single current-liveness row into the
+        `agent_heartbeats` collection.
+
+        One doc per agent_id (upsert, never appends) carrying last_tick_at +
+        ok/error/skipped so the Jarvis screen can show REAL liveness — even for
+        an idle tick that emits no events (the reason agent_events looked dead).
+        Fully fail-soft; never raises (runs on every tick incl. inside the
+        error branch)."""
+        try:
+            col = self.get_collection("agent_heartbeats")
+            if col is None:
+                return
+            now = datetime.now(timezone.utc)
+            col.update_one(
+                {"agent_id": self.agent_id},
+                {
+                    "$set": {
+                        "agent_id": self.agent_id,
+                        "agent_name": self.agent_name,
+                        "last_tick_at": now,
+                        "last_tick_status": status,  # ok | error | skipped
+                        "last_tick_error": error,
+                        "last_tick_ms": round(elapsed_ms, 1),
+                    },
+                    "$inc": {"tick_count": 1},
+                    "$setOnInsert": {"first_tick_at": now},
+                },
+                upsert=True,
+            )
+        except Exception as e:  # pragma: no cover - liveness write is best-effort
+            logger.debug(f"[{self.agent_id}] heartbeat write failed: {e}")
 
     # --- Serialization ---
 
