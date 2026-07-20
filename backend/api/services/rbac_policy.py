@@ -1834,6 +1834,19 @@ POLICY: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
     },
     {
+        # Accountant GST cross-check: GSTR-1/3B vs books side-by-side + sign-off.
+        # Org-wide/entity-grouped filing view -> finance-admin only (handler
+        # enforces _require_finance_admin).
+        "method": "GET",
+        "path": "/api/v1/finance/gst/cross-check",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/finance/gst/cross-check-signoff",
+        "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+    },
+    {
         "method": "GET",
         "path": "/api/v1/finance/gst/summary",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],

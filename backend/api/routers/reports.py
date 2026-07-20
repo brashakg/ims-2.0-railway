@@ -3146,6 +3146,87 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
     return 0.0, 0.0, 0.0
 
 
+def _itc_transfer_from_vendor_bills(db, active_store, year, mon, last_day):
+    """R1: the TRANSFER-BORNE slice of Table-4 ITC -- ITC from inter-GSTIN
+    stock-transfer mirror bills only (source_transfer_id set), kept for the
+    GSTIN being filed. Returns (igst, cgst, sgst); fail-soft -> zeros.
+
+    Unlike regular purchase ITC (entity-scoped -> identical across every sibling
+    store of an entity), this slice is GSTIN-scoped: on a same-entity
+    cross-state transfer only the RECEIVING GSTIN claims the credit, so two
+    sibling stores of one entity with DIFFERENT GSTINs return DIFFERENT transfer
+    ITC. gst_crosscheck.aggregate_gstr3b therefore dedupes this component once
+    per GSTIN (and the regular remainder once per entity), making the entity
+    figure independent of store enumeration order.
+
+    Uses the SAME status / itc_eligible / date-window / entity / recipient-GSTIN
+    keep filters as _itc_from_vendor_bills, restricted to transfer bills, so
+    (this) + (regular-only bills) == _itc_from_vendor_bills total by
+    construction -- reports.py stays the single source of tax truth."""
+    if db is None:
+        return 0.0, 0.0, 0.0
+    try:
+        entity_id = None
+        store_gstin = ""
+        try:
+            _srow = db["stores"].find_one(
+                {"store_id": active_store}, {"entity_id": 1, "gstin": 1}
+            )
+            entity_id = (_srow or {}).get("entity_id")
+            store_gstin = str((_srow or {}).get("gstin", "") or "").strip()
+        except Exception:
+            entity_id = None
+        month_lo = f"{year:04d}-{mon:02d}-01"
+        month_hi = f"{year:04d}-{mon:02d}-{last_day:02d}T23:59:59"
+        # Same keep-conditions as _itc_from_vendor_bills: a transfer mirror
+        # bill's ITC belongs to the RECEIVING GSTIN (recipient_gstin == the
+        # GSTIN being filed), falling back to to_store_id when the bill carries
+        # no recipient GSTIN.
+        transfer_keep: list = [
+            {"recipient_gstin": {"$in": ["", None]}, "to_store_id": active_store},
+        ]
+        if store_gstin:
+            transfer_keep.insert(0, {"recipient_gstin": store_gstin})
+        vb_match: dict = {
+            "status": {"$nin": ["CANCELLED", "cancelled", "VOID", "voided"]},
+            "itc_eligible": {"$ne": False},
+            "source_transfer_id": {"$exists": True, "$ne": None},
+            "$and": [
+                {
+                    "$or": [
+                        {"invoice_date": {"$gte": month_lo, "$lte": month_hi}},
+                        {"bill_date": {"$gte": month_lo, "$lte": month_hi}},
+                    ]
+                },
+                {"$or": transfer_keep},
+            ],
+        }
+        if entity_id:
+            vb_match["recipient_entity_id"] = entity_id
+        pipeline = [
+            {"$match": vb_match},
+            {
+                "$group": {
+                    "_id": None,
+                    "igst": {"$sum": "$igst_total"},
+                    "cgst": {"$sum": "$cgst_total"},
+                    "sgst": {"$sum": "$sgst_total"},
+                }
+            },
+        ]
+        res = list(db["vendor_bills"].aggregate(pipeline))
+        if res:
+            a = res[0]
+            return (
+                float(a.get("igst", 0.0) or 0.0),
+                float(a.get("cgst", 0.0) or 0.0),
+                float(a.get("sgst", 0.0) or 0.0),
+            )
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0
+
+
 def _transfer_outward_bills(db, active_store, year, mon, last_day):
     """NEW-GST-TRANSFER-OUTWARD (GAP A): the SENDING side of an inter-GSTIN
     stock transfer (Schedule I deemed supply between distinct persons).
@@ -3415,6 +3496,11 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     itc_cgst = 0.0
     itc_sgst = 0.0
 
+    # R1: transfer-borne (GSTIN-scoped) ITC slice, split out of the total above.
+    t_itc_igst = 0.0
+    t_itc_cgst = 0.0
+    t_itc_sgst = 0.0
+
     # RCM (Table 3.1(d)) accumulators -- inward supplies liable to reverse charge.
     rcm_igst = 0.0
     rcm_cgst = 0.0
@@ -3504,6 +3590,14 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         itc_igst, itc_cgst, itc_sgst = _itc_from_vendor_bills(
             db, active_store, year, mon, last_day
         )
+        # R1: split the transfer-borne (GSTIN-scoped) slice out of the total so
+        # the cross-check aggregator can dedupe it once per GSTIN while the
+        # regular (entity-scoped) remainder is deduped once per entity. The
+        # transfer slice uses the SAME filters restricted to source_transfer_id
+        # bills, so regular = total - transfer exactly.
+        t_itc_igst, t_itc_cgst, t_itc_sgst = _itc_transfer_from_vendor_bills(
+            db, active_store, year, mon, last_day
+        )
 
         # NEW-GST-RCM: Table 3.1(d) inward supplies liable to reverse charge.
         rcm_igst, rcm_cgst, rcm_sgst, rcm_taxable = _rcm_from_vendor_bills(
@@ -3552,6 +3646,22 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "integratedTax": _r(itc_igst),
             "centralTax": _r(itc_cgst),
             "stateTax": _r(itc_sgst),
+            "cess": 0.0,
+        },
+        # R1: itcAvailable split into the entity-scoped regular remainder and the
+        # GSTIN-scoped transfer slice (regular + transfer == itcAvailable). The
+        # cross-check aggregator dedupes each at its true scope so a multi-GSTIN
+        # entity's ITC is independent of store enumeration order.
+        "itcAvailableRegular": {
+            "integratedTax": _r(itc_igst - t_itc_igst),
+            "centralTax": _r(itc_cgst - t_itc_cgst),
+            "stateTax": _r(itc_sgst - t_itc_sgst),
+            "cess": 0.0,
+        },
+        "itcAvailableTransfer": {
+            "integratedTax": _r(t_itc_igst),
+            "centralTax": _r(t_itc_cgst),
+            "stateTax": _r(t_itc_sgst),
             "cess": 0.0,
         },
         "exemptSupplies": 0.0,
