@@ -146,6 +146,40 @@ def _store_gstr3b(rcm_c=0.0, rcm_s=0.0, rcm_taxable=0.0):
     }
 
 
+def _store_gstr3b_split(
+    reg_c=0.0, reg_s=0.0, reg_i=0.0,
+    trf_c=0.0, trf_s=0.0, trf_i=0.0,
+    out_c=0.0, out_s=0.0, out_i=0.0, out_taxable=0.0,
+):
+    """A per-store GSTR-3B carrying the R1 ITC split (itcAvailableRegular +
+    itcAvailableTransfer, summing to itcAvailable). Regular ITC is entity-scoped
+    (identical across sibling stores); the transfer slice is GSTIN-scoped."""
+    return {
+        "period": "2026-04",
+        "outwardTaxableValue": out_taxable,
+        "outwardTaxableSupplies": {
+            "integratedTax": out_i, "centralTax": out_c, "stateTax": out_s,
+            "cess": 0.0,
+        },
+        "itcAvailable": {
+            "integratedTax": reg_i + trf_i, "centralTax": reg_c + trf_c,
+            "stateTax": reg_s + trf_s, "cess": 0.0,
+        },
+        "itcAvailableRegular": {
+            "integratedTax": reg_i, "centralTax": reg_c, "stateTax": reg_s,
+            "cess": 0.0,
+        },
+        "itcAvailableTransfer": {
+            "integratedTax": trf_i, "centralTax": trf_c, "stateTax": trf_s,
+            "cess": 0.0,
+        },
+        "inwardSuppliesReverseChargeValue": 0.0,
+        "inwardSuppliesReverseCharge": {
+            "integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # aggregate_gstr1
 # ---------------------------------------------------------------------------
@@ -275,6 +309,61 @@ def test_aggregate_gstr3b_empty_is_safe():
     agg = aggregate_gstr3b([])
     assert agg["outwardTax"] == 0.0
     assert agg["itc"]["total"] == 0.0
+
+
+def test_aggregate_gstr3b_r1_transfer_itc_order_independent():
+    # R1: a multi-GSTIN entity in a same-entity cross-state transfer month.
+    # S1 (sender GSTIN) itc = 20000 regular; S2 (receiver GSTIN) itc = 20000
+    # regular + 9000 transfer. The entity ITC/net-cash must NOT depend on which
+    # store Mongo enumerates first.
+    s1 = _store_gstr3b_split(reg_i=20000.0, trf_i=0.0, out_i=25000.0, out_taxable=100000.0)
+    s2 = _store_gstr3b_split(reg_i=20000.0, trf_i=9000.0, out_i=0.0, out_taxable=0.0)
+    fwd = aggregate_gstr3b([s1, s2], ["E1", "E1"], ["GSTIN-A", "GSTIN-B"])
+    rev = aggregate_gstr3b([s2, s1], ["E1", "E1"], ["GSTIN-B", "GSTIN-A"])
+    # ITC = regular once (20000) + transfer once for the RECEIVER GSTIN (9000).
+    assert fwd["itc"]["igst"] == 29000.0
+    assert fwd["itc"] == rev["itc"]
+    # Outward is store-scoped -> summed the same either way.
+    assert fwd["igst"] == rev["igst"] == 25000.0
+    # Net cash: max(0, 25000 - 29000) = 0, order-independent (was 29000 vs 24000).
+    assert fwd["netCash"]["total"] == rev["netCash"]["total"] == 0.0
+
+
+def test_aggregate_gstr3b_transfer_itc_summed_across_gstins_of_entity():
+    # Same entity, two DIFFERENT GSTINs, each with its own transfer credit ->
+    # both count (deduped per GSTIN, not per entity); regular counted once.
+    s_a = _store_gstr3b_split(reg_c=100.0, trf_c=50.0)
+    s_b = _store_gstr3b_split(reg_c=100.0, trf_c=70.0)
+    agg = aggregate_gstr3b([s_a, s_b], ["E1", "E1"], ["G-A", "G-B"])
+    # regular once (100) + transfer G-A (50) + transfer G-B (70) = 220.
+    assert agg["itc"]["cgst"] == 220.0
+
+
+def test_aggregate_gstr3b_transfer_itc_deduped_per_gstin():
+    # Two sibling stores of the SAME GSTIN return the SAME transfer slice ->
+    # count it ONCE (not doubled), just like regular ITC.
+    s1 = _store_gstr3b_split(reg_c=100.0, trf_c=50.0)
+    s2 = _store_gstr3b_split(reg_c=100.0, trf_c=50.0)
+    agg = aggregate_gstr3b([s1, s2], ["E1", "E1"], ["G-A", "G-A"])
+    # regular once (100) + transfer once for G-A (50) = 150.
+    assert agg["itc"]["cgst"] == 150.0
+
+
+def test_aggregate_gstr3b_legacy_itcavailable_treated_as_regular():
+    # A report predating the R1 split (only itcAvailable) -> whole figure is
+    # regular, deduped once per entity, transfer 0. (back-compat)
+    agg = aggregate_gstr3b([_store_gstr3b(), _store_gstr3b()], ["E1", "E1"])
+    assert agg["itc"]["total"] == 800.0  # counted once, unchanged from before
+
+
+def test_aggregate_gstr3b_r3_non_dict_entry_keeps_pairing():
+    # R3: a non-dict entry must not shift later reports onto the wrong entity.
+    s1 = _store_gstr3b_split(reg_c=200.0)
+    s2 = _store_gstr3b_split(reg_c=300.0)
+    agg = aggregate_gstr3b([s1, None, s2], ["E1", "E1", "E2"], ["G1", "G1", "G2"])
+    # E1 regular 200 (once) + E2 regular 300 = 500; the None does not mispair s2.
+    assert agg["itc"]["cgst"] == 500.0
+    assert agg["bucketCount"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +545,42 @@ def test_build_crosscheck_net_cash_row_like_for_like():
     # netCash = max(0,1150-400)+1150+100 = 2000 ; comparator recomputes the same.
     assert row["sources"]["Output - ITC + RCM"] == 2000.0
     assert row["status"] == "MATCH"
+
+
+def test_build_crosscheck_net_cash_row_advisory_multi_entity():
+    # R2: the all-entities 'Net GST payable (cash)' comparator clamps the
+    # cross-entity totals ONCE per head (clamp-of-sums) while netCash clamps PER
+    # entity then sums (sum-of-clamps). They diverge without bound in the
+    # combined view, so the row must be advisory (INFO) and NOT count -- netCash
+    # is the correct figure. E1 has an IGST-ITC surplus, E2 an IGST liability.
+    gstr3b = aggregate_gstr3b(
+        [_store_gstr3b_split(out_c=50000.0, out_s=50000.0, reg_i=40000.0),
+         _store_gstr3b_split(out_i=30000.0)],
+        ["E1", "E2"], ["G1", "G2"],
+    )
+    assert gstr3b["bucketCount"] == 2
+    # sum-of-clamps: E1 100000 (IGST ITC wasted, out_i=0) + E2 30000 = 130000.
+    assert gstr3b["netCash"]["total"] == 130000.0
+    res = build_crosscheck({}, gstr3b, {}, {})
+    row = next(c for c in res["comparisons"] if c["metric"] == "Net GST payable (cash)")
+    # clamp-of-sums comparator = 100000, so a 30000 gap is real but advisory.
+    assert row["variance"] == 30000.0
+    assert row["status"] == "INFO"
+    assert "Net GST payable (cash)" not in res["summary"]["mismatch_metrics"]
+
+
+def test_build_crosscheck_net_cash_row_exact_single_entity():
+    # A single-entity view stays exact: bucketCount == 1 -> not advisory, the
+    # comparator equals netCash and reports MATCH.
+    gstr3b = aggregate_gstr3b(
+        [_store_gstr3b_split(out_c=1150.0, out_s=1150.0, reg_c=400.0, reg_s=400.0)],
+        ["E1"], ["G1"],
+    )
+    assert gstr3b["bucketCount"] == 1
+    res = build_crosscheck({}, gstr3b, {}, {})
+    row = next(c for c in res["comparisons"] if c["metric"] == "Net GST payable (cash)")
+    assert row["status"] == "MATCH"
+    assert row["variance"] == 0.0
 
 
 def test_build_crosscheck_empty_inputs_safe():

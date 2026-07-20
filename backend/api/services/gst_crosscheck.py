@@ -27,6 +27,7 @@ and locks no period; the accountant sign-off is an audit marker only.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, Dict, List, Optional
 
 # Default variance tolerance in rupees. Sub-rupee spreads are paise-rounding
@@ -176,9 +177,38 @@ def aggregate_gstr1(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _itc_regular(rep: Dict[str, Any]) -> Dict[str, float]:
+    """The ENTITY-scoped regular ITC of a per-store GSTR-3B report. Prefers the
+    split field ``itcAvailableRegular``; falls back to the whole ``itcAvailable``
+    for legacy report dicts that predate the R1 split (transfer slice then 0)."""
+    src = rep.get("itcAvailableRegular")
+    if src is None and (
+        "itcAvailableTransfer" not in rep and "itcAvailableRegular" not in rep
+    ):
+        src = rep.get("itcAvailable")
+    src = src or {}
+    return {
+        "c": _f(src.get("centralTax")),
+        "s": _f(src.get("stateTax")),
+        "i": _f(src.get("integratedTax")),
+    }
+
+
+def _itc_transfer(rep: Dict[str, Any]) -> Dict[str, float]:
+    """The GSTIN-scoped transfer-borne ITC slice of a per-store GSTR-3B report
+    (``itcAvailableTransfer``); 0 for legacy dicts without the split."""
+    src = rep.get("itcAvailableTransfer") or {}
+    return {
+        "c": _f(src.get("centralTax")),
+        "s": _f(src.get("stateTax")),
+        "i": _f(src.get("integratedTax")),
+    }
+
+
 def aggregate_gstr3b(
     store_reports: List[Dict[str, Any]],
     entity_ids: Optional[List[Any]] = None,
+    store_gstins: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """Merge N per-store GSTR-3B dicts (reports.py::_compute_gstr3b) into one
     entity-level dict: outward taxable + tax, ITC available, net cash payable,
@@ -187,14 +217,24 @@ def aggregate_gstr3b(
     OUTWARD supply is STORE-scoped (reports.py reads it from that store's own
     orders + sender-side transfer bills), so it is SUMMED across every store.
 
-    ITC and RCM are ENTITY-scoped: reports.py::_itc_from_vendor_bills /
-    _rcm_from_vendor_bills filter on recipient_entity_id, so EVERY store of an
-    entity returns the SAME Table-4 ITC/RCM ("one GSTIN, one filing"). Summing
-    them across sibling stores multiplies ITC / RCM / net cash by the store
-    count -- the P1 defect this closes. Pass ``entity_ids`` (a parallel list,
-    one entity_id per store report) so ITC/RCM are counted ONCE per entity; a
-    store whose entity_id is falsy contributes ZERO ITC/RCM (its per-store
-    figure is org-wide, not entity-scoped, so it must not be trusted).
+    ITC is split by scope (R1). REGULAR purchase ITC and RCM are ENTITY-scoped:
+    reports.py::_itc_from_vendor_bills / _rcm_from_vendor_bills filter on
+    recipient_entity_id, so EVERY store of an entity returns the SAME regular
+    Table-4 figure ("one entity, one books ITC"); they are counted ONCE per
+    entity. TRANSFER-borne ITC (``itcAvailableTransfer``) is GSTIN-scoped -- on
+    a same-entity cross-state stock transfer only the RECEIVING GSTIN claims it,
+    so sibling stores of one entity with DIFFERENT GSTINs return DIFFERENT
+    transfer ITC; it is counted ONCE per GSTIN. Without this split the entity
+    figure depended on which store Mongo listed first (order-dependent ITC and
+    net cash) -- the R1 defect this closes. A store whose entity_id is falsy
+    contributes ZERO ITC/RCM (its per-store figure is org-wide, not
+    entity-scoped, so it must not be trusted).
+
+    Pass ``entity_ids`` (a parallel list, one entity_id per store report) and,
+    for the transfer split, ``store_gstins`` (one GSTIN per store report). A
+    report with no GSTIN falls back to per-store transfer inclusion (its
+    underlying keep-condition is to_store_id-scoped, so distinct stores never
+    overlap).
 
     Net cash is derived ENTITY-LEVEL after aggregation as per-head
     max(0, out - itc) + rcm and summed across entities -- one entity's ITC
@@ -202,15 +242,28 @@ def aggregate_gstr3b(
     separately), and RCM is always discharged in cash on top.
 
     ``entity_ids=None`` keeps the legacy per-report summation, for callers that
-    already know every report is a distinct entity."""
-    reports = [r for r in (store_reports or []) if isinstance(r, dict)]
+    already know every report is a distinct entity.
+
+    Also returns ``bucketCount`` (number of distinct entity buckets that
+    contributed) so build_crosscheck can mark the combined-view net-cash
+    comparator advisory when more than one entity clamps separately."""
     if entity_ids is None:
+        reports = [r for r in (store_reports or []) if isinstance(r, dict)]
         keys: List[Any] = list(range(len(reports)))
+        gstins: List[Any] = [None] * len(reports)
     else:
-        keys = [
-            entity_ids[i] if i < len(entity_ids) else None
-            for i in range(len(reports))
+        # R3: zip the parallel lists FIRST, then drop non-dict reports, so a bad
+        # report never shifts every later report onto the wrong entity/GSTIN.
+        triples = [
+            (r, k, g)
+            for r, k, g in itertools.zip_longest(
+                store_reports or [], entity_ids, store_gstins or [], fillvalue=None
+            )
+            if isinstance(r, dict)
         ]
+        reports = [t[0] for t in triples]
+        keys = [t[1] for t in triples]
+        gstins = [t[2] for t in triples]
 
     def _blank() -> Dict[str, float]:
         return {
@@ -222,8 +275,9 @@ def aggregate_gstr3b(
     # Accumulate PER ENTITY so ITC/RCM (entity-scoped) is not multiplied and net
     # cash is clamped per entity, not on the cross-entity grand total.
     buckets: Dict[Any, Dict[str, float]] = {}
-    itc_taken: set = set()
-    for rep, key in zip(reports, keys):
+    regular_taken: set = set()   # regular ITC + RCM: once per entity
+    transfer_taken: set = set()  # transfer-borne ITC: once per GSTIN
+    for rep, key, gstin in zip(reports, keys, gstins):
         # Storeless stores (falsy entity_id) share one bucket: their outward is
         # real and counted, but they never contribute ITC/RCM.
         bkey = key if (entity_ids is None or key) else "__no_entity__"
@@ -233,18 +287,38 @@ def aggregate_gstr3b(
         b["out_c"] += _f(osup.get("centralTax"))
         b["out_s"] += _f(osup.get("stateTax"))
         b["out_i"] += _f(osup.get("integratedTax"))
-        take_itc = (entity_ids is None or bool(key)) and key not in itc_taken
-        if take_itc:
-            itc_taken.add(key)
-            itc = rep.get("itcAvailable") or {}
-            b["itc_c"] += _f(itc.get("centralTax"))
-            b["itc_s"] += _f(itc.get("stateTax"))
-            b["itc_i"] += _f(itc.get("integratedTax"))
+
+        # Storeless (falsy entity_id in the tagged path) never contributes ITC/RCM.
+        if not (entity_ids is None or bool(key)):
+            continue
+
+        # Regular ITC + RCM are entity-scoped -> count ONCE per entity.
+        if key not in regular_taken:
+            regular_taken.add(key)
+            reg = _itc_regular(rep)
+            b["itc_c"] += reg["c"]
+            b["itc_s"] += reg["s"]
+            b["itc_i"] += reg["i"]
             rcm = rep.get("inwardSuppliesReverseCharge") or {}
             b["rcm_c"] += _f(rcm.get("centralTax"))
             b["rcm_s"] += _f(rcm.get("stateTax"))
             b["rcm_i"] += _f(rcm.get("integratedTax"))
             b["rcm_taxable"] += _f(rep.get("inwardSuppliesReverseChargeValue"))
+
+        # Transfer-borne ITC is GSTIN-scoped -> count ONCE per GSTIN (legacy
+        # per-report path or a report with no GSTIN sums it in, since those keys
+        # are already distinct per filing / per store).
+        trf = _itc_transfer(rep)
+        if trf["c"] or trf["s"] or trf["i"]:
+            if entity_ids is not None and gstin:
+                take_trf = gstin not in transfer_taken
+                transfer_taken.add(gstin)
+            else:
+                take_trf = True
+            if take_trf:
+                b["itc_c"] += trf["c"]
+                b["itc_s"] += trf["s"]
+                b["itc_i"] += trf["i"]
 
     vals = list(buckets.values())
     out_taxable = sum(b["out_taxable"] for b in vals)
@@ -270,6 +344,10 @@ def aggregate_gstr3b(
         "sgst": _r(out_s),
         "igst": _r(out_i),
         "outwardTax": _r(out_c + out_s + out_i),
+        # Distinct entity buckets that contributed. >1 means the combined view
+        # clamps each entity's net cash separately, so build_crosscheck marks the
+        # 'Net GST payable (cash)' comparator advisory (R2).
+        "bucketCount": len(buckets),
         "itc": {
             "cgst": _r(itc_c),
             "sgst": _r(itc_s),
@@ -413,6 +491,15 @@ def build_crosscheck(
         + max(0.0, out_i - _f(itc.get("igst"))) + _f(rcm.get("igst")),
         2,
     )
+    # R2: net_expected clamps the CROSS-ENTITY totals once per head (clamp-of-
+    # sums), while netCash clamps PER ENTITY then sums (sum-of-clamps). Those
+    # agree exactly for a single entity but diverge without bound in the combined
+    # all-entities view (one entity's ITC surplus wrongly nets another's output
+    # tax in net_expected). So this row is advisory when more than one entity
+    # bucket contributed -- netCash is the correct figure; the comparator is the
+    # wrong-model side and must not inflate the sign-off mismatch_count.
+    bucket_count = int(_f(gstr3b.get("bucketCount")) or 1)
+    net_cash_advisory = bucket_count > 1
 
     b_taxable = _f(books.get("sales_taxable"))
     b_tax = _f(books.get("sales_tax"))
@@ -497,10 +584,18 @@ def build_crosscheck(
             tolerance,
             note=(
                 "Output tax minus ITC (floored at zero per head) plus reverse-"
-                "charge tax, which is paid in cash. In the combined all-entities "
-                "view a small gap can appear because each entity's cash is "
-                "clamped separately (one entity's ITC cannot offset another's)."
+                "charge tax, which is paid in cash. This row is informational in "
+                "the combined all-entities view: each entity clamps its own cash "
+                "separately (one entity's ITC surplus cannot offset another's "
+                "output tax), so this comparator legitimately differs from the "
+                "summed GSTR-3B figure -- GSTR-3B is the correct number. Open "
+                "each entity individually to reconcile net cash exactly."
+                if net_cash_advisory
+                else "Output tax minus ITC (floored at zero per head) plus "
+                "reverse-charge tax, which is paid in cash. In a single-entity "
+                "view this equals the GSTR-3B net cash exactly."
             ),
+            advisory=net_cash_advisory,
         ),
         _cmp_row(
             "Sales: invoiced vs collected",

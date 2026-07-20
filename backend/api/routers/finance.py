@@ -427,6 +427,23 @@ def _store_state_map(db) -> dict:
     return out
 
 
+def _store_gstin_map(db) -> dict:
+    """store_id -> GSTIN. Used to dedupe transfer-borne ITC once per GSTIN in the
+    GST cross-check aggregator (R1): a same-entity cross-state stock transfer is
+    claimed by the RECEIVING GSTIN only, so sibling stores of one entity with
+    different GSTINs return different transfer ITC."""
+    out: dict = {}
+    try:
+        for s in db.get_collection("stores").find(
+            {}, {"_id": 0, "store_id": 1, "gstin": 1}
+        ):
+            if s.get("store_id"):
+                out[s["store_id"]] = str(s.get("gstin") or "").strip()
+    except Exception:
+        pass
+    return out
+
+
 def _customer_state_map(db) -> dict:
     """customer_id -> state (for intra/inter-state GST classification)."""
     out: dict = {}
@@ -2258,7 +2275,12 @@ async def get_gst_reconciliation(
     # {"date": <string>} filter matched NOTHING and input_credit read a permanent
     # 0. Use the SAME IST created_at window as the orders side, and map a PO to an
     # entity via delivery_store_id OR store_id (gst_reconciliation's own mapping).
-    p_match = {"created_at": {"$gte": start, "$lt": end}}
+    # HR-3: exclude DRAFT / CANCELLED POs so a human draft or cancelled PO with
+    # tax_amount does not inflate input_credit (parity with the cross-check leg).
+    p_match = {
+        "created_at": {"$gte": start, "$lt": end},
+        "status": {"$nin": ["DRAFT", "draft", "CANCELLED", "cancelled"]},
+    }
     if store_ids is not None:
         p_match["$or"] = [
             {"delivery_store_id": {"$in": store_ids}},
@@ -2415,6 +2437,7 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     period = f"{y:04d}-{m:02d}"
 
     s2e, enames = _store_maps(db)
+    s2g = _store_gstin_map(db)
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
         if not store_ids:
@@ -2423,13 +2446,21 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             )
     else:
         store_ids = list(s2e.keys())
+        # HR-2: an empty store map (wiped foundation data or a transient stores
+        # query failure) would otherwise render every source 0.00 and sign off a
+        # false all-entities "all sources reconcile" green -- the same failure
+        # mode the named-entity 404 guards. Refuse the unscoped figure.
+        if not store_ids:
+            raise HTTPException(
+                status_code=404, detail="No stores configured - nothing to reconcile"
+            )
 
     # Reuse the per-store GST-return computations (single source of truth for
     # the tax math), then aggregate to the entity level in the pure service. A
     # per-store compute failure is tracked (not silently dropped) so the screen
     # can flag partial data instead of presenting understated GSTR totals as a
     # tax break, and so sign-off can be blocked.
-    g1_reports, g3_reports, g3_entities = [], [], []
+    g1_reports, g3_reports, g3_entities, g3_gstins = [], [], [], []
     failed: set = set()
     for sid in store_ids:
         try:
@@ -2440,28 +2471,38 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
         try:
             g3_reports.append(_compute_gstr3b(period, sid))
             g3_entities.append(s2e.get(sid))
+            g3_gstins.append(s2g.get(sid))
         except Exception:  # noqa: BLE001
             logger.exception("cross-check: GSTR-3B compute failed for %s", sid)
             failed.add(sid)
 
     gstr1 = _xc.aggregate_gstr1(g1_reports)
-    # ITC / RCM are entity-scoped (identical for every sibling store), so pass
-    # the entity per store report -- aggregate_gstr3b counts them ONCE per
-    # entity instead of multiplying by the entity's store count.
-    gstr3b = _xc.aggregate_gstr3b(g3_reports, g3_entities)
+    # Regular ITC / RCM are entity-scoped (identical for every sibling store), so
+    # pass the entity per store report -- aggregate_gstr3b counts them ONCE per
+    # entity. Transfer-borne ITC is GSTIN-scoped (R1), so pass the GSTIN per
+    # store report -- it is counted ONCE per GSTIN, making a multi-GSTIN entity's
+    # ITC independent of store enumeration order.
+    gstr3b = _xc.aggregate_gstr3b(g3_reports, g3_entities, g3_gstins)
 
     start, end = _gst_month_window(y, m)
     books, tally = _books_and_tally_for_stores(db, store_ids, start, end)
 
     # Purchase-side ITC (from purchase_orders) as an INDEPENDENT cross-check
     # against GSTR-3B's vendor-bills ITC. Reuse gst_reconciliation()'s math.
+    itc_leg_failed = False
     try:
         # purchase_orders.created_at is a BSON datetime (BaseRepository
         # _add_timestamps); no writer ever set a `date` field, so the old
         # `date` string filter matched NOTHING and ITC read a permanent 0. Use
         # the SAME IST created_at window as the orders side, and map a PO to an
         # entity via delivery_store_id OR store_id (gst_reconciliation's mapping).
-        p_match: dict = {"created_at": {"$gte": start, "$lt": end}}
+        # HR-3: exclude DRAFT / CANCELLED POs (auto-draft POs are tax-less, but a
+        # human DRAFT or CANCELLED PO with tax_amount would inflate books ITC and
+        # flag a phantom mismatch) -- match the case variants PO writers write.
+        p_match: dict = {
+            "created_at": {"$gte": start, "$lt": end},
+            "status": {"$nin": ["DRAFT", "draft", "CANCELLED", "cancelled"]},
+        }
         if entity_id:
             p_match["$or"] = [
                 {"delivery_store_id": {"$in": store_ids}},
@@ -2487,7 +2528,12 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             books["input_credit"] = recon.get("total_input_credit", 0.0)
     except Exception:  # noqa: BLE001
         logger.exception("cross-check: purchase-side ITC failed")
+        # HR-1: a dead ITC leg must not sign off green. input_credit=None renders
+        # the ITC row INFO (one source), which the mismatch_count silently
+        # ignores; flag it so the sign-off gate can block (409) and the record
+        # is stamped for forensics.
         books["input_credit"] = None
+        itc_leg_failed = True
 
     result = _xc.build_crosscheck(gstr1, gstr3b, books, tally)
     result.update(
@@ -2501,6 +2547,7 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             "stores_computed": len(store_ids) - len(failed),
             "failed_store_ids": sorted(failed),
             "partial": bool(failed),
+            "itc_leg_failed": itc_leg_failed,
             "gstr1": {
                 "totalTaxableValue": gstr1["totalTaxableValue"],
                 "totalTax": gstr1["totalTax"],
@@ -2575,13 +2622,23 @@ async def gst_cross_check_signoff(
     # Recompute the cross-check SERVER-SIDE so the durable audit snapshot is the
     # server's figure, never a (forgeable) client-supplied mismatch_count=0.
     server = _run_gst_cross_check(db, m, y, body.entity_id)
-    if server.get("partial"):
+    # HR-1: block sign-off when EITHER reconciliation leg is degraded -- store
+    # compute failure (understated GSTR totals) or a dead purchase-side ITC leg
+    # (ITC row silently drops to INFO and escapes mismatch_count). Name the leg.
+    if server.get("partial") or server.get("itc_leg_failed"):
+        reasons = []
+        if server.get("partial"):
+            reasons.append(
+                "%d store(s) failed to compute"
+                % len(server.get("failed_store_ids") or [])
+            )
+        if server.get("itc_leg_failed"):
+            reasons.append("the purchase-side ITC leg failed to compute")
         raise HTTPException(
             status_code=409,
             detail=(
-                "Cannot sign off: %d store(s) failed to compute, so the figures "
-                "are understated. Resolve and retry."
-                % len(server.get("failed_store_ids") or [])
+                "Cannot sign off: %s, so the figures are understated. Resolve "
+                "and retry." % " and ".join(reasons)
             ),
         )
     server_summary = server.get("summary", {})
@@ -2605,6 +2662,9 @@ async def gst_cross_check_signoff(
         "mismatch_count": server_mismatch,
         "gst_payable": server_payable,
         "mismatch_metrics": server_summary.get("mismatch_metrics", []),
+        # Forensic marker: both legs computed cleanly (the gate above blocks a
+        # sign-off otherwise, so this is always False on a stored record).
+        "itc_leg_failed": bool(server.get("itc_leg_failed")),
         # What the client claimed it saw (drift forensics only, never trusted).
         "client_mismatch_count": body.mismatch_count,
         "client_gst_payable": body.gst_payable,
@@ -2619,13 +2679,22 @@ async def gst_cross_check_signoff(
         prior = None
     update: dict = {"$set": record}
     if prior:
+        # HR-5: keep BOTH drift-forensics figures (server + client gst_payable)
+        # and cap the history at the last 50 sign-offs so it cannot grow without
+        # bound.
         update["$push"] = {
             "history": {
-                k: prior.get(k)
-                for k in (
-                    "checked_by", "checked_by_name", "checked_at", "note",
-                    "mismatch_count", "gst_payable", "client_mismatch_count",
-                )
+                "$each": [
+                    {
+                        k: prior.get(k)
+                        for k in (
+                            "checked_by", "checked_by_name", "checked_at", "note",
+                            "mismatch_count", "gst_payable",
+                            "client_mismatch_count", "client_gst_payable",
+                        )
+                    }
+                ],
+                "$slice": -50,
             }
         }
     try:
