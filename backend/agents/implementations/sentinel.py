@@ -11,7 +11,7 @@ SENTINEL is TOGGLEABLE — can be turned ON/OFF by Superadmin.
 Default schedule: Every 60 seconds.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from datetime import datetime, timezone, timedelta
 import logging
 import time
@@ -55,13 +55,6 @@ API_BASE_URL = os.getenv(
 if API_BASE_URL and not API_BASE_URL.startswith("http"):
     API_BASE_URL = f"https://{API_BASE_URL}"
 
-# Nightly BVI catalog parity run fires on the FIRST tick at/after this IST
-# wall-clock time, once per IST day (SENTINEL ticks every 60s, so in practice
-# ~02:30 IST). Same only-at-hour idea as NEXUS's nightly Tally export, plus a
-# per-day dedupe that survives restarts (backed by the snapshot collection).
-BVI_PARITY_RUN_HOUR = 2
-BVI_PARITY_RUN_MINUTE = 30
-
 
 class SentinelAgent(JarvisAgent):
     """
@@ -94,9 +87,6 @@ class SentinelAgent(JarvisAgent):
         self._health_score = 100
         self._last_health_data: Dict[str, Any] = {}
         self._alerts: List[Dict] = []
-        # IST date ("YYYY-MM-DD") of the last nightly BVI parity run, so the
-        # every-60s tick only fires the check ONCE per IST day.
-        self._bvi_parity_last_ist_date: Optional[str] = None
 
     async def _do_background_work(self):
         """
@@ -125,10 +115,6 @@ class SentinelAgent(JarvisAgent):
         if self._run_count % 10 == 0:
             integrity = await self._check_data_integrity()
             results["data_integrity"] = integrity
-
-        # 6. Nightly BVI catalog parity snapshot (IST ~02:30, once per IST
-        # day). Fully fail-soft -- can never take down the tick/scheduler.
-        await self._maybe_run_bvi_parity()
 
         # Compute overall health score
         self._health_score = self._compute_health_score(results)
@@ -453,77 +439,6 @@ class SentinelAgent(JarvisAgent):
             logger.error(f"[SENTINEL] Data integrity check failed: {e}")
 
         return result
-
-    # ===== Nightly BVI catalog parity (continuous drift monitor) =====
-
-    async def _maybe_run_bvi_parity(self, now=None):
-        """Run the nightly BVI (Postgres) vs IMS (Mongo) catalog parity
-        snapshot once per IST day, on the first tick at/after ~02:30 IST.
-
-        Until the old BVI app is decommissioned BOTH catalogs exist and can
-        drift (an edit in the BVI admin that IMS never hears about). The
-        heavy lifting -- snapshot, persistence with 30-day retention, drift
-        detection, deduped SYSTEM task -- lives in
-        api.services.bvi_parity.run_and_record_parity (itself fail-soft).
-
-        Gates, in order:
-          * BVI_PARITY_MONITOR env switch (default on).
-          * IST wall-clock >= 02:30 (before that, tonight's run is not due).
-          * Once per IST day: in-memory marker first, then a DB lookup in
-            bvi_parity_snapshots so a mid-day restart does not re-run it.
-
-        FULLY fail-soft: any exception is swallowed with a WARNING -- the
-        60-second health tick (and the scheduler) must never die because the
-        parity oracle had a bad night. Blocking DB I/O runs in a worker
-        thread so the event loop is not held for the Postgres round-trip.
-
-        ``now`` is injectable (tz-aware IST datetime) for tests.
-        """
-        try:
-            from api.services import bvi_parity  # noqa: PLC0415 -- lazy, fail-soft
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[SENTINEL] bvi_parity service unavailable: {e}")
-            return
-        try:
-            if not bvi_parity.monitor_enabled():
-                return
-
-            if now is None:
-                from api.utils.ist import now_ist  # noqa: PLC0415
-                now = now_ist()
-
-            # Not yet 02:30 IST -> tonight's run is not due.
-            if (now.hour, now.minute) < (BVI_PARITY_RUN_HOUR, BVI_PARITY_RUN_MINUTE):
-                return
-
-            today = now.strftime("%Y-%m-%d")
-            if self._bvi_parity_last_ist_date == today:
-                return  # already ran (or confirmed) today
-
-            # Restart-safe dedupe: a snapshot stored for today means another
-            # process (or this one, pre-restart) already ran tonight's check.
-            col = self.get_collection(bvi_parity.PARITY_SNAPSHOT_COLLECTION)
-            if col is not None:
-                try:
-                    if col.find_one({"ist_date": today}) is not None:
-                        self._bvi_parity_last_ist_date = today
-                        return
-                except Exception:  # noqa: BLE001
-                    pass  # dedupe lookup is best-effort
-
-            import asyncio  # noqa: PLC0415
-
-            # Mark BEFORE running so a slow/failed run is not retried every
-            # 60s all night; the snapshot itself records ok=False on failure.
-            self._bvi_parity_last_ist_date = today
-            snapshot = await asyncio.to_thread(bvi_parity.run_and_record_parity, self.db)
-            logger.info(
-                "[SENTINEL] nightly BVI parity ran (ok=%s, drift=%s)",
-                snapshot.get("ok"),
-                (snapshot.get("drift") or {}).get("drift"),
-            )
-        except Exception as e:  # noqa: BLE001 -- the tick must never die here
-            logger.warning(f"[SENTINEL] BVI parity nightly run failed (soft): {e}")
 
     # ===== Health Scoring =====
 

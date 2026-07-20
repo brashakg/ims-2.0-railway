@@ -15,8 +15,6 @@ THE FIX (read-side, idempotent -- stored docs are NEVER rewritten):
      VARIANT_PRICE->price; unknown columns pass through marked, never crash),
      applied inside the evaluator + the collection GET serializers.
   2. attributes.brand_name added to the brand field-path list.
-  3. scripts/migrate_bvi_pim.py::map_collection now writes the normalized shape
-     under `rules` and keeps the original under `rules_shopify` for fidelity.
 
 Layers (mirrors test_ecom_collections.py style; CI-robust: monkeypatched
 accessors + seeded MockCollection docs, no live Mongo needed):
@@ -25,7 +23,6 @@ accessors + seeded MockCollection docs, no live Mongo needed):
      relations + brand_name + native-shape regression).
   3. Live router: editor GET returns normalized rules; resolved-products
      resolves a migrated SMART collection; the stored doc stays untouched.
-  4. Migration mapper: normalized `rules` + verbatim `rules_shopify`.
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_smart_collections_revive.py -q
 """
@@ -37,11 +34,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
-# Make scripts/ importable for the migration mapper (same pattern as
-# test_migrate_bvi_pim.py).
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
-
 import pytest  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
@@ -50,7 +42,6 @@ from database.repositories.ecom_collection_repository import (  # noqa: E402
 )
 from api.services import ecom_smart_rules as smart  # noqa: E402
 from api.routers import online_store_collections as osc  # noqa: E402
-from migrate_bvi_pim import map_collection  # noqa: E402
 
 
 # ===========================================================================
@@ -339,68 +330,3 @@ def test_resolved_products_resolves_migrated_collection(
     assert body["rules"][0] == {
         "field": "brand", "relation": "EQUALS", "value": "Ray-Ban"
     }
-
-
-# ===========================================================================
-# Layer 4 -- migration mapper writes the normalized shape going forward
-# ===========================================================================
-
-def _bvi_collection_row(**overrides):
-    base = {
-        "id": "cuid_col_1",
-        "handle": "ray-ban",
-        "title": "Ray-Ban",
-        "collectionType": "SMART",
-        "published": True,
-        "rules": (
-            '[{"column":"VENDOR","relation":"EQUALS","condition":"Ray-Ban"}]'
-        ),
-        "disjunctive": False,
-    }
-    base.update(overrides)
-    return base
-
-
-def test_map_collection_writes_normalized_rules_plus_shopify_fidelity():
-    doc = map_collection(_bvi_collection_row(), [])
-    assert doc["rules"] == [
-        {"field": "brand", "relation": "EQUALS", "value": "Ray-Ban"}
-    ]
-    # Original Shopify shape preserved verbatim for push-side fidelity.
-    assert doc["rules_shopify"] == [
-        {"column": "VENDOR", "relation": "EQUALS", "condition": "Ray-Ban"}
-    ]
-
-
-def test_map_collection_native_rules_pass_through():
-    row = _bvi_collection_row(
-        rules='[{"field":"brand","relation":"EQUALS","value":"Ray-Ban"}]'
-    )
-    doc = map_collection(row, [])
-    assert doc["rules"] == [
-        {"field": "brand", "relation": "EQUALS", "value": "Ray-Ban"}
-    ]
-    assert doc["rules_shopify"] == doc["rules"]
-
-
-def test_map_collection_without_rules_stays_empty():
-    doc = map_collection(_bvi_collection_row(rules=None), [])
-    assert doc["rules"] == []
-    assert doc["rules_shopify"] == []
-
-
-def test_migration_to_resolution_end_to_end():
-    """Full pipeline: BVI row (Shopify-shape rules JSON) -> map_collection ->
-    engine resolution against the seeded catalog -> the right SKU."""
-    row = _bvi_collection_row(
-        rules=(
-            '[{"column":"VENDOR","relation":"EQUALS","condition":"Ray-Ban"},'
-            '{"column":"VARIANT_PRICE","relation":"GREATER_THAN",'
-            '"condition":"5000"}]'
-        )
-    )
-    doc = map_collection(row, [])
-    skus = smart.resolve_skus(
-        CATALOG, doc["rules"], disjunctive=doc["disjunctive"]
-    )
-    assert skus == ["RB-EXP"]
