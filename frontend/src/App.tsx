@@ -150,6 +150,7 @@ const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 const CashFlowPage = lazy(() => import('./pages/finance/CashFlowPage'));
 const ItcReconcilePage = lazy(() => import('./pages/finance/ItcReconcilePage'));
+const GstCrossCheckPage = lazy(() => import('./pages/finance/GstCrossCheckPage'));
 const CashRegisterPage = lazy(() => import('./pages/finance/CashRegisterPage'));
 const BlindEodTallyPage = lazy(() => import('./pages/finance/BlindEodTallyPage'));
 const CashReconciliationPage = lazy(() => import('./pages/finance/CashReconciliationPage'));
@@ -1553,6 +1554,17 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
                         <ItcReconcilePage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  {/* Accountant GST cross-check: GSTR-1/3B vs books side-by-side
+                      + month sign-off. Finance-admin only (matches backend
+                      _require_finance_admin). */}
+                  <Route
+                    path="finance/gst-cross-check"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+                        <GstCrossCheckPage />
                       </ProtectedRoute>
                     }
                   />

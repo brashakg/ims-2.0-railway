@@ -146,6 +146,8 @@ export const NAV_GROUPS: NavGroup[] = [
       // group below (cashier tools, not accountant analysis). URLs + roles unchanged.
       { id: 'cashflow', label: 'Cash Flow', to: '/finance/cash-flow', icon: 'trendingUp', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'percent', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      // Accountant GST cross-check: GSTR-1/3B vs books side-by-side + sign-off.
+      { id: 'gst-cross-check', label: 'GST Cross-Check', to: '/finance/gst-cross-check', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // B2B invoices -> Tally: e-invoice + e-way bill issued in Tally (owner
       // decision). Export console + reminder worklist; finance-admin only.
       { id: 'b2b-tally-export', label: 'B2B → Tally Export', to: '/finance/b2b-tally-export', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
