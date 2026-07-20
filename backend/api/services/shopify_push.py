@@ -164,19 +164,22 @@ def push_mode_status(db) -> Dict[str, Any]:
     }
 
 
-def _has_shopify_creds(db) -> bool:
+def _has_shopify_creds(db, storefront_id: str = "BV") -> bool:
     """True iff usable Shopify Admin API credentials resolve (shop_url +
     access_token), via OAuth client-credentials OR the vault/env fallback --
     NOT a raw read of the (possibly stale) stored token. So the gate now reports
     creds-present whenever OAuth env creds are configured, even if the Mongo
     vault token is a known-bad placeholder. Fail-soft -> False (treated as DARK).
 
+    `storefront_id` (default "BV") keys the resolver; the BV default is
+    byte-identical to the previous single-arg call.
+
     NOTE: this is only ever reached (in _live_or_reason) AFTER the writes +
     dispatch gates pass, so in the DARK default posture no OAuth token is minted.
     push_mode_status calls it directly; with the in-process token cache that
     mints at most ~once per TTL."""
     try:
-        creds = resolve_shopify_credentials(db)
+        creds = resolve_shopify_credentials(db, storefront_id)
         return bool(creds and creds.get("shop_url") and creds.get("access_token"))
     except Exception:  # noqa: BLE001 -- a config read must never raise into a push
         return False
@@ -315,7 +318,9 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     Raises httpx/ValueError on a transport-level failure; the caller catches and
     converts to a fail-soft PushResult.
     """
-    creds = resolve_shopify_credentials(db)
+    # Keyed to the default BV storefront (Phase 0); byte-identical to the
+    # previous single-arg resolve for BV.
+    creds = resolve_shopify_credentials(db, "BV")
     shop_url = (creds or {}).get("shop_url")
     access_token = (creds or {}).get("access_token")
     if not shop_url or not access_token:

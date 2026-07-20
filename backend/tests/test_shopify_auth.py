@@ -81,7 +81,7 @@ def test_oauth_preferred_and_cached(monkeypatch):
     # Even a present (but stale) vault token must NOT win over OAuth.
     monkeypatch.setattr(
         shopify_auth, "_vault_config",
-        lambda db: {"shop_url": "bv.myshopify.com", "access_token": "STALE_BAD"},
+        lambda db, storefront_id="BV": {"shop_url": "bv.myshopify.com", "access_token": "STALE_BAD"},
     )
     spy = _MintSpy(token="shpat_fresh")
     monkeypatch.setattr(shopify_auth, "_mint_oauth_token", spy)
@@ -106,7 +106,7 @@ def test_oauth_shop_from_vault_when_env_store_absent(monkeypatch):
     monkeypatch.setenv("SHOPIFY_CLIENT_SECRET", "csecret")
     monkeypatch.setattr(
         shopify_auth, "_vault_config",
-        lambda db: {"shop_url": "https://from-vault.myshopify.com/"},
+        lambda db, storefront_id="BV": {"shop_url": "https://from-vault.myshopify.com/"},
     )
     spy = _MintSpy()
     monkeypatch.setattr(shopify_auth, "_mint_oauth_token", spy)
@@ -126,7 +126,7 @@ def test_oauth_mint_failure_falls_back_to_vault(monkeypatch):
     monkeypatch.setenv("SHOPIFY_STORE_URL", "bv.myshopify.com")
     monkeypatch.setattr(
         shopify_auth, "_vault_config",
-        lambda db: {"shop_url": "bv.myshopify.com", "access_token": "vault_tok"},
+        lambda db, storefront_id="BV": {"shop_url": "bv.myshopify.com", "access_token": "vault_tok"},
     )
     monkeypatch.setattr(shopify_auth, "_mint_oauth_token", lambda *a: None)
 
@@ -152,7 +152,7 @@ def test_vault_fallback_when_no_oauth_env(monkeypatch):
     monkeypatch.setattr(shopify_auth, "_mint_oauth_token", _boom)
     monkeypatch.setattr(
         shopify_auth, "_vault_config",
-        lambda db: {"shop_url": "bv.myshopify.com", "access_token": "vault_only"},
+        lambda db, storefront_id="BV": {"shop_url": "bv.myshopify.com", "access_token": "vault_only"},
     )
     res = shopify_auth.resolve_shopify_credentials(object())
     assert res == {
@@ -167,7 +167,7 @@ def test_env_static_token_fallback(monkeypatch):
     source=env."""
     monkeypatch.setenv("SHOPIFY_STORE_URL", "bv.myshopify.com")
     monkeypatch.setenv("SHOPIFY_ACCESS_TOKEN", "env_static_tok")
-    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db: {})
+    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db, storefront_id="BV": {})
     res = shopify_auth.resolve_shopify_credentials(object())
     assert res == {
         "shop_url": "bv.myshopify.com",
@@ -179,7 +179,7 @@ def test_env_static_token_fallback(monkeypatch):
 def test_returns_none_when_nothing_configured(monkeypatch):
     """Nothing configured (no OAuth env, empty vault, no env token) -> None,
     never a raise."""
-    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db: {})
+    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db, storefront_id="BV": {})
     assert shopify_auth.resolve_shopify_credentials(object()) is None
 
 
@@ -188,7 +188,7 @@ def test_vault_config_failsoft_on_read_error(monkeypatch):
     stays fail-soft and returns None when there is nothing else usable."""
     from agents import nexus_providers as nx
 
-    def _explode(db, t):
+    def _explode(db, t, storefront_id=None):
         raise RuntimeError("mongo down")
 
     monkeypatch.setattr(nx, "_load_integration_config", _explode)
@@ -206,7 +206,7 @@ def test_token_never_logged(monkeypatch, caplog):
     monkeypatch.setenv("SHOPIFY_CLIENT_ID", "cid")
     monkeypatch.setenv("SHOPIFY_CLIENT_SECRET", "csecret")
     monkeypatch.setenv("SHOPIFY_STORE_URL", "bv.myshopify.com")
-    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db: {})
+    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db, storefront_id="BV": {})
     secret_token = "shpat_SUPER_SECRET_VALUE_9999"
     monkeypatch.setattr(
         shopify_auth, "_mint_oauth_token",
@@ -250,7 +250,7 @@ def test_http_mint_sends_client_credentials_grant(monkeypatch):
     monkeypatch.setenv("SHOPIFY_CLIENT_ID", "the_cid")
     monkeypatch.setenv("SHOPIFY_CLIENT_SECRET", "the_secret")
     monkeypatch.setenv("SHOPIFY_STORE_URL", "https://bv.myshopify.com")
-    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db: {})
+    monkeypatch.setattr(shopify_auth, "_vault_config", lambda db, storefront_id="BV": {})
 
     res = shopify_auth.resolve_shopify_credentials(object())
     assert res == {
@@ -283,8 +283,8 @@ def test_push_has_creds_true_via_oauth_despite_bad_vault_token(monkeypatch):
     # The stored Mongo token is the stale placeholder that 401s the Admin API.
     monkeypatch.setattr(
         nx, "_load_integration_config",
-        lambda db, t: {"shop_url": "bv.myshopify.com",
-                       "access_token": "STALE_401_PLACEHOLDER"},
+        lambda db, t, storefront_id=None: {"shop_url": "bv.myshopify.com",
+                                           "access_token": "STALE_401_PLACEHOLDER"},
     )
     monkeypatch.setattr(
         shopify_auth, "_mint_oauth_token",

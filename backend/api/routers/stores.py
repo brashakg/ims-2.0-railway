@@ -20,8 +20,11 @@ from ..services import org_validation as ov
 
 router = APIRouter()
 
-# Store outlet types.
-STORE_TYPES = ("HQ", "RETAIL", "WAREHOUSE")
+# Store outlet types. ONLINE is the storefront-fulfilment store type (WizOpt
+# multi-storefront Phase 0): an ONLINE store (e.g. BV-ONLINE-01) is where an
+# online storefront's orders are fulfilled from. Additive only -- existing HQ /
+# RETAIL / WAREHOUSE stores are completely unaffected.
+STORE_TYPES = ("HQ", "RETAIL", "WAREHOUSE", "ONLINE")
 # Canonical product categories a store can stock/sell (constrains the free-text
 # enabled_categories list). Mirrors the catalog category enum.
 STORE_CATEGORIES = (

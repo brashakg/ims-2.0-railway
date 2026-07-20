@@ -918,7 +918,7 @@ def test_webhook_subscription_delete_builds_right_mutation(monkeypatch):
     # Creds resolve via shopify_auth.resolve_shopify_credentials since #916.
     monkeypatch.setattr(
         shopify_push, "resolve_shopify_credentials",
-        lambda db: {"shop_url": "x.myshopify.com", "access_token": "shpat_x",
+        lambda db, storefront_id="BV": {"shop_url": "x.myshopify.com", "access_token": "shpat_x",
                     "source": "vault"},
     )
 

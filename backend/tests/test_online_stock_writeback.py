@@ -86,7 +86,7 @@ def _live_shopify(monkeypatch):
     monkeypatch.setattr(nexus_providers, "dispatch_mode", lambda: "live")
     monkeypatch.setattr(
         nexus_providers, "_load_integration_config",
-        lambda db, t: {"shop_url": "test.myshopify.com", "access_token": "tok"},
+        lambda db, t, storefront_id=None: {"shop_url": "test.myshopify.com", "access_token": "tok"},
     )
     monkeypatch.setattr(nexus_providers.httpx, "AsyncClient", _FakeAsyncClient)
 

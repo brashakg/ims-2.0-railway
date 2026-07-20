@@ -78,7 +78,7 @@ def _force_dark(monkeypatch):
     # Creds resolve via shopify_auth.resolve_shopify_credentials since #916
     # (the old _load_integration_config seam no longer exists on shopify_push).
     monkeypatch.setattr(
-        shopify_push, "resolve_shopify_credentials", lambda db: None
+        shopify_push, "resolve_shopify_credentials", lambda db, storefront_id="BV": None
     )
 
     async def _boom(db, query, variables):  # pragma: no cover
@@ -406,7 +406,7 @@ def _force_live(monkeypatch, graphql_fn):
     monkeypatch.setattr(
         shopify_push,
         "resolve_shopify_credentials",
-        lambda db: {"shop_url": "t.myshopify.com", "access_token": "shpat_x"},
+        lambda db, storefront_id="BV": {"shop_url": "t.myshopify.com", "access_token": "shpat_x"},
     )
     monkeypatch.setattr(shopify_push, "_graphql", graphql_fn)
 
