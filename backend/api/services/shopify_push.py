@@ -1654,8 +1654,32 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             "media"
         ) or []
         new_gid = (media_nodes[0].get("id") if media_nodes else None) or existing_gid
-        if new_gid and iid:
-            _writeback_image(db, iid, new_gid)
+        # Persist the MediaImage gid for idempotency. _writeback_image now takes
+        # the WHOLE image doc so it can locate the row even when image_id is null
+        # (the BVI-migrated docs) via the natural key (product_id + url). If it
+        # STILL cannot persist, the media WAS created on Shopify but we have no
+        # way to record it -> Fail Loudly (ok=False) instead of a silent success,
+        # because a clean-looking ok=True on an un-recorded create is exactly what
+        # let a re-run duplicate media. shopify_id is still returned so the audit
+        # row captures the orphaned gid for manual reconcile.
+        if new_gid:
+            persisted = _writeback_image(db, image, new_gid)
+            if not persisted:
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="image",
+                    action=action,
+                    target_id=iid,
+                    ok=False,
+                    shopify_id=new_gid,
+                    payload=payload,
+                    error=(
+                        "media attached on Shopify (%s) but shopify_image_id "
+                        "write-back failed: no stable image key (image_id or "
+                        "product_id+url) to persist it -- manual reconcile "
+                        "required to avoid a duplicate on re-push" % new_gid
+                    ),
+                )
         return PushResult(
             mode=MODE_LIVE,
             entity="image",
@@ -1716,16 +1740,53 @@ def _resolve_product_gid(db, product_id: Optional[str]) -> Optional[str]:
         return None
 
 
-def _writeback_image(db, image_id: str, shopify_id: str) -> None:
-    """Persist shopify_image_id on the product_images doc. Fail-soft. (The image
-    has no locally_modified flag; the gid presence is the idempotency key.)"""
+def _image_writeback_filter(image: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The Mongo filter that uniquely locates this image doc for a write-back.
+
+    Prefers the primary key `image_id`. When it is missing/null (the BVI-migrated
+    docs are stored with image_id=None) it falls back to the documented natural
+    key product_id + url (ProductImageRepository: "Idempotent keys (never _id):
+    image_id | product_id | variant_id"). Returns None when NEITHER is available
+    -- there is then no safe way to target exactly one row, so the caller must
+    fail loudly rather than write blindly."""
+    iid = image.get("image_id")
+    if iid:
+        return {"image_id": iid}
+    pid = image.get("product_id")
+    url = image.get("url")
+    if pid and url:
+        return {"product_id": pid, "url": url}
+    return None
+
+
+def _writeback_image(db, image: Dict[str, Any], shopify_id: str) -> bool:
+    """Persist shopify_image_id on the product_images doc. Returns True iff a row
+    was actually located + written, False otherwise (no usable key, or a fail-soft
+    error). The gid presence is the idempotency key (the image has no
+    locally_modified flag), so a reliable write-back is what stops a re-push from
+    duplicating media.
+
+    Takes the WHOLE image doc (not just an id) so it can locate the row via the
+    natural key when image_id is null -- the exact condition that made the
+    BVI-migrated docs silently skip their write-back before this fix."""
+    filt = _image_writeback_filter(image)
+    if filt is None:
+        return False
     try:
-        db["product_images"].update_one(
-            {"image_id": image_id},
+        res = db["product_images"].update_one(
+            filt,
             {"$set": {"shopify_image_id": shopify_id, "updated_at": _now()}},
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"[SHOPIFY_PUSH] image write-back failed {image_id}: {e}")
+        logger.warning(
+            f"[SHOPIFY_PUSH] image write-back failed {filt}: {e}"
+        )
+        return False
+    # matched_count on real pymongo; MockCollection exposes modified_count only.
+    touched = getattr(res, "matched_count", None)
+    if touched is None:
+        touched = getattr(res, "modified_count", 0)
+    return bool(touched)
 
 
 # ===========================================================================
