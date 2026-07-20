@@ -280,7 +280,9 @@ def test_sibling_summary_shape():
         "image_url",
     ):
         assert key in s
-    assert s["name"] == "Ray-Ban RB-2140"
+    # The spine now carries an auto-minted SEO name (product_naming), so the
+    # summary surfaces it verbatim rather than the old brand+model fallback.
+    assert s["name"] == "Ray-Ban RB-2140 Eyeglasses - Blk"
 
 
 # ===========================================================================
