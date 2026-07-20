@@ -52,6 +52,13 @@ from typing import Any, Dict, List, Optional
 
 from .gst_rates import gst_rate_for_category, hsn_for_category
 from .pricing_caps import evaluate_offer_price
+from .product_naming import (
+    build_handle,
+    build_product_name,
+    build_seo_description,
+    build_seo_title,
+    needs_name,
+)
 
 logger = logging.getLogger("ims.product_master")
 
@@ -844,8 +851,9 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         attrs.get("colour_code") or attrs.get("colour_name") or existing.get("color")
     )
     size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
-    # Display name: an explicit doc name wins; else "Brand Model" (products
-    # have no name column -- brand+model IS the display identity).
+    # Display name: the doc's auto-minted `name` wins (product_naming stamps it
+    # at create time); legacy rows created before that fall back to "Brand
+    # Model".
     name = existing.get("name") or (
         " ".join(str(p) for p in (brand, model) if p) or None
     )
@@ -1213,6 +1221,17 @@ def normalise_payload(
     # Reorder dashboard). setdefault so a door that DID supply a value
     # (via extra_fields) keeps it.
     doc.setdefault("reorder_quantity", -1)
+    # --- SEO auto-naming: mint a display name when the payload leaves it blank ---
+    # The spine has historically had NO `name` column (brand+model was the
+    # implicit display identity), so products created via the Add-Product flow
+    # landed blank on bills / POS lines / the online catalog. Auto-mint a
+    # deterministic, SEO-shaped name from the attributes at save time. An
+    # explicit door-supplied name (via extra_fields, e.g. a SERVICE's name)
+    # is NEVER overwritten -- needs_name() only fires on a blank.
+    if needs_name(doc):
+        minted = build_product_name(doc)
+        if minted:
+            doc["name"] = minted
     # --- Phase 0: stamp the catalog-done chokepoint on the spine ---
     # compute_catalog_status reads the doc we just built (cost_price + the
     # derived hsn/gst are now present), so the stamp is consistent with what was
@@ -1293,9 +1312,17 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
     """Project the spine + its attributes into a catalog_products PIM doc.
 
     The PIM doc is schemaless; it carries the Shopify/PIM superset attributes
-    untouched under `ecom.category_specific` so they round-trip to NEXUS.
+    untouched under `ecom.category_specific` so they round-trip to NEXUS. It
+    lands `ecom.status = DRAFT` (never live) with an SEO title + handle so the
+    Online Store push (shopify_push.build_product_input reads ecom.status /
+    ecom.handle / ecom.seo.{title,description,tags} + top-level name) has a
+    complete, reviewable-but-not-sellable object the moment it is created.
     """
     attrs = dict(spine.get("attributes") or {})
+    name = spine.get("name") or build_product_name(spine)
+    seo_title = build_seo_title(spine)
+    handle = build_handle(spine)
+    seo_description = build_seo_description(spine)
     return {
         "id": spine.get("pim_product_id"),
         "parent_sku": spine.get("sku"),
@@ -1307,8 +1334,22 @@ def _build_pim_doc(spine: Dict[str, Any]) -> Dict[str, Any]:
         "offer_price": spine.get("offer_price"),
         "hsn_code": spine.get("hsn_code"),
         "gst_rate": spine.get("gst_rate"),
+        # Display identity the storefront + push read (top-level name/title).
+        "name": name or None,
+        "title": name or None,
+        # Legacy top-level status kept for existing readers; ecom.status is the
+        # one the Shopify push honours.
         "status": "DRAFT",
-        "ecom": {"category_specific": attrs},
+        "ecom": {
+            "status": "DRAFT",
+            "handle": handle or None,
+            "seo": {
+                "title": seo_title or name or None,
+                "description": seo_description or None,
+                "tags": list(spine.get("tags") or []),
+            },
+            "category_specific": attrs,
+        },
         # Surface the common Shopify superset fields top-level too (verbatim).
         "attributes": attrs,
     }
@@ -1394,6 +1435,58 @@ def _write_mirror(
         )
 
     return targets
+
+
+def _stage_catalog_draft(
+    spine: Dict[str, Any],
+    *,
+    catalog_repo=None,
+    db=None,
+) -> _SyncTarget:
+    """Stage the spine as a catalog_products PIM DRAFT doc -- ALWAYS, regardless
+    of the mirror flag.
+
+    ROOT-CAUSE FIX: create_product pre-assigns every spine a `pim_product_id`
+    (the intended catalog_products link), but the ONLY writer of that
+    catalog_products doc used to be `_write_mirror`, which is gated behind the
+    off-by-default `pm.mirror_enabled` flag. So on a normal deploy the
+    pim_product_id pointed at a doc that was never created -- a DANGLING link,
+    and the product could never be pushed online (the Online Store products
+    card counts `catalog_products` with an `ecom` sub-doc).
+
+    Staging a LOCAL Mongo DRAFT doc is NOT an external write: the mirror flag /
+    DISPATCH_MODE gate exists to guard the EXTERNAL (Postgres/Shopify) push,
+    which stays gated (ecom.status=DRAFT is never live). So the internal DRAFT
+    doc is created unconditionally to make the link valid and the product
+    push-able later.
+
+    Idempotent (upsert on `id`), fail-soft (NEVER raises -- returns a
+    _SyncTarget the caller records). Recorded under its OWN target key
+    ("catalog_draft") so the flag-gated `catalog_products` mirror target
+    semantics are untouched.
+    """
+    pim_id = spine.get("pim_product_id")
+    if not pim_id:
+        return _SyncTarget("catalog_draft", "SKIPPED", "no pim_product_id")
+    try:
+        pim_doc = _build_pim_doc(spine)
+        if catalog_repo is not None:
+            catalog_repo.upsert(pim_doc)
+            return _SyncTarget("catalog_draft", "OK")
+        if db is not None:
+            coll = db.get_collection("catalog_products")
+            if coll is None:
+                return _SyncTarget("catalog_draft", "SKIPPED", "no catalog collection")
+            coll.update_one({"id": pim_id}, {"$set": pim_doc}, upsert=True)
+            return _SyncTarget("catalog_draft", "OK")
+        return _SyncTarget("catalog_draft", "SKIPPED", "no catalog target")
+    except Exception as exc:  # noqa: BLE001 - staging must never fail a create
+        logger.warning(
+            "[PM] catalog_products DRAFT staging failed for %s: %s",
+            spine.get("sku"),
+            exc,
+        )
+        return _SyncTarget("catalog_draft", "FAILED", str(exc)[:200])
 
 
 def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
@@ -1837,6 +1930,15 @@ def create_product(
     # --- STEP 2: gated, best-effort mirror (never corrupts the spine) ---
     targets = _write_mirror(
         created, catalog_repo=catalog_repo, variant_repo=variant_repo, db=db
+    )
+
+    # --- STEP 2b: ALWAYS stage the catalog_products DRAFT doc (linkage fix) ---
+    # Makes the pre-assigned pim_product_id resolve to a real (DRAFT, not live)
+    # catalog_products doc so the product can be pushed online later. Runs
+    # regardless of the mirror flag; fail-soft; recorded under its own target
+    # key so the flag-gated mirror targets above are unaffected.
+    targets.append(
+        _stage_catalog_draft(created, catalog_repo=catalog_repo, db=db)
     )
 
     # --- STEP 3: record compensation/sync status back on the spine ---
