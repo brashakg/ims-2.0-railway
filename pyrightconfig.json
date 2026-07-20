@@ -10,7 +10,6 @@
     "**/node_modules",
     "**/.venv",
     "**/__pycache__",
-    "ecommerce",
     "frontend",
     "scripts",
     "e2e",
