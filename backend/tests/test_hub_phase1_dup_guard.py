@@ -239,7 +239,9 @@ def test_dup_conflict_payload_is_enriched_for_fe_rescue():
     assert c["brand"] == "Ray-Ban"
     assert c["model"] == "RB-2140"
     assert c["colour_code"] == "BLK"
-    assert c["name"] == "Ray-Ban RB-2140"
+    # Auto-naming (#928): blank names are now SEO-minted from attributes,
+    # so the dup-guard payload carries the full generated name.
+    assert c["name"].startswith("Ray-Ban RB-2140")
     assert c["category"] == "FRAME"
     assert c["mrp"] == 5000.0
     assert c["offer_price"] == 4500.0
