@@ -546,12 +546,18 @@ class NexusAgent(JarvisAgent):
     #   refunds/create      -> GST credit note (output-tax reversal) + stock restock
     #   fulfillments/*      -> reconcile shipped/tracking onto the IMS online order
     #   customers/*         -> upsert into IMS CRM (dedupe on mobile/email, merge)
+    #   orders/delete       -> VOID the IMS online order (soft; never hard-delete)
+    #   customers/delete    -> flag the IMS customer for data erasure (keep history)
+    #   app/uninstalled     -> loud alert + integration-health record (token gone)
     _SHOPIFY_TOPIC_HANDLERS = {
         "refunds/create": "_handle_shopify_refund_topic",
         "fulfillments/create": "_handle_shopify_fulfillment_topic",
         "fulfillments/update": "_handle_shopify_fulfillment_topic",
         "customers/create": "_handle_shopify_customer_topic",
         "customers/update": "_handle_shopify_customer_topic",
+        "orders/delete": "_handle_shopify_order_delete_topic",
+        "customers/delete": "_handle_shopify_customer_delete_topic",
+        "app/uninstalled": "_handle_shopify_app_uninstalled_topic",
     }
 
     # Catalog / collection / inventory reverse-sync is CONSCIOUSLY UNBUILT (owner
@@ -718,6 +724,59 @@ class NexusAgent(JarvisAgent):
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify customer handling failed: {e}")
+
+    async def _handle_shopify_order_delete_topic(self, payload: Dict[str, Any], topic: str):
+        """orders/delete -> VOID the matching IMS online order (soft status change +
+        shopify_deleted_at stamp; NEVER hard-delete), via
+        api.services.shopify_order_delete. Idempotent on the shopify_deleted_at
+        marker. Fail-soft if the order isn't found."""
+        try:
+            from api.services.shopify_order_delete import handle_shopify_order_delete
+
+            result = handle_shopify_order_delete(self.db, payload, topic=str(topic))
+            logger.info(
+                "[NEXUS] shopify order delete -> status=%s order=%s shopify_order=%s",
+                result.get("status"),
+                result.get("order_id"),
+                result.get("shopify_order_id"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] shopify order delete handling failed: {e}")
+
+    async def _handle_shopify_customer_delete_topic(self, payload: Dict[str, Any], topic: str):
+        """customers/delete -> flag the matching IMS customer for data erasure
+        (shopify_erasure_requested + timestamp; NEVER hard-delete PII-linked
+        history), via api.services.shopify_customer_delete. Idempotent. Fail-soft."""
+        try:
+            from api.services.shopify_customer_delete import handle_shopify_customer_delete
+
+            result = handle_shopify_customer_delete(self.db, payload, topic=str(topic))
+            logger.info(
+                "[NEXUS] shopify customer delete -> status=%s customer=%s shopify_id=%s",
+                result.get("status"),
+                result.get("customer_id"),
+                result.get("shopify_customer_id"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] shopify customer delete handling failed: {e}")
+
+    async def _handle_shopify_app_uninstalled_topic(self, payload: Dict[str, Any], topic: str):
+        """app/uninstalled -> LOUD log + integration-health/alert record + a HIGH
+        audit alert that the Shopify connection is gone (access token revoked), via
+        api.services.shopify_app_uninstall. Idempotent (the HIGH alert fires once).
+        Fail-soft."""
+        try:
+            from api.services.shopify_app_uninstall import handle_shopify_app_uninstalled
+
+            result = await handle_shopify_app_uninstalled(self.db, payload, topic=str(topic))
+            logger.error(
+                "[NEXUS] shopify APP UNINSTALLED -> status=%s shop=%s alerted=%s",
+                result.get("status"),
+                result.get("shop"),
+                result.get("alerted"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] shopify app-uninstalled handling failed: {e}")
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
         evt = payload.get("current_status") or payload.get("event") or "unknown"
