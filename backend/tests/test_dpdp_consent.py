@@ -91,11 +91,17 @@ def test_default_consent_text_is_sensible():
 # ---------------------------------------------------------------------------
 
 def test_consent_grant_request_defaults_all_purposes():
-    """Omitting purposes grants all four by default."""
-    from api.routers.customers import ConsentGrantRequest, _ALL_PURPOSES
+    """Omitting purposes grants the four STANDARD purposes by default.
+
+    AD_AUDIENCE (third-party ad-platform sharing) is a valid purpose but is
+    deliberately NOT part of the default grant -- it requires an explicit,
+    separate opt-in -- so the default is _DEFAULT_GRANT_PURPOSES, not _ALL_PURPOSES.
+    """
+    from api.routers.customers import ConsentGrantRequest, _DEFAULT_GRANT_PURPOSES
 
     req = ConsentGrantRequest()
-    assert set(req.purposes) == _ALL_PURPOSES
+    assert set(req.purposes) == _DEFAULT_GRANT_PURPOSES
+    assert "AD_AUDIENCE" not in req.purposes
 
 
 def test_consent_grant_request_rejects_unknown_purpose():
@@ -347,8 +353,10 @@ def test_pending_purge_returns_retention_windows():
     }
     assert "retention_windows_days" in no_db_result
     assert set(no_db_result["retention_windows_days"].keys()) == {
-        "SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS"
+        "SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS", "AD_AUDIENCE"
     }
+    # AD_AUDIENCE (third-party sharing) stops immediately on withdrawal.
+    assert no_db_result["retention_windows_days"]["AD_AUDIENCE"] == 0
 
 
 # ---------------------------------------------------------------------------

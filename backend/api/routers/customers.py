@@ -1527,6 +1527,12 @@ async def get_store_credit_ledger(
 #   MARKETING          - promotional messages, birthday/Rx reminders
 #   RX_HISTORY         - retaining prescription history for clinical use
 #   ANALYTICS          - anonymised usage analytics and business reporting
+#   AD_AUDIENCE        - sharing HASHED identifiers with Google/Meta for ad
+#                        audience matching + suppression (third-party sharing).
+#                        DISTINCT + more sensitive than MARKETING: it discloses
+#                        (hashed) personal data to a processor outside IMS, so
+#                        DPDP requires it be a SEPARATE, EXPLICIT opt-in -- it is
+#                        deliberately NOT part of the default consent grant.
 #
 # Retention windows (mapped to purposes; after consent withdrawn the record
 # should be erased/anonymised within this window, unless a legal basis overrides):
@@ -1534,15 +1540,38 @@ async def get_store_credit_ledger(
 #   MARKETING          - 0 days   (immediate — no legal basis once withdrawn)
 #   RX_HISTORY         - 5 years  (clinical best practice; 7 for minors)
 #   ANALYTICS          - 30 days  (anonymise within 30 days of withdrawal)
+#   AD_AUDIENCE        - 0 days   (stop sharing immediately; the audience-export
+#                                  suppression list carries the delete request)
 # ============================================================================
 
-_ALL_PURPOSES = frozenset({"SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS"})
+_ALL_PURPOSES = frozenset(
+    {"SERVICE_DELIVERY", "MARKETING", "RX_HISTORY", "ANALYTICS", "AD_AUDIENCE"}
+)
+
+# The purposes captured by a default "grant all" at the counter. AD_AUDIENCE
+# (third-party ad-platform sharing) is intentionally EXCLUDED: it must be an
+# explicit, separate opt-in, never bundled into the standard consent tick.
+_DEFAULT_GRANT_PURPOSES = frozenset(_ALL_PURPOSES - {"AD_AUDIENCE"})
+
+# Versioned wording specific to the AD_AUDIENCE third-party-sharing opt-in. The
+# grant/withdraw flow already accepts an arbitrary text_version; this is the
+# canonical default shown when capturing ad-audience consent so the agreement is
+# always tied to exact wording (roadmap: "versioned consent-text").
+AD_AUDIENCE_CONSENT_VERSION = "ad_audience_v1"
+AD_AUDIENCE_CONSENT_TEXT = (
+    "I agree that Better Vision / WizOpt may share a secure, irreversibly "
+    "hashed form of my phone number and/or email with Google and Meta so that "
+    "I see more relevant ads and am not shown ads to re-acquire me as a new "
+    "customer. My raw contact details are never shared. I can withdraw this at "
+    "any time, after which sharing stops and a deletion request is sent."
+)
 
 _PURPOSE_RETENTION_DAYS: Dict[str, int] = {
     "SERVICE_DELIVERY": 1095,  # 3 years
     "MARKETING": 0,
     "RX_HISTORY": 1825,  # 5 years
     "ANALYTICS": 30,
+    "AD_AUDIENCE": 0,
 }
 
 
@@ -1550,10 +1579,12 @@ class ConsentGrantRequest(BaseModel):
     """Body for granting (or re-granting after an update) DPDP consent."""
 
     purposes: List[str] = Field(
-        default_factory=lambda: list(_ALL_PURPOSES),
+        default_factory=lambda: sorted(_DEFAULT_GRANT_PURPOSES),
         description=(
-            "Purposes being consented to. Defaults to all four purposes "
-            "(SERVICE_DELIVERY, MARKETING, RX_HISTORY, ANALYTICS)."
+            "Purposes being consented to. Defaults to the four standard purposes "
+            "(SERVICE_DELIVERY, MARKETING, RX_HISTORY, ANALYTICS). AD_AUDIENCE "
+            "(sharing hashed identifiers with Google/Meta) is a valid purpose but "
+            "is NEVER a default -- pass it explicitly to record that separate opt-in."
         ),
     )
     text_version: Optional[str] = Field(
