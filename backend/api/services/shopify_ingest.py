@@ -639,6 +639,46 @@ def _refund_credit_note_date_iso(refund: Dict[str, Any], order_payload: Dict[str
     )
 
 
+def _ensure_unique_hist_cn_ref_index(db) -> None:
+    """Concurrency backstop for the historical CN booking: a UNIQUE PARTIAL index
+    on credit_note_ledger.ref scoped to THIS import's rows (historical=True).
+
+    Closes the find-then-insert race between the create-branch booking and a
+    concurrent duplicate-path heal (parallel apply runs / the E11000 loser): the
+    racing loser's insert trips the index and is treated as a DUPLICATE, never
+    booked twice.
+
+    Deliberately NARROWER than an all-string-refs unique index: live writers can
+    legitimately reuse a ref (the manual store-credit endpoint persists a
+    caller-supplied body.ref -- customers.py), so a blanket unique index on ref
+    would start rejecting live inserts. Historical CN refs
+    ('SHOPIFY-HIST-REFUND-<refund id>') are unique by construction and every
+    historical CN row stamps historical=True, so the partial filter pins exactly
+    the racing writes. Idempotent + fail-soft: an index-build failure (e.g.
+    unexpected pre-existing duplicate rows in prod) logs and skips -- booking
+    then proceeds with the find-then-insert guard exactly as before, never
+    crashing the import."""
+    try:
+        coll = db.get_collection("credit_note_ledger")
+        if coll is None:
+            return
+        coll.create_index(
+            "ref",
+            name="uniq_hist_cn_ref",
+            unique=True,
+            partialFilterExpression={
+                "ref": {"$type": "string"},
+                "historical": True,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 -- backstop only; never block booking
+        logger.warning(
+            "[SHOPIFY_INGEST] uniq_hist_cn_ref index ensure failed (continuing "
+            "with find-then-insert dedupe): %s",
+            exc,
+        )
+
+
 def _hist_cn_note_number(refund_id: str) -> str:
     """Short DETERMINISTIC GSTN-legal note number (<=16 chars, charset [A-Z0-9-])
     for a synthesized historical credit note: 'CNH-' + the alphanumeric tail of
@@ -704,6 +744,12 @@ def _book_historical_refund_credit_notes(
         # duplicate path re-invokes this idempotent function).
         "cn_failed": 0,
         "cn_failed_refund_ids": [],
+        # Refunds whose CN was ALREADY booked (by a prior run or a concurrent
+        # racer). Non-zero GATES OFF the whole-order fallback: the prior run's
+        # per-refund booking decision and residual policy stand -- re-firing the
+        # fallback would stack a whole-order CN on top of existing per-refund
+        # CNs (reversal exceeding the invoice).
+        "duplicate_refunds": 0,
     }
     fin = str(payload.get("financial_status") or "").strip().lower()
     if fin not in ("refunded", "partially_refunded"):
@@ -740,6 +786,18 @@ def _book_historical_refund_credit_notes(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_INGEST] historical refund machinery import failed: %s", exc)
         return summary
+
+    # Concurrency backstops (idempotent, fail-soft): the unique partial index on
+    # historical CN refs closes the create-vs-heal booking race, and the returns
+    # uniq_shopify_refund_id index (normally built lazily by the LIVE refund
+    # path only) gives the historical stamps the same insert-level guarantee.
+    _ensure_unique_hist_cn_ref_index(db)
+    try:
+        shopify_refund._ensure_unique_refund_index(
+            db, shopify_refund._RETURNS_COLLECTION
+        )
+    except Exception:  # noqa: BLE001 -- backstop only
+        pass
 
     customer_id = order_doc.get("customer_id")
     billing_store = order_doc.get("store_id")
@@ -973,6 +1031,17 @@ def _book_historical_refund_credit_notes(
         try:
             ledger.insert_one(dict(entry))
         except Exception as exc:  # noqa: BLE001
+            if shopify_refund._is_dup_key(exc):
+                # A concurrent run (create-branch booking vs duplicate-path
+                # heal, or two parallel heals) won the unique-index insert for
+                # this ref -- this is a DUPLICATE, not a failure: never counted
+                # as cn_failed, never told to 're-run to heal'.
+                logger.info(
+                    "[SHOPIFY_INGEST] historical credit note for %s already "
+                    "inserted by a concurrent run -- treated as duplicate",
+                    refund_id,
+                )
+                return "duplicate"
             logger.warning(
                 "[SHOPIFY_INGEST] historical credit note insert failed for %s: %s",
                 refund_id, exc,
@@ -995,11 +1064,17 @@ def _book_historical_refund_credit_notes(
     for refund in refunds:
         if not isinstance(refund, dict):
             continue
-        if _process(refund) == "skipped":
+        status = _process(refund)
+        if status == "skipped":
             # Pricing exception / ledger insert failure -- NOT a residual: the
             # booking is idempotent, so a re-run of the import heals it (the
             # duplicate ingest path re-invokes this function).
             _record_failed(refund)
+        elif status == "duplicate":
+            # Booked by a PRIOR run (or a concurrent racer). Tracked so the
+            # whole-order fallback below never fires on a heal re-run and
+            # stacks a whole-order CN on top of existing per-refund CNs.
+            summary["duplicate_refunds"] += 1
 
     # TERMINALLY fully-refunded order whose refunds[] exist but NONE produced a
     # line-mapped credit note (all amount-only / unmappable -- Shopify's 'refund
@@ -1010,6 +1085,12 @@ def _book_historical_refund_credit_notes(
     if (
         fin == "refunded"
         and summary["credit_notes"] == 0
+        # HEAL-RERUN GUARD: any refund on this order ALREADY booked by a prior
+        # run (or a concurrent racer) means that run's per-refund booking
+        # decision and residual policy stand -- firing the fallback here would
+        # stack a whole-order CN on top of the existing per-refund CN(s),
+        # reversing more than the original invoice (GST-illegal).
+        and summary["duplicate_refunds"] == 0
         and unmapped_real_ids
         and order_items
     ):
@@ -1043,15 +1124,21 @@ def _book_historical_refund_credit_notes(
         fb_status = _process(synthetic)
         if fb_status == "skipped":
             _record_failed(synthetic)
-        if fb_status == "booked":
-            summary["whole_order_fallback"] = True
-            # The amount-only refunds are now COVERED by the whole-order credit
-            # note -- they are no longer an unreported residual. Stamp each real
-            # refund id so a future webhook redelivery dedupes instead of
-            # double-crediting on top of the whole-order reversal.
+        if fb_status in ("booked", "duplicate"):
+            # 'booked': fresh whole-order reversal. 'duplicate': a PRIOR run
+            # already booked the whole-order CN but its covered-stamps may have
+            # silently failed (fail-soft insert) -- re-running the stamp block
+            # here makes a stamp failure HEALABLE on re-run (the per-id
+            # existence pre-check keeps it idempotent). Either way the covered
+            # refunds are netted by a whole-order CN, so they are no longer an
+            # unreported residual.
+            if fb_status == "booked":
+                summary["whole_order_fallback"] = True
             summary["unmapped_refunds"] = max(
                 0, summary["unmapped_refunds"] - len(covered)
             )
+            # Stamp each real refund id so a future webhook redelivery dedupes
+            # instead of double-crediting on top of the whole-order reversal.
             cn_date = _refund_credit_note_date_iso(synthetic, payload)
             for rid in covered:
                 try:

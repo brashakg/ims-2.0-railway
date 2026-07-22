@@ -733,6 +733,136 @@ def test_cn_failure_reported_and_healed_on_rerun(wired):
     assert len([d for d in ledger.docs if d.get("shopify_refund_id") == "88045"]) == 1
 
 
+def test_heal_rerun_never_stacks_whole_order_cn_on_prior_per_refund_cn(wired):
+    # ROUND-4 P0 regression: mixed-shape fully-refunded order -- refund A is
+    # line-mappable (books a per-refund CN on run 1), refund B is amount-only
+    # (residual). On the heal re-run A dedupes ('duplicate') so the fresh
+    # summary's credit_notes stays 0 -- the whole-order fallback gate must be
+    # duplicate-aware and NOT fire, or it would stack a full whole-order CN on
+    # top of run 1's per-refund CN (total reversal > invoice, GST-illegal).
+    payload = _hist_order(21047, financial="refunded")
+    payload["refunds"] = [
+        {
+            "id": 88048,
+            "created_at": "2023-09-01T10:00:00Z",
+            "refund_line_items": [_refund_line()],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "799.00"}
+            ],
+        },
+        {
+            "id": 88049,
+            "created_at": "2023-09-02T10:00:00Z",
+            "refund_line_items": [],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "200.00"}
+            ],
+        },
+    ]
+    # Run 1 (create branch): A books a scaled Rs 799 CN; B stays a residual;
+    # the fallback is suppressed because credit_notes == 1.
+    res1 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    rcn1 = res1["refund_credit_notes"]
+    assert rcn1["credit_notes"] == 1
+    assert rcn1["unmapped_refunds"] == 1
+    assert "whole_order_fallback" not in rcn1
+
+    # Run 2 (duplicate -> heal): A returns 'duplicate' -> the fallback gate
+    # must see duplicate_refunds > 0 and book NOTHING.
+    res2 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    assert res2["status"] == "duplicate"
+    rcn2 = res2["refund_credit_notes"]
+    assert rcn2["credit_notes"] == 0, "heal re-run books NOTHING"
+    assert rcn2["duplicate_refunds"] == 1
+    assert "whole_order_fallback" not in rcn2
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    order_cns = [
+        d for d in ledger
+        if d.get("shopify_refund_id") in ("88048", "88049")
+        or str(d.get("shopify_refund_id", "")).startswith("orderfull:21047")
+    ]
+    assert not any(
+        str(d.get("shopify_refund_id", "")).startswith("orderfull:")
+        for d in order_cns
+    ), "no whole-order CN stacked on the per-refund CN"
+    total_reversed = round(
+        sum(float(d.get("gross_refund") or 0) for d in order_cns), 2
+    )
+    assert total_reversed == 799.0
+    assert total_reversed <= 999.0, "total reversal never exceeds the invoice"
+
+
+def test_stamp_failure_healed_on_rerun_via_duplicate_fallback(wired):
+    # ROUND-4 rider: run 1 books the whole-order CN but the covered-stamp
+    # inserts silently fail (fail-soft). The heal re-run's fallback returns
+    # 'duplicate' (CN already booked) -- the stamp block must STILL run so the
+    # missing dedupe stamps are healed and the phantom residual clears.
+    returns_coll = wired["db"].get_collection("returns")
+    orig_insert = returns_coll.insert_one
+
+    def _broken_insert(doc):
+        raise RuntimeError("transient stamp failure")
+
+    returns_coll.insert_one = _broken_insert
+    payload = _hist_order(21048, financial="refunded")
+    payload["refunds"] = [
+        {
+            "id": 88050,
+            "created_at": "2023-10-01T10:00:00Z",
+            "refund_line_items": [],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "999.00"}
+            ],
+        }
+    ]
+    try:
+        res1 = online_order_mapper.map_shopify_order(
+            dict(payload), wired["db"], topic="orders/create", historical=True
+        )
+    finally:
+        returns_coll.insert_one = orig_insert
+    rcn1 = res1["refund_credit_notes"]
+    assert rcn1["credit_notes"] == 1
+    assert rcn1.get("whole_order_fallback") is True
+    assert not any(
+        r.get("shopify_refund_id") == "88050" for r in returns_coll.docs
+    ), "stamp silently failed on run 1"
+
+    # Heal re-run: fallback synthetic dedupes on the existing orderfull CN, but
+    # the covered-stamp block still runs and repairs the missing stamp.
+    res2 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    assert res2["status"] == "duplicate"
+    rcn2 = res2["refund_credit_notes"]
+    assert rcn2["credit_notes"] == 0, "no second whole-order CN"
+    assert "whole_order_fallback" not in rcn2, "flag only set on a fresh booking"
+    assert rcn2["unmapped_refunds"] == 0, "covered residual clears on the heal"
+    assert any(
+        r.get("shopify_refund_id") == "88050" for r in returns_coll.docs
+    ), "missing stamp healed"
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    full = [
+        d for d in ledger
+        if str(d.get("shopify_refund_id", "")).startswith("orderfull:21048")
+    ]
+    assert len(full) == 1, "still exactly one whole-order CN"
+
+    # And the healed stamp makes a webhook redelivery dedupe.
+    from api.services import shopify_refund
+
+    res_wh = shopify_refund.handle_shopify_refund(
+        wired["db"],
+        {"id": 88050, "order_id": "21048", "refund_line_items": []},
+        topic="refunds/create",
+    )
+    assert res_wh["status"] == "duplicate", res_wh
+
+
 def test_zero_gross_and_amount_only_refunds_both_covered_by_whole_order(wired):
     # fin=refunded with one AMOUNT-ONLY refund (no line items) and one
     # ZERO-GROSS refund (maps to a free/zero-priced line): the whole-order
