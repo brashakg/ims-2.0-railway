@@ -898,7 +898,12 @@ class OracleAgent(JarvisAgent):
         orders_coll = self.get_collection("orders")
         if orders_coll is not None:
             try:
-                now = datetime.now(timezone.utc)
+                # NAIVE-UTC DATETIME bounds (the frame created_at is stored in),
+                # like _detect_sales_anomalies above. The old .isoformat() STRING
+                # bounds never matched a BSON Date (Mongo type bracketing) --
+                # post-backfill every order is datetime-typed, so the string
+                # query silently returned ZERO revenue for all 7 days.
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
                 by_day: Dict[str, float] = {}
                 for d in range(7):
                     day_start = (now - timedelta(days=d)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -906,7 +911,7 @@ class OracleAgent(JarvisAgent):
                     day_total = sum(
                         o.get("grand_total", 0) or 0
                         for o in orders_coll.find(
-                            {"created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()}},
+                            {"created_at": {"$gte": day_start, "$lt": day_end}},
                             {"grand_total": 1},
                         )
                     )

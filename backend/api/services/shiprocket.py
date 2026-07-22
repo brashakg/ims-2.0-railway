@@ -43,6 +43,8 @@ import os
 
 import httpx
 
+from ..utils.dates import to_date_str
+
 try:
     # Reuse the single DISPATCH_MODE gate the rest of the app uses.
     from agents.providers import dispatch_mode
@@ -259,7 +261,10 @@ def build_shipment_payload(
             }
         )
 
-    order_date = (order.get("created_at") or datetime.now().isoformat())[:10]
+    # created_at is a BSON datetime on POS orders and (post-#935) online orders;
+    # legacy docs may carry an ISO string. Slicing a datetime raised TypeError and
+    # 500'd live booking (this call sits OUTSIDE create_shipment's try).
+    order_date = to_date_str(order.get("created_at")) or datetime.now().date().isoformat()
     sub_total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
 
     return {

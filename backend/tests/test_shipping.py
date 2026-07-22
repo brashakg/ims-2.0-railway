@@ -134,6 +134,29 @@ def test_build_payload_maps_items_and_address():
     assert p["sub_total"] == 3000.0
 
 
+def test_build_payload_handles_datetime_created_at():
+    # Orders persist created_at as a naive-UTC BSON DATETIME (POS always did;
+    # online orders post-#935). Slicing it ([:10]) raised TypeError -- and the
+    # build_shipment_payload call sits OUTSIDE create_shipment's try, so live
+    # dispatch mode 500'd on every datetime-dated order.
+    order = {
+        "order_id": "ORD-3",
+        "order_number": "INV-1002",
+        "grand_total": 500.0,
+        "created_at": datetime(2026, 7, 21, 9, 30, 0),
+        "items": [],
+    }
+    p = shiprocket.build_shipment_payload(order, {})
+    assert p["order_date"] == "2026-07-21"
+
+
+def test_build_payload_missing_created_at_defaults_to_today():
+    p = shiprocket.build_shipment_payload(
+        {"order_id": "ORD-4", "grand_total": 1.0, "items": [], "created_at": None}, {}
+    )
+    assert p["order_date"] == datetime.now().date().isoformat()
+
+
 def test_build_payload_empty_cart_gets_summary_line():
     p = shiprocket.build_shipment_payload(
         {"order_id": "ORD-2", "grand_total": 999.0, "items": []}, {}

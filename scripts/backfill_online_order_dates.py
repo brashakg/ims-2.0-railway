@@ -138,9 +138,11 @@ def run(
 
     total = len(candidates)
     converted = 0
+    failed = 0
     unparseable = 0
     fields_set = 0
     samples: List[str] = []
+    unparseable_ids: List[str] = []
 
     for doc in candidates:
         update: Dict[str, Any] = {}
@@ -150,7 +152,19 @@ def run(
                 update[field] = dt
         if not update:
             unparseable += 1
+            unparseable_ids.append(str(doc.get("order_id") or doc.get("_id")))
             continue
+        if apply:
+            try:
+                coll.update_one(
+                    {"_id": doc.get("_id")}, {"$set": update}
+                )
+            except Exception as exc:  # noqa: BLE001
+                # NOT counted as converted -- the summary must reflect what
+                # actually landed, and the run exits non-zero (see main()).
+                failed += 1
+                print(f"[APPLY] update failed for {doc.get('_id')}: {exc}")
+                continue
         converted += 1
         fields_set += len(update)
         if len(samples) < 20:
@@ -158,23 +172,24 @@ def run(
                 f"{doc.get('order_id') or doc.get('_id')} "
                 f"created_at={doc.get('created_at')} -> {update.get('created_at')}"
             )
-        if apply:
-            try:
-                coll.update_one(
-                    {"_id": doc.get("_id")}, {"$set": update}
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[APPLY] update failed for {doc.get('_id')}: {exc}")
 
     print("")
     print("=" * 68)
     print("ONLINE-ORDER DATE BACKFILL  --  %s" % ("APPLY" if apply else "DRY-RUN"))
     print("=" * 68)
     print(f"  string-dated online orders found ...... {total}")
-    print(f"  would convert (>=1 parseable field) ... {converted}")
-    print(f"  date fields to set (created/updated/invoice): {fields_set}")
+    print(f"  {'converted' if apply else 'would convert'} (>=1 parseable field) ... {converted}")
+    print(f"  date fields {'set' if apply else 'to set'} (created/updated/invoice): {fields_set}")
     print(f"  unparseable (left as-is) .............. {unparseable}")
+    if apply:
+        print(f"  update failures ....................... {failed}")
     print("")
+    if unparseable_ids:
+        print("  ! unparseable order_ids (need manual fixing -- created_at/"
+              "updated_at/invoice_date all failed to parse):")
+        for uid in unparseable_ids:
+            print(f"    {uid}")
+        print("")
     if samples:
         print("  sample conversions:")
         for s in samples:
@@ -192,8 +207,10 @@ def run(
     return {
         "found": total,
         "converted": converted,
+        "failed": failed,
         "fields_set": fields_set,
         "unparseable": unparseable,
+        "unparseable_ids": unparseable_ids,
         "applied": apply,
     }
 
@@ -217,11 +234,16 @@ def main():
         help="Write the conversions. Without this flag the script is a dry-run.",
     )
     args = parser.parse_args()
-    run(
+    summary = run(
         mongo_uri=resolve_mongo_uri(args.mongo_uri),
         db_name=args.db,
         apply=args.apply,
     )
+    # Exit non-zero when docs could not be parsed or writes failed, so a
+    # runbook/automation caller can't mistake a partial run for a clean one.
+    if summary.get("unparseable") or summary.get("failed"):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

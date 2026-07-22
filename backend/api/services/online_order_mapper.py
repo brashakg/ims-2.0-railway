@@ -590,7 +590,10 @@ def _sync_existing_order_status(
         "payment_status": st["payment_status"],
         "fulfillment_status": st["fulfillment_status"],
         "status": st["order_status"],
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        # NAIVE-UTC DATETIME, matching how ingest stamps order date fields -- an
+        # ISO string here would flip backfilled datetime updated_at values back
+        # to strings on every status webhook (mixed-type regeneration).
+        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
     }
     if st["payment_status"] == "PAID":
         update["amount_paid"] = grand_total

@@ -92,7 +92,11 @@ def test_gstr1_includes_cdnr_from_credit_note_ledger(monkeypatch):
     assert "cdnr" in report and isinstance(report["cdnr"], list)
     assert len(report["cdnr"]) == 1, report["cdnr"]
     cn = report["cdnr"][0]
-    assert cn["refReference"] == "RET-250415-ABC123"
+    # The 17-char internal ref exceeds GSTN's 16-char note-number cap, so the
+    # filing caps it (synthesized historical CNs instead carry a dedicated
+    # GSTN-legal note_number the resolver prefers -- see _cdnr_note_number).
+    assert cn["refReference"] == "RET-250415-ABC12"
+    assert len(cn["refReference"]) <= 16
     assert cn["grossValue"] == 118.0
     assert cn["taxableValue"] == 100.0
     assert round(cn["taxValue"], 2) == 18.0  # 118 gross - 100 net

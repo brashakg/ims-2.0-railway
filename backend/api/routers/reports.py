@@ -5,6 +5,7 @@ Real database queries for dashboard and reports
 """
 
 import logging
+import re
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
@@ -111,31 +112,81 @@ def _order_discount(order: dict) -> float:
     return 0.0
 
 
-def _gstr1_bill_number(order: dict) -> str:
-    """GSTN-safe invoice identifier for a GSTR-1 B2B / B2CL row.
+_GSTN_DOC_ILLEGAL = re.compile(r"[^A-Za-z0-9/-]")
 
-    The GSTN portal caps the invoice number at 16 chars and it must NEVER be the
-    36-char order_id UUID. Historical online orders carry ``invoice_number=None``
-    (a back-dated order mints no live GST serial -- CGST Rule 46(b)), so the old
-    ``order.get("invoice_number", <default>)`` returned None (the KEY EXISTS with
-    value None, so the default never applied) and fell through ``or order_id`` to a
-    36-char UUID that GSTN rejects.
 
-    Resolve the first NON-EMPTY, <=16-char human identifier:
-      invoice_number -> bill_number -> order_number (e.g. ``ONL-<id>``) ->
-      the short Shopify order name (e.g. ``#1001`` with '#' stripped) ->
-      finally a 16-char-capped order_id (a last resort, never the full UUID).
+def _gstr1_bill_number(order: dict, validation_issues: Optional[list] = None) -> str:
+    """GSTN invoice identifier for a GSTR-1 B2B / B2CL row.
+
+    A present, non-empty ``invoice_number`` ALWAYS wins VERBATIM: GSTR-1 must file
+    the number of the tax invoice actually issued (the minted serial, e.g.
+    ``BV/BOK-01/26-27/0001``), never a substituted identifier -- substituting
+    breaks the B2B recipient's GSTR-2A/2B matching and books-vs-return
+    reconciliation. If the real serial exceeds GSTN's 16-char cap, that is a
+    NUMBERING-SCHEME defect to flag (a ``validation_issues`` warn when a list is
+    passed) and fix at mint time, not something to paper over per row.
+
+    Only when ``invoice_number`` is None/empty (historical online imports mint no
+    serial -- CGST Rule 46(b)) do the FALLBACK tiers apply, each sanitized to the
+    GSTN doc-number charset ([A-Za-z0-9/-]) and gated at <=16 chars:
+      bill_number -> order_number (e.g. ``ONL-<id>``) -> the short Shopify order
+      name ('#' stripped; bare numerics are prefixed with the storefront, e.g.
+      ``BV-1001``, so BV and WizOpt names can't collide under one GSTIN) ->
+      finally a 16-char-capped order_id (last resort, never the full UUID).
     Never raises."""
-    for key in ("invoice_number", "bill_number", "order_number"):
+    inv = order.get("invoice_number")
+    if inv:
+        s = str(inv).strip()
+        if s:
+            if len(s) > 16 and validation_issues is not None:
+                validation_issues.append(
+                    {
+                        "level": "warn",
+                        "invoice": s,
+                        "issue": (
+                            "Invoice number exceeds the GSTN 16-char cap -- "
+                            "the portal may reject it; shorten the invoice "
+                            "serial format"
+                        ),
+                    }
+                )
+            return s
+    for key in ("bill_number", "order_number"):
         val = order.get(key)
         if val:
-            s = str(val).strip()
+            s = _GSTN_DOC_ILLEGAL.sub("", str(val).strip())
             if s and len(s) <= 16:
                 return s
     name = str(order.get("shopify_order_name") or "").strip().lstrip("#").strip()
+    name = _GSTN_DOC_ILLEGAL.sub("", name)
+    if name and name.isdigit():
+        # Bare Shopify order names ('#1001') restart per storefront; BV and
+        # WizOpt ONLINE both bill under BV Opticals Pvt Ltd (one GSTIN book), so
+        # disambiguate with the storefront prefix (store_id's first segment).
+        prefix = _GSTN_DOC_ILLEGAL.sub(
+            "", str(order.get("store_id") or "").strip().split("-")[0].upper()
+        )
+        if prefix and len(f"{prefix}-{name}") <= 16:
+            name = f"{prefix}-{name}"
     if name and len(name) <= 16:
         return name
     return str(order.get("order_id") or "").strip()[:16]
+
+
+def _cdnr_note_number(entry: dict) -> str:
+    """16-char-safe CDNR note number for a GSTR-1 credit-note row.
+
+    GSTN caps note numbers at 16 chars like invoice numbers. Synthesized
+    historical credit notes (shopify_ingest) stamp a dedicated GSTN-legal
+    ``note_number`` ('CNH-<refund-id tail>', <=16 chars) at insert -- prefer it.
+    Legacy rows carry only the internal ``ref`` (e.g. 'RET-250415-ABC123', 17
+    chars; 'SHOPIFY-HIST-REFUND-<id>', ~33 chars) -- cap it at 16 for the filing.
+    The internal ``ref`` itself (the idempotency key) is NEVER changed."""
+    note = str(entry.get("note_number") or "").strip()
+    if note and len(note) <= 16:
+        return note
+    ref = str(entry.get("ref", entry.get("entry_id", "")) or "").strip()
+    return ref[:16]
 
 
 def _order_tax(order: dict) -> float:
@@ -2660,7 +2711,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     sgst = round(total_tax / 2, 2)
                     igst = 0.0
 
-                bill_number = _gstr1_bill_number(order)
+                bill_number = _gstr1_bill_number(order, validation_issues)
                 created_raw = order.get("created_at", "")
                 invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
                 place_of_supply = customer_state or store_state or "Unknown"
@@ -2874,8 +2925,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             cn_sgst = round(cn_tax / 2, 2)
                             cn_igst = 0.0
 
-                        # Reference to the return (e.g., RET-250415-ABC123)
-                        ref = str(entry.get("ref", entry.get("entry_id", "")) or "")
+                        # GSTN-legal note number (<=16 chars): prefer the
+                        # dedicated note_number stamped on synthesized
+                        # historical CNs, else the internal ref capped at 16.
+                        ref = _cdnr_note_number(entry)
                         cn_date = str(entry.get("created_at", ""))[:10] if entry.get("created_at") else month + "-01"
 
                         # Credit notes carry the items' HSN/rate. Prefer the rate

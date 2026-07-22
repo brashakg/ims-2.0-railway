@@ -225,10 +225,62 @@ def _map_for_report(payload: Dict[str, Any], db) -> Dict[str, Any]:
     year = shopify_ingest._order_datetime(payload).year
     return {
         "items": len(items),
+        "mapped_items": items,
         "grand_total": grand_total,
         "per_rate": per_rate,
         "year": year,
     }
+
+
+def _simulate_refund_credit_notes(
+    o: Dict[str, Any], mapped_items: List[Dict[str, Any]]
+) -> Dict[str, int]:
+    """DRY-RUN twin of shopify_ingest._book_historical_refund_credit_notes'
+    LINE-MAPPING decision (no writes): reuses the SAME live mapper
+    (shopify_refund._build_return_lines) against the same mapped items the ingest
+    would store, so the dry-run reports what WOULD book instead of an
+    unconditional 'refunds are booked as CDNR' claim.
+
+    Returns {"mappable": <refunds that book a line-mapped CN>,
+             "whole_order": <orders covered by the whole-order reversal fallback>,
+             "amount_only": <refunds left as an UNMAPPED residual (no CN)>}."""
+    from api.services import shopify_refund
+
+    fin = str(o.get("financial_status") or "").strip().lower()
+    out = {"mappable": 0, "whole_order": 0, "amount_only": 0}
+    if fin not in ("refunded", "partially_refunded"):
+        return out
+    refunds = o.get("refunds")
+    if not isinstance(refunds, list) or not refunds:
+        # No per-refund detail: full refund -> whole-order reversal; a partial
+        # with no detail is an unmapped residual.
+        if fin == "refunded":
+            out["whole_order"] = 1
+        else:
+            out["amount_only"] = 1
+        return out
+    order_shim = {"items": mapped_items, "order_id": o.get("id")}
+    mappable = 0
+    unmapped = 0
+    for r in refunds:
+        if not isinstance(r, dict):
+            continue
+        try:
+            lines = shopify_refund._build_return_lines(r, order_shim)
+        except Exception:  # noqa: BLE001
+            lines = []
+        if lines:
+            mappable += 1
+        else:
+            unmapped += 1
+    out["mappable"] = mappable
+    if fin == "refunded" and mappable == 0 and unmapped > 0:
+        # Amount-only refunds on a TERMINALLY refunded order are covered by the
+        # whole-order reversal fallback at ingest.
+        out["whole_order"] = 1
+    else:
+        out["amount_only"] = unmapped
+    return out
 
 
 def _existing_order(db, shopify_order_id: str):
@@ -353,6 +405,12 @@ def run(
     shipping_undershoot = 0.0
     refunded_orders = 0
     partially_refunded_orders = 0
+    refunds_mappable = 0
+    refunds_whole_order = 0
+    refunds_amount_only = 0
+    residual_refund_order_ids: List[str] = []
+    partially_paid_orders = 0
+    partially_paid_outstanding = 0.0
     per_year: Dict[int, Dict[str, float]] = defaultdict(lambda: {"count": 0, "gross": 0.0})
     per_rate_all: Dict[float, Dict[str, float]] = defaultdict(
         lambda: {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "lines": 0}
@@ -387,6 +445,21 @@ def run(
             refunded_orders += 1
         elif fin == "partially_refunded":
             partially_refunded_orders += 1
+        elif fin == "partially_paid":
+            # Booked as fully PAID at import (no phantom receivable) -- the
+            # uncollected remainder is an AR WRITE-OFF the owner must see.
+            partially_paid_orders += 1
+            try:
+                partially_paid_outstanding += float(o.get("total_outstanding") or 0)
+            except (TypeError, ValueError):
+                pass
+        if fin in ("refunded", "partially_refunded"):
+            sim = _simulate_refund_credit_notes(o, report["mapped_items"])
+            refunds_mappable += sim["mappable"]
+            refunds_whole_order += sim["whole_order"]
+            refunds_amount_only += sim["amount_only"]
+            if sim["amount_only"] and len(residual_refund_order_ids) < 50:
+                residual_refund_order_ids.append(oid)
         py = per_year[report["year"]]
         py["count"] += 1
         py["gross"] += report["grand_total"]
@@ -442,11 +515,28 @@ def run(
         f"  shipping NOT booked (line-items-only undershoot): Rs {shipping_undershoot:,.2f}"
     )
     if refunded_orders or partially_refunded_orders:
+        # SIMULATED line-mapping (same mapper the ingest uses) -- an honest CDNR
+        # forecast, not an unconditional claim. Amount-only refunds on a
+        # partially_refunded order book NO credit note (residual reported).
+        print("  refunds (simulated line-mapping, same mapper as ingest):")
+        print(f"    line-mappable (book per-refund CDNR) ...... {refunds_mappable}")
+        print(f"    whole-order reversal fallback ............. {refunds_whole_order} order(s)")
+        print(f"    amount-only/unmappable (NO CDNR booked) ... {refunds_amount_only} refund(s)")
+        if residual_refund_order_ids:
+            print(
+                "    ! orders left with an UNMAPPED refund residual (GST stays "
+                "overstated for them): "
+                + ", ".join(residual_refund_order_ids)
+            )
+    if partially_paid_orders:
+        print("")
         print(
-            "  refunds: booked as GST credit notes (CDNR) at import so GSTR-1 nets"
+            f"  ! partially_paid write-off: {partially_paid_orders} order(s) will be "
+            f"booked as fully PAID;"
         )
         print(
-            "           them -- the sale is booked gross + an equal/partial credit note."
+            f"    Rs {partially_paid_outstanding:,.2f} outstanding (Shopify "
+            f"total_outstanding) is written off as collected."
         )
     print("")
     print("  Sum of totals per year:")
@@ -483,6 +573,12 @@ def run(
         "customer_unmatched": unmatched_customer,
         "refunded_orders": refunded_orders,
         "partially_refunded_orders": partially_refunded_orders,
+        "refunds_mappable": refunds_mappable,
+        "refunds_whole_order": refunds_whole_order,
+        "refunds_amount_only": refunds_amount_only,
+        "residual_refund_order_ids": residual_refund_order_ids,
+        "partially_paid_orders": partially_paid_orders,
+        "partially_paid_outstanding": round(partially_paid_outstanding, 2),
         "shipping_undershoot": round(shipping_undershoot, 2),
         "grand_total_sum": round(grand_total_sum, 2),
         "applied": apply,
@@ -505,6 +601,14 @@ def run(
     shadow_skipped = 0
     errors = 0
     done = 0
+    # Refund credit-note aggregation across the apply loop -- the per-order
+    # summary ingest returns must reach the operator, not be discarded.
+    cn_count = 0
+    cn_gross = 0.0
+    cn_tax = 0.0
+    cn_unmapped = 0
+    cn_whole_order_fallbacks = 0
+    unmapped_refund_order_ids: List[str] = []
     for o in real:
         oid = str(o.get("id") or o.get("order_id") or "").strip()
         if not oid:
@@ -536,6 +640,18 @@ def run(
             duplicate += 1
         else:
             skipped += 1
+        rcn = (res or {}).get("refund_credit_notes") or {}
+        if isinstance(rcn, dict) and rcn:
+            cn_count += int(rcn.get("credit_notes") or 0)
+            cn_gross += float(rcn.get("gross") or 0.0)
+            cn_tax += float(rcn.get("tax") or 0.0)
+            if rcn.get("whole_order_fallback"):
+                cn_whole_order_fallbacks += 1
+            um = int(rcn.get("unmapped_refunds") or 0)
+            if um > 0:
+                cn_unmapped += um
+                if len(unmapped_refund_order_ids) < 50:
+                    unmapped_refund_order_ids.append(oid)
         done += 1
         if done % 100 == 0:
             print(
@@ -551,6 +667,17 @@ def run(
     print(f"  shadowed (skipped) .... {shadow_skipped}")
     print(f"  skipped ............... {skipped}")
     print(f"  errors ................ {errors}")
+    print("  -- refund credit notes (CDNR) --")
+    print(f"  credit notes booked ... {cn_count}  "
+          f"(gross Rs {cn_gross:,.2f}, tax Rs {cn_tax:,.2f})")
+    print(f"  whole-order fallbacks . {cn_whole_order_fallbacks}")
+    print(f"  UNMAPPED refunds ...... {cn_unmapped}  (residual -- NO credit note; "
+          f"GST stays overstated for these)")
+    if unmapped_refund_order_ids:
+        print(
+            "  ! shopify order ids with an unmapped refund residual: "
+            + ", ".join(unmapped_refund_order_ids)
+        )
     print("=" * 68)
 
     summary.update(
@@ -560,6 +687,12 @@ def run(
             "shadow_skipped": shadow_skipped,
             "skipped_apply": skipped,
             "errors": errors,
+            "credit_notes_booked": cn_count,
+            "credit_notes_gross": round(cn_gross, 2),
+            "credit_notes_tax": round(cn_tax, 2),
+            "credit_notes_whole_order_fallbacks": cn_whole_order_fallbacks,
+            "credit_notes_unmapped_refunds": cn_unmapped,
+            "unmapped_refund_order_ids": unmapped_refund_order_ids,
         }
     )
     return summary

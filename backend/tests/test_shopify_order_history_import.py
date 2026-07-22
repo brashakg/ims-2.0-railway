@@ -625,6 +625,123 @@ def test_historical_refund_credit_note_is_idempotent(wired):
     assert len(mine) == 1, "credit note booked exactly once on re-import"
 
 
+def test_historical_refund_scaled_to_actual_shopify_amount(wired):
+    # Rs 999 billed line but Shopify ACTUALLY refunded only Rs 200 (goodwill /
+    # partial-amount refund). The CN must book Rs 200 -- never the billed gross
+    # (over-reversing output GST on the Rs 799 the customer kept paying for).
+    payload = _hist_order(21040, financial="partially_refunded")
+    payload["refunds"] = [
+        {
+            "id": 88040,
+            "created_at": "2023-06-02T10:00:00Z",
+            "refund_line_items": [_refund_line()],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "200.00"}
+            ],
+        }
+    ]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    mine = [d for d in ledger if d.get("shopify_refund_id") == "88040"]
+    assert len(mine) == 1
+    cn = mine[0]
+    assert cn["gross_refund"] == 200.0, "books the ACTUAL refunded amount"
+    assert cn["billed_gross"] == 999.0, "pre-scale figure kept for audit"
+    assert cn["reconciliation"] == "SCALED_TO_SHOPIFY_REFUNDED"
+    assert round(cn["taxable"] + cn["tax"], 2) == 200.0, "split scales with it"
+    assert cn["delta"] == 0.0
+
+
+def test_fully_refunded_amount_only_refunds_fall_through_to_whole_order(wired):
+    # financial_status='refunded' with refunds[] PRESENT but every entry
+    # amount-only (empty refund_line_items -- Shopify 'refund custom amount'
+    # shape) previously booked ZERO credit notes while the full sale stayed in
+    # GSTR-1. It must fall through to the whole-order reversal, reconciled
+    # against what Shopify actually refunded.
+    payload = _hist_order(21041, financial="refunded")
+    payload["refunds"] = [
+        {
+            "id": 88041,
+            "created_at": "2023-07-01T10:00:00Z",
+            "refund_line_items": [],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "999.00"}
+            ],
+        }
+    ]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    full = [
+        d for d in ledger
+        if str(d.get("shopify_refund_id", "")).startswith("orderfull:")
+    ]
+    assert len(full) == 1, "whole-order reversal booked for the amount-only case"
+    assert full[0]["gross_refund"] == 999.0
+    # CDNR period = the refund's own date, not the sale date.
+    assert str(full[0]["created_at"]).startswith("2023-07-01")
+    # The covered amount-only refund id is STAMPED so a webhook redelivery of
+    # that same refund dedupes instead of double-crediting.
+    returns = wired["db"].get_collection("returns").docs
+    assert any(r.get("shopify_refund_id") == "88041" for r in returns)
+
+    from api.services import shopify_refund
+
+    res = shopify_refund.handle_shopify_refund(
+        wired["db"],
+        {"id": 88041, "order_id": "21041", "refund_line_items": []},
+        topic="refunds/create",
+    )
+    assert res["status"] == "duplicate", res
+
+
+def test_historical_cn_carries_gstn_legal_note_number(wired):
+    payload = _hist_order(21042, financial="partially_refunded")
+    payload["refunds"] = [
+        {"id": 8804212345678, "refund_line_items": [_refund_line()]}
+    ]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    mine = [d for d in ledger if d.get("shopify_refund_id") == "8804212345678"]
+    assert len(mine) == 1
+    cn = mine[0]
+    # Dedicated GSTN-legal note number; the internal idempotency ref UNCHANGED.
+    assert cn["note_number"].startswith("CNH-") and len(cn["note_number"]) <= 16
+    assert cn["ref"] == "SHOPIFY-HIST-REFUND-8804212345678"
+
+
+def test_offset_timestamp_converts_to_utc_and_lands_in_correct_ist_month(wired):
+    # Shopify REST emits +05:30 offsets for an IST shop. 2023-04-01T01:00 IST is
+    # 2023-03-31T19:30 UTC -- INSIDE April's IST GST window (which opens at
+    # 2023-03-31T18:30 UTC), so the order must file in April, not March. A naive
+    # 'strip the offset' regression would ship silently without this test.
+    from datetime import date
+
+    from api.utils.ist import ist_day_start_utc
+
+    online_order_mapper.map_shopify_order(
+        _hist_order(21043, created_at="2023-04-01T01:00:00+05:30"),
+        wired["db"], topic="orders/create", historical=True,
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "21043"})
+    assert order["created_at"] == datetime(2023, 3, 31, 19, 30, 0), (
+        "true offset-to-UTC conversion (not an offset strip)"
+    )
+    apr_start = ist_day_start_utc(date(2023, 4, 1))
+    may_start = ist_day_start_utc(date(2023, 5, 1))
+    assert apr_start <= order["created_at"] < may_start, (
+        "order falls inside the April IST GST window"
+    )
+    # And NOT inside March's.
+    mar_start = ist_day_start_utc(date(2023, 3, 1))
+    assert not (mar_start <= order["created_at"] < apr_start)
+
+
 def test_future_refund_webhook_against_history_import_not_skipped(wired):
     # Book a historical order, then a NEW real refund (absent at import) arrives by
     # webhook. It must NOT be permanently skipped -- it is booked (review queue).
@@ -667,17 +784,51 @@ def test_refund_already_booked_at_import_is_duplicate_on_webhook(wired):
 
 
 # ---------------------------------------------------------------------------
-# MEDIUM -- GSTR-1 invoice number never falls through to the 36-char order_id
-# UUID (GSTN caps the invoice number at 16 chars).
+# GSTR-1 invoice number: the REAL minted serial ALWAYS wins verbatim; only the
+# fallback tiers (invoice_number None -- historical imports) are 16-char-gated
+# and never fall through to the 36-char order_id UUID.
 # ---------------------------------------------------------------------------
+
+
+def test_gstr1_bill_number_real_minted_serial_always_wins_verbatim():
+    from api.routers.reports import _gstr1_bill_number
+
+    # The system's OWN minted serial format ({PREFIX}/{STORE}/{FY}/{serial},
+    # 20 chars -- pinned by test_orders_numbering) must be returned VERBATIM:
+    # GSTR-1 files the number of the tax invoice actually issued; substituting a
+    # UUID fragment breaks B2B recipients' GSTR-2A/2B matching.
+    real = "BV/BOK-01/26-27/0001"
+    assert len(real) == 20
+    uuid_like = "b1f2c3d4-e5f6-7890-abcd-ef1234567890"
+    got = _gstr1_bill_number(
+        {
+            "invoice_number": real,
+            "order_number": "ORD-BOK01-2026-A1B2C3",
+            "order_id": uuid_like,
+        }
+    )
+    assert got == real
+    # A live ONLINE serial (23 chars) also wins over the Shopify name.
+    online = "BV/ONLINE-01/26-27/0001"
+    assert _gstr1_bill_number(
+        {"invoice_number": online, "shopify_order_name": "#1001"}
+    ) == online
+    # An over-cap serial is FLAGGED as a validation issue, never substituted.
+    issues: list = []
+    assert _gstr1_bill_number({"invoice_number": real}, issues) == real
+    assert len(issues) == 1
+    assert issues[0]["invoice"] == real
+    assert "16" in issues[0]["issue"]
+    # A short real serial wins with NO issue raised.
+    issues2: list = []
+    assert _gstr1_bill_number({"invoice_number": "INV-0007"}, issues2) == "INV-0007"
+    assert issues2 == []
 
 
 def test_gstr1_bill_number_falls_back_to_order_number_not_uuid():
     from api.routers.reports import _gstr1_bill_number
 
     uuid_like = "b1f2c3d4-e5f6-7890-abcd-ef1234567890"  # 36 chars
-    # Real serial wins.
-    assert _gstr1_bill_number({"invoice_number": "INV-0007"}) == "INV-0007"
     # invoice_number EXISTS as None (historical) -> order_number, NOT the UUID.
     got = _gstr1_bill_number(
         {"invoice_number": None, "order_number": "ONL-123", "order_id": uuid_like}
@@ -697,3 +848,49 @@ def test_gstr1_bill_number_falls_back_to_order_number_not_uuid():
     # Last resort: never emit a 36-char UUID -> capped to 16.
     got3 = _gstr1_bill_number({"invoice_number": None, "order_id": uuid_like})
     assert len(got3) <= 16 and got3 != uuid_like
+
+
+def test_gstr1_bill_number_fallbacks_prefix_storefront_and_sanitize_charset():
+    from api.routers.reports import _gstr1_bill_number
+
+    uuid_like = "b1f2c3d4-e5f6-7890-abcd-ef1234567890"
+    # Bare Shopify-name numerics are prefixed per storefront: BV and WizOpt
+    # names both start at #1001 and bill under ONE GSTIN -> 'BV-1001'/'WO-1001'
+    # pre-empts the same-FY doc-number collision.
+    base = {
+        "invoice_number": None,
+        "order_number": "ONL-1234567890123",  # 17 chars -> fails the gate
+        "shopify_order_name": "#1001",
+        "order_id": uuid_like,
+    }
+    assert _gstr1_bill_number({**base, "store_id": "BV-ONLINE-01"}) == "BV-1001"
+    assert _gstr1_bill_number({**base, "store_id": "WO-ONLINE-01"}) == "WO-1001"
+    # GSTN charset: fallback tiers are sanitized to [A-Za-z0-9/-].
+    got = _gstr1_bill_number(
+        {
+            "invoice_number": None,
+            "shopify_order_name": "#10 01*A",
+            "order_id": uuid_like,
+        }
+    )
+    assert got == "1001A"
+
+
+def test_hist_cn_note_number_and_cdnr_resolver_are_gstn_legal():
+    from api.routers.reports import _cdnr_note_number
+    from api.services.shopify_ingest import _hist_cn_note_number
+
+    # Deterministic, <=16 chars, GSTN charset, for both real and pseudo ids.
+    n1 = _hist_cn_note_number("8804212345678")
+    assert n1.startswith("CNH-") and len(n1) <= 16
+    assert n1 == _hist_cn_note_number("8804212345678"), "deterministic"
+    n2 = _hist_cn_note_number("orderfull:1234567890123")
+    assert n2.startswith("CNH-") and len(n2) <= 16
+    # The CDNR resolver PREFERS the dedicated note_number...
+    assert _cdnr_note_number(
+        {"note_number": n1, "ref": "SHOPIFY-HIST-REFUND-8804212345678"}
+    ) == n1
+    # ...and caps legacy refs (no note_number) at the GSTN 16-char limit.
+    legacy = _cdnr_note_number({"ref": "SHOPIFY-HIST-REFUND-8804212345678"})
+    assert len(legacy) <= 16
+    assert len(_cdnr_note_number({"ref": "RET-250415-ABC123"})) <= 16

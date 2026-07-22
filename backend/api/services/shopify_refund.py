@@ -607,11 +607,21 @@ def handle_shopify_refund(
             and abs(shopify_refunded - gross_refund) > _AMOUNT_EPS
         )
 
+        # Whether the money already went back via a payment GATEWAY (card/UPI/
+        # wallet). Computed HERE -- BEFORE the queue/discrepancy branches -- and
+        # PERSISTED in the credit_note dict so the accountant-confirm path
+        # (post_from_review reads credit_note.settled_externally) never mints
+        # redeemable store credit ON TOP of a gateway refund. Previously only the
+        # AUTO branch computed it, so a queued gateway refund confirmed by the
+        # accountant granted the customer a double benefit.
+        settled_externally = _is_gateway_refund(payload)
+
         credit_note = {
             "gross_refund": gross_refund,
             "net_refund": gross_refund,  # no online restocking fee
             "gst_breakup": gst_view,
             "shopify_refunded_amount": shopify_refunded,
+            "settled_externally": settled_externally,
             "lines": priced,
         }
 
@@ -652,7 +662,7 @@ def handle_shopify_refund(
             )
 
         # AUTO: post the credit note + restock automatically (opt-in only).
-        settled_externally = _is_gateway_refund(payload)
+        # settled_externally was computed above (shared with the queue path).
         result = _post_credit_and_restock(
             db,
             refund_id=refund_id,
