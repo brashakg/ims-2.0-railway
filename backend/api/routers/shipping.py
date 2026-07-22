@@ -178,6 +178,72 @@ def _shipment_to_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _write_fulfillment_push_audit(result: Dict[str, Any], current_user: dict) -> None:
+    """Chained ONLINE_STORE_PUSH audit row for a fulfilment push-back attempt
+    (live OR dry-run), mirroring online_store_push._write_audit. Fail-soft: an
+    audit error can NEVER undo/block the booking."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is None:
+            return
+        ok = result.get("ok")
+        audit.create(
+            {
+                "action": "ONLINE_STORE_PUSH",
+                "entity_type": result.get("entity"),
+                "entity_id": result.get("target_id"),
+                "user_id": (current_user or {}).get("user_id"),
+                "severity": "INFO" if ok else "WARNING",
+                "details": {
+                    "mode": result.get("mode"),
+                    "push_action": result.get("action"),
+                    "ok": ok,
+                    "shopify_id": result.get("shopify_id"),
+                    "error": result.get("error"),
+                    "reason": result.get("reason"),
+                },
+            }
+        )
+    except Exception:  # noqa: BLE001 -- audit must never break the booking
+        pass
+
+
+async def _maybe_push_online_fulfillment(
+    db, order: Dict[str, Any], ship_result, current_user: dict
+) -> None:
+    """FIRE-AND-FORGET: when an ONLINE (Shopify) order is dispatched via
+    Shiprocket, push the fulfilment + tracking to Shopify so the buyer gets
+    Shopify's shipping notification and the order shows Fulfilled.
+
+    Fail-soft + gated: the push is SIMULATED unless the Shopify writer gates are
+    armed, and it NEVER raises -- ANY error here is swallowed so it can never
+    block the booking that triggered it. A non-online order (or a FAILED booking
+    with no AWB) is a clean silent no-op."""
+    try:
+        if not order or not order.get("shopify_order_id"):
+            return
+        if str(order.get("source") or "").lower() != "shopify":
+            return
+        # A failed booking never really dispatched -- do not tell Shopify it did.
+        if getattr(ship_result, "status", None) == "FAILED":
+            return
+        from ..services.shopify_fulfillment_push import push_fulfillment
+
+        tracking = {
+            "number": getattr(ship_result, "awb", None),
+            "company": getattr(ship_result, "courier", None),
+            "url": getattr(ship_result, "tracking_url", None),
+        }
+        result = await push_fulfillment(db, order, tracking=tracking)
+        _write_fulfillment_push_audit(result.to_dict(), current_user)
+    except Exception as exc:  # noqa: BLE001 -- must never block the booking
+        logger.warning(
+            "[SHIPROCKET] online fulfilment push-back failed soft: %s", exc
+        )
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -253,6 +319,13 @@ async def book_shipment(
             coll.insert_one(dict(doc))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SHIPROCKET] persist failed: %s", exc)
+
+    # Close the order loop: an ONLINE (Shopify) order just dispatched via
+    # Shiprocket must be told to Shopify (fulfilment + tracking) so the buyer
+    # gets Shopify's shipping mail and the order shows Fulfilled. Fire-and-forget
+    # + fail-soft -- gated like every other Shopify write and it never raises, so
+    # it can never block this booking. A non-online order is a silent no-op.
+    await _maybe_push_online_fulfillment(db, order, result, current_user)
 
     if result.status == "FAILED":
         # Booking attempted live but failed - record kept, surface a soft message.
