@@ -67,24 +67,48 @@ def _make_order(
     }
 
 
+def _cmp(actual, op, op_val) -> bool:
+    """One operator, with Mongo type-bracketing: an incomparable type pair (e.g. a
+    Date bound against a string field) simply does not match instead of raising.
+    UNIMPLEMENTED operators FAIL the match (mirrors the shopify-import fake's
+    _cmp_ok) -- a `return True` fallthrough would let a wrong/typo'd operator
+    match every doc in tests while behaving differently against real Mongo."""
+    if actual is None:
+        return op in ("$ne", "$nin")
+    try:
+        if op == "$gte":
+            return actual >= op_val
+        if op == "$lte":
+            return actual <= op_val
+        if op == "$lt":
+            return actual < op_val
+    except TypeError:
+        return False  # type bracketing: Date range never matches a string, etc.
+    if op == "$in":
+        return actual in op_val
+    if op == "$nin":
+        return actual not in op_val
+    if op == "$ne":
+        return actual != op_val
+    if op == "$exists":
+        return (actual is not None) == bool(op_val)
+    return False
+
+
 def _doc_matches(doc, filter_):
-    """Mini Mongo-filter matcher — supports plain equality, $in, $gte/$lt
-    (the only operators the orchestrator uses)."""
+    """Mini Mongo-filter matcher — supports plain equality, $or, $in, $ne,
+    $gte/$lte/$lt (with type-bracketing), the operators the orchestrator uses."""
     if not filter_:
         return True
     for k, expected in filter_.items():
+        if k == "$or":
+            if not any(_doc_matches(doc, sub) for sub in expected):
+                return False
+            continue
         actual = doc.get(k)
         if isinstance(expected, dict):
             for op, op_val in expected.items():
-                if op == "$gte" and not (actual is not None and actual >= op_val):
-                    return False
-                if op == "$lte" and not (actual is not None and actual <= op_val):
-                    return False
-                if op == "$lt" and not (actual is not None and actual < op_val):
-                    return False
-                if op == "$in" and actual not in op_val:
-                    return False
-                if op == "$ne" and actual == op_val:
+                if not _cmp(actual, op, op_val):
                     return False
         else:
             if actual != expected:
@@ -396,6 +420,37 @@ async def test_orchestrator_writes_unbalanced_row(patched_nexus):
     assert rows[0]["balanced"] is False
     assert rows[0]["balance_check"]["mismatch_count"] == 1
     assert result.ok is True  # Export still completes; row just flagged
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_includes_bson_datetime_dated_orders(patched_nexus):
+    """POS orders (always) and online orders (post-#935) store created_at as a
+    naive-UTC BSON DATETIME; legacy online orders wrote ISO strings. The
+    dual-type $or must bring BOTH shapes into the same day export."""
+    nexus, db = patched_nexus
+    orders = db.get_collection("orders")
+    # A datetime-dated order (the branch previously untested)...
+    dt_order = _make_order(order_id="ODT", store_id="BV-GK1", created_iso="replaced")
+    dt_order["created_at"] = datetime.now(timezone.utc).replace(
+        hour=10, minute=0, second=0, microsecond=0, tzinfo=None
+    )
+    orders.insert_one(dt_order)
+    # ...alongside a legacy string-dated order the same day.
+    today_iso = datetime.now(timezone.utc).replace(
+        hour=11, minute=0, second=0, microsecond=0
+    ).isoformat()
+    orders.insert_one(
+        _make_order(order_id="OSTR", store_id="BV-GK1", created_iso=today_iso)
+    )
+
+    result = await nexus._build_tally_export()
+
+    assert result.ok is True
+    rows = db.get_collection("tally_exports").docs
+    by_store = {r["store_id"]: r for r in rows}
+    assert by_store["BV-GK1"]["voucher_count"] == 2, (
+        "datetime-dated AND string-dated orders both land in the day export"
+    )
 
 
 @pytest.mark.asyncio

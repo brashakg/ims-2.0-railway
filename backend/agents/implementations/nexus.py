@@ -258,6 +258,19 @@ class NexusAgent(JarvisAgent):
         day_end = day_start + timedelta(days=1)
         export_date_iso = day_start.isoformat()
 
+        # created_at is stored as a naive-UTC BSON DATETIME for both POS orders
+        # (BaseRepository._add_timestamps) and online orders (shopify_ingest now
+        # writes datetimes too). LEGACY online orders wrote ISO STRINGS. MongoDB
+        # type-brackets a Date range away from a string field, so query BOTH shapes
+        # via $or -- otherwise one type is silently dropped from the Tally day
+        # export. (Reused for the store loop below; see _dt_or_str_created_range.)
+        ds_dt = day_start.replace(tzinfo=None) if getattr(day_start, "tzinfo", None) else day_start
+        de_dt = day_end.replace(tzinfo=None) if getattr(day_end, "tzinfo", None) else day_end
+        created_or = [
+            {"created_at": {"$gte": ds_dt, "$lt": de_dt}},
+            {"created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()}},
+        ]
+
         # Resolve the list of stores to process
         try:
             from api.dependencies import get_store_repository
@@ -289,7 +302,7 @@ class NexusAgent(JarvisAgent):
                 continue
             try:
                 orders = list(orders_coll.find({
-                    "created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()},
+                    "$or": created_or,
                     "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
                     "store_id": sid,
                 }))
@@ -366,9 +379,18 @@ class NexusAgent(JarvisAgent):
         """Single-row chain-wide export — used when StoreRepository
         is unavailable so we never silently skip the export. Mirrors
         the pre-I-6 behavior."""
+        # Dual-type created_at match: orders persist created_at as a naive-UTC BSON
+        # datetime (POS + online), but legacy online orders wrote ISO strings -- a
+        # Date range never matches a string field (Mongo type bracketing), so $or
+        # both shapes to avoid silently dropping either from the export.
+        ds_dt = day_start.replace(tzinfo=None) if getattr(day_start, "tzinfo", None) else day_start
+        de_dt = day_end.replace(tzinfo=None) if getattr(day_end, "tzinfo", None) else day_end
         try:
             todays_orders = list(orders_coll.find({
-                "created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()},
+                "$or": [
+                    {"created_at": {"$gte": ds_dt, "$lt": de_dt}},
+                    {"created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()}},
+                ],
                 "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
             }))
         except Exception as e:

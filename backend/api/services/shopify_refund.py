@@ -547,12 +547,26 @@ def handle_shopify_refund(
                 "shopify_order_id": shopify_order_id,
             }
 
-        # HISTORICAL import guard (mirrors online_order_mapper): a pre-IMS order
-        # imported for customer-360 history was settled OUTSIDE IMS books; never
-        # book a credit note / restock against it.
-        if order.get("historical") or order.get("source") == "bvi_import":
+        # HISTORICAL import guard: skip ONLY a pre-IMS customer-360 import
+        # (scripts/migrate_bvi_pim.py orders leg; source=bvi_import, status
+        # HISTORICAL) -- that order was settled OUTSIDE IMS books and carries NO
+        # IMS revenue/output-GST, so a credit note would reverse tax that was never
+        # output.
+        #
+        # Our OWN Shopify order-history import (import_source=shopify_order_history)
+        # is DIFFERENT: it books real IMS revenue + output GST (status DELIVERED /
+        # REFUNDED). A real refund webhook against one of those MUST still produce a
+        # GST credit note. Every refund PRESENT in the order payload at import time
+        # was already credited (a `returns` doc stamped with its refund id makes
+        # _refund_already_processed above catch it as a duplicate); only a NEW, later
+        # refund -- absent at import -- reaches here, and it should be booked (via
+        # the accountant review queue by default), NOT permanently skipped.
+        if order.get("source") == "bvi_import" or (
+            order.get("historical")
+            and order.get("import_source") != "shopify_order_history"
+        ):
             logger.info(
-                "[SHOPIFY_REFUND] skip refund for HISTORICAL import order=%s",
+                "[SHOPIFY_REFUND] skip refund for pre-IMS customer-360 import order=%s",
                 order.get("order_id"),
             )
             return {
@@ -593,11 +607,21 @@ def handle_shopify_refund(
             and abs(shopify_refunded - gross_refund) > _AMOUNT_EPS
         )
 
+        # Whether the money already went back via a payment GATEWAY (card/UPI/
+        # wallet). Computed HERE -- BEFORE the queue/discrepancy branches -- and
+        # PERSISTED in the credit_note dict so the accountant-confirm path
+        # (post_from_review reads credit_note.settled_externally) never mints
+        # redeemable store credit ON TOP of a gateway refund. Previously only the
+        # AUTO branch computed it, so a queued gateway refund confirmed by the
+        # accountant granted the customer a double benefit.
+        settled_externally = _is_gateway_refund(payload)
+
         credit_note = {
             "gross_refund": gross_refund,
             "net_refund": gross_refund,  # no online restocking fee
             "gst_breakup": gst_view,
             "shopify_refunded_amount": shopify_refunded,
+            "settled_externally": settled_externally,
             "lines": priced,
         }
 
@@ -638,7 +662,7 @@ def handle_shopify_refund(
             )
 
         # AUTO: post the credit note + restock automatically (opt-in only).
-        settled_externally = _is_gateway_refund(payload)
+        # settled_externally was computed above (shared with the queue path).
         result = _post_credit_and_restock(
             db,
             refund_id=refund_id,

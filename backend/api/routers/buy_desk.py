@@ -107,7 +107,10 @@ def _velocity_map(db, product_ids: List[str]) -> Dict[str, float]:
     pid_set = set(product_ids)
     sold: Dict[str, int] = {}
     try:
-        cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
+        # NAIVE-UTC DATETIME bound -- created_at is a BSON datetime (POS always;
+        # online post-#935 + backfill). The old .isoformat() STRING bound never
+        # matched a Date field (Mongo type bracketing) -> zero velocity for all.
+        cutoff = datetime.utcnow() - timedelta(days=30)
         cur = db.get_collection("orders").find(
             {
                 "created_at": {"$gte": cutoff},
