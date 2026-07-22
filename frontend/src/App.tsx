@@ -560,9 +560,10 @@ function App() {
                     }
                   />
 
-                  {/* Online Store — Products / PIM (BVI Phase 1). Read-only list
-                      of the online catalog + per-SKU online status. Same
-                      catalog/design role gate as the module shell. */}
+                  {/* Online Store — Products / PIM. Server-paged list of the
+                      catalog_products master with truthful per-row website
+                      state; admin-only per-row push. Same catalog/design role
+                      gate as the module shell. */}
                   <Route
                     path="online-store/products"
                     element={

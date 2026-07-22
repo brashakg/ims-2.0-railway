@@ -590,6 +590,28 @@ def test_push_product_400_without_ecom_subdoc(client, auth_headers, patched_db):
     assert r.status_code == 400, r.text
 
 
+def test_get_catalog_product_falls_back_to_sku_then_parent_sku():
+    """Audit OS-004: the resolver retries by `sku` (BVI-imported docs) and then
+    `parent_sku` (door-created spine mirrors, whose catalog `id` is the
+    pim_product_id uuid) when the primary id lookup misses -- a caller holding
+    a sku no longer gets a misleading 404."""
+    from api.routers.online_store_push import _get_catalog_product
+
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        {"id": "PIM-1", "sku": "BV-SKU-1", "title": "BVI import"})
+    db["catalog_products"].insert_one(
+        {"id": "PIM-2", "parent_sku": "FR-SKU-2", "title": "Door mirror"})
+    # Primary id hit still wins.
+    assert _get_catalog_product(db, "PIM-1")["title"] == "BVI import"
+    # sku fallback (BVI docs carry `sku`).
+    assert _get_catalog_product(db, "BV-SKU-1")["title"] == "BVI import"
+    # parent_sku fallback (door mirrors carry `parent_sku`, not `sku`).
+    assert _get_catalog_product(db, "FR-SKU-2")["title"] == "Door mirror"
+    # A genuine miss is still None (-> the route's 404).
+    assert _get_catalog_product(db, "NOPE") is None
+
+
 def test_live_push_collection_and_menu_simulated_over_http(client, auth_headers, patched_db, monkeypatch):
     conn, audit_repo = patched_db
     _force_dark(monkeypatch, "writes_off")
