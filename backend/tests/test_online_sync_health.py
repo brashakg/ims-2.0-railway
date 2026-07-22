@@ -359,6 +359,67 @@ def test_stock_tally_unknown_listed_is_null_and_never_flags(monkeypatch):
         assert row["oversell_risk"] is False
 
 
+def test_stock_tally_partial_coverage_is_not_live(monkeypatch):
+    """Fix-round P1: when the live read covered only SOME mapped SKUs, the
+    tally must NOT claim listed_qty_live -- uncovered rows stay None/no-risk
+    and the coverage counts are surfaced."""
+    _patch_online(
+        monkeypatch,
+        {
+            "SKU-OK": {"online": True, "online_stock": None},
+            "SKU-RISK": {"online": True, "online_stock": None},
+        },
+    )
+    out = sh.stock_tally_summary(
+        _tally_db(),
+        online_qty={"SKU-OK": 3},
+        listed_coverage={"live": 1, "mapped": 2},
+    )
+    s = out["summary"]
+    assert s["listed_qty_live"] is False   # partial, not full coverage
+    assert s["listed_live_rows"] == 1
+    assert s["listed_mapped_rows"] == 2
+    by_sku = {i["sku"]: i for i in out["items"]}
+    assert by_sku["SKU-OK"]["online_listed_qty"] == 3
+    assert by_sku["SKU-RISK"]["online_listed_qty"] is None  # uncovered
+    assert by_sku["SKU-RISK"]["oversell_risk"] is False
+
+
+def test_live_listed_qty_filters_mapped_first_then_caps(monkeypatch):
+    """Fix-round P1: the live-read cap applies to the MAPPED set (an unmapped
+    SKU can never waste a cap slot) and the result reports honest coverage:
+    600 mapped with cap 500 -> live=500, capped=True, SKUs 501+ uncovered."""
+    import asyncio
+
+    import api.services.shopify_push as sp
+    from api.services import online_catalog, shopify_stock_parity
+
+    monkeypatch.setattr(sp, "_has_shopify_creds", lambda db: True)
+    # 600 mapped SKUs interleaved with 600 unmapped ones in scan order.
+    mapped = [f"M{i:04d}" for i in range(600)]
+    unmapped = [f"U{i:04d}" for i in range(600)]
+    skus = [x for pair in zip(unmapped, mapped) for x in pair]
+    monkeypatch.setattr(
+        online_catalog,
+        "inventory_items_for_skus",
+        lambda db, s: {k: f"inv-{k}" for k in s if k.startswith("M")},
+    )
+
+    async def _avail(db, inv_ids):
+        return {i: 5 for i in inv_ids}
+
+    monkeypatch.setattr(shopify_stock_parity, "_shopify_available_by_item", _avail)
+
+    out = asyncio.run(sh.live_listed_qty_for_skus(object(), skus, cap=500))
+    assert out is not None
+    assert out["mapped"] == 600
+    assert out["live"] == 500
+    assert out["capped"] is True
+    # The cap is spent ONLY on mapped SKUs -- the first 500 in input order.
+    assert set(out["qty"]) == set(mapped[:500])
+    assert not any(k.startswith("U") for k in out["qty"])
+
+
 # ---------------------------------------------------------------------------
 # HTTP endpoint tests (SUPERADMIN gate + payload shape)
 # ---------------------------------------------------------------------------

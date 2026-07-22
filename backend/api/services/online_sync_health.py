@@ -289,6 +289,7 @@ def stock_tally_summary(
     db,
     limit: int = _RECONCILE_SCAN_LIMIT,
     online_qty: Optional[Dict[str, int]] = None,
+    listed_coverage: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
     already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
@@ -312,13 +313,26 @@ def stock_tally_summary(
 
     Plus a summary {skus_checked, at_risk_count, total_online_listed,
     total_on_hand, total_reserved, total_sellable, online_configured,
-    listed_qty_live}.
+    listed_qty_live, listed_live_rows, listed_mapped_rows}.
+
+    ``listed_coverage`` ({live, mapped} from live_listed_qty_for_skus) makes
+    partial coverage explicit: listed_qty_live is True ONLY on FULL mapped
+    coverage (audit fix-round P1 -- a partially-covered read must not present
+    itself as fully live). Rows outside coverage stay None/no-risk.
 
     100% read-only + fail-soft: no DB -> empty envelope. NEVER mutates stock,
     NEVER reserves a unit."""
     from .online_catalog import online_mapping_available, online_status_for_skus
 
-    listed_live = online_qty is not None
+    live_rows = mapped_rows = 0
+    if online_qty is not None:
+        live_rows = len(online_qty)
+        mapped_rows = len(online_qty)
+    if listed_coverage:
+        live_rows = int(listed_coverage.get("live") or 0)
+        mapped_rows = int(listed_coverage.get("mapped") or 0)
+    # "Live" only when we actually read Shopify AND covered every mapped SKU.
+    listed_live = online_qty is not None and mapped_rows > 0 and live_rows >= mapped_rows
     base: Dict[str, Any] = {
         "items": [],
         "summary": {
@@ -330,6 +344,8 @@ def stock_tally_summary(
             "total_sellable": 0,
             "online_configured": online_mapping_available(db),
             "listed_qty_live": listed_live,
+            "listed_live_rows": live_rows,
+            "listed_mapped_rows": mapped_rows,
         },
     }
     if db is None:
@@ -431,20 +447,34 @@ def stock_tally_summary(
             "total_sellable": tot_sellable,
             "online_configured": online_mapping_available(db),
             "listed_qty_live": listed_live,
+            "listed_live_rows": live_rows,
+            "listed_mapped_rows": mapped_rows,
         },
     }
 
 
 async def live_listed_qty_for_skus(
     db, skus: List[str], cap: int = 500
-) -> Optional[Dict[str, int]]:
-    """LIVE Shopify 'available' quantity per SKU for online-mapped SKUs (first
-    ``cap``), via the IMS Mongo variant mapping + the read-only
-    shopify_stock_parity batch reader (the single _graphql boundary).
+) -> Optional[Dict[str, Any]]:
+    """LIVE Shopify 'available' quantity per SKU via the IMS Mongo variant
+    mapping + the read-only shopify_stock_parity batch reader (the single
+    _graphql boundary).
 
-    Returns {sku: available} for the SKUs Shopify returned, or None when the
-    live read is unavailable (no creds / no mapping / error) so callers can
-    tell "0 listed" apart from "unknown". READ-ONLY + fail-soft, never raises."""
+    Coverage honesty (audit fix-round P1): the input is filtered to
+    online-MAPPED SKUs FIRST and ``cap`` applies to the MAPPED set -- an
+    unmapped SKU can never waste a cap slot -- and the result carries coverage
+    counts so callers can tell full from partial coverage and never render an
+    uncovered SKU as a confident 0/OK.
+
+    Returns None when the live read is unavailable (no creds / no mapping /
+    read error), else:
+        {
+          "qty":    {sku: available},  # only SKUs Shopify actually returned
+          "mapped": int,               # online-mapped SKUs in the input
+          "live":   int,               # == len(qty) (may be < mapped)
+          "capped": bool,              # True when mapped > cap
+        }
+    READ-ONLY + fail-soft, never raises."""
     try:
         from .shopify_push import _has_shopify_creds
 
@@ -454,20 +484,30 @@ async def live_listed_qty_for_skus(
         from .shopify_stock_parity import _shopify_available_by_item
 
         clean = [str(s).strip() for s in (skus or []) if str(s or "").strip()]
-        inv_map = inventory_items_for_skus(db, clean[: max(0, int(cap))])
-        if not inv_map:
+        # Mapped FIRST, then cap -- preserving the caller's SKU order.
+        inv_map_full = inventory_items_for_skus(db, clean)
+        if not inv_map_full:
             return None
+        mapped_ordered = [s for s in dict.fromkeys(clean) if s in inv_map_full]
+        cap = max(0, int(cap))
+        capped = len(mapped_ordered) > cap
+        inv_map = {s: inv_map_full[s] for s in mapped_ordered[:cap]}
         avail = await _shopify_available_by_item(
             db, sorted(set(inv_map.values()))
         )
-        if not avail:
-            return None
-        out: Dict[str, int] = {}
+        qty: Dict[str, int] = {}
         for sku, inv in inv_map.items():
-            qty = avail.get(inv)
-            if qty is not None:
-                out[sku] = int(qty)
-        return out or None
+            q = avail.get(inv)
+            if q is not None:
+                qty[sku] = int(q)
+        if not qty:
+            return None
+        return {
+            "qty": qty,
+            "mapped": len(mapped_ordered),
+            "live": len(qty),
+            "capped": capped,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK_TALLY] live listed-qty read failed: %s", exc)
         return None
@@ -475,10 +515,13 @@ async def live_listed_qty_for_skus(
 
 async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, Any]:
     """stock_tally_summary with LIVE Shopify listed quantities: reads the real
-    'available' per online-mapped SKU (creds-gated, read-only) and feeds it into
-    the pure tally. Degrades to the honest-unknown tally (listed None) when the
-    live read is unavailable. Never raises."""
+    'available' per online-mapped SKU (creds-gated, read-only) and feeds it
+    into the pure tally WITH its coverage counts, so partial coverage is
+    explicit (listed_qty_live is only True on full mapped coverage). Degrades
+    to the honest-unknown tally (listed None) when the live read is
+    unavailable. Never raises."""
     online_qty: Optional[Dict[str, int]] = None
+    coverage: Optional[Dict[str, int]] = None
     try:
         products = list(
             _coll(db, "products")
@@ -490,10 +533,15 @@ async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, 
         )
         skus = [p.get("sku") for p in products if p.get("sku")]
         if skus:
-            online_qty = await live_listed_qty_for_skus(db, skus)
+            live = await live_listed_qty_for_skus(db, skus)
+            if live is not None:
+                online_qty = live["qty"]
+                coverage = {"live": live["live"], "mapped": live["mapped"]}
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_TALLY] live scan skipped: %s", exc)
-    return stock_tally_summary(db, limit=limit, online_qty=online_qty)
+    return stock_tally_summary(
+        db, limit=limit, online_qty=online_qty, listed_coverage=coverage
+    )
 
 
 def failed_webhook_summary(db) -> Dict[str, Any]:
@@ -1018,14 +1066,21 @@ async def repush_oversell_risk(db, dry_run: bool = True) -> Dict[str, Any]:
     # Oversell detection post-BVI: the listed quantity lives ONLY on Shopify, so
     # read it LIVE for the online-mapped SKUs (creds-gated, read-only, fail-soft
     # -> None). An unknown listed qty can never flag a false OVERSELL_RISK.
-    online_qty = await live_listed_qty_for_skus(db, skus)
-    if online_qty is None:
-        online_qty = {}
+    live = await live_listed_qty_for_skus(db, skus)
+    online_qty = (live or {}).get("qty") or {}
+    if live is None:
         if not base["skipped_reason"]:
             base["skipped_reason"] = (
                 "live Shopify availability unavailable (creds/mapping) -- "
                 "no oversell candidates can be detected"
             )
+    elif live.get("capped"):
+        # Partial sweep is still a sweep -- record coverage without hijacking
+        # skipped_reason (which explains why NOTHING ran).
+        base["coverage_note"] = (
+            f"live availability read capped: {live.get('live')} of "
+            f"{live.get('mapped')} mapped SKU(s) checked this sweep"
+        )
 
     items = []
     for p in products:

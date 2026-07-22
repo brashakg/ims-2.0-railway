@@ -121,9 +121,12 @@ async def online_stock_reconcile(
 
     Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
     the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
-    (creds-gated, read-only, capped) -- listed_qty_live=False in the response
-    means the live read was unavailable, listed quantities are unknown (0 in
-    rows) and oversell flags cannot fire. Read-only + fail-soft."""
+    (creds-gated, read-only, capped to the MAPPED set). Honesty contract
+    (audit fix-round P1): an online SKU the live read did NOT cover carries
+    online=null and classifies LISTED_UNKNOWN -- never a confident 0/OK.
+    listed_qty_live is True only on FULL mapped coverage;
+    listed_live_rows / listed_mapped_rows expose partial coverage.
+    Read-only + fail-soft."""
     db = _get_db()
     if db is None:
         return {
@@ -131,6 +134,8 @@ async def online_stock_reconcile(
             "summary": {},
             "online_configured": False,
             "listed_qty_live": False,
+            "listed_live_rows": 0,
+            "listed_mapped_rows": 0,
         }
     try:
         products = list(
@@ -149,30 +154,38 @@ async def online_stock_reconcile(
     skus = [p.get("sku") for p in products if p.get("sku")]
     online = online_status_for_skus(db, skus)  # {sku: {online, status, ...}}
 
-    # Live Shopify listed quantities for the online-mapped SKUs (None when the
-    # read is unavailable -- rows then carry 0 and can never false-flag).
+    # Live Shopify listed quantities: mapped SKUs first, cap on the mapped set,
+    # coverage counts carried through (None when the read is unavailable).
     from ..services.online_sync_health import live_listed_qty_for_skus
 
-    online_qty = await live_listed_qty_for_skus(db, skus)
+    live = await live_listed_qty_for_skus(db, skus)
+    online_qty = (live or {}).get("qty") or {}
 
     items = []
     for p in products:
         sku = p.get("sku")
         o = online.get(sku, {})
-        listed = (online_qty or {}).get(sku)
+        is_online = bool(o.get("online"))
+        # Uncovered online SKU -> None (LISTED_UNKNOWN downstream), never a
+        # confident 0. Offline SKUs carry 0 (they are not assessed anyway).
+        listed = online_qty.get(sku)
         items.append(
             {
                 "sku": sku,
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
                 "in_store": on_hand.get(p.get("product_id"), 0),
-                "online": int(listed or 0),
-                "is_online": bool(o.get("online")),
+                "online": (listed if is_online else 0),
+                "is_online": is_online,
             }
         )
 
     result = stock_allocation.reconcile_items(items, safety_buffer=safety_buffer)
     result["online_configured"] = online_mapping_available(db)
-    result["listed_qty_live"] = online_qty is not None
+    live_rows = int(live["live"]) if live else 0
+    mapped_rows = int(live["mapped"]) if live else 0
+    result["listed_qty_live"] = bool(live) and mapped_rows > 0 and live_rows >= mapped_rows
+    result["listed_live_rows"] = live_rows
+    result["listed_mapped_rows"] = mapped_rows
     return result
 
 

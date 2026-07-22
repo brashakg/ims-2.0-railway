@@ -82,24 +82,32 @@ def _variants_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
         return {}
     out: Dict[str, Dict[str, Any]] = {}
     try:
-        cursor = coll.find(
-            _match_query(_VARIANT_KEY_FIELDS, keys),
-            {
-                "_id": 0,
-                "sku": 1,
-                "store_barcode": 1,
-                "barcode": 1,
-                "gtin": 1,
-                "parent_product_id": 1,
-                "parent_sku": 1,
-                "shopify_variant_id": 1,
-                "shopify_inventory_item_id": 1,
-                "shopify_location_id": 1,
-            },
+        docs = list(
+            coll.find(
+                _match_query(_VARIANT_KEY_FIELDS, keys),
+                {
+                    "_id": 0,
+                    "sku": 1,
+                    "store_barcode": 1,
+                    "barcode": 1,
+                    "gtin": 1,
+                    "parent_product_id": 1,
+                    "parent_sku": 1,
+                    "shopify_variant_id": 1,
+                    "shopify_inventory_item_id": 1,
+                    "shopify_location_id": 1,
+                },
+            )
         )
         keyset = set(keys)
-        for doc in cursor:
-            for field in _VARIANT_KEY_FIELDS:
+        # DETERMINISTIC precedence: assign keys by FIELD priority (sku beats
+        # store_barcode beats barcode beats gtin), NOT document order -- an
+        # identifier that is one variant's sku and another variant's barcode
+        # must always resolve to the sku owner. sku and store_barcode carry
+        # unique indexes; within the non-unique barcode/gtin tiers the first
+        # matching document wins (fail-soft).
+        for field in _VARIANT_KEY_FIELDS:
+            for doc in docs:
                 ident = normalize_sku(doc.get(field))
                 if ident and ident in keyset and ident not in out:
                     out[ident] = doc
@@ -117,13 +125,17 @@ def _products_by_key(db, keys: List[str]) -> Dict[str, Dict[str, Any]]:
         return {}
     out: Dict[str, Dict[str, Any]] = {}
     try:
-        cursor = coll.find(
-            _match_query(_PRODUCT_KEY_FIELDS, keys),
-            {"_id": 0, "id": 1, "sku": 1, "barcode": 1, "ecom": 1},
+        docs = list(
+            coll.find(
+                _match_query(_PRODUCT_KEY_FIELDS, keys),
+                {"_id": 0, "id": 1, "sku": 1, "barcode": 1, "ecom": 1},
+            )
         )
         keyset = set(keys)
-        for doc in cursor:
-            for field in _PRODUCT_KEY_FIELDS:
+        # Same deterministic precedence as variants: sku assignments first,
+        # then barcode fills the remainder (catalog_products.sku is unique).
+        for field in _PRODUCT_KEY_FIELDS:
+            for doc in docs:
                 ident = normalize_sku(doc.get(field))
                 if ident and ident in keyset and ident not in out:
                     out[ident] = doc
@@ -164,12 +176,24 @@ def _parents_for_variants(db, variants: List[Dict[str, Any]]) -> Dict[str, Dict[
 
 
 def _ecom_online(ecom: Dict[str, Any]) -> bool:
-    """Same semantics as the old bridge: a product is 'online' when it has been
-    pushed to Shopify (gid present) OR is staged PUBLISHED."""
+    """DISPLAY semantics (same as the old bridge): a product is 'online' when
+    it has been pushed to Shopify (gid present) OR is staged PUBLISHED. NOTE:
+    this includes unpurchasable Shopify DRAFTs -- for anything guard/alert
+    related use the sellable_online flag instead."""
     if not isinstance(ecom, dict):
         return False
     pushed = bool(normalize_sku(ecom.get("shopify_product_id")))
     return pushed or str(ecom.get("status") or "").upper() == "PUBLISHED"
+
+
+def _ecom_sellable(ecom: Dict[str, Any]) -> bool:
+    """SELLABLE semantics: customers can actually buy it online -- ecom.status
+    PUBLISHED (push maps PUBLISHED -> Shopify ACTIVE). A product pushed as a
+    Shopify DRAFT (gid present, status DRAFT) is NOT sellable and must never
+    trip oversell alarms."""
+    if not isinstance(ecom, dict):
+        return False
+    return str(ecom.get("status") or "").upper() == "PUBLISHED"
 
 
 def online_mapping_available(db) -> bool:
@@ -200,15 +224,20 @@ def online_mapping_available(db) -> bool:
 
 
 def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Return {requested_key: {online, online_stock, status}} for identifiers
-    that exist in the IMS online catalog (catalog_products.ecom, resolved
-    directly or via a matching catalog_variants row).
+    """Return {requested_key: {online, sellable_online, online_stock, status}}
+    for identifiers that exist in the IMS online catalog (catalog_products.ecom,
+    resolved directly or via a matching catalog_variants row).
 
-    online       -- pushed to Shopify (gid present) OR staged PUBLISHED.
-    online_stock -- ALWAYS None: Shopify owns the live listed quantity and IMS
-                    does not mirror it; use online_sync_health's live readers
-                    for a real number. Never a fake 0.
-    status       -- the ecom.status (DRAFT/PUBLISHED/ARCHIVED) when known.
+    online          -- DISPLAY flag: pushed to Shopify (gid present) OR staged
+                       PUBLISHED (includes unpurchasable Shopify DRAFTs).
+    sellable_online -- GUARD flag: customers can actually buy it -- ecom.status
+                       PUBLISHED, or (variant path) a live variant gid. Use
+                       THIS for oversell alarms, never `online` (fix-round P1:
+                       the 2,032 staged drafts must not trip guard alerts).
+    online_stock    -- ALWAYS None: Shopify owns the live listed quantity and
+                       IMS does not mirror it; use online_sync_health's live
+                       readers for a real number. Never a fake 0.
+    status          -- the ecom.status (DRAFT/PUBLISHED/ARCHIVED) when known.
 
     Empty dict on any failure (fail-soft)."""
     keys = _clean_keys(skus)
@@ -226,6 +255,7 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
             continue
         out[key] = {
             "online": _ecom_online(ecom),
+            "sellable_online": _ecom_sellable(ecom),
             "online_stock": None,
             "status": ecom.get("status"),
         }
@@ -248,6 +278,12 @@ def online_status_for_skus(db, skus: List[str]) -> Dict[str, Dict[str, Any]]:
             continue
         out[key] = {
             "online": _ecom_online(ecom) or var_pushed,
+            # Sellable when the parent is PUBLISHED, or -- per the audit
+            # fix-round instruction -- when the variant carries a live variant
+            # gid (BVI-era imported variants whose parent linkage/ecom may be
+            # missing belong to live storefront products).
+            "sellable_online": _ecom_sellable(ecom)
+            or bool(normalize_sku(var.get("shopify_variant_id"))),
             "online_stock": None,
             "status": ecom.get("status"),
         }

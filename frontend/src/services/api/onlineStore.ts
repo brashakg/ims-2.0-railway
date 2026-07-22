@@ -99,9 +99,12 @@ export interface StockTallySummary {
   total_sellable: number;
   /** IMS catalog carries Shopify-mapped products (post-BVI truth source). */
   online_configured: boolean;
-  /** True when listed quantities came from a LIVE Shopify read; false =
-   *  listed is unknown (rows show an em dash, risk flags can't fire). */
+  /** True ONLY when the live Shopify read covered EVERY mapped SKU; partial
+   *  coverage keeps this false (uncovered rows show an em dash, no risk). */
   listed_qty_live?: boolean;
+  /** Live-read coverage: mapped SKUs that got a live quantity vs all mapped. */
+  listed_live_rows?: number;
+  listed_mapped_rows?: number;
 }
 
 export interface StockTallyResult {
@@ -123,6 +126,8 @@ const STOCK_TALLY_PLACEHOLDER: StockTallyResult = {
     total_sellable: 0,
     online_configured: false,
     listed_qty_live: false,
+    listed_live_rows: 0,
+    listed_mapped_rows: 0,
   },
   available: false,
 };
@@ -186,6 +191,8 @@ export const onlineStoreApi = {
           total_sellable: num(s.total_sellable),
           online_configured: !!s.online_configured,
           listed_qty_live: !!s.listed_qty_live,
+          listed_live_rows: num(s.listed_live_rows),
+          listed_mapped_rows: num(s.listed_mapped_rows),
         },
         available: true,
       };

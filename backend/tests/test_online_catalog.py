@@ -223,6 +223,71 @@ def test_status_unknown_and_blank_skus_skipped():
     assert "SKU-PLAIN" not in out
 
 
+def test_sellable_online_excludes_unpurchasable_drafts():
+    """Fix-round P1: `online` (display) vs `sellable_online` (guard). A product
+    pushed as a Shopify DRAFT is online for display but NOT sellable -- it must
+    never trip oversell alarms. PUBLISHED products are sellable."""
+    out = online_status_for_skus(
+        _db(), ["SKU-PUSHED", "SKU-PUB", "SKU-DRAFT", "VAR-2"]
+    )
+    # Pushed but DRAFT: display-online, NOT sellable.
+    assert out["SKU-PUSHED"]["online"] is True
+    assert out["SKU-PUSHED"]["sellable_online"] is False
+    # PUBLISHED: sellable.
+    assert out["SKU-PUB"]["sellable_online"] is True
+    # Unpushed DRAFT: neither.
+    assert out["SKU-DRAFT"]["online"] is False
+    assert out["SKU-DRAFT"]["sellable_online"] is False
+    # Variant of a PUBLISHED parent: sellable.
+    assert out["VAR-2"]["sellable_online"] is True
+
+
+def test_identifier_priority_sku_beats_barcode_across_variants():
+    """Heads-up hardening: when one requested identifier is variant A's barcode
+    AND variant B's sku, the SKU owner must win deterministically (field
+    priority, not document order)."""
+    db = _Db(
+        {
+            "catalog_products": _Coll([]),
+            "catalog_variants": _Coll(
+                [
+                    # Document order puts the BARCODE owner first on purpose.
+                    {"sku": "X1", "barcode": "COLLIDE", "shopify_inventory_item_id": "inv-A"},
+                    {"sku": "COLLIDE", "shopify_inventory_item_id": "inv-B"},
+                ]
+            ),
+        }
+    )
+    assert inventory_items_for_skus(db, ["COLLIDE"]) == {"COLLIDE": "inv-B"}
+
+
+def test_identifier_priority_product_sku_beats_other_products_barcode():
+    """Same determinism on the product tier: a key that is product A's barcode
+    and product B's sku resolves to B (the sku owner)."""
+    db = _Db(
+        {
+            "catalog_products": _Coll(
+                [
+                    {
+                        "id": "A",
+                        "sku": "A-SKU",
+                        "barcode": "P-COLLIDE",
+                        "ecom": {"status": "DRAFT"},
+                    },
+                    {
+                        "id": "B",
+                        "sku": "P-COLLIDE",
+                        "ecom": {"status": "PUBLISHED"},
+                    },
+                ]
+            ),
+            "catalog_variants": _Coll([]),
+        }
+    )
+    out = online_status_for_skus(db, ["P-COLLIDE"])
+    assert out["P-COLLIDE"]["status"] == "PUBLISHED"  # product B (sku owner)
+
+
 # ---------------------------------------------------------------------------
 # write-back target resolution (the oversell-guard mapping, audit OS-015)
 # ---------------------------------------------------------------------------

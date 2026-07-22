@@ -174,13 +174,14 @@ export default function OnlineStockPage() {
         </div>
       )}
 
-      {/* Live Shopify read unavailable: listed quantities are unknown ("—"). */}
+      {/* Live Shopify read unavailable or PARTIAL: uncovered rows show "—". */}
       {!loading && available && onlineConfigured && summary?.listed_qty_live === false && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">
-            Live Shopify quantities are unavailable right now, so "Listed online" shows — (unknown)
-            and oversell flags can't fire. On-hand, reserved and sellable counts are live.
+            {(summary?.listed_live_rows ?? 0) > 0
+              ? `Live Shopify quantities cover ${summary?.listed_live_rows} of ${summary?.listed_mapped_rows} mapped SKUs. Rows showing — were not covered by this read and are unverified (no oversell flag can fire for them).`
+              : 'Live Shopify quantities are unavailable right now, so "Listed online" shows — (unknown) and oversell flags can\'t fire. On-hand, reserved and sellable counts are live.'}
           </span>
         </div>
       )}
