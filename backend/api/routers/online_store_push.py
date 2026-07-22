@@ -484,9 +484,22 @@ def _empty_counts() -> Dict[str, Any]:
 
 def _get_catalog_product(db, product_id: str) -> Optional[Dict]:
     """Fetch a catalog_products doc by its `id` (the catalog key, never _id).
+
+    Defensive fallback (audit OS-004): when the id misses, retry by `sku` and
+    then `parent_sku`. Door-created spine mirrors key their catalog doc on
+    pim_product_id (a DIFFERENT uuid from the spine product_id) but always
+    carry the spine sku as `parent_sku`; BVI-imported docs carry `sku`. This
+    keeps a caller holding a sku (or a legacy id) from getting a misleading
+    404 "Product not found". Sequential find_one calls (no $or) so the
+    in-memory MockCollection used by tests resolves identically.
     Strips the Mongo _id. Fail-soft -> None."""
     try:
-        doc = db["catalog_products"].find_one({"id": product_id})
+        coll = db["catalog_products"]
+        doc = coll.find_one({"id": product_id})
+        if doc is None and product_id:
+            doc = coll.find_one({"sku": product_id})
+        if doc is None and product_id:
+            doc = coll.find_one({"parent_sku": product_id})
         if doc is not None:
             doc.pop("_id", None)
         return doc
