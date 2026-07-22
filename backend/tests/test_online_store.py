@@ -55,6 +55,57 @@ def test_summary_mounts_and_returns_status(client, auth_headers):
         assert isinstance(_v, int)
 
 
+def test_summary_products_ecom_shape(client, auth_headers):
+    """The Phase-1 truth slice adds a products_ecom block (draft / published /
+    staged_total / text_only) -- always present + integer, fail-soft to zeros."""
+    r = client.get(SUMMARY, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    pe = r.json().get("products_ecom")
+    assert isinstance(pe, dict), "products_ecom block missing from summary"
+    assert {"draft", "published", "staged_total", "text_only"} <= set(pe)
+    for _v in pe.values():
+        assert isinstance(_v, int)
+
+
+def test_summary_products_ecom_counts(client, auth_headers):
+    """DB-backed correctness: DRAFT/PUBLISHED split + text-only (no images) count.
+    Uses deltas against a live baseline so pre-existing rows don't matter, and
+    skips fail-soft when no DB is connected (local run)."""
+    import pytest
+
+    from api.dependencies import get_db
+
+    conn = get_db()
+    db = getattr(conn, "db", None) if conn is not None else None
+    # Only meaningful against a REAL mongo (CI): the seeded MockDatabase reports
+    # "connected" but does not persist inserts, and counting is fail-soft to
+    # zeros -- skip there rather than assert against a stub.
+    if db is None or "Mock" in type(db).__name__:
+        pytest.skip("no real DB connected (counting is fail-soft to zeros)")
+
+    coll = conn.get_collection("catalog_products")
+    before = client.get(SUMMARY, headers=auth_headers).json()["products_ecom"]
+    docs = [
+        # DRAFT with an image -> draft +1, staged +1, NOT text_only.
+        {"product_id": "ZZ_ECOM_1", "ecom": {"status": "DRAFT"}, "images": ["http://x/a.jpg"]},
+        # DRAFT with an empty images array -> draft +1, staged +1, text_only +1.
+        {"product_id": "ZZ_ECOM_2", "ecom": {"status": "DRAFT"}, "images": []},
+        # DRAFT with images field missing -> draft +1, staged +1, text_only +1.
+        {"product_id": "ZZ_ECOM_3", "ecom": {"status": "DRAFT"}},
+        # PUBLISHED with an image -> published +1, staged +1, NOT text_only.
+        {"product_id": "ZZ_ECOM_4", "ecom": {"status": "PUBLISHED"}, "images": ["http://x/b.jpg"]},
+    ]
+    coll.insert_many(docs)
+    try:
+        after = client.get(SUMMARY, headers=auth_headers).json()["products_ecom"]
+        assert after["draft"] - before["draft"] == 3
+        assert after["published"] - before["published"] == 1
+        assert after["staged_total"] - before["staged_total"] == 4
+        assert after["text_only"] - before["text_only"] == 2
+    finally:
+        coll.delete_many({"product_id": {"$regex": "^ZZ_ECOM_"}})
+
+
 def test_summary_forbidden_for_sales_staff(client, staff_headers):
     """SALES_STAFF is outside the ecom role set -> 403."""
     r = client.get(SUMMARY, headers=staff_headers)

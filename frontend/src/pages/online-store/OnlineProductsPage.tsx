@@ -34,8 +34,13 @@ import {
   Layers,
   Globe,
   CircleSlash,
+  Send,
 } from 'lucide-react';
 import { productApi, catalogApi, type OnlineStatus } from '../../services/api/products';
+import { onlineStoreApi, pushApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
+import { SyncChip, formatPushResult } from '../../components/online-store/OnlineStoreSyncBanner';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 // ---------------------------------------------------------------------------
 // A slim, presentation-only product row (whatever the catalog list emits, we
@@ -50,6 +55,10 @@ interface ProductRow {
   online_price: number | null;
   mrp: number | null;
   variant_count: number | null;
+  /** The product is mapped to a Shopify id (was pushed at least once). */
+  shopify_mapped: boolean;
+  /** ecom.status (DRAFT | PUBLISHED | ARCHIVED) if the doc carries an ecom sub-doc. */
+  ecom_status: string | null;
 }
 
 /** Project a raw catalog doc onto ProductRow, tolerating the several shapes the
@@ -69,6 +78,13 @@ function toRow(p: Record<string, any>): ProductRow {
         : typeof p.variants_count === 'number'
           ? p.variants_count
           : null;
+  const ecom = (p.ecom && typeof p.ecom === 'object' ? p.ecom : {}) as Record<string, any>;
+  const shopifyMapped = !!(
+    ecom.shopify_product_id ||
+    p.shopify_product_id ||
+    ecom.shopify?.product_id
+  );
+  const ecomStatus = ecom.status ? String(ecom.status).toUpperCase() : null;
   return {
     product_id: String(p.product_id ?? p.id ?? p._id ?? ''),
     sku: p.sku ?? null,
@@ -85,6 +101,8 @@ function toRow(p: Record<string, any>): ProductRow {
             : null,
     mrp: typeof p.mrp === 'number' ? p.mrp : null,
     variant_count: variantCount,
+    shopify_mapped: shopifyMapped,
+    ecom_status: ecomStatus,
   };
 }
 
@@ -101,6 +119,16 @@ function fmtMoney(amount: number | null | undefined): string {
   }
 }
 
+/** Format an integer count (null/undefined -> "0") with en-IN grouping. */
+function fmtInt(n: number | null | undefined): string {
+  const v = typeof n === 'number' && isFinite(n) ? n : 0;
+  try {
+    return v.toLocaleString('en-IN');
+  } catch {
+    return String(v);
+  }
+}
+
 /** Humanise a raw category token ("READING_GLASSES" -> "Reading glasses"). */
 function humanise(s: string | null | undefined): string {
   if (!s) return '—';
@@ -113,14 +141,27 @@ function humanise(s: string | null | undefined): string {
 // Page
 // ===========================================================================
 export default function OnlineProductsPage() {
+  const { hasRole } = useAuth();
+  const toast = useToast();
+  // "Send to website" is a live-write affordance -> SUPERADMIN / ADMIN only,
+  // mirroring the backend push gate (online_store_push.py _PUSH_ROLES). CM/DM
+  // see the sync chip but not the button (the backend would 403 them anyway).
+  const canPush = hasRole(['SUPERADMIN', 'ADMIN']);
+
   const [rows, setRows] = useState<ProductRow[]>([]);
   const [online, setOnline] = useState<Record<string, OnlineStatus>>({});
+  const [summary, setSummary] = useState<OnlineStoreSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [pushingId, setPushingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // The DRAFT/PUBLISHED/text-only breakdown for the header strip (fail-soft
+      // -> PLACEHOLDER; getSummary never throws).
+      onlineStoreApi.getSummary().then(setSummary).catch(() => {});
+
       // The catalog list. Fail-soft: any error -> empty list (friendly state).
       let raw: Record<string, any>[] = [];
       try {
@@ -154,6 +195,35 @@ export default function OnlineProductsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Wire the (previously orphaned) single-product push. DARK by default: unless
+  // the owner has armed the triple-gate on the server this is a SIMULATED
+  // dry-run and nothing reaches the storefront -- formatPushResult stamps
+  // SIMULATED vs LIVE on the toast so it can never be mistaken.
+  const pushRow = async (row: ProductRow) => {
+    if (!canPush || pushingId) return;
+    const ok = window.confirm(
+      `Send "${row.title}" to the website?\n\n` +
+        'If the live gates are off this runs as a dry-run (SIMULATED) and nothing reaches ' +
+        'the storefront. When the gates are armed this writes to the live website.',
+    );
+    if (!ok) return;
+    setPushingId(row.product_id);
+    try {
+      const res = await pushApi.pushProduct(row.product_id);
+      const msg = formatPushResult(row.title, res);
+      if (res.ok) toast.success(msg);
+      else toast.error(msg);
+      // A LIVE push may have mapped a Shopify id -> refresh chip + header counts.
+      load();
+    } catch (e: any) {
+      toast.error(
+        `${row.title}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+      );
+    } finally {
+      setPushingId(null);
+    }
+  };
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -198,8 +268,9 @@ export default function OnlineProductsPage() {
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
         The product catalog as it appears online — title, category, brand, the online price and the
         bridged variant tier. The <span className="font-medium text-gray-700">Online</span> column
-        shows whether each SKU is currently live on the storefront and mapped to physical stock. This
-        is a read-only view; products are added and edited from the catalog.
+        shows whether each SKU is currently live on the storefront and mapped to physical stock, and
+        the <span className="font-medium text-gray-700">Website</span> column its Shopify sync state.
+        Products are added and edited from the catalog; admins can send a product to the website here.
       </p>
 
       {/* Toolbar */}
@@ -221,6 +292,31 @@ export default function OnlineProductsPage() {
           </span>
         )}
       </div>
+
+      {/* Staged-product breakdown (DRAFT vs PUBLISHED vs text-only) — makes the
+          publish decision visible. Reads the extended /online-store/summary. */}
+      {summary?.products_ecom && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <span
+            className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 border border-gray-200 px-2.5 py-1 text-xs font-medium"
+            title="Staged for online but not visible to customers yet"
+          >
+            {fmtInt(summary.products_ecom.draft)} staged as draft
+          </span>
+          <span
+            className="inline-flex items-center rounded-full bg-green-100 text-green-800 border border-green-200 px-2.5 py-1 text-xs font-medium"
+            title="Published — visible on the website"
+          >
+            {fmtInt(summary.products_ecom.published)} published
+          </span>
+          <span
+            className="inline-flex items-center rounded-full bg-amber-100 text-amber-800 border border-amber-200 px-2.5 py-1 text-xs font-medium"
+            title="Staged products carrying no images — text-only until re-imaged"
+          >
+            {fmtInt(summary.products_ecom.text_only)} text-only (no images)
+          </span>
+        </div>
+      )}
 
       {/* List */}
       {loading ? (
@@ -247,6 +343,7 @@ export default function OnlineProductsPage() {
                   <th className="text-right font-medium px-4 py-2.5 w-28">Online price</th>
                   <th className="text-right font-medium px-4 py-2.5 w-24">Variants</th>
                   <th className="text-left font-medium px-4 py-2.5 w-40">Online</th>
+                  <th className="text-left font-medium px-4 py-2.5 w-48">Website</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -302,6 +399,27 @@ export default function OnlineProductsPage() {
                           </span>
                         )}
                       </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <SyncChip synced={r.shopify_mapped || isOnline} />
+                          {canPush && (
+                            <button
+                              type="button"
+                              onClick={() => pushRow(r)}
+                              disabled={pushingId === r.product_id}
+                              className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                              title="Send this product to the website (a dry-run unless the live gates are armed)"
+                            >
+                              {pushingId === r.product_id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Send className="w-3 h-3" />
+                              )}
+                              Send to website
+                            </button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -312,7 +430,8 @@ export default function OnlineProductsPage() {
       )}
 
       <p className="mt-6 text-xs text-gray-400">
-        Online Store module · Products / PIM. A read-only view of the catalog as it appears online.
+        Online Store module · Products / PIM. The catalog as it appears online. Sending to the website
+        is a dry-run (SIMULATED) unless the owner has armed the live gates — see the Shopify sync page.
       </p>
     </div>
   );

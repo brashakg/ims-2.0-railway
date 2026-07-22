@@ -145,6 +145,26 @@ async def online_store_summary(
         # Online orders (Phase 3b -- orders ingested from Shopify webhooks).
         "orders": _safe_count(db, "orders", {"channel": "ONLINE"}),
     }
+    # DRAFT vs PUBLISHED breakdown + text-only (no images) among staged docs.
+    # Makes the owner's 2,032-draft publish decision VISIBLE in the UI without
+    # any new write semantics. Same route + same roles as this summary, so NO
+    # new rbac_policy row is needed. Simple count_documents at ~4.4k docs.
+    products_ecom = {
+        # ecom.status is the field the Shopify push honours (DRAFT->DRAFT,
+        # PUBLISHED->ACTIVE). A status query implies the ecom sub-doc exists.
+        "draft": _safe_count(db, "catalog_products", {"ecom.status": "DRAFT"}),
+        "published": _safe_count(db, "catalog_products", {"ecom.status": "PUBLISHED"}),
+        # Everything staged for online (has an ecom sub-doc) -- mirrors counts.products.
+        "staged_total": _safe_count(db, "catalog_products", {"ecom": {"$exists": True}}),
+        # Staged but carrying no product images (array empty/null/missing) --
+        # the text-only drafts left after the 2026-07-20 image loss. $in with
+        # [None, []] matches missing, null, and the empty array.
+        "text_only": _safe_count(
+            db,
+            "catalog_products",
+            {"ecom": {"$exists": True}, "images": {"$in": [None, []]}},
+        ),
+    }
     # Truthful posture (owner 2026-07-05): phases 1-5 are BUILT; the module is
     # waiting on the Phase-6 baton cutover (arm the triple gate + flip BVI's
     # writer off). Report the REAL push gate instead of hardcoded foundation
@@ -165,6 +185,7 @@ async def online_store_summary(
         "push_mode": push_mode,
         "planned_features": _PLANNED_FEATURES,
         "counts": counts,
+        "products_ecom": products_ecom,
         "blueprint": "docs/reference/BVI_MERGE_PLAN.md",
     }
 
