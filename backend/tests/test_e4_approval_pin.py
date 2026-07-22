@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -408,6 +408,13 @@ def test_t2_pin_is_bcrypt_and_never_in_audit(engine, db):
         k = str(key or "").lower()
         if k not in _PIN_METADATA_KEYS:
             assert "pin" not in k and "password" not in k, f"pin-ish key {key!r} in audit"
+        # Datetime-typed values render as wall-clock digit runs that can contain
+        # any 4-digit PIN by sheer chance -- a real CI run false-tripped on
+        # created_at='... 13:51:20.615678' matching PIN "5678" in the
+        # microseconds. A datetime OBJECT cannot carry a leaked PIN; a real leak
+        # lands in a STRING field, which the scan below still covers in full.
+        if isinstance(val, (date, datetime, timedelta)):
+            continue
         sval = str(val)
         assert not sval.startswith("$2b$"), f"bcrypt hash leaked under {key!r}"
         if k in _RANDOM_ID_KEYS:
