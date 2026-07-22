@@ -521,6 +521,16 @@ def _build_channel_clause(channel: Optional[str]) -> Optional[Dict[str, Any]]:
 async def list_customers(
     search: Optional[str] = Query(None),
     customer_type: Optional[str] = Query(None),
+    exclude_marketing: bool = Query(
+        False,
+        description=(
+            "Additive tier filter (owner model 2026-07-20). When true, MARKETING-"
+            "tier records (email-only online contacts with no phone -- no loyalty / "
+            "no WhatsApp) are excluded, leaving only FULL customers. POS pickers "
+            "pass this so a marketing contact never appears in a billing search. "
+            "Default false keeps every existing list unchanged (nothing excluded)."
+        ),
+    ),
     channel: Optional[str] = Query(
         None,
         description=(
@@ -574,6 +584,11 @@ async def list_customers(
         filter_dict: Dict[str, Any] = {}
         if customer_type:
             filter_dict["customer_type"] = customer_type
+        # Additive tier filter: exclude email-only MARKETING contacts when asked.
+        # ``$ne`` also keeps docs where the field is ABSENT (normal customers +
+        # FULL upgrades never carry it), so only true MARKETING rows drop out.
+        if exclude_marketing:
+            filter_dict["contact_tier"] = {"$ne": "MARKETING"}
 
         # Determine the effective store filter
         user_roles = current_user.get("roles", [])
@@ -616,6 +631,14 @@ async def list_customers(
             rows = repo.search_customers(search, effective_store)
             if channel_clause is not None:
                 rows = [r for r in rows if _row_matches_channel(r, channel)]
+            if exclude_marketing:
+                # Mirror the Mongo $ne filter for the search path (repo rows, not a
+                # cursor): drop only rows explicitly tagged MARKETING.
+                rows = [
+                    r
+                    for r in rows
+                    if str(r.get("contact_tier") or "").upper() != "MARKETING"
+                ]
             customers = _annotate_customer_matches(rows, search)
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
