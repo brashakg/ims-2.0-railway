@@ -92,8 +92,8 @@ export interface CreateProductPayload {
   discount_category?: string;
   images?: string[];
   shopify?: {
-    // Kept for future NEXUS agent → Shopify sync only. We don't run our
-    // own storefront, so `publish_to_online_store` was removed in 6.12.
+    // Online-store staging flags for a new product. IMS owns Shopify writes
+    // directly; the actual push happens from the Online Store module.
     sync_to_shopify: boolean;
     shopify_tags?: string[];
     publish_to_pos?: boolean;

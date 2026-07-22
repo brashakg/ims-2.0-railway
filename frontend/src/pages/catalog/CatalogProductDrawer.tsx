@@ -37,10 +37,14 @@ import {
   ArchiveRestore,
   ShieldCheck,
   Globe,
+  Send,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { pushApi } from '../../services/api/onlineStore';
+import { formatPushResult } from '../../components/online-store/OnlineStoreSyncBanner';
 // Import DIRECT from the modules (not the services/api barrel — TS2614).
 import {
   catalogProductsApi,
@@ -170,6 +174,38 @@ function GroupTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Plain-English chip for the ecom.status field: DRAFT (staged, not visible),
+ *  PUBLISHED (live), ARCHIVED, or anything else -> "Not staged". */
+function EcomStatusChip({ status }: { status: string }) {
+  const st = (status || '').toUpperCase();
+  if (st === 'PUBLISHED') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-green-100 text-green-800 border border-green-200 px-2 py-0.5 text-[11px] font-medium">
+        Published — live on website
+      </span>
+    );
+  }
+  if (st === 'DRAFT') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 border border-gray-200 px-2 py-0.5 text-[11px] font-medium">
+        Staged (draft) — not visible to customers
+      </span>
+    );
+  }
+  if (st === 'ARCHIVED') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-500 border border-gray-200 px-2 py-0.5 text-[11px] font-medium">
+        Archived
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-500 border border-gray-200 px-2 py-0.5 text-[11px] font-medium">
+      Not staged
+    </span>
+  );
+}
+
 // ===========================================================================
 // Drawer
 // ===========================================================================
@@ -184,6 +220,10 @@ export function CatalogProductDrawer({
 }: CatalogProductDrawerProps) {
   const navigate = useNavigate();
   const toast = useToast();
+  const { hasRole } = useAuth();
+  // "Send to website" is a live-write affordance -> SUPERADMIN / ADMIN only,
+  // mirroring the backend push gate (online_store_push.py _PUSH_ROLES).
+  const canPush = hasRole(['SUPERADMIN', 'ADMIN']);
 
   // Local copy of the doc so a review-form save can refresh it in place.
   const [doc, setDoc] = useState<Record<string, unknown>>(item.doc);
@@ -195,6 +235,33 @@ export function CatalogProductDrawer({
   const isImported = item.kind === 'imported';
   const attributes = (doc.attributes || {}) as Record<string, unknown>;
   const ecom = (doc.ecom || null) as Record<string, unknown> | null;
+
+  // Wire the single-product push (previously orphaned pushApi.pushProduct).
+  // DARK by default: a SIMULATED dry-run unless the owner has armed the triple
+  // gate on the server -- formatPushResult stamps SIMULATED vs LIVE on the toast.
+  const [pushingEcom, setPushingEcom] = useState(false);
+  const pushToWebsite = async () => {
+    if (!canPush || pushingEcom || !id) return;
+    const ok = window.confirm(
+      `Send "${name}" to the website?\n\n` +
+        'If the live gates are off this runs as a dry-run (SIMULATED) and nothing reaches ' +
+        'the storefront. When the gates are armed this writes to the live website.',
+    );
+    if (!ok) return;
+    setPushingEcom(true);
+    try {
+      const res = await pushApi.pushProduct(id);
+      const msg = formatPushResult(name, res);
+      if (res.ok) toast.success(msg);
+      else toast.error(msg);
+    } catch (e: any) {
+      toast.error(
+        `${name}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+      );
+    } finally {
+      setPushingEcom(false);
+    }
+  };
 
   const [lightboxAt, setLightboxAt] = useState<number | null>(null);
 
@@ -601,7 +668,7 @@ export function CatalogProductDrawer({
             <>
               <GroupTitle>Online store</GroupTitle>
               <dl className="divide-y divide-gray-50">
-                <FactRow label="Status" value={str(ecom.status)} />
+                <FactRow label="Status" value={<EcomStatusChip status={str(ecom.status)} />} />
                 <FactRow
                   label="Page"
                   value={
@@ -621,6 +688,22 @@ export function CatalogProductDrawer({
                 />
                 <FactRow label="Shopify id" value={str(ecom.shopify_product_id)} />
               </dl>
+              {canPush && (
+                <button
+                  type="button"
+                  onClick={pushToWebsite}
+                  disabled={pushingEcom}
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                  title="Send this product to the website (a dry-run unless the live gates are armed)"
+                >
+                  {pushingEcom ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
+                  Send to website
+                </button>
+              )}
             </>
           )}
 

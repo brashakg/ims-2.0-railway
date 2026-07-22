@@ -23,6 +23,20 @@ export interface OnlineStoreCounts {
   orders?: number | null;
 }
 
+/** DRAFT/PUBLISHED breakdown of staged products + a text-only (no images) tally.
+ *  Makes the owner's draft-publish decision visible. All optional/nullable so a
+ *  stale backend that omits the block never breaks rendering. */
+export interface OnlineStoreProductsEcom {
+  /** Staged with ecom.status = DRAFT (not visible to customers). */
+  draft?: number | null;
+  /** Staged with ecom.status = PUBLISHED (live on the website). */
+  published?: number | null;
+  /** Everything staged for online (has an ecom sub-doc). */
+  staged_total?: number | null;
+  /** Staged but carrying no product images (text-only). */
+  text_only?: number | null;
+}
+
 export interface OnlineStoreSummary {
   /** Whether the backend module endpoint answered at all. false => placeholder. */
   available: boolean;
@@ -31,6 +45,8 @@ export interface OnlineStoreSummary {
   /** Whether IMS is the live Shopify writer yet (kill-switch). Default false. */
   shopify_writes_enabled?: boolean | null;
   counts?: OnlineStoreCounts | null;
+  /** DRAFT/PUBLISHED/text-only staged-product breakdown (Phase-1 truth slice). */
+  products_ecom?: OnlineStoreProductsEcom | null;
   /** Optional human note from the backend (e.g. "shadow sync only"). */
   message?: string | null;
 }
@@ -132,6 +148,7 @@ export const onlineStoreApi = {
         status: data.status ?? 'FOUNDATION',
         shopify_writes_enabled: data.shopify_writes_enabled ?? false,
         counts: data.counts ?? {},
+        products_ecom: data.products_ecom ?? null,
         message: data.message ?? null,
       };
     } catch {
@@ -1343,8 +1360,11 @@ export interface PushSweepResult {
   db_connected?: boolean | null;
   pushed_count?: number | null;
   limit_reached?: boolean | null;
-  /** Per-entity {pushed, failed} tally. */
-  summary?: Record<string, { pushed?: number; failed?: number } | null> | null;
+  /** Per-entity {pushed, failed, blocked_skipped} tally. `blocked_skipped` is
+   *  set on the `products` bucket when the sweep excluded push-locked SKUs. */
+  summary?:
+    | Record<string, { pushed?: number; failed?: number; blocked_skipped?: number } | null>
+    | null;
   /** The per-doc PushResult rows (SIMULATED plans when DARK). */
   results?: PushResult[] | null;
 }
@@ -1605,8 +1625,14 @@ export interface OnlineOrder {
   /** Payment posture — either the IMS PAID/PARTIAL/PENDING or Shopify's
    *  financial_status (paid/pending/refunded/...). Rendered as-is, humanised. */
   payment_status?: string | null;
-  /** Shopify fulfillment_status (fulfilled/partial/unfulfilled/null). */
+  /** Shopify fulfillment_status (fulfilled/partial/unfulfilled/null) — INBOUND
+   *  (what Shopify reports back to IMS). */
   fulfillment_status?: string | null;
+  // --- Outbound fulfillment push-back (IMS -> Shopify, stamped by PR #933) ---
+  /** The Shopify Fulfillment gid once IMS has told Shopify this order shipped. */
+  shopify_fulfillment_id?: string | null;
+  /** ISO of when IMS pushed the fulfillment back to Shopify (LIVE only). */
+  shopify_fulfillment_pushed_at?: string | null;
   // --- The map outcome (drives the Re-map affordance) ---
   map_status?: OnlineOrderMapStatus | null;
   /** Why a FAILED row failed (shown on the row so the operator knows the fix). */
@@ -1685,6 +1711,14 @@ function _onlineOrderFrom(o: Record<string, any>): OnlineOrder {
     order_status: o.order_status ?? o.orderStatus ?? o.status ?? null,
     payment_status: o.payment_status ?? o.paymentStatus ?? o.financial_status ?? null,
     fulfillment_status: o.fulfillment_status ?? o.fulfillmentStatus ?? null,
+    // Outbound push-back stamps (flat top-level fields per PR #933). Absent =>
+    // not pushed live yet (or gates dark) => the column reads a grey em-dash.
+    shopify_fulfillment_id:
+      (o.shopify_fulfillment_id ?? o.shopifyFulfillmentId) != null
+        ? String(o.shopify_fulfillment_id ?? o.shopifyFulfillmentId)
+        : null,
+    shopify_fulfillment_pushed_at:
+      o.shopify_fulfillment_pushed_at ?? o.shopifyFulfillmentPushedAt ?? null,
     map_status: mapStatus,
     map_error: o.map_error ?? o.error ?? o.mapping_error ?? null,
     placed_at: o.placed_at ?? o.processed_at ?? o.shopify_created_at ?? o.createdAt ?? o.created_at ?? null,

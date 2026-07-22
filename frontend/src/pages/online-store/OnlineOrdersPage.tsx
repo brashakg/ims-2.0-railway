@@ -36,6 +36,7 @@ import {
   CheckCircle2,
   Clock,
   RotateCw,
+  Send,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -405,11 +406,41 @@ export default function OnlineOrdersPage() {
                           'inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ' +
                           statusChipClass(order.fulfillment_status)
                         }
-                        title="Fulfillment status"
+                        title="What Shopify reports back to IMS (inbound fulfillment status)"
                       >
-                        {fulLabel}
+                        Shopify says: {fulLabel}
                       </span>
                     )}
+                    {/* Outbound: did IMS tell Shopify this order shipped? (PR #933
+                        stamps). Fail-soft: absent renders a grey em-dash so this
+                        merges safely before or after #933. */}
+                    {(() => {
+                      const pushedAt = order.shopify_fulfillment_pushed_at;
+                      const notified = !!pushedAt || !!order.shopify_fulfillment_id;
+                      if (notified) {
+                        return (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium bg-green-100 text-green-800 border-green-200"
+                            title={
+                              pushedAt
+                                ? `IMS notified the website at ${formatDateIST(pushedAt)} ${formatTimeIST(pushedAt)}`
+                                : 'The website knows this order is fulfilled'
+                            }
+                          >
+                            <Send className="w-3 h-3" /> Website notified
+                            {pushedAt ? ` · ${formatTimeIST(pushedAt)}` : ''}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium bg-gray-100 text-gray-500 border-gray-200"
+                          title="IMS has not sent a fulfillment update to the website (not shipped yet, or the live gates are dark)"
+                        >
+                          Website · —
+                        </span>
+                      );
+                    })()}
                   </div>
                   {ms === 'FAILED' && canRemap && order.shopify_order_id && (
                     <button
