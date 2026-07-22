@@ -1091,6 +1091,13 @@ def _book_historical_refund_credit_notes(
         # stack a whole-order CN on top of the existing per-refund CN(s),
         # reversing more than the original invoice (GST-illegal).
         and summary["duplicate_refunds"] == 0
+        # FAILED-BOOKING GUARD (mirror of the heal-rerun guard above): a FAILED
+        # per-refund booking (transient pricing/ledger error) is promised
+        # heal-on-re-run -- the whole-order fallback must not pre-empt that in
+        # the SAME run. Without this, run 1 books the whole-order CN at the
+        # full actual total (which sums the failed refund too) and the run-2
+        # heal then stacks the per-refund CN on top of it (reversal > invoice).
+        and summary["cn_failed"] == 0
         and unmapped_real_ids
         and order_items
     ):

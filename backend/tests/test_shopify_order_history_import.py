@@ -796,6 +796,83 @@ def test_heal_rerun_never_stacks_whole_order_cn_on_prior_per_refund_cn(wired):
     assert total_reversed <= 999.0, "total reversal never exceeds the invoice"
 
 
+def test_cn_failed_gates_fallback_so_heal_never_stacks(wired):
+    # ROUND-5 P1 regression (chair-reproduced): mixed-shape fully-refunded
+    # order where refund A's ledger insert fails TRANSIENTLY on run 1
+    # ('skipped', cn_failed=1) while refund B is amount-only. Without the
+    # cn_failed gate, run 1 books the whole-order CN at the FULL actual total
+    # (which sums failed A too) and the promised run-2 heal then stacks A's
+    # per-refund CN on top: Rs 1,798 reversed vs a Rs 999 invoice. The gate
+    # must defer the WHOLE decision to the clean re-run.
+    ledger = wired["db"].get_collection("credit_note_ledger")
+    orig_insert = ledger.insert_one
+
+    def _fail_only_refund_a(doc):
+        if doc.get("shopify_refund_id") == "88051":
+            raise RuntimeError("transient mongo blip on refund A only")
+        return orig_insert(doc)
+
+    payload = _hist_order(21049, financial="refunded")
+    payload["refunds"] = [
+        {
+            "id": 88051,
+            "created_at": "2023-11-01T10:00:00Z",
+            "refund_line_items": [_refund_line()],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "799.00"}
+            ],
+        },
+        {
+            "id": 88052,
+            "created_at": "2023-11-02T10:00:00Z",
+            "refund_line_items": [],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "200.00"}
+            ],
+        },
+    ]
+    ledger.insert_one = _fail_only_refund_a
+    try:
+        res1 = online_order_mapper.map_shopify_order(
+            dict(payload), wired["db"], topic="orders/create", historical=True
+        )
+    finally:
+        ledger.insert_one = orig_insert
+    rcn1 = res1["refund_credit_notes"]
+    assert rcn1["cn_failed"] == 1
+    assert rcn1["cn_failed_refund_ids"] == ["88051"]
+    assert rcn1["credit_notes"] == 0, "run 1 books NOTHING (fallback gated)"
+    assert "whole_order_fallback" not in rcn1, "fallback deferred to the heal"
+    assert ledger.docs == []
+
+    # Clean re-run (the promised heal): A books its per-refund CN; credit_notes
+    # > 0 then suppresses the fallback, B stays a reported residual.
+    res2 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    assert res2["status"] == "duplicate"
+    rcn2 = res2["refund_credit_notes"]
+    assert rcn2["credit_notes"] == 1
+    assert rcn2["cn_failed"] == 0
+    assert rcn2["unmapped_refunds"] == 1, "B stays a reported residual"
+    assert "whole_order_fallback" not in rcn2
+
+    order_cns = [
+        d for d in ledger.docs
+        if d.get("shopify_refund_id") in ("88051", "88052")
+        or str(d.get("shopify_refund_id", "")).startswith("orderfull:21049")
+    ]
+    assert not any(
+        str(d.get("shopify_refund_id", "")).startswith("orderfull:")
+        for d in order_cns
+    ), "no orderfull CN coexists with a per-refund CN"
+    total_reversed = round(
+        sum(float(d.get("gross_refund") or 0) for d in order_cns), 2
+    )
+    assert total_reversed == 799.0
+    assert total_reversed <= 999.0, "total reversal never exceeds the invoice"
+
+
 def test_stamp_failure_healed_on_rerun_via_duplicate_fallback(wired):
     # ROUND-4 rider: run 1 books the whole-order CN but the covered-stamp
     # inserts silently fail (fail-soft). The heal re-run's fallback returns
