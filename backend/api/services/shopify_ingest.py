@@ -489,14 +489,106 @@ def _webhook_already_seen(db, webhook_id: Optional[str]) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# HISTORICAL import support (scripts/import_shopify_order_history.py).
+# A historical import replays the FULL Shopify order history as settled IMS
+# orders so finance / GST / reports see the online back-catalogue. It reuses
+# THIS exact create path (line mapping + inclusive GST split + place-of-supply
+# machinery) but, via `historical=True`, MUST NOT fire any live side effect:
+# no Rx flag-and-hold, no stock decrement, no oversell write-back, no task
+# creation, no loyalty earn, no messaging -- and no fresh per-FY invoice serial
+# (a back-dated order can never consume the CURRENT financial year's consecutive
+# sequence -- CGST Rule 46(b)). The order lands in a terminal status with its
+# real Shopify order date preserved. Default False -> the live webhook path is
+# byte-identical to before.
+# ---------------------------------------------------------------------------
+
+# Shopify financial_status -> IMS payment_status for a SETTLED historical order.
+_HIST_PAYMENT_STATUS_MAP = {
+    "paid": "PAID",
+    "partially_paid": "PARTIAL",
+    "partially_refunded": "PARTIAL_REFUND",
+    "refunded": "REFUNDED",
+}
+
+# Shopify fulfillment_status -> IMS fulfillment_status (historical assumes shipped).
+_HIST_FULFILLMENT_MAP = {
+    "fulfilled": "FULFILLED",
+    "partial": "PARTIAL",
+    "restocked": "RESTOCKED",
+}
+
+
+def _order_datetime(payload: Dict[str, Any]) -> datetime:
+    """The real order timestamp for a HISTORICAL import: Shopify `created_at`
+    (fallback `processed_at` / `updated_at`), parsed to an aware UTC datetime.
+    Falls back to now() only when none is parseable, so a historical order never
+    silently loses its accounting period. Never raises."""
+    for key in ("created_at", "processed_at", "updated_at"):
+        raw = payload.get(key)
+        if not raw:
+            continue
+        try:
+            s = str(raw).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:  # noqa: BLE001 -- unparseable date -> try the next key
+            continue
+    return datetime.now(timezone.utc)
+
+
+def _historical_overrides(payload: Dict[str, Any], grand_total: float) -> Dict[str, Any]:
+    """The order-doc fields a HISTORICAL import overlays on the shared create
+    shape: a terminal lifecycle status, a SETTLED payment (Shopify collected the
+    money at sale time -> no phantom receivable), NO Rx / fulfillment hold (long
+    dispensed), and the traceability markers. Tax math is untouched (reused)."""
+    fin = str(payload.get("financial_status") or "").strip().lower()
+    ful = str(payload.get("fulfillment_status") or "").strip().lower()
+    if payload.get("cancelled_at"):
+        status = "CANCELLED"
+    elif fin == "refunded":
+        status = "REFUNDED"
+    else:
+        status = "DELIVERED"
+    return {
+        "status": status,
+        "payment_status": _HIST_PAYMENT_STATUS_MAP.get(fin, "PAID"),
+        "fulfillment_status": _HIST_FULFILLMENT_MAP.get(ful, "FULFILLED"),
+        # Settled OUTSIDE IMS at sale time -> full amount paid, zero balance so AR /
+        # cash reports are never polluted with a fake receivable for an old order.
+        "amount_paid": grand_total,
+        "balance_due": 0.0,
+        # A years-old sale is long dispensed: never Rx-hold or fulfillment-hold it.
+        "rx_pending": False,
+        "rx_hold_reasons": [],
+        "rx_hold_reason": "",
+        "fulfillment_hold": False,
+        # Reversible + traceable, and protects the imported status from a late
+        # Shopify webhook (see _sync_existing_order_status historical guard).
+        "historical": True,
+        "import_source": "shopify_order_history",
+    }
+
+
 def ingest_shopify_order(
     db,
     payload: Dict[str, Any],
     webhook_id: Optional[str] = None,
     topic: Optional[str] = None,
+    historical: bool = False,
 ) -> Dict[str, Any]:
     """Idempotently turn a Shopify `orders/create` payload into an IMS order +
     GST tax invoice. PURE of network I/O; operates only on the payload.
+
+    `historical=True` (default False) replays a SETTLED back-catalogue order for
+    finance/GST visibility: it reuses every bit of the line/GST math below but
+    skips ALL live side effects (Rx hold, stock decrement, oversell write-back,
+    task creation) and mints NO fresh per-FY invoice serial, landing the order in
+    a terminal status with its real Shopify date. See the section header above.
 
     Returns a structured result dict (never raises on the normal paths):
       {"status": "created"|"duplicate"|"replayed"|"simulated"|"ignored"|"error",
@@ -639,42 +731,53 @@ def ingest_shopify_order(
     # dispensing. Contacts / frames / sunglasses are EXEMPT. Fail-soft: any error
     # leaves the order un-held rather than blocking the booked sale.
     rx_eval: Dict[str, Any] = {"rx_pending": False, "reasons": [], "lines": [], "detail": ""}
-    try:
-        from .online_rx_hold import evaluate_rx_hold
+    # HISTORICAL import: a years-old, already-dispensed order is NEVER Rx-held, so
+    # the flag-and-hold evaluation (and its follow-up task, below) is skipped whole.
+    if not historical:
+        try:
+            from .online_rx_hold import evaluate_rx_hold
 
-        # Prefer a pre-resolved IMS customer id (stamped by online_order_mapper)
-        # so the Rx match uses the IMS customer's prescriptions; fall back to the
-        # raw Shopify customer id (won't match IMS Rx -> safely over-holds).
-        rx_customer_id = (
-            str(payload.get("_ims_customer_id") or "").strip()
-            or str(payload.get("customer", {}).get("id") or "")
-            or None
-        )
-        rx_eval = evaluate_rx_hold(db, items, rx_customer_id)
-    except Exception as exc:  # noqa: BLE001 - compliance check must never block a sale
-        logger.warning("[SHOPIFY_INGEST] rx hold evaluation skipped: %s", exc)
+            # Prefer a pre-resolved IMS customer id (stamped by online_order_mapper)
+            # so the Rx match uses the IMS customer's prescriptions; fall back to the
+            # raw Shopify customer id (won't match IMS Rx -> safely over-holds).
+            rx_customer_id = (
+                str(payload.get("_ims_customer_id") or "").strip()
+                or str(payload.get("customer", {}).get("id") or "")
+                or None
+            )
+            rx_eval = evaluate_rx_hold(db, items, rx_customer_id)
+        except Exception as exc:  # noqa: BLE001 - compliance check must never block a sale
+            logger.warning("[SHOPIFY_INGEST] rx hold evaluation skipped: %s", exc)
 
-    now = datetime.now(timezone.utc)
+    # Order timestamp: the live path stamps NOW; a HISTORICAL import preserves the
+    # real Shopify order date so the sale lands in its true accounting period.
+    now = _order_datetime(payload) if historical else datetime.now(timezone.utc)
     order_id = str(uuid.uuid4())
 
     # Allocate the GST invoice serial (consecutive per store + FY) the same way
     # POS does -- via the order repository's atomic counter. Best-effort: a
     # DB-less repo falls back to a time-derived unique serial inside
     # next_invoice_number, so we always get a usable, FY-labelled number.
+    #
+    # HISTORICAL import: NO serial is minted. A back-dated order must never consume
+    # the CURRENT financial year's consecutive invoice sequence (CGST Rule 46(b)) --
+    # that would corrupt the live serial run. invoice_number stays None; GST
+    # reconciliation falls back to order_number and flags has_invoice_number=False.
     invoice_number: Optional[str] = None
-    try:
-        from ..dependencies import get_order_repository
+    if not historical:
+        try:
+            from ..dependencies import get_order_repository
 
-        order_repo = get_order_repository()
-        if order_repo is not None:
-            try:
-                order_repo.ensure_invoice_index()
-            except Exception:  # noqa: BLE001
-                pass
-            invoice_number = order_repo.next_invoice_number(store_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_INGEST] invoice number alloc failed: %s", exc)
-        invoice_number = None
+            order_repo = get_order_repository()
+            if order_repo is not None:
+                try:
+                    order_repo.ensure_invoice_index()
+                except Exception:  # noqa: BLE001
+                    pass
+                invoice_number = order_repo.next_invoice_number(store_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] invoice number alloc failed: %s", exc)
+            invoice_number = None
 
     order_doc = {
         "order_id": order_id,
@@ -738,6 +841,12 @@ def ingest_shopify_order(
         "updated_at": now.isoformat(),
     }
 
+    # HISTORICAL import: overlay the terminal status + settled payment + traceability
+    # markers on the shared create shape (the real order dates are already preserved
+    # via `now`; the tax lines / GST split above are reused untouched).
+    if historical:
+        order_doc.update(_historical_overrides(payload, grand_total))
+
     try:
         orders_coll.insert_one(dict(order_doc))
     except Exception as exc:  # noqa: BLE001
@@ -773,6 +882,23 @@ def ingest_shopify_order(
         invoice_number,
         order_doc["interstate"],
     )
+
+    # HISTORICAL import: a settled back-catalogue order has NO live side effects --
+    # the units shipped long ago. Skip the Rx-hold task, the stock decrement, the
+    # oversell write-back, and the fallback ship tasks entirely, and return now so
+    # nothing downstream (loyalty / messaging / inventory) is ever touched.
+    if historical:
+        return {
+            "status": "created",
+            "order_id": order_id,
+            "invoice_number": None,
+            "shopify_order_id": shopify_order_id,
+            "interstate": order_doc["interstate"],
+            "place_of_supply": order_doc["place_of_supply"],
+            "grand_total": grand_total,
+            "rx_pending": False,
+            "historical": True,
+        }
 
     # CLINICAL FLAG & HOLD follow-up task. Raised ONLY on a fresh create (the
     # duplicate / replay guards above return before this point), so re-ingesting

@@ -453,6 +453,67 @@ def _match_or_create_customer(
         return None
 
 
+def _match_existing_customer(db, buyer: Dict[str, str]) -> Optional[str]:
+    """HISTORICAL import ONLY: resolve an EXISTING IMS customer for this Shopify
+    buyer WITHOUT ever creating one.
+
+    Order-history buyers were already imported as customers (matched on
+    mobile/email, tagged imported_from="shopify_order_history_2026_07_22"), so a
+    historical order must LINK to that existing record -- never mint a duplicate.
+    Match precedence, most-precise first: Shopify customer id -> normalized Indian
+    mobile -> email. Returns the customer_id, or None for an unmatched buyer (the
+    order is then recorded as a guest sale by _stamp_order_customer). Never raises.
+    """
+    if db is None:
+        return None
+    try:
+        from ..dependencies import get_customer_repository
+
+        repo = get_customer_repository()
+    except Exception:  # noqa: BLE001
+        repo = None
+
+    # 1) Shopify customer id -- the import stamped shopify_customer_id on the
+    #    customer record, so this is the strongest, phone/email-independent key.
+    shopify_id = _norm(buyer.get("shopify_customer_id"))
+    if shopify_id:
+        try:
+            coll = db.get_collection("customers")
+            if coll is not None:
+                row = coll.find_one({"shopify_customer_id": shopify_id})
+                if row and _norm(row.get("customer_id")):
+                    return _norm(row.get("customer_id"))
+        except Exception:  # noqa: BLE001
+            logger.debug("[ONLINE_MAP] historical shopify-id match failed", exc_info=True)
+
+    if repo is None:
+        return None
+
+    # 2) Normalized Indian mobile (the canonical dedup key).
+    phone = _normalize_indian_mobile(buyer.get("phone", ""))
+    if phone:
+        try:
+            found = repo.find_by_mobile(phone)
+            if found and _norm(found.get("customer_id")):
+                return _norm(found.get("customer_id"))
+        except Exception:  # noqa: BLE001
+            logger.debug("[ONLINE_MAP] historical phone match failed", exc_info=True)
+
+    # 3) Email.
+    email = _norm(buyer.get("email"))
+    if email:
+        try:
+            finder = getattr(repo, "find_by_email", None)
+            if callable(finder):
+                found = finder(email)
+                if found and _norm(found.get("customer_id")):
+                    return _norm(found.get("customer_id"))
+        except Exception:  # noqa: BLE001
+            logger.debug("[ONLINE_MAP] historical email match failed", exc_info=True)
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 4) Status sync (orders/updated, orders/cancelled re-ingest).
 # ---------------------------------------------------------------------------
@@ -601,8 +662,17 @@ def map_shopify_order(
     *,
     webhook_id: Optional[str] = None,
     topic: Optional[str] = None,
+    historical: bool = False,
 ) -> Dict[str, Any]:
     """Idempotently create-or-sync the canonical IMS order for one Shopify order.
+
+    `historical=True` (default False) is the back-catalogue import mode used by
+    scripts/import_shopify_order_history.py: the order is booked through the SAME
+    ingest create path (so it is shape-identical to a webhook-ingested order) but
+    (1) the buyer is only ever MATCHED to an existing customer, never created, and
+    (2) ingest fires NO live side effect and lands the order in a terminal status
+    with its real Shopify date. The live webhook path (historical=False) is
+    unchanged.
 
     Steps (count-once):
       1. Resolve the online store bucket (settings / primary-store fallback) and
@@ -665,9 +735,14 @@ def map_shopify_order(
                 shopify_order_id,
             )
 
-        # (3) customer match/create.
+        # (3) customer resolution. Live path: match-or-create the canonical
+        # customer. HISTORICAL path: match an ALREADY-imported customer ONLY (never
+        # mint a duplicate) -- the order links to it or is recorded as a guest sale.
         buyer = _extract_buyer(payload)
-        customer_id = _match_or_create_customer(db, buyer, store_id)
+        if historical:
+            customer_id = _match_existing_customer(db, buyer)
+        else:
+            customer_id = _match_or_create_customer(db, buyer, store_id)
         # Stamp the resolved IMS customer id so the shared ingest's clinical
         # FLAG & HOLD check matches against THIS customer's prescriptions (the raw
         # Shopify customer id is not the IMS one; without this the Rx-match would
@@ -692,7 +767,7 @@ def map_shopify_order(
             ingest_topic = "orders/create"
 
         result = ingest_shopify_order(
-            db, payload, webhook_id=webhook_id, topic=ingest_topic
+            db, payload, webhook_id=webhook_id, topic=ingest_topic, historical=historical
         )
         result = result if isinstance(result, dict) else {"status": "error"}
         status = result.get("status")
