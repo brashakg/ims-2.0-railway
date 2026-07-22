@@ -33,6 +33,7 @@ import {
   Layers,
   Menu as MenuIcon,
   Image as ImageIcon,
+  Tag,
   Play,
   Rocket,
   Activity,
@@ -60,7 +61,7 @@ import { useToast } from '../../context/ToastContext';
 // ----------------------------------------------------------------------------
 // Per-entity descriptor: which status-count block + all-pending filter it uses.
 // ----------------------------------------------------------------------------
-type EntityKey = 'products' | 'collections' | 'menus' | 'images';
+type EntityKey = 'products' | 'collections' | 'menus' | 'images' | 'variant-prices';
 
 interface EntityDef {
   key: EntityKey;
@@ -72,6 +73,11 @@ interface EntityDef {
   pushedLabel: string;
   /** Label for the "not yet pushed / dirty" count. */
   pendingLabel: string;
+  /** Opt-in resync action with NO status-count block (e.g. variant-prices):
+   *  the card shows `note` instead of the staged/pushed/pending triplet. */
+  optIn?: boolean;
+  /** Explanatory copy for opt-in cards, shown in place of the count triplet. */
+  note?: string;
 }
 
 const ENTITIES: EntityDef[] = [
@@ -79,6 +85,19 @@ const ENTITIES: EntityDef[] = [
   { key: 'collections', token: 'collections', label: 'Collections', icon: Layers, pushedLabel: 'pushed', pendingLabel: 'pending' },
   { key: 'menus', token: 'menus', label: 'Menus', icon: MenuIcon, pushedLabel: 'pushed', pendingLabel: 'pending' },
   { key: 'images', token: 'images', label: 'Images', icon: ImageIcon, pushedLabel: 'pushed', pendingLabel: 'pending' },
+  {
+    // Opt-in bulk price/compare-at/barcode resync over every product already on
+    // Shopify (the "MRP revision" resync). NOT in the default sweep -- a normal
+    // product push already carries prices -- so it is its own explicit card.
+    key: 'variant-prices',
+    token: 'variant-prices',
+    label: 'Variant prices',
+    icon: Tag,
+    pushedLabel: 'resynced',
+    pendingLabel: '',
+    optIn: true,
+    note: 'Re-push price / compare-at / barcode for every product already on Shopify — the bulk MRP-revision resync. Not part of the normal product push.',
+  },
 ];
 
 function fmt(n: number | null | undefined): string {
@@ -378,22 +397,26 @@ export default function OnlineShopifySyncPage() {
                     {isLive ? 'Push' : 'Dry-run'}
                   </button>
                 </div>
-                <div className="flex items-center gap-4 text-xs text-gray-600">
-                  <span>
-                    <span className="text-sm font-semibold text-gray-900">{fmt(total)}</span> {totalLabel}
-                  </span>
-                  <span>
-                    <span className="text-sm font-semibold text-green-700">{fmt(pushed)}</span> {ent.pushedLabel}
-                  </span>
-                  <span>
-                    <span className="text-sm font-semibold text-amber-700">{fmt(pending)}</span> {ent.pendingLabel}
-                  </span>
-                </div>
+                {ent.optIn ? (
+                  <p className="text-[11px] leading-relaxed text-gray-500">{ent.note}</p>
+                ) : (
+                  <div className="flex items-center gap-4 text-xs text-gray-600">
+                    <span>
+                      <span className="text-sm font-semibold text-gray-900">{fmt(total)}</span> {totalLabel}
+                    </span>
+                    <span>
+                      <span className="text-sm font-semibold text-green-700">{fmt(pushed)}</span> {ent.pushedLabel}
+                    </span>
+                    <span>
+                      <span className="text-sm font-semibold text-amber-700">{fmt(pending)}</span> {ent.pendingLabel}
+                    </span>
+                  </div>
+                )}
 
                 {/* Last sweep result (the returned plan / outcome). */}
                 {sweep && (
                   <div className="mt-3 rounded-lg border border-gray-100 bg-gray-50 p-2.5">
-                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-gray-700">
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-gray-700">
                       {sweep.mode?.mode === 'LIVE' ? (
                         <span className="inline-flex items-center gap-1 text-green-700">
                           <Zap className="w-3 h-3" /> LIVE result
@@ -404,6 +427,20 @@ export default function OnlineShopifySyncPage() {
                         </span>
                       )}
                       <span className="text-gray-400">· {sweep.pushed_count ?? 0} processed</span>
+                      {/* Push-locked SKUs the sweep excluded (from summary.products). */}
+                      {(() => {
+                        const blocked = Number(
+                          (sweep.summary?.[ent.token]?.blocked_skipped ?? 0) as number,
+                        );
+                        return blocked > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Push-locked SKUs skipped by this sweep"
+                          >
+                            · {fmt(blocked)} blocked (skipped)
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
                     {Array.isArray(sweep.results) && sweep.results.length > 0 ? (
                       <ul className="mt-1.5 space-y-1 max-h-40 overflow-auto">
