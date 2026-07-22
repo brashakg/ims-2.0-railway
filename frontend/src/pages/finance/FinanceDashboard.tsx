@@ -63,15 +63,21 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
 
 function mapGst(d: any): GSTSummaryData | null {
   if (!d) return null;
+  // OS-010: igst_collected was hardcoded to 0, so the "IGST (inter-state)"
+  // card could never show the inter-state tax the backend computes.
+  // finance.py splits output tax into cgst/sgst/igst precisely so these
+  // cards reconcile to gst_collected — map the real value and derive the
+  // type from it.
+  const igst = Number(d.igst || 0);
   return {
     period: `${d.month ?? ''}/${d.year ?? ''}`,
     cgst_collected: Number(d.cgst || 0),
     sgst_collected: Number(d.sgst || 0),
-    igst_collected: 0,
+    igst_collected: igst,
     total_gst: Number(d.gst_collected || 0),
     gst_payable: Number(d.net_gst_payable || 0),
     input_tax_credit: Number(d.gst_input_credit || 0),
-    gst_type: 'CGST_SGST',
+    gst_type: igst > 0 ? 'IGST' : 'CGST_SGST',
   };
 }
 
@@ -140,7 +146,7 @@ function mapVendorPayments(d: any): VendorPaymentData[] {
 // fabricated money). The Reconciliation tab + the Cash Flow "Bank Reconciliation
 // Status" block that consumed it are gone too.
 
-import FinanceFilters from './FinanceFilters';
+import FinanceFilters, { currentFyLabelIST } from './FinanceFilters';
 import FinanceSummary from './FinanceSummary';
 import GSTPanel from './GSTPanel';
 import OutstandingPanel from './OutstandingPanel';
@@ -180,7 +186,9 @@ export default function FinanceDashboard() {
 
   // UI states
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedYear, setSelectedYear] = useState('2025-2026');
+  // OS-054: default to the CURRENT Indian FY (computed from the IST date)
+  // instead of a hardcoded year that goes stale every April.
+  const [selectedYear, setSelectedYear] = useState(currentFyLabelIST());
   const [periodLocked, setPeriodLocked] = useState(false);
 
   useEffect(() => {

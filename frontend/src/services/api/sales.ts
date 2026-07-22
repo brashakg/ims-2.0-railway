@@ -9,7 +9,11 @@ import api from './client';
 // ============================================================================
 
 export const orderApi = {
-  getOrders: async (params?: { storeId?: string; status?: string; date?: string; from_date?: string; to_date?: string; customerId?: string; limit?: number; skip?: number }) => {
+  // NOTE: the backend list endpoint only accepts from_date/to_date (plus
+  // store_id/status/customer_id/limit/skip). A `date` param used to be in this
+  // type but FastAPI silently DROPPED it, returning the newest orders across
+  // all days (OS-002) — do not re-add unsupported params here.
+  getOrders: async (params?: { storeId?: string; status?: string; from_date?: string; to_date?: string; customerId?: string; limit?: number; skip?: number }) => {
     // Convert camelCase storeId/customerId → snake_case for the FastAPI Query
     // params. Without this the backend silently ignored ?storeId and fell
     // back to the user's token store, so the topbar store-switch never

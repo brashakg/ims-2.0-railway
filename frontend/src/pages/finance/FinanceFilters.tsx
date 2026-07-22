@@ -28,6 +28,45 @@ interface FinanceFiltersProps {
   onTabChange: (tab: TabType) => void;
 }
 
+// ---- Indian financial year (Apr–Mar), computed from the current IST date ----
+// OS-054: the FY dropdown used to be a hardcoded list that went stale (current
+// FY missing) and the subtitle was frozen at "2025-26". Everything below is
+// derived from IST "today" so it never needs a yearly code change.
+
+/** FY start year for the current IST date: Apr..Dec -> this year, Jan..Mar -> last year. */
+export function currentFyStartYearIST(): number {
+  // en-CA yields YYYY-MM-DD; Asia/Kolkata pins the calendar date to IST.
+  const [y, m] = new Date()
+    .toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+    .split('-')
+    .map(Number);
+  return m >= 4 ? y : y - 1;
+}
+
+/** Current FY in the selector's "YYYY-YYYY" format, e.g. "2026-2027". */
+export function currentFyLabelIST(): string {
+  const start = currentFyStartYearIST();
+  return `${start}-${start + 1}`;
+}
+
+// Earliest FY the selector offered before this fix — kept so no previously
+// selectable year disappears; the list grows by one option each April.
+const EARLIEST_FY_START = 2023;
+
+function fyOptions(): string[] {
+  const options: string[] = [];
+  for (let y = currentFyStartYearIST(); y >= EARLIEST_FY_START; y--) {
+    options.push(`${y}-${y + 1}`);
+  }
+  return options;
+}
+
+/** "2026-2027" -> "2026-27" for the compact subtitle. */
+function fyShort(label: string): string {
+  const [a, b] = label.split('-');
+  return a && b && b.length === 4 ? `${a}-${b.slice(2)}` : label;
+}
+
 const TABS: { id: TabType; label: string; icon: typeof TrendingUp }[] = [
   { id: 'revenue-pl', label: 'Revenue & P&L', icon: TrendingUp },
   { id: 'gst', label: 'GST Management', icon: Percent },
@@ -59,7 +98,7 @@ export default function FinanceFilters({
               <BarChart3 className="w-8 h-8 text-blue-600" />
               Finance & Accounting
             </h1>
-            <p className="text-slate-600 mt-2">Financial year 2025-26 | Indian Accounting Standards</p>
+            <p className="text-slate-600 mt-2">Financial year {fyShort(selectedYear)} | Indian Accounting Standards</p>
           </div>
           <div className="flex gap-3">
             <select
@@ -67,9 +106,9 @@ export default function FinanceFilters({
               onChange={(e) => onYearChange(e.target.value)}
               className="bg-slate-50 border border-gray-200 text-gray-900 rounded px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
             >
-              <option>2025-2026</option>
-              <option>2024-2025</option>
-              <option>2023-2024</option>
+              {fyOptions().map((fy) => (
+                <option key={fy} value={fy}>{fy}</option>
+              ))}
             </select>
             <button className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded border border-blue-700 transition-colors font-medium text-sm">
               <Download className="w-4 h-4" />
