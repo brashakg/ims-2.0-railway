@@ -124,7 +124,7 @@ def _find_existing(db, buyer: Dict[str, str]):
         except Exception:  # noqa: BLE001
             pass
 
-    from .online_order_mapper import _normalize_indian_mobile
+    from .online_order_mapper import _normalize_indian_mobile, _is_full_record
 
     phone = _normalize_indian_mobile(buyer.get("phone", ""))
     if phone:
@@ -139,8 +139,15 @@ def _find_existing(db, buyer: Dict[str, str]):
         try:
             finder = getattr(repo, "find_by_email", None)
             if callable(finder):
-                found = finder(email)
-                if found:
+                # Casefolded lookup: email-only MARKETING contacts are stored with
+                # a normalized lowercase email, so match on the same form.
+                found = finder(_norm(email).lower())
+                # An email match is only the "same" existing customer when it is a
+                # NON-full (MARKETING) contact. An email shared with a phone-carrying
+                # FULL record (families share emails) is a DIFFERENT person, so it is
+                # NOT treated as an existing match -- keeping created-vs-updated in
+                # step with _match_or_create_customer's identical dedupe rule.
+                if found and not _is_full_record(found):
                     return found
         except Exception:  # noqa: BLE001
             pass
@@ -175,13 +182,23 @@ def _merge_fields(customer_id: str, buyer: Dict[str, str]) -> Dict[str, Any]:
     if buyer.get("phone") and not _norm(existing.get("mobile")) and not _norm(
         existing.get("phone")
     ):
-        from .online_order_mapper import _normalize_indian_mobile
+        from .online_order_mapper import (
+            _normalize_indian_mobile,
+            CONTACT_TIER_MARKETING,
+            CONTACT_TIER_FULL,
+        )
 
         norm = _normalize_indian_mobile(buyer["phone"])
         if norm:
             updates["mobile"] = norm
             updates["phone"] = norm
             updates["raw_phone"] = buyer["phone"]
+            # AUTO-UPGRADE (owner model 2026-07-20): an email-only MARKETING
+            # contact that just gained a phone becomes a FULL customer. Only an
+            # explicitly MARKETING-tagged record is flipped (a legacy untagged
+            # record stays untagged == FULL); a phone was already excluded above.
+            if _norm(existing.get("contact_tier")).upper() == CONTACT_TIER_MARKETING:
+                updates["contact_tier"] = CONTACT_TIER_FULL
     if buyer.get("shopify_customer_id") and not _norm(
         existing.get("shopify_customer_id")
     ):

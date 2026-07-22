@@ -308,6 +308,84 @@ def _normalize_indian_mobile(phone: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Contact-tier model (owner-approved 2026-07-20)
+# ---------------------------------------------------------------------------
+# Mobile stays the PRIMARY retail identity (loyalty / WhatsApp / Rx need it), but
+# an EMAIL-ONLY online buyer must no longer be dropped: it is captured as a
+# customer record flagged contact_tier="MARKETING" (no loyalty, no WhatsApp
+# sends, excluded from POS pickers where a tier filter opts in). It AUTO-UPGRADES
+# to a full customer (contact_tier="FULL") the moment a phone appears for it.
+#
+# NOTE: this customer-record field is a DIFFERENT concept from
+# ``match_keys.contact_tier`` (which labels an ad-audience row PHONE_ONLY /
+# EMAIL_ONLY / ...). They live in separate namespaces and never interact.
+CONTACT_TIER_MARKETING = "MARKETING"
+CONTACT_TIER_FULL = "FULL"
+
+
+def _is_full_record(doc: Dict[str, Any]) -> bool:
+    """A record an email-only contact must NEVER be merged into by email alone:
+    it carries a phone (a real, phone-keyed customer identity) OR is explicitly
+    tagged contact_tier=FULL. A no-phone MARKETING (or legacy untagged email-only)
+    record is NOT full and may be deduped/upgraded. Families share emails, so a
+    shared email hitting a phone-carrying record is a DIFFERENT person."""
+    if not isinstance(doc, dict):
+        return False
+    if _norm(doc.get("mobile")) or _norm(doc.get("phone")):
+        return True
+    return _norm(doc.get("contact_tier")).upper() == CONTACT_TIER_FULL
+
+
+def _upgrade_marketing_to_full(
+    repo, email: str, phone_norm: str, raw_phone: str, shopify_id: str = ""
+) -> Optional[str]:
+    """Auto-upgrade an email-only MARKETING contact to a FULL customer when a
+    phone first appears for it. Returns the upgraded customer_id, or None when
+    there is no upgradeable MARKETING record for this email.
+
+    Guards (owner dedupe rules 2026-07-20):
+      * phone-first still wins -- if ANY record already keys on this mobile we do
+        NOT intercept (return None so the canonical mobile dedupe resolves it);
+      * we NEVER touch a phone-carrying / FULL record matched only by a shared
+        email (families share emails) -- only a no-phone MARKETING contact.
+    Fail-soft: any repo error returns None (the caller then creates/dedupes as
+    usual)."""
+    email = _norm(email).lower()  # casefolded dedupe key (exact-match find_by_email)
+    if not email or not phone_norm:
+        return None
+    try:
+        if repo.find_by_mobile(phone_norm):
+            return None  # an existing mobile-keyed record -> phone-first dedupe wins
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        match = repo.find_by_email(email)
+    except Exception:  # noqa: BLE001
+        return None
+    if not match or not _norm(match.get("customer_id")):
+        return None
+    if _is_full_record(match):
+        return None  # never merge a phone onto a FULL / shared-email family record
+    cid = _norm(match.get("customer_id"))
+    updates: Dict[str, Any] = {
+        "mobile": phone_norm,
+        "phone": phone_norm,
+        "raw_phone": raw_phone or phone_norm,
+        "contact_tier": CONTACT_TIER_FULL,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if shopify_id and not _norm(match.get("shopify_customer_id")):
+        updates["shopify_customer_id"] = shopify_id
+    try:
+        repo.update(cid, updates)
+    except Exception:  # noqa: BLE001
+        logger.debug("[ONLINE_MAP] marketing->full upgrade write failed", exc_info=True)
+        return None
+    logger.info("[ONLINE_MAP] upgraded MARKETING contact %s -> FULL (phone added)", cid)
+    return cid
+
+
 def _match_or_create_customer(
     db, buyer: Dict[str, str], store_id: str
 ) -> Optional[str]:
@@ -351,10 +429,27 @@ def _match_or_create_customer(
     raw_phone = _norm(buyer.get("phone"))
     phone = _normalize_indian_mobile(buyer.get("phone", ""))
     email = _norm(buyer.get("email"))
+    # Normalized lowercase email is the dedupe key for email-only MARKETING
+    # contacts (owner rule 2026-07-20). find_by_email is an exact match, so the
+    # stored value AND every lookup use this same casefolded form.
+    email_key = email.lower()
     shopify_id = buyer.get("shopify_customer_id") or ""
 
     # --- phone path: delegate the dedup+create to the canonical service --------
     if phone:
+        # AUTO-UPGRADE (owner model 2026-07-20): a phone has now appeared for an
+        # email-only MARKETING contact. Phone-first dedupe still wins (an existing
+        # mobile-keyed record is matched by ensure_customer below); we only
+        # intercept to UPGRADE a pre-existing MARKETING record that shares this
+        # email -> flip it to FULL + set its mobile, instead of minting a
+        # duplicate. Skipped when there is no email (nothing to match on) or no
+        # MARKETING record -> the phone create path stays byte-identical.
+        if email_key:
+            upgraded_id = _upgrade_marketing_to_full(
+                repo, email_key, phone, raw_phone, shopify_id
+            )
+            if upgraded_id:
+                return upgraded_id
         from .customer_service import ensure_customer
 
         try:
@@ -393,10 +488,14 @@ def _match_or_create_customer(
     # --- email path: match an existing customer by email, else create ----------
     # The canonical service is mobile-keyed; an email-only buyer is handled here so
     # the prior behaviour (email-only buyers DO become customers) is preserved.
-    if email:
+    if email_key:
         try:
-            found = repo.find_by_email(email)
-            if found and _norm(found.get("customer_id")):
+            found = repo.find_by_email(email_key)
+            # Email dedupe only collapses into a NON-full (MARKETING) contact. An
+            # email shared with a phone-carrying / FULL record belongs to a
+            # DIFFERENT person (families share emails) -> we do NOT merge; a fresh
+            # MARKETING contact is created below instead.
+            if found and _norm(found.get("customer_id")) and not _is_full_record(found):
                 return _norm(found.get("customer_id"))
         except Exception:  # noqa: BLE001
             logger.debug("[ONLINE_MAP] email match failed", exc_info=True)
@@ -431,6 +530,16 @@ def _match_or_create_customer(
         "created_at": now,
         "updated_at": now,
     }
+    # Owner model (2026-07-20): an email-only online contact is captured as a
+    # MARKETING-tier customer (no loyalty / no WhatsApp / excluded from POS
+    # pickers) that auto-upgrades to FULL the moment a phone appears. A record
+    # that already carries a phone here (the ensure_customer-failed fallback) is a
+    # normal full customer, so it stays untagged (absent tier == FULL).
+    if email and not phone:
+        doc["contact_tier"] = CONTACT_TIER_MARKETING
+        # Store the casefolded email so a re-delivery in any surface case dedupes
+        # (find_by_email is exact-match).
+        doc["email"] = email_key
     try:
         created = repo.create(doc)
         if created and _norm(created.get("customer_id")):
@@ -443,8 +552,8 @@ def _match_or_create_customer(
                 found = repo.find_by_mobile(phone)
                 if found and _norm(found.get("customer_id")):
                     return _norm(found.get("customer_id"))
-            if email:
-                found = repo.find_by_email(email)
+            if email_key:
+                found = repo.find_by_email(email_key)
                 if found and _norm(found.get("customer_id")):
                     return _norm(found.get("customer_id"))
         except Exception:  # noqa: BLE001
