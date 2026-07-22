@@ -57,3 +57,20 @@ export function formatDateIST(value: Parameters<typeof toDate>[0], fallback = 'â
 export function formatTimeIST(value: Parameters<typeof toDate>[0], fallback = 'â€”'): string {
   return fmt(value, { hour: 'numeric', minute: '2-digit', hour12: true }, fallback);
 }
+
+/** IST calendar date of a backend timestamp as "YYYY-MM-DD", or null if
+ *  unparseable. Used by day-scoped reports (e.g. Day-End close) to pin rows
+ *  to the exact IST business day, belt-and-braces on top of the server-side
+ *  from_date/to_date window. */
+export function istDayString(value: Parameters<typeof toDate>[0]): string | null {
+  const d = toDate(value);
+  if (!d) return null;
+  try {
+    // en-CA formats as YYYY-MM-DD.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: IST_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(d);
+  } catch {
+    return null;
+  }
+}

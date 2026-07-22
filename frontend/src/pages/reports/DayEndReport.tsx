@@ -7,6 +7,7 @@ import { useToast } from '../../context/ToastContext';
 import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
 import { orderApi, reportsApi } from '../../services/api';
 import type { DayEndClose } from '../../services/api/reports';
+import { istDayString } from '../../utils/datetime';
 import {
   IndianRupee, CreditCard, Phone, FileText,
   TrendingUp, Package, Printer,
@@ -60,8 +61,27 @@ export default function DayEndReport() {
   const loadDayOrders = async () => {
     setIsLoading(true);
     try {
-      const response = await orderApi.getOrders({ storeId, date: reportDate });
-      setOrders(response.orders || response || []);
+      // OS-002: the backend list endpoint only understands from_date/to_date.
+      // The old `date` param was silently dropped by FastAPI, so this report
+      // aggregated the newest 500 orders across ALL days — wrong totals and a
+      // wrong cash-close variance. Pin the window to the selected day (the
+      // backend frames it as the IST business day); limit=500 so a busy day
+      // isn't truncated by the default page size of 50.
+      const response = await orderApi.getOrders({
+        storeId,
+        from_date: reportDate,
+        to_date: reportDate,
+        limit: 500,
+      });
+      const list: any[] = Array.isArray(response?.orders)
+        ? response.orders
+        : Array.isArray(response) ? response : [];
+      // Belt-and-braces: keep only orders whose IST calendar day matches the
+      // report date, so a window-boundary order can never leak into the close.
+      setOrders(list.filter((o: any) => {
+        const day = istDayString(o.createdAt || o.created_at);
+        return day === null || day === reportDate;
+      }));
     } catch {
       setOrders([]);
     } finally {

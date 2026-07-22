@@ -18,6 +18,7 @@ import {
   Receipt,
 } from 'lucide-react';
 import { orderApi } from '../../services/api';
+import { istDayString } from '../../utils/datetime';
 import { getGSTRateByCategory, getHSNByCategory } from '../../constants/gst';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -79,13 +80,27 @@ export function DayEndReport({ storeId, onClose, entity, store, overrides }: Day
   const loadOrders = async () => {
     setLoading(true);
     try {
+      // OS-002: the backend list endpoint only understands from_date/to_date
+      // and limit. The old date_from/date_to/page_size params were silently
+      // dropped by FastAPI, so this Z-report summed the newest orders across
+      // ALL days. Pin the window to the selected day (backend frames it as
+      // the IST business day); limit=500 so a busy day isn't truncated by
+      // the default page size of 50.
       const result = await orderApi.getOrders({
-        store_id: storeId,
-        date_from: date,
-        date_to: date,
-        page_size: 500,
-      } as any);
-      setOrders(result?.orders || result || []);
+        storeId,
+        from_date: date,
+        to_date: date,
+        limit: 500,
+      });
+      const list: any[] = Array.isArray(result?.orders)
+        ? result.orders
+        : Array.isArray(result) ? result : [];
+      // Belt-and-braces: keep only orders whose IST calendar day matches the
+      // report date, so a window-boundary order can never leak into the close.
+      setOrders(list.filter((o: any) => {
+        const day = istDayString(o.createdAt || o.created_at);
+        return day === null || day === date;
+      }));
     } catch {
       setOrders([]);
     }
