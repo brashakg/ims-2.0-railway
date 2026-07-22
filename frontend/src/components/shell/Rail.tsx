@@ -13,7 +13,6 @@ import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
 import { Icon } from './Icon';
 import { NAV_GROUPS, filterVisibleGroups } from './navConfig';
-import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
 import { getBrandAssets } from '../../utils/brandAssets';
 
 const COLLAPSED_GROUPS_KEY = 'ims_rail_collapsed_groups';
@@ -221,32 +220,7 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
               {group.items.map((item) => {
                 const IconCmp = Icon[item.icon];
                 if (item.external) {
-                  if (item.sso) {
-                    // SSO handoff: mint a short-lived token, then open the
-                    // external app already logged in. Falls back to a plain
-                    // open if SSO isn't configured / the user isn't allowed.
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        className="rail-item"
-                        title={`${item.label} (opens in new tab)`}
-                        onMouseEnter={positionTooltip}
-                        onClick={async () => {
-                          try {
-                            const r = await ecommerceSsoApi.getUrl();
-                            window.open(r.url, '_blank', 'noopener,noreferrer');
-                          } catch {
-                            window.open(item.to, '_blank', 'noopener,noreferrer');
-                          }
-                        }}
-                      >
-                        <IconCmp />
-                        <span className="rail-label">{item.label}</span>
-                      </button>
-                    );
-                  }
-                  // External app (e.g. the e-commerce admin) — open in a new tab.
+                  // External app — open in a new tab.
                   return (
                     <a
                       key={item.id}

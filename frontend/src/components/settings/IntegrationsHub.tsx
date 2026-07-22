@@ -83,8 +83,8 @@ const INTEGRATION_META: Record<string, IntegrationMeta> = {
   },
   shopify: {
     banner: {
-      kind: 'warn',
-      text: 'Shopify via NEXUS is currently dormant - the bettervision-inventory (BVI) app now owns Shopify writes. Saving values here is for future re-activation only.',
+      kind: 'info',
+      text: 'IMS owns Shopify writes directly (the separate BVI app was retired 2026-07-20). Publishing posture and go-live controls live in Online Store -> Shopify Sync.',
     },
   },
   shiprocket: {

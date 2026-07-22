@@ -3068,9 +3068,10 @@ export function QuickAddPage() {
             </div>
           </Section>
 
-          {/* ONLINE — compact, always-visible strip (Shopify writes are owned by
-              the BVI app; these are dormant future flags, so keep them muted and
-              minimal, no accordion / no extra click). Hidden in review mode:
+          {/* ONLINE — compact, always-visible strip. IMS pushes to Shopify
+              directly via the Online Store module; these create-time flags set
+              whether the new product is staged for online, so keep them muted and
+              minimal, no accordion / no extra click. Hidden in review mode:
               the imported doc's real online status shows read-only in the
               banner, and these create-time flags aren't part of the review PUT. */}
           {!isReviewMode && (

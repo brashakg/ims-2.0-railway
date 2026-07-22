@@ -670,7 +670,7 @@ function BrandModal({
             </label>
             <p className="text-xs text-gray-500 mt-1 ml-6">
               New products of this brand are marked for the online store by default.
-              (Intent only — the e-commerce app controls the actual Shopify push.)
+              (Sets the default for new products; pushing to the website happens from Online Store.)
             </p>
           </div>
         </div>

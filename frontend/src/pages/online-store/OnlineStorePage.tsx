@@ -22,7 +22,6 @@ import {
   Boxes,
   Activity,
   RefreshCw,
-  ExternalLink,
   Loader2,
   CheckCircle2,
   ArrowRight,
@@ -30,7 +29,6 @@ import {
   ReceiptText,
 } from 'lucide-react';
 import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
-import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
 import OnlineStoreSyncBanner from '../../components/online-store/OnlineStoreSyncBanner';
 
 type CountKey =
@@ -196,12 +194,6 @@ function fmtCount(n: number | null | undefined): string {
 export default function OnlineStorePage() {
   const [summary, setSummary] = useState<OnlineStoreSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [openingAdmin, setOpeningAdmin] = useState(false);
-
-  // External admin URL (current BVI app) — kept reachable during the
-  // strangler-fig transition until the in-app screens fully replace it.
-  const ecommerceUrl =
-    (import.meta.env.VITE_ECOMMERCE_URL as string | undefined) || 'https://uniparallel.com';
 
   useEffect(() => {
     let alive = true;
@@ -218,19 +210,6 @@ export default function OnlineStorePage() {
     };
   }, []);
 
-  // SSO handoff to the current external admin; falls back to a plain open.
-  const openCurrentAdmin = async () => {
-    setOpeningAdmin(true);
-    try {
-      const r = await ecommerceSsoApi.getUrl();
-      window.open(r.url, '_blank', 'noopener,noreferrer');
-    } catch {
-      window.open(ecommerceUrl, '_blank', 'noopener,noreferrer');
-    } finally {
-      setOpeningAdmin(false);
-    }
-  };
-
   const counts = summary?.counts ?? {};
   const available = summary?.available ?? false;
 
@@ -241,16 +220,6 @@ export default function OnlineStorePage() {
         <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
           <Store className="w-5 h-5" /> Online Store
         </h1>
-        <button
-          type="button"
-          onClick={openCurrentAdmin}
-          disabled={openingAdmin}
-          className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5 disabled:opacity-60"
-          title="Open the current storefront admin in a new tab"
-        >
-          {openingAdmin ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
-          Open current admin
-        </button>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
         The e-commerce admin is being rebuilt inside IMS so the catalog, collections, navigation and the
@@ -394,8 +363,8 @@ export default function OnlineStorePage() {
       </div>
 
       <p className="mt-6 text-xs text-gray-400">
-        Online Store module · all screens live (phases 1–5 shipped). Shopify publishing stays in
-        dry-run until the go-live switch is armed — see the banner above for the current posture.
+        Online Store module · all screens live (phases 1–5 shipped). Publishing posture is shown in
+        the banner above.
       </p>
     </div>
   );

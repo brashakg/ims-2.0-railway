@@ -18,7 +18,6 @@ export interface NavItem {
   icon: IconName;
   requireRoles?: UserRole[]; // if set, only visible to users holding one of these roles
   external?: boolean; // render as <a target=_blank> instead of an in-app route
-  sso?: boolean; // external app reached via an SSO handoff (mint token, then open)
 }
 
 export interface NavGroup {
@@ -148,6 +147,11 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'itc', label: 'GST Credit (ITC)', to: '/finance/itc', icon: 'percent', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // Accountant GST cross-check: GSTR-1/3B vs books side-by-side + sign-off.
       { id: 'gst-cross-check', label: 'GST Cross-Check', to: '/finance/gst-cross-check', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      // Online refunds: Shopify refunds -> proposed GST credit notes awaiting
+      // accountant confirmation. The /online-store/refund-reviews route already
+      // admits ACCOUNTANT, but the "Online Store" nav item does not -- this gives
+      // accountants a nav path without widening the Online Store module item.
+      { id: 'online-refunds', label: 'Online Refunds', to: '/online-store/refund-reviews', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // B2B invoices -> Tally: e-invoice + e-way bill issued in Tally (owner
       // decision). Export console + reminder worklist; finance-admin only.
       { id: 'b2b-tally-export', label: 'B2B → Tally Export', to: '/finance/b2b-tally-export', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
@@ -169,9 +173,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'vip-churn-watchlist', label: 'VIP Watch List', to: '/customers/vip-churn-watchlist', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN'] },
       // CRM-14: WhatsApp Inbox -- inbound customer messages via Meta Business API.
       { id: 'whatsapp-inbox', label: 'WA Inbox', to: '/customers/whatsapp-inbox', icon: 'chat', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      // In-app Online Store module (BVI merge). Replaces the old external SSO
-      // link to uniparallel.com; the storefront admin remains reachable from a
-      // button inside the module page during the strangler-fig transition.
+      // In-app Online Store module. IMS owns Shopify writes directly (the
+      // separate BVI admin app was retired 2026-07-20); all screens are in-app.
       { id: 'online-store', label: 'Online Store', to: '/online-store', icon: 'store', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'] },
       // CRM-16: Ad Performance (Google + Meta agency oversight). Finance-sensitive
       // spend data -- restricted to SUPERADMIN / ADMIN only.

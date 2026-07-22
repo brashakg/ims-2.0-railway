@@ -28,7 +28,6 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { Icon } from './Icon';
 import { filterVisibleGroups, type NavItem } from './navConfig';
-import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
 import { getBrandAssets } from '../../utils/brandAssets';
 
 function MenuChevron() {
@@ -48,28 +47,6 @@ function MenuChevron() {
 function DropdownItem({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
   const IconCmp = Icon[item.icon];
   if (item.external) {
-    if (item.sso) {
-      return (
-        <button
-          type="button"
-          role="menuitem"
-          className="top-nav-dd-item"
-          title={`${item.label} (opens in new tab)`}
-          onClick={async () => {
-            onNavigate();
-            try {
-              const r = await ecommerceSsoApi.getUrl();
-              window.open(r.url, '_blank', 'noopener,noreferrer');
-            } catch {
-              window.open(item.to, '_blank', 'noopener,noreferrer');
-            }
-          }}
-        >
-          <IconCmp />
-          <span>{item.label}</span>
-        </button>
-      );
-    }
     return (
       <a
         role="menuitem"
