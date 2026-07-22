@@ -29,6 +29,7 @@ immutable record of every manual re-run (SYSTEM_INTENT: Audit Everything).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -37,6 +38,30 @@ from .auth import require_roles
 from ..dependencies import user_store_scope
 
 router = APIRouter()
+
+
+def _parse_created_bound(raw: Optional[str], *, end: bool) -> Optional[datetime]:
+    """Parse a ?date_from / ?date_to string into a naive-UTC datetime bound on
+    `created_at` (online orders now persist created_at as a BSON datetime). A
+    date-only value expands to the end of the day for an upper bound. Returns None
+    when unparseable (the caller then omits the datetime branch)."""
+    if not raw:
+        return None
+    txt = str(raw).strip()
+    if not txt:
+        return None
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(txt[:10])
+        except ValueError:
+            return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    if end and len(txt) <= 10:
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
 
 # Reading the online order book is also for the ACCOUNTANT; mutating (remap) is not.
 _READ_ROLES = ("ADMIN", "ACCOUNTANT")
@@ -127,13 +152,28 @@ async def list_online_orders(
 
     if status:
         query["status"] = status
-    created: Dict[str, Any] = {}
+    # Dual-type created_at range. Online orders now persist created_at as a naive-UTC
+    # BSON DATETIME (shopify_ingest), but LEGACY online orders (pre-fix / not yet
+    # backfilled) wrote ISO STRINGS. Mongo type-brackets a Date range away from a
+    # string field, so build BOTH a datetime range and the raw string range and $or
+    # them -- otherwise the date filter silently drops whichever type it isn't.
+    created_dt: Dict[str, Any] = {}
+    created_str: Dict[str, Any] = {}
+    lo = _parse_created_bound(date_from, end=False)
+    hi = _parse_created_bound(date_to, end=True)
     if date_from:
-        created["$gte"] = date_from
+        created_str["$gte"] = date_from
+        if lo is not None:
+            created_dt["$gte"] = lo
     if date_to:
-        created["$lte"] = date_to
-    if created:
-        query["created_at"] = created
+        created_str["$lte"] = date_to
+        if hi is not None:
+            created_dt["$lte"] = hi
+    if created_str:
+        branches: List[Dict[str, Any]] = [{"created_at": created_str}]
+        if created_dt:
+            branches.append({"created_at": created_dt})
+        query["$or"] = branches
 
     try:
         coll = db.get_collection("orders")

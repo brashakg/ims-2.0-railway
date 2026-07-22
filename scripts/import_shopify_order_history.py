@@ -231,14 +231,51 @@ def _map_for_report(payload: Dict[str, Any], db) -> Dict[str, Any]:
     }
 
 
-def _already_present(db, shopify_order_id: str) -> bool:
+def _existing_order(db, shopify_order_id: str):
+    """The IMS order doc already carrying this Shopify order id, or None.
+    Returned (not a bool) so the caller can DISTINGUISH a genuinely-booked online
+    order from a pre-IMS bvi_import shadow doc that would silently dedupe it."""
     try:
         coll = db.get_collection("orders")
         if coll is None:
-            return False
-        return coll.find_one({"shopify_order_id": shopify_order_id}) is not None
+            return None
+        return coll.find_one({"shopify_order_id": shopify_order_id})
     except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_bvi_shadow(doc: Optional[Dict[str, Any]]) -> bool:
+    """True when an existing order is a pre-IMS customer-360 shadow doc
+    (scripts/migrate_bvi_pim.py orders leg: source=bvi_import, usually status
+    HISTORICAL) rather than a genuinely-booked online order. Such a doc dedupes the
+    import (same shopify_order_id) but is EXCLUDED from all finance/GST aggregation
+    by its status/source -- so lumping it into 'already present (idempotent)' would
+    silently hide orders that were never actually booked as revenue."""
+    if not doc:
         return False
+    if str(doc.get("source") or "").strip().lower() == "bvi_import":
+        return True
+    # A HISTORICAL-status doc that is NOT our own order-history import is a shadow.
+    status = str(doc.get("status") or "").strip().upper()
+    if status == "HISTORICAL" and doc.get("import_source") != "shopify_order_history":
+        return True
+    return False
+
+
+def _shipping_total(o: Dict[str, Any]) -> float:
+    """Sum of a Shopify order's shipping_lines (the shipping the buyer paid).
+    IMS's line-items-only grand_total deliberately does NOT map shipping (the live
+    ingest path doesn't either -- adding it would change the tax math), so this is
+    reported as a known UNDERSHOOT vs the Shopify-collected total, never booked."""
+    total = 0.0
+    for sl in o.get("shipping_lines") or []:
+        if not isinstance(sl, dict):
+            continue
+        try:
+            total += float(sl.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def _match_customer_readonly(db, payload: Dict[str, Any]) -> Optional[str]:
@@ -287,14 +324,35 @@ def run(
 
     real = [o for o in raw_orders if is_real_order(o)]
 
+    # P2 pre-flight: how many pre-IMS bvi_import shadow docs carry a shopify_order_id
+    # at all. If >0, some real orders may be silently deduped by a shadow that is
+    # excluded from finance/GST -- report that bucket SEPARATELY (below) and list the
+    # colliding ids so nothing is silently lumped into 'already present'.
+    bvi_shadow_total = 0
+    try:
+        _ocoll = dbh.get_collection("orders")
+        if _ocoll is not None:
+            bvi_shadow_total = int(
+                _ocoll.count_documents(
+                    {"source": "bvi_import", "shopify_order_id": {"$exists": True}}
+                )
+            )
+    except Exception:  # noqa: BLE001
+        bvi_shadow_total = 0
+
     # Dry-run accounting.
     mapped_ok = 0
     unmappable = 0
     already = 0
     would_insert = 0
+    shadowed = 0
+    shadowed_ids: List[str] = []
     unmatched_customer = 0
     matched_customer = 0
     grand_total_sum = 0.0
+    shipping_undershoot = 0.0
+    refunded_orders = 0
+    partially_refunded_orders = 0
     per_year: Dict[int, Dict[str, float]] = defaultdict(lambda: {"count": 0, "gross": 0.0})
     per_rate_all: Dict[float, Dict[str, float]] = defaultdict(
         lambda: {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "lines": 0}
@@ -310,12 +368,25 @@ def run(
             unmappable += 1
             continue
         mapped_ok += 1
-        present = _already_present(dbh, oid)
-        if present:
+        existing = _existing_order(dbh, oid)
+        if existing is not None and _is_bvi_shadow(existing):
+            # SHADOWED: a pre-IMS bvi_import doc already holds this shopify_order_id.
+            # It will dedupe the import but is NOT booked as revenue -- surface it
+            # separately (skip-and-list), never lump it into 'already present'.
+            shadowed += 1
+            if len(shadowed_ids) < 50:
+                shadowed_ids.append(oid)
+        elif existing is not None:
             already += 1
         else:
             would_insert += 1
         grand_total_sum += report["grand_total"]
+        shipping_undershoot += _shipping_total(o)
+        fin = str(o.get("financial_status") or "").strip().lower()
+        if fin == "refunded":
+            refunded_orders += 1
+        elif fin == "partially_refunded":
+            partially_refunded_orders += 1
         py = per_year[report["year"]]
         py["count"] += 1
         py["gross"] += report["grand_total"]
@@ -340,11 +411,43 @@ def run(
     print(f"  REAL (filter passes) ................ {len(real)}")
     print(f"  mapped OK (>=1 billable line) ....... {mapped_ok}")
     print(f"  unmappable (skipped) ................ {unmappable}")
-    print(f"  already present (idempotent) ........ {already}")
+    print(f"  already present as ONLINE order ..... {already}")
+    print(f"  SHADOWED by pre-IMS bvi_import ...... {shadowed}")
     print(f"  WOULD INSERT ........................ {would_insert}")
     print(f"  customer matched (existing) ......... {matched_customer}")
     print(f"  customer UNMATCHED (guest sale) ..... {unmatched_customer}")
+    print(f"  refunded orders (full) .............. {refunded_orders}")
+    print(f"  partially_refunded orders .......... {partially_refunded_orders}")
     print(f"  sum of order totals (all mapped) .... Rs {grand_total_sum:,.2f}")
+    print("")
+    # P2: bvi_import shadow docs are EXCLUDED from finance/GST -- report them apart
+    # from genuine online duplicates so nothing is silently lumped as 'idempotent'.
+    print(f"  Pre-IMS bvi_import shadow docs (with shopify_order_id): {bvi_shadow_total}")
+    if shadowed:
+        preview = ", ".join(shadowed_ids)
+        more = "" if shadowed <= len(shadowed_ids) else f" (+{shadowed - len(shadowed_ids)} more)"
+        print(
+            f"  ! {shadowed} REAL order(s) are SHADOWED by a bvi_import doc and will be"
+        )
+        print(
+            "    skipped by dedupe WITHOUT being booked as revenue. Decide"
+            " upgrade-in-place vs skip BEFORE --apply. Ids: "
+            f"{preview}{more}"
+        )
+    print("")
+    # P3: shipping is NOT mapped into grand_total (the live ingest path doesn't map
+    # it either; adding it would change the tax math). Report the undershoot so the
+    # Rs 23,14,013 sanity target is compared like-for-like (line-items-only).
+    print(
+        f"  shipping NOT booked (line-items-only undershoot): Rs {shipping_undershoot:,.2f}"
+    )
+    if refunded_orders or partially_refunded_orders:
+        print(
+            "  refunds: booked as GST credit notes (CDNR) at import so GSTR-1 nets"
+        )
+        print(
+            "           them -- the sale is booked gross + an equal/partial credit note."
+        )
     print("")
     print("  Sum of totals per year:")
     for yr in sorted(per_year):
@@ -372,9 +475,15 @@ def run(
         "mapped_ok": mapped_ok,
         "unmappable": unmappable,
         "already_present": already,
+        "shadowed_by_bvi_import": shadowed,
+        "shadowed_ids_sample": shadowed_ids,
+        "bvi_shadow_total": bvi_shadow_total,
         "would_insert": would_insert,
         "customer_matched": matched_customer,
         "customer_unmatched": unmatched_customer,
+        "refunded_orders": refunded_orders,
+        "partially_refunded_orders": partially_refunded_orders,
+        "shipping_undershoot": round(shipping_undershoot, 2),
         "grand_total_sum": round(grand_total_sum, 2),
         "applied": apply,
     }
@@ -393,12 +502,21 @@ def run(
     created = 0
     duplicate = 0
     skipped = 0
+    shadow_skipped = 0
     errors = 0
     done = 0
     for o in real:
         oid = str(o.get("id") or o.get("order_id") or "").strip()
         if not oid:
             skipped += 1
+            continue
+        # P2: never let a pre-IMS bvi_import shadow doc silently swallow a real
+        # order as a 'duplicate'. Skip-and-LIST it explicitly (the owner decides
+        # upgrade-in-place vs skip out-of-band) so the count is honest.
+        existing = _existing_order(dbh, oid)
+        if existing is not None and _is_bvi_shadow(existing):
+            shadow_skipped += 1
+            print(f"[APPLY] order {oid} SHADOWED by bvi_import doc -- skipped (not booked)")
             continue
         payload = dict(o)
         # Deterministic attribution to the online store, independent of env config.
@@ -428,16 +546,18 @@ def run(
     print("")
     print("=" * 68)
     print("APPLY RESULT")
-    print(f"  created ....... {created}")
-    print(f"  duplicate ..... {duplicate}")
-    print(f"  skipped ....... {skipped}")
-    print(f"  errors ........ {errors}")
+    print(f"  created ............... {created}")
+    print(f"  duplicate ............. {duplicate}")
+    print(f"  shadowed (skipped) .... {shadow_skipped}")
+    print(f"  skipped ............... {skipped}")
+    print(f"  errors ................ {errors}")
     print("=" * 68)
 
     summary.update(
         {
             "created": created,
             "duplicate": duplicate,
+            "shadow_skipped": shadow_skipped,
             "skipped_apply": skipped,
             "errors": errors,
         }

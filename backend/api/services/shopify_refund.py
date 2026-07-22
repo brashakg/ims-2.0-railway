@@ -547,12 +547,26 @@ def handle_shopify_refund(
                 "shopify_order_id": shopify_order_id,
             }
 
-        # HISTORICAL import guard (mirrors online_order_mapper): a pre-IMS order
-        # imported for customer-360 history was settled OUTSIDE IMS books; never
-        # book a credit note / restock against it.
-        if order.get("historical") or order.get("source") == "bvi_import":
+        # HISTORICAL import guard: skip ONLY a pre-IMS customer-360 import
+        # (scripts/migrate_bvi_pim.py orders leg; source=bvi_import, status
+        # HISTORICAL) -- that order was settled OUTSIDE IMS books and carries NO
+        # IMS revenue/output-GST, so a credit note would reverse tax that was never
+        # output.
+        #
+        # Our OWN Shopify order-history import (import_source=shopify_order_history)
+        # is DIFFERENT: it books real IMS revenue + output GST (status DELIVERED /
+        # REFUNDED). A real refund webhook against one of those MUST still produce a
+        # GST credit note. Every refund PRESENT in the order payload at import time
+        # was already credited (a `returns` doc stamped with its refund id makes
+        # _refund_already_processed above catch it as a duplicate); only a NEW, later
+        # refund -- absent at import -- reaches here, and it should be booked (via
+        # the accountant review queue by default), NOT permanently skipped.
+        if order.get("source") == "bvi_import" or (
+            order.get("historical")
+            and order.get("import_source") != "shopify_order_history"
+        ):
             logger.info(
-                "[SHOPIFY_REFUND] skip refund for HISTORICAL import order=%s",
+                "[SHOPIFY_REFUND] skip refund for pre-IMS customer-360 import order=%s",
                 order.get("order_id"),
             )
             return {

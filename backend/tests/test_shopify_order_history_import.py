@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -55,6 +56,51 @@ class _DuplicateKeyError(Exception):
     pass
 
 
+def _type_name(val) -> str:
+    """Minimal BSON $type emulation for the operators these tests use."""
+    from datetime import datetime as _dt
+
+    if isinstance(val, bool):
+        return "bool"
+    if isinstance(val, str):
+        return "string"
+    if isinstance(val, _dt):
+        return "date"
+    if isinstance(val, (int, float)):
+        return "number"
+    return "object"
+
+
+def _cmp_ok(actual, op, op_val) -> bool:
+    if actual is None:
+        # A None field only satisfies negative/exists-false style checks.
+        return op in ("$ne", "$nin")
+    try:
+        if op == "$gte":
+            return actual >= op_val
+        if op == "$gt":
+            return actual > op_val
+        if op == "$lte":
+            return actual <= op_val
+        if op == "$lt":
+            return actual < op_val
+    except TypeError:
+        # Mongo type-bracketing: a Date range never matches a string field (and
+        # vice-versa). Mirror that -- an incomparable type simply doesn't match.
+        return False
+    if op == "$in":
+        return actual in op_val
+    if op == "$nin":
+        return actual not in op_val
+    if op == "$ne":
+        return actual != op_val
+    if op == "$exists":
+        return (actual is not None) == bool(op_val)
+    if op == "$type":
+        return _type_name(actual) == op_val
+    return False
+
+
 def _match(doc, filter_) -> bool:
     if not filter_:
         return True
@@ -66,16 +112,10 @@ def _match(doc, filter_) -> bool:
         actual = doc.get(k)
         if isinstance(expected, dict):
             for op, op_val in expected.items():
-                if op == "$type":
-                    if actual is None:
+                if op == "$exists":
+                    if (actual is not None) != bool(op_val):
                         return False
-                elif op == "$gte":
-                    if actual is None or actual < op_val:
-                        return False
-                elif op == "$lte":
-                    if actual is None or actual > op_val:
-                        return False
-                else:
+                elif not _cmp_ok(actual, op, op_val):
                     return False
         else:
             if actual != expected:
@@ -428,3 +468,232 @@ def test_historical_reimport_is_idempotent(wired):
     assert len(online) == 1, "count-once: still exactly one IMS order"
     # The historical order's terminal status is NOT re-synced by a replay.
     assert online[0]["status"] == "DELIVERED"
+
+
+# ---------------------------------------------------------------------------
+# P0 -- created_at / invoice_date persist as BSON DATETIMES (not ISO strings),
+# so a date-windowed finance/GST query actually matches the order. A STRING
+# created_at never matches a Date-typed $gte/$lt range (Mongo type bracketing).
+# ---------------------------------------------------------------------------
+
+
+def _in_window(coll, lo, hi):
+    """Orders whose datetime created_at falls in [lo, hi) -- exactly how every
+    finance/GST window queries (naive-UTC datetime bounds)."""
+    return list(coll.find({"created_at": {"$gte": lo, "$lt": hi}}))
+
+
+def test_historical_created_at_is_bson_datetime_and_matches_window(wired):
+    online_order_mapper.map_shopify_order(
+        _hist_order(21001, created_at="2023-05-10T09:30:00Z"),
+        wired["db"], topic="orders/create", historical=True,
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "21001"})
+    # created_at / invoice_date are datetimes, NOT strings.
+    assert isinstance(order["created_at"], datetime)
+    assert isinstance(order["invoice_date"], datetime)
+    assert isinstance(order["updated_at"], datetime)
+    # naive-UTC (tz stripped) so it compares with the finance/GST naive bounds.
+    assert order["created_at"].tzinfo is None
+    assert order["created_at"] == datetime(2023, 5, 10, 9, 30, 0)
+
+    coll = wired["orders"]
+    # In-period window MATCHES (the whole point of the fix).
+    hit = _in_window(coll, datetime(2023, 5, 1), datetime(2023, 6, 1))
+    assert any(o.get("shopify_order_id") == "21001" for o in hit)
+    # Out-of-period window does NOT match.
+    miss = _in_window(coll, datetime(2024, 1, 1), datetime(2024, 2, 1))
+    assert not any(o.get("shopify_order_id") == "21001" for o in miss)
+
+
+def test_live_order_created_at_is_bson_datetime_and_matches_window(wired, spies):
+    # The date-type fix applies to the LIVE webhook path too: a live online order
+    # must be datetime-dated and visible to a date-windowed query.
+    res = online_order_mapper.map_shopify_order(
+        _hist_order(21002), wired["db"], topic="orders/create", historical=False
+    )
+    assert res["status"] == "created"
+    order = wired["orders"].find_one({"shopify_order_id": "21002"})
+    assert isinstance(order["created_at"], datetime)
+    assert isinstance(order["invoice_date"], datetime)
+    assert order["created_at"].tzinfo is None
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    hit = _in_window(
+        wired["orders"], now - timedelta(days=1), now + timedelta(days=1)
+    )
+    assert any(o.get("shopify_order_id") == "21002" for o in hit)
+
+
+# ---------------------------------------------------------------------------
+# P3 -- a settled payment row (cross-check payments_collected coherence) and
+# partially_paid label consistency.
+# ---------------------------------------------------------------------------
+
+
+def test_historical_settled_payment_row_present(wired):
+    online_order_mapper.map_shopify_order(
+        _hist_order(21010), wired["db"], topic="orders/create", historical=True
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "21010"})
+    payments = order.get("payments") or []
+    assert len(payments) == 1, "one settled payment row for cross-check coherence"
+    assert payments[0]["amount"] == order["grand_total"]
+    assert payments[0].get("settled_outside_ims") is True
+
+
+def test_partially_paid_history_labeled_paid_not_partial(wired):
+    # partially_paid is booked as fully SETTLED (balance_due 0, amount_paid=grand),
+    # so its label must be PAID -- PARTIAL with a zero balance was inconsistent.
+    online_order_mapper.map_shopify_order(
+        _hist_order(21011, financial="partially_paid"),
+        wired["db"], topic="orders/create", historical=True,
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "21011"})
+    assert order["payment_status"] == "PAID"
+    assert order["balance_due"] == 0.0
+    assert order["amount_paid"] == order["grand_total"]
+
+
+# ---------------------------------------------------------------------------
+# P1 -- refunded / partially_refunded orders synthesize GST credit notes (CDNR)
+# so GSTR-1 nets them; idempotent; and a FUTURE refund webhook against an
+# import-sourced order is no longer permanently skipped.
+# ---------------------------------------------------------------------------
+
+
+def _refund_line(line_item_id=9001, qty=1, subtotal="999.00", total_tax="0.00"):
+    return {
+        "line_item_id": line_item_id,
+        "quantity": qty,
+        "subtotal": subtotal,
+        "total_tax": total_tax,
+    }
+
+
+def test_refunded_history_synthesizes_full_credit_note(wired):
+    # Fully refunded, no per-line refund detail -> reverse the WHOLE order so it
+    # never books as full revenue. A credit_note_ledger CDNR entry is written.
+    online_order_mapper.map_shopify_order(
+        _hist_order(21020, financial="refunded"),
+        wired["db"], topic="orders/create", historical=True,
+    )
+    ledger = [d for d in wired["db"].get_collection("credit_note_ledger").docs]
+    mine = [d for d in ledger if d.get("shopify_refund_id", "").startswith("orderfull:")]
+    assert len(mine) == 1, "one whole-order credit note for a full refund"
+    cn = mine[0]
+    assert cn["type"] == "ISSUED"
+    assert cn["settlement"] == "EXTERNAL"
+    assert cn["delta"] == 0.0, "no redeemable store credit minted"
+    assert cn["gross_refund"] == 999.0, "reverses the full order gross"
+    assert isinstance(cn["created_at"], str), "CDNR reads ISO-string created_at"
+    # A returns doc is stamped so a future webhook is recognised as credited.
+    returns = wired["db"].get_collection("returns").docs
+    assert any(r.get("credit_note_issued") is True for r in returns)
+
+
+def test_partially_refunded_history_credit_note_from_lines(wired):
+    payload = _hist_order(21021, financial="partially_refunded")
+    payload["refunds"] = [
+        {"id": 88021, "created_at": "2023-06-01T10:00:00Z",
+         "refund_line_items": [_refund_line()]}
+    ]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    mine = [d for d in ledger if d.get("shopify_refund_id") == "88021"]
+    assert len(mine) == 1
+    assert mine[0]["ref"] == "SHOPIFY-HIST-REFUND-88021"
+    assert mine[0]["gross_refund"] > 0
+    # Credit-note date = the refund's date (correct GST period), not the sale date.
+    assert str(mine[0]["created_at"]).startswith("2023-06-01")
+
+
+def test_historical_refund_credit_note_is_idempotent(wired):
+    payload = _hist_order(21022, financial="partially_refunded")
+    payload["refunds"] = [{"id": 88022, "refund_line_items": [_refund_line()]}]
+    online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    # Re-import the same order -> order-level dedupe + ledger ref guard both hold.
+    online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    mine = [d for d in ledger if d.get("shopify_refund_id") == "88022"]
+    assert len(mine) == 1, "credit note booked exactly once on re-import"
+
+
+def test_future_refund_webhook_against_history_import_not_skipped(wired):
+    # Book a historical order, then a NEW real refund (absent at import) arrives by
+    # webhook. It must NOT be permanently skipped -- it is booked (review queue).
+    from api.services import shopify_refund
+
+    online_order_mapper.map_shopify_order(
+        _hist_order(21030, financial="paid"),
+        wired["db"], topic="orders/create", historical=True,
+    )
+    refund_payload = {
+        "id": 99030,
+        "order_id": "21030",
+        "refund_line_items": [_refund_line()],
+    }
+    res = shopify_refund.handle_shopify_refund(
+        wired["db"], refund_payload, topic="refunds/create"
+    )
+    assert res["status"] != "skipped", res
+    assert res.get("reason") != "historical_import_order"
+    # Default posture is the accountant review queue (no auto-post).
+    assert res["status"] == "queued"
+
+
+def test_refund_already_booked_at_import_is_duplicate_on_webhook(wired):
+    # A refund present at import time is credited + stamped, so the same refund id
+    # arriving later by webhook is recognised as a duplicate (no double credit).
+    from api.services import shopify_refund
+
+    payload = _hist_order(21031, financial="partially_refunded")
+    payload["refunds"] = [{"id": 88031, "refund_line_items": [_refund_line()]}]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    res = shopify_refund.handle_shopify_refund(
+        wired["db"],
+        {"id": 88031, "order_id": "21031", "refund_line_items": [_refund_line()]},
+        topic="refunds/create",
+    )
+    assert res["status"] == "duplicate", res
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM -- GSTR-1 invoice number never falls through to the 36-char order_id
+# UUID (GSTN caps the invoice number at 16 chars).
+# ---------------------------------------------------------------------------
+
+
+def test_gstr1_bill_number_falls_back_to_order_number_not_uuid():
+    from api.routers.reports import _gstr1_bill_number
+
+    uuid_like = "b1f2c3d4-e5f6-7890-abcd-ef1234567890"  # 36 chars
+    # Real serial wins.
+    assert _gstr1_bill_number({"invoice_number": "INV-0007"}) == "INV-0007"
+    # invoice_number EXISTS as None (historical) -> order_number, NOT the UUID.
+    got = _gstr1_bill_number(
+        {"invoice_number": None, "order_number": "ONL-123", "order_id": uuid_like}
+    )
+    assert got == "ONL-123"
+    assert got != uuid_like and len(got) <= 16
+    # order_number too long (ONL-<13-digit> = 17) -> the short Shopify name.
+    got2 = _gstr1_bill_number(
+        {
+            "invoice_number": None,
+            "order_number": "ONL-1234567890123",
+            "shopify_order_name": "#1001",
+            "order_id": uuid_like,
+        }
+    )
+    assert got2 == "1001" and len(got2) <= 16
+    # Last resort: never emit a 36-char UUID -> capped to 16.
+    got3 = _gstr1_bill_number({"invoice_number": None, "order_id": uuid_like})
+    assert len(got3) <= 16 and got3 != uuid_like

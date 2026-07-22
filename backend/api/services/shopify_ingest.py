@@ -504,9 +504,16 @@ def _webhook_already_seen(db, webhook_id: Optional[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 # Shopify financial_status -> IMS payment_status for a SETTLED historical order.
+# NOTE: partially_paid -> PAID (not PARTIAL). A historical import books the sale as
+# fully SETTLED (amount_paid == grand_total, balance_due == 0, one settled payment
+# row) so it never fabricates a phantom years-old receivable; labeling it PARTIAL
+# while balance_due == 0 was internally inconsistent (a PARTIAL implies an open
+# balance). The tiny uncollected remainder is treated as collected/written off at
+# import time. (partially_refunded / refunded describe REFUND state, not payment,
+# and net via synthesized GST credit notes -- see _book_historical_refund_credit_notes.)
 _HIST_PAYMENT_STATUS_MAP = {
     "paid": "PAID",
-    "partially_paid": "PARTIAL",
+    "partially_paid": "PAID",
     "partially_refunded": "PARTIAL_REFUND",
     "refunded": "REFUNDED",
 }
@@ -541,6 +548,26 @@ def _order_datetime(payload: Dict[str, Any]) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _to_naive_utc(raw: Any) -> Optional[datetime]:
+    """Parse a Shopify ISO timestamp to a NAIVE-UTC datetime (tzinfo stripped),
+    the exact shape orders persist `created_at` in so it compares apples-to-apples
+    with every finance/GST datetime window. Returns None when unparseable."""
+    if not raw:
+        return None
+    if isinstance(raw, datetime):
+        return raw.astimezone(timezone.utc).replace(tzinfo=None) if raw.tzinfo else raw
+    try:
+        s = str(raw).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _historical_overrides(payload: Dict[str, Any], grand_total: float) -> Dict[str, Any]:
     """The order-doc fields a HISTORICAL import overlays on the shared create
     shape: a terminal lifecycle status, a SETTLED payment (Shopify collected the
@@ -571,7 +598,270 @@ def _historical_overrides(payload: Dict[str, Any], grand_total: float) -> Dict[s
         # Shopify webhook (see _sync_existing_order_status historical guard).
         "historical": True,
         "import_source": "shopify_order_history",
+        # A single SETTLED payment row: the money was collected OUTSIDE IMS at sale
+        # time (Shopify), so /gst/cross-check payments_collected (which sums
+        # order.payments[].amount) stays COHERENT with sales_grand for back-months
+        # instead of reading ~0 against a large books figure. This mirrors real
+        # accounting: the full sale was collected, and any refund is booked
+        # SEPARATELY as a GST credit note (see _book_historical_refund_credit_notes),
+        # exactly like a live sale followed by a later refund.
+        "payments": [
+            {
+                "payment_id": str(uuid.uuid4()),
+                "method": "SHOPIFY",
+                "amount": round(float(grand_total), 2),
+                "reference": f"shopify:{payload.get('id')}",
+                "status": "SETTLED",
+                "settled_outside_ims": True,
+                "received_by": "SYSTEM_SHOPIFY_HISTORY_IMPORT",
+                "received_at": (
+                    (_to_naive_utc(payload.get("created_at")) or _order_datetime(payload)
+                     .astimezone(timezone.utc).replace(tzinfo=None)).isoformat()
+                ),
+            }
+        ],
     }
+
+
+def _refund_credit_note_date_iso(refund: Dict[str, Any], order_payload: Dict[str, Any]) -> str:
+    """The ISO-STRING date a synthesized historical credit note is stamped with:
+    the refund's own processed_at / created_at (so the CDNR is reported in the
+    period the refund was ISSUED -- correct GST credit-note timing), falling back to
+    the order date. Returned as a naive-UTC ISO STRING because the GSTR-1 CDNR query
+    (reports.py) and store_credit_ledger.make_entry both bound / write
+    credit_note_ledger.created_at as STRINGS."""
+    for raw in (refund.get("processed_at"), refund.get("created_at")):
+        dt = _to_naive_utc(raw)
+        if dt is not None:
+            return dt.isoformat()
+    return (
+        _order_datetime(order_payload).astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+    )
+
+
+def _book_historical_refund_credit_notes(
+    db, payload: Dict[str, Any], order_doc: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Synthesize GST CREDIT NOTES for a refunded / partially_refunded HISTORICAL
+    order so the imported refund NETS the imported sale in GSTR-1 (CDNR) instead of
+    leaving the full sale as overstated output tax + revenue.
+
+    NO NEW TAX MATH -- every rupee of taxable/tax is recovered from the ORIGINAL
+    order line and backed out through the SAME machinery the live Shopify-refund
+    path uses (shopify_refund._build_return_lines -> returns._priced_return_lines ->
+    returns_engine.gst_breakup_lines). The reversal is written to
+    `credit_note_ledger` (the CDNR source reports.py reads) with:
+      * created_at as an ISO STRING (the CDNR query + the ledger both use strings);
+      * delta 0.0 / settlement EXTERNAL -- the money went back OUTSIDE IMS years ago,
+        so the CDNR row is written for the GST reversal but NO redeemable store
+        credit is minted (mirrors the live card-refund bump_balance=False shape).
+
+    A minimal `returns` doc stamped with each Shopify refund id is ALSO written so a
+    FUTURE real refund webhook for the same refund is recognised as already-credited
+    by shopify_refund._refund_already_processed (idempotent), rather than
+    double-crediting.
+
+    Coverage: a `partially_refunded` order books one credit note per refund entry
+    (from its refund_line_items). A fully `refunded` order with no per-line refund
+    detail reverses the WHOLE order (still via the reused pricing) so a full refund
+    can never book as full revenue. Amount-only refunds that cannot be line-mapped
+    are counted in `unmapped_refunds` (reported, never fabricated).
+
+    Idempotent + fail-soft: an already-booked ref/refund-id is skipped; any error is
+    swallowed (the order is already booked). Returns a small summary dict."""
+    summary: Dict[str, Any] = {
+        "credit_notes": 0,
+        "gross": 0.0,
+        "tax": 0.0,
+        "unmapped_refunds": 0,
+    }
+    fin = str(payload.get("financial_status") or "").strip().lower()
+    if fin not in ("refunded", "partially_refunded"):
+        return summary
+
+    refunds = payload.get("refunds")
+    if not isinstance(refunds, list) or not refunds:
+        # No per-refund detail. A FULL refund still must net the whole sale, so
+        # synthesize a single whole-order reversal; a partial with no detail can't
+        # be line-mapped -> report it as residual (never fabricate a split).
+        if fin == "refunded":
+            refunds = [
+                {"id": f"orderfull:{payload.get('id')}", "_reverse_whole_order": True}
+            ]
+        else:
+            summary["unmapped_refunds"] = 1
+            return summary
+
+    try:
+        ledger = db.get_collection("credit_note_ledger")
+    except Exception:  # noqa: BLE001
+        ledger = None
+    if ledger is None:
+        return summary
+    try:
+        returns_coll = db.get_collection("returns")
+    except Exception:  # noqa: BLE001
+        returns_coll = None
+
+    try:
+        from ..routers.returns import ReturnLine, _priced_return_lines
+        from . import returns_engine as engine
+        from . import shopify_refund
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] historical refund machinery import failed: %s", exc)
+        return summary
+
+    customer_id = order_doc.get("customer_id")
+    billing_store = order_doc.get("store_id")
+    order_items = [i for i in (order_doc.get("items") or []) if isinstance(i, dict)]
+
+    for refund in refunds:
+        if not isinstance(refund, dict):
+            continue
+        refund_id = str(refund.get("id") or "").strip()
+        if not refund_id:
+            continue
+        ref = f"SHOPIFY-HIST-REFUND-{refund_id}"
+
+        # Idempotency: skip if a credit note for this ref OR a returns doc for this
+        # refund id already exists (re-run of the import, or a webhook handled it).
+        try:
+            if ledger.find_one({"ref": ref}) is not None:
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if returns_coll is not None and (
+                returns_coll.find_one({"shopify_refund_id": refund_id}) is not None
+            ):
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Build return lines: ALL order lines for a whole-order full-refund reversal,
+        # else the refund's own refund_line_items (reusing the live refund mapper).
+        if refund.get("_reverse_whole_order"):
+            return_lines = [
+                ReturnLine(
+                    order_item_id=str(it.get("item_id")) or None,
+                    product_id=(
+                        str(it.get("ims_product_id") or it.get("product_id") or "")
+                        or None
+                    ),
+                    product_name=str(it.get("product_name") or ""),
+                    sku=str(it.get("sku") or ""),
+                    return_qty=float(it.get("quantity") or 1),
+                    unit_price=0.0,
+                    condition="GOOD",
+                    restock=False,
+                    reason="Shopify refund (historical import)",
+                )
+                for it in order_items
+                if float(it.get("quantity") or 0) > 0
+            ]
+        else:
+            try:
+                return_lines = shopify_refund._build_return_lines(refund, order_doc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[SHOPIFY_INGEST] historical refund %s line-build failed: %s",
+                    refund_id, exc,
+                )
+                return_lines = []
+
+        if not return_lines:
+            summary["unmapped_refunds"] += 1
+            logger.info(
+                "[SHOPIFY_INGEST] historical refund %s on order %s not line-mappable "
+                "-- credit note skipped (residual reported)",
+                refund_id, order_doc.get("order_id"),
+            )
+            continue
+
+        try:
+            priced = _priced_return_lines(return_lines, order_doc)
+            gross = engine.returned_value(priced)
+            gst_view = engine.gst_breakup_lines(priced)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[SHOPIFY_INGEST] historical refund %s pricing failed: %s", refund_id, exc
+            )
+            continue
+        if gross <= 0:
+            continue
+
+        cn_date = _refund_credit_note_date_iso(refund, payload)
+        cn_tax = round(float(gst_view.get("tax") or 0.0), 2)
+        entry = {
+            "entry_id": str(uuid.uuid4()),
+            "customer_id": customer_id,
+            "type": "ISSUED",
+            "amount": round(gross, 2),
+            # delta 0: settled OUTSIDE IMS (money returned via Shopify long ago) ->
+            # the CDNR row exists for the GST reversal but mints NO store credit.
+            "delta": 0.0,
+            "balance_after": None,
+            "settlement": "EXTERNAL",
+            "reason": (
+                f"Shopify refund {refund_id} for order "
+                f"{order_doc.get('order_id')} (historical import)"
+            ),
+            "ref": ref,
+            "store_id": billing_store,
+            "created_by": "SYSTEM_SHOPIFY_HISTORY_IMPORT",
+            "created_at": cn_date,
+            "gross_refund": round(gross, 2),
+            "net_refund": round(gross, 2),
+            "taxable": round(float(gst_view.get("taxable") or 0.0), 2),
+            "tax": cn_tax,
+            "gst_rate": gst_view.get("gst_rate"),
+            "shopify_refund_id": refund_id,
+            "channel": "ONLINE",
+            "historical": True,
+        }
+        try:
+            ledger.insert_one(dict(entry))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[SHOPIFY_INGEST] historical credit note insert failed for %s: %s",
+                refund_id, exc,
+            )
+            continue
+
+        # Minimal returns doc stamped with the refund id so a FUTURE real refund
+        # webhook for this same refund is recognised as already-credited.
+        if returns_coll is not None:
+            try:
+                returns_coll.insert_one(
+                    {
+                        "return_id": f"RET-HIST-{refund_id}",
+                        "shopify_refund_id": refund_id,
+                        "order_id": order_doc.get("order_id"),
+                        "order_number": order_doc.get("order_number"),
+                        "customer_id": customer_id,
+                        "store_id": billing_store,
+                        "return_type": "CREDIT_NOTE",
+                        "source": "shopify_order_history",
+                        "channel": "ONLINE",
+                        "returned_value": round(gross, 2),
+                        "gross_refund": round(gross, 2),
+                        "net_refund": round(gross, 2),
+                        "gst_breakup": gst_view,
+                        "credit_note_issued": True,
+                        "settled_externally": True,
+                        "status": "COMPLETED",
+                        "historical": True,
+                        "created_at": cn_date,
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        summary["credit_notes"] += 1
+        summary["gross"] = round(summary["gross"] + gross, 2)
+        summary["tax"] = round(summary["tax"] + cn_tax, 2)
+
+    return summary
 
 
 def ingest_shopify_order(
@@ -751,7 +1041,19 @@ def ingest_shopify_order(
 
     # Order timestamp: the live path stamps NOW; a HISTORICAL import preserves the
     # real Shopify order date so the sale lands in its true accounting period.
+    #
+    # Persist created_at / updated_at / invoice_date as NAIVE-UTC BSON DATETIMES,
+    # never ISO strings. Every date-windowed finance/GST query bounds created_at
+    # with naive-UTC datetimes (finance._parse_range_dt / _apply_created_at_range,
+    # reports.ist_day_start_utc); MongoDB type-bracketing means a Date-typed
+    # $gte/$lt range NEVER matches a STRING field, so a string-dated order is
+    # silently invisible to GSTR-1/3B, the GST cross-check, GST reconciliation, P&L
+    # and cash-flow -- the exact reason the online back-catalogue (and the live
+    # online orders) failed to appear. Storing a datetime makes online orders
+    # type-consistent with the offline POS (BaseRepository._add_timestamps also
+    # stamps a naive datetime). Applies to BOTH the live webhook and the import.
     now = _order_datetime(payload) if historical else datetime.now(timezone.utc)
+    now = now.astimezone(timezone.utc).replace(tzinfo=None)
     order_id = str(uuid.uuid4())
 
     # Allocate the GST invoice serial (consecutive per store + FY) the same way
@@ -804,7 +1106,7 @@ def ingest_shopify_order(
         "pricing_model": "inclusive",
         # Shopify confirmation is the RECEIPT; the IMS invoice is the tax doc.
         "invoice_number": invoice_number,
-        "invoice_date": now.isoformat(),
+        "invoice_date": now,
         # Shopify already collected payment -> the online order is PAID on
         # ingestion (its financial_status is typically "paid").
         "amount_paid": (
@@ -837,8 +1139,8 @@ def ingest_shopify_order(
         "tax_summary": gst_split.get("rows", []),
         "tax_totals": gst_split.get("totals", {}),
         "payments": [],
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
+        "created_at": now,
+        "updated_at": now,
     }
 
     # HISTORICAL import: overlay the terminal status + settled payment + traceability
@@ -885,9 +1187,13 @@ def ingest_shopify_order(
 
     # HISTORICAL import: a settled back-catalogue order has NO live side effects --
     # the units shipped long ago. Skip the Rx-hold task, the stock decrement, the
-    # oversell write-back, and the fallback ship tasks entirely, and return now so
-    # nothing downstream (loyalty / messaging / inventory) is ever touched.
+    # oversell write-back, and the fallback ship tasks entirely. The ONE bit of
+    # bookkeeping a settled historical order still needs is the GST reversal for any
+    # refund it carries -- synthesized as a credit note (CDNR) so a refunded sale
+    # nets in GSTR-1 instead of counting as full output tax. Then return so nothing
+    # downstream (loyalty / messaging / inventory) is ever touched.
     if historical:
+        refund_cn = _book_historical_refund_credit_notes(db, payload, order_doc)
         return {
             "status": "created",
             "order_id": order_id,
@@ -898,6 +1204,7 @@ def ingest_shopify_order(
             "grand_total": grand_total,
             "rx_pending": False,
             "historical": True,
+            "refund_credit_notes": refund_cn,
         }
 
     # CLINICAL FLAG & HOLD follow-up task. Raised ONLY on a fresh create (the

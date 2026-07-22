@@ -111,6 +111,33 @@ def _order_discount(order: dict) -> float:
     return 0.0
 
 
+def _gstr1_bill_number(order: dict) -> str:
+    """GSTN-safe invoice identifier for a GSTR-1 B2B / B2CL row.
+
+    The GSTN portal caps the invoice number at 16 chars and it must NEVER be the
+    36-char order_id UUID. Historical online orders carry ``invoice_number=None``
+    (a back-dated order mints no live GST serial -- CGST Rule 46(b)), so the old
+    ``order.get("invoice_number", <default>)`` returned None (the KEY EXISTS with
+    value None, so the default never applied) and fell through ``or order_id`` to a
+    36-char UUID that GSTN rejects.
+
+    Resolve the first NON-EMPTY, <=16-char human identifier:
+      invoice_number -> bill_number -> order_number (e.g. ``ONL-<id>``) ->
+      the short Shopify order name (e.g. ``#1001`` with '#' stripped) ->
+      finally a 16-char-capped order_id (a last resort, never the full UUID).
+    Never raises."""
+    for key in ("invoice_number", "bill_number", "order_number"):
+        val = order.get(key)
+        if val:
+            s = str(val).strip()
+            if s and len(s) <= 16:
+                return s
+    name = str(order.get("shopify_order_name") or "").strip().lstrip("#").strip()
+    if name and len(name) <= 16:
+        return name
+    return str(order.get("order_id") or "").strip()[:16]
+
+
 def _order_tax(order: dict) -> float:
     for k in ("tax_amount", "total_tax", "tax"):
         v = order.get(k)
@@ -2633,10 +2660,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     sgst = round(total_tax / 2, 2)
                     igst = 0.0
 
-                bill_number = order.get(
-                    "invoice_number",
-                    order.get("bill_number", order.get("order_number", ""))
-                ) or order.get("order_id", "")
+                bill_number = _gstr1_bill_number(order)
                 created_raw = order.get("created_at", "")
                 invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
                 place_of_supply = customer_state or store_state or "Unknown"

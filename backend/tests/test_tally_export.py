@@ -67,24 +67,41 @@ def _make_order(
     }
 
 
+def _cmp(actual, op, op_val) -> bool:
+    """One operator, with Mongo type-bracketing: an incomparable type pair (e.g. a
+    Date bound against a string field) simply does not match instead of raising."""
+    if actual is None:
+        return op == "$ne"
+    try:
+        if op == "$gte":
+            return actual >= op_val
+        if op == "$lte":
+            return actual <= op_val
+        if op == "$lt":
+            return actual < op_val
+    except TypeError:
+        return False  # type bracketing: Date range never matches a string, etc.
+    if op == "$in":
+        return actual in op_val
+    if op == "$ne":
+        return actual != op_val
+    return True
+
+
 def _doc_matches(doc, filter_):
-    """Mini Mongo-filter matcher — supports plain equality, $in, $gte/$lt
-    (the only operators the orchestrator uses)."""
+    """Mini Mongo-filter matcher — supports plain equality, $or, $in, $ne,
+    $gte/$lte/$lt (with type-bracketing), the operators the orchestrator uses."""
     if not filter_:
         return True
     for k, expected in filter_.items():
+        if k == "$or":
+            if not any(_doc_matches(doc, sub) for sub in expected):
+                return False
+            continue
         actual = doc.get(k)
         if isinstance(expected, dict):
             for op, op_val in expected.items():
-                if op == "$gte" and not (actual is not None and actual >= op_val):
-                    return False
-                if op == "$lte" and not (actual is not None and actual <= op_val):
-                    return False
-                if op == "$lt" and not (actual is not None and actual < op_val):
-                    return False
-                if op == "$in" and actual not in op_val:
-                    return False
-                if op == "$ne" and actual == op_val:
+                if not _cmp(actual, op, op_val):
                     return False
         else:
             if actual != expected:

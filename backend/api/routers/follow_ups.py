@@ -17,6 +17,7 @@ import uuid
 
 from .auth import get_current_user
 from ..dependencies import get_db as _dep_get_db, validate_store_access
+from ..utils.dates import to_date_str
 
 router = APIRouter()
 
@@ -392,7 +393,14 @@ async def auto_generate_follow_ups(
             orders = list(orders_collection.find({"store_id": store_id}))
             for order in orders:
                 if order.get("created_at"):
-                    order_date = datetime.fromisoformat(order["created_at"]).date()
+                    # created_at is a BSON datetime for POS + online orders (online
+                    # orders switched from ISO strings to datetimes); to_date_str
+                    # normalizes datetime|str|date -> 'YYYY-MM-DD' so
+                    # datetime.fromisoformat never TypeErrors on a datetime input.
+                    day = to_date_str(order["created_at"])
+                    if not day:
+                        continue
+                    order_date = datetime.fromisoformat(day).date()
                     reminder_date = order_date + timedelta(days=730)  # 2 years
 
                     if reminder_date >= today:
