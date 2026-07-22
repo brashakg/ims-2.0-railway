@@ -11,7 +11,7 @@ SENTINEL is TOGGLEABLE — can be turned ON/OFF by Superadmin.
 Default schedule: Every 60 seconds.
 """
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone, timedelta
 import logging
 import time
@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 # even before/without the TTL index. (A TTL index build needs >=500MB free disk;
 # on a small Mongo volume the index can be deferred while this prune caps growth.)
 HEALTH_CHECK_RETENTION_DAYS = 14
+
+# Hour (IST) at which SENTINEL runs its once-a-day Shopify stock-parity check.
+# SENTINEL ticks every ~60s; a per-IST-day guard makes the job fire once.
+_STOCK_PARITY_HOUR_IST = 3
 
 
 def prune_health_checks(col, retention_days: int = HEALTH_CHECK_RETENTION_DAYS, now=None) -> int:
@@ -87,6 +91,9 @@ class SentinelAgent(JarvisAgent):
         self._health_score = 100
         self._last_health_data: Dict[str, Any] = {}
         self._alerts: List[Dict] = []
+        # IST date (YYYY-MM-DD) the daily stock-parity job last ran, so the
+        # ~03:00 IST tick fires once per day despite the 60s health cadence.
+        self._last_stock_parity_date: Optional[str] = None
 
     async def _do_background_work(self):
         """
@@ -124,6 +131,10 @@ class SentinelAgent(JarvisAgent):
         self._last_health_data = results
         await self._store_health_check(results)
 
+        # 6. Once-a-day (~03:00 IST) Shopify stock-parity check. Fully fail-soft
+        # and guarded to fire once per IST day; NEVER takes down the scheduler.
+        await self._maybe_daily_stock_parity()
+
         # Auto-alert state transitions — first time we drop below 70,
         # file a HIGH alert with the failing components so the UI/Slack
         # surface it. Above 70 stays quiet.
@@ -148,6 +159,40 @@ class SentinelAgent(JarvisAgent):
                 "details": results,
             })
             logger.warning(f"[SENTINEL] System health DEGRADED: {self._health_score}/100 — {failing}")
+
+    async def _maybe_daily_stock_parity(self):
+        """Run the Shopify stock-parity check once per IST day at ~03:00 IST.
+
+        SENTINEL ticks every ~60s, so a per-day date guard (set BEFORE running)
+        prevents both a 60x re-run during the 03:00 hour and duplicate work.
+        The whole path is fail-soft: any error is swallowed here so a parity
+        hiccup can never crash the health scheduler.
+        """
+        try:
+            from api.utils.ist import now_ist
+
+            now = now_ist()
+            if now.hour != _STOCK_PARITY_HOUR_IST:
+                return
+            today = now.date().isoformat()
+            if self._last_stock_parity_date == today:
+                return
+            # Claim the day up-front so concurrent/next-minute ticks skip it even
+            # if the run below is slow or fails (best-effort, once a day).
+            self._last_stock_parity_date = today
+
+            from api.services.shopify_stock_parity import run_parity_tick
+
+            summary = await run_parity_tick(self.db)
+            logger.info(
+                "[SENTINEL] daily stock-parity: sampled=%s drift=%s task=%s reason=%s",
+                summary.get("sampled"),
+                summary.get("drift_count"),
+                summary.get("task_filed"),
+                summary.get("reason"),
+            )
+        except Exception as e:  # noqa: BLE001 -- never crash the scheduler
+            logger.warning(f"[SENTINEL] daily stock-parity tick skipped: {e}")
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """Handle on-demand health queries from CORTEX."""

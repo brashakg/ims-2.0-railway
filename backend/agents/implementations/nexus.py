@@ -558,6 +558,8 @@ class NexusAgent(JarvisAgent):
         "orders/delete": "_handle_shopify_order_delete_topic",
         "customers/delete": "_handle_shopify_customer_delete_topic",
         "app/uninstalled": "_handle_shopify_app_uninstalled_topic",
+        "checkouts/create": "_handle_shopify_checkout_topic",
+        "checkouts/update": "_handle_shopify_checkout_topic",
     }
 
     # Catalog / collection / inventory reverse-sync is CONSCIOUSLY UNBUILT (owner
@@ -724,6 +726,24 @@ class NexusAgent(JarvisAgent):
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify customer handling failed: {e}")
+
+    async def _handle_shopify_checkout_topic(self, payload: Dict[str, Any], topic: str):
+        """checkouts/create + checkouts/update -> upsert the raw essentials of an
+        abandoned checkout (contact + line summary + totals, consent-aware, NO
+        marketing send) into abandoned_checkouts keyed on the checkout token, via
+        api.services.shopify_checkout_capture. Idempotent. Fail-soft."""
+        try:
+            from api.services.shopify_checkout_capture import capture_checkout
+
+            result = capture_checkout(self.db, payload, topic=str(topic))
+            logger.info(
+                "[NEXUS] shopify checkout -> status=%s token=%s items=%s",
+                result.get("status"),
+                result.get("token"),
+                result.get("item_count"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] shopify checkout handling failed: {e}")
 
     async def _handle_shopify_order_delete_topic(self, payload: Dict[str, Any], topic: str):
         """orders/delete -> VOID the matching IMS online order (soft status change +
