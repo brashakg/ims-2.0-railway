@@ -112,8 +112,14 @@ def test_sync_health_none_db_is_failsoft():
     assert out["reconcile"]["pending"] == 0
     assert out["reconcile"]["oversell_risk"] == 0
     assert out["webhooks"] == {"failed": 0, "skipped": 0, "pending": 0}
-    # online_configured reflects env; in tests ECOMMERCE_DATABASE_URL is unset.
+    # online_configured = IMS Mongo carries Shopify-mapped objects; no DB -> False.
     assert out["online_configured"] is False
+    # Catalog-push signal (OS-049) degrades to not-found on no DB.
+    assert out["catalog_push"] == {
+        "found": False,
+        "last_pushed_at": None,
+        "pushed_products": 0,
+    }
 
 
 def test_last_shopify_sync_reads_newest_row():
@@ -255,11 +261,11 @@ def _tally_db():
 
 
 def _patch_online(monkeypatch, mapping):
-    """Stub online_status_for_skus (Postgres bridge) with a fixed mapping."""
+    """Stub online_status_for_skus (IMS Mongo catalog) with a fixed mapping."""
     from api.services import online_catalog
 
     monkeypatch.setattr(
-        online_catalog, "online_status_for_skus", lambda skus: mapping
+        online_catalog, "online_status_for_skus", lambda db, skus: mapping
     )
     # stock_tally imports the name inside the function from .online_catalog, so
     # patching the module attribute is sufficient.
@@ -279,20 +285,21 @@ def test_stock_tally_failsoft_no_db():
 
 def test_stock_tally_populated_with_oversell_risk(monkeypatch):
     """Populated fake repo: SKU-OK healthy, SKU-RISK oversell (listed > sellable),
-    SKU-OFFLINE skipped (not online). Read-only: no stock is mutated."""
+    SKU-OFFLINE skipped (not online). The online FLAG comes from the IMS Mongo
+    catalog; the LISTED quantity from the live Shopify read (online_qty).
+    Read-only: no stock is mutated."""
     _patch_online(
         monkeypatch,
         {
-            # listed 3 <= sellable 4 -> OK
-            "SKU-OK": {"online": True, "online_stock": 3},
-            # listed 9 > sellable 2 -> OVERSELL RISK
-            "SKU-RISK": {"online": True, "online_stock": 9},
+            "SKU-OK": {"online": True, "online_stock": None},
+            "SKU-RISK": {"online": True, "online_stock": None},
             # present online-status but marked not-online -> excluded
-            "SKU-OFFLINE": {"online": False, "online_stock": 0},
+            "SKU-OFFLINE": {"online": False, "online_stock": None},
         },
     )
     db = _tally_db()
-    out = sh.stock_tally_summary(db)
+    # listed 3 <= sellable 4 -> OK; listed 9 > sellable 2 -> OVERSELL RISK.
+    out = sh.stock_tally_summary(db, online_qty={"SKU-OK": 3, "SKU-RISK": 9})
 
     # Only the two ONLINE skus are assessed; the offline one is skipped.
     assert out["summary"]["skus_checked"] == 2
@@ -323,13 +330,33 @@ def test_stock_tally_populated_with_oversell_risk(monkeypatch):
     assert len(db["stock_units"]._rows) == 11
 
 
-def test_stock_tally_online_unconfigured_lists_zero(monkeypatch):
-    """Postgres unconfigured -> online_status_for_skus returns {} -> no SKU is
-    treated as online, so the tally is empty (never raises)."""
+def test_stock_tally_no_mapped_products_is_empty(monkeypatch):
+    """No Shopify-mapped products in the IMS catalog -> online_status_for_skus
+    returns {} -> no SKU is treated as online, so the tally is empty (never
+    raises)."""
     _patch_online(monkeypatch, {})
     out = sh.stock_tally_summary(_tally_db())
     assert out["items"] == []
     assert out["summary"]["skus_checked"] == 0
+
+
+def test_stock_tally_unknown_listed_is_null_and_never_flags(monkeypatch):
+    """Without a live Shopify read (online_qty=None) the listed qty is an honest
+    None -- never a fake 0 -- and oversell_risk cannot fire."""
+    _patch_online(
+        monkeypatch,
+        {
+            "SKU-OK": {"online": True, "online_stock": None},
+            "SKU-RISK": {"online": True, "online_stock": None},
+        },
+    )
+    out = sh.stock_tally_summary(_tally_db())
+    assert out["summary"]["skus_checked"] == 2
+    assert out["summary"]["at_risk_count"] == 0
+    assert out["summary"]["listed_qty_live"] is False
+    for row in out["items"]:
+        assert row["online_listed_qty"] is None
+        assert row["oversell_risk"] is False
 
 
 # ---------------------------------------------------------------------------

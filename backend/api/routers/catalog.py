@@ -21,7 +21,7 @@ from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
     reconcile_store_barcodes,
-    ecommerce_db_configured,
+    online_mapping_available,
 )
 from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
@@ -39,12 +39,14 @@ _VALID_DISCOUNT_CATEGORIES = frozenset(CATEGORY_DISCOUNT_CAPS.keys())
 
 
 # ============================================================================
-# ONLINE CATALOG BRIDGE (IMS Mongo <-> e-commerce BVI Postgres)
+# ONLINE CATALOG STATUS (IMS Mongo -- post-BVI)
 # ============================================================================
-# Lets IMS surface which products are "Online" (in Shopify, via the BVI
-# Postgres in the same Railway project) + their online stock, matched by SKU.
-# Fully fail-soft: if the e-commerce DB isn't configured/reachable, these
-# return empty so IMS keeps working unchanged.
+# Lets IMS surface which products are "Online" (on Shopify), matched by
+# SKU/barcode against the IMS catalog itself (catalog_products.ecom +
+# catalog_variants) -- BVI and its Postgres were deleted 2026-07-20 and IMS is
+# the sole source of online truth. Fully fail-soft: any failure returns empty
+# so IMS keeps working unchanged. The live LISTED quantity stays on Shopify
+# (online_stock is null here; see /online-store/stock-tally for a live read).
 
 
 @router.get("/online-status")
@@ -52,10 +54,10 @@ async def get_online_status(
     skus: str = Query(..., description="Comma-separated SKUs to look up"),
     current_user: dict = Depends(get_current_user),
 ):
-    """For each SKU, whether it's online (in Shopify) + its online stock.
-    Returns {statuses: {sku: {online, online_stock, status}}}."""
+    """For each SKU, whether it's online (on Shopify, per the IMS catalog).
+    Returns {statuses: {sku: {online, online_stock(null), status}}}."""
     sku_list = [s.strip() for s in (skus or "").split(",") if s.strip()]
-    return {"statuses": online_status_for_skus(sku_list)}
+    return {"statuses": online_status_for_skus(_get_db(), sku_list)}
 
 
 class OnlineStatusRequest(BaseModel):
@@ -73,13 +75,13 @@ async def post_online_status(
     proxy length limits -> net::ERR_CONNECTION_CLOSED, blanking the "Online"
     column (QA F12). Same response shape as the GET."""
     sku_list = [s.strip() for s in (body.skus or []) if s and s.strip()]
-    return {"statuses": online_status_for_skus(sku_list)}
+    return {"statuses": online_status_for_skus(_get_db(), sku_list)}
 
 
 @router.get("/online-summary")
 async def get_online_summary(current_user: dict = Depends(get_current_user)):
-    """Diagnostic: is the e-commerce catalog DB configured/reachable + counts."""
-    return online_summary()
+    """Diagnostic: is the IMS online catalog (Mongo) populated + mapped counts."""
+    return online_summary(_get_db())
 
 
 class ReconcileBarcodesBody(BaseModel):
@@ -94,9 +96,9 @@ async def reconcile_store_barcodes_ep(
     body: ReconcileBarcodesBody,
     current_user: dict = Depends(require_roles("SUPERADMIN")),
 ):
-    """One-time SUPERADMIN reconciliation: fill the e-commerce catalog's
-    storeBarcode from a SKU->barcode map (the store master sheet). Dry-run by
-    default; writes only the storeBarcode column, only where it's empty."""
+    """RETIRED (2026-07-20): this filled storeBarcode in the BVI Postgres, which
+    was deleted with BVI. Store barcodes now live on IMS
+    catalog_variants.store_barcode. Kept as an honest no-op (never writes)."""
     return reconcile_store_barcodes(
         body.pairs, apply=body.apply, only_empty=body.only_empty
     )
@@ -114,15 +116,21 @@ async def online_stock_reconcile(
     current_user: dict = Depends(get_current_user),
 ):
     """Reconcile in-store physical on-hand (IMS) vs online-listed stock
-    (BVI/Shopify) per SKU and flag overselling risk + a recommended safe online
-    allocation (on-hand minus safety_buffer). Read-only + fail-soft: if the
-    e-commerce DB isn't configured, every product shows 0 online stock."""
+    (Shopify) per SKU and flag overselling risk + a recommended safe online
+    allocation (on-hand minus safety_buffer).
+
+    Post-BVI: "which SKUs are online" comes from the IMS catalog (Mongo), and
+    the LISTED quantity is read LIVE from Shopify for the online-mapped SKUs
+    (creds-gated, read-only, capped) -- listed_qty_live=False in the response
+    means the live read was unavailable, listed quantities are unknown (0 in
+    rows) and oversell flags cannot fire. Read-only + fail-soft."""
     db = _get_db()
     if db is None:
         return {
             "items": [],
             "summary": {},
-            "online_configured": ecommerce_db_configured(),
+            "online_configured": False,
+            "listed_qty_live": False,
         }
     try:
         products = list(
@@ -139,24 +147,32 @@ async def online_stock_reconcile(
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids, store_id)
     skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(skus)  # {sku: {online, online_stock, status}}
+    online = online_status_for_skus(db, skus)  # {sku: {online, status, ...}}
+
+    # Live Shopify listed quantities for the online-mapped SKUs (None when the
+    # read is unavailable -- rows then carry 0 and can never false-flag).
+    from ..services.online_sync_health import live_listed_qty_for_skus
+
+    online_qty = await live_listed_qty_for_skus(db, skus)
 
     items = []
     for p in products:
         sku = p.get("sku")
         o = online.get(sku, {})
+        listed = (online_qty or {}).get(sku)
         items.append(
             {
                 "sku": sku,
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
                 "in_store": on_hand.get(p.get("product_id"), 0),
-                "online": int(o.get("online_stock") or 0),
+                "online": int(listed or 0),
                 "is_online": bool(o.get("online")),
             }
         )
 
     result = stock_allocation.reconcile_items(items, safety_buffer=safety_buffer)
-    result["online_configured"] = ecommerce_db_configured()
+    result["online_configured"] = online_mapping_available(db)
+    result["listed_qty_live"] = online_qty is not None
     return result
 
 

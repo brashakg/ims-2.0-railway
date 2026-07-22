@@ -1,9 +1,10 @@
 // ============================================================================
 // IMS 2.0 - Online vs In-store Stock (prevent overselling)
 // ============================================================================
-// Compares in-store physical on-hand (IMS) with online-listed stock
-// (BVI/Shopify) per SKU, flags overselling risk, and recommends a safe online
-// allocation (on-hand minus a safety buffer you control).
+// Compares in-store physical on-hand (IMS) with online-listed stock (a live
+// Shopify read via the IMS catalog mapping) per SKU, flags overselling risk,
+// and recommends a safe online allocation (on-hand minus a safety buffer you
+// control).
 
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from 'lucide-react';
@@ -70,7 +71,16 @@ export default function OnlineStockPage() {
       {data && data.online_configured === false && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-blue-50 border-blue-200 text-blue-800 mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
-          Online store isn't connected yet, so online stock shows 0. Once it's linked, this page flags real overselling risk.
+          No products are mapped to Shopify yet, so online stock shows 0. Once products are pushed
+          online, this page flags real overselling risk.
+        </div>
+      )}
+
+      {data && data.online_configured !== false && data.listed_qty_live === false && (
+        <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-amber-50 border-amber-200 text-amber-800 mb-4">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          Live Shopify quantities are unavailable right now, so the Online column reads 0 (unknown)
+          and oversell flags can't fire. On-hand and recommended numbers are live.
         </div>
       )}
 
@@ -149,7 +159,9 @@ export default function OnlineStockPage() {
             </table>
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            Pushing these recommended quantities to the online store automatically will turn on once the online store is connected.
+            After every in-store sale or restock, IMS automatically pushes the reduced available
+            quantity for mapped SKUs to Shopify (the oversell guard). "Online" is a live Shopify
+            read when available.
           </p>
         </>
       )}

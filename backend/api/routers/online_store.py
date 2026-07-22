@@ -202,18 +202,20 @@ async def online_store_stock_tally(
     conservative buffer to keep off the online listing -- a SUGGESTION only.
 
     This surface is strictly read-only: it REUSES the on-hand / reserved
-    aggregations (services.online_sync_health) + the online-catalog bridge and
-    NEVER mutates stock, NEVER reserves a unit. The write-path allocation
+    aggregations (services.online_sync_health) + the IMS Mongo online catalog
+    (post-BVI truth) and NEVER mutates stock, NEVER reserves a unit. The listed
+    quantity is read LIVE from Shopify (creds-gated, read-only); when the live
+    read is unavailable, online_listed_qty is null (honest unknown -- never a
+    fake 0) and summary.listed_qty_live=False. The write-path allocation
     (marking units RESERVED on order ingest, excluding them from on-hand) is a
     deliberate, separately-reviewed follow-up (needs an atomic claim +
     idempotency) and is NOT part of this endpoint.
 
-    Fail-soft: no DB -> an empty envelope; Postgres unconfigured ->
-    online_listed_qty 0 with online_configured=False. Never 500s.
+    Fail-soft: no DB -> an empty envelope. Never 500s.
     """
-    from ..services.online_sync_health import stock_tally_summary
+    from ..services.online_sync_health import stock_tally_live
 
-    return stock_tally_summary(_get_db())
+    return await stock_tally_live(_get_db())
 
 
 @router.get("/store-health")

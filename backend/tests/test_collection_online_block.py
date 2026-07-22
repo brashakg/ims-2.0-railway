@@ -342,10 +342,10 @@ def test_writeback_forces_zero_available_for_blocked(monkeypatch):
         return _Res()
 
     monkeypatch.setattr(nexus_providers, "shopify_set_inventory_available", _setter)
-    monkeypatch.setattr(online_catalog, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(online_catalog, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         online_catalog, "online_variant_targets_for_skus",
-        lambda skus: {
+        lambda db, skus: {
             "SKU-A": {"inventory_item_id": "iiA", "location_id": "L"},
             "SKU-B": {"inventory_item_id": "iiB", "location_id": "L"},
         },

@@ -1,7 +1,7 @@
 """
 IMS 2.0 - Online-store sync health (read-only diagnostics)
 ==========================================================
-A single fail-soft summary of the IMS <-> online-store (BVI/Shopify) bridge for
+A single fail-soft summary of the IMS <-> online-store (Shopify) sync for
 the SUPERADMIN integrations/status surface (council D10). It answers:
 
   1. last_shopify_sync    -- when did NEXUS last successfully sync Shopify?
@@ -20,9 +20,14 @@ Additional callables (NEXUS / endpoint use):
   parity_summary(db)               -- sync, IMS-vs-Shopify catalog count diff.
   uploads_image_audit(db)          -- sync, images with local /uploads/ URLs.
 
+Online-truth source (post-BVI): BVI + its Postgres were deleted 2026-07-20.
+"Listed online" comes from IMS Mongo (online_catalog over catalog_products.ecom
++ catalog_variants), and live LISTED quantities come from a real Shopify read
+(live_listed_qty_for_skus, reusing the shopify_stock_parity reader).
+
 Contract (mirrors the rest of the consolidation bridge):
-- 100% FAIL-SOFT. Missing DB / driver / e-commerce Postgres unconfigured ->
-  zeros + flags, NEVER raises, never 500s the status page.
+- 100% FAIL-SOFT. Missing DB / creds -> zeros + flags, NEVER raises, never
+  500s the status page.
 - READ-ONLY for detect_drift / parity / uploads_audit.
   repush_oversell_risk respects the TRIPLE gate; dry_run=True is the safe default.
 - The Shopify drift read uses shopify_push._graphql (the single network boundary).
@@ -154,8 +159,12 @@ def pending_reconcile_summary(
 
     Returns a small summary: total scanned, oversell_risk, over_allocated,
     pending (= oversell_risk + over_allocated), oversell_risk_units, plus
-    online_configured. Fail-soft -> zeros."""
-    from .online_catalog import ecommerce_db_configured, online_status_for_skus
+    online_configured (IMS Mongo carries Shopify-mapped objects). NOTE: this
+    sync tile has no live Shopify read, so listed quantities are unknown here
+    and only structural mismatches surface; the live quantity comparison is the
+    nightly shopify_stock_parity check + the stock-tally endpoint.
+    Fail-soft -> zeros."""
+    from .online_catalog import online_mapping_available, online_status_for_skus
     from . import stock_allocation
 
     base = {
@@ -164,7 +173,7 @@ def pending_reconcile_summary(
         "over_allocated": 0,
         "pending": 0,
         "oversell_risk_units": 0,
-        "online_configured": ecommerce_db_configured(),
+        "online_configured": online_mapping_available(db),
     }
     if db is None:
         return base
@@ -187,7 +196,7 @@ def pending_reconcile_summary(
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids)
     skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(skus)  # {} when Postgres unconfigured
+    online = online_status_for_skus(db, skus)  # {} on any failure
 
     items = []
     for p in products:
@@ -197,6 +206,8 @@ def pending_reconcile_summary(
             {
                 "sku": sku,
                 "in_store": on_hand.get(p.get("product_id"), 0),
+                # Listed qty is unknown without a live Shopify read (None -> 0
+                # in the pure reconciler; an unknown qty can never false-flag).
                 "online": int(o.get("online_stock") or 0),
                 "is_online": bool(o.get("online")),
             }
@@ -212,7 +223,7 @@ def pending_reconcile_summary(
         "over_allocated": over_alloc,
         "pending": oversell + over_alloc,
         "oversell_risk_units": int(summary.get("oversell_risk_units") or 0),
-        "online_configured": ecommerce_db_configured(),
+        "online_configured": online_mapping_available(db),
     }
 
 
@@ -275,31 +286,39 @@ def _recommended_buffer(on_hand: int) -> int:
 
 
 def stock_tally_summary(
-    db, limit: int = _RECONCILE_SCAN_LIMIT
+    db,
+    limit: int = _RECONCILE_SCAN_LIMIT,
+    online_qty: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """READ-ONLY per-SKU reconciliation of online-listed qty vs real on-hand vs
     already-reserved -- the Online Store "Stock tally" dashboard (BVI Phase 5).
 
+    "Which SKUs are online" comes from IMS Mongo (online_catalog). The LISTED
+    quantity lives on Shopify; pass ``online_qty`` ({sku: live available}, from
+    live_listed_qty_for_skus / the stock-tally endpoint) to compare against it.
+    Without it, online_listed_qty is reported as None (honest unknown -- never
+    a fake 0) and oversell_risk stays False for those rows.
+
     For each online-eligible SKU it reports:
-      - online_listed_qty : what the storefront currently lists (Shopify/BVI)
+      - online_listed_qty : live Shopify available when known, else None
       - on_hand           : AVAILABLE serialized stock_units (reuses
                             _on_hand_by_product -- NOT re-derived)
       - reserved          : RESERVED serialized stock_units (reuses
                             _reserved_by_product)
       - sellable          : max(0, on_hand - reserved)
       - recommended_buffer: a conservative reserve suggestion (not enforced)
-      - oversell_risk     : online_listed_qty > sellable  (the admin.py
-                            oversell-risk rule: online listing exceeds what is
-                            actually free to sell)
+      - oversell_risk     : online_listed_qty > sellable, only when the listed
+                            qty is actually known
 
     Plus a summary {skus_checked, at_risk_count, total_online_listed,
-    total_on_hand, total_reserved, total_sellable, online_configured}.
+    total_on_hand, total_reserved, total_sellable, online_configured,
+    listed_qty_live}.
 
-    100% read-only + fail-soft: no DB -> empty envelope; a Postgres that is
-    unconfigured -> online_listed_qty 0 everywhere (online_configured=False so
-    the UI can say so). NEVER mutates stock, NEVER reserves a unit."""
-    from .online_catalog import ecommerce_db_configured, online_status_for_skus
+    100% read-only + fail-soft: no DB -> empty envelope. NEVER mutates stock,
+    NEVER reserves a unit."""
+    from .online_catalog import online_mapping_available, online_status_for_skus
 
+    listed_live = online_qty is not None
     base: Dict[str, Any] = {
         "items": [],
         "summary": {
@@ -309,7 +328,8 @@ def stock_tally_summary(
             "total_on_hand": 0,
             "total_reserved": 0,
             "total_sellable": 0,
-            "online_configured": ecommerce_db_configured(),
+            "online_configured": online_mapping_available(db),
+            "listed_qty_live": listed_live,
         },
     }
     if db is None:
@@ -334,7 +354,7 @@ def stock_tally_summary(
     on_hand = _on_hand_by_product(db, pids)
     reserved = _reserved_by_product(db, pids)
     skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(skus)  # {} when Postgres unconfigured
+    online = online_status_for_skus(db, skus)  # {} on any failure
 
     # SUPERADMIN "block a collection from online sale": a product in an
     # online_sync_blocked collection is NOT sellable online (sellable forced to 0
@@ -367,11 +387,15 @@ def stock_tally_summary(
         # physical stock (a brand ban); force its sellable to 0 so it can never
         # show as available online.
         sellable = 0 if sku in blocked else max(0, oh - rv)
-        listed = int(o.get("online_stock") or 0)
-        risk = listed > sellable
+        # Listed qty: only from a live Shopify read (online_qty). Unknown ->
+        # None, and an unknown quantity can never flag (or hide) a risk row.
+        listed: Optional[int] = None
+        if online_qty is not None and online_qty.get(sku) is not None:
+            listed = int(online_qty.get(sku) or 0)
+        risk = listed is not None and listed > sellable
         if risk:
             at_risk += 1
-        tot_listed += listed
+        tot_listed += listed or 0
         tot_on_hand += oh
         tot_reserved += rv
         tot_sellable += sellable
@@ -392,7 +416,7 @@ def stock_tally_summary(
     items.sort(
         key=lambda r: (
             0 if r["oversell_risk"] else 1,
-            -(r["online_listed_qty"] - r["sellable"]),
+            -((r["online_listed_qty"] or 0) - r["sellable"]),
         )
     )
 
@@ -405,9 +429,71 @@ def stock_tally_summary(
             "total_on_hand": tot_on_hand,
             "total_reserved": tot_reserved,
             "total_sellable": tot_sellable,
-            "online_configured": ecommerce_db_configured(),
+            "online_configured": online_mapping_available(db),
+            "listed_qty_live": listed_live,
         },
     }
+
+
+async def live_listed_qty_for_skus(
+    db, skus: List[str], cap: int = 500
+) -> Optional[Dict[str, int]]:
+    """LIVE Shopify 'available' quantity per SKU for online-mapped SKUs (first
+    ``cap``), via the IMS Mongo variant mapping + the read-only
+    shopify_stock_parity batch reader (the single _graphql boundary).
+
+    Returns {sku: available} for the SKUs Shopify returned, or None when the
+    live read is unavailable (no creds / no mapping / error) so callers can
+    tell "0 listed" apart from "unknown". READ-ONLY + fail-soft, never raises."""
+    try:
+        from .shopify_push import _has_shopify_creds
+
+        if not _has_shopify_creds(db):
+            return None
+        from .online_catalog import inventory_items_for_skus
+        from .shopify_stock_parity import _shopify_available_by_item
+
+        clean = [str(s).strip() for s in (skus or []) if str(s or "").strip()]
+        inv_map = inventory_items_for_skus(db, clean[: max(0, int(cap))])
+        if not inv_map:
+            return None
+        avail = await _shopify_available_by_item(
+            db, sorted(set(inv_map.values()))
+        )
+        if not avail:
+            return None
+        out: Dict[str, int] = {}
+        for sku, inv in inv_map.items():
+            qty = avail.get(inv)
+            if qty is not None:
+                out[sku] = int(qty)
+        return out or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK_TALLY] live listed-qty read failed: %s", exc)
+        return None
+
+
+async def stock_tally_live(db, limit: int = _RECONCILE_SCAN_LIMIT) -> Dict[str, Any]:
+    """stock_tally_summary with LIVE Shopify listed quantities: reads the real
+    'available' per online-mapped SKU (creds-gated, read-only) and feeds it into
+    the pure tally. Degrades to the honest-unknown tally (listed None) when the
+    live read is unavailable. Never raises."""
+    online_qty: Optional[Dict[str, int]] = None
+    try:
+        products = list(
+            _coll(db, "products")
+            .find(
+                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
+                {"_id": 0, "sku": 1},
+            )
+            .limit(limit)
+        )
+        skus = [p.get("sku") for p in products if p.get("sku")]
+        if skus:
+            online_qty = await live_listed_qty_for_skus(db, skus)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_TALLY] live scan skipped: %s", exc)
+    return stock_tally_summary(db, limit=limit, online_qty=online_qty)
 
 
 def failed_webhook_summary(db) -> Dict[str, Any]:
@@ -533,21 +619,70 @@ def sync_health(db, safety_buffer: int = 0) -> Dict[str, Any]:
     directly -- sync_health calls the sync shim which is a no-op without creds.
 
     The `fulfillment_store` block (R6) warns when online orders would decrement
-    stock at a store that holds no serialized units (a silent oversell footgun)."""
-    from .online_catalog import ecommerce_db_configured
+    stock at a store that holds no serialized units (a silent oversell footgun).
+
+    Post-BVI signal notes (audit OS-049):
+      online_configured -- the IMS Mongo catalog carries Shopify-mapped objects
+        (the retired ECOMMERCE_DATABASE_URL env check is gone with BVI).
+      last_shopify_sync / last_successful_shopify_sync_at -- from sync_runs,
+        which order pulls and stock write-backs feed; the catalog PUSH engine
+        does not write sync_runs, so `catalog_push` reports that separately
+        (max ecom.last_pushed_at, stamped on every LIVE product push)."""
+    from .online_catalog import online_mapping_available
 
     drift = _drift_sync_shim(db)
 
     return {
-        "online_configured": ecommerce_db_configured(),
+        "online_configured": online_mapping_available(db),
         "last_shopify_sync": last_shopify_sync(db),
         "last_successful_shopify_sync_at": last_successful_shopify_sync_at(db),
+        "catalog_push": last_catalog_push(db),
         "reconcile": pending_reconcile_summary(db, safety_buffer=safety_buffer),
         "webhooks": failed_webhook_summary(db),
         "drift": drift,
         "fulfillment_store": fulfillment_store_health(db),
         "stock_miss": online_stock_miss_summary(db),
     }
+
+
+def last_catalog_push(db) -> Dict[str, Any]:
+    """When did the catalog push engine last write a product to Shopify LIVE?
+    Reads max(ecom.last_pushed_at) over catalog_products (stamped by
+    shopify_push._writeback_product on every LIVE push -- the ONLINE_STORE_PUSH
+    audit ledger records attempts incl. dry-runs, this records real writes) plus
+    how many products carry a Shopify gid. Fail-soft -> {found: False}."""
+    out: Dict[str, Any] = {
+        "found": False,
+        "last_pushed_at": None,
+        "pushed_products": 0,
+    }
+    coll = _coll(db, "catalog_products")
+    if coll is None:
+        return out
+    try:
+        out["pushed_products"] = int(
+            coll.count_documents(
+                {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}}
+            )
+        )
+        rows = list(
+            coll.find(
+                {"ecom.last_pushed_at": {"$exists": True, "$nin": [None, ""]}},
+                {"_id": 0, "ecom.last_pushed_at": 1},
+            )
+            .sort("ecom.last_pushed_at", -1)
+            .limit(1)
+        )
+        if rows:
+            stamp = (rows[0].get("ecom") or {}).get("last_pushed_at")
+            if stamp:
+                out["found"] = True
+                out["last_pushed_at"] = (
+                    stamp.isoformat() if isinstance(stamp, datetime) else str(stamp)
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SYNC_HEALTH] catalog-push read failed: %s", exc)
+    return out
 
 
 def online_stock_miss_summary(db) -> Dict[str, Any]:
@@ -803,9 +938,11 @@ def _drift_sync_shim(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
 # ===========================================================================
 # STEP 4 -- Re-push SWEEP for oversell-risk SKUs (NEXUS-callable)
 # ===========================================================================
-# For each SKU flagged as oversell_risk by pending_reconcile_summary, push
-# the absolute on-hand quantity back to Shopify via nexus_providers
-# shopify_set_inventory_available so the live qty cannot go below zero.
+# For each SKU whose LIVE Shopify availability exceeds physical on-hand
+# (read via live_listed_qty_for_skus -- IMS Mongo mapping + a real Shopify
+# read), push the absolute on-hand quantity back to Shopify via
+# nexus_providers.shopify_set_inventory_available so the live qty cannot
+# go below zero.
 #
 # DARK by default (dry_run=True). Respects ims_shopify_writes_enabled();
 # when writes are off OR dry_run, returns the PLAN without touching Shopify.
@@ -847,13 +984,12 @@ async def repush_oversell_risk(db, dry_run: bool = True) -> Dict[str, Any]:
 
     if not ims_shopify_writes_enabled():
         base["skipped_reason"] = (
-            "IMS_SHOPIFY_WRITES is OFF -- BVI owns the Shopify catalog; "
+            "IMS_SHOPIFY_WRITES is OFF -- Shopify writes are disabled; "
             "set IMS_SHOPIFY_WRITES=1 to enable"
         )
 
     # Build the oversell-risk list from the existing reconcile engine.
     try:
-        from .online_catalog import online_status_for_skus
         from . import stock_allocation
     except Exception as exc:  # noqa: BLE001
         return {**base, "skipped_reason": f"import error: {exc}"}
@@ -879,18 +1015,28 @@ async def repush_oversell_risk(db, dry_run: bool = True) -> Dict[str, Any]:
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids)
     skus = [p.get("sku") for p in products if p.get("sku")]
-    online = online_status_for_skus(skus)
+    # Oversell detection post-BVI: the listed quantity lives ONLY on Shopify, so
+    # read it LIVE for the online-mapped SKUs (creds-gated, read-only, fail-soft
+    # -> None). An unknown listed qty can never flag a false OVERSELL_RISK.
+    online_qty = await live_listed_qty_for_skus(db, skus)
+    if online_qty is None:
+        online_qty = {}
+        if not base["skipped_reason"]:
+            base["skipped_reason"] = (
+                "live Shopify availability unavailable (creds/mapping) -- "
+                "no oversell candidates can be detected"
+            )
 
     items = []
     for p in products:
         sku = p.get("sku")
-        o = online.get(sku, {})
+        listed = online_qty.get(sku)
         items.append(
             {
                 "sku": sku,
                 "in_store": on_hand.get(p.get("product_id"), 0),
-                "online": int(o.get("online_stock") or 0),
-                "is_online": bool(o.get("online")),
+                "online": int(listed or 0),
+                "is_online": listed is not None,
                 "product_id": p.get("product_id"),
             }
         )

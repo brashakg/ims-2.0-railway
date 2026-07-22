@@ -163,13 +163,24 @@ export default function OnlineStockPage() {
         </div>
       )}
 
-      {/* Postgres-not-configured advisory: online quantities read as 0. */}
+      {/* No Shopify-mapped products yet: nothing to tally. */}
       {!loading && available && !onlineConfigured && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
           <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
           <span className="text-sm text-amber-900">
-            The e-commerce catalog bridge isn't configured yet, so online-listed quantities read as 0.
-            On-hand and reserved counts are live; online figures appear once the bridge is connected.
+            No products in the catalog are mapped to Shopify yet, so there is nothing to tally.
+            Push products to the online store and they appear here.
+          </span>
+        </div>
+      )}
+
+      {/* Live Shopify read unavailable: listed quantities are unknown ("—"). */}
+      {!loading && available && onlineConfigured && summary?.listed_qty_live === false && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-2">
+          <Info className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+          <span className="text-sm text-amber-900">
+            Live Shopify quantities are unavailable right now, so "Listed online" shows — (unknown)
+            and oversell flags can't fire. On-hand, reserved and sellable counts are live.
           </span>
         </div>
       )}

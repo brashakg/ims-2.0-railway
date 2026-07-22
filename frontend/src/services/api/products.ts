@@ -261,16 +261,19 @@ export interface UpdateProductPayload {
 }
 
 // ============================================================================
-// Catalog API - Online (Shopify/e-commerce) status bridge
+// Catalog API - Online (Shopify) status
 // ----------------------------------------------------------------------------
-// Reads the e-commerce (BVI) catalog to tell, per SKU/barcode, whether a
-// product is online (in Shopify) and how much online stock exists. Fully
-// fail-soft on the backend: an unconfigured/unreachable bridge returns {}.
+// Reads the IMS catalog (catalog_products.ecom + catalog_variants — the sole
+// online truth since BVI was retired 2026-07-20) to tell, per SKU/barcode,
+// whether a product is online (on Shopify). The live LISTED quantity stays on
+// Shopify, so online_stock is null (unknown) here — never a fake 0. Fully
+// fail-soft on the backend: any failure returns {}.
 // ============================================================================
 
 export interface OnlineStatus {
   online: boolean;
-  online_stock: number;
+  /** Live Shopify listed qty is not mirrored in IMS — null = unknown. */
+  online_stock: number | null;
   status?: string | null;
 }
 
@@ -289,15 +292,17 @@ export const catalogApi = {
     return (response.data?.statuses || {}) as Record<string, OnlineStatus>;
   },
 
-  /** Diagnostic: is the e-commerce catalog configured/reachable + counts. */
+  /** Diagnostic: is the IMS online catalog populated (Shopify-mapped) + counts. */
   getOnlineSummary: async () => {
     const response = await api.get('/catalog/online-summary');
     return response.data as {
       configured: boolean;
       reachable: boolean;
+      source?: string;
       online_products?: number;
       online_variants?: number;
-      sample?: Array<{ sku: string | null; store_barcode: string | null; barcode: string | null }>;
+      published_products?: number;
+      draft_products?: number;
     };
   },
 };

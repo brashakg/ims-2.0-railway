@@ -9,11 +9,12 @@ website can't oversell. These tests pin:
   * DISPATCH_MODE=off  -> NO live Shopify call (default == today, byte-identical)
   * DISPATCH_MODE=live -> a real inventorySetQuantities call is made
   * no Shopify mapping for a SKU -> skipped (no-op, not every product is online)
+  * BUT an ONLINE SKU with no mapping is a GUARD GAP -> loud alert + SYSTEM task
   * a setter EXCEPTION never propagates into the sale path
   * the GraphQL setter is gated on IMS_SHOPIFY_WRITES then DISPATCH_MODE
 
-Everything is mocked: the BVI Postgres target resolver, the Mongo on-hand
-lookup, and the Shopify GraphQL HTTP call. No DB / network is touched.
+Everything is mocked: the IMS Mongo target resolver (online_catalog), the
+on-hand lookup, and the Shopify GraphQL HTTP call. No DB / network is touched.
 """
 
 import asyncio
@@ -176,14 +177,14 @@ def test_setter_reports_user_errors_as_failure(monkeypatch):
 def test_sale_pushes_on_hand_minus_buffer_to_mapped_variant(monkeypatch):
     _live_shopify(monkeypatch)
     monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "1")
-    # SKU -> Shopify target (as if resolved from the BVI Postgres).
+    # SKU -> Shopify target (as if resolved from the IMS Mongo mapping).
     monkeypatch.setattr(
         wb, "_resolve_db", lambda db: object())  # truthy db; collections mocked below
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         oc, "online_variant_targets_for_skus",
-        lambda skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
     )
     # on-hand AFTER the sale = 3 units left for SP-1.
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-1": 3})
@@ -201,14 +202,71 @@ def test_sale_pushes_on_hand_minus_buffer_to_mapped_variant(monkeypatch):
 def test_no_mapping_is_skipped(monkeypatch):
     _live_shopify(monkeypatch)
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
-    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda skus: {})
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda db, skus: {})
+    # The SKU is NOT listed online -> a silent, correct no-op (no alert).
+    monkeypatch.setattr(oc, "online_status_for_skus", lambda db, skus: {})
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {})
 
     summary = _run(wb.writeback_skus(object(), ["NOT-ONLINE"], "store-1"))
     assert summary["pushed"] == 0
     assert summary["skipped_no_mapping"] == 1
+    assert summary["unmapped_online"] == 0  # not online -> no guard-gap alert
     assert _FakeAsyncClient.calls == []  # nothing pushed
+
+
+def test_unmapped_but_online_sku_alerts_loudly(monkeypatch):
+    """OS-015 guard-gap: a sold SKU that IS listed online but has no Shopify
+    inventory mapping must alert LOUDLY (summary flag + deduped SYSTEM task),
+    never fail soft-silent."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda db, skus: {})
+    monkeypatch.setattr(
+        oc, "online_status_for_skus",
+        lambda db, skus: {
+            "SP-ONLINE": {"online": True, "online_stock": None, "status": "PUBLISHED"}
+        },
+    )
+    filed = {}
+    monkeypatch.setattr(
+        wb, "_file_guard_gap_task", lambda db, skus: filed.setdefault("skus", skus)
+    )
+    recorded = {}
+    monkeypatch.setattr(
+        wb, "_record_run", lambda db, summary: recorded.update(summary)
+    )
+
+    summary = _run(wb.writeback_skus(object(), ["SP-ONLINE", "SP-OFFLINE"], "s1"))
+    assert summary["skipped_no_mapping"] == 2
+    assert summary["unmapped_online"] == 1      # only the online SKU alerts
+    assert filed["skus"] == ["SP-ONLINE"]       # SYSTEM task filed for it
+    assert recorded.get("unmapped_online") == 1  # and the run was recorded
+    assert _FakeAsyncClient.calls == []          # nothing pushed
+
+
+def test_record_run_writes_sync_row_for_guard_gap():
+    """A guard-gap run (unmapped_online > 0) writes a NOT-ok sync_runs row so
+    the sync-health tile can see it; a pure no-op run stays silent."""
+    rows = []
+
+    class _Coll:
+        def insert_one(self, doc):
+            rows.append(doc)
+
+    class _Db:
+        def get_collection(self, name):
+            return _Coll()
+
+    wb._record_run(_Db(), {"pushed": 0, "failed": 0, "unmapped_online": 2, "source": "sale"})
+    assert len(rows) == 1
+    assert rows[0]["ok"] is False
+    assert "oversell-guard gap" in rows[0]["error"]
+
+    rows.clear()
+    wb._record_run(_Db(), {"pushed": 0, "failed": 0, "unmapped_online": 0, "source": "sale"})
+    assert rows == []  # pure no-op -> no spam
 
 
 def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):
@@ -217,10 +275,10 @@ def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):
     monkeypatch.setattr(nexus_providers, "dispatch_mode", lambda: "off")
     monkeypatch.setattr(nexus_providers.httpx, "AsyncClient", _FakeAsyncClient)
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         oc, "online_variant_targets_for_skus",
-        lambda skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
     )
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-1": 3})
     monkeypatch.setattr(wb, "_record_run", lambda db, summary: None)
@@ -234,10 +292,10 @@ def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):
 def test_setter_exception_does_not_propagate(monkeypatch):
     # The orchestrator must swallow a setter raise and keep going.
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         oc, "online_variant_targets_for_skus",
-        lambda skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
     )
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-1": 3})
     monkeypatch.setattr(wb, "_record_run", lambda db, summary: None)

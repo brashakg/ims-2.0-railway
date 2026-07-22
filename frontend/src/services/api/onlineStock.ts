@@ -26,7 +26,11 @@ export interface ReconcileResult {
     oversell_risk_units?: number;
     safety_buffer?: number;
   };
+  /** IMS catalog carries Shopify-mapped products (post-BVI truth source). */
   online_configured?: boolean;
+  /** True when the online quantities are a LIVE Shopify read; false = listed
+   *  quantities were unavailable (rows carry 0 = unknown, risk can't fire). */
+  listed_qty_live?: boolean;
 }
 
 export const onlineStockApi = {
