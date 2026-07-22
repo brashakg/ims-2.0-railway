@@ -114,6 +114,39 @@ def _order_discount(order: dict) -> float:
 
 _GSTN_DOC_ILLEGAL = re.compile(r"[^A-Za-z0-9/-]")
 
+# Marker key for the AGGREGATED >16-char invoice-serial warn (one issue per
+# report, not one per order -- see _note_over_cap_serial).
+_OVER_CAP_ISSUE_CODE = "INVOICE_SERIAL_OVER_16"
+
+
+def _note_over_cap_serial(validation_issues: list, serial: str) -> None:
+    """Aggregate the >16-char minted-serial warn into ONE issue per report.
+
+    Every minted serial shares the same numbering scheme ({PREFIX}/{STORE}/{FY}/
+    {serial}, 20 chars), so a per-order warn would fire for EVERY sale in the
+    month: issueCount ~= order count and the issues[:50] window fills with
+    identical serial warns, burying the genuinely actionable ones (missing
+    GSTIN/state). One aggregated issue keeps ok=false and the real signal:
+    a count plus one example serial. The real fix is shortening the mint format
+    (order_repository.next_invoice_number) -- tracked separately."""
+    for issue in validation_issues:
+        if isinstance(issue, dict) and issue.get("issue_code") == _OVER_CAP_ISSUE_CODE:
+            issue["count"] = int(issue.get("count") or 1) + 1
+            return
+    validation_issues.append(
+        {
+            "level": "warn",
+            "issue_code": _OVER_CAP_ISSUE_CODE,
+            "invoice": serial,
+            "count": 1,
+            "issue": (
+                "Invoice numbers exceed the GSTN 16-char cap (example: "
+                f"{serial}) -- the portal may reject the upload; the minted "
+                "serial format needs shortening"
+            ),
+        }
+    )
+
 
 def _gstr1_bill_number(order: dict, validation_issues: Optional[list] = None) -> str:
     """GSTN invoice identifier for a GSTR-1 B2B / B2CL row.
@@ -139,17 +172,9 @@ def _gstr1_bill_number(order: dict, validation_issues: Optional[list] = None) ->
         s = str(inv).strip()
         if s:
             if len(s) > 16 and validation_issues is not None:
-                validation_issues.append(
-                    {
-                        "level": "warn",
-                        "invoice": s,
-                        "issue": (
-                            "Invoice number exceeds the GSTN 16-char cap -- "
-                            "the portal may reject it; shorten the invoice "
-                            "serial format"
-                        ),
-                    }
-                )
+                # ONE aggregated warn per report (count + example), never one
+                # per order -- see _note_over_cap_serial.
+                _note_over_cap_serial(validation_issues, s)
             return s
     for key in ("bill_number", "order_number"):
         val = order.get(key)

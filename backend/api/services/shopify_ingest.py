@@ -699,6 +699,11 @@ def _book_historical_refund_credit_notes(
         "gross": 0.0,
         "tax": 0.0,
         "unmapped_refunds": 0,
+        # CN bookings that FAILED (pricing exception / ledger insert error) --
+        # distinct from unmapped residuals: these are healable by a re-run (the
+        # duplicate path re-invokes this idempotent function).
+        "cn_failed": 0,
+        "cn_failed_refund_ids": [],
     }
     fin = str(payload.get("financial_status") or "").strip().lower()
     if fin not in ("refunded", "partially_refunded"):
@@ -852,7 +857,11 @@ def _book_historical_refund_credit_notes(
         if gross <= 0:
             # Order lines carried no usable billed value -> nothing derivable;
             # count the residual (consistent with the unmappable branch above).
+            # Appended to unmapped_real_ids so the whole-order fallback COVERS it
+            # (stamped into returns -> a webhook redelivery dedupes instead of
+            # double-crediting on top of the whole-order reversal).
             summary["unmapped_refunds"] += 1
+            unmapped_real_ids.append(refund_id)
             return "unmapped"
 
         # AMOUNT RECONCILIATION against what Shopify ACTUALLY refunded (reuses the
@@ -864,12 +873,16 @@ def _book_historical_refund_credit_notes(
             actual = shopify_refund._shopify_refunded_amount(refund)
         billed_gross = gross
         reconciled = False
+        clamped = False
+        excess = 0.0
         if actual is not None and abs(actual - gross) > shopify_refund._AMOUNT_EPS:
             if actual <= 0:
                 # Shopify shows NO money actually refunded (restock-without-refund
                 # event) -> there is no output-tax reversal to book; report the
-                # residual instead of fabricating a credit note.
+                # residual instead of fabricating a credit note. Appended to
+                # unmapped_real_ids for the same covered-stamp reason as gross<=0.
                 summary["unmapped_refunds"] += 1
+                unmapped_real_ids.append(refund_id)
                 logger.info(
                     "[SHOPIFY_INGEST] historical refund %s on order %s shows zero "
                     "refunded amount vs billed Rs %.2f -- credit note skipped "
@@ -877,22 +890,43 @@ def _book_historical_refund_credit_notes(
                     refund_id, order_doc.get("order_id"), gross,
                 )
                 return "unmapped"
-            # Proportionally scale the credit note to the ACTUAL refunded amount
-            # (pure arithmetic on the already-derived split -- never re-derive GST;
-            # never silently over-post the billed gross).
-            factor = actual / gross
-            scaled_taxable = round(float(gst_view.get("taxable") or 0.0) * factor, 2)
-            gross = round(actual, 2)
-            gst_view = dict(gst_view)
-            gst_view["gross"] = gross
-            gst_view["taxable"] = scaled_taxable
-            gst_view["tax"] = round(gross - scaled_taxable, 2)
-            reconciled = True
-            logger.info(
-                "[SHOPIFY_INGEST] historical refund %s on order %s reconciled: "
-                "billed Rs %.2f -> actual Rs %.2f (credit note scaled)",
-                refund_id, order_doc.get("order_id"), billed_gross, gross,
-            )
+            if actual > gross:
+                # CLAMP AT BILLED GROSS: a credit note can never exceed the
+                # original invoice value. Shopify's refunded total INCLUDES
+                # shipping/goodwill amounts the import never booked as sale
+                # revenue (line items only), so scaling UP would reverse output
+                # tax that was never output. Post the FULL billed reversal and
+                # surface the excess as an unreconciled residual for the
+                # operator/accountant.
+                excess = round(actual - gross, 2)
+                reconciled = True
+                clamped = True
+                logger.warning(
+                    "[SHOPIFY_INGEST] historical refund %s on order %s: Shopify "
+                    "refunded Rs %.2f > billed Rs %.2f -- credit note CLAMPED at "
+                    "the billed gross; excess Rs %.2f (shipping/goodwill never "
+                    "booked as sale) left un-reversed",
+                    refund_id, order_doc.get("order_id"), actual, gross, excess,
+                )
+            else:
+                # Proportionally scale DOWN to the ACTUAL refunded amount (pure
+                # arithmetic on the already-derived split -- never re-derive GST;
+                # never silently over-post the billed gross).
+                factor = actual / gross
+                scaled_taxable = round(
+                    float(gst_view.get("taxable") or 0.0) * factor, 2
+                )
+                gross = round(actual, 2)
+                gst_view = dict(gst_view)
+                gst_view["gross"] = gross
+                gst_view["taxable"] = scaled_taxable
+                gst_view["tax"] = round(gross - scaled_taxable, 2)
+                reconciled = True
+                logger.info(
+                    "[SHOPIFY_INGEST] historical refund %s on order %s reconciled: "
+                    "billed Rs %.2f -> actual Rs %.2f (credit note scaled)",
+                    refund_id, order_doc.get("order_id"), billed_gross, gross,
+                )
 
         cn_date = _refund_credit_note_date_iso(refund, payload)
         cn_tax = round(float(gst_view.get("tax") or 0.0), 2)
@@ -928,7 +962,14 @@ def _book_historical_refund_credit_notes(
         }
         if reconciled:
             entry["billed_gross"] = round(billed_gross, 2)
-            entry["reconciliation"] = "SCALED_TO_SHOPIFY_REFUNDED"
+            entry["reconciliation"] = (
+                "CLAMPED_AT_BILLED_GROSS" if clamped else "SCALED_TO_SHOPIFY_REFUNDED"
+            )
+            if clamped:
+                # The shipping/goodwill amount Shopify refunded ON TOP of the
+                # booked sale -- deliberately NOT reversed (never booked as
+                # output tax); recorded for accountant reconciliation.
+                entry["unreconciled_excess"] = excess
         try:
             ledger.insert_one(dict(entry))
         except Exception as exc:  # noqa: BLE001
@@ -945,10 +986,20 @@ def _book_historical_refund_credit_notes(
         summary["tax"] = round(summary["tax"] + cn_tax, 2)
         return "booked"
 
+    def _record_failed(refund: Dict[str, Any]) -> None:
+        summary["cn_failed"] += 1
+        rid = str(refund.get("id") or "?").strip() or "?"
+        if len(summary["cn_failed_refund_ids"]) < 20:
+            summary["cn_failed_refund_ids"].append(rid)
+
     for refund in refunds:
         if not isinstance(refund, dict):
             continue
-        _process(refund)
+        if _process(refund) == "skipped":
+            # Pricing exception / ledger insert failure -- NOT a residual: the
+            # booking is idempotent, so a re-run of the import heals it (the
+            # duplicate ingest path re-invokes this function).
+            _record_failed(refund)
 
     # TERMINALLY fully-refunded order whose refunds[] exist but NONE produced a
     # line-mapped credit note (all amount-only / unmappable -- Shopify's 'refund
@@ -989,7 +1040,10 @@ def _book_historical_refund_credit_notes(
             # CDNR period = when the refund was ISSUED, not the sale date.
             synthetic["processed_at"] = latest_dt.isoformat()
         covered = list(unmapped_real_ids)
-        if _process(synthetic) == "booked":
+        fb_status = _process(synthetic)
+        if fb_status == "skipped":
+            _record_failed(synthetic)
+        if fb_status == "booked":
             summary["whole_order_fallback"] = True
             # The amount-only refunds are now COVERED by the whole-order credit
             # note -- they are no longer an unreported residual. Stamp each real
@@ -1014,6 +1068,35 @@ def _book_historical_refund_credit_notes(
                 )
 
     return summary
+
+
+def _heal_historical_refund_credit_notes(
+    db, payload: Dict[str, Any], existing: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """DUPLICATE-path self-heal for a HISTORICAL re-run: re-invoke the IDEMPOTENT
+    credit-note synthesizer against the EXISTING order doc, so a partial failure
+    on a prior apply run (order inserted, CN booking failed on a transient error)
+    is repaired by simply re-running the import -- without this, the duplicate
+    guard fires before the create-branch CN booking and the missing GST reversal
+    is permanently unrecoverable.
+
+    ONLY heals orders THIS import created (import_source=shopify_order_history):
+    refunds against a genuinely-live webhook-created order belong to the
+    shopify_refund accountant-review path and must NEVER be auto-posted here
+    (a queued PENDING review + a historical auto-post would double-reverse).
+    Already-booked refunds return 'duplicate' inside the synthesizer, so a
+    healthy re-run books nothing. Fail-soft -> None."""
+    if not isinstance(existing, dict):
+        return None
+    if existing.get("import_source") != "shopify_order_history":
+        return None
+    try:
+        return _book_historical_refund_credit_notes(db, payload, existing)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] duplicate-path credit-note heal failed soft: %s", exc
+        )
+        return None
 
 
 def ingest_shopify_order(
@@ -1093,12 +1176,21 @@ def ingest_shopify_order(
         logger.warning("[SHOPIFY_INGEST] dedupe lookup failed: %s", exc)
         existing = None
     if existing:
-        return {
+        result = {
             "status": "duplicate",
             "order_id": existing.get("order_id"),
             "invoice_number": existing.get("invoice_number"),
             "shopify_order_id": shopify_order_id,
         }
+        if historical:
+            # SELF-HEAL: a prior apply run may have inserted the order but
+            # failed the (fail-soft) credit-note booking -- re-invoke the
+            # IDEMPOTENT synthesizer so a re-run repairs the missing GST
+            # reversal instead of it being permanently unrecoverable.
+            refund_cn = _heal_historical_refund_credit_notes(db, payload, existing)
+            if refund_cn is not None:
+                result["refund_credit_notes"] = refund_cn
+        return result
 
     # --- Build the IMS order ------------------------------------------------
     product_repo = None
@@ -1313,7 +1405,7 @@ def ingest_shopify_order(
                 existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
             except Exception:  # noqa: BLE001
                 existing = None
-            return {
+            result = {
                 "status": "duplicate",
                 "order_id": (existing or {}).get("order_id", order_id),
                 "invoice_number": (existing or {}).get(
@@ -1321,6 +1413,15 @@ def ingest_shopify_order(
                 ),
                 "shopify_order_id": shopify_order_id,
             }
+            if historical:
+                # SELF-HEAL (see the Layer-1 duplicate guard): re-invoke the
+                # idempotent CN synthesizer for the racing winner's order doc.
+                refund_cn = _heal_historical_refund_credit_notes(
+                    db, payload, existing
+                )
+                if refund_cn is not None:
+                    result["refund_credit_notes"] = refund_cn
+            return result
         logger.error("[SHOPIFY_INGEST] order insert failed: %s", exc)
         return {
             "status": "error",

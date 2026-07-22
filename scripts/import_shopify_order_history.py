@@ -608,7 +608,9 @@ def run(
     cn_tax = 0.0
     cn_unmapped = 0
     cn_whole_order_fallbacks = 0
+    cn_failed = 0
     unmapped_refund_order_ids: List[str] = []
+    cn_failed_order_ids: List[str] = []
     for o in real:
         oid = str(o.get("id") or o.get("order_id") or "").strip()
         if not oid:
@@ -652,6 +654,11 @@ def run(
                 cn_unmapped += um
                 if len(unmapped_refund_order_ids) < 50:
                     unmapped_refund_order_ids.append(oid)
+            cf = int(rcn.get("cn_failed") or 0)
+            if cf > 0:
+                cn_failed += cf
+                if len(cn_failed_order_ids) < 50:
+                    cn_failed_order_ids.append(oid)
         done += 1
         if done % 100 == 0:
             print(
@@ -678,6 +685,13 @@ def run(
             "  ! shopify order ids with an unmapped refund residual: "
             + ", ".join(unmapped_refund_order_ids)
         )
+    print(f"  CN FAILED ............. {cn_failed}  (re-run to heal -- the booking "
+          f"is idempotent and re-runs on the duplicate path)")
+    if cn_failed_order_ids:
+        print(
+            "  ! shopify order ids with a FAILED credit-note booking: "
+            + ", ".join(cn_failed_order_ids)
+        )
     print("=" * 68)
 
     summary.update(
@@ -692,6 +706,8 @@ def run(
             "credit_notes_tax": round(cn_tax, 2),
             "credit_notes_whole_order_fallbacks": cn_whole_order_fallbacks,
             "credit_notes_unmapped_refunds": cn_unmapped,
+            "credit_notes_failed": cn_failed,
+            "cn_failed_order_ids": cn_failed_order_ids,
             "unmapped_refund_order_ids": unmapped_refund_order_ids,
         }
     )

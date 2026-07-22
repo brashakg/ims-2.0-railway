@@ -654,6 +654,151 @@ def test_historical_refund_scaled_to_actual_shopify_amount(wired):
     assert cn["delta"] == 0.0
 
 
+def test_historical_refund_clamped_when_actual_exceeds_billed(wired):
+    # Shopify's refunded total INCLUDES shipping/goodwill the import never books
+    # as sale revenue (line items only), so actual > billed is SYSTEMATIC for
+    # shipping-charged orders. A credit note can never exceed the original
+    # invoice value: the CN is CLAMPED at the billed gross (full reversal of
+    # what was booked) and the excess is surfaced as an unreconciled residual.
+    payload = _hist_order(21044, financial="partially_refunded")
+    payload["refunds"] = [
+        {
+            "id": 88044,
+            "created_at": "2023-06-03T10:00:00Z",
+            "refund_line_items": [_refund_line()],
+            # Rs 999 goods + Rs 151 shipping refunded via the gateway.
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "1150.00"}
+            ],
+        }
+    ]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    mine = [d for d in ledger if d.get("shopify_refund_id") == "88044"]
+    assert len(mine) == 1
+    cn = mine[0]
+    assert cn["gross_refund"] == 999.0, "CN never exceeds the billed gross"
+    assert cn["billed_gross"] == 999.0
+    assert cn["reconciliation"] == "CLAMPED_AT_BILLED_GROSS"
+    assert cn["unreconciled_excess"] == 151.0, "shipping/goodwill excess surfaced"
+    assert round(cn["taxable"] + cn["tax"], 2) == 999.0, "split NOT scaled up"
+
+
+def test_cn_failure_reported_and_healed_on_rerun(wired):
+    # Run 1: the ledger insert fails on a transient error -> the failure is
+    # COUNTED in the summary (cn_failed), not silently dropped. Run 2 (the
+    # order now dedupes as 'duplicate'): the idempotent synthesizer re-runs on
+    # the duplicate path and HEALS the missing GST reversal.
+    ledger = wired["db"].get_collection("credit_note_ledger")
+    orig_insert = ledger.insert_one
+
+    def _flaky_insert(doc):
+        raise RuntimeError("transient mongo blip")
+
+    ledger.insert_one = _flaky_insert
+    payload = _hist_order(21045, financial="partially_refunded")
+    payload["refunds"] = [{"id": 88045, "refund_line_items": [_refund_line()]}]
+    try:
+        res1 = online_order_mapper.map_shopify_order(
+            dict(payload), wired["db"], topic="orders/create", historical=True
+        )
+    finally:
+        ledger.insert_one = orig_insert
+    assert res1["status"] == "created"
+    rcn1 = res1["refund_credit_notes"]
+    assert rcn1["credit_notes"] == 0
+    assert rcn1["cn_failed"] == 1, "failed booking is REPORTED, not swallowed"
+    assert rcn1["cn_failed_refund_ids"] == ["88045"]
+    assert ledger.docs == [], "nothing landed on the failed run"
+
+    # Re-run: duplicate order path still invokes the idempotent CN synthesizer.
+    res2 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    assert res2["status"] == "duplicate"
+    rcn2 = res2.get("refund_credit_notes") or {}
+    assert rcn2.get("credit_notes") == 1, "re-run heals the missing credit note"
+    assert rcn2.get("cn_failed") == 0
+    mine = [d for d in ledger.docs if d.get("shopify_refund_id") == "88045"]
+    assert len(mine) == 1, "healed exactly once"
+
+    # Run 3: nothing left to heal -- no double booking.
+    res3 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )
+    assert res3["status"] == "duplicate"
+    assert (res3.get("refund_credit_notes") or {}).get("credit_notes") == 0
+    assert len([d for d in ledger.docs if d.get("shopify_refund_id") == "88045"]) == 1
+
+
+def test_zero_gross_and_amount_only_refunds_both_covered_by_whole_order(wired):
+    # fin=refunded with one AMOUNT-ONLY refund (no line items) and one
+    # ZERO-GROSS refund (maps to a free/zero-priced line): the whole-order
+    # reversal covers BOTH -- both ids are stamped into returns (webhook
+    # redelivery dedupes; no double credit on top of the reversal) and the
+    # residual count reconciles to zero.
+    payload = _hist_order(21046, financial="refunded")
+    payload["line_items"].append(
+        {
+            "id": 9002,
+            "product_id": 7002,
+            "variant_id": 999002,
+            "title": "Free cleaning kit",
+            "product_type": "Accessories",
+            "sku": "KIT-0",
+            "quantity": 1,
+            "price": "0.00",
+            "total_discount": "0.00",
+        }
+    )
+    payload["refunds"] = [
+        {
+            "id": 88046,
+            "created_at": "2023-08-01T10:00:00Z",
+            "refund_line_items": [],
+            "transactions": [
+                {"kind": "refund", "status": "success", "amount": "999.00"}
+            ],
+        },
+        {
+            "id": 88047,
+            "created_at": "2023-08-02T10:00:00Z",
+            "refund_line_items": [
+                _refund_line(line_item_id=9002, subtotal="0.00", total_tax="0.00")
+            ],
+        },
+    ]
+    res = online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    rcn = res["refund_credit_notes"]
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    full = [
+        d for d in ledger
+        if str(d.get("shopify_refund_id", "")).startswith("orderfull:")
+    ]
+    assert len(full) == 1, "whole-order reversal booked"
+    assert full[0]["gross_refund"] == 999.0
+    assert rcn["whole_order_fallback"] is True
+    assert rcn["unmapped_refunds"] == 0, "both residuals covered by the reversal"
+    # BOTH refund ids stamped -> webhook redeliveries dedupe.
+    returns = wired["db"].get_collection("returns").docs
+    stamped = {r.get("shopify_refund_id") for r in returns}
+    assert "88046" in stamped and "88047" in stamped
+
+    from api.services import shopify_refund
+
+    for rid in (88046, 88047):
+        res_wh = shopify_refund.handle_shopify_refund(
+            wired["db"],
+            {"id": rid, "order_id": "21046", "refund_line_items": []},
+            topic="refunds/create",
+        )
+        assert res_wh["status"] == "duplicate", res_wh
+
+
 def test_fully_refunded_amount_only_refunds_fall_through_to_whole_order(wired):
     # financial_status='refunded' with refunds[] PRESENT but every entry
     # amount-only (empty refund_line_items -- Shopify 'refund custom amount'
@@ -819,6 +964,15 @@ def test_gstr1_bill_number_real_minted_serial_always_wins_verbatim():
     assert len(issues) == 1
     assert issues[0]["invoice"] == real
     assert "16" in issues[0]["issue"]
+    assert issues[0]["issue_code"] == "INVOICE_SERIAL_OVER_16"
+    assert issues[0]["count"] == 1
+    # DEDUPED: further over-cap orders AGGREGATE into the SAME issue (count
+    # bumps) instead of appending one warn per order -- per-order warns would
+    # flood issues[:50] and bury the genuinely actionable warnings.
+    assert _gstr1_bill_number({"invoice_number": online}, issues) == online
+    assert _gstr1_bill_number({"invoice_number": real}, issues) == real
+    assert len(issues) == 1, "one aggregated issue, not one per order"
+    assert issues[0]["count"] == 3
     # A short real serial wins with NO issue raised.
     issues2: list = []
     assert _gstr1_bill_number({"invoice_number": "INV-0007"}, issues2) == "INV-0007"

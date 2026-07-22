@@ -9,6 +9,7 @@ import {
   FileText,
   Calendar,
   AlertCircle,
+  AlertTriangle,
   CheckCircle,
   Loader2,
   RefreshCw,
@@ -45,6 +46,25 @@ interface GSTR1B2CSummary {
   totalTax: number;
 }
 
+interface GSTR1ValidationIssue {
+  level: string;
+  issue: string;
+  invoice?: string;
+  // Aggregated issues (e.g. the >16-char serial warn) carry a machine code +
+  // how many invoices it applies to.
+  issue_code?: string;
+  count?: number;
+}
+
+interface GSTR1Validation {
+  ok: boolean;
+  issueCount: number;
+  issues: GSTR1ValidationIssue[];
+}
+
+// issue_code of the aggregated "minted serial exceeds GSTN's 16-char cap" warn.
+const SERIAL_OVER_CAP_CODE = 'INVOICE_SERIAL_OVER_16';
+
 interface GSTR1Data {
   b2b: GSTR1Invoice[];
   b2cl: GSTR1Invoice[];
@@ -55,6 +75,7 @@ interface GSTR1Data {
   totalInvoices: number;
   totalTaxableValue: number;
   totalTax: number;
+  validation?: GSTR1Validation;
 }
 
 export function GSTR1Report() {
@@ -98,9 +119,28 @@ export function GSTR1Report() {
     toast.success('GSTR-1 JSON downloaded successfully');
   };
 
+  const hasSerialLengthIssue = Boolean(
+    reportData?.validation?.issues?.some(
+      (i) => i.issue_code === SERIAL_OVER_CAP_CODE
+    )
+  );
+
   // GST portal offline-tool JSON (the format you upload on gst.gov.in).
+  // NOTE: validation warnings are shown HERE (and in the banner above the
+  // tables) -- they are never injected into the uploaded JSON body itself.
   const downloadGstnJSON = async () => {
     if (!reportData) return;
+    if (hasSerialLengthIssue) {
+      const proceed = window.confirm(
+        'Warning: invoice numbers in this report exceed the GSTN 16-character ' +
+          'cap, so the portal may REJECT this upload. The invoice serial ' +
+          'format needs shortening (a tracked fix). Download anyway?'
+      );
+      if (!proceed) return;
+      toast.warning(
+        'GSTN JSON downloaded with over-length invoice numbers - the portal may reject it'
+      );
+    }
     try {
       const gstn = await reportsApi.getGSTR1GstnJson(selectedMonth, user?.activeStoreId);
       const dataStr = JSON.stringify(gstn, null, 2);
@@ -398,6 +438,49 @@ export function GSTR1Report() {
             <p className="text-lg font-bold text-green-900 font-mono">
               {reportData.gstin || 'Not configured'}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Validation warnings (serial-length cap, missing GSTIN/state, ...) */}
+      {reportData?.validation && !reportData.validation.ok && (
+        <div className="card bg-amber-50 border-amber-300">
+          <div className="flex gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-amber-900 min-w-0">
+              <p className="font-medium mb-1">
+                {reportData.validation.issueCount} validation issue
+                {reportData.validation.issueCount === 1 ? '' : 's'} - review before
+                filing
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-amber-800">
+                {reportData.validation.issues.map((issue, idx) => (
+                  <li key={idx} className="break-words">
+                    <span className="uppercase text-xs font-semibold mr-1">
+                      {issue.level}
+                    </span>
+                    {issue.issue}
+                    {(issue.count ?? 1) > 1 && (
+                      <span className="ml-1 font-medium">
+                        ({issue.count} invoices)
+                      </span>
+                    )}
+                    {issue.invoice && !issue.issue.includes(issue.invoice) && (
+                      <span className="ml-1 font-mono text-xs">
+                        [{issue.invoice}]
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {hasSerialLengthIssue && (
+                <p className="mt-2 text-xs text-amber-700">
+                  The GSTN portal caps invoice numbers at 16 characters; the GSTN
+                  JSON download will warn before generating. Fixing the minted
+                  serial format is tracked separately.
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
