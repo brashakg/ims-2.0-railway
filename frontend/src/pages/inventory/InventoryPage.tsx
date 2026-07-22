@@ -52,6 +52,14 @@ import { displayPlacementsApi, type DisplayPlacement } from '../../services/api/
 import { displayFixturesApi, type DisplayFixture } from '../../services/api/displayFixtures';
 // Movements-ledger entry type comes DIRECT from the module (TS2614 barrel dodge).
 import { type StockMovementEntry } from '../../services/api/inventory';
+// Online-store module summary (website counts) — DIRECT import (TS2614 dodge).
+// getSummary() never throws: a non-ecom role / stale deploy resolves to an
+// { available:false } placeholder, which the online KPI cards render as
+// "View" links to /online-store rather than a wrong 0.
+import { onlineStoreApi, type OnlineStoreSummary } from '../../services/api/onlineStore';
+// ONLINE (stockless / pooled-fulfilment) store detection — single testable
+// source of truth (see storeMode.ts + its unit test).
+import { isOnlineStore, isOnlineStoreId } from './storeMode';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
@@ -165,7 +173,7 @@ export function InventoryPage() {
   // Online/offline availability filter + cross-store stock view.
   const [availabilityFilter, setAvailabilityFilter] = useState<'all' | 'online' | 'offline'>('all');
   const [storeFilter, setStoreFilter] = useState<string>(user?.activeStoreId || '');
-  const [stores, setStores] = useState<{ id: string; name: string }[]>([]);
+  const [stores, setStores] = useState<{ id: string; name: string; store_type?: string }[]>([]);
 
   // Cataloguer attribution: "which user catalogued what". '' = all users.
   // The roster comes from GET /products/cataloguers (manager-ladder gated on
@@ -236,6 +244,39 @@ export function InventoryPage() {
   const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
   // Mirrors the backend gate on GET /products/cataloguers (manager ladder).
   const canSeeCataloguers = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']);
+
+  // ── ONLINE-store adaptation ──────────────────────────────────────────────
+  // When the ACTIVE store is an ONLINE (stockless, pooled-fulfilment) store,
+  // the physical-inventory framing — stock value, low-stock, on-floor zones —
+  // is meaningless: an online store owns NO stock of its own and sells from the
+  // pooled stock of every shop. So the page swaps to an online-appropriate view
+  // (explainer banner, website counts, no zone/stock columns, CTA → Online
+  // Store). Physical stores are byte-identical to before. Detection prefers the
+  // store_type field; the known-id fast-path flips instantly before the store
+  // list has loaded. Declared here (before the effects) so the summary-fetch
+  // effect's dep array is defined.
+  const activeStoreId = storeFilter || user?.activeStoreId || '';
+  const activeStore = stores.find((s) => s.id === activeStoreId);
+  const isOnlineStoreView = isOnlineStore(activeStore) || isOnlineStoreId(activeStoreId);
+  // Website counts for the ONLINE view (products synced, collections, orders,
+  // customers). null until fetched / not applicable.
+  const [onlineSummary, setOnlineSummary] = useState<OnlineStoreSummary | null>(null);
+
+  // Fetch the online-store module summary only when viewing an ONLINE store.
+  // getSummary() NEVER throws (403/404 → { available:false }), so a non-ecom
+  // role simply yields available:false and the KPI cards degrade to Online-Store
+  // links instead of showing a wrong 0.
+  useEffect(() => {
+    if (!isOnlineStoreView) {
+      setOnlineSummary(null);
+      return;
+    }
+    let cancelled = false;
+    onlineStoreApi.getSummary().then((s) => {
+      if (!cancelled) setOnlineSummary(s);
+    });
+    return () => { cancelled = true; };
+  }, [isOnlineStoreView]);
 
   // Load data on mount + whenever the viewed store or cataloguer filter changes
   useEffect(() => {
@@ -313,6 +354,9 @@ export function InventoryPage() {
         .map((s: any) => ({
           id: String(s.store_id || s.id || s._id || ''),
           name: String(s.store_name || s.storeName || s.name || s.store_id || s.id || ''),
+          // Carry store_type so the page can tell an ONLINE (stockless) store
+          // from a physical shop and swap to the online-appropriate view.
+          store_type: String(s.store_type || ''),
         }))
         .filter((s: { id: string }) => s.id && (allStoreAccess || (user?.storeIds || []).includes(s.id)));
       setStores(mapped);
@@ -683,7 +727,10 @@ export function InventoryPage() {
 
   const tabList: Array<{ id: ViewTab; label: string; icon: typeof AlertTriangle; count?: number }> = [
     { id: 'alerts',         label: 'Alerts',          icon: AlertTriangle },
-    { id: 'catalog',        label: 'Catalog',         icon: Package, count: totalSKUs },
+    // Labelled "Stock ledger" (not "Catalog") so it never reads as a duplicate
+    // of the "Catalog" GROUP tab it lives under — one coherent, non-repeating
+    // nav. The tab id stays 'catalog' (deep-links/?tab=catalog unchanged).
+    { id: 'catalog',        label: 'Stock ledger',    icon: Package, count: totalSKUs },
     { id: 'display-layout', label: 'Display layout',  icon: LayoutGrid, count: Object.keys(fixturesMap).length || undefined },
     { id: 'low-stock',      label: 'Low stock',       icon: AlertTriangle, count: lowStockCount },
     { id: 'reorders',       label: 'Reorders',        icon: ShoppingCart },
@@ -731,10 +778,27 @@ export function InventoryPage() {
     tabGroups.find((g) => g.members.includes(activeTab))?.id ?? 'catalog';
   const activeGroup = tabGroups.find((g) => g.id === activeGroupId)!;
   const subTabs = tabList.filter((t) => activeGroup.members.includes(t.id));
-  const groupCount = (g: typeof tabGroups[number]): number | undefined => {
-    // Surface a count badge on the group when one of its child tabs has one.
-    const child = tabList.find((t) => g.members.includes(t.id) && typeof t.count === 'number');
-    return child?.count;
+
+  // ONLINE KPI value: the website counts come from GET /online-store/summary,
+  // which is gated to the e-commerce role set. While loading -> "…"; if the
+  // caller can't read the counts (available:false) -> a "View" link to the
+  // Online Store module rather than a misleading 0; otherwise the real number.
+  const onlineCounts = onlineSummary?.counts || {};
+  const renderOnlineValue = (n?: number | null) => {
+    if (onlineSummary == null) return <div className="v">…</div>;
+    if (!onlineSummary.available) {
+      return (
+        <button
+          type="button"
+          onClick={() => navigate('/online-store')}
+          className="v"
+          style={{ fontSize: 16, color: 'var(--bv)', background: 'none', border: 0, padding: 0, cursor: 'pointer' }}
+        >
+          View →
+        </button>
+      );
+    }
+    return <div className="v">{(n ?? 0).toLocaleString('en-IN')}</div>;
   };
 
   return (
@@ -755,24 +819,35 @@ export function InventoryPage() {
             {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
-          {canExport && (
-            <button onClick={exportInventoryCsv} className="btn sm">
-              <Download className="w-4 h-4" /> Export
+          {isOnlineStoreView ? (
+            // ONLINE store: the physical actions (export ledger, transfer stock,
+            // CSV opening-stock, add-to-a-store) don't apply — the primary CTA
+            // is the Online Store module itself.
+            <button onClick={() => navigate('/online-store')} className="btn sm primary">
+              <Globe className="w-4 h-4" /> Open online store
             </button>
-          )}
-          {canTransfer && (
-            <button onClick={() => setShowTransferModal(true)} className="btn sm">
-              <ArrowRightLeft className="w-4 h-4" /> New transfer
-            </button>
-          )}
-          {canAddProduct && (
+          ) : (
             <>
-              <button onClick={() => setShowCSVImport(true)} className="btn sm">
-                <Upload className="w-4 h-4" /> CSV import
-              </button>
-              <button onClick={() => navigate('/catalog/add')} className="btn sm primary">
-                <Plus className="w-4 h-4" /> Add product
-              </button>
+              {canExport && (
+                <button onClick={exportInventoryCsv} className="btn sm">
+                  <Download className="w-4 h-4" /> Export
+                </button>
+              )}
+              {canTransfer && (
+                <button onClick={() => setShowTransferModal(true)} className="btn sm">
+                  <ArrowRightLeft className="w-4 h-4" /> New transfer
+                </button>
+              )}
+              {canAddProduct && (
+                <>
+                  <button onClick={() => setShowCSVImport(true)} className="btn sm">
+                    <Upload className="w-4 h-4" /> CSV import
+                  </button>
+                  <button onClick={() => navigate('/catalog/add')} className="btn sm primary">
+                    <Plus className="w-4 h-4" /> Add product
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -787,7 +862,61 @@ export function InventoryPage() {
         </div>
       )}
 
-      {/* 6-cell stat strip (incl. Online) */}
+      {isOnlineStoreView ? (
+        <>
+          {/* ONLINE store explainer — an online store owns no stock of its own;
+              it sells from every shop's pooled stock (reserve-on-order). */}
+          <div
+            className="s-section"
+            style={{ padding: '12px 14px', display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14, background: 'var(--bv-50)', borderColor: 'var(--line)' }}
+          >
+            <Globe className="w-5 h-5" style={{ color: 'var(--bv)', flexShrink: 0, marginTop: 2 }} strokeWidth={1.8} />
+            <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+              <strong style={{ color: 'var(--ink)' }}>This online store sells from all shops' pooled stock — it holds no stock of its own.</strong>{' '}
+              Physical figures like stock value, low-stock and floor zones don't apply here; the numbers below reflect what's live on the website.{' '}
+              <button
+                type="button"
+                onClick={() => navigate('/online-store')}
+                style={{ color: 'var(--bv)', background: 'none', border: 0, padding: 0, cursor: 'pointer', fontWeight: 600 }}
+              >
+                Manage the online store →
+              </button>
+            </div>
+          </div>
+
+          {/* ONLINE stat strip — website-meaningful counts (default 5 columns).
+              Values come from GET /online-store/summary; unavailable to the
+              caller's role => a "View" link, never a wrong 0. */}
+          <div className="stat-strip">
+            <div>
+              <div className="l">Synced to website</div>
+              {renderOnlineValue(onlineCounts.products)}
+              <div className="d">products live on the store</div>
+            </div>
+            <div>
+              <div className="l">Collections</div>
+              {renderOnlineValue(onlineCounts.collections)}
+              <div className="d">merchandising sets</div>
+            </div>
+            <div>
+              <div className="l">Online orders</div>
+              {renderOnlineValue(onlineCounts.orders)}
+              <div className="d">channel = online</div>
+            </div>
+            <div>
+              <div className="l">Online customers</div>
+              {renderOnlineValue(onlineCounts.customers)}
+              <div className="d">joined from Shopify</div>
+            </div>
+            <div>
+              <div className="l">Images pending</div>
+              {renderOnlineValue(onlineCounts.images_pending_design)}
+              <div className="d">awaiting design work</div>
+            </div>
+          </div>
+        </>
+      ) : (
+      /* 6-cell stat strip (incl. Online) */
       <div className="stat-strip stat-strip-6">
         <div>
           <div className="l">Total SKUs</div>
@@ -822,12 +951,14 @@ export function InventoryPage() {
           <div className="d">active tab</div>
         </div>
       </div>
+      )}
 
-      {/* Primary tab groups (5) — Catalog · Stock health · Operations · Optical · Insights */}
+      {/* Primary tab groups (5) — Catalog · Stock health · Operations · Optical · Insights.
+          Count badges live only on the sub-tabs (precise, single source) — the
+          group row stays clean so it never double-prints a child's "· N". */}
       <div className="inv-tabs">
         {tabGroups.map((g) => {
           const GIcon = g.icon;
-          const cnt = groupCount(g);
           return (
             <button
               key={g.id}
@@ -840,7 +971,6 @@ export function InventoryPage() {
             >
               <GIcon className="w-4 h-4" />
               {g.label}
-              {typeof cnt === 'number' && <span className="count">· {cnt}</span>}
             </button>
           );
         })}
@@ -949,8 +1079,9 @@ export function InventoryPage() {
           </div>
         </div>
 
-        {/* Category Filters */}
-        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+        {/* Category Filters — compact ims-chip pills on a single wrapping row
+            (matches the CatalogManagerPage precedent; no horizontal scroll). */}
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => setSelectedCategory(null)}
             className={clsx('ims-chip', !selectedCategory && 'ims-chip--on')}
@@ -1008,28 +1139,50 @@ export function InventoryPage() {
               <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
             </div>
           ) : filteredInventory.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
-              <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>{searchQuery || selectedCategory || availabilityFilter !== 'all' ? 'No products found matching your filters' : 'No products in inventory'}</p>
-            </div>
+            isOnlineStoreView && !(searchQuery || selectedCategory || availabilityFilter !== 'all') ? (
+              // ONLINE store owns no physical stock, so the on-hand ledger is
+              // empty by design — point to the website catalogue instead.
+              <div className="text-center py-12 text-gray-500">
+                <Globe className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <p className="font-medium text-gray-700">This online store holds no stock of its own.</p>
+                <p className="text-sm mt-1">It sells from every shop's pooled stock. Manage what's listed on the website in the Online Store module.</p>
+                <button onClick={() => navigate('/online-store')} className="btn sm primary mt-4 inline-flex">
+                  <Globe className="w-4 h-4" /> Open online store
+                </button>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-gray-500">
+                <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <p>{searchQuery || selectedCategory || availabilityFilter !== 'all' ? 'No products found matching your filters' : 'No products in inventory'}</p>
+              </div>
+            )
           ) : (
             <>
+            {/* min-width forces the table to SCROLL horizontally inside this
+                container (never squash a column to one-word-per-line). Headers
+                are nowrap so "Product" can't clip to "…DUCT". */}
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full min-w-[1100px]">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Barcode</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">MRP</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Offer</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">In-Store</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Zone</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Online</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Location</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap min-w-[240px]">Product</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">SKU</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Barcode</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Category</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">MRP</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Offer</th>
+                    {/* Physical-only columns: an ONLINE store owns no stock and
+                        has no on-floor zone, so these are hidden there. */}
+                    {!isOnlineStoreView && (
+                      <>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase whitespace-nowrap">In-Store</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Zone</th>
+                      </>
+                    )}
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Online</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Location</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Status</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
@@ -1127,37 +1280,43 @@ export function InventoryPage() {
                         <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">
                           {formatCurrency(item.offerPrice || item.mrp || 0)}
                         </td>
-                        <td className="px-4 py-3 text-center">
-                          <span className="font-medium">{item.stock - (item.reserved || 0)}</span>
-                          {item.reserved > 0 && (
-                            <span className="text-xs text-amber-600 ml-1">+{item.reserved} reserved</span>
-                          )}
-                        </td>
-                        {/* v2-2b: Zone column — primary placement (fixture code + zone). Cell
-                            click deep-links to the Display layout tab with the fixture pre-selected. */}
-                        <td className="px-4 py-3 text-center">
-                          {(() => {
-                            const z = getZone(item.sku);
-                            if (!z) {
-                              return (
-                                <span className="text-xs text-gray-400" title="Not placed yet">-</span>
-                              );
-                            }
-                            return (
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); openFixtureInLayout(z.fixture.fixture_id); }}
-                                className={'zone-chip' + (z.fixture.lockable ? ' warn' : '')}
-                                title={`${z.fixture.name}${z.placement.position ? ' . ' + z.placement.position : ''} . click to open`}
-                              >
-                                {z.fixture.code}
-                                <span style={{ color: 'var(--ink-4)', fontWeight: 500, marginLeft: 2 }}>
-                                  . {z.fixture.zone}
-                                </span>
-                              </button>
-                            );
-                          })()}
-                        </td>
+                        {/* Physical-only cells (In-Store on-hand + on-floor Zone) —
+                            hidden for an ONLINE store to match the header. */}
+                        {!isOnlineStoreView && (
+                          <>
+                            <td className="px-4 py-3 text-center">
+                              <span className="font-medium">{item.stock - (item.reserved || 0)}</span>
+                              {item.reserved > 0 && (
+                                <span className="text-xs text-amber-600 ml-1">+{item.reserved} reserved</span>
+                              )}
+                            </td>
+                            {/* v2-2b: Zone column — primary placement (fixture code + zone). Cell
+                                click deep-links to the Display layout tab with the fixture pre-selected. */}
+                            <td className="px-4 py-3 text-center">
+                              {(() => {
+                                const z = getZone(item.sku);
+                                if (!z) {
+                                  return (
+                                    <span className="text-xs text-gray-400" title="Not placed yet">-</span>
+                                  );
+                                }
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); openFixtureInLayout(z.fixture.fixture_id); }}
+                                    className={'zone-chip' + (z.fixture.lockable ? ' warn' : '')}
+                                    title={`${z.fixture.name}${z.placement.position ? ' . ' + z.placement.position : ''} . click to open`}
+                                  >
+                                    {z.fixture.code}
+                                    <span style={{ color: 'var(--ink-4)', fontWeight: 500, marginLeft: 2 }}>
+                                      . {z.fixture.zone}
+                                    </span>
+                                  </button>
+                                );
+                              })()}
+                            </td>
+                          </>
+                        )}
                         <td className="px-4 py-3 text-center">
                           {(() => {
                             const o = getOnline(item);
