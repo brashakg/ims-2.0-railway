@@ -1,8 +1,10 @@
 # Register the full set of Shopify webhook topics IMS's signed receiver handles,
-# INCLUDING the three lifecycle-cleanup topics IMS now has handlers for:
+# INCLUDING the lifecycle-cleanup + abandoned-checkout topics IMS has handlers for:
 #   orders/delete      -> VOID the IMS online order (soft; never hard-delete)
 #   customers/delete   -> flag the IMS customer for data erasure (keep history)
 #   app/uninstalled    -> loud alert + integration-health record (token revoked)
+#   checkouts/create   -> capture abandoned-checkout essentials (contact only)
+#   checkouts/update   -> update the captured abandoned checkout (idempotent)
 #
 # The base BVI-retirement cutover set lives in
 # backend/api/services/shopify_push.py (CUTOVER_WEBHOOK_TOPICS); this runner
@@ -36,6 +38,8 @@ IMS_EXTRA_WEBHOOK_TOPICS = [
     "orders/delete",
     "customers/delete",
     "app/uninstalled",
+    "checkouts/create",
+    "checkouts/update",
 ]
 
 
