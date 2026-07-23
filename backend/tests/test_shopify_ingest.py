@@ -36,7 +36,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test_x")
 # Pin inclusive pricing so the assertions are deterministic regardless of env.
 os.environ["GST_PRICING_MODE"] = "inclusive"
 
-from api.services import shopify_ingest
+from api.services import online_order_mapper, shopify_ingest
 
 
 # ---------------------------------------------------------------------------
@@ -796,3 +796,106 @@ def test_fallback_exhausted_still_records_miss(wired, monkeypatch):
     misses = wired["db"].get_collection("online_stock_miss").docs
     assert len(misses) == 1
     assert misses[0]["detail"]["claimed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GUEST checkout (regression): a Shopify GUEST order has customer == None (the
+# key is PRESENT but null). Both the Rx-hold customer-id derivation and the
+# order-doc customer_id previously did payload.get("customer", {}).get("id") --
+# but the {} default only applies when the KEY IS ABSENT, so a present-but-None
+# customer made `.get("id")` raise "'NoneType' object has no attribute 'get'".
+# In ingest that raised out of the order-doc build; the mapper caught it fail-
+# soft and SKIPPED the whole paid order. This is exactly what skipped the one
+# live-import order (Shopify id 5582316962041, a Rs 483 CL-care solution guest
+# sale). A guest order must ALWAYS book -- with customer_id=None (a guest), NOT
+# be dropped. These reproduce the crash (they fail on origin/main) and pin the fix.
+# ---------------------------------------------------------------------------
+
+
+def _guest_order(order_id: int = 5582316962041, price: str = "483.00"):
+    """A Shopify GUEST orders/create payload mirroring the live-import skip:
+    customer == None, contact_email == None, one line with product_id == None /
+    variant_id == None (a CL-care solution -> Rx-exempt ACCESSORIES)."""
+    return {
+        "id": order_id,
+        "name": "44F73DD27C62D47866C3879B02908F22",
+        "financial_status": "paid",
+        "email": None,
+        "contact_email": None,
+        # GUEST: the key is present but null (NOT missing).
+        "customer": None,
+        "shipping_address": None,
+        "billing_address": None,
+        "line_items": [
+            {
+                "id": 9200,
+                "product_id": None,
+                "variant_id": None,
+                "title": "Bausch and Lomb Renu Fresh 355ml",
+                "product_type": "Solution",
+                "sku": "ASBAUSCHANDLOMBRENUFRESH355ML",
+                "quantity": 1,
+                "price": price,
+                "total_discount": "0.00",
+            }
+        ],
+    }
+
+
+def test_guest_checkout_ingest_books_order_not_skipped(wired, monkeypatch):
+    """ingest_shopify_order must BOOK a guest order (customer == None), not raise.
+    On origin/main this raises 'NoneType' object has no attribute 'get' out of the
+    order-doc build (the customer_id line)."""
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _guest_order(), topic="orders/create"
+    )
+    assert res["status"] == "created", "a paid guest order must always book"
+    assert res["rx_pending"] is False  # CL-care solution is Rx-exempt
+
+    order = wired["orders"].find_one({"shopify_order_id": "5582316962041"})
+    assert order is not None, "the guest order must be persisted"
+    # GUEST: no IMS customer linked (the raw Shopify id is null -> None), and the
+    # buyer name falls back to the generic online label. The sale is fully booked.
+    assert order["customer_id"] is None
+    assert order["customer_name"] == "Online Customer"
+    assert order["channel"] == "ONLINE"
+    assert order["payment_status"] == "PAID"
+    # Money: inclusive extraction keeps the all-in Rs 483.00 the customer paid.
+    assert order["grand_total"] == 483.0
+    assert order["amount_paid"] == 483.0
+    assert order["balance_due"] == 0.0
+    assert round(order["subtotal"], 2) == 483.0
+    # GST reconciles (taxable + tax == grand_total), whatever the resolved rate.
+    assert round(
+        sum(i["taxable_value"] + i["tax_amount"] for i in order["items"]), 2
+    ) == order["grand_total"]
+
+
+def test_guest_checkout_mapper_books_order_as_guest(wired, monkeypatch):
+    """map_shopify_order must BOOK a guest order and mark it is_guest_order, not
+    return {status: skipped}. On origin/main the underlying ingest crash bubbles
+    up and the mapper's fail-soft handler skips the whole order."""
+    import api.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+    # No usable phone/email on a guest -> no customer is (or should be) created;
+    # pin the customer repo to None so the resolution is deterministic.
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: None)
+
+    res = online_order_mapper.map_shopify_order(
+        _guest_order(), wired["db"], topic="orders/create"
+    )
+    assert res["status"] == "created", "the mapper must book the guest order"
+    assert res["customer_id"] is None  # guest: no IMS customer resolved
+
+    order = wired["orders"].find_one({"shopify_order_id": "5582316962041"})
+    assert order is not None
+    # The mapper's _stamp_order_customer nulls the phantom Shopify-id link and
+    # marks the sale as an unidentified guest, keeping the money on the order.
+    assert order["customer_id"] is None
+    assert order["is_guest_order"] is True
+    assert order["grand_total"] == 483.0
