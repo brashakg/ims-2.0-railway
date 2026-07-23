@@ -1368,9 +1368,15 @@ def ingest_shopify_order(
             # Prefer a pre-resolved IMS customer id (stamped by online_order_mapper)
             # so the Rx match uses the IMS customer's prescriptions; fall back to the
             # raw Shopify customer id (won't match IMS Rx -> safely over-holds).
+            # NB: use the `cust` local (an empty dict for a GUEST checkout where
+            # payload["customer"] is None), NOT payload.get("customer", {}) -- the
+            # default only applies when the KEY is absent, so a present-but-None
+            # customer would make `.get("id")` raise NoneType and (fail-soft) skip
+            # the whole order. A guest resolves rx_customer_id to None -> the Rx
+            # match simply finds nothing (flag-and-hold policy), never crashes.
             rx_customer_id = (
                 str(payload.get("_ims_customer_id") or "").strip()
-                or str(payload.get("customer", {}).get("id") or "")
+                or str(cust.get("id") or "")
                 or None
             )
             rx_eval = evaluate_rx_hold(db, items, rx_customer_id)
@@ -1429,7 +1435,11 @@ def ingest_shopify_order(
         "shopify_order_id": shopify_order_id,
         "shopify_order_name": payload.get("name"),  # e.g. "#1001"
         "store_id": store_id,
-        "customer_id": str(payload.get("customer", {}).get("id") or "") or None,
+        # GUEST-SAFE: `cust` is {} when payload["customer"] is None (a Shopify
+        # guest checkout). payload.get("customer", {}) would return that None and
+        # crash on .get("id"), skipping the whole paid order. A guest books with
+        # customer_id=None (the mapper then marks it is_guest_order).
+        "customer_id": str(cust.get("id") or "") or None,
         "customer_name": customer_name,
         "customer_phone": (cust.get("phone") if cust else "")
         or payload.get("phone")
