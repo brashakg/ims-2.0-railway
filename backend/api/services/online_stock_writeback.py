@@ -135,10 +135,19 @@ def skus_from_items(items_data: List[dict]) -> List[str]:
 def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str, int]:
     """Map each SKU -> IMS on-hand (AVAILABLE stock_units). store_id=None (the
     ONLY value the write-back uses) means POOLED across all stores -- the
-    quantity the online listing must reflect. Reuses
-    inventory._on_hand_by_product (the canonical on-hand math) after resolving
-    SKU -> product_id via the products collection. Fail-soft -> {} (the caller
-    must treat {} as UNKNOWN, never as zero)."""
+    quantity the online listing must reflect.
+
+    STRICT failure contract (audit round-2 P1): this feeds an ABSOLUTE stock
+    WRITER, so an aggregate failure must surface as {} (UNKNOWN -> the caller's
+    batch abort), never as default-0. inventory._on_hand_by_product swallows
+    aggregate exceptions internally ('except: pass' -> {}/PARTIAL without
+    raising), which would let a Mongo blip default every spine-resolved SKU to
+    0 and write absolute 0 live -- so the SAME canonical pipeline (identical
+    match/group, ON_HAND_STATUSES + EXCLUDED_STATUSES from item_events) is run
+    INLINE here: ANY exception, including one raised MID-ITERATION after some
+    rows were yielded, discards the partial result and returns {}. A pid absent
+    from a SUCCESSFULLY completed aggregate legitimately means zero on-hand and
+    only then defaults to 0."""
     if db is None or not skus:
         return {}
     try:
@@ -163,14 +172,49 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     if not sku_to_pid:
         return {}
 
+    # Canonical on-hand pipeline, inlined STRICT (mirrors
+    # inventory._on_hand_by_product's match/group exactly, without its
+    # exception swallow). The cursor is consumed INSIDE the try so a
+    # mid-iteration failure also discards the partial dict.
     try:
-        from ..routers.inventory import _on_hand_by_product
+        from .item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
 
-        on_hand_by_pid = _on_hand_by_product(db, list(sku_to_pid.values()), store_id)
+        stock_coll = db.get_collection("stock_units")
+        if stock_coll is None:
+            return {}
+        match: Dict[str, Any] = {
+            "product_id": {"$in": list(sku_to_pid.values())},
+            "status": {"$nin": list(EXCLUDED_STATUSES)},
+            "$or": [
+                {"status": {"$in": list(ON_HAND_STATUSES)}},
+                {"status": {"$exists": False}},
+                {"status": None},
+            ],
+        }
+        if store_id:
+            match["store_id"] = store_id
+        on_hand_by_pid: Dict[str, int] = {}
+        for row in stock_coll.aggregate(
+            [
+                {"$match": match},
+                {
+                    "$group": {
+                        "_id": "$product_id",
+                        "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                },
+            ]
+        ):
+            on_hand_by_pid[row.get("_id")] = int(row.get("n", 0) or 0)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] on-hand aggregate failed: %s", exc)
+        logger.warning(
+            "[STOCK_WRITEBACK] on-hand aggregate failed (STRICT -> unknown, "
+            "batch will abort rather than write 0): %s",
+            exc,
+        )
         return {}
 
+    # The aggregate COMPLETED: a pid it omitted genuinely has zero on-hand.
     out: Dict[str, int] = {}
     for sku, pid in sku_to_pid.items():
         out[sku] = int(on_hand_by_pid.get(pid, 0) or 0)
@@ -251,11 +295,13 @@ async def writeback_skus(
     #    whole chain's availability, never one shop's).
     on_hand = _on_hand_for_skus(db, list(targets.keys()), None)
     if not on_hand:
-        # UNKNOWN on-hand for the whole batch (lookup failed or no spine rows).
-        # An absolute stock WRITER must never fail soft to 0 -- writing 0 would
-        # delist every sold SKU that is physically in stock. Abort loudly.
+        # UNKNOWN on-hand for the whole batch (lookup/aggregate failed or no
+        # spine rows). An absolute stock WRITER must never fail soft to 0 --
+        # writing 0 would delist every sold SKU that is physically in stock.
+        # Abort loudly.
         summary["skipped_no_onhand"] = len(targets)
-        summary["skipped_no_mapping"] = len(distinct) - len(targets)
+        unmapped = [s for s in distinct if s not in targets]
+        summary["skipped_no_mapping"] = len(unmapped)
         logger.warning(
             "[STOCK_WRITEBACK] on-hand UNKNOWN for all %d targeted SKU(s) "
             "(lookup failed or products spine has no rows) -- aborting the "
@@ -263,6 +309,11 @@ async def writeback_skus(
             len(targets),
             ", ".join(sorted(targets.keys())[:20]),
         )
+        # The abort must not swallow the guard-gap check for the UNMAPPED
+        # subset (round-2 rider): a sellable-online SKU with no mapping still
+        # alerts even when this batch aborted on unknown on-hand.
+        if unmapped:
+            _alert_unmapped_online(db, unmapped, summary)
         _record_run(db, summary)
         return summary
 

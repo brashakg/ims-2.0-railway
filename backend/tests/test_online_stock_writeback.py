@@ -399,6 +399,118 @@ def test_sale_pushes_pooled_all_store_on_hand_not_selling_store(monkeypatch):
     assert q["quantity"] == 10  # POOLED (1 at A + 9 at B), not A's remainder
 
 
+class _RaisingStock:
+    """stock_units whose aggregate raises IMMEDIATELY (Mongo blip)."""
+
+    def aggregate(self, _pipeline):
+        raise RuntimeError("mongo aggregate blew up")
+
+
+class _MidFailStock:
+    """stock_units whose aggregate yields ONE row then raises mid-iteration
+    (cursor death) -- the partial result must be discarded, never trusted."""
+
+    def aggregate(self, _pipeline):
+        def _gen():
+            yield {"_id": "P1", "n": 3}
+            raise RuntimeError("cursor died mid-iteration")
+
+        return _gen()
+
+
+class _SyncRunsColl:
+    def __init__(self):
+        self.rows = []
+
+    def insert_one(self, doc):
+        self.rows.append(doc)
+
+
+def _raising_db(stock, sync_runs):
+    """_SpineDb + a sync_runs capture collection so the REAL _record_run runs."""
+    db = _SpineDb(
+        _SpineProducts(
+            [{"sku": "SP-1", "product_id": "P1"}, {"sku": "SP-2", "product_id": "P2"}]
+        ),
+        stock,
+    )
+    db._colls["sync_runs"] = sync_runs
+    return db
+
+
+def test_aggregate_raise_aborts_batch_never_writes_zero(monkeypatch):
+    """Round-2 P1: a stock_units aggregate that RAISES must flow into the
+    batch abort (not default every spine-resolved SKU to 0 as the swallowed
+    inventory helper did). Zero Shopify calls, skipped_no_onhand ==
+    len(targets), not-ok sync_runs row."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {
+            "SP-1": {"inventory_item_id": "991", "location_id": "loc-1"},
+            "SP-2": {"inventory_item_id": "992", "location_id": "loc-1"},
+        },
+    )
+    sync_runs = _SyncRunsColl()
+    db = _raising_db(_RaisingStock(), sync_runs)
+
+    summary = _run(wb.writeback_skus(db, ["SP-1", "SP-2"], "STORE-A"))
+    assert _FakeAsyncClient.calls == []          # ZERO Shopify writes
+    assert summary["pushed"] == 0
+    assert summary["skipped_no_onhand"] == 2     # == len(targets)
+    assert len(sync_runs.rows) == 1              # run recorded...
+    assert sync_runs.rows[0]["ok"] is False      # ...as NOT ok
+    assert "on-hand UNKNOWN" in sync_runs.rows[0]["error"]
+
+
+def test_aggregate_mid_iteration_raise_discards_partial_and_aborts(monkeypatch):
+    """Round-2 P1 (worse mode): the cursor yields one healthy row THEN dies.
+    The partial result must be discarded -- surviving pids must not look
+    healthy while missing pids silently get 0. Also pins the abort-branch
+    rider: an unmapped sellable-online SKU in the same batch STILL alerts."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {
+            "SP-1": {"inventory_item_id": "991", "location_id": "loc-1"},
+            "SP-2": {"inventory_item_id": "992", "location_id": "loc-1"},
+        },
+    )
+    # A third sold SKU with NO mapping that IS sellable online -> must alert
+    # even though the batch aborts (round-2 rider).
+    monkeypatch.setattr(
+        oc, "online_status_for_skus",
+        lambda db, skus: {
+            "SP-GAP": {
+                "online": True,
+                "sellable_online": True,
+                "online_stock": None,
+                "status": "PUBLISHED",
+            }
+        },
+    )
+    filed = {}
+    monkeypatch.setattr(
+        wb, "_file_guard_gap_task", lambda db, skus: filed.setdefault("skus", skus)
+    )
+    sync_runs = _SyncRunsColl()
+    db = _raising_db(_MidFailStock(), sync_runs)
+
+    summary = _run(wb.writeback_skus(db, ["SP-1", "SP-2", "SP-GAP"], "STORE-A"))
+    assert _FakeAsyncClient.calls == []          # ZERO Shopify writes
+    assert summary["pushed"] == 0
+    assert summary["skipped_no_onhand"] == 2     # == len(targets)
+    assert summary["skipped_no_mapping"] == 1    # SP-GAP
+    assert summary["unmapped_online"] == 1       # rider: gap still alerted
+    assert filed["skus"] == ["SP-GAP"]
+    assert len(sync_runs.rows) == 1
+    assert sync_runs.rows[0]["ok"] is False
+
+
 def test_unknown_on_hand_aborts_batch_never_writes_zero(monkeypatch):
     """Fix-round P1: when the on-hand lookup returns {} for a non-empty target
     set (Mongo blip / missing spine rows), the batch must ABORT with a not-ok
