@@ -1329,7 +1329,9 @@ export function InventoryPage() {
                                   <Globe className="w-3 h-3" strokeWidth={2} />
                                   Online
                                 </span>
-                                <span className="text-xs text-gray-600">{o.online_stock} online</span>
+                                {typeof o.online_stock === 'number' && (
+                                  <span className="text-xs text-gray-600">{o.online_stock} online</span>
+                                )}
                               </div>
                             );
                           })()}
@@ -1710,7 +1712,14 @@ export function InventoryPage() {
           ['In stock', String(detailItem.stock ?? 0)],
           ['Reserved', String(detailItem.reserved ?? 0)],
           ['Available', String(available)],
-          ['Online', online?.online ? `Yes (${online.online_stock ?? 0} online)` : 'In-store only'],
+          [
+            'Online',
+            online?.online
+              ? typeof online.online_stock === 'number'
+                ? `Yes (${online.online_stock} online)`
+                : 'Yes'
+              : 'In-store only',
+          ],
           ['Location', detailItem.location || '-'],
           // Attribution is a manager surface (mirrors the backend gate).
           ...(canSeeCataloguers

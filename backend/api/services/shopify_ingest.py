@@ -1656,14 +1656,11 @@ def ingest_shopify_order(
     try:
         from .online_stock_writeback import writeback_after_sale
 
-        # Re-publish the reduced online quantity for EVERY store that actually
-        # gave up units (fallback included), not just the preferred store.
-        wb_stores = [fulfillment_store]
-        for s in fulfilled_stores:
-            if s not in wb_stores:
-                wb_stores.append(s)
-        for s in wb_stores:
-            writeback_after_sale(db, items, s)
+        # ONE write-back for the whole order: the pushed quantity is the POOLED
+        # all-store on-hand (store_id is context only), so per-store pushes
+        # would be identical writes racing each other. The preferred
+        # fulfillment store rides along purely as logging context.
+        writeback_after_sale(db, items, fulfillment_store)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[SHOPIFY_INGEST] online stock writeback skipped for %s: %s",

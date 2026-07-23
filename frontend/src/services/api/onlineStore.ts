@@ -75,8 +75,9 @@ const PLACEHOLDER: OnlineStoreSummary = {
 export interface StockTallyRow {
   sku: string;
   name?: string | null;
-  /** What the storefront currently lists (Shopify/BVI online_stock). */
-  online_listed_qty: number;
+  /** What the storefront currently lists (LIVE Shopify read); null = unknown
+   *  (live read unavailable — rendered as an em dash, never a fake 0). */
+  online_listed_qty: number | null;
   /** AVAILABLE serialized stock units (physical on-hand). */
   on_hand: number;
   /** RESERVED serialized stock units. */
@@ -96,8 +97,14 @@ export interface StockTallySummary {
   total_on_hand: number;
   total_reserved: number;
   total_sellable: number;
-  /** Whether the e-commerce Postgres bridge is configured (else listed=0). */
+  /** IMS catalog carries Shopify-mapped products (post-BVI truth source). */
   online_configured: boolean;
+  /** True ONLY when the live Shopify read covered EVERY mapped SKU; partial
+   *  coverage keeps this false (uncovered rows show an em dash, no risk). */
+  listed_qty_live?: boolean;
+  /** Live-read coverage: mapped SKUs that got a live quantity vs all mapped. */
+  listed_live_rows?: number;
+  listed_mapped_rows?: number;
 }
 
 export interface StockTallyResult {
@@ -118,6 +125,9 @@ const STOCK_TALLY_PLACEHOLDER: StockTallyResult = {
     total_reserved: 0,
     total_sellable: 0,
     online_configured: false,
+    listed_qty_live: false,
+    listed_live_rows: 0,
+    listed_mapped_rows: 0,
   },
   available: false,
 };
@@ -127,7 +137,11 @@ function _tallyRowFrom(r: Record<string, any>): StockTallyRow {
   return {
     sku: String(r.sku ?? ''),
     name: r.name ?? null,
-    online_listed_qty: num(r.online_listed_qty),
+    // null is meaningful here: "listed qty unknown" (live Shopify read off).
+    online_listed_qty:
+      typeof r.online_listed_qty === 'number' && isFinite(r.online_listed_qty)
+        ? r.online_listed_qty
+        : null,
     on_hand: num(r.on_hand),
     reserved: num(r.reserved),
     sellable: num(r.sellable),
@@ -176,6 +190,9 @@ export const onlineStoreApi = {
           total_reserved: num(s.total_reserved),
           total_sellable: num(s.total_sellable),
           online_configured: !!s.online_configured,
+          listed_qty_live: !!s.listed_qty_live,
+          listed_live_rows: num(s.listed_live_rows),
+          listed_mapped_rows: num(s.listed_mapped_rows),
         },
         available: true,
       };
@@ -1515,9 +1532,17 @@ export interface SyncParity {
 /** Sync-health summary (mirrors online_sync_health.sync_health). Only the fields
  *  the panel surfaces are typed; the rest pass through untyped. */
 export interface SyncHealth {
+  /** IMS catalog carries Shopify-mapped objects (post-BVI truth source). */
   online_configured?: boolean | null;
   last_successful_shopify_sync_at?: string | null;
   last_shopify_sync?: { found?: boolean; ok?: boolean; ran_at?: string | null } | null;
+  /** Last LIVE catalog push (max ecom.last_pushed_at) — the push engine does
+   *  not write sync_runs, so this is its own signal (audit OS-049). */
+  catalog_push?: {
+    found?: boolean;
+    last_pushed_at?: string | null;
+    pushed_products?: number;
+  } | null;
   reconcile?: { checked?: boolean; oversell_risk?: number; count?: number } | null;
   webhooks?: { checked?: boolean; failed?: number; skipped?: number } | null;
   drift?: { checked?: boolean; reason?: string | null } | null;

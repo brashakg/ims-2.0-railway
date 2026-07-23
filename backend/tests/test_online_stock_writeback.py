@@ -9,11 +9,12 @@ website can't oversell. These tests pin:
   * DISPATCH_MODE=off  -> NO live Shopify call (default == today, byte-identical)
   * DISPATCH_MODE=live -> a real inventorySetQuantities call is made
   * no Shopify mapping for a SKU -> skipped (no-op, not every product is online)
+  * BUT an ONLINE SKU with no mapping is a GUARD GAP -> loud alert + SYSTEM task
   * a setter EXCEPTION never propagates into the sale path
   * the GraphQL setter is gated on IMS_SHOPIFY_WRITES then DISPATCH_MODE
 
-Everything is mocked: the BVI Postgres target resolver, the Mongo on-hand
-lookup, and the Shopify GraphQL HTTP call. No DB / network is touched.
+Everything is mocked: the IMS Mongo target resolver (online_catalog), the
+on-hand lookup, and the Shopify GraphQL HTTP call. No DB / network is touched.
 """
 
 import asyncio
@@ -176,14 +177,14 @@ def test_setter_reports_user_errors_as_failure(monkeypatch):
 def test_sale_pushes_on_hand_minus_buffer_to_mapped_variant(monkeypatch):
     _live_shopify(monkeypatch)
     monkeypatch.setenv("ONLINE_STOCK_SAFETY_BUFFER", "1")
-    # SKU -> Shopify target (as if resolved from the BVI Postgres).
+    # SKU -> Shopify target (as if resolved from the IMS Mongo mapping).
     monkeypatch.setattr(
         wb, "_resolve_db", lambda db: object())  # truthy db; collections mocked below
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         oc, "online_variant_targets_for_skus",
-        lambda skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
     )
     # on-hand AFTER the sale = 3 units left for SP-1.
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-1": 3})
@@ -201,14 +202,412 @@ def test_sale_pushes_on_hand_minus_buffer_to_mapped_variant(monkeypatch):
 def test_no_mapping_is_skipped(monkeypatch):
     _live_shopify(monkeypatch)
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
-    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda skus: {})
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda db, skus: {})
+    # The SKU is NOT listed online -> a silent, correct no-op (no alert).
+    monkeypatch.setattr(oc, "online_status_for_skus", lambda db, skus: {})
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {})
 
     summary = _run(wb.writeback_skus(object(), ["NOT-ONLINE"], "store-1"))
     assert summary["pushed"] == 0
     assert summary["skipped_no_mapping"] == 1
+    assert summary["unmapped_online"] == 0  # not online -> no guard-gap alert
     assert _FakeAsyncClient.calls == []  # nothing pushed
+
+
+def test_unmapped_but_sellable_online_sku_alerts_loudly(monkeypatch):
+    """OS-015 guard-gap: a sold SKU that is SELLABLE online but has no Shopify
+    inventory mapping must alert LOUDLY (summary flag + deduped SYSTEM task),
+    never fail soft-silent."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda db, skus: {})
+    monkeypatch.setattr(
+        oc, "online_status_for_skus",
+        lambda db, skus: {
+            "SP-ONLINE": {
+                "online": True,
+                "sellable_online": True,
+                "online_stock": None,
+                "status": "PUBLISHED",
+            }
+        },
+    )
+    filed = {}
+    monkeypatch.setattr(
+        wb, "_file_guard_gap_task", lambda db, skus: filed.setdefault("skus", skus)
+    )
+    recorded = {}
+    monkeypatch.setattr(
+        wb, "_record_run", lambda db, summary: recorded.update(summary)
+    )
+
+    summary = _run(wb.writeback_skus(object(), ["SP-ONLINE", "SP-OFFLINE"], "s1"))
+    assert summary["skipped_no_mapping"] == 2
+    assert summary["unmapped_online"] == 1      # only the sellable SKU alerts
+    assert filed["skus"] == ["SP-ONLINE"]       # SYSTEM task filed for it
+    assert recorded.get("unmapped_online") == 1  # and the run was recorded
+    assert _FakeAsyncClient.calls == []          # nothing pushed
+
+
+def test_unmapped_draft_sku_never_alerts(monkeypatch):
+    """Fix-round P1: an unpurchasable Shopify DRAFT (gid present, status DRAFT
+    -- e.g. the 2,032 staged drafts) canNOT oversell, so selling its in-store
+    stock must NOT fire the guard-gap alarm or file a task."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(oc, "online_variant_targets_for_skus", lambda db, skus: {})
+    monkeypatch.setattr(
+        oc, "online_status_for_skus",
+        lambda db, skus: {
+            "SP-DRAFT": {
+                "online": True,            # display flag: pushed as a draft
+                "sellable_online": False,  # but customers cannot buy it
+                "online_stock": None,
+                "status": "DRAFT",
+            }
+        },
+    )
+    filed = {}
+    monkeypatch.setattr(
+        wb, "_file_guard_gap_task", lambda db, skus: filed.setdefault("skus", skus)
+    )
+
+    summary = _run(wb.writeback_skus(object(), ["SP-DRAFT"], "s1"))
+    assert summary["skipped_no_mapping"] == 1
+    assert summary["unmapped_online"] == 0   # draft -> no guard gap
+    assert filed == {}                        # no task filed
+    assert _FakeAsyncClient.calls == []
+
+
+def test_guard_gap_task_merges_new_skus_into_open_task(monkeypatch):
+    """Fix-round P1: while a guard-gap task is OPEN, a NEW distinct gap must
+    not vanish behind the dedupe -- the new SKUs are $addToSet-merged into the
+    open task's payload."""
+    import api.services.task_triggers as tt
+
+    # Simulate "a task with this source_ref is already open" -> dedupe None.
+    monkeypatch.setattr(tt, "create_system_task", lambda *a, **k: None)
+
+    calls = {}
+
+    class _TasksColl:
+        def update_one(self, flt, update):
+            calls["flt"] = flt
+            calls["update"] = update
+
+    class _Db:
+        def get_collection(self, name):
+            return _TasksColl() if name == "tasks" else None
+
+    wb._file_guard_gap_task(_Db(), ["SKU-NEW-1", "SKU-NEW-2"])
+    assert calls["flt"]["source_ref"] == wb._GUARD_GAP_TASK_REF
+    assert calls["flt"]["status"]["$in"] == ["OPEN", "IN_PROGRESS", "ESCALATED"]
+    assert calls["update"]["$addToSet"]["payload.skus"]["$each"] == [
+        "SKU-NEW-1",
+        "SKU-NEW-2",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# POOLED availability (fix-round P0) + unknown-on-hand safety (fix-round P1)
+# ---------------------------------------------------------------------------
+
+
+class _SpineProducts:
+    """products collection: sku -> product_id resolution."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def find(self, query=None, _proj=None, *_a, **_k):
+        skus = ((query or {}).get("sku") or {}).get("$in") or []
+        return iter([dict(r) for r in self._rows if r.get("sku") in skus])
+
+
+class _SpineStock:
+    """stock_units collection: honours the aggregate's product_id + OPTIONAL
+    store_id match, so the test proves the write-back does NOT scope the
+    on-hand math to the selling store."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def aggregate(self, pipeline):
+        match = {}
+        for stage in pipeline:
+            if "$match" in stage:
+                match = stage["$match"]
+        pid_in = ((match.get("product_id") or {}).get("$in")) or []
+        store = match.get("store_id")
+        counts = {}
+        for r in self._rows:
+            if r.get("product_id") not in pid_in:
+                continue
+            if store and r.get("store_id") != store:
+                continue
+            if r.get("status") not in (None, "AVAILABLE"):
+                continue
+            pid = r.get("product_id")
+            counts[pid] = counts.get(pid, 0) + 1
+        return iter([{"_id": pid, "n": n} for pid, n in counts.items()])
+
+
+class _SpineDb:
+    is_connected = True
+
+    def __init__(self, products, stock):
+        self._colls = {"products": products, "stock_units": stock}
+
+    def get_collection(self, name):
+        return self._colls.get(name)
+
+
+def test_sale_pushes_pooled_all_store_on_hand_not_selling_store(monkeypatch):
+    """Fix-round P0: 1 unit at Store A + 9 at Store B; the sale happens at A.
+    The pushed absolute quantity must be the POOLED all-store on-hand (10),
+    NEVER the selling store's remainder -- the online store sells from every
+    shop combined, so scoping to A would zero/underlist a stocked product."""
+    _live_shopify(monkeypatch)
+    monkeypatch.delenv("ONLINE_STOCK_SAFETY_BUFFER", raising=False)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+    )
+    monkeypatch.setattr(wb, "_safety_buffer", lambda db: 0)
+    monkeypatch.setattr(wb, "_record_run", lambda db, summary: None)
+
+    db = _SpineDb(
+        _SpineProducts([{"sku": "SP-1", "product_id": "P1"}]),
+        _SpineStock(
+            [{"product_id": "P1", "store_id": "STORE-A", "status": "AVAILABLE"}]
+            + [
+                {"product_id": "P1", "store_id": "STORE-B", "status": "AVAILABLE"}
+                for _ in range(9)
+            ]
+        ),
+    )
+    # Sale at STORE-A (which holds only 1 unit).
+    summary = _run(wb.writeback_skus(db, ["SP-1"], "STORE-A"))
+    assert summary["pushed"] == 1
+    assert summary["store_id"] == "STORE-A"  # context only
+    q = _FakeAsyncClient.calls[0]["json"]["variables"]["input"]["quantities"][0]
+    assert q["quantity"] == 10  # POOLED (1 at A + 9 at B), not A's remainder
+
+
+class _RaisingStock:
+    """stock_units whose aggregate raises IMMEDIATELY (Mongo blip)."""
+
+    def aggregate(self, _pipeline):
+        raise RuntimeError("mongo aggregate blew up")
+
+
+class _MidFailStock:
+    """stock_units whose aggregate yields ONE row then raises mid-iteration
+    (cursor death) -- the partial result must be discarded, never trusted."""
+
+    def aggregate(self, _pipeline):
+        def _gen():
+            yield {"_id": "P1", "n": 3}
+            raise RuntimeError("cursor died mid-iteration")
+
+        return _gen()
+
+
+class _SyncRunsColl:
+    def __init__(self):
+        self.rows = []
+
+    def insert_one(self, doc):
+        self.rows.append(doc)
+
+
+def _raising_db(stock, sync_runs):
+    """_SpineDb + a sync_runs capture collection so the REAL _record_run runs."""
+    db = _SpineDb(
+        _SpineProducts(
+            [{"sku": "SP-1", "product_id": "P1"}, {"sku": "SP-2", "product_id": "P2"}]
+        ),
+        stock,
+    )
+    db._colls["sync_runs"] = sync_runs
+    return db
+
+
+def test_aggregate_raise_aborts_batch_never_writes_zero(monkeypatch):
+    """Round-2 P1: a stock_units aggregate that RAISES must flow into the
+    batch abort (not default every spine-resolved SKU to 0 as the swallowed
+    inventory helper did). Zero Shopify calls, skipped_no_onhand ==
+    len(targets), not-ok sync_runs row."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {
+            "SP-1": {"inventory_item_id": "991", "location_id": "loc-1"},
+            "SP-2": {"inventory_item_id": "992", "location_id": "loc-1"},
+        },
+    )
+    sync_runs = _SyncRunsColl()
+    db = _raising_db(_RaisingStock(), sync_runs)
+
+    summary = _run(wb.writeback_skus(db, ["SP-1", "SP-2"], "STORE-A"))
+    assert _FakeAsyncClient.calls == []          # ZERO Shopify writes
+    assert summary["pushed"] == 0
+    assert summary["skipped_no_onhand"] == 2     # == len(targets)
+    assert len(sync_runs.rows) == 1              # run recorded...
+    assert sync_runs.rows[0]["ok"] is False      # ...as NOT ok
+    assert "on-hand UNKNOWN" in sync_runs.rows[0]["error"]
+
+
+def test_aggregate_mid_iteration_raise_discards_partial_and_aborts(monkeypatch):
+    """Round-2 P1 (worse mode): the cursor yields one healthy row THEN dies.
+    The partial result must be discarded -- surviving pids must not look
+    healthy while missing pids silently get 0. Also pins the abort-branch
+    rider: an unmapped sellable-online SKU in the same batch STILL alerts."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {
+            "SP-1": {"inventory_item_id": "991", "location_id": "loc-1"},
+            "SP-2": {"inventory_item_id": "992", "location_id": "loc-1"},
+        },
+    )
+    # A third sold SKU with NO mapping that IS sellable online -> must alert
+    # even though the batch aborts (round-2 rider).
+    monkeypatch.setattr(
+        oc, "online_status_for_skus",
+        lambda db, skus: {
+            "SP-GAP": {
+                "online": True,
+                "sellable_online": True,
+                "online_stock": None,
+                "status": "PUBLISHED",
+            }
+        },
+    )
+    filed = {}
+    monkeypatch.setattr(
+        wb, "_file_guard_gap_task", lambda db, skus: filed.setdefault("skus", skus)
+    )
+    sync_runs = _SyncRunsColl()
+    db = _raising_db(_MidFailStock(), sync_runs)
+
+    summary = _run(wb.writeback_skus(db, ["SP-1", "SP-2", "SP-GAP"], "STORE-A"))
+    assert _FakeAsyncClient.calls == []          # ZERO Shopify writes
+    assert summary["pushed"] == 0
+    assert summary["skipped_no_onhand"] == 2     # == len(targets)
+    assert summary["skipped_no_mapping"] == 1    # SP-GAP
+    assert summary["unmapped_online"] == 1       # rider: gap still alerted
+    assert filed["skus"] == ["SP-GAP"]
+    assert len(sync_runs.rows) == 1
+    assert sync_runs.rows[0]["ok"] is False
+
+
+def test_unknown_on_hand_aborts_batch_never_writes_zero(monkeypatch):
+    """Fix-round P1: when the on-hand lookup returns {} for a non-empty target
+    set (Mongo blip / missing spine rows), the batch must ABORT with a not-ok
+    run -- writing absolute 0 would delist in-stock products."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {
+            "SP-1": {"inventory_item_id": "991", "location_id": "loc-1"},
+            "SP-2": {"inventory_item_id": "992", "location_id": "loc-1"},
+        },
+    )
+    monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {})
+    recorded = {}
+    monkeypatch.setattr(wb, "_record_run", lambda db, summary: recorded.update(summary))
+
+    summary = _run(wb.writeback_skus(object(), ["SP-1", "SP-2"], "s1"))
+    assert _FakeAsyncClient.calls == []          # ZERO Shopify writes
+    assert summary["pushed"] == 0
+    assert summary["skipped_no_onhand"] == 2
+    assert recorded.get("skipped_no_onhand") == 2  # run recorded (not-ok)
+
+
+def test_record_run_flags_unknown_on_hand_as_not_ok():
+    """The abort path's sync_runs row is NOT ok and says why."""
+    rows = []
+
+    class _Coll:
+        def insert_one(self, doc):
+            rows.append(doc)
+
+    class _Db:
+        def get_collection(self, name):
+            return _Coll()
+
+    wb._record_run(
+        _Db(),
+        {"pushed": 0, "failed": 0, "unmapped_online": 0,
+         "skipped_no_onhand": 2, "source": "sale"},
+    )
+    assert len(rows) == 1
+    assert rows[0]["ok"] is False
+    assert "on-hand UNKNOWN" in rows[0]["error"]
+
+
+def test_partially_unknown_on_hand_skips_only_missing_sku(monkeypatch):
+    """A SKU absent from the on-hand map is skipped; a SKU PRESENT with 0
+    still pushes 0 (that IS the oversell guard)."""
+    _live_shopify(monkeypatch)
+    import api.services.online_catalog as oc
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
+    monkeypatch.setattr(
+        oc, "online_variant_targets_for_skus",
+        lambda db, skus: {
+            "SP-ZERO": {"inventory_item_id": "991", "location_id": "loc-1"},
+            "SP-MISSING": {"inventory_item_id": "992", "location_id": "loc-1"},
+        },
+    )
+    monkeypatch.setattr(wb, "_safety_buffer", lambda db: 0)
+    # SP-ZERO is KNOWN to be sold out (0); SP-MISSING is unknown.
+    monkeypatch.setattr(
+        wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-ZERO": 0}
+    )
+    monkeypatch.setattr(wb, "_record_run", lambda db, summary: None)
+
+    summary = _run(wb.writeback_skus(object(), ["SP-ZERO", "SP-MISSING"], "s1"))
+    assert summary["pushed"] == 1
+    assert summary["skipped_no_onhand"] == 1
+    assert len(_FakeAsyncClient.calls) == 1
+    q = _FakeAsyncClient.calls[0]["json"]["variables"]["input"]["quantities"][0]
+    assert q["inventoryItemId"] == "gid://shopify/InventoryItem/991"
+    assert q["quantity"] == 0  # genuinely-zero pushes 0
+
+
+def test_record_run_writes_sync_row_for_guard_gap():
+    """A guard-gap run (unmapped_online > 0) writes a NOT-ok sync_runs row so
+    the sync-health tile can see it; a pure no-op run stays silent."""
+    rows = []
+
+    class _Coll:
+        def insert_one(self, doc):
+            rows.append(doc)
+
+    class _Db:
+        def get_collection(self, name):
+            return _Coll()
+
+    wb._record_run(_Db(), {"pushed": 0, "failed": 0, "unmapped_online": 2, "source": "sale"})
+    assert len(rows) == 1
+    assert rows[0]["ok"] is False
+    assert "oversell-guard gap" in rows[0]["error"]
+
+    rows.clear()
+    wb._record_run(_Db(), {"pushed": 0, "failed": 0, "unmapped_online": 0, "source": "sale"})
+    assert rows == []  # pure no-op -> no spam
 
 
 def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):
@@ -217,10 +616,10 @@ def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):
     monkeypatch.setattr(nexus_providers, "dispatch_mode", lambda: "off")
     monkeypatch.setattr(nexus_providers.httpx, "AsyncClient", _FakeAsyncClient)
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         oc, "online_variant_targets_for_skus",
-        lambda skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
     )
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-1": 3})
     monkeypatch.setattr(wb, "_record_run", lambda db, summary: None)
@@ -234,10 +633,10 @@ def test_dispatch_off_makes_no_live_call_via_orchestrator(monkeypatch):
 def test_setter_exception_does_not_propagate(monkeypatch):
     # The orchestrator must swallow a setter raise and keep going.
     import api.services.online_catalog as oc
-    monkeypatch.setattr(oc, "ecommerce_db_configured", lambda: True)
+    monkeypatch.setattr(oc, "online_mapping_available", lambda db: True)
     monkeypatch.setattr(
         oc, "online_variant_targets_for_skus",
-        lambda skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
+        lambda db, skus: {"SP-1": {"inventory_item_id": "999", "location_id": "loc-1"}},
     )
     monkeypatch.setattr(wb, "_on_hand_for_skus", lambda db, skus, store: {"SP-1": 3})
     monkeypatch.setattr(wb, "_record_run", lambda db, summary: None)

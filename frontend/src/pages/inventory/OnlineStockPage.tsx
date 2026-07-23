@@ -1,9 +1,10 @@
 // ============================================================================
 // IMS 2.0 - Online vs In-store Stock (prevent overselling)
 // ============================================================================
-// Compares in-store physical on-hand (IMS) with online-listed stock
-// (BVI/Shopify) per SKU, flags overselling risk, and recommends a safe online
-// allocation (on-hand minus a safety buffer you control).
+// Compares in-store physical on-hand (IMS) with online-listed stock (a live
+// Shopify read via the IMS catalog mapping) per SKU, flags overselling risk,
+// and recommends a safe online allocation (on-hand minus a safety buffer you
+// control).
 
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from 'lucide-react';
@@ -16,12 +17,14 @@ interface StoreOpt { store_id: string; store_name?: string; store_code?: string;
 const STATUS_STYLE: Record<string, string> = {
   OVERSELL_RISK: 'bg-red-100 text-red-800 border-red-200',
   OVER_ALLOCATED: 'bg-amber-100 text-amber-800 border-amber-200',
+  LISTED_UNKNOWN: 'bg-blue-50 text-blue-700 border-blue-200',
   OK: 'bg-green-100 text-green-800 border-green-200',
   NOT_ONLINE: 'bg-gray-100 text-gray-500 border-gray-200',
 };
 const STATUS_LABEL: Record<string, string> = {
   OVERSELL_RISK: 'Oversell risk',
   OVER_ALLOCATED: 'Over-allocated',
+  LISTED_UNKNOWN: 'Unverified',
   OK: 'OK',
   NOT_ONLINE: 'Not online',
 };
@@ -70,7 +73,17 @@ export default function OnlineStockPage() {
       {data && data.online_configured === false && (
         <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-blue-50 border-blue-200 text-blue-800 mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
-          Online store isn't connected yet, so online stock shows 0. Once it's linked, this page flags real overselling risk.
+          No products are mapped to Shopify yet, so there are no online quantities to reconcile.
+          Once products are pushed online, this page flags real overselling risk.
+        </div>
+      )}
+
+      {data && data.online_configured !== false && data.listed_qty_live === false && (
+        <div className="flex items-center gap-2 text-sm rounded-lg px-3 py-2 border bg-amber-50 border-amber-200 text-amber-800 mb-4">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          {(data.listed_live_rows ?? 0) > 0
+            ? `Live Shopify quantities cover ${data.listed_live_rows} of ${data.listed_mapped_rows} online SKUs on this page. Rows marked "Unverified" (Online = —) were not covered and cannot be cleared as OK.`
+            : 'Live Shopify quantities are unavailable right now, so online SKUs show "Unverified" (Online = —) and oversell flags can\'t fire. On-hand and recommended numbers are live.'}
         </div>
       )}
 
@@ -136,7 +149,7 @@ export default function OnlineStockPage() {
                     <td className="px-3 py-2 font-mono text-xs text-gray-700">{it.sku}</td>
                     <td className="px-3 py-2 text-gray-700">{it.name}</td>
                     <td className="px-3 py-2 text-right">{it.in_store}</td>
-                    <td className="px-3 py-2 text-right">{it.online}</td>
+                    <td className="px-3 py-2 text-right">{typeof it.online === 'number' ? it.online : '—'}</td>
                     <td className="px-3 py-2 text-right font-medium">{it.recommended}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-flex items-center text-xs border rounded-full px-2 py-0.5 ${STATUS_STYLE[it.status]}`}>
@@ -149,7 +162,9 @@ export default function OnlineStockPage() {
             </table>
           </div>
           <p className="text-xs text-gray-400 mt-2">
-            Pushing these recommended quantities to the online store automatically will turn on once the online store is connected.
+            After every in-store sale or restock, IMS automatically pushes the reduced available
+            quantity for mapped SKUs to Shopify (the oversell guard). "Online" is a live Shopify
+            read when available.
           </p>
         </>
       )}

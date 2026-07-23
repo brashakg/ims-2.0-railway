@@ -486,10 +486,22 @@ export default function OnlineShopifySyncPage() {
           {/* Sync health */}
           <DiagTile title="Sync health" loading={diagLoading} unavailable={health?.unavailable}>
             <DiagRow
-              label="Last successful sync"
+              label="Last sync (orders/stock)"
               value={health?.last_successful_shopify_sync_at ? new Date(health.last_successful_shopify_sync_at).toLocaleString('en-IN') : '—'}
             />
-            <DiagRow label="Online configured" value={health?.online_configured ? 'yes' : 'no'} />
+            <DiagRow
+              label="Last LIVE catalog push"
+              value={
+                health?.catalog_push?.last_pushed_at
+                  ? new Date(health.catalog_push.last_pushed_at).toLocaleString('en-IN')
+                  : '—'
+              }
+            />
+            <DiagRow
+              label="Catalog mapped to Shopify"
+              value={health?.online_configured ? 'yes' : 'no'}
+              warn={health ? !health.online_configured : false}
+            />
             <DiagRow
               label="Oversell misses"
               value={health?.stock_miss?.checked ? fmt(health.stock_miss.unresolved) : '—'}

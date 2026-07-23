@@ -9,18 +9,26 @@ can never oversell.
 Flow on a sale:
   1. The POS create-order path flips serialized stock_units to SOLD, then calls
      writeback_after_sale(db, items_data, store_id).
-  2. For each sold SKU we recompute IMS on-hand (the AVAILABLE stock_units count
-     for the online-serving store) MINUS a safety buffer, via the canonical
-     stock_allocation.recommend_allocation -- the SAME math the
-     /catalog/online-stock-reconcile diagnostic uses.
-  3. We look up the SKU's Shopify InventoryItem GID + location GID in the BVI
-     Postgres (online_catalog.online_variant_targets_for_skus). No mapping ->
-     NO-OP (not every IMS product is online).
+  2. For each sold SKU we recompute the POOLED IMS on-hand: AVAILABLE
+     stock_units across ALL stores, MINUS a safety buffer, via the canonical
+     stock_allocation.recommend_allocation. The online store owns no stock and
+     sells from every shop combined (owner decision 2026-07-20), so the
+     caller's store_id is CONTEXT ONLY (logging/summary) and never scopes the
+     quantity -- selling one store's last unit must not zero a listing that
+     still has stock elsewhere. This is the same pooled math the nightly
+     shopify_stock_parity check compares against.
+  3. We look up the SKU's Shopify InventoryItem GID + location GID in IMS Mongo
+     (online_catalog.online_variant_targets_for_skus over
+     catalog_variants.shopify_inventory_item_id -- BVI + its Postgres were
+     deleted 2026-07-20; IMS is the sole Shopify writer). No mapping -> NO-OP
+     for a product that simply isn't online, but a SKU that IS listed online
+     and cannot be targeted is a GUARD GAP: it is logged loudly and files a
+     deduped SYSTEM task (never a silent fake success).
   4. We call the Shopify GraphQL inventorySetQuantities setter with the ABSOLUTE
      quantity (idempotent on retry).
 
 Contract (mirrors the rest of the consolidation bridge + the NEXUS providers):
-- 100% FAIL-SOFT. A Shopify/Postgres/Mongo failure is caught + logged and NEVER
+- 100% FAIL-SOFT. A Shopify/Mongo failure is caught + logged and NEVER
   propagates into (or slows/blocks) the sale. The sale already happened; the
   write-back is best-effort.
 - GATED. shopify_set_inventory_available enforces IMS_SHOPIFY_WRITES +
@@ -125,9 +133,21 @@ def skus_from_items(items_data: List[dict]) -> List[str]:
 
 
 def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str, int]:
-    """Map each SKU -> IMS on-hand (AVAILABLE stock_units) for the given store.
-    Reuses inventory._on_hand_by_product (the canonical on-hand math) after
-    resolving SKU -> product_id via the products collection. Fail-soft -> {}."""
+    """Map each SKU -> IMS on-hand (AVAILABLE stock_units). store_id=None (the
+    ONLY value the write-back uses) means POOLED across all stores -- the
+    quantity the online listing must reflect.
+
+    STRICT failure contract (audit round-2 P1): this feeds an ABSOLUTE stock
+    WRITER, so an aggregate failure must surface as {} (UNKNOWN -> the caller's
+    batch abort), never as default-0. inventory._on_hand_by_product swallows
+    aggregate exceptions internally ('except: pass' -> {}/PARTIAL without
+    raising), which would let a Mongo blip default every spine-resolved SKU to
+    0 and write absolute 0 live -- so the SAME canonical pipeline (identical
+    match/group, ON_HAND_STATUSES + EXCLUDED_STATUSES from item_events) is run
+    INLINE here: ANY exception, including one raised MID-ITERATION after some
+    rows were yielded, discards the partial result and returns {}. A pid absent
+    from a SUCCESSFULLY completed aggregate legitimately means zero on-hand and
+    only then defaults to 0."""
     if db is None or not skus:
         return {}
     try:
@@ -152,14 +172,49 @@ def _on_hand_for_skus(db, skus: List[str], store_id: Optional[str]) -> Dict[str,
     if not sku_to_pid:
         return {}
 
+    # Canonical on-hand pipeline, inlined STRICT (mirrors
+    # inventory._on_hand_by_product's match/group exactly, without its
+    # exception swallow). The cursor is consumed INSIDE the try so a
+    # mid-iteration failure also discards the partial dict.
     try:
-        from ..routers.inventory import _on_hand_by_product
+        from .item_events import ON_HAND_STATUSES, EXCLUDED_STATUSES
 
-        on_hand_by_pid = _on_hand_by_product(db, list(sku_to_pid.values()), store_id)
+        stock_coll = db.get_collection("stock_units")
+        if stock_coll is None:
+            return {}
+        match: Dict[str, Any] = {
+            "product_id": {"$in": list(sku_to_pid.values())},
+            "status": {"$nin": list(EXCLUDED_STATUSES)},
+            "$or": [
+                {"status": {"$in": list(ON_HAND_STATUSES)}},
+                {"status": {"$exists": False}},
+                {"status": None},
+            ],
+        }
+        if store_id:
+            match["store_id"] = store_id
+        on_hand_by_pid: Dict[str, int] = {}
+        for row in stock_coll.aggregate(
+            [
+                {"$match": match},
+                {
+                    "$group": {
+                        "_id": "$product_id",
+                        "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                },
+            ]
+        ):
+            on_hand_by_pid[row.get("_id")] = int(row.get("n", 0) or 0)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[STOCK_WRITEBACK] on-hand aggregate failed: %s", exc)
+        logger.warning(
+            "[STOCK_WRITEBACK] on-hand aggregate failed (STRICT -> unknown, "
+            "batch will abort rather than write 0): %s",
+            exc,
+        )
         return {}
 
+    # The aggregate COMPLETED: a pid it omitted genuinely has zero on-hand.
     out: Dict[str, int] = {}
     for sku, pid in sku_to_pid.items():
         out[sku] = int(on_hand_by_pid.get(pid, 0) or 0)
@@ -174,20 +229,35 @@ async def writeback_skus(
     source: str = "sale",
     safety_buffer: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Core: push the (on_hand - buffer) available quantity to Shopify for each
-    SKU that maps to an online variant. Gated + fail-soft. Returns a summary
-    dict (pushed / skipped / failed / simulated). NEVER raises.
+    """Core: push the POOLED (on_hand - buffer) available quantity to Shopify
+    for each SKU that maps to an online variant. Gated + fail-soft. Returns a
+    summary dict (pushed / skipped / failed / simulated). NEVER raises.
 
-    A SKU is skipped (no-op) when it has no Shopify InventoryItem mapping in the
-    BVI catalog -- not every IMS product is online.
+    ``store_id`` is CONTEXT ONLY (recorded on the summary for logging); the
+    pushed quantity is always the ALL-store pooled on-hand -- the online store
+    sells from every shop combined, so scoping to the selling store would zero
+    a listing that still has stock elsewhere (audit fix-round P0).
+
+    Safety rules for the absolute write:
+    - A SKU with no Shopify InventoryItem mapping is skipped -- and when it IS
+      sellable online (PUBLISHED / live variant) that is a GUARD GAP alerted
+      LOUDLY (_alert_unmapped_online), never a silent fake success.
+    - UNKNOWN on-hand is NEVER written as 0: a SKU absent from the on-hand map
+      is skipped (skipped_no_onhand), and an entirely-empty on-hand result for
+      a non-empty target set aborts the batch with a WARNING + not-ok
+      sync_runs row (audit fix-round P1). A SKU PRESENT with on-hand 0 still
+      pushes 0 -- that IS the oversell guard.
     """
     summary: Dict[str, Any] = {
         "source": source,
+        "store_id": store_id,  # context only -- quantities are pooled
         "candidates": 0,
         "pushed": 0,
         "simulated": 0,
         "skipped_no_mapping": 0,
+        "skipped_no_onhand": 0,
         "failed": 0,
+        "unmapped_online": 0,
         "online_configured": False,
     }
     db = _resolve_db(db)
@@ -196,8 +266,8 @@ async def writeback_skus(
     if not distinct:
         return summary
 
-    # Lazy imports keep this module import-light (and the Postgres/psycopg2 path
-    # optional) so a backend without the e-commerce bridge still boots.
+    # Lazy imports keep this module import-light so the backend boots even if a
+    # sibling service is broken.
     try:
         from . import online_catalog
         from . import stock_allocation
@@ -206,19 +276,46 @@ async def writeback_skus(
         logger.debug("[STOCK_WRITEBACK] deps unavailable: %s", exc)
         return summary
 
-    summary["online_configured"] = online_catalog.ecommerce_db_configured()
+    summary["online_configured"] = online_catalog.online_mapping_available(db)
 
     buf = _safety_buffer(db) if safety_buffer is None else max(0, int(safety_buffer))
 
-    # 1. Resolve Shopify targets (inventory-item + location GIDs). Empty when the
-    #    bridge is unconfigured/unreachable -> everything is a no-op skip.
-    targets = online_catalog.online_variant_targets_for_skus(distinct)
+    # 1. Resolve Shopify targets (inventory-item + location GIDs) from the IMS
+    #    Mongo mapping. A SKU with no target is skipped -- and checked below for
+    #    the online-but-unmapped guard gap.
+    targets = online_catalog.online_variant_targets_for_skus(db, distinct)
     if not targets:
         summary["skipped_no_mapping"] = len(distinct)
+        _alert_unmapped_online(db, distinct, summary)
+        _record_run(db, summary)
         return summary
 
-    # 2. Compute on-hand once for the targeted SKUs (the only ones worth pushing).
-    on_hand = _on_hand_for_skus(db, list(targets.keys()), store_id)
+    # 2. Compute on-hand once for the targeted SKUs -- POOLED across ALL stores
+    #    (store_id deliberately NOT passed: the online listing reflects the
+    #    whole chain's availability, never one shop's).
+    on_hand = _on_hand_for_skus(db, list(targets.keys()), None)
+    if not on_hand:
+        # UNKNOWN on-hand for the whole batch (lookup/aggregate failed or no
+        # spine rows). An absolute stock WRITER must never fail soft to 0 --
+        # writing 0 would delist every sold SKU that is physically in stock.
+        # Abort loudly.
+        summary["skipped_no_onhand"] = len(targets)
+        unmapped = [s for s in distinct if s not in targets]
+        summary["skipped_no_mapping"] = len(unmapped)
+        logger.warning(
+            "[STOCK_WRITEBACK] on-hand UNKNOWN for all %d targeted SKU(s) "
+            "(lookup failed or products spine has no rows) -- aborting the "
+            "push batch; NOT writing 0 to the live listing. SKUs: %s",
+            len(targets),
+            ", ".join(sorted(targets.keys())[:20]),
+        )
+        # The abort must not swallow the guard-gap check for the UNMAPPED
+        # subset (round-2 rider): a sellable-online SKU with no mapping still
+        # alerts even when this batch aborted on unknown on-hand.
+        if unmapped:
+            _alert_unmapped_online(db, unmapped, summary)
+        _record_run(db, summary)
+        return summary
 
     # SUPERADMIN "block a collection from online sale": a product that belongs to
     # an online_sync_blocked collection must NEVER be sellable online even if it
@@ -236,10 +333,16 @@ async def writeback_skus(
     for sku, tgt in targets.items():
         try:
             if sku in blocked:
+                # Deliberate delist: 0 regardless of on-hand.
                 qty = 0
                 summary["blocked_online"] += 1
+            elif sku not in on_hand:
+                # UNKNOWN on-hand for this SKU: skip, never write 0. (A SKU
+                # present with value 0 falls through and pushes 0 -- correct.)
+                summary["skipped_no_onhand"] += 1
+                continue
             else:
-                qty = stock_allocation.recommend_allocation(on_hand.get(sku, 0), buf)
+                qty = stock_allocation.recommend_allocation(on_hand[sku], buf)
             res = await shopify_set_inventory_available(
                 db, tgt.get("inventory_item_id"), tgt.get("location_id"), qty
             )
@@ -258,10 +361,112 @@ async def writeback_skus(
             summary["simulated"] += 1
 
     # SKUs with no online mapping (present in distinct but not targets).
-    summary["skipped_no_mapping"] = len(distinct) - len(targets)
+    unmapped = [s for s in distinct if s not in targets]
+    summary["skipped_no_mapping"] = len(unmapped)
+    if unmapped:
+        _alert_unmapped_online(db, unmapped, summary)
 
     _record_run(db, summary)
     return summary
+
+
+def _alert_unmapped_online(db, skus: List[str], summary: Dict[str, Any]) -> None:
+    """OVERSELL-GUARD GAP alert (audit OS-015 + fix-round P1): a sold SKU that
+    is SELLABLE online but has NO Shopify inventory mapping cannot receive the
+    post-sale stock write-back -- the storefront keeps listing the pre-sale
+    quantity, a real oversell window.
+
+    Gating (fix-round): the alert requires sellable_online -- ecom.status
+    PUBLISHED, or a live variant gid -- NOT mere shopify_product_id presence.
+    An unpurchasable Shopify DRAFT (e.g. the 2,032 staged drafts) cannot
+    oversell, so it must never fire this alarm or clog the dedupe. A SKU that
+    simply isn't online at all stays a silent, correct no-op.
+
+    Alerts LOUDLY, never silently: structured ERROR log + a deduped,
+    SELF-UPDATING SYSTEM task (new gap SKUs are $addToSet-ed into the open
+    task's payload) and stamps summary['unmapped_online'] so _record_run
+    writes a not-ok sync_runs row. Fail-soft: never raises into the sale path."""
+    try:
+        from . import online_catalog
+
+        statuses = online_catalog.online_status_for_skus(db, skus)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] unmapped-online check skipped: %s", exc)
+        return
+    online_unmapped = sorted(
+        s for s in skus if (statuses.get(s) or {}).get("sellable_online")
+    )
+    if not online_unmapped:
+        return
+    summary["unmapped_online"] = len(online_unmapped)
+    logger.error(
+        "[STOCK_WRITEBACK] OVERSELL-GUARD GAP: %d sold SKU(s) are sellable "
+        "online but carry no Shopify inventory mapping -- stock write-back "
+        "could NOT run for: %s",
+        len(online_unmapped),
+        ", ".join(online_unmapped[:20]),
+    )
+    _file_guard_gap_task(db, online_unmapped)
+
+
+# Stable dedupe key: at most ONE open guard-gap task; new gap SKUs are merged
+# into the open task's payload (see _file_guard_gap_task) so a later, different
+# gap is never silently masked by an already-open task.
+_GUARD_GAP_TASK_REF = "online-stock-writeback-unmapped"
+
+
+def _file_guard_gap_task(db, skus: List[str]) -> None:
+    """File ONE deduped P1 SYSTEM task for the guard gap; when a task is already
+    OPEN for this ref, MERGE the new gap SKUs into its payload ($addToSet) so
+    the open task always reflects the full current gap set (fix-round P1: a
+    frozen first-filing payload must not mask later, different gaps).
+    Fail-soft."""
+    try:
+        from .task_triggers import create_system_task
+        from database.repositories.task_repository import TaskRepository
+
+        coll = None
+        getter = getattr(db, "get_collection", None)
+        if callable(getter):
+            coll = getter("tasks")
+        elif db is not None:
+            coll = db["tasks"]
+        if coll is None:
+            return
+        created = create_system_task(
+            TaskRepository(coll),
+            title="Online oversell guard gap: unmapped online SKUs",
+            description=(
+                f"{len(skus)} SKU(s) sold in-store are sellable online but have "
+                f"no Shopify inventory mapping, so the automatic post-sale stock "
+                f"write-back CANNOT correct their online quantity (oversell "
+                f"window). IMS does not yet write variant inventory mappings on "
+                f"push (pending work package: variant-gid write-back on LIVE "
+                f"productCreate), so re-pushing will NOT fix this. Until the "
+                f"mapping backfill ships: manually reduce the Shopify quantity "
+                f"for these SKUs after in-store sales, or unpublish them. The "
+                f"full current SKU set is in this task's payload. First SKUs: "
+                f"{', '.join(skus[:20])}"
+            ),
+            priority="P1",
+            category="Inventory",
+            store_id=None,
+            dedupe_ref=_GUARD_GAP_TASK_REF,
+            extra={"payload": {"skus": skus[:50]}},
+        )
+        if created is None:
+            # Deduped: a guard-gap task is already open. Merge the new SKUs
+            # into its payload so the open task reflects the CURRENT gap set
+            # instead of freezing at the first filing.
+            coll.update_one(
+                {
+                    "source_ref": _GUARD_GAP_TASK_REF,
+                    "status": {"$in": ["OPEN", "IN_PROGRESS", "ESCALATED"]},
+                },
+                {"$addToSet": {"payload.skus": {"$each": skus[:50]}}},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[STOCK_WRITEBACK] guard-gap task skipped: %s", exc)
 
 
 def _record_run(db, summary: Dict[str, Any]) -> None:
@@ -269,10 +474,32 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
     can see write-back activity. Never raises."""
     if db is None:
         return
-    # Only record when something actually happened live (a push or a failure);
-    # a pure simulate/no-op shouldn't spam the sync log.
-    if not (summary.get("pushed") or summary.get("failed")):
+    # Record when something actually happened live (a push or a failure), the
+    # guard gapped (sellable-online SKU with no mapping), or on-hand was
+    # UNKNOWN and SKUs were skipped; a pure simulate/offline no-op shouldn't
+    # spam the sync log.
+    if not (
+        summary.get("pushed")
+        or summary.get("failed")
+        or summary.get("unmapped_online")
+        or summary.get("skipped_no_onhand")
+    ):
         return
+    unmapped_online = int(summary.get("unmapped_online", 0) or 0)
+    skipped_no_onhand = int(summary.get("skipped_no_onhand", 0) or 0)
+    errors = []
+    if summary.get("failed"):
+        errors.append(f"{summary.get('failed')} push(es) failed")
+    if unmapped_online:
+        errors.append(
+            f"{unmapped_online} online SKU(s) had no Shopify inventory mapping "
+            f"(oversell-guard gap)"
+        )
+    if skipped_no_onhand:
+        errors.append(
+            f"{skipped_no_onhand} SKU(s) skipped: on-hand UNKNOWN "
+            f"(never written as 0)"
+        )
     try:
         coll = db.get_collection("sync_runs")
         if coll is None:
@@ -281,14 +508,15 @@ def _record_run(db, summary: Dict[str, Any]) -> None:
             {
                 "integration": "shopify",
                 "kind": "stock_writeback",
-                "ok": summary.get("failed", 0) == 0,
-                "items_synced": int(summary.get("pushed", 0)),
-                "error": (
-                    f"{summary.get('failed')} push(es) failed"
-                    if summary.get("failed")
-                    else None
+                "ok": (
+                    summary.get("failed", 0) == 0
+                    and unmapped_online == 0
+                    and skipped_no_onhand == 0
                 ),
+                "items_synced": int(summary.get("pushed", 0)),
+                "error": ("; ".join(errors) if errors else None),
                 "source": summary.get("source"),
+                "store_id": summary.get("store_id"),
                 "ran_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -326,7 +554,8 @@ def _swallow_task_result(task: "asyncio.Task") -> None:
 def writeback_after_sale(db, items_data: List[dict], store_id: Optional[str]) -> None:
     """Fail-soft entrypoint for the POS create-order path. Schedules a Shopify
     stock push for the sold SKUs and returns IMMEDIATELY -- the sale is never
-    blocked or slowed. NEVER raises."""
+    blocked or slowed. store_id is context only; the pushed quantity is always
+    the ALL-store pooled on-hand. NEVER raises."""
     try:
         skus = skus_from_items(items_data)
         if not skus:

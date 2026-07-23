@@ -157,9 +157,10 @@ def push_mode_status(db) -> Dict[str, Any]:
         "is_live": live,
         "api_version": SHOPIFY_API_VERSION,
         "single_writer_note": (
-            "BVI is the single Shopify writer until the Phase-6 baton cutover; "
-            "IMS push is DARK until IMS_SHOPIFY_WRITES=1 AND "
-            "SHOPIFY_DISPATCH_MODE=live (or global DISPATCH_MODE=live)."
+            "IMS is the single Shopify writer (BVI was retired on 2026-07-20). "
+            "Push runs LIVE only when IMS_SHOPIFY_WRITES=1 AND "
+            "SHOPIFY_DISPATCH_MODE=live (or global DISPATCH_MODE=live) AND "
+            "Shopify credentials are configured; otherwise it is SIMULATED."
         ),
     }
 
