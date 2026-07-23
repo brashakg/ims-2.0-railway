@@ -21,6 +21,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import { storeApi } from '../../services/api/stores';
+import { isOnlineStore } from '../../utils/storeMode';
 
 interface StockTransferModalProps {
   isOpen: boolean;
@@ -51,6 +52,8 @@ interface Store {
   id: string;
   name: string;
   code: string;
+  /** OS-032: needed to exclude ONLINE (stockless) stores from destinations. */
+  store_type?: string;
 }
 
 export function StockTransferModal({ isOpen, onClose, onTransferCreated }: StockTransferModalProps) {
@@ -87,10 +90,15 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
         id: s.store_id || s.id || s._id,
         name: s.store_name || s.name || '',
         code: s.store_code || s.code || '',
+        store_type: s.store_type || '',
       }));
 
-      // Filter out current store
-      const otherStores = mapped.filter(s => s.id !== user?.activeStoreId);
+      // Filter out the current store AND online stores (W1.4 / OS-032): an
+      // ONLINE store sells pooled stock and owns none of its own, so it can
+      // never be a transfer destination (backend enforces the same 400).
+      const otherStores = mapped.filter(
+        (s) => s.id !== user?.activeStoreId && !isOnlineStore(s),
+      );
       setStores(otherStores);
     } catch (error: any) {
       toast.error('Failed to load stores');

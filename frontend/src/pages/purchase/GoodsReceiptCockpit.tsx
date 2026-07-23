@@ -33,6 +33,7 @@ import { vendorsApi } from '../../services/api/inventory';
 import labelsApi from '../../services/api/labels';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import type {
   VendorOption,
   CockpitPayload,
@@ -211,6 +212,9 @@ export function GoodsReceiptCockpit() {
   const { user } = useAuth();
   const toast = useToast();
   const storeId = user?.activeStoreId || '';
+  // W1.4 / OS-006: receiving books stock at the active store. An ONLINE store
+  // holds no stock — warn up front (backend rejects the GRN with 400 too).
+  const onlineStore = useIsOnlineStore(storeId);
 
   // ---- Vendor picker state -------------------------------------------------
   const [vendors, setVendors] = useState<VendorOption[]>([]);
@@ -740,6 +744,20 @@ export function GoodsReceiptCockpit() {
             </button>
           )}
         </div>
+
+        {/* W1.4 / OS-006: online-store warning — receiving books stock here. */}
+        {onlineStore && (
+          <div className="p-4 mb-4 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-blue-900">
+              <p className="font-medium">You're on an online store — it holds no stock.</p>
+              <p className="text-xs text-blue-800 mt-1">
+                Goods must be received into a physical shop. Switch stores from
+                the header dropdown; receiving here will be rejected.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* ── Vendor picker (classic vendor-first cockpit) ── */}
         {(showClassicPicker || vendorId) && (

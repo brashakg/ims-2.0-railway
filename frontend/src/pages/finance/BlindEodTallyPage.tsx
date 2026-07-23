@@ -23,8 +23,10 @@ import {
   Banknote,
   Coins,
   EyeOff,
+  Globe,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useToast } from '../../context/ToastContext';
 import {
   tillApi,
@@ -118,6 +120,9 @@ export default function BlindEodTallyPage() {
   const storeId = user?.activeStoreId || user?.storeIds?.[0] || '';
   const isManager = MANAGER_PLUS(roles);
   const canLock = CAN_LOCK(roles);
+  // W1.4 / OS-030: an ONLINE store has no till — hide the blind-EOD workflow
+  // (backend rejects the till open with 400 too).
+  const onlineStore = useIsOnlineStore(storeId);
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -263,6 +268,26 @@ export default function BlindEodTallyPage() {
 
   if (!storeId) {
     return <div className="p-6 text-gray-500">No store context for your account.</div>;
+  }
+
+  // W1.4 / OS-030: online stores have no drawer to count — friendly note
+  // instead of the till workflow (all hooks above ran unconditionally).
+  if (onlineStore) {
+    return (
+      <div className="max-w-5xl mx-auto p-6">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-5 flex items-start gap-3">
+          <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-blue-900">
+            <p className="font-semibold mb-1">This is an online store — there is no till.</p>
+            <p className="text-blue-800">
+              Payments for website orders settle via the payment gateway, so
+              there is no drawer to count or Z-Read to lock. Switch to a
+              physical store from the header dropdown to run its blind EOD.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const lockedToday = sessions.filter((s) => s.status === 'LOCKED');

@@ -31,6 +31,9 @@ export interface AccessibleStore {
   city?: string;
   brand?: string;
   entityId?: string;
+  /** OS-029: raw store_type (RETAIL / HQ / WAREHOUSE / ONLINE) so the picker
+   *  can badge ONLINE stores instead of presenting them as physical shops. */
+  storeType?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -53,6 +56,7 @@ export function normalizeStore(s: Record<string, unknown> | null | undefined): A
     city: (s.city || s.location || '') as string,
     brand: (s.brand || '') as string,
     entityId: (s.entity_id || s.entityId || '') as string,
+    storeType: (s.store_type || s.storeType || '') as string,
   };
 }
 

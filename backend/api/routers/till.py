@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import eod_tally as till
+from ..services.stores_util import is_online_store
 
 router = APIRouter(tags=["till"])
 
@@ -157,6 +158,18 @@ async def open_till_session(
     store_id = validate_store_access(body.store_id or "", current_user)
     if not store_id:
         raise HTTPException(status_code=400, detail="No store context for this user")
+
+    # W1.4 / OS-030: an ONLINE store has no till -- payments settle via the
+    # online payment gateway, so a blind-EOD drawer session is meaningless.
+    if is_online_store(None, store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is an online store - payments settle via the payment "
+                "gateway, so there is no till to open or count."
+            ),
+        )
+
     session_date = _validate_session_date(body.session_date)
 
     res = till.open_session(

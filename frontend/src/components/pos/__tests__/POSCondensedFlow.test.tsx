@@ -54,6 +54,10 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
   useProducts: () => ({ data: [], isLoading: false }),
   useCustomerSearch: () => ({ data: [], isLoading: false }),
   useCustomer: () => ({ data: null }),
+  // W1.4 / OS-005: POSLayout's useIsOnlineStore reads the store list through
+  // useStores; an empty list + the physical BV-BOK-01 store keeps the register
+  // mounted (the online panel is exercised via the storeMode unit tests).
+  useStores: () => ({ data: [], isLoading: false }),
 }));
 
 // GST runtime resolver → static, no /health fetch.
@@ -82,15 +86,20 @@ vi.mock('../../../services/api/walkouts', () => ({
   walkoutsApi: { walkinsPosIncrement: () => Promise.resolve({ total: 1 }) },
 }));
 
+import { MemoryRouter } from 'react-router-dom';
 import { POSLayout } from '../POSLayout';
 import { usePOSStore } from '../../../stores/posStore';
 import { ToastProvider } from '../../../context/ToastContext';
 
 function renderPOS() {
+  // MemoryRouter: POSLayout now calls useNavigate (W1.4 online-store panel's
+  // "Open online store" button), which requires a router context.
   return render(
-    <ToastProvider>
-      <POSLayout />
-    </ToastProvider>,
+    <MemoryRouter>
+      <ToastProvider>
+        <POSLayout />
+      </ToastProvider>
+    </MemoryRouter>,
   );
 }
 

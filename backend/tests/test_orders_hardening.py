@@ -1122,3 +1122,72 @@ def test_d2_add_to_draft_applies_brand_cap(client, hardening_orders, monkeypatch
     add = client.post("/api/v1/orders/" + str(oid) + "/items", json=_capped_item(pid, 3000.0, 5.0), headers=hdr)
     # 5% > Cartier 2% brand cap -> blocked (previously allowed under the 10% role cap)
     assert add.status_code == 403 and "exceeds" in add.text.lower(), add.text
+
+
+# ============================================================================
+# W1.4 / OS-005 - ONLINE-store POS guard (owner-approved 2026-07-23)
+# ============================================================================
+# An ONLINE store (BV-ONLINE-01 / WO-ONLINE-01, store_type == "ONLINE") owns no
+# stock, has no till and no walk-ins. create_order must 400 for it BEFORE any
+# validation/persist; physical stores are untouched; the Shopify ingest path
+# never calls this route (locked separately in test_online_order_mapper).
+
+
+def _online_store_headers(store_id="BV-ONLINE-01"):
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": "test-admin-online",
+            "username": "testadminonline",
+            "roles": ["SUPERADMIN"],
+            "store_ids": [store_id],
+            "active_store_id": store_id,
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_os005_create_order_blocked_for_online_store(client, hardening_orders):
+    """POS create under BV-ONLINE-01 -> 400 with the plain-English detail and
+    NOTHING persisted. Uses the known-id fast path (no store doc needed)."""
+    resp = _post_order(client, _online_store_headers(), [_frame_item()])
+    assert resp.status_code == 400, resp.text
+    low = resp.text.lower()
+    assert "online store" in low and "shopify" in low
+    assert hardening_orders["order_repo"].collection.docs == []
+
+
+def test_os005_create_order_blocked_via_store_type_doc(
+    client, hardening_orders, monkeypatch
+):
+    """A store whose DOC says store_type=ONLINE (id NOT in the known list) is
+    blocked too -- the guard prefers the store_type field over the id list."""
+    from api.routers import orders as orders_module
+
+    class _Coll:
+        def __init__(self, doc=None):
+            self.doc = doc
+
+        def find_one(self, *_a, **_k):
+            return self.doc
+
+    class _Db:
+        def get_collection(self, name):
+            if name == "stores":
+                return _Coll({"store_id": "ZZ-ONLINE-99", "store_type": "ONLINE"})
+            return _Coll(None)
+
+    monkeypatch.setattr(orders_module, "_get_db", lambda: _Db())
+    resp = _post_order(
+        client, _online_store_headers("ZZ-ONLINE-99"), [_frame_item()]
+    )
+    assert resp.status_code == 400, resp.text
+    assert "online store" in resp.text.lower()
+    assert hardening_orders["order_repo"].collection.docs == []
+
+
+def test_os005_physical_store_unaffected(client, auth_headers, hardening_orders):
+    """The SAME payload under the physical BV-TEST-01 still creates (201)."""
+    resp = _post_order(client, auth_headers, [_frame_item()])
+    assert resp.status_code in (200, 201), resp.text

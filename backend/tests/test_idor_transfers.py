@@ -570,3 +570,37 @@ def test_pending_admin_sees_all(coll):
         transfers.get_pending_transfers(current_user=_user("ADMIN", []))
     )
     assert {t["id"] for t in res["pending_approval"]} == {"p5", "p6"}
+
+
+# ===========================================================================
+# W1.4 / OS-032 -- ONLINE-store destination guard on create
+# ===========================================================================
+# An ONLINE store (BV-ONLINE-01 / WO-ONLINE-01) sells pooled stock and owns
+# none of its own: a transfer INTO it must 400 before anything persists.
+# (Physical destinations stay covered by test_create_from_own_store_ok above.)
+
+
+def test_create_with_online_destination_400(coll):
+    hq = _user("ADMIN", [])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            transfers.create_transfer(
+                _transfer_input("A", "BV-ONLINE-01"), current_user=hq
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "online store" in str(exc.value.detail).lower()
+    assert coll.docs == {}  # nothing persisted
+
+
+def test_create_with_online_destination_400_for_store_manager(coll):
+    """Same guard for a store-scoped manager transferring out of their own
+    store -- the destination check fires after the source-IDOR check."""
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            transfers.create_transfer(
+                _transfer_input("A", "WO-ONLINE-01"), current_user=MGR_A
+            )
+        )
+    assert exc.value.status_code == 400
+    assert coll.docs == {}

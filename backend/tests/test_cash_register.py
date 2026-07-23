@@ -516,3 +516,56 @@ def test_cash_register_roundtrip_real_mongo(mongo_db):
     ).json()
     ids = [s["session_id"] for s in hist["sessions"]]
     assert sid in ids
+
+
+# ===========================================================================
+# W1.4 / OS-030 -- ONLINE-store till guard on /cash-register/open
+# ===========================================================================
+# An ONLINE store (BV-ONLINE-01 / WO-ONLINE-01, store_type == "ONLINE") has no
+# cash drawer -- payments settle via the gateway. Opening must 400 and mint no
+# session; physical stores stay untouched (covered by the endpoint tests above).
+
+
+class TestOnlineStoreTillGuard:
+    def test_open_blocked_for_known_online_store_id(self):
+        db = _FakeDB()
+        c = _client(db, roles=["ADMIN"], active_store="BV-ONLINE-01")
+        r = c.post(
+            "/finance/cash-register/open",
+            json={"store_id": "BV-ONLINE-01", "opening_float": 500, "denominations": []},
+        )
+        assert r.status_code == 400, r.text
+        assert "online store" in r.text.lower()
+        sessions = db.collections.get(finance._CASH_SESSIONS)
+        assert sessions is None or sessions.docs == []
+
+    def test_open_blocked_by_store_type_doc(self):
+        """A store whose DOC says store_type=ONLINE (id not in the known list)
+        is blocked too -- the guard reads the stores collection."""
+        db = _FakeDB()
+        db.get_collection("stores").docs.append(
+            {"store_id": "ZZ-ONLINE-77", "store_type": "ONLINE"}
+        )
+        c = _client(db, roles=["ADMIN"], active_store="ZZ-ONLINE-77")
+        r = c.post(
+            "/finance/cash-register/open",
+            json={"store_id": "ZZ-ONLINE-77", "opening_float": 500, "denominations": []},
+        )
+        assert r.status_code == 400, r.text
+        assert "online store" in r.text.lower()
+        sessions = db.collections.get(finance._CASH_SESSIONS)
+        assert sessions is None or sessions.docs == []
+
+    def test_open_still_works_for_physical_store_with_stores_coll(self):
+        """A RETAIL store doc in the stores collection never trips the guard."""
+        db = _FakeDB()
+        db.get_collection("stores").docs.append(
+            {"store_id": "store-001", "store_type": "RETAIL"}
+        )
+        c = _client(db)
+        r = c.post(
+            "/finance/cash-register/open",
+            json={"store_id": "store-001", "opening_float": 500, "denominations": []},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["store_id"] == "store-001"

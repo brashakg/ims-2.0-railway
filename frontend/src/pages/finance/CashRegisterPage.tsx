@@ -20,8 +20,10 @@ import {
   CheckCircle2,
   Banknote,
   Coins,
+  Globe,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useToast } from '../../context/ToastContext';
 import {
   cashRegisterApi,
@@ -70,6 +72,9 @@ export default function CashRegisterPage() {
   const { user } = useAuth();
   const toast = useToast();
   const storeId = user?.activeStoreId || user?.storeIds?.[0] || '';
+  // W1.4 / OS-030: an ONLINE store has no cash drawer — hide the till
+  // open/close controls (the backend rejects /cash-register/open with 400 too).
+  const onlineStore = useIsOnlineStore(storeId);
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<SessionsResponse | null>(null);
@@ -196,7 +201,19 @@ export default function CashRegisterPage() {
       ) : (
         <>
           {/* === Live session state === */}
-          {openSession ? (
+          {onlineStore ? (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-5 flex items-start gap-3">
+              <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="text-sm text-blue-900">
+                <p className="font-semibold mb-1">This is an online store — there is no till.</p>
+                <p className="text-blue-800">
+                  Payments for website orders settle via the payment gateway, so
+                  there is no cash drawer to open or reconcile. Switch to a
+                  physical store from the header dropdown to manage its register.
+                </p>
+              </div>
+            </div>
+          ) : openSession ? (
             <ReconcileView
               session={openSession}
               preview={preview}

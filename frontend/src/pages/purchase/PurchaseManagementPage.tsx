@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { vendorsApi } from '../../services/api';
 import { VendorReturns } from './VendorReturns';
 import { PurchaseTable } from './PurchaseTable';
@@ -101,6 +102,9 @@ function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
 export function PurchaseManagementPage() {
   const toast = useToast();
   const { user } = useAuth();
+  // W1.4 / OS-006: POs created here deliver to the ACTIVE store. An ONLINE
+  // store holds no stock, so warn up front (backend rejects with 400 too).
+  const onlineStore = useIsOnlineStore();
   const [searchParams] = useSearchParams();
 
   const [activeTab, setActiveTab] = useState<TabType>('purchase-orders');
@@ -239,6 +243,21 @@ export function PurchaseManagementPage() {
           </button>
         )}
       </div>
+
+      {/* W1.4 / OS-006: online-store warning — POs deliver to the active store. */}
+      {onlineStore && (
+        <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-blue-900">
+            <p className="font-medium">You're on an online store — it holds no stock.</p>
+            <p className="text-xs text-blue-800 mt-1">
+              Purchase orders and goods receipts must be raised under a physical
+              shop. Switch stores from the header dropdown; creating a PO here
+              will be rejected.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Load Error Banner */}
       {loadError && (

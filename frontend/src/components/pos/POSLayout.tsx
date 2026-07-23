@@ -11,9 +11,11 @@ import {
   ChevronRight, ChevronLeft, Plus, X,
   Pause, Play, RotateCcw, AlertTriangle,
   Glasses, Watch, FileText, Zap, Sparkles,
-  UserPlus, DoorOpen,
+  UserPlus, DoorOpen, Globe,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { usePOSStore } from '../../stores/posStore';
 import { canonicalCategory, CATEGORY_BROWSE_OPTIONS, categoryBrowseLabel } from '../../utils/categoryNormalize';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
@@ -168,6 +170,12 @@ export function POSLayout() {
   // whenever the user toggled their active store mid-session.
   const activeStoreId = user?.activeStoreId || user?.storeIds?.[0] || '';
   const noStoreSelected = !activeStoreId || activeStoreId === 'No store';
+  // W1.4 / OS-005 (owner-approved): POS is disabled under an ONLINE store —
+  // website orders arrive from Shopify; ringing a manual sale here would issue
+  // a real GST invoice with zero stock movement. Hook runs unconditionally
+  // (rules of hooks); the friendly panel renders after the no-store branch.
+  const onlineStoreActive = useIsOnlineStore(activeStoreId);
+  const navigate = useNavigate();
 
   const [showPrescriptionModal, setShowPrescriptionModal] = useState(false);
   const [showNewPrescription, setShowNewPrescription] = useState(false);
@@ -680,6 +688,35 @@ export function POSLayout() {
           <p className="text-xs text-gray-500">
             Orders created without a store context cannot be tracked, invoiced, or reported accurately.
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  // W1.4 / OS-005: full-page friendly panel instead of the register when the
+  // active store is ONLINE. The backend enforces the same rule with a 400 on
+  // order create, so this panel is honesty, not the only lock.
+  if (onlineStoreActive) {
+    return (
+      <div className="min-h-screen min-h-[100dvh] bg-white flex items-center justify-center p-4">
+        <div className="bg-white border border-blue-200 rounded-2xl p-8 max-w-md text-center">
+          <Globe className="w-12 h-12 text-blue-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-gray-900 mb-2">This is an online store</h2>
+          <p className="text-sm text-gray-500 mb-3">
+            Website orders arrive from Shopify and are billed automatically —
+            in-store billing is disabled here. This store sells the pooled stock
+            of every shop and has no till or walk-ins.
+          </p>
+          <p className="text-xs text-gray-500 mb-5">
+            To ring an in-store sale, switch to a physical store from the header dropdown.
+          </p>
+          <button
+            type="button"
+            onClick={() => navigate('/online-store')}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700"
+          >
+            <Globe className="w-4 h-4" /> Open online store
+          </button>
         </div>
       </div>
     );

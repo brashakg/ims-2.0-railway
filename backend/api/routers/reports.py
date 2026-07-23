@@ -5540,6 +5540,19 @@ async def create_day_end_close(
     if db is None or not getattr(db, "is_connected", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
+    # W1.4 / OS-030: an ONLINE store has no cash drawer -- day-end cash close
+    # does not apply (payments settle via the online payment gateway).
+    from ..services.stores_util import is_online_store
+
+    if is_online_store(db, sid):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is an online store - there is no cash drawer to "
+                "reconcile, so day-end close does not apply here."
+            ),
+        )
+
     closes = db.get_collection("day_end_closes")
     existing = closes.find_one({"store_id": sid, "date": body.date})
     if existing:

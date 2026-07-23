@@ -23,6 +23,7 @@ import {
   hasNoActiveStore,
   type AccessibleStore,
 } from '../../utils/storeAccess';
+import { isOnlineStore } from '../../utils/storeMode';
 import { Icon } from '../../components/shell/Icon';
 
 type Phase = 'loading' | 'choose' | 'empty';
@@ -196,6 +197,8 @@ export function StoreSelectPage() {
         >
           {stores.map((s) => {
             const isCurrent = s.id === user?.activeStoreId;
+            // OS-029: badge ONLINE stores so they never read as physical shops.
+            const online = isOnlineStore({ id: s.id, store_type: s.storeType });
             const meta = [s.city, s.brand].filter(Boolean).join(' · ');
             return (
               <button
@@ -233,6 +236,24 @@ export function StoreSelectPage() {
                     >
                       {s.name}
                     </span>
+                    {online && (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                          color: 'var(--info, #2563eb)',
+                          background: 'var(--info-50, #eff6ff)',
+                          border: '1px solid currentColor',
+                          borderRadius: 999,
+                          padding: '1px 7px',
+                          flexShrink: 0,
+                        }}
+                      >
+                        Online
+                      </span>
+                    )}
                     {isCurrent && (
                       <span
                         style={{

@@ -21,6 +21,10 @@ from ..dependencies import (
     validate_store_access,
 )
 
+# W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
+# land stock on a pooled, stockless ONLINE store.
+from ..services.stores_util import is_online_store
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -948,6 +952,20 @@ async def create_transfer(
         raise HTTPException(
             status_code=400,
             detail="Source and destination store must be different",
+        )
+
+    # W1.4 / OS-032: an ONLINE store sells the pooled stock of every physical
+    # shop and owns none of its own -- stock must never be transferred INTO it
+    # (receive would re-home real units onto the pooled store).
+    if transfer.to_location_id and is_online_store(
+        _get_db(), transfer.to_location_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "An online store sells pooled stock from every shop and "
+                "cannot hold its own - choose a physical destination store."
+            ),
         )
 
     # BUG FIX: at least one item must be in the transfer.

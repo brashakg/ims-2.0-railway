@@ -83,6 +83,11 @@ def _get_db():
     return get_db().db
 
 
+# W1.4 / OS-006: shared ONLINE store-type detector. An ONLINE store owns no
+# stock, so a PO can never deliver to it and a GRN can never receive at it.
+from ..services.stores_util import is_online_store  # noqa: E402
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -999,6 +1004,17 @@ async def create_pos_from_forecast(
     if not active_store:
         raise HTTPException(status_code=400, detail="store_id is required")
 
+    # W1.4 / OS-006: forecast POs deliver to the requesting store -- never an
+    # ONLINE (stockless, pooled) store.
+    if is_online_store(db, active_store):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Online stores hold no stock - switch to a physical shop "
+                "before generating purchase orders."
+            ),
+        )
+
     horizon = body.horizon_days
     safety = body.safety_stock_days
 
@@ -1205,6 +1221,18 @@ async def create_po(
     # request body, so a store-scoped user could craft a PO against another
     # store's inventory.
     validate_store_access(po.delivery_store_id, current_user)
+
+    # W1.4 / OS-006: an ONLINE store (pooled, stockless) can never be the
+    # delivery store -- receiving there would mint phantom owned stock that
+    # corrupts the pooled-inventory model feeding the live storefront.
+    if is_online_store(None, po.delivery_store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Online stores hold no stock - choose a physical shop as the "
+                "delivery store for this purchase order."
+            ),
+        )
 
     po_id = str(uuid.uuid4())
     po_number = generate_po_number(po.delivery_store_id)
@@ -2113,6 +2141,19 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     )
                 store_id = po_store
 
+    # W1.4 / OS-006: the receiving store is now FINAL (PO re-point applied).
+    # An ONLINE store owns no stock -- accepting goods there would mint real
+    # stock_units on the pooled store, corrupting the no-own-stock model and
+    # masking the oversell warning. Reject BEFORE the GRN doc is minted.
+    if is_online_store(None, store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Online stores hold no stock - receive these goods into a "
+                "physical shop instead."
+            ),
+        )
+
     # F9: the vendor a DC is for -- from the PO when linked, else the body field.
     vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
 
@@ -2426,6 +2467,18 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     # already-minted lines and mints only the newly-resolved ones.
     if grn.get("status") not in ("PENDING", "PARTIALLY_ACCEPTED"):
         raise HTTPException(status_code=400, detail="GRN is not pending")
+
+    # W1.4 / OS-006 (belt and braces): accepting mints real stock_units at the
+    # GRN's store. A legacy/imported GRN stamped with an ONLINE store must not
+    # create owned stock on a pooled, stockless store.
+    if is_online_store(None, grn.get("store_id")):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This goods receipt is addressed to an online store, which "
+                "holds no stock. Re-create it against a physical shop."
+            ),
+        )
 
     store_id = grn.get("store_id")
     po_id = grn.get("po_id")
