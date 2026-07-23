@@ -1397,9 +1397,16 @@ async def create_order(
     # sale rung under it would issue a real GST invoice with zero stock
     # movement (the serialized-availability gate never fires because an online
     # store owns no stock_units rows). Reject BEFORE any validation/persist.
-    # The Shopify webhook ingest path is untouched by construction: it writes
-    # order docs directly (shopify_ingest.py -> orders_coll.insert_one) and
-    # never calls this route.
+    #
+    # The guard is UNCONDITIONAL on an ONLINE active store -- there is no
+    # source-based carve-out (OrderCreate has no `source` field, and store_id
+    # binds ONLY to current_user['active_store_id'], never a request-body
+    # override). It is safe precisely because nothing legitimate routes an
+    # online sale through here: the Shopify webhook ingest writes order docs
+    # directly (shopify_ingest.py -> orders_coll.insert_one) and never calls
+    # this route, and online_store_orders is read/remap-only. So the guard
+    # over-blocks (an in-store user ringing under an online store) and never
+    # under-blocks a real online/Shopify sale.
     if is_online_store(_get_db(), store_id):
         raise HTTPException(
             status_code=400,

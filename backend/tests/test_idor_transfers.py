@@ -604,3 +604,54 @@ def test_create_with_online_destination_400_for_store_manager(coll):
         )
     assert exc.value.status_code == 400
     assert coll.docs == {}
+
+
+# ---------------------------------------------------------------------------
+# W1.4 / OS-032 belt-and-braces -- the stock-LANDING step (receive) is guarded
+# too, mirroring the GRN accept guard. A legacy/in-flight transfer whose
+# destination is ONLINE (created before create_transfer was guarded) must NOT
+# re-home real units onto the pooled, stockless store.
+# ---------------------------------------------------------------------------
+
+
+def test_receive_online_destination_400_no_stock_landed(coll):
+    """An IN_TRANSIT transfer to BV-ONLINE-01 is rejected at receive with a 400,
+    and the doc is NOT flipped to RECEIVED (no stock re-homed onto the online
+    store). The dest-scoped manager passes the IDOR check first."""
+    _seed_transfer("t-on-1", "B", "BV-ONLINE-01", "in_transit")
+    mgr_online = _user("STORE_MANAGER", ["BV-ONLINE-01"])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            transfers.receive_transfer(
+                "t-on-1",
+                items_received=[
+                    transfers.TransferItemReceive(
+                        transfer_item_id="t-on-1-line-1", quantity_received=2
+                    )
+                ],
+                current_user=mgr_online,
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "online store" in str(exc.value.detail).lower()
+    # Guard fired before the stock-mint / status flip: still in transit.
+    assert coll.docs["t-on-1"]["status"] == "in_transit"
+
+
+def test_receive_physical_destination_unaffected(coll):
+    """Control: the SAME receive against a physical destination still completes
+    (the guard is destination-ONLINE-only, never false-blocks a physical shop)."""
+    _seed_transfer("t-phys-1", "B", "C", "in_transit")
+    res = asyncio.run(
+        transfers.receive_transfer(
+            "t-phys-1",
+            items_received=[
+                transfers.TransferItemReceive(
+                    transfer_item_id="t-phys-1-line-1", quantity_received=2
+                )
+            ],
+            current_user=MGR_C,
+        )
+    )
+    assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
+    assert coll.docs["t-phys-1"]["status"] == "received"
