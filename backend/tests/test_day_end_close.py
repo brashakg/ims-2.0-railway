@@ -146,3 +146,26 @@ def test_close_persists_audits_and_is_idempotent(client, auth_headers):
         )
         assert row is not None
         assert row["details"]["variance"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# W1.4 / OS-030 -- ONLINE-store guard: no day-end cash close for an online store
+# ---------------------------------------------------------------------------
+
+def test_post_blocked_for_online_store(client):
+    """BV-ONLINE-01 has no cash drawer -- day-end close is a 400 (known-id fast
+    path, fires before the DB write; a DB-less run may 503 first, both prove
+    nothing was recorded)."""
+    r = client.post(
+        POST_URL,
+        json={
+            "date": DATE,
+            "store_id": "BV-ONLINE-01",
+            "closing_cash": 0,
+            "system_cash": 0,
+        },
+        headers=_headers(["SUPERADMIN"], store_id="BV-ONLINE-01"),
+    )
+    assert r.status_code in (400, 503), r.text
+    if r.status_code == 400:
+        assert "online store" in r.text.lower()

@@ -886,3 +886,36 @@ def test_ensure_indexes_idempotent_and_failsoft(db):
     till.ensure_till_indexes(db)
     till.ensure_till_indexes(db)
     till.ensure_till_indexes(None)  # DB absent -> no raise
+
+
+# ---------------------------------------------------------------------------
+# W1.4 / OS-030 -- ONLINE-store guard: no blind-EOD till for an online store
+# ---------------------------------------------------------------------------
+
+
+def test_open_route_rejects_online_store(db, monkeypatch):
+    """An ONLINE store (BV-ONLINE-01) has no till -- opening a blind-EOD session
+    for it is a 400 and no session doc is written."""
+    import asyncio
+    from fastapi import HTTPException
+    from api.routers import till as tillroute
+
+    monkeypatch.setattr(tillroute, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        tillroute,
+        "validate_store_access",
+        lambda sid, u: sid or u.get("active_store_id"),
+    )
+
+    body = tillroute.OpenSession(
+        store_id="BV-ONLINE-01", opening_denominations=[], opening_float_paisa=0
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            tillroute.open_till_session(
+                body, current_user=_cashier(store="BV-ONLINE-01")
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "online store" in str(exc.value.detail).lower()
+    assert db.get_collection("till_sessions").find_one({"store_id": "BV-ONLINE-01"}) is None

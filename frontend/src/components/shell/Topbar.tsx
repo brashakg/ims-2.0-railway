@@ -7,6 +7,7 @@ import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storeApi } from '../../services/api';
+import { isOnlineStore } from '../../utils/storeMode';
 import { Icon } from './Icon';
 import { NotificationBell } from './NotificationBell';
 import { CommandPalette } from './CommandPalette';
@@ -44,6 +45,23 @@ function friendlyStoreLabel(
   return looksLikeUuid(id) ? 'Store' : id;
 }
 
+// OS-029: small "Online" pill rendered next to an ONLINE store's name in the
+// store pill + dropdown (lifted from the OrganizationPage store_type badge —
+// same information, shell-token styling).
+const onlineBadgeStyle: React.CSSProperties = {
+  fontSize: 9.5,
+  fontWeight: 700,
+  letterSpacing: '0.05em',
+  textTransform: 'uppercase',
+  color: 'var(--info, #2563eb)',
+  background: 'var(--info-50, #eff6ff)',
+  border: '1px solid currentColor',
+  borderRadius: 999,
+  padding: '0 6px',
+  lineHeight: '14px',
+  flexShrink: 0,
+};
+
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, onOutside: () => void) {
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -58,6 +76,9 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
   const navigate = useNavigate();
   const { user, setActiveRole, setActiveStore, hasRole } = useAuth();
   const [storeNames, setStoreNames] = useState<Record<string, string>>({});
+  // OS-029: store_type per id (from the same GET /stores response) so ONLINE
+  // stores are badged in the pill + dropdown instead of masquerading as shops.
+  const [storeTypes, setStoreTypes] = useState<Record<string, string>>({});
   const [roleOpen, setRoleOpen] = useState(false);
   const [storeOpen, setStoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -95,15 +116,23 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
         const stores = res?.stores || res || [];
         if (!Array.isArray(stores)) return;
         const map: Record<string, string> = {};
+        const types: Record<string, string> = {};
         stores.forEach((s: any) => {
           const id = s.store_id || s.id || s._id;
           const name = s.store_name || s.storeName || s.name;
           if (id && name) map[id] = name;
+          if (id && s.store_type) types[id] = String(s.store_type);
         });
         setStoreNames(map);
+        setStoreTypes(types);
       })
       .catch(() => {});
   }, []);
+
+  // OS-029: ONLINE badge for a store id — prefers the fetched store_type, with
+  // the known-id fast-path (works before the store list loads).
+  const storeIsOnline = (id: string | null | undefined): boolean =>
+    !!id && isOnlineStore({ id, store_type: storeTypes[id] });
 
   const activeStoreName = friendlyStoreLabel(user?.activeStoreId, storeNames);
   // The little mono "code" line under the name: show the code only when it's a
@@ -183,6 +212,9 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                 on desktop show the full store name + code. */}
             <span className="name" style={{ fontSize: 16 }}>{activeStoreName}</span>
             <span className="code" style={{ fontSize: 12 }}>{activeStoreCode}</span>
+            {storeIsOnline(user?.activeStoreId) && (
+              <span style={onlineBadgeStyle}>Online</span>
+            )}
             <Icon.chevronDown width={12} height={12} />
           </button>
           {storeOpen && (
@@ -241,7 +273,19 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
                     cursor: 'pointer',
                   }}
                 >
-                  <div>{friendlyStoreLabel(id, storeNames)}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span
+                      style={{
+                        minWidth: 0,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {friendlyStoreLabel(id, storeNames)}
+                    </span>
+                    {storeIsOnline(id) && <span style={onlineBadgeStyle}>Online</span>}
+                  </div>
                   <div className="mono" style={{ color: 'var(--ink-4)', fontSize: 10.5 }}>
                     {looksLikeUuid(id) ? '' : id}
                   </div>

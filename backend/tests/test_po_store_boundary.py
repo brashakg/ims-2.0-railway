@@ -208,3 +208,160 @@ def test_create_grn_books_to_po_store_not_active(monkeypatch):
     assert grn_repo.created[0]["store_id"] == "STORE-B"
     # Serial minted from the PO store, not the caller's active store.
     assert grn_repo.created[0]["grn_number"] == "GRN-STORE-B"
+
+
+# --------------------------------------------------------------------------- #
+# W1.4 / OS-006 -- ONLINE-store guard on PO create + GRN create/accept
+# --------------------------------------------------------------------------- #
+# An ONLINE store (BV-ONLINE-01 / WO-ONLINE-01, store_type == "ONLINE") owns no
+# stock: a PO must not deliver to it and a GRN must not receive/accept at it.
+# The router guards use api.services.stores_util.is_online_store (known-id fast
+# path needs no DB; the store_type path is unit-tested below).
+
+
+def test_stores_util_known_id_and_store_type_paths():
+    from api.services.stores_util import is_online_store
+
+    class _Coll:
+        def __init__(self, doc):
+            self.doc = doc
+
+        def find_one(self, _flt, _proj=None):
+            return self.doc
+
+    class _Db:
+        def __init__(self, doc):
+            self._coll = _Coll(doc)
+
+        def get_collection(self, _name):
+            return self._coll
+
+    # Known ids fire WITHOUT any DB.
+    assert is_online_store(None, "BV-ONLINE-01") is True
+    assert is_online_store(None, "WO-ONLINE-01") is True
+    # store_type=ONLINE on the doc fires for any id.
+    assert is_online_store(_Db({"store_id": "ZZ-X", "store_type": "ONLINE"}), "ZZ-X") is True
+    assert is_online_store(_Db({"store_id": "ZZ-X", "store_type": "online "}), "ZZ-X") is True
+    # Physical / unknown / blank stay False (fail-open, never false-block).
+    assert is_online_store(_Db({"store_id": "ZZ-X", "store_type": "RETAIL"}), "ZZ-X") is False
+    assert is_online_store(_Db(None), "ZZ-X") is False
+    assert is_online_store(None, "") is False
+    assert is_online_store(None, None) is False
+
+
+def test_stores_util_lookup_error_fails_open():
+    from api.services.stores_util import is_online_store
+
+    class _Boom:
+        def get_collection(self, _name):
+            raise RuntimeError("db down")
+
+    assert is_online_store(_Boom(), "STORE-A") is False
+    # ... but the known-id belt-and-braces still catches the live online store.
+    assert is_online_store(_Boom(), "BV-ONLINE-01") is True
+
+
+def test_create_po_online_delivery_store_400(monkeypatch):
+    """ADMIN raising a PO delivering to BV-ONLINE-01 -> 400, nothing persisted."""
+    repo = _PORepo(None)
+    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: repo)
+    monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: None)
+    body = vendors_mod.POCreate(
+        vendor_id="V1",
+        delivery_store_id="BV-ONLINE-01",
+        items=[
+            vendors_mod.POItemCreate(
+                product_id="P1",
+                product_name="Frame",
+                sku="S1",
+                quantity=1,
+                unit_price=100.0,
+            )
+        ],
+    )
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.create_po(body, _user(["ADMIN"], "STORE-A")))
+    assert e.value.status_code == 400
+    assert "hold no stock" in str(e.value.detail).lower()
+    assert repo.mutations == []
+
+
+def test_create_po_physical_store_still_allowed(monkeypatch):
+    """Sanity: the SAME PO against a physical store still creates."""
+
+    class _CreatingPORepo(_PORepo):
+        def create(self, doc):
+            self.mutations.append(("create", doc))
+            return doc
+
+    repo = _CreatingPORepo(None)
+    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: repo)
+    monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: None)
+    monkeypatch.setattr(vendors_mod, "get_product_repository", lambda: None)
+    monkeypatch.setattr(vendors_mod, "generate_po_number", lambda s: f"PO-{s}")
+    body = vendors_mod.POCreate(
+        vendor_id="V1",
+        delivery_store_id="STORE-A",
+        items=[
+            vendors_mod.POItemCreate(
+                product_id="P1",
+                product_name="Frame",
+                sku="S1",
+                quantity=1,
+                unit_price=100.0,
+            )
+        ],
+    )
+    out = asyncio.run(vendors_mod.create_po(body, _user(["ADMIN"], "STORE-A")))
+    assert out["po_number"] == "PO-STORE-A"
+    assert [m for m in repo.mutations if m[0] == "create"], "PO must persist"
+
+
+def test_create_grn_online_po_store_400(monkeypatch):
+    """A GRN against a PO delivering to BV-ONLINE-01 -> 400 after the store
+    re-point, and NO GRN doc is minted."""
+    grn_repo = _GRNRepo()
+    monkeypatch.setattr(vendors_mod, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(
+        vendors_mod,
+        "get_purchase_order_repository",
+        lambda: _PORepo(_po("BV-ONLINE-01")),
+    )
+    monkeypatch.setattr(vendors_mod, "get_file_store", lambda: _FileStore())
+    monkeypatch.setattr(vendors_mod, "generate_grn_number", lambda s: "GRN-1")
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(
+            vendors_mod.create_grn(_grn_body(), _user(["ADMIN"], "STORE-A"))
+        )
+    assert e.value.status_code == 400
+    assert "hold no stock" in str(e.value.detail).lower()
+    assert grn_repo.created == []
+
+
+def test_accept_grn_online_store_400(monkeypatch):
+    """Belt-and-braces: accepting a (legacy) GRN stamped with an ONLINE store is
+    rejected before any stock is minted."""
+
+    class _GRNFindRepo:
+        def __init__(self, doc):
+            self.doc = doc
+            self.updates = []
+
+        def find_by_id(self, gid):
+            return dict(self.doc) if gid == self.doc["grn_id"] else None
+
+        def update(self, gid, patch):
+            self.updates.append((gid, patch))
+            return True
+
+    grn_repo = _GRNFindRepo(
+        {"grn_id": "G-ON-1", "store_id": "BV-ONLINE-01", "status": "PENDING"}
+    )
+    monkeypatch.setattr(vendors_mod, "get_grn_repository", lambda: grn_repo)
+    monkeypatch.setattr(vendors_mod, "get_stock_repository", lambda: None)
+    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: None)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.accept_grn("G-ON-1", _user(["ADMIN"], "STORE-A")))
+    assert e.value.status_code == 400
+    assert "online store" in str(e.value.detail).lower()
+    assert grn_repo.updates == [], "guard must fire before any status flip"

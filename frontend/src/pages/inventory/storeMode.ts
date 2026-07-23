@@ -1,46 +1,12 @@
 // ============================================================================
-// Inventory store-mode helper
+// Inventory store-mode helper — COMPATIBILITY RE-EXPORT
 // ----------------------------------------------------------------------------
-// An ONLINE store (store_type === "ONLINE", e.g. BV-ONLINE-01 / WO-ONLINE-01)
-// owns NO physical stock of its own — it sells from the pooled stock of every
-// shop (reserve-on-order). The Inventory page's physical framing (stock value,
-// low-stock, on-floor zones) is therefore meaningless for such a store, so the
-// page swaps to an ONLINE-appropriate view (see InventoryPage). This tiny pure
-// helper is the single, testable source of truth for that decision.
+// W1.4 / RC-B: the ONLINE-store detector was lifted to utils/storeMode.ts so
+// every surface (shell banner, POS, purchase, till, transfers) shares the one
+// source of truth. This module re-exports it so existing inventory imports
+// (InventoryPage, tests) keep working unchanged. Import NEW code from
+// '../../utils/storeMode' directly.
 // ============================================================================
 
-/** Known ONLINE store ids (created 2026-07-20). Used as a fast-path so the
- *  online view renders instantly even before the store list has loaded — and
- *  as a fallback if a legacy store doc is missing its store_type. Prefer the
- *  store_type field; these ids are the belt-and-braces. */
-export const ONLINE_STORE_IDS: ReadonlySet<string> = new Set([
-  'BV-ONLINE-01',
-  'WO-ONLINE-01',
-]);
-
-/** Minimal shape we need to classify a store. All fields optional so callers
- *  can pass a partial store row (the Inventory store dropdown only maps a few
- *  fields) without a cast. */
-export interface StoreModeInput {
-  id?: string | null;
-  store_id?: string | null;
-  store_type?: string | null;
-  owns_stock?: boolean | null;
-}
-
-/** True when the given store is an ONLINE (stockless, pooled-fulfilment) store.
- *  Decision order: explicit store_type wins; then the known-id allow-list. */
-export function isOnlineStore(store: StoreModeInput | null | undefined): boolean {
-  if (!store) return false;
-  if (String(store.store_type ?? '').trim().toUpperCase() === 'ONLINE') return true;
-  const id = String(store.store_id ?? store.id ?? '').trim();
-  return id !== '' && ONLINE_STORE_IDS.has(id);
-}
-
-/** True when the given store id is a known ONLINE store id. Lets a caller flip
- *  to the online view from just the active-store id (before the full store row
- *  is available). */
-export function isOnlineStoreId(storeId: string | null | undefined): boolean {
-  const id = String(storeId ?? '').trim();
-  return id !== '' && ONLINE_STORE_IDS.has(id);
-}
+export { ONLINE_STORE_IDS, isOnlineStore, isOnlineStoreId } from '../../utils/storeMode';
+export type { StoreModeInput } from '../../utils/storeMode';

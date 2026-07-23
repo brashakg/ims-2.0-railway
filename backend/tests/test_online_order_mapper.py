@@ -415,3 +415,20 @@ def test_no_db_simulates_without_crashing():
 def test_bad_payload_is_skipped_not_raised(wired):
     res = online_order_mapper.map_shopify_order({"junk": True}, wired["db"], topic="orders/create")
     assert res["status"] == "skipped"
+
+
+def test_w14_pos_guard_leaves_shopify_ingest_unaffected(wired):
+    """W1.4 / OS-005 regression lock: POS create_order now 400s under an ONLINE
+    store, but the Shopify ingest path writes order docs DIRECTLY (never through
+    that route) -- an orders/create webhook for BV-ONLINE-01 must still create a
+    settled order with source == 'shopify'."""
+    payload = _frame_order(10099)
+
+    res = online_order_mapper.map_shopify_order(payload, wired["db"], topic="orders/create")
+
+    assert res["status"] == "created"
+    docs = [d for d in wired["orders"].docs if d.get("shopify_order_id") == "10099"]
+    assert len(docs) == 1
+    assert docs[0]["store_id"] == "BV-ONLINE-01"
+    assert docs[0]["source"] == "shopify"
+    assert docs[0]["channel"] == "ONLINE"

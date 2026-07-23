@@ -21,6 +21,10 @@ from ..dependencies import (
     validate_store_access,
 )
 
+# W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
+# land stock on a pooled, stockless ONLINE store.
+from ..services.stores_util import is_online_store
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -950,6 +954,20 @@ async def create_transfer(
             detail="Source and destination store must be different",
         )
 
+    # W1.4 / OS-032: an ONLINE store sells the pooled stock of every physical
+    # shop and owns none of its own -- stock must never be transferred INTO it
+    # (receive would re-home real units onto the pooled store).
+    if transfer.to_location_id and is_online_store(
+        _get_db(), transfer.to_location_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "An online store sells pooled stock from every shop and "
+                "cannot hold its own - choose a physical destination store."
+            ),
+        )
+
     # BUG FIX: at least one item must be in the transfer.
     if not transfer.items:
         raise HTTPException(
@@ -1333,6 +1351,27 @@ async def receive_transfer(
     # IDOR guard: receiving re-homes REAL stock_units INTO the DESTINATION
     # store -- only someone scoped to that store may confirm arrival.
     _assert_transfer_access(transfer, current_user, side="dest")
+
+    # W1.4 / OS-032 (belt and braces): receive is the actual stock-LANDING step
+    # -- _apply_receive_stock_move re-homes real units with store_id = to_store.
+    # create_transfer already blocks an ONLINE destination, but a legacy /
+    # in-flight transfer whose to_location_id was set to an ONLINE store BEFORE
+    # that guard existed could still land owned stock on the pooled, stockless
+    # store here. Mirror the _accept_grn_impl belt-and-braces guard so the
+    # no-own-stock invariant holds on the landing step too. (Ship is NOT guarded
+    # -- it only decrements the SOURCE store's on-hand and lands nothing on the
+    # destination.)
+    if transfer.get("to_location_id") and is_online_store(
+        _get_db(), transfer.get("to_location_id")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The destination is an online store, which sells pooled stock "
+                "and holds none of its own - it cannot receive a transfer. "
+                "Re-route these units to a physical shop."
+            ),
+        )
 
     if transfer["status"] not in [
         TransferStatus.IN_TRANSIT,

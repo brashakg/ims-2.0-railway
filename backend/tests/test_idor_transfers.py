@@ -570,3 +570,88 @@ def test_pending_admin_sees_all(coll):
         transfers.get_pending_transfers(current_user=_user("ADMIN", []))
     )
     assert {t["id"] for t in res["pending_approval"]} == {"p5", "p6"}
+
+
+# ===========================================================================
+# W1.4 / OS-032 -- ONLINE-store destination guard on create
+# ===========================================================================
+# An ONLINE store (BV-ONLINE-01 / WO-ONLINE-01) sells pooled stock and owns
+# none of its own: a transfer INTO it must 400 before anything persists.
+# (Physical destinations stay covered by test_create_from_own_store_ok above.)
+
+
+def test_create_with_online_destination_400(coll):
+    hq = _user("ADMIN", [])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            transfers.create_transfer(
+                _transfer_input("A", "BV-ONLINE-01"), current_user=hq
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "online store" in str(exc.value.detail).lower()
+    assert coll.docs == {}  # nothing persisted
+
+
+def test_create_with_online_destination_400_for_store_manager(coll):
+    """Same guard for a store-scoped manager transferring out of their own
+    store -- the destination check fires after the source-IDOR check."""
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            transfers.create_transfer(
+                _transfer_input("A", "WO-ONLINE-01"), current_user=MGR_A
+            )
+        )
+    assert exc.value.status_code == 400
+    assert coll.docs == {}
+
+
+# ---------------------------------------------------------------------------
+# W1.4 / OS-032 belt-and-braces -- the stock-LANDING step (receive) is guarded
+# too, mirroring the GRN accept guard. A legacy/in-flight transfer whose
+# destination is ONLINE (created before create_transfer was guarded) must NOT
+# re-home real units onto the pooled, stockless store.
+# ---------------------------------------------------------------------------
+
+
+def test_receive_online_destination_400_no_stock_landed(coll):
+    """An IN_TRANSIT transfer to BV-ONLINE-01 is rejected at receive with a 400,
+    and the doc is NOT flipped to RECEIVED (no stock re-homed onto the online
+    store). The dest-scoped manager passes the IDOR check first."""
+    _seed_transfer("t-on-1", "B", "BV-ONLINE-01", "in_transit")
+    mgr_online = _user("STORE_MANAGER", ["BV-ONLINE-01"])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            transfers.receive_transfer(
+                "t-on-1",
+                items_received=[
+                    transfers.TransferItemReceive(
+                        transfer_item_id="t-on-1-line-1", quantity_received=2
+                    )
+                ],
+                current_user=mgr_online,
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "online store" in str(exc.value.detail).lower()
+    # Guard fired before the stock-mint / status flip: still in transit.
+    assert coll.docs["t-on-1"]["status"] == "in_transit"
+
+
+def test_receive_physical_destination_unaffected(coll):
+    """Control: the SAME receive against a physical destination still completes
+    (the guard is destination-ONLINE-only, never false-blocks a physical shop)."""
+    _seed_transfer("t-phys-1", "B", "C", "in_transit")
+    res = asyncio.run(
+        transfers.receive_transfer(
+            "t-phys-1",
+            items_received=[
+                transfers.TransferItemReceive(
+                    transfer_item_id="t-phys-1-line-1", quantity_received=2
+                )
+            ],
+            current_user=MGR_C,
+        )
+    )
+    assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
+    assert coll.docs["t-phys-1"]["status"] == "received"

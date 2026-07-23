@@ -12,6 +12,7 @@ import { Rail } from './Rail';
 import { TopNav } from './TopNav';
 import { Topbar, type Crumb } from './Topbar';
 import { useAppearance } from '../../context/AppearanceContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 
 interface ShellProps {
   crumbs?: Crumb[];
@@ -23,6 +24,10 @@ interface ShellProps {
 export function Shell({ crumbs, actions, brand, children }: ShellProps) {
   const { railExpanded } = useAppearance();
   const location = useLocation();
+  // W1.4 / OS-029: when the ACTIVE store is an ONLINE (pooled, stockless)
+  // store, every page gets a one-line honest frame — physical-store tools
+  // (POS, till, receiving, transfers-in) are disabled for it.
+  const onlineStoreActive = useIsOnlineStore();
   // navOpen drives the PHONE drawer only (the Rail rendered as a left overlay).
   const [navOpen, setNavOpen] = useState(false);
   // Track last path so we only close on an actual navigation, not initial mount.
@@ -86,6 +91,22 @@ export function Shell({ crumbs, actions, brand, children }: ShellProps) {
           onHamburgerClick={() => setNavOpen((o) => !o)}
           navOpen={navOpen}
         />
+        {onlineStoreActive && (
+          <div
+            className="no-print"
+            role="status"
+            style={{
+              padding: '5px 16px',
+              background: 'var(--info-50, #eff6ff)',
+              borderBottom: '1px solid var(--line)',
+              color: 'var(--info, #2563eb)',
+              font: '600 12px var(--font-sans)',
+              textAlign: 'center',
+            }}
+          >
+            Online store — sells pooled stock; no till or floor operations.
+          </div>
+        )}
         <div id="main-content" className="page-body">{children}</div>
       </div>
     </div>

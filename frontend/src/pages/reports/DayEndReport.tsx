@@ -5,13 +5,14 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useStorePrintInfo } from '../../hooks/useStorePrintInfo';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { orderApi, reportsApi } from '../../services/api';
 import type { DayEndClose } from '../../services/api/reports';
 import { istDayString } from '../../utils/datetime';
 import {
   IndianRupee, CreditCard, Phone, FileText,
   TrendingUp, Package, Printer,
-  AlertTriangle, CheckCircle, ChevronDown, ChevronUp,
+  AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Globe,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -51,6 +52,9 @@ export default function DayEndReport() {
   // STORE-SPECIFIC: the printed Z-report header carries the issuing store's
   // name, not a hardcoded brand. Resolved from the report's store.
   const printStore = useStorePrintInfo(storeId);
+  // W1.4 / OS-030: an ONLINE store has no cash drawer — hide the cash count +
+  // Close Day controls (backend rejects the day-end close with 400 too).
+  const onlineStore = useIsOnlineStore(storeId);
 
   useEffect(() => {
     loadDayOrders();
@@ -284,7 +288,20 @@ export default function DayEndReport() {
             </div>
           </div>
 
-          {/* Cash Reconciliation */}
+          {/* Cash Reconciliation — hidden for ONLINE stores (no drawer). */}
+          {onlineStore && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 flex items-start gap-3">
+              <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="text-sm text-blue-900">
+                <p className="font-semibold mb-1">Online store — no cash drawer to close.</p>
+                <p className="text-blue-800">
+                  Website-order payments settle via the payment gateway, so the
+                  physical cash count and day closing do not apply here.
+                </p>
+              </div>
+            </div>
+          )}
+          {!onlineStore && (
           <div className="bg-white border border-gray-200 rounded-xl p-5">
             <h3 className="font-semibold text-gray-900 mb-4">Cash Reconciliation</h3>
             <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4 items-end">
@@ -312,6 +329,7 @@ export default function DayEndReport() {
               </div>
             </div>
           </div>
+          )}
 
           {/* Staff Performance */}
           {summary.staffSales.length > 0 && (
@@ -357,8 +375,8 @@ export default function DayEndReport() {
             </div>
           )}
 
-          {/* Closing Action */}
-          {!isClosed ? (
+          {/* Closing Action — hidden for ONLINE stores (day close = drawer close). */}
+          {onlineStore ? null : !isClosed ? (
             <div className="bg-white border border-gray-200 rounded-xl p-5 print:hidden">
               <h3 className="font-semibold text-gray-900 mb-3">Close Day</h3>
               <textarea value={closingNotes} onChange={e => setClosingNotes(e.target.value)}

@@ -78,6 +78,11 @@ POS_WRITE_ROLES = (
 # backend mirror of the frontend's getGSTRateByCategory.
 from ..services.gst_rates import gst_rate_for_category as _gst_rate_for_category
 
+# W1.4 / OS-005: shared ONLINE store-type detector (single backend source of
+# truth, mirrors the frontend storeMode helper). Used to block manual POS
+# billing under a stockless pooled ONLINE store.
+from ..services.stores_util import is_online_store
+
 # resolve_gst_rate layers the SUPERADMIN-editable HSN->GST master over the
 # static canonical table, so a govt rate change is an in-app edit (Settings ->
 # HSN & GST Rates) with no code change. Fail-soft: falls back to the static
@@ -1386,6 +1391,31 @@ async def create_order(
     order_repo = get_order_repository()
     customer_repo = get_customer_repository()
     store_id = current_user.get("active_store_id")
+
+    # W1.4 / OS-005 (owner-approved 2026-07-23): an ONLINE store (BV-ONLINE-01 /
+    # WO-ONLINE-01) owns no stock, has no till and no walk-ins -- a manual POS
+    # sale rung under it would issue a real GST invoice with zero stock
+    # movement (the serialized-availability gate never fires because an online
+    # store owns no stock_units rows). Reject BEFORE any validation/persist.
+    #
+    # The guard is UNCONDITIONAL on an ONLINE active store -- there is no
+    # source-based carve-out (OrderCreate has no `source` field, and store_id
+    # binds ONLY to current_user['active_store_id'], never a request-body
+    # override). It is safe precisely because nothing legitimate routes an
+    # online sale through here: the Shopify webhook ingest writes order docs
+    # directly (shopify_ingest.py -> orders_coll.insert_one) and never calls
+    # this route, and online_store_orders is read/remap-only. So the guard
+    # over-blocks (an in-store user ringing under an online store) and never
+    # under-blocks a real online/Shopify sale.
+    if is_online_store(_get_db(), store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is an online store - website orders arrive from Shopify; "
+                "in-store billing is disabled. Switch to a physical store to "
+                "ring a sale."
+            ),
+        )
     # Salesperson attribution drives the incentive engine. Prefer the
     # explicit POS picker value; fall back to the logged-in user so older
     # clients (and quick sales) still attribute somewhere.

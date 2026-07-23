@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
+from ..services.stores_util import is_online_store
 from ..services import survival_cashflow
 from ..services.cost_mask import can_see_cost
 from ..services.cache import cache
@@ -3675,6 +3676,18 @@ async def open_cash_register(
     store_id = validate_store_access(body.store_id or "", current_user)
     if not store_id:
         raise HTTPException(status_code=400, detail="No store context for this user")
+
+    # W1.4 / OS-030: an ONLINE store has no cash drawer -- its payments settle
+    # through the online payment gateway. Opening a till for it would create a
+    # fictitious session in the cash-reconciliation summary.
+    if is_online_store(db, store_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is an online store - payments settle via the payment "
+                "gateway, so there is no cash drawer to open."
+            ),
+        )
 
     coll = db.get_collection(_CASH_SESSIONS)
 
