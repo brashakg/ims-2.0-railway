@@ -28,6 +28,7 @@ import type { JobStatus, JobPriority } from '../../types';
 import { workshopApi, orderApi, vendorsApi } from '../../services/api';
 import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 // Thermal label system (scan-to-advance + labels). Imported DIRECTLY from
@@ -129,6 +130,9 @@ function resolvePriorityConfig(priority: unknown) {
 export function WorkshopPage() {
   const { user } = useAuth();
   const toast = useToast();
+  // OS-065: an ONLINE store has no workshop bench — job intake is disabled
+  // there (online orders are fulfilled from the physical stores' benches).
+  const isOnlineStoreActive = useIsOnlineStore();
 
   // Data state
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -545,7 +549,12 @@ const loadJobs = async () => {
           <div className="hint">Lens ordered → received → mounted → QC. Assign by technician, auto-notify when ready, customer pickup with OTP verify.</div>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <button onClick={() => setShowCreateJob(true)} className="btn sm primary">
+          <button
+            onClick={() => setShowCreateJob(true)}
+            className="btn sm primary"
+            disabled={isOnlineStoreActive}
+            title={isOnlineStoreActive ? 'Not available for an online store — jobs run on the physical stores’ benches' : undefined}
+          >
             <Wrench className="w-4 h-4" /> New job from order
           </button>
           <button onClick={loadJobs} disabled={isLoading} className="btn sm">

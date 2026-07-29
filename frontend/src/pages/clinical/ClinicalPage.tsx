@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import { useToast } from '../../context/ToastContext';
@@ -131,6 +132,9 @@ export function ClinicalPage() {
 
   // Role-based permissions
   const canStartTest = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']);
+  // OS-065: an ONLINE store has no exam room or walk-ins — queue intake is
+  // disabled there so nonsense records can't be attributed to a virtual store.
+  const isOnlineStoreActive = useIsOnlineStore();
   const canAddPatient = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_STAFF']);
   const canViewAbuseAlerts = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
   // F24 conversion tab: clinical-management + optometrists (server role-strips
@@ -448,16 +452,21 @@ export function ClinicalPage() {
             <>
               {/* Phase 6.13 — search-existing first, new-patient second.
                   Most walk-ins are repeat customers; this flow saves
-                  re-keying their details every visit. */}
+                  re-keying their details every visit. OS-065: disabled for an
+                  ONLINE store (no exam room, no walk-ins). */}
               <button
                 onClick={() => setShowQueueExistingModal(true)}
                 className="btn sm"
+                disabled={isOnlineStoreActive}
+                title={isOnlineStoreActive ? 'Not available for an online store — it has no walk-in queue' : undefined}
               >
                 <Search className="w-4 h-4" /> Queue existing
               </button>
               <button
                 onClick={() => setShowAddCustomerModal(true)}
                 className="btn sm primary"
+                disabled={isOnlineStoreActive}
+                title={isOnlineStoreActive ? 'Not available for an online store — it has no walk-in queue' : undefined}
               >
                 <Plus className="w-4 h-4" /> New patient
               </button>

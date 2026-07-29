@@ -68,7 +68,12 @@ const EMPTY_FORM: FormState = {
  *  matched nothing while the footnote claimed every product was repriced). */
 function recomputeNote(r?: RecomputeResult): string {
   if (!r) return '';
-  if (r.ok === false) return ' (price recompute deferred)';
+  // OS-068: ok:false means the bulk recompute ERRORED after the rule saved —
+  // stored online prices may now be inconsistent with the rules. "Deferred"
+  // implied it would happen by itself; nothing retries automatically.
+  if (r.ok === false) {
+    return ' — but the price recompute FAILED, so stored online prices may be stale. Use "Recompute prices" to retry.';
+  }
   const p = r.products ?? 0;
   const v = r.variants ?? 0;
   if (!p && !v) return ' — 0 products matched this scope; nothing was repriced';
@@ -95,7 +100,6 @@ export default function DiscountRulesPage() {
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -230,7 +234,7 @@ export default function DiscountRulesPage() {
             onClick={recomputeAll}
             disabled={recomputing}
             className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 border border-gray-300 bg-white hover:bg-gray-50 rounded-lg px-3 py-1.5 disabled:opacity-60"
-            title="Re-apply every rule to the stored online prices across the whole catalog (changed products are queued for the next Shopify push)"
+            title="Re-apply every active rule to the stored online prices across the whole catalog — changed products are queued for the next Shopify push (also use after a save reports a failed recompute)"
           >
             {recomputing ? (
               <Loader2 className="w-4 h-4 animate-spin" />

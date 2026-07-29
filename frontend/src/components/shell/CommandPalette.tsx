@@ -20,7 +20,7 @@ import { customerApi } from '../../services/api/customers';
 import { orderApi } from '../../services/api/sales';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
-import type { UserRole } from '../../types';
+import { filterVisibleGroups } from './navConfig';
 import { Icon } from './Icon';
 
 // ----------------------------------------------------------------------------
@@ -74,58 +74,21 @@ function pushRecent(next: RecentItem): RecentItem[] {
 }
 
 // ----------------------------------------------------------------------------
-// Static page index (role-filtered). Mirrors the visible items in
-// frontend/src/components/shell/Rail.tsx so we never surface a page the
-// signed-in user is not allowed to load.
+// Page index — DERIVED from the shell nav model (navConfig.NAV_GROUPS) through
+// the exact same visibility filter both shells use (filterVisibleGroups: role
+// ceiling + per-user module deny). OS-052: the palette used to keep its own
+// hand-maintained copy of the nav, which silently drifted (zero Online Store
+// entries, a phantom "Catalog Autopilot" row, ~20 newer items missing).
+// Deriving from the single nav source of truth means a new nav item is
+// jumpable the moment it ships — the two can never drift again.
 // ----------------------------------------------------------------------------
 
 interface JumpPage {
   label: string;
   route: string;
-  requireRoles?: UserRole[];
+  /** Nav group title (e.g. "Growth") — shown as context, and searchable. */
   hint?: string;
 }
-
-const ALL_PAGES: JumpPage[] = [
-  { label: 'Hub', route: '/dashboard' },
-  { label: 'Notifications', route: '/notifications' },
-  { label: 'POS', route: '/pos', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
-  { label: 'Customers', route: '/customers', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_STAFF'] },
-  { label: 'Walkouts', route: '/walkouts', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
-  { label: 'Orders', route: '/orders', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
-  { label: 'Estimates / Quotations', route: '/estimates', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
-  { label: 'Returns', route: '/returns', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'] },
-  { label: 'Refund Approvals', route: '/returns/approvals', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Clinical', route: '/clinical', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'] },
-  { label: 'Inventory', route: '/inventory', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'] },
-  { label: 'Power Grid', route: '/inventory/power-grid', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'OPTOMETRIST'] },
-  { label: 'Online Stock', route: '/inventory/online-sync', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
-  { label: 'Purchase', route: '/purchase', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Vendor Returns', route: '/purchase/vendor-returns', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
-  { label: 'Workshop', route: '/workshop', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
-  { label: 'Catalog', route: '/catalog', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-  { label: 'Add Product', route: '/catalog/add', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-  { label: 'Catalog Autopilot', route: '/catalog/autopilot', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-  { label: 'Pricing & Offers', route: '/catalog/pricing', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
-  { label: 'Tasks & SOPs', route: '/tasks', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Expenses', route: '/finance/expenses' },
-  { label: 'HR', route: '/hr', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Salary Setup', route: '/hr/salary-setup', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Payroll Run', route: '/hr/payroll-run', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-  { label: 'Incentive', route: '/incentive', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
-  { label: 'Reports', route: '/reports', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Finance', route: '/finance/dashboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Cash Register', route: '/finance/cash-register', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Cash Flow', route: '/finance/cash-flow', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-  { label: 'GST Credit (ITC)', route: '/finance/itc', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-  { label: 'Marketing', route: '/customers/campaigns', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-  { label: 'Jarvis', route: '/jarvis', requireRoles: ['SUPERADMIN'] },
-  { label: 'Activity Log', route: '/admin/activity-log', requireRoles: ['SUPERADMIN'] },
-  { label: 'Print', route: '/print', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_STAFF'] },
-  { label: 'Settings', route: '/settings', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'] },
-  { label: 'Staff Onboarding', route: '/setup', requireRoles: ['SUPERADMIN', 'ADMIN'] },
-  { label: 'Organization', route: '/organization', requireRoles: ['SUPERADMIN', 'ADMIN'] },
-];
 
 // ----------------------------------------------------------------------------
 // Debounce hook (200ms per the spec)
@@ -179,7 +142,7 @@ interface CommandPaletteProps {
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate();
-  const { user, hasRole } = useAuth();
+  const { user, hasModuleAccess } = useAuth();
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebounced(query, 200);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -355,18 +318,25 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     };
   }, [open, debouncedQuery]);
 
-  // Role-filtered page list - mirrors Rail.tsx hasAnyRole + activeRole logic.
+  // Jump list derived from the nav model through the shared visibility filter
+  // (role ceiling + per-user module deny) — identical to what TopNav/Rail
+  // render, so the palette can never offer a page the nav would hide (OS-052).
+  // External/SSO items are skipped (navigate() can't open them); routes are
+  // deduped in case two groups ever surface the same destination.
   const visiblePages = useMemo(() => {
-    const userRoles = user?.roles;
-    const activeRole = user?.activeRole;
-    return ALL_PAGES.filter((p) => {
-      if (!p.requireRoles) return true;
-      if (userRoles && p.requireRoles.some((r) => userRoles.includes(r))) return true;
-      if (activeRole && p.requireRoles.includes(activeRole)) return true;
-      // Also let hasRole() catch SUPERADMIN/ADMIN broad access.
-      return hasRole(p.requireRoles);
-    });
-  }, [user, hasRole]);
+    const groups = filterVisibleGroups(user?.roles, user?.activeRole, hasModuleAccess);
+    const seen = new Set<string>();
+    const pages: JumpPage[] = [];
+    for (const group of groups) {
+      for (const item of group.items) {
+        if (item.external) continue;
+        if (seen.has(item.to)) continue;
+        seen.add(item.to);
+        pages.push({ label: item.label, route: item.to, hint: group.title });
+      }
+    }
+    return pages;
+  }, [user, hasModuleAccess]);
 
   // ----- Selection handlers ---------------------------------------------
 
@@ -584,7 +554,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             // match plus a tiny acronym match (e.g. "gst" matches "GST Credit").
             const q = trimmedQuery.toLowerCase();
             const matched = q
-              ? visiblePages.filter((p) => p.label.toLowerCase().includes(q))
+              ? visiblePages.filter((p) =>
+                  `${p.label} ${p.hint ?? ''}`.toLowerCase().includes(q),
+                )
               : visiblePages;
             const sliced = matched.slice(0, q ? 8 : 12);
             if (sliced.length === 0) {
@@ -593,14 +565,17 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             return sliced.map((p) => (
               <Command.Item
                 key={`page-${p.route}`}
-                value={`page ${p.label} ${p.route}`}
+                value={`page ${p.label} ${p.hint ?? ''} ${p.route}`}
                 onSelect={() => selectPage(p)}
                 className="cmdk-item"
               >
                 <RowIcon kind="page" />
                 <div className="cmdk-row-text">
                   <div className="cmdk-row-label">{p.label}</div>
-                  <div className="cmdk-row-sub cmdk-row-sub-mono">{p.route}</div>
+                  <div className="cmdk-row-sub cmdk-row-sub-mono">
+                    {p.hint ? `${p.hint} · ` : ''}
+                    {p.route}
+                  </div>
                 </div>
                 <span className="cmdk-row-tag">Page</span>
               </Command.Item>

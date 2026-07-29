@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { walkoutsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useToast } from '../../context/ToastContext';
 import type {
   WalkinStatusResponse,
@@ -78,7 +79,11 @@ export function FootfallPage() {
 
   const userRoles = (user as any)?.roles as string[] | undefined;
   const activeRole = (user as any)?.activeRole as string | undefined;
-  const canEdit = hasAnyRole(userRoles, activeRole, EDIT_ROLES);
+  // OS-065: footfall is a count of people through a physical door — an ONLINE
+  // store has none, so ALL write surfaces (per-staff counts, unattributed
+  // top-up) flip to read-only there. Reads stay (honest empties).
+  const isOnlineStoreActive = useIsOnlineStore();
+  const canEdit = hasAnyRole(userRoles, activeRole, EDIT_ROLES) && !isOnlineStoreActive;
   const isToday = (d: string) => d === todayIso();
 
   const [date, setDate] = useState<string>(todayIso());

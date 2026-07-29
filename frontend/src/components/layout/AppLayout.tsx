@@ -61,6 +61,20 @@ const SEGMENT_LABELS: Record<string, string> = {
   analytics: 'Analytics',
   footfall: 'Footfall',
   print: 'Print',
+  // OS-070: /online-store/* segments — match the nav label casing ("Online
+  // Store", not the dash-stripped "Online store" fallback).
+  'online-store': 'Online Store',
+  products: 'Products',
+  collections: 'Collections',
+  browse: 'Browse',
+  'discount-rules': 'Discount Rules',
+  menus: 'Menus',
+  images: 'Image Design Queue',
+  'refund-reviews': 'Refund Reviews',
+  'stock-tally': 'Stock Tally',
+  'store-health': 'Store Health',
+  ondc: 'ONDC Seller',
+  shopify: 'Shopify Sync',
 };
 
 function pathToCrumbs(pathname: string): Crumb[] {
