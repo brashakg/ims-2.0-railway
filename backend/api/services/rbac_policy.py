@@ -4753,6 +4753,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/push/status",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # Read-only push HISTORY (OS-047): surfaces the chained ONLINE_STORE_PUSH
+    # audit ledger on the sync page. Same {ADMIN, SUPERADMIN} set as every other
+    # row in this push family, so the module's grant-union is UNCHANGED (no
+    # capability broadening -- see the rbac capability-union gotcha).
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/push/history",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     {
         "method": "POST",
         "path": "/api/v1/online-store/push/product/{product_id}",

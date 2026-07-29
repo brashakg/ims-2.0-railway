@@ -907,6 +907,35 @@ def _resolve_variant_pricing(
     return price, mrp
 
 
+def _variants_for_price_push(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """Effective variant rows for a price/barcode push. Pure.
+
+    The passed catalog_variants rows when there are any; otherwise ONE
+    synthesized product-level pseudo-variant carrying the stored DEFAULT-variant
+    gid (ecom.shopify_variant_id -- written back by the create-side seeding).
+    A product with no catalog_variants rows maps to a single Shopify "Default
+    Title" variant, and without this synthesis its price changes (e.g. a
+    discount-rule recompute -- OS-016) could never ride the variant-price push:
+    build_variant_price_inputs only reads the rows it is given, and
+    _resolve_variant_pricing already falls back to the product/ecom pricing for
+    an option-less row. UPDATE-only stays true: no stored default gid -> []
+    (a clean noop downstream, never a create)."""
+    rows = list(variants or [])
+    if rows:
+        return rows
+    ecom = product.get("ecom") or {}
+    default_gid = ecom.get("shopify_variant_id")
+    if not default_gid:
+        return []
+    pseudo: Dict[str, Any] = {"shopify_variant_id": default_gid}
+    barcode = product.get("gtin") or product.get("barcode")
+    if barcode:
+        pseudo["gtin"] = barcode
+    return [pseudo]
+
+
 def build_variant_price_inputs(
     product: Dict[str, Any], variants: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -1758,10 +1787,12 @@ async def push_product(
     live, reason = _live_or_reason(db)
     if not live:
         # Variant price/barcode plan rides on the dry-run too (owner priority:
-        # a price change must be visibly part of the push plan).
+        # a price change must be visibly part of the push plan). Covers the
+        # product-level pseudo-variant of a no-variant-row product (OS-016).
         vp_plan = None
-        if variants:
-            vp_rows, vp_skipped = build_variant_price_inputs(product, variants)
+        vp_variants = _variants_for_price_push(product, variants)
+        if vp_variants:
+            vp_rows, vp_skipped = build_variant_price_inputs(product, vp_variants)
             vp_plan = {"variants": vp_rows, "skipped_no_gid_or_price": vp_skipped}
         # The CREATE-side seeding plan (price + SKU for the variants Shopify will
         # mint) rides on the dry-run too, so the owner can SEE the money before
@@ -1873,8 +1904,11 @@ async def push_product(
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.
         # Skipped when the seeding step above already wrote these exact prices.
+        # Also covers a no-variant-row product's default variant (via the
+        # stored ecom.shopify_variant_id pseudo-variant) so a queued price
+        # change is actually CARRIED by the update push (OS-016).
         vp_summary = None
-        if variants and new_gid and not seeded:
+        if _variants_for_price_push(product, variants) and new_gid and not seeded:
             vp_product = dict(product)
             vp_ecom = dict(vp_product.get("ecom") or {})
             vp_ecom["shopify_product_id"] = new_gid
@@ -2018,7 +2052,12 @@ async def push_variant_prices(
     ecom = product.get("ecom") or {}
     raw_gid = ecom.get("shopify_product_id")
     product_gid = _as_shopify_gid(raw_gid, "Product") if raw_gid else None
-    rows, skipped = build_variant_price_inputs(product, variants or [])
+    # No catalog_variants rows -> the product-level pseudo-variant (the stored
+    # default-variant gid), so a single-variant product's price change can
+    # still be re-pushed (OS-016 / OS-017). [] when no gid -> clean noop.
+    rows, skipped = build_variant_price_inputs(
+        product, _variants_for_price_push(product, variants)
+    )
     payload: Dict[str, Any] = {
         "productId": product_gid,
         "variants": rows,

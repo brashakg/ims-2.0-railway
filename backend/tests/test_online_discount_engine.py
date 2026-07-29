@@ -561,3 +561,91 @@ def test_resolve_variant_pricing_uses_stamped_engine_online_price():
     }
     price, _mrp = shopify_push._resolve_variant_pricing(product, {})
     assert price == 540.0  # engine-stamped rule price IS preferred
+
+
+# ===========================================================================
+# G. RC-G push pending-truth (OS-016 / OS-050)
+# ===========================================================================
+
+
+def test_recompute_price_change_marks_locally_modified():
+    """OS-016: a recompute that MOVES a persisted price flips
+    ecom.locally_modified=True so the change enters the Shopify push queue
+    (the sweep + pending counter key solely on that flag)."""
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r1", "category": "SUNGLASS", "discount_percentage": 10, "active": True}
+    )
+    db["catalog_products"].insert_one({"id": "A", "category": "SUNGLASS", "mrp": 2000})
+    out = engine.recompute_all(db, category="SUNGLASS")
+    assert out["ok"] is True and out["products"] == 1
+    assert out["changed"] == 1
+    a = db["catalog_products"].find_one({"id": "A"})
+    assert a["ecom"]["online_offer_price"] == 1800.0
+    assert a["ecom"]["locally_modified"] is True
+
+
+def test_recompute_idempotent_rerun_does_not_redirty():
+    """OS-016 flood-guard: an idempotent re-run re-stamps the SAME numbers and
+    must NOT re-dirty the doc (a cleared push flag stays cleared)."""
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r1", "category": "SUNGLASS", "discount_percentage": 10, "active": True}
+    )
+    db["catalog_products"].insert_one({"id": "A", "category": "SUNGLASS", "mrp": 2000})
+    engine.recompute_all(db, category="SUNGLASS")
+    # Simulate a successful push clearing the dirty flag.
+    a = db["catalog_products"].find_one({"id": "A"})
+    ecom = dict(a["ecom"])
+    ecom["locally_modified"] = False
+    db["catalog_products"].update_one({"id": "A"}, {"$set": {"ecom": ecom}})
+
+    out2 = engine.recompute_all(db, category="SUNGLASS")
+    assert out2["changed"] == 0
+    a2 = db["catalog_products"].find_one({"id": "A"})
+    assert a2["ecom"]["locally_modified"] is False  # NOT re-dirtied
+    assert a2["ecom"]["online_offer_price"] == 1800.0
+
+
+def test_recompute_variant_change_dirties_parent_product():
+    """OS-016: a variant-level price movement marks the PARENT product dirty
+    (the push queue keys on product-level ecom.locally_modified only)."""
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r1", "category": "SUNGLASS", "discount_percentage": 20, "active": True}
+    )
+    db["catalog_products"].insert_one({"id": "A", "category": "SUNGLASS", "mrp": 2000})
+    db["catalog_variants"].insert_one(
+        {"sku": "V1", "parent_product_id": "A", "mrp": 3000}
+    )
+    out = engine.recompute_all(db, category="SUNGLASS")
+    assert out["changed"] == 1
+    v = db["catalog_variants"].find_one({"sku": "V1"})
+    assert v["discounted_price"] == 2400.0
+    a = db["catalog_products"].find_one({"id": "A"})
+    assert a["ecom"]["locally_modified"] is True
+
+
+def test_recompute_all_category_scope_is_alias_safe():
+    """OS-050: the scoped sweep matches stored categories through
+    resolve_category -- a legacy/alias-cased doc ('Sunglasses') that the rule
+    engine WOULD discount is repriced, not silently skipped, while a raw
+    {'category': 'SUNGLASS'} equality filter would have missed it."""
+    db = _EngineDB()
+    db["ecom_discount_rules"].insert_one(
+        {"id": "r1", "category": "SUNGLASS", "discount_percentage": 10, "active": True}
+    )
+    # Legacy/alias-cased stored category (BVI-era shape) + one canonical doc.
+    db["catalog_products"].insert_one({"id": "L", "category": "Sunglasses", "mrp": 1000})
+    db["catalog_products"].insert_one({"id": "C", "category": "SUNGLASS", "mrp": 2000})
+    db["catalog_products"].insert_one({"id": "F", "category": "FRAME", "mrp": 3000})
+
+    out = engine.recompute_all(db, category="SUNGLASS")
+    assert out["ok"] is True
+    assert out["products"] == 2  # BOTH sunglass docs, not just the canonical one
+    legacy = db["catalog_products"].find_one({"id": "L"})
+    assert legacy["ecom"]["online_offer_price"] == 900.0
+    assert legacy["ecom"]["locally_modified"] is True
+    # Out-of-scope FRAME untouched.
+    f = db["catalog_products"].find_one({"id": "F"})
+    assert "ecom" not in f or "online_offer_price" not in (f.get("ecom") or {})

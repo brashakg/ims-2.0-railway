@@ -159,11 +159,15 @@ def _validate_category(category: str) -> str:
 
 def _trigger_recompute(db, category: Optional[str]) -> Dict[str, Any]:
     """Fire a FAIL-SOFT bulk recompute of stored online prices after a rule change.
-    Scoped to the affected category (the minimal correct set) so a single edit need
-    not sweep the whole catalog. Never raises into the CRUD path."""
+    Scoped to the affected category so a single edit need not reprice the whole
+    catalog. ALIAS-SAFE (OS-050): the scope is matched ENGINE-SIDE through
+    resolve_category (the same normalisation the rule matcher uses), NOT via a raw
+    Mongo {'category': X} equality -- stored catalog categories can be legacy /
+    alias-cased and a raw filter silently skipped exactly the docs the engine
+    would discount, stranding them on their pre-edit price. Never raises into the
+    CRUD path."""
     try:
-        rule_filter = {"category": category} if category else None
-        return engine.recompute_all(db, rule_filter)
+        return engine.recompute_all(db, category=category)
     except Exception as exc:  # noqa: BLE001 -- recompute must never fail a rule edit
         return {"ok": False, "error": str(exc)}
 

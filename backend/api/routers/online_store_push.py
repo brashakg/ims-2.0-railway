@@ -255,10 +255,119 @@ async def push_status(
     return {"mode": mode, "db_connected": True, "counts": counts}
 
 
+@router.get("/history")
+async def push_history(
+    limit: int = 50,
+    mode: Optional[str] = None,
+    ok: Optional[bool] = None,
+    entity: Optional[str] = None,
+    current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
+) -> Dict[str, Any]:
+    """Read-only push HISTORY from the chained ONLINE_STORE_PUSH audit ledger
+    (OS-047). Every push attempt -- LIVE or dry-run -- already writes an
+    audit_logs row (_write_audit above); this surfaces that ledger on the sync
+    page so the operator can see what was sent, when, by whom, and what failed,
+    without knowing the Activity Log's internal action string. Visible to the
+    SAME roles that can push (ADMIN + SUPERADMIN -- previously ADMINs had no
+    history surface at all: the Activity Log page is SUPERADMIN-only).
+
+    Filters: `mode` (LIVE|SIMULATED), `ok` (true/false), `entity` (product /
+    collection / menu / image / variant-prices). The details.* filters are
+    applied in Python -- portable across the in-memory MockCollection, which
+    does not model dot-notation queries. READ-ONLY: the ledger stays
+    append-only; nothing here mutates audit rows. Fail-soft: no audit store ->
+    an empty, honest `available: false` payload, never a 500."""
+    limit = max(1, min(int(limit), 200))
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+    except Exception:  # noqa: BLE001
+        audit = None
+    if audit is None:
+        return {"entries": [], "count": 0, "available": False}
+
+    flt: Dict[str, Any] = {"action": "ONLINE_STORE_PUSH"}
+    if entity:
+        flt["entity_type"] = entity.strip().lower()
+    # Over-fetch when a details filter is active (the filter is post-hoc).
+    fetch_n = limit if (mode is None and ok is None) else 500
+    try:
+        rows = audit.find_many(flt, sort=[("created_at", -1)], limit=fetch_n)
+    except Exception:  # noqa: BLE001
+        rows = []
+
+    want_mode = mode.strip().upper() if mode else None
+    entries: List[Dict[str, Any]] = []
+    for r in rows:
+        d = r.get("details") or {}
+        if want_mode and str(d.get("mode") or "").upper() != want_mode:
+            continue
+        if ok is not None and bool(d.get("ok")) is not ok:
+            continue
+        entries.append(
+            {
+                "timestamp": r.get("created_at"),
+                "user_id": r.get("user_id"),
+                "entity": r.get("entity_type"),
+                "target_id": r.get("entity_id"),
+                "mode": d.get("mode"),
+                "push_action": d.get("push_action"),
+                "ok": d.get("ok"),
+                "shopify_id": d.get("shopify_id"),
+                "error": d.get("error"),
+                "reason": d.get("reason"),
+            }
+        )
+        if len(entries) >= limit:
+            break
+
+    _enrich_history_entries(_get_db(), entries)
+    return {"entries": entries, "count": len(entries), "available": True}
+
+
+def _enrich_history_entries(db, entries: List[Dict[str, Any]]) -> None:
+    """Best-effort readability enrichment for the history rows: product ids ->
+    sku + name (a raw uuid is unreadable on the panel), user ids -> display
+    name. Per-id find_one lookups (bounded by the <=200-row page) so it works
+    identically on the MockCollection. Fail-soft: any error leaves the raw ids."""
+    if db is None or not entries:
+        return
+    prod_cache: Dict[str, Optional[Dict]] = {}
+    user_cache: Dict[str, Optional[str]] = {}
+    for e in entries:
+        tid = e.get("target_id")
+        if tid and e.get("entity") in ("product", "variant-prices"):
+            if tid not in prod_cache:
+                try:
+                    prod_cache[tid] = db["catalog_products"].find_one({"id": tid})
+                except Exception:  # noqa: BLE001
+                    prod_cache[tid] = None
+            doc = prod_cache[tid]
+            if doc:
+                e["sku"] = doc.get("sku") or doc.get("parent_sku")
+                e["name"] = doc.get("name") or doc.get("title")
+        uid = e.get("user_id")
+        if uid:
+            if uid not in user_cache:
+                try:
+                    u = db["users"].find_one({"user_id": uid})
+                    user_cache[uid] = (
+                        (u.get("full_name") or u.get("name") or u.get("username"))
+                        if u
+                        else None
+                    )
+                except Exception:  # noqa: BLE001
+                    user_cache[uid] = None
+            if user_cache[uid]:
+                e["user_name"] = user_cache[uid]
+
+
 @router.post("/all-pending")
 async def push_all_pending(
     entities: Optional[str] = None,
     limit: int = 500,
+    offset: int = 0,
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
 ) -> Dict[str, Any]:
     """Sweep EVERY pending/dirty ecom doc and push it via the same per-entity
@@ -268,13 +377,23 @@ async def push_all_pending(
 
     `entities` is an optional CSV filter (products,collections,menus,images;
     default all). `limit` caps the total number of pushes in one sweep (a safety
-    valve against a runaway batch).
+    valve against a runaway batch); when the cap is hit `limit_reached` is True
+    and the caller should run again to continue (OS-046 -- the FE surfaces it).
+    `offset` pages the variant-prices resync ONLY (see below).
 
     `variant-prices` is an OPT-IN extra entity (NOT in the default set): a
     normal product push already carries the variant price/barcode side channel,
     so sweeping it by default would double-push. Select it explicitly
     (?entities=variant-prices) to re-sync price/compareAtPrice/barcode for
     EVERY product already mapped to Shopify -- the "bulk MRP revision" resync.
+    Its eligible set (mapped products) never shrinks after a resync, so unlike
+    the locally_modified queues a bare limit would rescan the same first N docs
+    forever (OS-017). It therefore pages deterministically: docs are sorted by
+    catalog id, `offset` says where to start, and the response carries
+    `eligible_total` + `next_offset` (null when the whole set was covered) so
+    the caller can loop until done. A product whose variants have no stored
+    Shopify gid returns action="noop" and is tallied under `noop`, NEVER under
+    `pushed` -- a no-op must not read as a successful price update.
 
     DARK by default -- each push is SIMULATED (a dry-run plan, NO Shopify network
     call) unless the same three gates are open (IMS_SHOPIFY_WRITES + DISPATCH_MODE
@@ -298,8 +417,15 @@ async def push_all_pending(
     summary: Dict[str, Dict[str, int]] = {}
 
     def _tally(entity: str, data: Dict[str, Any]) -> None:
-        bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0})
-        if data.get("ok"):
+        bucket = summary.setdefault(entity, {"pushed": 0, "failed": 0, "noop": 0})
+        bucket.setdefault("noop", 0)
+        if data.get("ok") and data.get("action") == "noop":
+            # A clean no-op (nothing mapped/priced to send) is NOT a success
+            # push -- tallied separately so the UI renders it honestly (OS-017:
+            # "N processed" must never imply an MRP revision reached Shopify
+            # when nothing was sent).
+            bucket["noop"] += 1
+        elif data.get("ok"):
             bucket["pushed"] += 1
         else:
             bucket["failed"] += 1
@@ -347,27 +473,40 @@ async def push_all_pending(
             _write_audit(data, current_user)
             _tally("products", data)
         if blocked_skipped:
-            summary.setdefault("products", {"pushed": 0, "failed": 0})[
+            summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "blocked_skipped"
             ] = blocked_skipped
 
     # OPT-IN price/barcode resync (never in the default set -- the product
     # sweep above already pushes prices as part of each product push). Targets
-    # every product ALREADY mapped to Shopify that has variants; the engine
-    # itself skips gid-less/priceless variants and no-ops cleanly.
+    # every product ALREADY mapped to Shopify; the engine skips gid-less /
+    # priceless variants and no-ops cleanly (tallied under `noop`, above).
+    # PAGED (OS-017): the eligible set never shrinks after a resync, so the
+    # sweep sorts deterministically by catalog id and walks [offset:] --
+    # repeated calls with the returned next_offset cover the WHOLE mapped set
+    # instead of rescanning the same first N docs forever.
+    eligible_total: Optional[int] = None
+    next_offset: Optional[int] = None
     if "variant-prices" in selected:
-        for doc in _all_docs(db, "catalog_products"):
+        eligible = [
+            d
+            for d in _all_docs(db, "catalog_products")
+            if (d.get("ecom") or {}).get("shopify_product_id")
+        ]
+        eligible.sort(key=lambda d: str(d.get("id") or d.get("sku") or ""))
+        eligible_total = len(eligible)
+        start = max(0, int(offset))
+        processed = 0
+        for doc in eligible[start:]:
             if len(results) >= limit:
                 break
-            ecom = doc.get("ecom")
-            if not ecom or not ecom.get("shopify_product_id"):
-                continue
             variants = _get_variants_for_product(db, doc)
-            if not variants:
-                continue
             data = (await shopify_push.push_variant_prices(db, doc, variants)).to_dict()
             _write_audit(data, current_user)
             _tally("variant-prices", data)
+            processed += 1
+        if start + processed < eligible_total:
+            next_offset = start + processed
 
     if "collections" in selected:
         for doc in _all_docs(db, "ecom_collections"):
@@ -405,6 +544,11 @@ async def push_all_pending(
         "db_connected": True,
         "pushed_count": len(results),
         "limit_reached": len(results) >= limit,
+        # Paging block (variant-prices only; null otherwise). next_offset=null
+        # means the whole eligible set was covered -- the caller may stop.
+        "offset": offset,
+        "next_offset": next_offset,
+        "eligible_total": eligible_total,
         "summary": summary,
         "results": results,
     }

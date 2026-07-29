@@ -63,13 +63,29 @@ const EMPTY_FORM: FormState = {
   active: true,
 };
 
+/** Human note for the fail-soft recompute summary. ALWAYS says something —
+ *  including the N=0 case (OS-050: a silent zero hid an alias-scoped sweep that
+ *  matched nothing while the footnote claimed every product was repriced). */
 function recomputeNote(r?: RecomputeResult): string {
   if (!r) return '';
   if (r.ok === false) return ' (price recompute deferred)';
   const p = r.products ?? 0;
   const v = r.variants ?? 0;
-  if (!p && !v) return '';
-  return ` (recomputed ${p} product${p === 1 ? '' : 's'}, ${v} variant${v === 1 ? '' : 's'})`;
+  if (!p && !v) return ' — 0 products matched this scope; nothing was repriced';
+  const c = r.changed;
+  const queued =
+    c !== undefined
+      ? c > 0
+        ? `; ${c} repriced & queued for the next Shopify push`
+        : '; prices unchanged (nothing queued)'
+      : '';
+  return ` (recomputed ${p} product${p === 1 ? '' : 's'}, ${v} variant${v === 1 ? '' : 's'}${queued})`;
+}
+
+/** True when the recompute demonstrably touched nothing — surfaced as a warning
+ *  toast, never a plain success. */
+function recomputeTouchedNothing(r?: RecomputeResult): boolean {
+  return !!r && r.ok !== false && !(r.products ?? 0) && !(r.variants ?? 0);
 }
 
 export default function DiscountRulesPage() {
@@ -132,10 +148,14 @@ export default function DiscountRulesPage() {
     try {
       if (form.rule_id) {
         const res = await onlineDiscountRulesApi.update(form.rule_id, payload);
-        toast.success('Rule updated' + recomputeNote(res.recompute));
+        const msg = 'Rule updated' + recomputeNote(res.recompute);
+        if (recomputeTouchedNothing(res.recompute)) toast.warning(msg);
+        else toast.success(msg);
       } else {
         const res = await onlineDiscountRulesApi.create(payload);
-        toast.success('Rule created' + recomputeNote(res.recompute));
+        const msg = 'Rule created' + recomputeNote(res.recompute);
+        if (recomputeTouchedNothing(res.recompute)) toast.warning(msg);
+        else toast.success(msg);
       }
       setModalOpen(false);
       await load();
@@ -155,10 +175,31 @@ export default function DiscountRulesPage() {
     }
     try {
       const res = await onlineDiscountRulesApi.remove(r.rule_id);
-      toast.success('Rule deleted' + recomputeNote(res.recompute));
+      const msg = 'Rule deleted' + recomputeNote(res.recompute);
+      if (recomputeTouchedNothing(res.recompute)) toast.warning(msg);
+      else toast.success(msg);
       await load();
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || e?.message || 'Could not delete rule');
+    }
+  };
+
+  // OS-050: the manual full-catalog recompute (the API existed; no control did).
+  // Re-applies every rule to the stored online prices — useful after a category
+  // clean-up or when a scoped sweep is suspected to have missed alias-cased docs.
+  const [recomputing, setRecomputing] = useState(false);
+  const recomputeAll = async () => {
+    if (recomputing) return;
+    setRecomputing(true);
+    try {
+      const res = await onlineDiscountRulesApi.recompute();
+      const msg = 'Recompute finished' + recomputeNote(res.recompute);
+      if (recomputeTouchedNothing(res.recompute)) toast.warning(msg);
+      else toast.success(msg);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || e?.message || 'Recompute failed');
+    } finally {
+      setRecomputing(false);
     }
   };
 
@@ -183,13 +224,29 @@ export default function DiscountRulesPage() {
         <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
           <Tag className="w-5 h-5" /> Online Discount Rules
         </h1>
-        <button
-          type="button"
-          onClick={openCreate}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv-red-600 hover:bg-bv-red-700 rounded-lg px-3 py-1.5"
-        >
-          <Plus className="w-4 h-4" /> Add rule
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={recomputeAll}
+            disabled={recomputing}
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 border border-gray-300 bg-white hover:bg-gray-50 rounded-lg px-3 py-1.5 disabled:opacity-60"
+            title="Re-apply every rule to the stored online prices across the whole catalog (changed products are queued for the next Shopify push)"
+          >
+            {recomputing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            Recompute prices
+          </button>
+          <button
+            type="button"
+            onClick={openCreate}
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv-red-600 hover:bg-bv-red-700 rounded-lg px-3 py-1.5"
+          >
+            <Plus className="w-4 h-4" /> Add rule
+          </button>
+        </div>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
         These rules set the <span className="font-medium text-gray-700">website</span> price
@@ -204,7 +261,9 @@ export default function DiscountRulesPage() {
         <span>
           Example: a <strong>Frames &rarr; 20% off</strong> rule shows every frame online at 20%
           below MRP (never below cost). A product with a hand-set online offer keeps that price.
-          Prices publish to the storefront only after go-live is armed.
+          Saving reprices matching products and <strong>queues the changed ones as pending</strong> —
+          they reach the website when an admin runs the push on the Shopify sync page (and only
+          writes live once the owner has armed the push gates).
         </span>
       </div>
 
@@ -368,8 +427,9 @@ export default function DiscountRulesPage() {
                 <span className="text-sm text-gray-700">Active</span>
               </label>
               <p className="text-[11px] text-gray-400 flex items-center gap-1">
-                <RefreshCw className="w-3 h-3" /> Saving recomputes the online price for every
-                product in this category (never below cost).
+                <RefreshCw className="w-3 h-3" /> Saving recomputes online prices for every product
+                in this category (alias-safe match, never below cost) and queues changed products
+                for the next Shopify push.
               </p>
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">

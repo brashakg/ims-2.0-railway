@@ -443,6 +443,7 @@ def test_build_rule_set_skips_unknown_columns():
 
 _PUSH_ROUTES = [
     ("GET", "/api/v1/online-store/push/status"),
+    ("GET", "/api/v1/online-store/push/history"),
     ("POST", "/api/v1/online-store/push/product/{product_id}"),
     ("POST", "/api/v1/online-store/push/collection/{collection_id}"),
     ("POST", "/api/v1/online-store/push/menu/{menu_id}"),
@@ -1124,3 +1125,137 @@ def test_register_webhooks_apply_creates_only_missing(monkeypatch):
     assert len(res["conflicts"]) == 1  # the BVI-pointed sub is surfaced
     # 1 query + 1 create (only the missing topic)
     assert len(spy.calls) == 2
+
+
+# ===========================================================================
+# RC-G push pending-truth (OS-016 / OS-017 / OS-046 / OS-047)
+# ===========================================================================
+
+
+def test_variant_prices_pseudo_default_variant_resync(monkeypatch):
+    """OS-016/OS-017: a product with NO catalog_variants rows but a stored
+    default-variant gid (ecom.shopify_variant_id, written back by the #944
+    create-side seeding) is resyncable -- the engine synthesizes the
+    product-level pseudo-variant instead of no-opping."""
+    _force_dark(monkeypatch, "writes_off")
+    product = {
+        "id": "P1", "title": "RB", "mrp": 5000, "offer_price": 4000,
+        "ecom": {
+            "shopify_product_id": "gid://shopify/Product/1",
+            "shopify_variant_id": "gid://shopify/ProductVariant/11",
+            "online_offer_price": 4500, "online_compare_at_price": 5000,
+            "online_price_source": "rule",
+        },
+    }
+    res = _run(shopify_push.push_variant_prices(_EngineDB(), product, []))
+    assert res.mode == "SIMULATED"
+    assert res.action == "update"          # NOT a noop -- the pseudo row carries
+    rows = res.payload["variants"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == "gid://shopify/ProductVariant/11"
+    # Engine-stamped online rule price wins over the in-store offer.
+    assert rows[0]["price"] == "4500.00"
+    assert rows[0]["compareAtPrice"] == "5000.00"
+
+
+def test_variant_prices_no_default_gid_stays_noop(monkeypatch):
+    """No variant rows AND no stored default-variant gid -> clean noop (we never
+    CREATE variants from the price resync)."""
+    _force_dark(monkeypatch, "writes_off")
+    product = {"id": "P1", "mrp": 5000,
+               "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
+    res = _run(shopify_push.push_variant_prices(_EngineDB(), product, []))
+    assert res.action == "noop" and res.ok is True
+
+
+def test_variant_prices_sweep_pages_and_tallies_noop(client, auth_headers, patched_db, monkeypatch):
+    """OS-017: the variant-prices sweep (a) pages deterministically via
+    offset/next_offset/eligible_total, and (b) tallies gid-less products as
+    `noop`, NEVER as `pushed`."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    # 3 mapped products: P1 has a mapped variant row, P2's variant has no gid
+    # (-> noop), P3 has no variant rows and no default gid (-> noop).
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "mrp": 1000,
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    conn.db["catalog_products"].insert_one(
+        {"id": "P2", "mrp": 1000,
+         "ecom": {"shopify_product_id": "gid://shopify/Product/2"}})
+    conn.db["catalog_products"].insert_one(
+        {"id": "P3", "mrp": 1000,
+         "ecom": {"shopify_product_id": "gid://shopify/Product/3"}})
+    conn.db["catalog_products"].insert_one({"id": "P4", "mrp": 1000})  # unmapped
+    conn.db["catalog_variants"].insert_one(
+        {"sku": "V1", "parent_product_id": "P1", "mrp": 1000,
+         "shopify_variant_id": "gid://shopify/ProductVariant/11"})
+    conn.db["catalog_variants"].insert_one(
+        {"sku": "V2", "parent_product_id": "P2", "mrp": 1000})  # no gid
+
+    # Page 1: limit=2 -> P1 + P2 processed, next_offset=2, eligible_total=3.
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=variant-prices&limit=2",
+        headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["eligible_total"] == 3
+    assert body["next_offset"] == 2
+    assert body["pushed_count"] == 2
+    assert body["summary"]["variant-prices"]["pushed"] == 1   # P1 (real rows)
+    assert body["summary"]["variant-prices"]["noop"] == 1     # P2 (gid-less)
+    assert body["summary"]["variant-prices"]["failed"] == 0
+
+    # Page 2: resume at offset=2 -> P3 only, done (next_offset null).
+    r2 = client.post(
+        "/api/v1/online-store/push/all-pending?entities=variant-prices&limit=2&offset=2",
+        headers=auth_headers)
+    body2 = r2.json()
+    assert body2["pushed_count"] == 1
+    assert body2["next_offset"] is None
+    assert body2["summary"]["variant-prices"]["noop"] == 1    # P3 (no rows/gid)
+
+
+def test_default_sweep_response_carries_paging_nulls(client, auth_headers, patched_db, monkeypatch):
+    """The default (non-variant-prices) sweep returns null paging fields --
+    the FE only loops when next_offset is a number."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+    r = client.post("/api/v1/online-store/push/all-pending", headers=auth_headers)
+    body = r.json()
+    assert body["eligible_total"] is None and body["next_offset"] is None
+
+
+def test_push_history_endpoint_reads_ledger(client, auth_headers, patched_db, monkeypatch):
+    """OS-047: GET /push/history surfaces the ONLINE_STORE_PUSH audit rows with
+    mode/ok filters and best-effort product enrichment."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    conn.db["catalog_products"].insert_one(
+        {"id": "P1", "sku": "SKU-1", "name": "Ray-Ban Aviator",
+         "ecom": {"status": "PUBLISHED", "handle": "rb", "locally_modified": True}})
+    # A push writes the ledger row this endpoint reads.
+    r = client.post("/api/v1/online-store/push/product/P1", headers=auth_headers)
+    assert r.status_code == 200, r.text
+
+    h = client.get("/api/v1/online-store/push/history", headers=auth_headers)
+    assert h.status_code == 200, h.text
+    hb = h.json()
+    assert hb["available"] is True and hb["count"] == 1
+    e = hb["entries"][0]
+    assert e["entity"] == "product" and e["target_id"] == "P1"
+    assert e["mode"] == "SIMULATED" and e["ok"] is True
+    assert e["sku"] == "SKU-1" and e["name"] == "Ray-Ban Aviator"
+
+    # mode filter: no LIVE rows exist -> empty, honest.
+    h2 = client.get("/api/v1/online-store/push/history?mode=LIVE", headers=auth_headers)
+    assert h2.json()["count"] == 0
+    # ok filter: no failures either.
+    h3 = client.get("/api/v1/online-store/push/history?ok=false", headers=auth_headers)
+    assert h3.json()["count"] == 0
+
+
+def test_push_history_403_for_catalog_manager(client, catalog_headers, patched_db):
+    """History rides the narrowed push surface -> CATALOG_MANAGER 403."""
+    r = client.get("/api/v1/online-store/push/history", headers=catalog_headers)
+    assert r.status_code == 403, r.text
