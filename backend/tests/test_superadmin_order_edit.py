@@ -464,6 +464,64 @@ def test_post_invoice_credit_note_linked_and_intact(client, auth_headers, wired)
     assert any(d.get("action") == "ORDER_INVOICE_CREDIT_NOTE" for d in audit_docs)
 
 
+def test_post_invoice_credit_note_stamps_parent_interstate(
+    client, auth_headers, wired
+):
+    """Money-panel round 2 (PR #945): the superadmin invoice-edit credit note's
+    type=ISSUED store-credit ledger row (the one the GSTR-1 CDNR loop reads)
+    must carry the PARENT order's persisted `interstate` flag, so a reversal
+    against an IGST-filed online sale files under IGST instead of the
+    intra-state customers.state fallback."""
+    _seed_order(
+        wired["order_repo"],
+        invoice_number="INV/BOK-01/26-27/0009",
+        channel="ONLINE",
+        interstate=True,
+    )
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={
+            "mode": "CREDIT_NOTE",
+            "reason": "Overcharged; refund the difference",
+            "items": [_edit_item(unit_price=800.0)],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    issued = [
+        d
+        for d in wired["db"].get_collection("credit_note_ledger").docs
+        if d.get("type") == "ISSUED"
+    ]
+    assert issued, "store-credit ISSUED row must be booked"
+    assert issued[-1].get("interstate") is True
+
+
+def test_post_invoice_credit_note_unflagged_parent_stays_unstamped(
+    client, auth_headers, wired
+):
+    """A POS parent (no persisted interstate flag) must keep the ledger row
+    unstamped so the CDNR state-compare fallback applies unchanged."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0010")
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={
+            "mode": "CREDIT_NOTE",
+            "reason": "Overcharged; refund the difference",
+            "items": [_edit_item(unit_price=800.0)],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    issued = [
+        d
+        for d in wired["db"].get_collection("credit_note_ledger").docs
+        if d.get("type") == "ISSUED"
+    ]
+    assert issued, "store-credit ISSUED row must be booked"
+    assert "interstate" not in issued[-1]
+
+
 def test_post_invoice_debit_note_on_increase(client, auth_headers, wired):
     _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0003")
     resp = client.put(
