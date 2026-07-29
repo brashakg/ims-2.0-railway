@@ -470,6 +470,37 @@ def test_custom_collection_rows_also_carry_product_id():
     assert rows["GHOST"]["product_id"] is None
 
 
+def test_products_by_sku_spine_wins_over_catalog_row(monkeypatch):
+    """The CUSTOM-membership resolver (_products_by_sku) must prefer the
+    `products` spine doc over a catalog_products doc with the SAME sku --
+    catalog rows carry neither images nor product_id, so a catalog row
+    shadowing the spine renders image-less member rows with a wrong id
+    (spine-wins is the convention everywhere else: _all_products,
+    catalogue_pdf._detail_by_sku)."""
+    from api.routers import online_store_collections as osc
+
+    db = MockDatabase()
+    db["catalog_products"].insert_one({"sku": "RB-X", "name": "Catalog copy"})
+    db["products"].insert_one(
+        {
+            "sku": "RB-X",
+            "product_id": "P-SPINE",
+            "images": ["/img/rb-x.jpg"],
+            "name": "Spine copy",
+        }
+    )
+    monkeypatch.setattr(osc, "_get_db", lambda: db)
+
+    out = osc._products_by_sku(["RB-X"])
+    assert out["RB-X"].get("product_id") == "P-SPINE"
+    assert out["RB-X"].get("images") == ["/img/rb-x.jpg"]
+
+    # A catalog-only sku still resolves (catalog fills the gaps; fail-soft).
+    db["catalog_products"].insert_one({"sku": "CAT-ONLY", "name": "Only catalog"})
+    out2 = osc._products_by_sku(["CAT-ONLY"])
+    assert out2["CAT-ONLY"].get("name") == "Only catalog"
+
+
 class _RecordingColl:
     """Records create_index calls (keys, kwargs) -- mirrors the fake in
     test_unification_index_backstops.py."""
