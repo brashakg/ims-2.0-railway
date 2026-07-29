@@ -61,7 +61,11 @@ def _now() -> datetime:
 def _all_products(db) -> List[Dict]:
     """UNION of the `products` spine + `catalog_products`, de-duped by SKU with
     the SPINE WINNING (so step-12 governed `tags` are present on the doc the rule
-    engine sees). Fail-soft -> []. Capped at _SCAN_MAX."""
+    engine sees). Fail-soft -> []. EACH source's scan is capped at _SCAN_MAX so
+    the cap bounds total work (<= 2x _SCAN_MAX docs) WITHOUT starving the spine:
+    the old single break only fired inside the `products` loop, so once
+    catalog_products alone exceeded the cap the spine loop died after one doc
+    and governed tags silently vanished from the rule engine's view."""
     if db is None:
         return []
     by_sku: Dict[str, Dict] = {}
@@ -76,7 +80,11 @@ def _all_products(db) -> List[Dict]:
             cursor = coll.find({})
         except Exception:  # noqa: BLE001
             continue
+        scanned = 0
         for doc in cursor:
+            if scanned >= _SCAN_MAX:
+                break
+            scanned += 1
             if not isinstance(doc, dict):
                 continue
             sku = doc.get("sku")
@@ -86,8 +94,6 @@ def _all_products(db) -> List[Dict]:
             if sku not in by_sku:
                 order.append(sku)
             by_sku[sku] = doc
-            if len(order) >= _SCAN_MAX and coll_name == "products":
-                break
     return [by_sku[s] for s in order]
 
 

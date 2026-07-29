@@ -470,6 +470,26 @@ def test_custom_collection_rows_also_carry_product_id():
     assert rows["GHOST"]["product_id"] is None
 
 
+def test_all_products_scan_cap_does_not_starve_spine(monkeypatch):
+    """When catalog_products ALONE exceeds _SCAN_MAX, the `products` spine loop
+    must still contribute (per-source budget). The old break only fired inside
+    the spine loop, so a big catalog scanned unbounded AND killed the spine
+    loop after one doc -- governed tags silently vanished from the rule
+    engine's view."""
+    monkeypatch.setattr(mat, "_SCAN_MAX", 5)
+    db = MockDatabase()
+    for i in range(10):  # catalog alone exceeds the (patched) cap
+        db["catalog_products"].insert_one({"sku": f"CAT-{i}", "category": "FRAME"})
+    db["products"].insert_one({"sku": "SP-1", "product_id": "SP-1", "tags": ["a"]})
+    db["products"].insert_one({"sku": "SP-2", "product_id": "SP-2", "tags": ["b"]})
+
+    skus = {d["sku"] for d in mat._all_products(db)}
+    # Spine NOT starved: both spine docs present.
+    assert "SP-1" in skus and "SP-2" in skus
+    # Cap bounds the catalog scan (was unbounded in the first loop).
+    assert sum(1 for s in skus if s.startswith("CAT-")) == 5
+
+
 def test_products_by_sku_spine_wins_over_catalog_row(monkeypatch):
     """The CUSTOM-membership resolver (_products_by_sku) must prefer the
     `products` spine doc over a catalog_products doc with the SAME sku --
