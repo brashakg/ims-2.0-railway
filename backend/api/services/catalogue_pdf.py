@@ -283,6 +283,14 @@ def _product_union(db) -> List[Dict]:
         scanned = 0
         for doc in cursor:
             if scanned >= _SCAN_MAX:
+                # Cap trip must never be silent: the PDF would omit products
+                # past this point with no operational signal otherwise.
+                logger.warning(
+                    "[PDF] %s scan capped at %d docs - catalogue PDF may be "
+                    "missing products beyond the cap",
+                    coll_name,
+                    _SCAN_MAX,
+                )
                 break
             scanned += 1
             if not isinstance(doc, dict):

@@ -68,8 +68,9 @@ def test_no_stale_policy_entries(app):
 
 
 def test_rogue_generate_sku_endpoint_removed(app):
-    """The uuid-random third SKU generator (POST /admin/products/generate-sku,
-    handler carried no auth Depends) is GONE -- the canonical deterministic
+    """The uuid-random third SKU generator (POST /admin/products/generate-sku)
+    is GONE. It was admin-gated (router-level _require_admin_role dependency)
+    but redundant, non-deterministic dead code -- the canonical deterministic
     preview is POST /products/sku-preview (routers/product_master.py). Guard
     BOTH the route and its POLICY row: re-adding a POLICY row under the
     /admin/products module path would re-broaden that module's grant-union

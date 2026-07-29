@@ -83,6 +83,14 @@ def _all_products(db) -> List[Dict]:
         scanned = 0
         for doc in cursor:
             if scanned >= _SCAN_MAX:
+                # Cap trip must never be silent: memberships computed past a
+                # tripped cap would quietly omit products.
+                logger.warning(
+                    "[COLL-MAT] %s scan capped at %d docs - materialized "
+                    "memberships may be missing products beyond the cap",
+                    coll_name,
+                    _SCAN_MAX,
+                )
                 break
             scanned += 1
             if not isinstance(doc, dict):

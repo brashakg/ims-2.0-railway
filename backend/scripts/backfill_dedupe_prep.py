@@ -137,6 +137,10 @@ def run_dedupe(
     # (plus any it mints this run) so it never re-creates the exact dup we are clearing.
     all_skus = {doc.get("sku") for doc in rows if doc.get("sku")}
     seen_skus: Dict[str, int] = {}
+    # pim_product_id of the KEPT first occurrence per SKU. If a later duplicate
+    # SHARES that pim id (doc-copy corruption), renaming the single shared
+    # mirror row would orphan the kept occurrence's join -- skip it instead.
+    first_pim_by_sku: Dict[str, Any] = {}
 
     def _mint_unique(base: str) -> str:
         n = 2
@@ -183,17 +187,29 @@ def run_dedupe(
         sku = doc.get("sku")
         if sku:
             seen_skus[sku] = seen_skus.get(sku, 0) + 1
+            if seen_skus[sku] == 1:
+                first_pim_by_sku[sku] = doc.get("pim_product_id")
             if seen_skus[sku] > 1:
                 new_sku = _mint_unique(sku)
                 stats["resku"] += 1
                 stats["resku_map"][f"{sku}#{seen_skus[sku]}"] = new_sku
+                shared_pim = bool(
+                    doc.get("pim_product_id")
+                    and doc.get("pim_product_id") == first_pim_by_sku.get(sku)
+                )
+                if shared_pim:
+                    stats["mirror_rename_skipped_shared_pim"] = (
+                        stats.get("mirror_rename_skipped_shared_pim", 0) + 1
+                    )
                 if apply:
                     set_fields["sku"] = new_sku
                     mirrors = {
                         "catalog_products": catalog_products,
                         "catalog_variants": catalog_variants,
                     }
-                    rename_ops = _mirror_rename_ops(doc, sku, new_sku)
+                    rename_ops = (
+                        {} if shared_pim else _mirror_rename_ops(doc, sku, new_sku)
+                    )
                     for kind, (m_filter, m_update) in rename_ops.items():
                         mirror = mirrors.get(kind)
                         if mirror is not None:

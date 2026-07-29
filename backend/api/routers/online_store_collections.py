@@ -537,7 +537,8 @@ async def list_collection_products(
 
     Membership is stored as an embedded `products: [{sku, position}]` array
     (SKU-keyed). The editor needs title/brand/category/image to render the list,
-    so we join the catalog (catalog_products, then products) by SKU, ordered by
+    so we join the catalog (products spine, then catalog_products -- spine
+    wins) by SKU, ordered by
     position. Fail-soft: an unknown SKU still appears (sku-only) so a catalog gap
     never hides a member. A SMART collection has no manual membership here -> []
     (its set is served by GET /{id}/resolved-products). This is the read the FE

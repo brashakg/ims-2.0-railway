@@ -1003,9 +1003,11 @@ async def quote_lens_price(payload: LensPriceQuoteInput):
 # the file, then defer the actual ingestion to the catalog router's
 # /catalog/products/import endpoint (which already exists at line 1358).
 # (A THIRD SKU generator used to live here: POST /products/generate-sku,
-# CAT-BRAND-MODEL-RAND4 with uuid randomness and no auth Depends on the
-# handler. REMOVED -- zero frontend callers; the canonical deterministic
-# preview is POST /products/sku-preview in routers/product_master.py.)
+# CAT-BRAND-MODEL-RAND4 with uuid randomness. It WAS admin-gated -- this
+# router carries a router-level _require_admin_role dependency -- but it was
+# a redundant, non-deterministic, dead-code generator (zero frontend
+# callers), REMOVED as hygiene/attack-surface reduction. The canonical
+# deterministic preview is POST /products/sku-preview in routers/product_master.py.)
 
 
 @router.post("/products/bulk-import", status_code=202)
@@ -1107,7 +1109,7 @@ async def download_bulk_import_file(job_id: str):
 # PRODUCTS — full CRUD aliases under /admin/products
 # ============================================================================
 # The frontend's `adminProductApi` was written against `/admin/products`
-# CRUD, but only `/admin/products/generate-sku` and
+# CRUD, but only `/admin/products/generate-sku` (since removed) and
 # `/admin/products/bulk-import` existed at that prefix — every list /
 # read / create / update / delete call was 404'ing. Backend HAD the
 # canonical endpoints at `/catalog/products` (catalog.py) and
