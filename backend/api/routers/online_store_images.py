@@ -72,6 +72,17 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # rows. Keep this in lock-step with rbac_policy.POLICY for every route below.
 _ECOM_ROLES = ("ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER")
 
+# OS-024: sign-off (APPROVED / REJECTED) is a smaller circle than queue access.
+# Mirrors the frontend gate (DesignQueuePage canApprove: SUPERADMIN / ADMIN /
+# DESIGN_MANAGER) -- a CATALOG_MANAGER may move an image QUEUED -> IN_PROGRESS
+# -> REVIEW but must not approve/reject it, because APPROVED is what makes an
+# image eligible for the Shopify push sweep. Enforced IN THE HANDLER (not by
+# narrowing the shared rbac_policy row: CATALOG_MANAGER legitimately needs the
+# same route for the earlier transitions, and a policy-level split would need
+# its own capability key per the rbac capability-union gotcha).
+_SIGNOFF_ROLES = frozenset({"SUPERADMIN", "ADMIN", "DESIGN_MANAGER"})
+_SIGNOFF_STATUSES = frozenset({"APPROVED", "REJECTED"})
+
 # Mirror the repository/schema enums so a typo can't store an un-pushable value.
 _KINDS = {"RAW", "EDITED", "FINAL"}
 _SOURCES = {"UPLOAD", "SHOPIFY", "SCRAPE", "AI"}
@@ -527,6 +538,22 @@ async def set_image_status(
         raise HTTPException(status_code=404, detail="Image not found")
 
     target = _validate_enum(payload.status, _STATUSES, "status")  # 400 if unknown
+
+    # OS-024: sign-off targets are approver-only. Checked BEFORE any state
+    # change so a CATALOG_MANAGER hitting the API directly gets the same 403
+    # the UI implies -- the earlier QUEUED/IN_PROGRESS/REVIEW transitions stay
+    # open to the full ecom role set.
+    if target in _SIGNOFF_STATUSES:
+        roles = set(current_user.get("roles", []) or [])
+        if not (roles & _SIGNOFF_ROLES):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Only ADMIN or DESIGN_MANAGER may approve or reject an "
+                    "image (approval gates the Shopify push)"
+                ),
+            )
+
     updated = repo.set_status(image_id, target, by=current_user.get("user_id"))
     if updated is None:
         # Known status but the transition is not allowed from the current state.

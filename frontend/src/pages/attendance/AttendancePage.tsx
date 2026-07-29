@@ -16,6 +16,7 @@ import { Link } from 'react-router-dom';
 import { Clock, Loader2, LayoutDashboard } from 'lucide-react';
 import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useToast } from '../../context/ToastContext';
 import { MonthlyAttendanceGrid } from '../../components/hr/MonthlyAttendanceGrid';
 import { AttendanceWidget } from '../../components/hr/AttendanceWidget';
@@ -29,6 +30,10 @@ interface StoreOpt {
 export function AttendancePage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  // OS-065: a virtual (ONLINE) store has no premises to geo-fence — self
+  // check-in against it is disabled (switch to your physical store to clock
+  // in). The manager grid stays readable.
+  const isOnlineStoreActive = useIsOnlineStore();
 
   // Manager-tier roles see the monthly grid (mirrors the grid read gate on the
   // backend). Everyone else just gets the self check-in card.
@@ -105,7 +110,8 @@ export function AttendancePage() {
           </Link>
           <button
             onClick={handleCheckIn}
-            disabled={checking}
+            disabled={checking || isOnlineStoreActive}
+            title={isOnlineStoreActive ? 'Not available for an online store — switch to your physical store to clock in' : undefined}
             className="btn-primary flex items-center gap-2 text-sm disabled:opacity-50"
           >
             {checking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Clock className="w-4 h-4" />}
@@ -114,10 +120,19 @@ export function AttendancePage() {
         </div>
       </div>
 
-      {/* Self check-in card — universal. Guards against double check-in. */}
-      <div className="max-w-md">
-        <AttendanceWidget />
-      </div>
+      {/* Self check-in card — universal. Guards against double check-in.
+          OS-065: swapped for a note under an ONLINE store (nothing to
+          geo-fence on a virtual store). */}
+      {isOnlineStoreActive ? (
+        <div className="max-w-md rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+          This is the online store — there are no premises to check in at. Switch to your
+          physical store from the top bar to clock in.
+        </div>
+      ) : (
+        <div className="max-w-md">
+          <AttendanceWidget />
+        </div>
+      )}
 
       {/* Monthly grid — manager/accountant tier only. */}
       {canViewGrid && (

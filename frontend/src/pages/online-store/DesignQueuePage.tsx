@@ -602,12 +602,15 @@ function ImageCard({
           <ActionButton onClick={onStart} disabled={busy} icon={Play} label="Start" />
         )}
 
-        {/* Upload / Attach the edited image -> REVIEW. Allowed while being worked
-            or queued. "Upload" sends a real file to durable storage (Phase 4a);
-            "Attach edited" stays as the paste-a-URL fallback. */}
-        {(img.design_status === 'IN_PROGRESS' ||
-          img.design_status === 'QUEUED' ||
-          img.design_status === 'REJECTED') && (
+        {/* Upload / Attach the edited image -> REVIEW. IN_PROGRESS ONLY: the
+            backend accepts the attach only from IN_PROGRESS and 409s otherwise
+            (OS-025 — showing these for QUEUED/REJECTED meant every click
+            failed, and the Upload path stranded the already-uploaded file in
+            storage). From QUEUED/REJECTED, the "Start" button beside moves the
+            card to IN_PROGRESS first. "Upload" sends a real file to durable
+            storage (Phase 4a); "Attach edited" stays as the paste-a-URL
+            fallback. */}
+        {img.design_status === 'IN_PROGRESS' && (
           <>
             <input
               ref={fileInputRef}

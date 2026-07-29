@@ -250,7 +250,13 @@ export default function OnlineStockPage() {
                 <th className="px-4 py-2.5 font-medium">SKU / Product</th>
                 <th className="px-4 py-2.5 font-medium text-right">Listed online</th>
                 <th className="px-4 py-2.5 font-medium text-right">On-hand</th>
-                <th className="px-4 py-2.5 font-medium text-right">Reserved</th>
+                {/* OS-067: only POS holds populate this column — online orders
+                    claim units as SOLD at ingest, never RESERVED. Label it for
+                    what it is so a permanent 0 doesn't read as missing
+                    protection. */}
+                <th className="px-4 py-2.5 font-medium text-right" title="Units held by POS (hold & recall). Online orders claim stock at ingest and never appear here.">
+                  Held (POS)
+                </th>
                 <th className="px-4 py-2.5 font-medium text-right">Sellable</th>
                 <th className="px-4 py-2.5 font-medium text-right" title="Suggested units to keep off the listing (not enforced)">
                   Buffer
@@ -308,7 +314,11 @@ export default function OnlineStockPage() {
           <span className="font-medium text-gray-600">Read-only:</span> nothing here reserves or moves
           stock. <span className="font-medium text-gray-600">Buffer</span> is a suggestion — keep about
           max(1, 5%) of on-hand off the online listing so a walk-in sale can't strand an online order.
-          Automatic reservation of units on online-order ingest is a separate, upcoming step.
+          {/* OS-067: reserve-on-order SHIPPED — order ingest FIFO-claims units
+              across all stores (marked SOLD, not RESERVED), so don't describe
+              it as "upcoming". */}
+          Online orders already claim their units the moment they land (pooled, across all
+          stores), so a paid order can't be undercut by a walk-in sale.
         </p>
       </div>
     </div>

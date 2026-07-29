@@ -9,6 +9,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Send, AlertTriangle, ListChecks, Clock, CheckCircle2, ChevronRight } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
@@ -96,6 +97,11 @@ export default function HubPage() {
   const { user, hasRole } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
+  // OS-064: under an ONLINE store (BV-ONLINE-01 / WO-ONLINE-01) the Hub must
+  // not frame a virtual storefront as a shop floor — the clinical-queue hero
+  // and the POS/Clinical cards are swapped for online-store surfaces below.
+  // Display-only: no POS or billing logic changes.
+  const isOnlineStoreActive = useIsOnlineStore();
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -179,7 +185,9 @@ export default function HubPage() {
       })
       .catch(() => {});
 
-    if (user?.activeStoreId) {
+    // OS-064: an ONLINE store has no walk-in clinical queue — skip the read
+    // (the hero renders the online-channel tile instead).
+    if (user?.activeStoreId && !isOnlineStoreActive) {
       clinicalApi
         .getQueue(user.activeStoreId)
         .then((r: any) => {
@@ -248,33 +256,66 @@ export default function HubPage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.activeStoreId]);
+  }, [user?.activeStoreId, isOnlineStoreActive]);
 
   const today = useMemo(() => humanDate(), []);
   const firstName = (user?.name ?? '').split(/\s+/)[0] ?? '';
 
+  // OS-064: the two floor-operation feature cards (POS "Most used", Clinical)
+  // make no sense for a virtual store — swap them for the Online Store hub and
+  // Online Orders, role-gated to mirror their /online-store ProtectedRoutes.
+  const featureCards: ModuleCard[] = isOnlineStoreActive
+    ? [
+        {
+          id: 'online-store',
+          to: '/online-store',
+          title: 'Online Store',
+          eyebrow: 'Storefront',
+          desc: 'Products/PIM, collections, mega-menu, image design queue, stock tally and the Shopify sync panel — the storefront back office.',
+          iconName: 'store',
+          meta: [['Today', meta.salesToday], ['Tasks', meta.openTasks]],
+          feature: true,
+          badge: 'Online store',
+          requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'],
+        },
+        {
+          id: 'online-orders',
+          to: '/online-store/orders',
+          title: 'Online Orders',
+          eyebrow: 'Web orders',
+          desc: 'Shopify orders flowing into the IMS books — mapping status, Rx holds and re-map for anything that failed to book.',
+          iconName: 'receipt',
+          meta: [['Channel', 'ONLINE'], ['Sales · Today', meta.salesToday]],
+          feature: true,
+          requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER'],
+        },
+      ]
+    : [
+        {
+          id: 'pos',
+          to: '/pos',
+          title: 'POS',
+          eyebrow: 'Checkout',
+          desc: 'Guided checkout with Rx intake, split payments, hold & recall, overall discount, and printable invoice + workshop handoff.',
+          iconName: 'cart',
+          meta: [['Today', meta.salesToday], ['Queue', meta.queue], ['Tasks', meta.openTasks]],
+          feature: true,
+          badge: 'Most used',
+        },
+        {
+          id: 'clinical',
+          to: '/clinical',
+          title: 'Clinical',
+          eyebrow: 'Eye exam',
+          desc: 'Optometrist queue, A5 Rx card, refraction form, handoff to POS with family & external-doctor flags.',
+          iconName: 'eye',
+          meta: [['Queue', meta.queue], ['Detail', meta.queueDetail || '—']],
+          feature: true,
+        },
+      ];
+
   const modules: ModuleCard[] = [
-    {
-      id: 'pos',
-      to: '/pos',
-      title: 'POS',
-      eyebrow: 'Checkout',
-      desc: 'Guided checkout with Rx intake, split payments, hold & recall, overall discount, and printable invoice + workshop handoff.',
-      iconName: 'cart',
-      meta: [['Today', meta.salesToday], ['Queue', meta.queue], ['Tasks', meta.openTasks]],
-      feature: true,
-      badge: 'Most used',
-    },
-    {
-      id: 'clinical',
-      to: '/clinical',
-      title: 'Clinical',
-      eyebrow: 'Eye exam',
-      desc: 'Optometrist queue, A5 Rx card, refraction form, handoff to POS with family & external-doctor flags.',
-      iconName: 'eye',
-      meta: [['Queue', meta.queue], ['Detail', meta.queueDetail || '—']],
-      feature: true,
-    },
+    ...featureCards,
     {
       id: 'inventory',
       to: '/inventory',
@@ -382,14 +423,24 @@ export default function HubPage() {
             <div className="v figure">{meta.openTasks}</div>
             {meta.tasksDetail && <div className="sm">{meta.tasksDetail}</div>}
           </div>
-          <div>
-            <div className="k">Queue</div>
-            <div className="v figure">
-              {meta.queue}
-              {meta.queueDetail && <span className="hub-meta-sub"> / {meta.queueDetail}</span>}
+          {isOnlineStoreActive ? (
+            // OS-064: no walk-in queue on a virtual store — say what this store
+            // IS instead of showing a clinical queue that can never fill.
+            <div>
+              <div className="k">Channel</div>
+              <div className="v figure">Online</div>
+              <div className="sm">Web storefront — no walk-ins</div>
             </div>
-            <div className="sm">Clinical</div>
-          </div>
+          ) : (
+            <div>
+              <div className="k">Queue</div>
+              <div className="v figure">
+                {meta.queue}
+                {meta.queueDetail && <span className="hub-meta-sub"> / {meta.queueDetail}</span>}
+              </div>
+              <div className="sm">Clinical</div>
+            </div>
+          )}
         </div>
       </section>
 

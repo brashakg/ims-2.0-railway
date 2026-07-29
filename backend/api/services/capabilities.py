@@ -224,6 +224,11 @@ MODULE_TO_CAPABILITY_MODULES: Dict[str, List[str]] = {
     "hr": ["hr", "payroll"],
     "reports": ["reports", "analytics"],
     "finance": ["finance", "budgets", "expenses"],
+    # OS-053: the Online Store module. A per-user 'ecommerce' deny maps to
+    # online-store:read/write capability DENIES so the API surface is blocked
+    # too, not just the nav. DENY-only mapping -- adds nothing to any grant
+    # union (the rbac capability-union gotcha concerns POLICY rows, not this).
+    "ecommerce": ["online-store"],
 }
 
 

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '../../context/AuthContext';
+import { isOnlineStoreId } from '../../utils/storeMode';
 import { reportsApi, analyticsApi } from '../../services/api';
 // financeApi isn't re-exported from the api barrel — import it directly (the
 // barrel re-export resolves to undefined for this module; see prior sessions).
@@ -444,7 +445,20 @@ export function ExecutiveDashboard() {
                     {index + 1}
                   </div>
                   <div>
-                    <h3 className="font-semibold text-gray-900">{store.storeName}</h3>
+                    <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                      {store.storeName}
+                      {/* OS-066: mark virtual storefronts so their rows aren't
+                          read as physical peers (stock value 0, no footfall,
+                          no sqft are structural here, not underperformance). */}
+                      {isOnlineStoreId(store.storeId) && (
+                        <span
+                          className="inline-flex items-center rounded-full bg-blue-100 text-blue-800 border border-blue-200 px-2 py-0.5 text-[11px] font-medium"
+                          title="Virtual storefront — sells pooled stock from all shops; holds no stock and has no floor"
+                        >
+                          Online
+                        </span>
+                      )}
+                    </h3>
                     <p className="text-sm text-gray-600">
                       {store.orders} orders this period
                     </p>

@@ -10,6 +10,7 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft, RefreshCw, Loader2, Plus, Users, TrendingUp, AlertCircle, BarChart3 } from 'lucide-react';
 import { walkoutsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useToast } from '../../context/ToastContext';
 import type {
   PerStaffCard,
@@ -35,6 +36,9 @@ export function WalkoutsDashboardPage() {
 
   const userRoles = (user as any)?.roles as string[] | undefined;
   const activeRole = (user as any)?.activeRole as string | undefined;
+  // OS-065: a virtual (ONLINE) store has no door, so no walk-ins/walkouts —
+  // manual intake is disabled there to keep per-store analytics clean.
+  const isOnlineStoreActive = useIsOnlineStore();
   const canTopup = hasAnyRole(userRoles, activeRole, REATTRIBUTE_ROLES);
 
   const [days, setDays] = useState(30);
@@ -135,7 +139,9 @@ export function WalkoutsDashboardPage() {
             <button
               type="button"
               onClick={() => setTopupOpen(true)}
-              className="btn-secondary inline-flex items-center gap-2"
+              className="btn-secondary inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isOnlineStoreActive}
+              title={isOnlineStoreActive ? 'Not available for an online store — it has no door for walk-ins' : undefined}
             >
               <Plus className="w-4 h-4" /> Log walk-in
             </button>
