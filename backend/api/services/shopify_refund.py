@@ -902,6 +902,14 @@ def _post_credit_and_restock(
                 tax=gst_view.get("tax"),
                 gst_rate=gst_view.get("gst_rate"),
                 bump_balance=not settled_externally,
+                # GSTR-1 CDNR head consistency: reverse under the SAME head the
+                # parent online order filed under (its persisted interstate
+                # flag); absent -> the CDNR state-compare fallback unchanged.
+                interstate=(
+                    order.get("interstate")
+                    if isinstance(order.get("interstate"), bool)
+                    else None
+                ),
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)

@@ -2955,12 +2955,22 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         else:
                             cn_taxable = round(net_refund, 2)
 
-                        # Split CGST/SGST vs IGST by comparing states
-                        is_inter = bool(
-                            store_state
-                            and cust_state
-                            and store_state.strip().lower() != cust_state.strip().lower()
-                        )
+                        # Split CGST/SGST vs IGST: prefer the head stamped from
+                        # the PARENT order at booking time (`interstate`, bool
+                        # -- online refunds carry it so the credit note reverses
+                        # under the same head the sale filed under, OS-008 CDNR
+                        # leg); the state compare stays the fallback for legacy
+                        # rows without the stamp.
+                        entry_interstate = entry.get("interstate")
+                        if isinstance(entry_interstate, bool):
+                            is_inter = entry_interstate
+                        else:
+                            is_inter = bool(
+                                store_state
+                                and cust_state
+                                and store_state.strip().lower()
+                                != cust_state.strip().lower()
+                            )
                         if is_inter:
                             cn_igst = round(cn_tax, 2)
                             cn_cgst = 0.0

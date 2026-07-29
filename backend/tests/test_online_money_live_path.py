@@ -15,8 +15,12 @@ webhook ingest path with three defects this file pins the fixes for:
           tender columns and the GST cross-check payments_collected (sum of
           order.payments[].amount) read zero against real online sales.
           Now: one synthesized SETTLED method="SHOPIFY" row (amount ==
-          amount_paid) at create, kept coherent by the status sync -- which
-          NEVER rewrites a staff-recorded payment row.
+          amount_paid) at create, kept coherent ROW-GRANULARLY by the status
+          sync (money-panel fix round): only the pipeline's own row is ever
+          upserted (amount = amount_paid - staff tenders, identity preserved,
+          unchanged list not written, snapshot-conditional against races);
+          staff-recorded rows are never touched, and the header is never
+          written below recorded staff tenders.
 
   OS-008  Finance/GST consumers recomputed inter/intra-state from
           customers.state (never set for online buyers -> every inter-state
@@ -461,7 +465,11 @@ def test_sync_paid_transition_synthesizes_full_payment_row(wired):
     assert o["payments"][0]["amount"] == 999.0
 
 
-def test_sync_never_rewrites_staff_recorded_payments(wired):
+def test_sync_adds_gateway_row_alongside_frozen_staff_row(wired):
+    """Panel fix 2 (row-granular freeze): order created pending, staff records a
+    CASH deposit, Shopify collects the remainder and sends orders/paid. The
+    gateway money must appear as its own SHOPIFY row NEXT TO the untouched
+    staff row so sum(payments) == amount_paid (cross-check / tender truth)."""
     staff_row = {
         "payment_id": "p-1",
         "method": "CASH",
@@ -473,10 +481,116 @@ def test_sync_never_rewrites_staff_recorded_payments(wired):
         wired["db"], "8003", _sync_payload(8003, "paid")
     )
     o = _the_order(wired, 8003)
-    # amount_paid/balance_due still repaired...
     assert o["amount_paid"] == 999.0 and o["balance_due"] == 0.0
-    # ...but the human-recorded tender row is FROZEN (never rewritten).
-    assert o["payments"] == [staff_row]
+    # The staff-recorded tender row is untouched...
+    assert staff_row in o["payments"]
+    # ...the gateway leg appears as the synthesized SHOPIFY row...
+    synth = [p for p in o["payments"] if p.get("settled_outside_ims")]
+    assert len(synth) == 1
+    assert synth[0]["method"] == "SHOPIFY"
+    assert synth[0]["amount"] == 899.0
+    # ...and the rows explain the header exactly.
+    assert round(sum(p["amount"] for p in o["payments"]), 2) == o["amount_paid"]
+
+
+def test_sync_partial_never_writes_header_below_staff_tenders(wired):
+    """Panel fix 1: Shopify never learns of an in-store balance collection, so
+    a routine orders/updated (financial_status still partially_paid with
+    total_outstanding = the amount the till already collected) must NOT reduce
+    amount_paid or resurrect balance_due."""
+    synth_row = {
+        "payment_id": "p-s",
+        "method": "SHOPIFY",
+        "amount": 400.0,
+        "status": "SETTLED",
+        "settled_outside_ims": True,
+        "reference": "shopify:8005",
+        "received_at": "2026-07-01T10:00:00",
+    }
+    staff_row = {"payment_id": "p-c", "method": "CASH", "amount": 600.0}
+    _seed_online_order(
+        wired,
+        8005,
+        grand=1000.0,
+        amount_paid=1000.0,
+        balance_due=0.0,
+        payment_status="PAID",
+        payments=[synth_row, staff_row],
+    )
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "8005", _sync_payload(8005, "partially_paid", "600.00")
+    )
+    o = _the_order(wired, 8005)
+    assert o["amount_paid"] == 1000.0  # never reduced below recorded tenders
+    assert o["balance_due"] == 0.0  # never resurrected
+    assert o["payment_status"] == "PAID"  # fully covered -> stays PAID
+    # No churn: the gateway row still explains exactly the gateway leg.
+    assert o["payments"] == [synth_row, staff_row]
+
+
+def test_sync_preserves_synth_row_identity_and_skips_unchanged(wired):
+    """Panel fix 2 riders: an unchanged amount writes nothing (no payment_id /
+    received_at churn); a changed amount mutates ONLY the amount."""
+    synth_row = {
+        "payment_id": "p-keep",
+        "method": "SHOPIFY",
+        "amount": 999.0,
+        "status": "SETTLED",
+        "settled_outside_ims": True,
+        "reference": "shopify:8006",
+        "received_at": "2026-07-01T10:00:00",
+    }
+    _seed_online_order(
+        wired,
+        8006,
+        grand=999.0,
+        amount_paid=999.0,
+        balance_due=0.0,
+        payment_status="PAID",
+        payments=[synth_row],
+    )
+    # Routine re-delivery of the paid status: amount unchanged -> no rewrite.
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "8006", _sync_payload(8006, "paid")
+    )
+    o = _the_order(wired, 8006)
+    assert o["payments"] == [synth_row]
+
+    # A partial correction changes the amount -- identity is still preserved.
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "8006", _sync_payload(8006, "partially_paid", "300.00")
+    )
+    o = _the_order(wired, 8006)
+    assert len(o["payments"]) == 1
+    row = o["payments"][0]
+    assert row["amount"] == 699.0
+    assert row["payment_id"] == "p-keep"  # identity preserved
+    assert row["received_at"] == "2026-07-01T10:00:00"  # collection date kept
+
+
+def test_nan_or_inf_outstanding_never_books_non_finite_money(wired):
+    """Panel P3 rider: 'NaN'/'inf' strings parse to floats that pass every
+    clamp -- both halves must treat them exactly like a missing value."""
+    import math as _math
+
+    payload = _frame_order(
+        7020, financial_status="partially_paid", total_outstanding="NaN"
+    )
+    shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    o = _the_order(wired, 7020)
+    assert o["amount_paid"] == 0.0
+    assert _math.isfinite(o["balance_due"])
+    assert o["balance_due"] == o["grand_total"]
+
+    _seed_online_order(
+        wired, 8007, grand=999.0, amount_paid=999.0, balance_due=999.0
+    )
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "8007", _sync_payload(8007, "partially_paid", "inf")
+    )
+    o2 = _the_order(wired, 8007)
+    # Money untouched (status still corrected by the normal vocabulary).
+    assert o2["amount_paid"] == 999.0 and o2["balance_due"] == 999.0
 
 
 def test_sync_partial_without_outstanding_leaves_money_untouched(wired):
@@ -737,6 +851,116 @@ def test_gstr3b_outward_igst_from_order_flag(monkeypatch):
     out = report["outwardTaxableSupplies"]
     assert out["integratedTax"] == 50.0
     assert out["centralTax"] == 0.0 and out["stateTax"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Panel fix 3 -- CDNR credit notes reverse under the parent order's head
+# ---------------------------------------------------------------------------
+
+
+def _cdnr_ledger_row(interstate):
+    row = {
+        "entry_id": "cn-1",
+        "customer_id": "",  # stateless online buyer
+        "type": "ISSUED",
+        "amount": 525.0,
+        "store_id": "BV-ONLINE-01",
+        "ref": "RET-1",
+        "created_at": "2026-04-20T10:00:00",
+        "gross_refund": 525.0,
+        "net_refund": 525.0,
+        "taxable": 500.0,
+        "tax": 25.0,
+        "gst_rate": 5,
+    }
+    if interstate is not None:
+        row["interstate"] = interstate
+    return row
+
+
+def _patch_reports_db_with_cn(monkeypatch, cn_row):
+    import api.routers.reports as r
+
+    db = _DB(
+        {
+            "stores": _Coll([_GSTR_STORE]),
+            "customers": _Coll([]),
+            "orders": _Coll([]),
+            "credit_note_ledger": _Coll([cn_row]),
+        }
+    )
+    monkeypatch.setattr(r, "_get_raw_db", lambda: db)
+
+
+def test_gstr1_cdnr_prefers_stamped_interstate(monkeypatch):
+    """A refund of an IGST-filed online sale must reverse under IGST -- the
+    ledger row's booking-time `interstate` stamp (from the parent order) wins
+    over the customers.state heuristic."""
+    from api.routers.reports import _compute_gstr1
+
+    _patch_reports_db_with_cn(monkeypatch, _cdnr_ledger_row(interstate=True))
+    report = _compute_gstr1("2026-04", "BV-ONLINE-01")
+    cdnr = report["cdnr"]
+    assert len(cdnr) == 1
+    assert cdnr[0]["igst"] == 25.0
+    assert cdnr[0]["cgst"] == 0.0 and cdnr[0]["sgst"] == 0.0
+
+
+def test_gstr1_cdnr_without_stamp_keeps_state_fallback(monkeypatch):
+    from api.routers.reports import _compute_gstr1
+
+    _patch_reports_db_with_cn(monkeypatch, _cdnr_ledger_row(interstate=None))
+    report = _compute_gstr1("2026-04", "BV-ONLINE-01")
+    cdnr = report["cdnr"]
+    assert len(cdnr) == 1
+    # Legacy row, stateless buyer -> intra fallback exactly as before.
+    assert cdnr[0]["igst"] == 0.0
+    assert cdnr[0]["cgst"] == 12.5 and cdnr[0]["sgst"] == 12.5
+
+
+def test_issue_store_credit_stamps_interstate(monkeypatch):
+    """The ONE credit_note_ledger door both the Shopify refund path and the
+    in-store CREDIT_NOTE path book through stamps the parent's interstate flag
+    (bool-gated; absent stays absent)."""
+    import api.routers.returns as ret
+    from database.repositories.customer_repository import CustomerRepository
+
+    db = FakeDB()
+    db.get_collection("customers").docs.append(
+        {"customer_id": "c1", "name": "A", "store_credit": 0.0}
+    )
+    repo = CustomerRepository(db.get_collection("customers"))
+    monkeypatch.setattr(ret, "_get_db", lambda: db)
+    monkeypatch.setattr(ret, "get_customer_repository", lambda: repo)
+    user = {"active_store_id": "BV-ONLINE-01", "user_id": "u1"}
+
+    entry = ret._issue_store_credit(
+        "c1", 100.0, reason="r", ref="REF-1", current_user=user, interstate=True
+    )
+    assert entry is not None and entry["interstate"] is True
+    rows = db.get_collection("credit_note_ledger").docs
+    assert rows and rows[-1].get("interstate") is True
+
+    entry2 = ret._issue_store_credit(
+        "c1", 50.0, reason="r", ref="REF-2", current_user=user
+    )
+    assert entry2 is not None and "interstate" not in entry2
+
+
+def test_historical_refund_cn_carries_parent_interstate(wired):
+    """#935 historical import: the synthesized whole-order refund credit note
+    carries the parent order's interstate flag so historical CDNR rows file
+    under the same head as the (excluded-from-revenue) parent."""
+    wired["store_state"]["code"] = "20"  # supplier Jharkhand
+    payload = _frame_order(7030, buyer_state="27", financial_status="refunded")
+    payload["created_at"] = "2024-06-10T10:00:00Z"
+    res = online_order_mapper.map_shopify_order(
+        payload, wired["db"], historical=True
+    )
+    assert res["status"] == "created"
+    rows = wired["db"].get_collection("credit_note_ledger").docs
+    assert rows, "whole-order historical refund must book a credit note"
+    assert rows[-1].get("interstate") is True
 
 
 # ---------------------------------------------------------------------------

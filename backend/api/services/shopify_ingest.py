@@ -37,6 +37,7 @@ count it exactly once and tell online from in-store revenue.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -544,6 +545,11 @@ def _live_payment_fields(
         try:
             outstanding = float(payload.get("total_outstanding"))
         except (TypeError, ValueError):
+            outstanding = None
+        if outstanding is not None and not math.isfinite(outstanding):
+            # "NaN"/"inf" strings parse to non-finite floats that pass every
+            # round/min/max clamp (all comparisons are False) and would persist
+            # NaN money into Mongo -- treat them exactly like a missing value.
             outstanding = None
         if outstanding is None:
             amount_paid = 0.0
@@ -1096,6 +1102,15 @@ def _book_historical_refund_credit_notes(
             "channel": "ONLINE",
             "historical": True,
         }
+        # GSTR-1 CDNR head consistency (money-panel fix 3): the credit note must
+        # reverse under the SAME CGST/SGST-vs-IGST head its parent invoice filed
+        # under. Online parents persist `interstate` (stamped at ingest from the
+        # delivery address); stamp it on the ledger row so the CDNR builder
+        # prefers it over the customers.state heuristic. Bool-gated: a parent
+        # without the flag keeps the legacy state-compare fallback.
+        parent_interstate = order_doc.get("interstate")
+        if isinstance(parent_interstate, bool):
+            entry["interstate"] = parent_interstate
         if reconciled:
             entry["billed_gross"] = round(billed_gross, 2)
             entry["reconciliation"] = (

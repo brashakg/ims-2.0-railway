@@ -648,6 +648,7 @@ def _issue_store_credit(
     tax: Optional[float] = None,
     gst_rate: Optional[float] = None,
     bump_balance: bool = True,
+    interstate: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
@@ -715,6 +716,14 @@ def _issue_store_credit(
         entry["tax"] = round(float(tax), 2)
     if gst_rate is not None:
         entry["gst_rate"] = round(float(gst_rate), 2)
+    # GSTR-1 CDNR head consistency: the credit note must reverse under the SAME
+    # CGST/SGST-vs-IGST head its parent invoice filed under. Online parent
+    # orders persist an `interstate` flag (stamped at ingest from the delivery
+    # address); stamping it here lets the CDNR builder prefer it over the
+    # customers.state heuristic. Bool-gated: POS parents don't carry the flag
+    # and keep the legacy state-compare fallback.
+    if isinstance(interstate, bool):
+        entry["interstate"] = interstate
 
     # Externally-settled (card/gateway refund): record the CDNR row but do NOT
     # add redeemable balance -> zero the delta, hold the balance, mark it.
@@ -1737,6 +1746,13 @@ async def create_return(
             taxable=gst_view.get("taxable"),
             tax=gst_view.get("tax"),
             gst_rate=gst_view.get("gst_rate"),
+            # CDNR head follows the PARENT order's persisted interstate flag
+            # (online orders); absent -> state-compare fallback unchanged.
+            interstate=(
+                order.get("interstate")
+                if isinstance(order.get("interstate"), bool)
+                else None
+            ),
         )
 
     else:  # EXCHANGE (settlement already computed + validated above)
@@ -1752,6 +1768,12 @@ async def create_return(
                 reason=f"Exchange refund for return {return_id}",
                 ref=return_id,
                 current_user=current_user,
+                # Same CDNR head consistency as the CREDIT_NOTE branch.
+                interstate=(
+                    order.get("interstate")
+                    if isinstance(order.get("interstate"), bool)
+                    else None
+                ),
             )
 
     # 3. Restock resellable (GOOD) units back into serialized stock (fail-soft).
