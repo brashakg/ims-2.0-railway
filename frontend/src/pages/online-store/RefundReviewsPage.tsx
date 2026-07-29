@@ -44,6 +44,19 @@ const STATUS_META: Record<string, { label: string; chip: string }> = {
 
 const OPEN_STATUSES = ['PENDING', 'DISCREPANCY', 'CREDIT_FAILED', 'NO_CUSTOMER'];
 
+/** Neutral presentation for a status this build doesn't know (OS-062): before,
+ *  an unrecognised value borrowed PENDING's amber 'Awaiting review' chip while
+ *  the row offered no actions — claiming work was waiting that could not be
+ *  done. Render the raw token neutrally instead. */
+function metaFor(s: string): { label: string; chip: string; known: boolean } {
+  const meta = STATUS_META[s];
+  if (meta) return { ...meta, known: true };
+  const label = s
+    ? s.replace(/[_-]+/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase())
+    : 'Unknown status';
+  return { label, chip: 'bg-gray-100 text-gray-600 border-gray-200', known: false };
+}
+
 type Filter = 'OPEN' | 'PENDING' | 'DISCREPANCY' | 'UNMATCHED' | 'RESOLVED' | 'ALL';
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'OPEN', label: 'Open' },
@@ -69,6 +82,7 @@ function fmtMoney(n: number | null | undefined): string {
 export default function RefundReviewsPage() {
   const toast = useToast();
   const [reviews, setReviews] = useState<RefundReview[]>([]);
+  const [total, setTotal] = useState(0);
   const [available, setAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('OPEN');
@@ -79,6 +93,7 @@ export default function RefundReviewsPage() {
     try {
       const res = await refundReviewsApi.list({ limit: 500 });
       setReviews(res.reviews);
+      setTotal(res.total);
       setAvailable(res.available);
     } finally {
       setLoading(false);
@@ -165,6 +180,13 @@ export default function RefundReviewsPage() {
         post the credit note and put the returned stock back, or reject if it should not be booked.
         Nothing hits the books until you confirm.
       </p>
+      {/* Scope hint (OS-013): refund rows bill under the ONLINE store, so this
+          queue deliberately spans every store — an empty list genuinely means
+          nothing is waiting, not that your active store filtered it out. */}
+      <p className="-mt-2 mb-4 text-xs text-gray-400 max-w-3xl">
+        This queue spans all stores — online refunds bill under the online store, so nothing here is
+        hidden by your active store.
+      </p>
 
       {openCount > 0 && (
         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -189,6 +211,14 @@ export default function RefundReviewsPage() {
             {f.label}
           </button>
         ))}
+        {!loading && available && total > reviews.length && (
+          // OS-044 (refund half): the fetch is capped at 500 — say so instead
+          // of letting the surplus silently vanish.
+          <span className="text-xs text-amber-700">
+            Showing the newest {reviews.length.toLocaleString('en-IN')} of{' '}
+            {total.toLocaleString('en-IN')} reviews.
+          </span>
+        )}
       </div>
 
       {loading ? (
@@ -214,9 +244,14 @@ export default function RefundReviewsPage() {
         <div className="rounded-xl border border-gray-200 bg-white divide-y divide-gray-100">
           {visible.map((r) => {
             const s = (r.status || 'PENDING').toUpperCase();
-            const meta = STATUS_META[s] || STATUS_META.PENDING;
+            const meta = metaFor(s);
             const isOpen = OPEN_STATUSES.includes(s);
             const acting = actingId === r.review_id;
+            // OS-061: prefer the display name the backend resolves from the
+            // stores registry; fall back to the raw code.
+            const restockLabel =
+              (r as RefundReview & { restock_store_name?: string | null }).restock_store_name ||
+              r.restock_store_id;
             const gst = (r.credit_note?.gst_breakup ?? {}) as Record<string, any>;
             const mismatch =
               s === 'DISCREPANCY' &&
@@ -248,7 +283,9 @@ export default function RefundReviewsPage() {
                       <>
                         <span className="text-gray-300">·</span>
                         <Store className="w-3 h-3 shrink-0" />
-                        <span className="truncate">restock {r.restock_store_id}</span>
+                        <span className="truncate" title={`Restock into ${r.restock_store_id}`}>
+                          restock {restockLabel}
+                        </span>
                       </>
                     )}
                   </div>
@@ -294,8 +331,12 @@ export default function RefundReviewsPage() {
                     <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                       <AlertTriangle className="w-3.5 h-3.5" /> Awaiting order
                     </span>
-                  ) : (
+                  ) : meta.known ? (
                     <span className="text-xs text-gray-400">Resolved</span>
+                  ) : (
+                    // OS-062: an unrecognised status is not "resolved" — say
+                    // plainly that this build has no action for it.
+                    <span className="text-xs text-gray-400">No action available</span>
                   )}
                 </div>
               </div>

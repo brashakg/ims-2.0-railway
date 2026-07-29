@@ -512,6 +512,81 @@ def _build_channel_clause(channel: Optional[str]) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Order statuses excluded from the customer order-count / lifetime-spend stats:
+# never-real (CANCELLED / DRAFT) and fully-refunded sales are not spend. Matches
+# the dashboard_widgets convention. HISTORICAL (imported, settled pre-IMS) IS
+# counted -- it is genuine past spend.
+_CUSTOMER_STATS_EXCLUDED_STATUSES = {"CANCELLED", "DRAFT", "REFUNDED"}
+
+
+def _attach_order_stats(rows: List[Dict[str, Any]], current_user: dict) -> None:
+    """OS-026: the Online-customers screen renders 'Orders' / 'Lifetime' columns
+    from fields (orders_count / total_spent) that NOTHING ever writes to customer
+    docs -- every online shopper showed 0 orders / Rs 0 forever. Compute them
+    server-side for the page being returned: one projected scan of the `orders`
+    collection over the page's customer ids, summed in Python (portable across
+    real Mongo and the seeded mock -- no aggregation pipeline needed for a page
+    of <=500 customers). RESPONSE-ONLY enrichment: nothing is persisted.
+
+    CROSS-STORE CALLERS ONLY (adversarial review, PR #947): the sum spans the
+    WHOLE orders collection -- all stores and channels, which is exactly what
+    makes it a truthful lifetime figure -- and store-pinned roles must never
+    see cross-store money. A store-bounded caller therefore gets NO enrichment:
+    the FE renders its honest em-dash for the absent fields, which is truthful,
+    unlike a partial per-store sum wearing a 'Lifetime' label. (The consuming
+    Online-customers screen is HQ-gated anyway.)
+
+    Fail-soft: any error leaves the rows unchanged (the FE then renders its
+    honest em-dash fallback, never a fake zero)."""
+    from ..dependencies import user_store_scope
+
+    is_cross, _allowed = user_store_scope(current_user)
+    if not is_cross:
+        return
+    ids = [str(r.get("customer_id") or "") for r in rows if isinstance(r, dict)]
+    ids = [i for i in ids if i]
+    if not ids:
+        return
+    try:
+        from ..dependencies import get_db
+
+        db = get_db()
+        if db is None or not getattr(db, "is_connected", True):
+            return
+        coll = db.get_collection("orders")
+        if coll is None:
+            return
+        stats: Dict[str, Dict[str, float]] = {}
+        cursor = coll.find(
+            {"customer_id": {"$in": ids}},
+            {"customer_id": 1, "grand_total": 1, "status": 1, "_id": 0},
+        )
+        for od in cursor:
+            if not isinstance(od, dict):
+                continue
+            cid = str(od.get("customer_id") or "")
+            if not cid:
+                continue
+            if str(od.get("status") or "").upper() in _CUSTOMER_STATS_EXCLUDED_STATUSES:
+                continue
+            entry = stats.setdefault(cid, {"n": 0.0, "sum": 0.0})
+            entry["n"] += 1
+            try:
+                entry["sum"] += float(od.get("grand_total") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            entry = stats.get(str(r.get("customer_id") or ""), {"n": 0.0, "sum": 0.0})
+            # A truthful zero: the ids were checked against the whole orders
+            # collection, so 'no orders found' genuinely means zero orders.
+            r["orders_count"] = int(entry["n"])
+            r["total_spent"] = round(float(entry["sum"]), 2)
+    except Exception:  # noqa: BLE001 - enrichment must never break the list
+        pass
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -642,6 +717,14 @@ async def list_customers(
             customers = _annotate_customer_matches(rows, search)
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
+
+        # OS-026: the online-segment list drives the Online-customers screen's
+        # Orders / Lifetime columns -- fields nothing persists. Enrich the page
+        # server-side (response-only). Scoped to ?channel=ONLINE so the general
+        # CRM list keeps its exact prior shape and cost; inside, cross-store
+        # callers only (store-pinned roles never see cross-store money).
+        if channel and str(channel).strip().upper() in _ONLINE_CHANNEL_VALUES:
+            _attach_order_stats(customers, current_user)
 
         from ..utils.pagination import paginate
 

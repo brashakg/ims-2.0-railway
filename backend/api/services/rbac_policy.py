@@ -4825,6 +4825,15 @@ POLICY: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/orders/remap/{shopify_order_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # Release the clinical Rx FLAG-AND-HOLD on one online order after the
+    # prescription is captured (OS-012: the hold was write-only). SAME allowed
+    # set as remap above -- deliberately NOT a wider set, so this row does not
+    # broaden the module's write grant-union (rbac capability-union gotcha).
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/orders/{order_id}/clear-rx-hold",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     # --- /api/v1/online-store/refund-reviews ---  (Shopify refund -> GST consumer)
     # The ACCOUNTANT-facing consumer for shopify_refund_review -- the queue the
     # refunds/create handler writes to by DEFAULT (SHOPIFY_REFUND_AUTO off). The
