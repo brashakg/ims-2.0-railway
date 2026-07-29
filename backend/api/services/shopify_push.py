@@ -69,7 +69,10 @@ Optional env flags (all default OFF -- nothing changes unless the owner sets the
                                   an UPDATE of an already-mapped product.
   SHOPIFY_PUBLISH_ON_CREATE=1     publish a newly created ACTIVE product to the
                                   Online Store sales channel (publishablePublish).
-                                  A DRAFT is NEVER published. The publication id
+                                  A DRAFT is NEVER published, and publish is
+                                  WITHHELD unless the variant seeding succeeded
+                                  with at least one PRICED row (a product must
+                                  never go visible at 0.00). The publication id
                                   can be pinned with SHOPIFY_ONLINE_STORE_PUBLICATION_ID
                                   (else it is looked up once via `publications`,
                                   which needs the read_publications scope).
@@ -1019,7 +1022,10 @@ def build_variant_seed_rows(
     {key, option_values, row, variant} where `row` is the price/sku part of a
     ProductVariantsBulkInput:
         price            the resolved selling price, "0.00" is NEVER sent
-        compareAtPrice   the MRP, only when it is strictly above the price
+        compareAtPrice   the MRP when it is strictly above the price, else an
+                         EXPLICIT None (GraphQL null) so a stale strikethrough
+                         on Shopify is CLEARED -- the same contract as
+                         build_variant_price_inputs
         barcode          the GTIN (variant gtin/barcode, else the product's) --
                          `store_barcode` is the physical join key and is never pushed
         inventoryItem.sku the IMS SKU (variant sku, else the product sku) -- in
@@ -1045,6 +1051,16 @@ def build_variant_seed_rows(
             row["price"] = f"{price:.2f}"
             if mrp > price:
                 row["compareAtPrice"] = f"{mrp:.2f}"
+            else:
+                # EXPLICIT GraphQL null, byte-matching build_variant_price_inputs'
+                # contract: when the MRP no longer exceeds the selling price, a
+                # stale strikethrough on Shopify must be CLEARED, not kept. On a
+                # flag-ON update the seeding step REPLACES push_variant_prices
+                # (seeded=True skips it), so omitting the field here would
+                # silently lose today's clearing behaviour and leave a fake
+                # "was <old MRP>" above the real price -- an MRP-display
+                # compliance issue (adversarial-panel must-fix 3).
+                row["compareAtPrice"] = None
         if sku:
             row["inventoryItem"] = {"sku": sku}
         if barcode:
@@ -1109,37 +1125,83 @@ def _assign_seed_rows(
                        the node's inventoryItem gid -- the oversell-guard stock
                        target -- None when the response did not carry it.
       skipped          rows we can neither update nor create (no gid, no options)
-    """
+
+    MATCHING ORDER (adversarial-panel must-fix 2): a row whose IMS variant
+    already stores a shopify_variant_id that appears among the returned nodes
+    is paired on that GID FIRST, regardless of option-label drift (an IMS
+    option rename, BVI-era spelling like Grey/Gray). Only rows without a
+    stored-and-present gid fall through to (color,size) option-key matching.
+    A row whose stored gid is present in the nodes can therefore NEVER reach
+    productVariantsBulkCreate -- the drift case previously minted a duplicate
+    live variant and re-pointed the row's stock target at it, leaving the old
+    variant sellable at a stale price with its stock never synced again."""
     pool: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     unmatched: List[Dict[str, Any]] = []
+    node_by_gid: Dict[str, Dict[str, Any]] = {}
     for n in nodes or []:
         if isinstance(n, dict) and n.get("id"):
             pool.setdefault(_node_option_key(n), []).append(n)
             unmatched.append(n)
+            node_by_gid[_as_shopify_gid(n.get("id"), "ProductVariant")] = n
 
     update_rows: List[Dict[str, Any]] = []
     create_rows: List[Dict[str, Any]] = []
     create_variants: List[Optional[Dict[str, Any]]] = []
     pairs: List[Tuple[Optional[Dict[str, Any]], str, Optional[str]]] = []
     skipped = 0
-    # Single-row / single-variant products: trust the 1:1 pairing even if the
-    # option labels do not line up (e.g. Shopify kept a "Title" option).
-    lone = len(seed_rows) == 1 and len(unmatched) == 1
 
-    for r in seed_rows:
+    # PASS 1 -- gid-first. matched_by_row keeps seed-row order so pairs /
+    # update_rows are emitted in the same order as before (pairs[0] stays the
+    # first seed row -- the default-variant contract used by the ecom
+    # write-back).
+    matched_by_row: Dict[int, Tuple[str, Optional[str]]] = {}
+    remaining: List[Tuple[int, Dict[str, Any]]] = []
+    for idx, r in enumerate(seed_rows):
+        stored = (
+            (r["variant"] or {}).get("shopify_variant_id")
+            if r["variant"] is not None
+            else None
+        )
+        gid = _as_shopify_gid(stored, "ProductVariant") if stored else ""
+        node = node_by_gid.pop(gid, None) if gid else None
+        if node is not None:
+            # Consume the node everywhere so option matching cannot reuse it.
+            if node in unmatched:
+                unmatched.remove(node)
+            bucket = pool.get(_node_option_key(node))
+            if bucket and node in bucket:
+                bucket.remove(node)
+            matched_by_row[idx] = (gid, _node_inventory_item_gid(node))
+        else:
+            remaining.append((idx, r))
+
+    # Single remaining row / single remaining node: trust the 1:1 pairing even
+    # if the option labels do not line up (e.g. Shopify kept a "Title" option).
+    lone = len(remaining) == 1 and len(unmatched) == 1
+
+    # PASS 2 -- option-key matching for the rows without a stored-and-present
+    # gid (unchanged semantics); only these may fall through to create/skip.
+    for idx, r in remaining:
         bucket = pool.get(r["key"]) or []
         node = bucket.pop(0) if bucket else (unmatched[0] if lone else None)
         if node is not None:
             if node in unmatched:
                 unmatched.remove(node)
             gid = _as_shopify_gid(node.get("id"), "ProductVariant")
-            update_rows.append({"id": gid, **r["row"]})
-            pairs.append((r["variant"], gid, _node_inventory_item_gid(node)))
+            matched_by_row[idx] = (gid, _node_inventory_item_gid(node))
         elif r["option_values"]:
             create_rows.append({"optionValues": r["option_values"], **r["row"]})
             create_variants.append(r["variant"])
         else:
             skipped += 1
+
+    for idx, r in enumerate(seed_rows):
+        got = matched_by_row.get(idx)
+        if got is None:
+            continue
+        gid, inv_gid = got
+        update_rows.append({"id": gid, **r["row"]})
+        pairs.append((r["variant"], gid, inv_gid))
     return update_rows, create_rows, create_variants, pairs, skipped
 
 
@@ -1179,6 +1241,10 @@ async def _seed_variants_after_write(
         # ecom fallback write-back).
         "inventory_item_gids": [],
         "product_level_inventory_item_gid": None,
+        # How many seed rows actually carried a selling price. The publish
+        # precondition (must-fix 1) requires this to be > 0: a SKU-only seed
+        # means Shopify's variant is still at 0.00 and must never go visible.
+        "priced_rows": sum(1 for r in seed_rows if r["row"].get("price")),
     }
 
     for i in range(0, len(update_rows), _VARIANTS_PER_CALL):
@@ -1775,6 +1841,15 @@ async def push_product(
                 )
         # Sales-channel publish (default OFF): an ACTIVE product published to no
         # channel is invisible on the storefront. DRAFTs are never published.
+        #
+        # PUBLISH PRECONDITION (adversarial-panel must-fix 1): publishing is
+        # WITHHELD unless the seeding step provably priced the variant --
+        # seed_summary exists, carries zero errors, and at least one seeded row
+        # carried a price. Seeding is fail-SOFT (a bulk-update userError or a
+        # priceless-but-PUBLISHED product leaves ok=True), so without this gate
+        # a transient Shopify error at go-live -- or a product with no
+        # resolvable price at all -- would put an ACTIVE product LIVE on the
+        # storefront at Shopify's auto-created 0.00.
         pub_summary = None
         if (
             new_gid
@@ -1782,7 +1857,18 @@ async def push_product(
             and publish_on_create_enabled()
             and payload.get("status") == "ACTIVE"
         ):
-            pub_summary = await _publish_to_online_store(db, new_gid)
+            seed_priced_ok = (
+                seed_summary is not None
+                and not seed_summary.get("errors")
+                and int(seed_summary.get("priced_rows") or 0) > 0
+            )
+            if seed_priced_ok:
+                pub_summary = await _publish_to_online_store(db, new_gid)
+            else:
+                pub_summary = {
+                    "published": False,
+                    "error": "publish withheld: variant unpriced or seeding failed",
+                }
         # Variant price/barcode push rides after the product write too (same
         # fail-soft side-channel contract: an error is reported on the result,
         # never flips the product push's ok). push_variant_prices never raises.

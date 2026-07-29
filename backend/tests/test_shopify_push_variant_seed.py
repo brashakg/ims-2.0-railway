@@ -24,6 +24,12 @@ THE FIX (covered here):
     (online_catalog.online_variant_targets_for_skus / inventory_items_for_skus,
     online_sync_health._inventory_item_id_for_sku). Section 6 proves the
     resolver finds a freshly pushed product's inventory item.
+  * ADVERSARIAL-PANEL MUST-FIXES (sections 5 + 7): publish-on-create is
+    WITHHELD unless seeding succeeded with a PRICED row (an ACTIVE product can
+    never go live at 0.00); variant matching is gid-FIRST so an option-label
+    rename can never mint a duplicate live variant or re-point a stock target;
+    a seed row carries an EXPLICIT compareAtPrice null when mrp <= price so a
+    stale strikethrough is cleared (MRP-display compliance).
   * UPDATE of an already-mapped product is UNCHANGED by default (the ~4,400 live
     products are never silently re-priced); opt in with
     SHOPIFY_PUSH_PRICE_ON_UPDATE=1.
@@ -575,12 +581,16 @@ def test_live_update_seeds_prices_only_when_the_owner_opts_in(monkeypatch):
 def test_publish_is_off_by_default(monkeypatch):
     monkeypatch.delenv("SHOPIFY_PUBLISH_ON_CREATE", raising=False)
     spy = _force_live(
-        monkeypatch, {"productCreate": _create_response([_DEFAULT_VARIANT_NODE])}
+        monkeypatch,
+        {
+            "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one(
-        {"id": "P3", "title": "X", "ecom": {"status": "PUBLISHED"}}
-    )
+    # PRICED fixture (panel must-fix 1): publish tests must not lean on a
+    # priceless product, or they enshrine the 0.00-publish hole.
+    db["catalog_products"].insert_one(_product(id="P3"))
     product = db["catalog_products"].find_one({"id": "P3"})
     res = _run(shopify_push.push_product(db, product, []))
     assert res.publication is None
@@ -588,22 +598,26 @@ def test_publish_is_off_by_default(monkeypatch):
     assert shopify_push.publish_on_create_enabled() is False
 
 
-def test_publish_on_create_when_flag_on_and_product_is_active(monkeypatch):
+def test_publish_on_create_when_flag_on_and_product_is_priced_and_active(monkeypatch):
+    """Publish fires ONLY on the happy path: ACTIVE + seeding succeeded with a
+    PRICED row. (The old fixture was priceless and asserted published:True --
+    it proved the 0.00 hole instead of guarding it; panel must-fix 1.)"""
     monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
         {
             "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
             "publishablePublish": {"data": {"publishablePublish": {"userErrors": []}}},
         },
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one(
-        {"id": "P4", "title": "X", "ecom": {"status": "PUBLISHED"}}
-    )
+    db["catalog_products"].insert_one(_product(id="P4"))
     product = db["catalog_products"].find_one({"id": "P4"})
     res = _run(shopify_push.push_product(db, product, []))
+    assert res.variants_seeded["errors"] == []
+    assert res.variants_seeded["priced_rows"] == 1
     assert res.publication == {
         "published": True,
         "publication_id": "gid://shopify/Publication/77",
@@ -616,20 +630,101 @@ def test_publish_on_create_when_flag_on_and_product_is_active(monkeypatch):
 
 
 def test_a_draft_is_never_published_even_with_the_flag_on(monkeypatch):
-    """The owner's publish gate: the 2,032 staged DRAFTs must stay invisible."""
+    """The owner's publish gate: the 2,032 staged DRAFTs must stay invisible --
+    even a fully PRICED draft (priced fixture per panel must-fix 1)."""
     monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
-        monkeypatch, {"productCreate": _create_response([_DEFAULT_VARIANT_NODE])}
+        monkeypatch,
+        {
+            "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
     )
     db = _EngineDB()
-    db["catalog_products"].insert_one(
-        {"id": "P5", "title": "X", "ecom": {"status": "DRAFT"}}
-    )
+    db["catalog_products"].insert_one(_product(id="P5", ecom={"status": "DRAFT"}))
     product = db["catalog_products"].find_one({"id": "P5"})
     res = _run(shopify_push.push_product(db, product, []))
     assert res.payload["status"] == "DRAFT"
     assert res.publication is None
+    assert spy.count_for("publishablePublish") == 0
+
+
+def test_publish_withheld_when_seeding_failed(monkeypatch):
+    """Panel must-fix 1(a): seeding is fail-soft, so a bulk-update userError at
+    go-live would previously still publish -- an ACTIVE product LIVE at 0.00.
+    The precondition now withholds publish and reports why."""
+    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
+            "productVariantsBulkUpdate": {
+                "data": {
+                    "productVariantsBulkUpdate": {
+                        "productVariants": [],
+                        "userErrors": [{"field": ["price"], "message": "boom"}],
+                    }
+                }
+            },
+            "publishablePublish": {"data": {"publishablePublish": {"userErrors": []}}},
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(_product(id="P6"))
+    product = db["catalog_products"].find_one({"id": "P6"})
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.ok is True  # the product push itself stays fail-soft
+    assert res.publication == {
+        "published": False,
+        "error": "publish withheld: variant unpriced or seeding failed",
+    }
+    assert spy.count_for("publishablePublish") == 0
+
+
+def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
+    """Panel must-fix 1(b): a PUBLISHED product with no resolvable price must
+    never go visible -- Shopify's auto-created variant sits at 0.00. Covers
+    BOTH unpriced shapes: SKU-only seeding (priced_rows == 0) and
+    nothing-to-seed at all (seed_summary is None)."""
+    monkeypatch.setenv("SHOPIFY_PUBLISH_ON_CREATE", "1")
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productCreate": _create_response([_DEFAULT_VARIANT_NODE]),
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+            "publishablePublish": {"data": {"publishablePublish": {"userErrors": []}}},
+        },
+    )
+    db = _EngineDB()
+    withheld = {
+        "published": False,
+        "error": "publish withheld: variant unpriced or seeding failed",
+    }
+    # Shape 1: SKU-only (seeding ran, but zero priced rows).
+    db["catalog_products"].insert_one(
+        {"id": "P7", "title": "X", "sku": "BV-NOPRICE", "ecom": {"status": "PUBLISHED"}}
+    )
+    res = _run(
+        shopify_push.push_product(
+            db, db["catalog_products"].find_one({"id": "P7"}), []
+        )
+    )
+    assert res.variants_seeded["priced_rows"] == 0
+    assert res.publication == withheld
+    # Shape 2: no price AND no SKU (nothing to seed at all).
+    db["catalog_products"].insert_one(
+        {"id": "P8", "title": "Y", "ecom": {"status": "PUBLISHED"}}
+    )
+    res2 = _run(
+        shopify_push.push_product(
+            db, db["catalog_products"].find_one({"id": "P8"}), []
+        )
+    )
+    assert res2.variants_seeded is None
+    assert res2.publication == withheld
     assert spy.count_for("publishablePublish") == 0
 
 
@@ -1028,3 +1123,210 @@ def test_resolver_finds_a_freshly_pushed_products_inventory_item(monkeypatch):
         online_sync_health._inventory_item_id_for_sku(db, "BV-RB-0001")
         == "gid://shopify/InventoryItem/7001"
     )
+
+
+# ===========================================================================
+# 7. Adversarial-panel must-fixes 2 + 3 (gid-first matching, compareAt null)
+# ===========================================================================
+
+
+def test_update_gid_first_matching_survives_an_option_rename(monkeypatch):
+    """Panel must-fix 2: a mapped multi-variant product whose IMS option value
+    was renamed (option-key no longer matches Shopify's selectedOptions) must
+    pair on the STORED shopify_variant_id -- both gids get bulk UPDATE rows and
+    productVariantsBulkCreate is NEVER called. Before the fix the drifted row
+    fell into the create branch: a duplicate live variant was minted and the
+    IMS row's stock target re-pointed at it, leaving the old variant sellable
+    at a stale price with its stock never synced again."""
+    monkeypatch.setenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", "1")
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productUpdate": {
+                "data": {
+                    "productUpdate": {
+                        "product": {
+                            "id": "gid://shopify/Product/900",
+                            "handle": "rb",
+                            "variants": {
+                                "nodes": [
+                                    {
+                                        "id": "gid://shopify/ProductVariant/5001",
+                                        "selectedOptions": [
+                                            {"name": "Color", "value": "Black"}
+                                        ],
+                                        "inventoryItem": {
+                                            "id": "gid://shopify/InventoryItem/7001"
+                                        },
+                                    },
+                                    {
+                                        "id": "gid://shopify/ProductVariant/5002",
+                                        "selectedOptions": [
+                                            {"name": "Color", "value": "Gold"}
+                                        ],
+                                        "inventoryItem": {
+                                            "id": "gid://shopify/InventoryItem/7002"
+                                        },
+                                    },
+                                ]
+                            },
+                        },
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+            "productVariantsBulkCreate": {
+                "data": {
+                    "productVariantsBulkCreate": {
+                        "productVariants": [
+                            {"id": "gid://shopify/ProductVariant/9999"}
+                        ],
+                        "userErrors": [],
+                    }
+                }
+            },
+        },
+    )
+    db = _EngineDB()
+    db["catalog_products"].insert_one(
+        _product(
+            ecom={
+                "status": "PUBLISHED",
+                "shopify_product_id": "gid://shopify/Product/900",
+            }
+        )
+    )
+    # V1's option_color was RENAMED in IMS ("Black" -> "Matte Black"): the
+    # option key no longer matches Shopify's node. Its stored gid must win.
+    db["catalog_variants"].insert_one(
+        {
+            "variant_id": "V1",
+            "sku": "S-BLK",
+            "parent_product_id": "P1",
+            "option_color": "Matte Black",
+            "shopify_variant_id": "gid://shopify/ProductVariant/5001",
+        }
+    )
+    # V2 stores a BARE NUMERIC gid (the BVI-era storage shape) -- the gid-first
+    # pass must normalise it before matching.
+    db["catalog_variants"].insert_one(
+        {
+            "variant_id": "V2",
+            "sku": "S-GLD",
+            "parent_product_id": "P1",
+            "option_color": "Gold",
+            "shopify_variant_id": "5002",
+        }
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    variants = [
+        db["catalog_variants"].find_one({"sku": "S-BLK"}),
+        db["catalog_variants"].find_one({"sku": "S-GLD"}),
+    ]
+
+    res = _run(shopify_push.push_product(db, product, variants))
+    assert res.ok is True and res.action == "update"
+
+    # Both STORED gids received bulk UPDATE rows; nothing was bulk-created.
+    call = spy.call_for("productVariantsBulkUpdate")
+    assert {r["id"] for r in call["variables"]["variants"]} == {
+        "gid://shopify/ProductVariant/5001",
+        "gid://shopify/ProductVariant/5002",
+    }
+    assert spy.count_for("productVariantsBulkCreate") == 0
+    assert res.variants_seeded["created"] == 0
+    assert res.variants_seeded["errors"] == []
+
+    # The drifted row kept its OWN stock target (7001) -- not a duplicate's.
+    blk = db["catalog_variants"].find_one({"sku": "S-BLK"})
+    assert blk["shopify_variant_id"] == "gid://shopify/ProductVariant/5001"
+    assert blk["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7001"
+    gld = db["catalog_variants"].find_one({"sku": "S-GLD"})
+    assert gld["shopify_inventory_item_id"] == "gid://shopify/InventoryItem/7002"
+
+
+def test_assign_seed_rows_never_creates_a_row_whose_stored_gid_is_present():
+    """Pure-level pin of must-fix 2: option drift + stored gid present in the
+    nodes => UPDATE row on that gid, create list EMPTY."""
+    product = {"id": "P1", "mrp": 100, "offer_price": 90, "ecom": {}}
+    variants = [
+        {
+            "sku": "S-1",
+            "option_color": "Matte Black",  # drifted label
+            "shopify_variant_id": "gid://shopify/ProductVariant/71",
+        }
+    ]
+    rows = shopify_push.build_variant_seed_rows(product, variants)
+    nodes = [
+        {
+            "id": "gid://shopify/ProductVariant/71",
+            "selectedOptions": [{"name": "Color", "value": "Black"}],
+            "inventoryItem": {"id": "gid://shopify/InventoryItem/81"},
+        }
+    ]
+    upd, crt, crt_vars, pairs, skipped = shopify_push._assign_seed_rows(rows, nodes)
+    assert [r["id"] for r in upd] == ["gid://shopify/ProductVariant/71"]
+    assert crt == [] and crt_vars == []
+    assert pairs == [
+        (
+            variants[0],
+            "gid://shopify/ProductVariant/71",
+            "gid://shopify/InventoryItem/81",
+        )
+    ]
+    assert skipped == 0
+
+
+def test_update_seed_row_clears_stale_compare_at_with_explicit_null(monkeypatch):
+    """Panel must-fix 3: when the MRP no longer exceeds the selling price, the
+    flag-ON update seed row must carry an EXPLICIT compareAtPrice None
+    (GraphQL null) so Shopify CLEARS the stale strikethrough -- the same
+    contract build_variant_price_inputs already honours. Omitting the field
+    would leave a fake "was <old MRP>" above the real price."""
+    # Pure builder first: mrp == price -> explicit None present in the row.
+    rows = shopify_push.build_variant_seed_rows(
+        {"id": "PX", "sku": "BV-X", "mrp": 10990, "offer_price": 10990, "ecom": {}},
+        [],
+    )
+    assert rows[0]["row"]["price"] == "10990.00"
+    assert "compareAtPrice" in rows[0]["row"]
+    assert rows[0]["row"]["compareAtPrice"] is None
+
+    # Full flag-ON update path: the null must ride on the wire row.
+    monkeypatch.setenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", "1")
+    spy = _force_live(
+        monkeypatch,
+        {
+            "productUpdate": {
+                "data": {
+                    "productUpdate": {
+                        "product": {
+                            "id": "gid://shopify/Product/900",
+                            "variants": {"nodes": [_DEFAULT_NODE_WITH_INV]},
+                        },
+                        "userErrors": [],
+                    }
+                }
+            },
+            "productVariantsBulkUpdate": _BULK_UPDATE_OK,
+        },
+    )
+    db = _EngineDB()
+    # Owner lowered the MRP to the selling price: strikethrough must clear.
+    db["catalog_products"].insert_one(
+        _product(
+            mrp=10990,
+            ecom={
+                "status": "PUBLISHED",
+                "shopify_product_id": "gid://shopify/Product/900",
+            },
+        )
+    )
+    product = db["catalog_products"].find_one({"id": "P1"})
+    res = _run(shopify_push.push_product(db, product, []))
+    assert res.ok is True and res.action == "update"
+    row = spy.call_for("productVariantsBulkUpdate")["variables"]["variants"][0]
+    assert row["price"] == "10990.00"
+    assert "compareAtPrice" in row
+    assert row["compareAtPrice"] is None
