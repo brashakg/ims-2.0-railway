@@ -198,9 +198,22 @@ def test_seed_rows_carry_price_compare_at_sku_and_barcode():
     assert row["compareAtPrice"] == "12990.00"  # MRP strikethrough
     # SKU lives on the inventory item in the 2024-04+ product model.
     assert row["inventoryItem"] == {"sku": "BV-RB-0001"}
-    assert row["barcode"] == "2000000000017"
+    # The product's `barcode` here is our INTERNAL store barcode (GS1 20-29,
+    # restricted distribution). It must NOT be published as a public GTIN --
+    # Shopify republishes that field into the Google/Meta Shopping feeds. This
+    # assertion used to expect "2000000000017"; the 2,032 draft pushes of
+    # 2026-07-20 carried exactly that shape, which is the leak now closed.
+    assert "barcode" not in row
     assert rows[0]["option_values"] == []  # nothing to create; update-only
     assert rows[0]["key"] == ("", "")  # matches Shopify's "Default Title"
+
+
+def test_seed_rows_publish_a_real_manufacturer_gtin():
+    """The counterpart to the guard above: a genuine GTIN still gets pushed."""
+    rows = shopify_push.build_variant_seed_rows(
+        _product(gtin="8056597720373"), []
+    )
+    assert rows[0]["row"]["barcode"] == "8056597720373"
 
 
 def test_seed_rows_never_send_a_zero_price_but_still_send_the_sku():

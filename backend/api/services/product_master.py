@@ -51,6 +51,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .gst_rates import gst_rate_for_category, hsn_for_category
+from .gtin import classify_gtin, is_valid_gtin, normalise_candidate
 from .pricing_caps import evaluate_offer_price
 from .product_naming import (
     build_handle,
@@ -1025,6 +1026,58 @@ def find_similar_products(
         return empty
 
 
+def _guard_gtin_attribute(
+    attributes: Dict[str, Any], *, strict: bool
+) -> Dict[str, Any]:
+    """Validate `attributes['gtin']` -- the PUBLIC barcode -- at the create door.
+
+    `gtin` is pushed to Shopify as ProductVariant.barcode and republished into
+    the Google/Meta Shopping feeds, so a wrong value is customer-visible: the
+    feeds either reject the item or match it to another manufacturer's product.
+    Nothing validated this field before, so the door persisted whatever it was
+    handed. The 2026-07-29 prod audit found 353 of 2,815 gtin-bearing variants
+    holding junk: supplier item codes ("2511661"), two EANs pasted into one
+    cell ("8056597720373 8056597720380"), model numbers ("TW003HG14"), and one
+    row carrying the comma-joined Shopify browse-TAG string.
+
+    Both live doors feed straight into here, which is why the check belongs at
+    this chokepoint rather than in either of them:
+      - the Add-Product form's free-text "GTIN (mfr)" box;
+      - Catalog Autopilot, which scrapes a manufacturer spec table and maps any
+        row labelled gtin/ean/"ean code"/barcode into this attribute verbatim
+        (frontend/src/pages/catalog/autopilotSpecMap.ts).
+
+    STRICT (the interactive form): raise 422 so the cataloguer sees the bad
+    value and fixes or clears it -- silently discarding what someone just typed
+    would be worse. DRAFT/IMPORT (bulk + clone doors): drop the value and log
+    it, so one bad cell never blocks a 2,000-row import while still never
+    persisting garbage. Empty stays empty in both modes.
+    """
+    attrs = attributes or {}
+    if "gtin" not in attrs:
+        return attrs
+    raw = attrs["gtin"]
+    if not normalise_candidate(raw) or is_valid_gtin(raw):
+        return attrs
+    reason = classify_gtin(raw)
+    if strict:
+        raise ProductMasterError(
+            f"'{str(raw)[:40]}' is not a valid GTIN ({reason}). A GTIN is 8, 12, "
+            "13 or 14 digits with a valid check digit. Leave it blank if the "
+            "manufacturer barcode is unknown.",
+            status=422,
+            field="gtin",
+        )
+    logger.warning(
+        "[PM] dropping invalid gtin on a draft/import row: reason=%s value=%.60r",
+        reason,
+        raw,
+    )
+    cleaned = dict(attrs)
+    cleaned.pop("gtin", None)
+    return cleaned
+
+
 def normalise_payload(
     *,
     category: Any,
@@ -1116,6 +1169,12 @@ def normalise_payload(
     # must match one of them; the match canonicalises casing. Fail-soft when
     # db is absent (unit tests / callers without a connection).
     attributes = enforce_dictionary_values(canonical, attributes or {}, db=db)
+
+    # A bad public GTIN is worse than none -- reject it here, before it can be
+    # persisted and pushed to Shopify / the Shopping feeds. See the helper.
+    attributes = _guard_gtin_attribute(
+        attributes, strict=not (as_draft or force_draft)
+    )
 
     # discount_category: forced for HA/SERVICES, else an explicit value wins
     # (validated), else DERIVED from the brand's Brand Master tier (owner rule:

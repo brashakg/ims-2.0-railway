@@ -20,9 +20,53 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 from datetime import datetime
+import logging
 import uuid
 
+from api.services.gtin import classify_gtin, is_valid_gtin, normalise_candidate
+
 from .base_repository import BaseRepository
+
+logger = logging.getLogger(__name__)
+
+
+def _drop_invalid_gtin(variant: Dict) -> Dict:
+    """Return `variant` with a non-publishable `gtin` removed.
+
+    LAST-LINE storage guard. `gtin` is the PUBLIC barcode: it is pushed to
+    Shopify and from there into the Google/Meta Shopping feeds, so a wrong
+    value is customer-visible. The prod audit of 2026-07-29 found 353 of 2,815
+    gtin-bearing variants holding junk -- supplier item codes, two EANs in one
+    cell, model numbers, and in one case the comma-joined Shopify browse-TAG
+    string. No caller had ever validated the field, so `$set` persisted
+    whatever it was handed.
+
+    Semantics, deliberately:
+      - an ABSENT `gtin` key is left absent (a patch must stay a patch);
+      - an EMPTY value is PRESERVED, so clearing a bad GTIN still works;
+      - a non-empty INVALID value is DROPPED from the patch, which leaves any
+        previously stored good value intact rather than overwriting it with
+        garbage.
+
+    Dropping (not raising) is right for this tier: the repository is fail-soft
+    by contract, and the user-facing rejection happens up at the create door
+    (product_master.normalise_payload).
+    """
+    if "gtin" not in variant:
+        return variant
+    raw = variant["gtin"]
+    candidate = normalise_candidate(raw)
+    if not candidate or is_valid_gtin(raw):
+        return variant
+    logger.warning(
+        "[catalog_variants] dropping invalid gtin for sku=%s reason=%s value=%.60r",
+        variant.get("sku"),
+        classify_gtin(raw),
+        raw,
+    )
+    cleaned = dict(variant)
+    cleaned.pop("gtin", None)
+    return cleaned
 
 
 class CatalogVariantRepository(BaseRepository):
@@ -79,6 +123,7 @@ class CatalogVariantRepository(BaseRepository):
             # null-keyed orphan that would later collide on the unique index.
             return None
 
+        variant = _drop_invalid_gtin(variant)
         sku = variant["sku"]
         now = datetime.now()
         existing = self.find_one({"sku": sku})
