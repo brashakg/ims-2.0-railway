@@ -240,6 +240,9 @@ export default function CollectionsPage() {
     setDrawerOpen(false);
   };
 
+  // Flips ONLY the IMS-local visibility flag — nothing reaches the storefront
+  // here (OS-037). "Publish" vocabulary is reserved for the Shopify push button
+  // on the same row; the toast says exactly what this toggle does.
   const togglePublished = async (c: EcomCollection) => {
     const next = !(c.published ?? false);
     // optimistic
@@ -248,7 +251,11 @@ export default function CollectionsPage() {
     );
     try {
       await collectionsApi.setPublished(c.id, next);
-      toast.success(next ? 'Collection published' : 'Collection unpublished');
+      toast.success(
+        next
+          ? 'Marked visible in IMS — reaches the storefront on the next Shopify push'
+          : 'Marked hidden in IMS — applies to the storefront on the next Shopify push',
+      );
     } catch (e: any) {
       // revert
       setCollections((prev) =>
@@ -513,7 +520,7 @@ export default function CollectionsPage() {
                 <th className="px-4 py-2 font-medium">Type</th>
                 <th className="px-4 py-2 font-medium text-right">Products</th>
                 <th className="px-4 py-2 font-medium text-right">Priority</th>
-                <th className="px-4 py-2 font-medium text-center">Published</th>
+                <th className="px-4 py-2 font-medium text-center">Visible (on push)</th>
                 <th className="px-4 py-2 font-medium text-right">Actions</th>
               </tr>
             </thead>
@@ -577,7 +584,11 @@ export default function CollectionsPage() {
                         'relative inline-flex h-5 w-9 items-center rounded-full transition-colors ' +
                         (c.published ? 'bg-green-500' : 'bg-gray-300')
                       }
-                      title={c.published ? 'Published — click to unpublish' : 'Hidden — click to publish'}
+                      title={
+                        c.published
+                          ? 'Visible in IMS — applied to the storefront on the next push. Click to hide.'
+                          : 'Hidden in IMS — click to mark visible (applies on the next push).'
+                      }
                     >
                       <span
                         className={
@@ -845,7 +856,9 @@ function CollectionDrawer({
                     onChange={(e) => set('published', e.target.checked)}
                     className="w-4 h-4 rounded"
                   />
-                  <span className="text-sm text-gray-700">Published</span>
+                  <span className="text-sm text-gray-700">
+                    Visible on storefront (applies on the next push)
+                  </span>
                 </label>
               </div>
             </div>
@@ -1357,21 +1370,24 @@ function SmartRulesEditor({
           onClick={runPreview}
           disabled={previewing}
           className="btn-outline inline-flex items-center gap-1.5 text-sm"
+          title="Previews the LAST-SAVED rules — save your edits first to preview them"
         >
           {previewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
           Preview matches
         </button>
       </div>
 
-      {/* Preview results */}
+      {/* Preview results. HONEST LABEL (OS-038): the backend resolves a SAVED
+          collection by id (no ad-hoc resolver), so this previews the rules as
+          LAST SAVED — unsaved edits in this drawer are not reflected. */}
       {preview !== null && (
         <div className="rounded-lg border border-gray-200">
           <div className="px-3 py-2 text-xs text-gray-500 border-b border-gray-100">
             {previewTotal > 0
               ? `${fmtCount(previewTotal)} product${previewTotal === 1 ? '' : 's'} match${
                   previewTotal === 1 ? 'es' : ''
-                } these rules${preview.length < previewTotal ? ` (showing first ${preview.length})` : ''}`
-              : 'No products match these rules yet.'}
+                } the last-saved rules${preview.length < previewTotal ? ` (showing first ${preview.length})` : ''}`
+              : 'No products match the last-saved rules yet.'}
           </div>
           {preview.length > 0 && (
             <ul className="max-h-56 overflow-y-auto divide-y divide-gray-100">
@@ -1391,9 +1407,9 @@ function SmartRulesEditor({
       )}
 
       <p className="text-xs text-gray-400">
-        Smart collections recompute their members from these rules. The exact set is resolved when
-        the collection is pushed to the storefront (a later phase); this preview shows what matches
-        right now.
+        Smart collections recompute their members from these rules. The preview runs on the rules as
+        <strong> last saved</strong> — rule edits made in this drawer are not reflected until you
+        save. The exact set is resolved again when the collection is pushed to the storefront.
       </p>
     </div>
   );

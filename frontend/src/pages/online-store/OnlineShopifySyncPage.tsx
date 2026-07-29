@@ -41,12 +41,15 @@ import {
   AlertTriangle,
   CheckCircle2,
   XCircle,
+  History as HistoryIcon,
+  MinusCircle,
 } from 'lucide-react';
 import {
   pushApi,
   syncHealthApi,
   type PushStatus,
   type PushSweepResult,
+  type PushHistoryResult,
   type SyncHealth,
   type SyncParity,
   type SyncDrift,
@@ -96,7 +99,10 @@ const ENTITIES: EntityDef[] = [
     pushedLabel: 'resynced',
     pendingLabel: '',
     optIn: true,
-    note: 'Re-push price / compare-at / barcode for every product already on Shopify — the bulk MRP-revision resync. Not part of the normal product push.',
+    note:
+      'Re-push price / compare-at / barcode for EVERY product already on Shopify — the bulk MRP / ' +
+      'discount-rule price resync. Pages through the whole mapped set in batches; a product whose ' +
+      'variants have no Shopify mapping yet is reported as "no-op", never counted as pushed.',
   },
 ];
 
@@ -177,6 +183,13 @@ export default function OnlineShopifySyncPage() {
   const [running, setRunning] = useState<EntityKey | null>(null);
   const [sweeps, setSweeps] = useState<Partial<Record<EntityKey, PushSweepResult>>>({});
   const [goingLive, setGoingLive] = useState(false);
+  // Variant-prices paged resync progress (OS-017): {done, total} while looping.
+  const [resyncProgress, setResyncProgress] = useState<{ done: number; total: number | null } | null>(null);
+
+  // Push history (OS-047): the read-only ONLINE_STORE_PUSH audit ledger.
+  const [history, setHistory] = useState<PushHistoryResult | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'live' | 'failed'>('all');
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -187,6 +200,21 @@ export default function OnlineShopifySyncPage() {
       setLoading(false);
     }
   }, []);
+
+  const loadHistory = useCallback(async (filter?: 'all' | 'live' | 'failed') => {
+    const f = filter ?? historyFilter;
+    setHistoryLoading(true);
+    try {
+      const opts: { limit: number; mode?: 'LIVE'; ok?: boolean } = { limit: 50 };
+      if (f === 'live') opts.mode = 'LIVE';
+      if (f === 'failed') opts.ok = false;
+      setHistory(await pushApi.getHistory(opts));
+    } finally {
+      setHistoryLoading(false);
+    }
+    // historyFilter is passed explicitly on filter clicks; the deps stay stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyFilter]);
 
   const loadDiagnostics = useCallback(async () => {
     setDiagLoading(true);
@@ -207,11 +235,15 @@ export default function OnlineShopifySyncPage() {
   useEffect(() => {
     loadStatus();
     loadDiagnostics();
+    loadHistory();
+    // Load once on mount; loadHistory re-fires on filter clicks explicitly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadStatus, loadDiagnostics]);
 
   const refreshAll = () => {
     loadStatus();
     loadDiagnostics();
+    loadHistory();
     bannerRef.current?.refresh();
   };
 
@@ -220,25 +252,85 @@ export default function OnlineShopifySyncPage() {
   // Run a DRY-RUN (or, if the gates are armed, the real) push for one entity via
   // the shared engine. It is SIMULATED whenever the backend reports DARK, so this
   // is safe to run at any time. The returned mode tells the truth either way.
+  //
+  // OS-017: the variant-prices resync PAGES through the WHOLE mapped set. Its
+  // eligible set (products already on Shopify) never shrinks after a resync, so
+  // a single capped call would rescan the same first ~100 products forever —
+  // instead we loop with the backend's next_offset until it comes back null,
+  // and report updated / no-op / failed separately (a no-op is NOT a success).
   const runEntity = async (ent: EntityDef) => {
     setRunning(ent.key);
     try {
-      const res = await pushApi.pushAllPending(ent.token, 100);
-      setSweeps((prev) => ({ ...prev, [ent.key]: res }));
-      const where = res.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
-      const s = res.summary?.[ent.token] ?? {};
-      toast.success(
-        `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
-          (s?.failed ? ` (${s.failed} failed)` : ''),
-      );
+      if (ent.key === 'variant-prices') {
+        let offset = 0;
+        let total: number | null = null;
+        let updated = 0;
+        let noop = 0;
+        let failed = 0;
+        let processed = 0;
+        let last: PushSweepResult | null = null;
+        setResyncProgress({ done: 0, total: null });
+        // Hard page cap: 80 pages x 100 = 8,000 products (catalog is ~4.4k).
+        for (let page = 0; page < 80; page++) {
+          const res = await pushApi.pushAllPending(ent.token, 100, offset);
+          last = res;
+          const s = res.summary?.[ent.token] ?? {};
+          updated += Number(s?.pushed ?? 0);
+          noop += Number(s?.noop ?? 0);
+          failed += Number(s?.failed ?? 0);
+          processed += Number(res.pushed_count ?? 0);
+          total = res.eligible_total ?? total;
+          setResyncProgress({ done: processed, total });
+          if (res.next_offset === null || res.next_offset === undefined) break;
+          offset = res.next_offset;
+        }
+        if (last) {
+          // Store the AGGREGATED tallies (the last page's rows for the detail
+          // list, the whole run's counts for the honest headline).
+          setSweeps((prev) => ({
+            ...prev,
+            [ent.key]: {
+              ...last!,
+              pushed_count: processed,
+              limit_reached: false,
+              summary: { [ent.token]: { pushed: updated, failed, noop } },
+            },
+          }));
+        }
+        const where = last?.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
+        const msg =
+          `${ent.label}: ${where} — ${updated} updated, ${noop} no-op (variants not mapped), ` +
+          `${failed} failed of ${total ?? processed} mapped products`;
+        if (failed > 0) toast.warning(msg);
+        else toast.success(msg);
+      } else {
+        const res = await pushApi.pushAllPending(ent.token, 100);
+        setSweeps((prev) => ({ ...prev, [ent.key]: res }));
+        const where = res.mode?.mode === 'LIVE' ? 'LIVE push' : 'dry-run (SIMULATED)';
+        const s = res.summary?.[ent.token] ?? {};
+        toast.success(
+          `${ent.label}: ${where} — ${res.pushed_count ?? 0} processed` +
+            (s?.failed ? ` (${s.failed} failed)` : '') +
+            (s?.noop ? ` (${s.noop} no-op)` : ''),
+        );
+        // OS-046: never let a capped sweep read as complete.
+        if (res.limit_reached) {
+          toast.info(
+            `${ent.label}: stopped at the 100-object safety cap — run again to continue ` +
+              '(the pending count below shows the remainder).',
+          );
+        }
+      }
       // A push may have written back Shopify ids (LIVE) or cleared nothing
-      // (dry-run) — refresh counts + the banner either way.
+      // (dry-run) — refresh counts + banner + history either way.
       loadStatus();
+      loadHistory();
       bannerRef.current?.refresh();
     } catch (e: any) {
       toast.error(`${ent.label}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
     } finally {
       setRunning(null);
+      setResyncProgress(null);
     }
   };
 
@@ -259,8 +351,16 @@ export default function OnlineShopifySyncPage() {
       const res = await pushApi.pushAllPending(undefined, 500);
       const where = res.mode?.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)';
       toast.success(`Cutover push (${where}): ${res.pushed_count ?? 0} objects processed`);
+      // OS-046: the 500-object safety cap must never read as "cutover done".
+      if (res.limit_reached) {
+        toast.info(
+          'Stopped at the 500-object safety cap — NOT everything was pushed. ' +
+            'Click again to continue; the pending counts below show the remainder.',
+        );
+      }
       loadStatus();
       loadDiagnostics();
+      loadHistory();
       bannerRef.current?.refresh();
     } catch (e: any) {
       toast.error(`Cutover push failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
@@ -398,7 +498,16 @@ export default function OnlineShopifySyncPage() {
                   </button>
                 </div>
                 {ent.optIn ? (
-                  <p className="text-[11px] leading-relaxed text-gray-500">{ent.note}</p>
+                  <>
+                    <p className="text-[11px] leading-relaxed text-gray-500">{ent.note}</p>
+                    {busy && resyncProgress && (
+                      <p className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-700">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Resyncing… {fmt(resyncProgress.done)}
+                        {resyncProgress.total !== null ? ` of ${fmt(resyncProgress.total)}` : ''} mapped products
+                      </p>
+                    )}
+                  </>
                 ) : (
                   <div className="flex items-center gap-4 text-xs text-gray-600">
                     <span>
@@ -427,6 +536,18 @@ export default function OnlineShopifySyncPage() {
                         </span>
                       )}
                       <span className="text-gray-400">· {sweep.pushed_count ?? 0} processed</span>
+                      {/* Honest breakdown: no-ops are NOT successes (OS-017). */}
+                      {(() => {
+                        const noop = Number((sweep.summary?.[ent.token]?.noop ?? 0) as number);
+                        return noop > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-gray-500"
+                            title="Nothing was sent for these — their variants have no Shopify mapping (gid) yet, or no usable price"
+                          >
+                            <MinusCircle className="w-3 h-3" /> {fmt(noop)} no-op (not pushed)
+                          </span>
+                        ) : null;
+                      })()}
                       {/* Push-locked SKUs the sweep excluded (from summary.products). */}
                       {(() => {
                         const blocked = Number(
@@ -442,6 +563,13 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                     </div>
+                    {/* OS-046: a capped sweep must not read as complete. */}
+                    {sweep.limit_reached && (
+                      <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700">
+                        <AlertTriangle className="w-3 h-3" /> Stopped at the safety cap — run again to
+                        continue.
+                      </p>
+                    )}
                     {Array.isArray(sweep.results) && sweep.results.length > 0 ? (
                       <ul className="mt-1.5 space-y-1 max-h-40 overflow-auto">
                         {sweep.results.slice(0, 12).map((r, i) => (
@@ -560,6 +688,127 @@ export default function OnlineShopifySyncPage() {
             )}
           </DiagTile>
         </div>
+      </section>
+
+      {/* ---- Push history (read-only ONLINE_STORE_PUSH audit ledger) ------- */}
+      <section className="mb-6 rounded-xl border border-gray-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <HistoryIcon className="w-4 h-4" /> Push history
+            <span className="text-[11px] font-normal text-gray-400">
+              (read-only — every push attempt, LIVE or dry-run, from the audit ledger)
+            </span>
+          </h2>
+          <div className="inline-flex rounded-lg border border-gray-200 overflow-hidden">
+            {(
+              [
+                { key: 'all', label: 'All' },
+                { key: 'live', label: 'LIVE only' },
+                { key: 'failed', label: 'Failures' },
+              ] as const
+            ).map((f) => (
+              <button
+                key={f.key}
+                type="button"
+                onClick={() => {
+                  setHistoryFilter(f.key);
+                  void loadHistory(f.key);
+                }}
+                className={
+                  'px-3 py-1 text-xs font-medium ' +
+                  (historyFilter === f.key
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-50')
+                }
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {historyLoading ? (
+          <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> loading history…
+          </div>
+        ) : !history || !history.available ? (
+          <p className="text-[11px] text-gray-400">
+            {history?.failure === 'forbidden'
+              ? 'Push history is visible to ADMIN and SUPERADMIN only.'
+              : 'Push history unavailable (endpoint not served by this deploy, or the audit store is unreachable).'}
+          </p>
+        ) : history.entries.length === 0 ? (
+          <p className="text-[11px] text-gray-500">
+            {historyFilter === 'failed'
+              ? 'No failed pushes recorded.'
+              : historyFilter === 'live'
+                ? 'No LIVE pushes recorded yet.'
+                : 'No pushes recorded yet.'}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wide text-gray-400 border-b border-gray-100">
+                  <th className="py-1.5 pr-3 font-medium">When</th>
+                  <th className="py-1.5 pr-3 font-medium">Mode</th>
+                  <th className="py-1.5 pr-3 font-medium">Entity</th>
+                  <th className="py-1.5 pr-3 font-medium">Target</th>
+                  <th className="py-1.5 pr-3 font-medium">Action</th>
+                  <th className="py-1.5 pr-3 font-medium">By</th>
+                  <th className="py-1.5 font-medium">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.entries.map((h, i) => (
+                  <tr key={(h.target_id ?? '') + i} className="border-b border-gray-50 last:border-0">
+                    <td className="py-1.5 pr-3 whitespace-nowrap text-gray-600">
+                      {h.timestamp ? new Date(h.timestamp).toLocaleString('en-IN') : '—'}
+                    </td>
+                    <td className="py-1.5 pr-3">
+                      {h.mode === 'LIVE' ? (
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-green-100 text-green-800 border border-green-200 px-1.5 py-0.5 font-semibold">
+                          <Zap className="w-2.5 h-2.5" /> LIVE
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-600 border border-gray-200 px-1.5 py-0.5 font-medium">
+                          {h.mode || 'SIMULATED'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-3 text-gray-700">{h.entity || '—'}</td>
+                    <td className="py-1.5 pr-3 max-w-[220px]">
+                      <span className="block truncate text-gray-900" title={h.target_id ?? undefined}>
+                        {h.name || h.sku || h.target_id || '—'}
+                      </span>
+                      {(h.name || h.sku) && h.sku && h.name && (
+                        <span className="block truncate text-gray-400">{h.sku}</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-3 text-gray-600">{h.push_action || '—'}</td>
+                    <td className="py-1.5 pr-3 text-gray-600 whitespace-nowrap">
+                      {h.user_name || h.user_id || '—'}
+                    </td>
+                    <td className="py-1.5">
+                      {h.ok ? (
+                        <span className="inline-flex items-center gap-1 text-green-700">
+                          <CheckCircle2 className="w-3 h-3" /> ok
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center gap-1 text-amber-700 max-w-[260px]"
+                          title={h.error || h.reason || undefined}
+                        >
+                          <XCircle className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{h.error || h.reason || 'failed'}</span>
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       {/* ---- Go live (owner-armed cutover) --------------------------------- */}

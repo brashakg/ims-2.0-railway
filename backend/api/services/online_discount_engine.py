@@ -547,6 +547,11 @@ def recompute_online_price(
         # wrote -- a BVI-migrated / hand-set storefront price.
         prior_stamp = ecom_existing.get("online_price_source")
         existing_online = _pos_or_none(ecom_existing.get(ECOM_OFFER_FIELD))
+        # Priors captured BEFORE any write so a real price movement can be
+        # detected (OS-016: a recompute that changes a persisted price must
+        # enter the Shopify push queue, not strand the new price locally).
+        prior_compare = _pos_or_none(ecom_existing.get(ECOM_COMPARE_FIELD))
+        price_changed = False
 
         product_manual = _product_manual_offer(product)
         seeded_manual = None
@@ -589,6 +594,14 @@ def recompute_online_price(
             }
             if seeded_manual is not None:
                 ecom_updates[MANUAL_OFFER_FIELD] = seeded_manual
+            # OS-016: did this write actually MOVE the persisted price? (A
+            # re-stamp of the same numbers is not a change -- it must not flood
+            # the push queue on every idempotent recompute sweep.)
+            if (
+                existing_online != prod_res["offer"]
+                or prior_compare != prod_res["compare_at"]
+            ):
+                price_changed = True
             # Mutate in place so a DB-less caller (unit test / pre-persist door) sees it.
             ecom = dict(ecom_existing)
             ecom.update(ecom_updates)
@@ -614,6 +627,7 @@ def recompute_online_price(
                 v_meta.get("source") if isinstance(v_meta, dict) else None
             )
             v_existing_online = _pos_or_none(v.get(VARIANT_OFFER_FIELD))
+            v_prior_compare = _pos_or_none(v.get(VARIANT_COMPARE_FIELD))
             v_manual = _variant_manual_offer(v)
             v_seeded_manual = None
             if v_manual is None and v_existing_online is not None and not v_prior_stamp:
@@ -632,6 +646,13 @@ def recompute_online_price(
             # Don't reset a never-priced variant to MRP when no rule / manual owns it.
             v_write = not (v_res["source"] == "none" and not v_prior_stamp)
             if v_write:
+                # OS-016: a moved variant price makes the PARENT product dirty
+                # (the push queue keys on ecom.locally_modified only).
+                if (
+                    v_existing_online != v_res["offer"]
+                    or v_prior_compare != v_res["compare_at"]
+                ):
+                    price_changed = True
                 v[VARIANT_OFFER_FIELD] = v_res["offer"]
                 v[VARIANT_COMPARE_FIELD] = v_res["compare_at"]
                 v["online_price_meta"] = {
@@ -662,12 +683,29 @@ def recompute_online_price(
                 }
             )
 
+        # ---- OS-016: a REAL price movement enters the Shopify push queue ----
+        # The sync sweep + pending counter key SOLELY on ecom.locally_modified
+        # (online_store_push.py), and a successful push clears it -- so without
+        # this flag a rule recompute persists new online prices that no sweep
+        # ever carries ("0 pending" while prices are stranded locally). Only an
+        # ACTUAL change marks dirty: an idempotent re-run re-stamps the same
+        # numbers and adds nothing to the queue.
+        if price_changed:
+            ecom_now = product.get("ecom")
+            if isinstance(ecom_now, dict):
+                ecom_now["locally_modified"] = True
+            else:
+                product["ecom"] = {"locally_modified": True}
+            if persist and db is not None and pid:
+                _persist_product_ecom(db, pid, {"locally_modified": True})
+
         return {
             "ok": True,
             "product_id": pid,
             "rule_id": rule_id,
             "source": prod_res["source"],
             "flags": sorted(all_flags),
+            "price_changed": price_changed,
             "product": prod_res,
             "variants": variant_summaries,
         }
@@ -690,16 +728,25 @@ def recompute_all(
     db,
     rule_filter: Optional[Dict[str, Any]] = None,
     *,
+    category: Optional[Any] = None,
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Recompute online prices across catalog_products (used when a rule changes).
 
     Loads the rule set ONCE, then recomputes every matching product + its variants.
     Fail-soft PER product (one bad doc never aborts the run). ``rule_filter`` is a
-    Mongo query narrowing which catalog_products to touch (e.g. by category/brand
-    of the rule that changed) so a single-rule edit need not sweep all ~4.4k docs.
+    raw Mongo query narrowing which catalog_products to touch. ``category`` is the
+    ALIAS-SAFE scope (OS-050): stored catalog categories can be legacy/alias-cased
+    (catalog.py resolves them defensively; the rule matcher is alias-proof via
+    resolve_category on both sides), so a raw {'category': X} equality filter
+    silently skips exactly the docs the engine WOULD discount. With ``category``
+    the scan matches each doc engine-side through resolve_category -- the same
+    normalisation find_matching_rule uses -- so no alias-cased doc is stranded on
+    its pre-edit price.
 
-    Returns {"ok", "products", "variants", "errors", "rules"}."""
+    Returns {"ok", "products", "variants", "changed", "errors", "rules"} where
+    ``changed`` counts products whose persisted online price actually moved (and
+    were therefore queued for the Shopify push -- OS-016)."""
     if db is None:
         return {"ok": False, "products": 0, "variants": 0, "errors": 0, "error": "no db"}
     rules = _load_rules(db)
@@ -708,16 +755,31 @@ def recompute_all(
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "products": 0, "variants": 0, "errors": 0, "error": str(exc)}
 
+    want_cat: Optional[str] = None
+    if category:
+        want_cat = resolve_category(category)
+        if want_cat is None:
+            want_cat = _norm_txt(category)
+
     products = 0
     variants = 0
+    changed = 0
     errors = 0
     for doc in cursor:
         if isinstance(doc, dict):
             doc.pop("_id", None)
+        if want_cat is not None:
+            doc_cat = resolve_category(doc.get("category"))
+            if doc_cat is None:
+                doc_cat = _norm_txt(doc.get("category"))
+            if doc_cat != want_cat:
+                continue
         res = recompute_online_price(doc, db=db, rules=rules, persist=True)
         if res.get("ok"):
             products += 1
             variants += len(res.get("variants") or [])
+            if res.get("price_changed"):
+                changed += 1
         else:
             errors += 1
         if limit and products >= int(limit):
@@ -726,6 +788,7 @@ def recompute_all(
         "ok": True,
         "products": products,
         "variants": variants,
+        "changed": changed,
         "errors": errors,
         "rules": len(rules),
     }

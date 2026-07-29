@@ -34,6 +34,9 @@ export interface RecomputeResult {
   ok: boolean;
   products?: number;
   variants?: number;
+  /** Products whose persisted online price actually moved — these were marked
+   *  locally_modified and queued for the next Shopify push (OS-016). */
+  changed?: number;
   errors?: number;
   rules?: number;
   error?: string;

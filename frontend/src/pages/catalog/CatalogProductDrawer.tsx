@@ -254,6 +254,20 @@ export function CatalogProductDrawer({
       const msg = formatPushResult(name, res);
       if (res.ok) toast.success(msg);
       else toast.error(msg);
+      if (res.ok && res.mode === 'LIVE') {
+        // OS-059: a LIVE push mints/updates the ecom facts shown right here
+        // (Shopify id, DRAFT/PUBLISHED chip, locally_modified) — re-fetch the
+        // doc so the drawer reflects them without a close/reopen. Fail-soft:
+        // the push already succeeded; a refresh error just leaves stale facts
+        // until the next open. (A dry-run changes nothing — no re-fetch.)
+        try {
+          const fresh = await catalogProductsApi.get(id);
+          setDoc(fresh as unknown as Record<string, unknown>);
+          onUpdated?.(fresh);
+        } catch {
+          /* facts refresh on next open */
+        }
+      }
     } catch (e: any) {
       toast.error(
         `${name}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,

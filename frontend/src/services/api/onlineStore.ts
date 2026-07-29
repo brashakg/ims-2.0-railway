@@ -1465,13 +1465,54 @@ export interface PushSweepResult {
   db_connected?: boolean | null;
   pushed_count?: number | null;
   limit_reached?: boolean | null;
-  /** Per-entity {pushed, failed, blocked_skipped} tally. `blocked_skipped` is
-   *  set on the `products` bucket when the sweep excluded push-locked SKUs. */
+  /** Paging block (variant-prices resync only; null otherwise — OS-017). The
+   *  eligible set never shrinks after a resync, so the backend pages it
+   *  deterministically: loop with `next_offset` until it comes back null. */
+  offset?: number | null;
+  next_offset?: number | null;
+  eligible_total?: number | null;
+  /** Per-entity {pushed, failed, noop, blocked_skipped} tally. `noop` counts
+   *  clean no-ops (nothing mapped/priced to send) — NEVER folded into `pushed`,
+   *  so a no-op can't read as a successful price update (OS-017).
+   *  `blocked_skipped` is set on the `products` bucket when the sweep excluded
+   *  push-locked SKUs. */
   summary?:
-    | Record<string, { pushed?: number; failed?: number; blocked_skipped?: number } | null>
+    | Record<
+        string,
+        { pushed?: number; failed?: number; noop?: number; blocked_skipped?: number } | null
+      >
     | null;
   /** The per-doc PushResult rows (SIMULATED plans when DARK). */
   results?: PushResult[] | null;
+}
+
+/** One row of the read-only push HISTORY (the chained ONLINE_STORE_PUSH audit
+ *  ledger surfaced by GET /push/history — OS-047). All fields optional. */
+export interface PushHistoryEntry {
+  timestamp?: string | null;
+  user_id?: string | null;
+  /** Best-effort display name resolved server-side (falls back to user_id). */
+  user_name?: string | null;
+  entity?: string | null;
+  target_id?: string | null;
+  /** Best-effort product enrichment (raw ids are unreadable on a panel). */
+  sku?: string | null;
+  name?: string | null;
+  mode?: 'SIMULATED' | 'LIVE' | string | null;
+  push_action?: string | null;
+  ok?: boolean | null;
+  shopify_id?: string | null;
+  error?: string | null;
+  reason?: string | null;
+}
+
+export interface PushHistoryResult {
+  entries: PushHistoryEntry[];
+  count: number;
+  /** False when the ledger could not be read (no DB / no permission). */
+  available: boolean;
+  /** Why the read failed (consumes classifyLoadError; null when it worked). */
+  failure?: OnlineStoreLoadFailure | null;
 }
 
 const PUSH_BASE = '/online-store/push';
@@ -1562,10 +1603,12 @@ export const pushApi = {
   pushAllPending: async (
     entities?: string,
     limit = 100,
+    offset = 0,
   ): Promise<PushSweepResult> => {
     const params = new URLSearchParams();
     if (entities) params.set('entities', entities);
     params.set('limit', String(limit));
+    if (offset > 0) params.set('offset', String(offset));
     const res = await api.post(`${PUSH_BASE}/all-pending?${params.toString()}`);
     const data = (res?.data ?? {}) as Partial<PushSweepResult>;
     const mode = (data.mode ?? {}) as PushMode;
@@ -1582,9 +1625,37 @@ export const pushApi = {
       db_connected: data.db_connected ?? null,
       pushed_count: data.pushed_count ?? 0,
       limit_reached: data.limit_reached ?? false,
+      offset: data.offset ?? null,
+      next_offset: data.next_offset ?? null,
+      eligible_total: data.eligible_total ?? null,
       summary: (data.summary ?? {}) as PushSweepResult['summary'],
       results: Array.isArray(data.results) ? (data.results as PushResult[]) : [],
     };
+  },
+
+  /** Read the push HISTORY ledger (GET /push/history — OS-047). Read-only;
+   *  ADMIN/SUPERADMIN on the backend. NEVER throws: a 403 / stale deploy /
+   *  network error resolves to {available:false, failure} so the panel renders
+   *  an honest unavailable state instead of crashing the page. */
+  getHistory: async (
+    opts: { limit?: number; mode?: 'LIVE' | 'SIMULATED'; ok?: boolean } = {},
+  ): Promise<PushHistoryResult> => {
+    try {
+      const params = new URLSearchParams();
+      params.set('limit', String(opts.limit ?? 50));
+      if (opts.mode) params.set('mode', opts.mode);
+      if (opts.ok !== undefined) params.set('ok', String(opts.ok));
+      const res = await api.get(`${PUSH_BASE}/history?${params.toString()}`);
+      const data = (res?.data ?? {}) as Partial<PushHistoryResult>;
+      return {
+        entries: Array.isArray(data.entries) ? (data.entries as PushHistoryEntry[]) : [],
+        count: data.count ?? 0,
+        available: data.available !== false,
+        failure: null,
+      };
+    } catch (err) {
+      return { entries: [], count: 0, available: false, failure: classifyLoadError(err) };
+    }
   },
 };
 
