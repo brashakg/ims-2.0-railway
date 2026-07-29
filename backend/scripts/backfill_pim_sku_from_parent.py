@@ -46,13 +46,17 @@ SAFETY CONTRACT
   alarm goes SILENT -- the exact P0 the online_catalog.py fix on this branch
   prevents.
 - MANDATORY PRE-FLIGHT FINGERPRINT (db name; the sku_1 index shape; GROWTH-
-  TOLERANT collection floors counts >= 59 / >= 53 -- every product create adds
-  one row to BOTH collections, so exact counts would break on the first
-  post-deploy create; the EXACT no-sku target count == 53, overridable via
-  --expect-targets N; and the invariant catalog_products - products == 6, the
-  six sku-carrying catalog rows that have no spine). A mismatch aborts with
-  exit 3 BEFORE any write -- this is what stops the script from cheerfully
-  "succeeding" against the wrong database.
+  TOLERANT collection floors counts >= 59 / >= 53 -- an ordinary product
+  create adds one row to BOTH collections, so exact counts would break on the
+  first post-deploy create; the EXACT no-sku target count == 53, overridable
+  via --expect-targets N; and the EXACT count gap catalog_products - products
+  == 1, overridable via --expect-gap N). The gap is NOT immutable: catalog-
+  first repairs/promotes add a spine row WITHOUT a new catalog row and shrink
+  it -- verified live 2026-07-29, when the latent-defects repair created
+  spines for 5 of the 6 sku-carrying spineless catalog rows and moved the gap
+  6 -> 1 (one stray remains: SGRAYMETARW4006601/715050SMARTGLASSES). Any
+  mismatch aborts with exit 3 BEFORE any write -- this is what stops the
+  script from cheerfully "succeeding" against the wrong database.
 - The connection string is resolved ONLY from MONGODB_URL / MONGO_PUBLIC_URL /
   MONGO_URL. There is deliberately NO DatabaseConfig.from_env() fallback: that
   helper silently defaults to localhost/ims_2_0, so a missing env var would
@@ -131,23 +135,31 @@ TARGET_PREDICATE: Dict[str, Any] = {
 HAS_SKU_PREDICATE: Dict[str, Any] = {"sku": {"$exists": True, "$nin": [None, ""]}}
 
 # ---------------------------------------------------------------------------
-# Pre-flight fingerprint -- verified live on prod 2026-07-29.
+# Pre-flight fingerprint -- RE-verified live on prod 2026-07-29 (late).
 #
-# The COUNTS are growth-tolerant FLOORS (>=), not exact: every product create
-# adds one row to BOTH collections, so exact 59/53 would break on the first
-# create after the branch deploys. What stays HARD and exact:
+# The COUNTS are growth-tolerant FLOORS (>=), not exact: an ordinary product
+# create adds one row to BOTH collections, so exact 59/53 would break on the
+# first create after the branch deploys. What stays HARD and exact:
 #   * the db name and the sku_1 unique+sparse index shape,
 #   * the TARGET_PREDICATE count (53 no-sku rows; --expect-targets overrides),
-#   * the invariant catalog_products_count - products_count == 6 -- the six
-#     sku-carrying catalog rows with no products spine (SGRAYMETARW4006601 /
-#     SB5050 etc.), which creates on the fixed code can never change because
-#     they always add to both sides.
+#   * the count gap catalog_products_count - products_count == 1
+#     (--expect-gap overrides).
+#
+# GAP HISTORY -- it is NOT immutable, which is exactly why it is checked:
+# at review time the gap was 6 (six sku-carrying catalog rows with no spine,
+# SGRAYMETARW4006601 / SB5050 etc.). On 2026-07-29 ~23:21 IST the
+# latent-defects repair (sibling branch, actor "latent-defects-repair")
+# created spine rows FOR five of those six, moving the gap 6 -> 1. Ordinary
+# creates keep the gap constant (both sides +1); catalog-first repairs /
+# promotes shrink it (spine only). If the last stray
+# (SGRAYMETARW4006601/715050SMARTGLASSES) gains a spine too, the gap becomes
+# 0 -- re-verify live and pass --expect-gap 0 rather than editing this file.
 # ---------------------------------------------------------------------------
 EXPECTED_DB_NAME = "ims_2_0"
 MIN_CATALOG_PRODUCTS = 59
 MIN_PRODUCTS = 53
 EXPECTED_TARGETS = 53
-EXPECTED_COUNT_GAP = 6
+EXPECTED_COUNT_GAP = 1
 EXPECTED_SKU_INDEX = "sku_1"
 
 GATE_DESCRIPTIONS = {
@@ -206,7 +218,11 @@ def select_targets(catalog) -> List[Dict[str, Any]]:
 
 
 def check_fingerprint(
-    db_name: str, catalog, products, expect_targets: int = EXPECTED_TARGETS
+    db_name: str,
+    catalog,
+    products,
+    expect_targets: int = EXPECTED_TARGETS,
+    expect_gap: int = EXPECTED_COUNT_GAP,
 ) -> List[str]:
     """Return a list of fingerprint problems ([] == matches).
 
@@ -214,13 +230,15 @@ def check_fingerprint(
     `sparse` is exactly why 53 key-absent rows coexist today, and `unique` is
     why writing an explicit null instead of a real sku would insert once and
     then collide forever. Also HARD + exact: the TARGET_PREDICATE count
-    (== expect_targets, default 53; --expect-targets overrides) and the
-    invariant catalog_products_count - products_count == 6.
+    (== expect_targets, default 53; --expect-targets overrides) and the count
+    gap catalog_products_count - products_count (== expect_gap, default 1 as
+    re-verified live 2026-07-29 after the latent-defects repair;
+    --expect-gap overrides after re-verifying).
 
     GROWTH-TOLERANT: the raw collection counts are FLOORS (>= 59 / >= 53),
-    because every product create after the branch deploys adds one row to BOTH
-    collections -- an exact count would brick the script on the first create,
-    while the gap invariant and the exact target count still pin the shape.
+    because an ordinary product create adds one row to BOTH collections -- an
+    exact count would brick the script on the first create, while the gap
+    check and the exact target count still pin the shape.
     """
     problems: List[str] = []
     if db_name != EXPECTED_DB_NAME:
@@ -237,11 +255,12 @@ def check_fingerprint(
     if pr_count < MIN_PRODUCTS:
         problems.append(f"products count is {pr_count}, expected >= {MIN_PRODUCTS}")
 
-    if (cp_count - pr_count) != EXPECTED_COUNT_GAP:
+    if (cp_count - pr_count) != int(expect_gap):
         problems.append(
             f"count gap (catalog_products - products) is {cp_count - pr_count}, "
-            f"expected exactly {EXPECTED_COUNT_GAP} (the 6 sku-carrying catalog "
-            "rows with no spine)"
+            f"expected exactly {expect_gap} (sku-carrying catalog rows with no "
+            "spine; re-verify live and pass --expect-gap N if a catalog-first "
+            "repair/promote legitimately changed it)"
         )
 
     target_count = catalog.count_documents(TARGET_PREDICATE)
@@ -453,6 +472,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "verifying why the target set changed.",
     )
     parser.add_argument(
+        "--expect-gap",
+        type=int,
+        default=EXPECTED_COUNT_GAP,
+        help=f"exact (catalog_products - products) count gap required by the "
+        f"pre-flight fingerprint (default {EXPECTED_COUNT_GAP}, re-verified "
+        "live 2026-07-29). Catalog-first repairs/promotes shrink it; override "
+        "ONLY after re-verifying live.",
+    )
+    parser.add_argument(
         "--audit-path",
         default=None,
         help="where to write the audit JSON (default: ./backfill_pim_sku_audit"
@@ -541,7 +569,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         _out("")
         _out("--- PRE-FLIGHT FINGERPRINT ---")
         problems = check_fingerprint(
-            db.name, catalog, products, expect_targets=args.expect_targets
+            db.name,
+            catalog,
+            products,
+            expect_targets=args.expect_targets,
+            expect_gap=args.expect_gap,
         )
         fingerprint = {
             "db_name": db.name,
@@ -564,7 +596,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         _out(
             "  count gap (cp - pr)     : "
             f"{fingerprint['catalog_products_count'] - fingerprint['products_count']}"
-            f" (expected exactly {EXPECTED_COUNT_GAP})"
+            f" (expected exactly {args.expect_gap})"
         )
         _out(
             f"  no-sku target count     : {fingerprint['no_sku_target_count']}"

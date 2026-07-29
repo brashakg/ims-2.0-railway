@@ -760,9 +760,12 @@ def test_backfill_resolve_uri_fails_loud_without_env(monkeypatch):
 
 
 def _bf_prod_world():
-    """The EXACT prod fingerprint shape: 59 catalog rows (53 skuless targets +
-    6 sku-carrying rows with NO spine, the SGRAYMETARW4006601-style strays),
-    53 products spine rows, 53 variants. Gap = 6, targets = 53."""
+    """The EXACT prod fingerprint shape as RE-verified live 2026-07-29 (after
+    the latent-defects repair created spines for 5 of the 6 spineless
+    strays): 59 catalog rows = 53 skuless targets + 1 sku-carrying row with
+    NO spine (the remaining SGRAYMETARW-style stray) + 5 sku-carrying rows
+    WITH spines; 58 products spine rows; 53 variants. Gap = 1, targets = 53.
+    """
     catalog_rows = [
         {
             "id": f"PIM-{i:02d}",
@@ -771,9 +774,13 @@ def _bf_prod_world():
         }
         for i in range(53)
     ]
-    catalog_rows += [{"id": f"CAT-ONLY-{j}", "sku": f"SGSTRAY{j}"} for j in range(6)]
+    catalog_rows.append({"id": "CAT-ONLY-0", "sku": "SGSTRAY0"})
+    catalog_rows += [{"id": f"PROMOTED-{j}", "sku": f"SGPROM{j}"} for j in range(5)]
     products_rows = [
         {"pim_product_id": f"PIM-{i:02d}", "sku": f"FRSKU{i:02d}"} for i in range(53)
+    ]
+    products_rows += [
+        {"pim_product_id": f"PROMOTED-{j}", "sku": f"SGPROM{j}"} for j in range(5)
     ]
     variant_rows = [
         {"parent_product_id": f"PIM-{i:02d}", "sku": f"FRSKU{i:02d}"}
@@ -784,9 +791,11 @@ def _bf_prod_world():
 
 def test_backfill_fingerprint_growth_tolerant_but_target_count_exact():
     """P2 (counts freeze): exact 59/53 would brick the script on the FIRST
-    product create after deploy (each create adds a row to BOTH collections).
-    The floors are >=, the (catalog - products) gap stays EXACTLY 6, and the
-    no-sku TARGET count stays EXACTLY 53 unless --expect-targets overrides."""
+    ordinary product create after deploy (it adds a row to BOTH collections).
+    The floors are >=, while the no-sku TARGET count (== 53) and the
+    (catalog - products) gap (== 1, re-verified live after the latent-defects
+    repair moved it 6 -> 1) stay EXACT unless --expect-targets /
+    --expect-gap record a re-verified change."""
     catalog, products, _variants = _bf_prod_world()
     # Exact prod shape passes.
     assert bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products) == []
@@ -797,7 +806,8 @@ def test_backfill_fingerprint_growth_tolerant_but_target_count_exact():
         )
         products.rows.append({"pim_product_id": f"NEW-{i}", "sku": f"FRNEW{i}"})
     assert bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products) == []
-    # A CHANGED target set aborts... (a 54th skuless row appears)
+    # A CHANGED target set aborts... (a 54th skuless row appears, WITH spine
+    # so the gap is untouched)
     catalog.rows.append({"id": "T-NEW", "parent_sku": "FRTNEW"})
     products.rows.append({"pim_product_id": "T-NEW", "sku": "FRTNEW"})
     problems = bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products)
@@ -807,12 +817,20 @@ def test_backfill_fingerprint_growth_tolerant_but_target_count_exact():
         bf.check_fingerprint(bf.EXPECTED_DB_NAME, catalog, products, expect_targets=54)
         == []
     )
-    # The gap invariant stays HARD: a catalog-only row (no spine) breaks == 6.
+    # The gap check stays HARD: a catalog-only row (no spine) breaks == 1...
     catalog.rows.append({"id": "STRAY-NEW", "sku": "SGSTRAYNEW"})
     problems = bf.check_fingerprint(
         bf.EXPECTED_DB_NAME, catalog, products, expect_targets=54
     )
     assert any("gap" in p.lower() for p in problems)
+    # ...and --expect-gap is the explicit, re-verified way through (e.g. the
+    # last stray gaining a spine would move the gap 1 -> 0).
+    assert (
+        bf.check_fingerprint(
+            bf.EXPECTED_DB_NAME, catalog, products, expect_targets=54, expect_gap=2
+        )
+        == []
+    )
 
 
 def test_backfill_fingerprint_db_name_and_index_shape_stay_hard():
