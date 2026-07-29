@@ -114,6 +114,7 @@ from agents.nexus_providers import (
 from api.services.shopify_auth import resolve_shopify_credentials
 
 # Attribute -> Shopify filter-tag generator (BVI parity). Pure, network-free.
+from .gtin import sanitise_gtin
 from .shopify_tag_gen import generate_attribute_tags, merge_tag_lists
 
 logger = logging.getLogger(__name__)
@@ -907,6 +908,31 @@ def _resolve_variant_pricing(
     return price, mrp
 
 
+def _publishable_gtin(*candidates: Any) -> Optional[str]:
+    """The first candidate that is a REAL GTIN, normalised. None when none is.
+
+    This is the last gate before a value becomes customer-visible: whatever we
+    put in Shopify's `ProductVariant.barcode` is republished into the Google
+    and Meta Shopping feeds. An empty barcode is always safer than a wrong one
+    -- a missing GTIN costs some feed match-rate, a WRONG GTIN gets the item
+    rejected or matched to another manufacturer's product.
+
+    Two behaviours worth calling out:
+      - it picks the first VALID candidate, not the first non-empty one, so a
+        junk value on the variant no longer shadows a good GTIN on the parent
+        product (the old `or` chain stopped at the first truthy string);
+      - `product["barcode"]` is in the fallback chain and, on many rows, holds
+        our INTERNALLY minted GS1 20-29 code. classify_gtin rejects that whole
+        prefix range as RESTRICTED, so an in-store barcode can no longer leak
+        out as if it were a manufacturer GTIN.
+    """
+    for candidate in candidates:
+        cleaned = sanitise_gtin(candidate)
+        if cleaned:
+            return cleaned
+    return None
+
+
 def build_variant_price_inputs(
     product: Dict[str, Any], variants: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -939,9 +965,9 @@ def build_variant_price_inputs(
             "price": f"{price:.2f}",
             "compareAtPrice": f"{mrp:.2f}" if mrp > price else None,
         }
-        barcode = v.get("gtin") or v.get("barcode")
+        barcode = _publishable_gtin(v.get("gtin"), v.get("barcode"))
         if barcode:
-            row["barcode"] = str(barcode)
+            row["barcode"] = barcode
         rows.append(row)
     return rows, skipped
 
@@ -1040,11 +1066,11 @@ def build_variant_seed_rows(
         vd = v or {}
         price, mrp = _resolve_variant_pricing(product, vd)
         sku = str(vd.get("sku") or product.get("sku") or "").strip()
-        barcode = (
-            vd.get("gtin")
-            or vd.get("barcode")
-            or product.get("gtin")
-            or product.get("barcode")
+        barcode = _publishable_gtin(
+            vd.get("gtin"),
+            vd.get("barcode"),
+            product.get("gtin"),
+            product.get("barcode"),
         )
         row: Dict[str, Any] = {}
         if price > 0:

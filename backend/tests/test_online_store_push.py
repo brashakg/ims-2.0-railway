@@ -975,13 +975,13 @@ def test_push_variant_prices_live_bulk_update(monkeypatch):
     })
     product = {"id": "P1", "mrp": 100, "offer_price": 90,
                "ecom": {"shopify_product_id": "77"}}
-    variants = [{"shopify_variant_id": "111", "gtin": "123"}]
+    variants = [{"shopify_variant_id": "111", "gtin": "8056597626088"}]
     res = _run(shopify_push.push_variant_prices(_EngineDB(), product, variants))
     assert res.mode == "LIVE" and res.ok is True
     assert len(spy.calls) == 1
     v = spy.calls[0]["variables"]
     assert v["productId"] == "gid://shopify/Product/77"
-    assert v["variants"][0]["barcode"] == "123"
+    assert v["variants"][0]["barcode"] == "8056597626088"
 
 
 def test_push_variant_prices_live_requires_parent_gid(monkeypatch):

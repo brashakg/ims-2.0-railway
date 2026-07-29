@@ -9,6 +9,7 @@ import {
   parseEyewearSize,
   coerceModality,
   normSpecKey,
+  isValidGtin,
 } from '../autopilotSpecMap';
 
 describe('normSpecKey', () => {
@@ -203,5 +204,37 @@ describe('mapSpecsToCategoryFields', () => {
       { color: 'Black' }
     );
     expect(mapped.colour_code).toBe('601/58');
+  });
+});
+
+describe('isValidGtin', () => {
+  it('accepts real GTIN-8 / 12 / 13 codes', () => {
+    expect(isValidGtin('8056597720373')).toBe(true); // EAN-13
+    expect(isValidGtin('036000291452')).toBe(true); // UPC-A
+    expect(isValidGtin('96385074')).toBe(true); // EAN-8
+    expect(isValidGtin(' 805-6597-72037-3 ')).toBe(true); // trimmed + dehyphenated
+  });
+
+  it('rejects the junk the 2026-07-29 prod audit found in catalog_variants.gtin', () => {
+    expect(isValidGtin('2511661')).toBe(false); // supplier item code
+    expect(isValidGtin('TW003HG14')).toBe(false); // model number
+    expect(isValidGtin('8056597720373 8056597720380')).toBe(false); // two EANs in one cell
+    expect(isValidGtin('92939293')).toBe(false); // bad check digit
+    expect(isValidGtin('0000000000000')).toBe(false); // placeholder
+    expect(isValidGtin('2000000000017')).toBe(false); // our internal GS1 20-29 barcode
+    expect(isValidGtin('')).toBe(false);
+    expect(isValidGtin(null)).toBe(false);
+  });
+});
+
+describe('autopilot never prefills an unpublishable GTIN', () => {
+  it('drops a scraped value that is not a real GTIN', () => {
+    const { mapped } = mapSpecsToCategoryFields('SG', { EAN: '8056597720373 8056597720380' }, {});
+    expect(mapped.gtin).toBeUndefined();
+  });
+
+  it('keeps a scraped value that IS a real GTIN', () => {
+    const { mapped } = mapSpecsToCategoryFields('SG', { EAN: '8056597720373' }, {});
+    expect(mapped.gtin).toBe('8056597720373');
   });
 });

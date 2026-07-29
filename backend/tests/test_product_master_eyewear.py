@@ -125,7 +125,7 @@ _FRAME_RICH_ATTRS = {
     "country_of_origin": "Italy",
     "warranty": "1 year",
     "upc": "805289126575",
-    "gtin": "8053672000000",
+    "gtin": "8053672000009",
 }
 
 # A representative rich SUNGLASS attribute payload (shared keys + sunglass-only).
@@ -155,7 +155,7 @@ _SUNGLASS_RICH_ATTRS = {
     "country_of_origin": "USA",
     "warranty": "2 years",
     "upc": "888392287533",
-    "gtin": "8888392287500",
+    "gtin": "8888392287504",
 }
 
 
@@ -314,7 +314,7 @@ def test_create_via_door_persists_rich_frame_to_the_spine(
     assert stored_attrs.get("shape") == "Wayfarer"
     assert stored_attrs.get("blue_cut_lens") == "Yes"
     assert stored_attrs.get("upc") == "805289126575"
-    assert stored_attrs.get("gtin") == "8053672000000"
+    assert stored_attrs.get("gtin") == "8053672000009"
 
 
 # ---------------------------------------------------------------------------
