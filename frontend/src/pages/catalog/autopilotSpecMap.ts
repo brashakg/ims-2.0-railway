@@ -273,9 +273,47 @@ function coerceCoating(value: string): string {
 
 /** Clean a raw scraped value for a target field. Returns '' when the value
  *  can't be sensibly coerced (the caller then leaves the field unfilled). */
+/**
+ * Is `raw` a real, publishable GTIN? Mirrors backend/api/services/gtin.py.
+ *
+ * `gtin` is the PUBLIC barcode: it is pushed to Shopify and republished into
+ * the Google/Meta Shopping feeds. Autopilot scrapes manufacturer spec tables
+ * and maps any row labelled gtin/ean/"ean code"/barcode into this field, so
+ * without a check it happily prefills things that are not GTINs at all -- the
+ * 2026-07-29 prod audit found model numbers ("TW003HG14"), supplier item codes
+ * ("2511661") and two EANs pasted into one cell ("8056597720373 8056597720380").
+ *
+ * The backend rejects those at the create door; filtering here means a bad
+ * scrape simply leaves the box EMPTY instead of prefilling a value the
+ * cataloguer would then have to clear before the form would save.
+ */
+export function isValidGtin(raw: unknown): boolean {
+  const digits = String(raw ?? '')
+    .trim()
+    .replace(/[\s-]+/g, '');
+  if (!/^\d+$/.test(digits)) return false;
+  if (![8, 12, 13, 14].includes(digits.length)) return false;
+  if (/^0+$/.test(digits)) return false;
+  // GS1 20-29 is restricted distribution / in-store only -- and is the range
+  // our own internal store_barcode is minted in. Never a manufacturer GTIN.
+  // A GTIN-14 leads with a packaging indicator, so its prefix starts later.
+  const prefix = digits.length === 14 ? digits.slice(1, 3) : digits.slice(0, 2);
+  if (Number(prefix) >= 20 && Number(prefix) <= 29) return false;
+  // GS1 mod-10: weights alternate 3/1 from the right, excluding the check digit.
+  const body = digits.slice(0, -1);
+  let total = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const digit = Number(body[body.length - 1 - i]);
+    total += digit * (i % 2 === 0 ? 3 : 1);
+  }
+  return (10 - (total % 10)) % 10 === Number(digits[digits.length - 1]);
+}
+
 function cleanValue(field: CategoryField, raw: string): string {
   const value = raw.trim();
   if (!value) return '';
+  // Never prefill a GTIN we would not be willing to publish (see isValidGtin).
+  if (field.name === 'gtin') return isValidGtin(value) ? value.replace(/[\s-]+/g, '') : '';
   if (field.name === 'modality') return coerceModality(value);
   if (field.type === 'number') {
     return firstNumber(value);
